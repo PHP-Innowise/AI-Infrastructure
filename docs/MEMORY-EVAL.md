@@ -1555,8 +1555,10 @@ under these instructions; arbitrary spontaneous extraction is not measured.
 
 The supported observed-save encoding is a direct canonical Python invocation,
 optionally inside the emitted exact-corpus `(cd ... && python3 ...)` wrapper,
-with literal JSON in a single-quoted heredoc. The runner requests that format
-in a generic instruction; it supplies no learning contents. Unsupported
+with literal JSON in a single-quoted heredoc. A plain `cat` quoted-heredoc
+pipeline into that exact wrapper is also accepted; extra commands, cat
+options, output redirections and unquoted delimiters are not. The runner
+requests that format in a generic instruction; it supplies no learning contents. Unsupported
 command encodings remain unproven. Shell/interpreter paths are pinned to
 trusted forms, and extracted command text is never executed by the verifier.
 Receipts and sidecars remain unsigned local evidence: producer authentication,

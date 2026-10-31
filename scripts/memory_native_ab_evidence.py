@@ -70,20 +70,26 @@ def command_args(command,root):
 
 
 def save_call(command, root):
-    """Direct invocation or emitted exact-corpus cd wrapper plus literal JSON.
+    """Canonical invocation with literal JSON, directly or through plain cat.
 
     Unsupported shell/Python encodings are unknown; never execute extracted text.
     """
     script=shell_script(command)
     if script is None:return None
-    match=re.fullmatch(r"(.+?)\s*<<\s*'([A-Za-z0-9_]+)'\n(.*?)\n\2\s*",script,re.S)
-    if not match:return None
-    args=canonical_args(match[1],root)
+    pipe=re.fullmatch(r"(?:cat|/bin/cat|/usr/bin/cat)[ \t]+<<[ \t]*'([A-Za-z0-9_]+)'"
+                      r"[ \t]*\|[ \t]*(\([^\n]+\))[ \t]*\n(.*?)\n\1\s*",script,re.S)
+    if pipe:
+        invocation,body=pipe[2],pipe[3]
+    else:
+        match=re.fullmatch(r"(.+?)\s*<<\s*'([A-Za-z0-9_]+)'\n(.*?)\n\2\s*",script,re.S)
+        if not match:return None
+        invocation,body=match[1],match[3]
+    args=canonical_args(invocation,root)
     if args is None:return None
     if len(args)!=8 or args[0]!='native-result' or args[1]!='--request' or args[3]!='--token' or args[5:]!=['--input','-','--json']:
         return None
     if not re.fullmatch('[0-9a-f]{64}',args[2]) or not re.fullmatch('[0-9a-f]{32}',args[4]):return None
-    return args[2],args[4],_json(match[3].encode())
+    return args[2],args[4],_json(body.encode())
 
 
 def capture(root, identity, session_id, events_path, before, *, deadline=None):

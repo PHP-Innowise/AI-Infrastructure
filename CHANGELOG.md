@@ -28,6 +28,13 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Observed native save pipeline recognition — 2026-10-31
+
+- Recognize literal `cat` quoted-heredoc pipelines into the exact-corpus native
+  save wrapper without executing extracted text or weakening receipt/proof
+  checks. Progress-only saves remain distinct from new durable knowledge;
+  unsupported commands and nonliteral input stay unproven.
+
 ### Reproducible native memory A-to-B experiment — 2026-10-31
 
 - Add a maintainer-only private plan/run/inspect controller with two fixed

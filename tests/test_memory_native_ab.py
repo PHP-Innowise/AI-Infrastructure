@@ -187,6 +187,36 @@ class CaptureEvidenceTests(unittest.TestCase):
         self.assertIsNotNone(evidence.save_call('/usr/bin/bash -lc '+shlex.quote(command),root))
         self.assertIsNone(evidence.save_call(command.replace('cd /public/project','cd /outside'),root))
 
+    def test_literal_cat_pipeline_binds_exact_root_and_payload(self):
+        import memory_native_ab_evidence as evidence
+        root=Path('/public/project with spaces')
+        invocation=('(cd '+shlex.quote(str(root))+' && python3 memory-bank/scripts/context.py --root '+
+                    shlex.quote(str(root))+' native-result --request '+'a'*64+' --token '+'b'*32+
+                    ' --input - --json)')
+        payload={'progress':'Checked $(not-executed) and `literal` text.','verified':True,'learnings':[]}
+        for cat in ('cat','/bin/cat','/usr/bin/cat'):
+            script=cat+" <<'JSON' | "+invocation+'\n'+json.dumps(payload)+'\nJSON'
+            for command in (script,'/usr/bin/bash -lc '+shlex.quote(script)):
+                with self.subTest(cat=cat,wrapped=command!=script):
+                    self.assertEqual(('a'*64,'b'*32,payload),evidence.save_call(command,root))
+
+    def test_cat_pipeline_rejects_other_commands_roots_and_nonliteral_input(self):
+        import memory_native_ab_evidence as evidence
+        root=Path('/public/project')
+        invocation=('(cd /public/project && python3 memory-bank/scripts/context.py native-result --request '+
+                    'a'*64+' --token '+'b'*32+' --input - --json)')
+        script="cat <<'JSON' | "+invocation+'\n{}\nJSON'
+        invalid=[script.replace('cat ',name+' ',1) for name in ('/tmp/cat','cat -','env cat','tee')]
+        invalid += [script.replace("<<'JSON'",'<<JSON'),script.replace("<<'JSON'","<<-'JSON'"),
+                    script.replace('cd /public/project','cd /outside'),
+                    script.replace('&& python3','&& echo fake && python3'),
+                    script.replace(' --json)',' --json && echo fake)'),
+                    script.replace(' | (',' | tee /tmp/copy | ('),
+                    script.replace(')\n',') > /tmp/output\n'),script+'\necho extra',
+                    script.replace('python3','/tmp/python3',1)]
+        for command in invalid:
+            with self.subTest(command=command):self.assertIsNone(evidence.save_call(command,root))
+
     def test_learning_only_and_decision_saves_are_valid(self):
         import memory_native_ab_evidence as evidence
         from tests.test_memory_native_capture import NativeCaptureFixture
@@ -271,6 +301,19 @@ class CaptureEvidenceTests(unittest.TestCase):
             events=case.root/'events.jsonl';events.write_text(json.dumps(event)+'\n')
             checked=evidence.capture(case.root,{'task_id':'research','task_uuid':state['task_uuid']},'session-a',events,before)
             self.assertTrue(checked['native_saved']);self.assertEqual([],checked['new_chunks'])
+            # Real CLI sessions also send the same literal JSON through cat into
+            # the emitted cd wrapper. A saved progress-only result is not a miss.
+            pipeline=("cat <<'JSON' | (cd "+shlex.quote(str(case.root))+
+                ' && python3 memory-bank/scripts/context.py --root '+shlex.quote(str(case.root))+
+                ' native-result --request '+path.stem+' --token '+state['token']+
+                ' --input - --json)\n'+json.dumps(payload)+'\nJSON')
+            event['item']['command']='/usr/bin/bash -lc '+shlex.quote(pipeline)
+            events.write_text(json.dumps(event)+'\n')
+            checked=evidence.capture(case.root,{'task_id':'research','task_uuid':state['task_uuid']},'session-a',events,before)
+            self.assertTrue(checked['native_saved']);self.assertEqual([],checked['record_ids'])
+            self.assertEqual([],checked['new_chunks'])
+            self.assertFalse(evidence.capture(case.root,{'task_id':'research','task_uuid':state['task_uuid']},
+                                              'other-session',events,before)['native_saved'])
         finally:case.doCleanups()
 
 
