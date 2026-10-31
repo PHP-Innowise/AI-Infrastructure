@@ -219,6 +219,20 @@ uncommitted according to the tool and team policy.
 Do not ignore shared `memory-bank/chunks/`, `project-brain/` governed records,
 or installed policy/skill/hook files merely to make adoption easier.
 
+A project may still keep `project-brain/` and `memory-bank/` out of its
+history - a client repository the team does not commit to, for instance -
+leaving them untracked or listing them in `.git/info/exclude`. The Brain is
+then a single copy on one machine: `git clean -fd` removes it while it is
+untracked, `git clean -fdX` once it is ignored, and no other clone has it.
+Copy it elsewhere regularly, for example:
+
+```bash
+tar -czf ~/brain-$(date +%F).tgz --exclude memory-bank/local project-brain memory-bank
+```
+
+`context.py export` is not a backup: it leaves out restricted and private
+records, and nothing imports it.
+
 ## 8. Validate After Installation
 
 From the target root:
@@ -265,7 +279,9 @@ Close active AI-tool sessions before changing integration files.
 3. Never delete an entire merged directory such as `.cursor/`, `.claude/`,
    `.agents/`, `.codex/`, `memory-bank/`, or `project-brain/`.
 4. The ignored `memory-bank/local/context.db` is disposable and may be removed
-   after confirming no needed lightweight-only local state remains.
+   after confirming no needed lightweight-only local state remains. Removing
+   it also drops the turns buffered since the last checkpoint and the recent
+   files (`docs/CONTEXT-AND-MEMORY.md`).
 5. Re-run project checks and `git status --short`.
 
 There is no automatic installer rollback command. For a `MERGE`, do not blindly

@@ -304,7 +304,8 @@ generated target project):
   active tasks, handoffs, findings, decisions. Governed mode is default.
 - **Local Context Engine** — indexes policy/skills/docs/specs/Project Brain
   records into ignored SQLite (`memory-bank/local/context.db`), retrieval via
-  FTS5/BM25. Disposable: deleting it deletes no authoritative data.
+  FTS5/BM25. Disposable: deleting it deletes no authoritative data, though it
+  drops the turns buffered since the last checkpoint and the recent files.
 - **Memory Bank** (`memory-bank/`) — Git-tracked durable knowledge chunks
   (`MEM-YYYYMMDD-xxxxxxxx-{slug}.md`), auto-promoted by default from resolved
   findings/incidents/decisions (tagged `auto-promoted`, unreviewed) unless
@@ -366,7 +367,7 @@ custom architecture — see `install/README.md`.
   root `scripts/`) go in the root `CHANGELOG.md` instead — CI's `changelog`
   job enforces this on PRs via `scripts/check_core_changelog.sh`.
 - Run the affected edition's `DOD.md` verification after a change.
-- Memory retrieval takes fixes only until a measurement of task outcomes
-  exists (capsule on against off, on replayed or real tasks). A new
-  ranking, admission or capsule heuristic is not merged on stand numbers;
-  see `docs/MEMORY-EVAL.md` ("Accepting a retrieval change").
+- Memory retrieval takes fixes. A ranking, admission, budget or capsule
+  heuristic is merged only on its own task-outcome measurement, sealed
+  before it runs on held-out tasks, never on stand numbers; see
+  `docs/MEMORY-EVAL.md` ("Accepting a retrieval change").
