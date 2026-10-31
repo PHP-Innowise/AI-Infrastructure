@@ -74,7 +74,9 @@ So:
 
 Retrieval is frozen to fixes until task outcomes are measured: a capsule
 against no capsule, on replayed or real tasks, counting the calls before the
-first touch of the file the task changed and whether the task got done. All
+first touch of the file the task changed. The stand stops a run at that
+touch, so it does not see whether the task got done: that needs full-length
+runs and a way to check the result, and neither exists yet. All
 of the earlier measures score relevance labels, and real use has not shown
 that relevant delivery changes what an agent does. In September one of 287
 delivered documents was opened.
@@ -331,8 +333,42 @@ variants; another folder with the same prefix is read only when its sessions
 ran in the project or in a worktree of the same repository (otherwise it is
 counted as skipped - `next-gen` is not `next`). A turn starts at the prompt
 hook's output (a `hook_success` `UserPromptSubmit` attachment; in Codex, a
-developer message that starts like a capsule) and ends at the next human
-prompt. `--json` prints the numbers as JSON, `--paths` adds per-path counts.
+developer message that starts like a capsule, which a Codex of October 2026
+or later also marks `hooks.additional_context`) and ends at the next human
+prompt. The hook may print "Previous native memory result was not saved
+completely." ahead of the capsule; until 2026-10-30 such a Codex turn was
+not counted at all. A hook that printed "Memory refresh unavailable" opened
+a turn without a capsule. `--json` prints the numbers as JSON, `--paths`
+adds per-path counts.
+
+A capsule hands over as memory only the items it lists: since October each
+on a line `- memory|history|skill|policy <path> — <title>`, its excerpt
+indented below; the September runtime put the layer on a line of its own
+(`semantic:`) with each item indented under it, plus `weak-match: <path>`.
+Both forms are read. The other lines name paths that are not delivered
+memory - recent and ticket files, the task's sources, the last turn, an
+excerpt that mentions a document - and until 2026-10-30 they were counted as
+delivered; the `task record:` pointer to the task's own record is counted on
+its own row (`task record pointers`). A task's record is the kind
+`task-record`, apart from the Brain's findings and decisions (`brain`).
+
+`realized` also reads every explicit retrieve in the sessions it reads -
+`context.py retrieve` (or `context`) through a shell, and the Memory MCP's
+`memory_retrieve` - in a capsule turn or not, pairs each call with its answer
+by the host's call ID, and reads the answer as it reads a capsule (or the
+capsule's JSON, with `--json`). Per host it counts the sessions that
+retrieved, the calls, the answers read and those naming a document, the
+documents returned and how many a later tool call opened, and the task
+records the answers pointed at and how many were opened afterwards; a
+document counts once per session. By kind it gives the same, and as a
+baseline the documents of that kind a session that retrieved opened without
+any retrieve naming them. In next's Codex sessions since 2026-09-01 (992
+read, 36 of them retrieved, 75 calls) the answers named 25 task records, 9
+of them opened afterwards, 4 findings and chunks, none opened, and
+`CHANGELOG.md` in 14 sessions, opened in 11. That runtime printed no `task
+record:` pointer; the records came as history items. In the same sessions'
+440 capsule turns the capsules delivered 54 items, 44 of them `CHANGELOG.md`
+(25 opened) and none of the rest opened.
 Codex keeps a finished rollout compressed, as `rollout-*.jsonl.zst` (3,040 of
 3,099 on the maintainer machine in October 2026); `realized` reads those too,
 through Python 3.14's `compression.zstd` or else the `zstd` command. Without
@@ -528,19 +564,26 @@ report them too.
 - **latency** - wall time of the refresh process on a warm index, p50 and p95.
 - **realized** - per host: prompt-hook turns, turns with a capsule and with
   documents, delivered items the agent touched with a tool and mentioned in
-  its text, by kind (skill, brain, chunk, task, spec-doc, changelog);
-  `context.py retrieve` calls and Memory MCP `memory_retrieve` calls by the
-  agent; and, as a baseline, documents of those kinds the agent opened that
-  the capsule did not deliver. From the native result journal, per host: the
+  its text, by kind (skill, brain, task-record, chunk, task, spec-doc,
+  changelog); the capsules' task record pointers and how many the agent
+  touched; `context.py retrieve` calls and Memory MCP `memory_retrieve` calls
+  by the agent in those turns; and, as a baseline, documents of those kinds
+  the agent opened that the capsule did not deliver. Then the explicit
+  retrieves of whole sessions, what they returned and what was opened
+  afterwards. From the native result journal, per host: the
   automatic save funnel from prompt hook run to promoted chunk, and the codes
   of every skip, refusal and failure. From the transcripts, per host: how many
   save requests the Stop hook made and, as medians, the seconds and output
   tokens from each request to the next human prompt, beside those of the
-  answer before it. The journal counts requests, but only the transcript
-  shows what each one cost. A request is found by its
+  answer before it, and where the host records them the input tokens and how
+  many came from the cache. The journal counts requests, but only the
+  transcript shows what each one cost. A request is found by its
   `INTERNAL_NATIVE_MEMORY_RESULT <token>` marker wherever the host recorded
   it, never in the agent's own text. On 21 Codex runs (16-19 October 2026) it
-  was +9.9 s and +383 output tokens after a 17.5 s answer of 701 tokens. The
+  was +9.9 s and +383 output tokens after a 17.5 s answer of 701 tokens. Its
+  input is the larger cost: on 43 saves on copies of two client projects
+  (24 October) the median save re-read 176,782 input tokens, 175,616 of them
+  cached, for 662 output tokens and 17.1 s, after an answer of 70.5 s. The
   team decides on `native_result_request` from that line. Once a runtime
   names how its request ends, the line is also split by the ending, read
   from the request's own words: `brief` (a session a person reads as it goes),
@@ -711,10 +754,14 @@ None says whether delivery changes what an agent does.
   as the Stop hook would have recorded them.
 - **The arms:** a headless `codex exec` session runs the same prompt twice:
   - `off`, with no hooks;
-  - `capsule`, with only the memory prompt hook (`working-memory-read.sh`).
+  - `capsule`, with only the memory prompt hook (`working-memory-read.sh`)
+    and `capsule_profile: full` in the corpus.
 
   The arms therefore differ by the Task Capsule alone. The policy's own
-  `context.py retrieve` stays available in both.
+  `context.py retrieve` stays available in both. Until 2026-10-30 `capsule`
+  left the profile to the corpus's own `runtime.json`; since the editions
+  shipped `recall` (2026-10-22) that would have run recall under the old
+  name.
 - **The `navigation` arm** runs the same hook with `capsule_profile:
   navigation` in the corpus: working state and recent files, no documents.
   It writes no manifest, so its runs are recognised by the line every hook
@@ -738,6 +785,12 @@ None says whether delivery changes what an agent does.
   arms of a result. The rule below then reads `<treatment>-helps` /
   `<treatment>-hurts`. Each run also records the token estimate of the
   documents the hook's manifest delivered.
+- **Cost:** `report` prints, per arm and outside the verdict, the mean
+  seconds of a run, on how many runs Codex reported its usage, the mean
+  input, cached and output tokens over those, and the documents' token
+  estimate. Codex reports usage only when a turn completes, so a run stopped
+  at the first gold touch has none; the estimate counts documents only, so a
+  recall or ticket capsule without one reads 0 whatever the hook printed.
 - **Repeats:** `--repeat` runs each arm several times; the order alternates by
   task and repeat.
 

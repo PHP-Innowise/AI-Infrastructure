@@ -1,6 +1,8 @@
 """Offline tests for scripts/memory_outcome_ab.py: no model, no network."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -204,6 +206,42 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(20, summary["pairs"])
         self.assertEqual(14, summary["ticket_files_delivered"])
         self.assertEqual("ticket-helps", summary["verdict"])
+
+    def test_the_cost_of_each_arm_is_reported_beside_the_verdict(self) -> None:
+        def run(calls, seconds, usage=None, tokens=0):
+            return {"stopped": "gold" if usage is None else "finished", "calls_to_gold": calls,
+                    "capsule_delivered": True, "hook_ran": True, "seconds": seconds, "usage": usage,
+                    "capsule_tokens": tokens}
+        finished = {"input_tokens": 40000, "cached_input_tokens": 30000, "output_tokens": 900}
+        items = {f"T{n}": {"status": "ok", "arms": {
+            "off": [{**run(6, 30.0), "capsule_delivered": False, "hook_ran": False}],
+            "capsule": [run(3, 20.0, finished if n == 0 else None, 400)],
+        }} for n in range(4)}
+        summary = ab.summarize({"meta": {"cap": 40}, "items": items})
+        self.assertEqual({"runs": 4, "seconds_mean": 20.0, "runs_with_usage": 1, "capsule_tokens_mean": 400.0,
+                          "input_tokens_mean": 40000.0, "cached_input_tokens_mean": 30000.0,
+                          "output_tokens_mean": 900.0}, summary["cost"]["capsule"])
+        self.assertEqual((0, 30.0), (summary["cost"]["off"]["runs_with_usage"], summary["cost"]["off"]["seconds_mean"]))
+        self.assertEqual("insufficient", summary["verdict"])
+        with tempfile.TemporaryDirectory() as directory:
+            result = Path(directory) / "result.json"
+            result.write_text(json.dumps({"meta": {"cap": 40}, "items": items}), encoding="utf-8")
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                ab.main(["report", str(result)])
+        self.assertIn("cost, not part of the verdict:", printed.getvalue())
+        self.assertIn("capsule: 20.0 s a run; Codex usage on 1 of 4 runs", printed.getvalue())
+
+    def test_the_capsule_arm_names_the_full_profile(self) -> None:
+        # The editions' default became recall: left to it, `capsule` would
+        # have measured recall under the old name.
+        with tempfile.TemporaryDirectory() as directory:
+            corpus = Path(directory)
+            ab.configure_corpus(corpus, {"capsule_profile": "recall"})
+            ab.configure_corpus(corpus, ab.ARM_SETTINGS["capsule"])
+            config = json.loads((corpus / "project-brain/config/runtime.json").read_text(encoding="utf-8"))
+        self.assertEqual("full", config["capsule_profile"])
+        self.assertEqual(set(ab.HOOKED_ARMS), set(ab.ARM_SETTINGS))
 
     def test_the_health_journal_tells_whether_ticket_files_came(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

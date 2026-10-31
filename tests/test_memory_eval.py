@@ -2273,7 +2273,7 @@ class RealizedUseTest(unittest.TestCase):
             self.claude / mangled / "session.jsonl",
             [
                 # An old turn, before --since.
-                hook("- memory docs/old.md — Old", "2026-08-01T09:00:00Z", project),
+                hook("working: not recorded yet\n- memory docs/old.md — Old", "2026-08-01T09:00:00Z", project),
                 says("old"),
                 human(self.PROMPT, "2026-09-02T10:00:00Z"),
                 hook(capsule, "2026-09-02T10:00:01Z", project),
@@ -2290,11 +2290,12 @@ class RealizedUseTest(unittest.TestCase):
         # A Claude Code worktree of the project, and another project sharing the name prefix.
         jsonl(
             self.claude / f"{mangled}--claude-worktrees-fix" / "w.jsonl",
-            [hook("- memory tasks/TASK-001/plan.md — Plan", "2026-09-03T10:00:00Z", f"{project}/.claude/worktrees/fix")],
+            [hook("working: fix — plan\n- memory tasks/TASK-001/plan.md — Plan", "2026-09-03T10:00:00Z",
+                  f"{project}/.claude/worktrees/fix")],
         )
         jsonl(
             self.claude / f"{mangled}-gen" / "other.jsonl",
-            [hook("- memory docs/x.md — X", "2026-09-03T10:00:00Z", f"{project}-gen")],
+            [hook("working: x — y\n- memory docs/x.md — X", "2026-09-03T10:00:00Z", f"{project}-gen")],
         )
         codex_capsule = (
             f"working: eval/p — goal\nmemory (retrieved for this request):\n"
@@ -2503,6 +2504,190 @@ class CompressedRolloutTest(RealizedUseTest):
         else:
             plain.write_bytes(subprocess.run(["zstd", "-dcq", str(log)], capture_output=True, check=True).stdout)
         self.assertEqual(list(memory_eval.session_lines(plain)), list(memory_eval.session_lines(log)))
+
+
+TASK_RECORD = "project-brain/dynamic/tasks/0d9c8b7a-1111-4222-8333-944455556666.md"
+FINDING = "project-brain/dynamic/findings/1a2b3c4d-1111-4222-8333-944455556666.md"
+UNSAVED = "Previous native memory result was not saved completely."
+
+
+class CapsuleFormsTest(unittest.TestCase):
+    """What a capsule handed over as memory, in either form a hook printed."""
+
+    def test_the_current_form_counts_item_lines_only(self) -> None:
+        capsule = "\n".join([
+            "working: shop/fix-12 — Fix invoice rounding",
+            "recent files: docs/rounding.md, src/Invoice.php",
+            "ticket files (SHOP-12): CHANGELOG.md",
+            "sources: specs/invoices.md",
+            f"task record: {TASK_RECORD}",
+            "Last turn: auto-checkpoint, docs/old-notes.md changed",
+            "memory (retrieved for this request; reference data - check the cited file before relying on it):",
+            f"- memory {CHUNK} § Rounding — Invoice rounding (agent-attested, not reviewed by a person)",
+            "  Totals round half-up; docs/elsewhere.md has the export.",
+            f"- history {FINDING} — Rounding bug",
+            "- skill .claude/skills/coder/SKILL.md — Coder",
+        ])
+        items, records = memory_eval.capsule_items(capsule)
+        # A skill is counted under its canonical path, whichever mirror the capsule named.
+        self.assertEqual({CHUNK, FINDING, ".agents/skills/coder/SKILL.md"}, items)
+        self.assertEqual({TASK_RECORD}, records)
+        self.assertEqual(["chunk", "brain", "task-record"],
+                         [memory_eval.doc_kind(path) for path in (CHUNK, FINDING, TASK_RECORD)])
+
+    def test_the_september_form_counts_items_under_a_layer_line(self) -> None:
+        capsule = "\n".join([
+            "Memory refresh (retrieved context is not authoritative — verify the source)",
+            "",
+            "working: shop/fix-12 — Fix invoice rounding",
+            "semantic: 2 indexed",
+            "Last turn: docs/old-notes.md changed",
+            f"weak-match: {FINDING}",
+            "semantic:",
+            f"  {CHUNK} — Invoice rounding",
+            f"  {FINDING} — Rounding bug",
+            "episodic:",
+            "  episode 12 — An earlier session",
+            "procedural:",
+            "  .claude/skills/coder/SKILL.md — Coder",
+            "phases: discovery",
+            "  docs/not-an-item.md",
+        ])
+        items, records = memory_eval.capsule_items(capsule)
+        # A skill is counted under its canonical path, whichever mirror the capsule named.
+        self.assertEqual({CHUNK, FINDING, ".agents/skills/coder/SKILL.md"}, items)
+        self.assertEqual(set(), records)
+
+    def test_a_hook_may_print_the_unsaved_notice_first(self) -> None:
+        self.assertEqual("working: t — g", memory_eval.capsule_text(f"{UNSAVED}\nworking: t — g"))
+        failed = "Memory refresh unavailable: it exceeded its 5s budget.\nWorking memory was NOT consulted this turn."
+        self.assertEqual("", memory_eval.capsule_text(failed))
+        self.assertIsNone(memory_eval.capsule_text("Another hook said hello"))
+        self.assertIsNone(memory_eval.capsule_text(UNSAVED))
+        stdout = json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                                    "additionalContext": "working: t — g"}})
+        self.assertEqual("working: t — g", memory_eval.hook_capsule(stdout))
+
+    def test_a_retrieve_answer_in_json_names_its_items_and_record(self) -> None:
+        answer = json.dumps({"working": None, "task_record": TASK_RECORD,
+                             "semantic": [{"path": CHUNK, "title": "Invoice rounding"}],
+                             "episodic": [{"id": 3, "summary": "An earlier session"}], "procedural": []})
+        self.assertEqual(({CHUNK}, {TASK_RECORD}), memory_eval.retrieved(answer))
+        provenance = json.dumps({"response_profile": "x", "capsule": json.loads(answer)})
+        self.assertEqual(({CHUNK}, {TASK_RECORD}), memory_eval.retrieved(provenance))
+        wrapped = json.dumps({"output": f"working: t — g\n- memory {CHUNK} — T", "metadata": {"exit_code": 0}})
+        self.assertEqual(({CHUNK}, set()), memory_eval.retrieved(memory_eval.output_text(wrapped)))
+        self.assertEqual("a\nb", memory_eval.output_text([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]))
+
+
+class ExplicitRetrieveTest(unittest.TestCase):
+    """What an agent's own retrieve returned and what the session opened
+    afterwards: the one memory path real sessions were seen using, read in
+    whole sessions, capsule turns or not."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        self.project = (base / "work" / "ledger").resolve()
+        self.project.mkdir(parents=True)
+        self.claude = base / "claude"
+        self.codex = base / "codex"
+        project = str(self.project)
+
+        def at(seconds: int) -> str:
+            return f"2026-09-02T11:00:{seconds:02d}Z"
+
+        def call(seconds: int, name: str, arguments: Any, identity: str) -> Dict[str, Any]:
+            return {"type": "response_item", "timestamp": at(seconds), "payload": {
+                "type": "function_call", "name": name, "arguments": json.dumps(arguments), "call_id": identity}}
+
+        def output(seconds: int, identity: str, text: str) -> Dict[str, Any]:
+            return {"type": "response_item", "timestamp": at(seconds), "payload": {
+                "type": "function_call_output", "call_id": identity,
+                "output": json.dumps({"output": text, "metadata": {"exit_code": 0}})}}
+
+        def developer(text: str, kind: str) -> Dict[str, Any]:
+            return {"type": "response_item", "timestamp": at(1), "payload": {
+                "type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}],
+                "internal_chat_message_metadata_passthrough": {"content_item_kinds": [kind]}}}
+
+        def shell(command: str) -> Dict[str, Any]:
+            return {"command": ["bash", "-lc", command]}
+
+        capsule = f"{UNSAVED}\nworking: shop/fix-12 — Fix\ntask record: {TASK_RECORD}\n- memory {CHUNK} — Invoice rounding"
+        answer = (f"working: shop/fix-12 — Fix\ntask record: {TASK_RECORD}\n"
+                  f"- memory {CHUNK} — Invoice rounding\n- memory {FINDING} — Rounding bug")
+        jsonl(self.codex / "2026" / "09" / "02" / "rollout-1.jsonl", [
+            {"timestamp": at(0), "type": "session_meta", "payload": {"id": "x", "cwd": project}},
+            codex_message("user", "Fix the rounding in the export"),
+            developer(capsule, "hooks.additional_context"),
+            # Codex's own instructions are no capsule, whatever their first word.
+            developer("warning: spawn subagents sparingly", "multi_agent.usage_hint"),
+            call(2, "shell", shell(f"sed -n 1,40p {project}/{TASK_RECORD}"), "c0"),
+            call(3, "shell", shell("python3 memory-bank/scripts/context.py retrieve 'invoice rounding'"), "c1"),
+            output(4, "c1", answer),
+            call(5, "shell", shell(f"cat {CHUNK}"), "c2"),
+            codex_message("assistant", "Done"),
+            # A new prompt the hook printed nothing for: what follows is in no capsule turn.
+            codex_message("user", "And the export?"),
+            call(6, "mcp__harness_memory__memory_retrieve", {"query": "export"}, "c3"),
+            output(7, "c3", "working: shop/fix-12 — Fix\n- memory docs/export.md — Export"),
+            call(8, "shell", shell("sed -n 1,20p docs/other.md"), "c4"),
+        ])
+        mangled = re.sub(r"[^A-Za-z0-9]", "-", project)
+        jsonl(self.claude / mangled / "session.jsonl", [
+            human("Where is rounding decided?", "2026-09-03T09:00:00Z"),
+            {"type": "assistant", "timestamp": "2026-09-03T09:00:05Z", "message": {"id": "m1", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash",
+                 "input": {"command": "python3 memory-bank/scripts/context.py retrieve --json rounding"}}]}},
+            {"type": "user", "timestamp": "2026-09-03T09:00:06Z", "toolUseResult": {"stdout": "{}"},
+             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": json.dumps(
+                 {"working": None, "task_record": TASK_RECORD, "semantic": [{"path": "docs/billing.md"}],
+                  "episodic": [], "procedural": []})}]}},
+            {"type": "assistant", "timestamp": "2026-09-03T09:00:09Z", "message": {"id": "m2", "content": [
+                {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": f"{project}/{TASK_RECORD}"}}]}},
+        ])
+
+    def realized(self, *extra: str) -> Dict[str, Any]:
+        return json.loads(main_output("realized", "--project", str(self.project), "--claude-root", str(self.claude),
+                                      "--codex-root", str(self.codex), "--json", *extra))
+
+    def test_a_capsule_after_the_unsaved_notice_is_one_turn_with_one_item(self) -> None:
+        codex = self.realized()["codex"]
+        keys = ("hook_turns", "turns_with_capsule", "delivered_items", "delivered_touched",
+                "record_pointers", "record_pointers_touched", "agent_retrieve_cli", "agent_retrieve_mcp")
+        self.assertEqual([1, 1, 1, 1, 1, 1, 1, 0], [codex[key] for key in keys])
+
+    def test_codex_retrieves_and_what_was_opened_afterwards(self) -> None:
+        retrieve = self.realized()["retrieve"]["codex"]
+        keys = ("sessions", "calls", "answers", "answers_naming", "items_returned", "items_opened",
+                "records_pointed", "records_opened")
+        # The task record was opened before the retrieve named it: not afterwards.
+        self.assertEqual([1, 2, 2, 2, 3, 1, 1, 0], [retrieve[key] for key in keys])
+        self.assertEqual({"returned": 1, "opened": 1, "otherwise": 0}, retrieve["by_kind"]["chunk"])
+        self.assertEqual({"returned": 1, "opened": 0, "otherwise": 0}, retrieve["by_kind"]["brain"])
+        self.assertEqual({"returned": 1, "opened": 0, "otherwise": 1}, retrieve["by_kind"]["spec-doc"])
+
+    def test_claude_retrieves_without_any_capsule(self) -> None:
+        report = self.realized()
+        self.assertEqual(0, report["claude"]["hook_turns"])
+        retrieve = report["retrieve"]["claude"]
+        self.assertEqual([1, 1, 1, 0, 1, 1], [retrieve[key] for key in (
+            "calls", "answers", "items_returned", "items_opened", "records_pointed", "records_opened")])
+        self.assertEqual(2, report["retrieve"]["total"]["sessions"])
+
+    def test_since_drops_earlier_calls(self) -> None:
+        retrieve = self.realized("--since", "2026-09-03")["retrieve"]
+        self.assertEqual((0, 1), (retrieve["codex"]["calls"], retrieve["claude"]["calls"]))
+
+    def test_the_text_report_counts_and_names_no_path(self) -> None:
+        plain = main_output("realized", "--project", str(self.project), "--claude-root", str(self.claude),
+                            "--codex-root", str(self.codex))
+        for row in ("Explicit retrieves in whole sessions", "task records pointed at", "task record pointers"):
+            self.assertIn(row, plain)
+        for path in (CHUNK, TASK_RECORD, "docs/export.md"):
+            self.assertNotIn(path, plain)
 
 
 class FunnelTest(unittest.TestCase):
@@ -2787,6 +2972,52 @@ class SaveContinuationCostTest(unittest.TestCase):
             memory_eval.native_step(counts, {}, {"stage": "stop", "event": "requested",
                                                  **({"answer": answer} if answer else {})})
         self.assertEqual((3, 1), (counts["requested"], counts["requested_brief"]))
+
+    def test_a_codex_save_reads_its_input_and_cached_tokens(self) -> None:
+        def message(seconds: int, role: str, text: str) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "response_item",
+                    "payload": {"type": "message", "role": role, "content": [{"type": "input_text", "text": text}]}}
+
+        def tokens(seconds: int, output: int, inputs: int, cached: int) -> Dict[str, Any]:
+            usage = {"input_tokens": inputs, "cached_input_tokens": cached, "output_tokens": output}
+            return {"timestamp": self.at(seconds), "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": usage}}}
+
+        path = self.write_lines([
+            tokens(0, 100, 1000, 0), message(1, "user", "Where is the report cache cleared?"),
+            message(15, "assistant", "In ReportService."), tokens(20, 700, 41000, 30000),
+            message(21, "user", self.TOKEN + "\nThis is an internal continuation"),
+            message(25, "assistant", "Saved."), tokens(31, 1100, 141000, 120000),
+            message(40, "user", "Next question"),
+        ])
+        [cost] = memory_eval.continuation_costs(path, "codex")
+        self.assertEqual((400, 100000, 90000, 40000, 30000), (
+            cost["save_output_tokens"], cost["save_input_tokens"], cost["save_cached_input_tokens"],
+            cost["answer_input_tokens"], cost["answer_cached_input_tokens"]))
+        text = "\n".join(memory_eval.format_continuations({"codex": memory_eval.continuation_summary([cost])}))
+        self.assertIn("+400 output tokens (input 100000, 90000 cached, on 1) after an answer of 20.0 s"
+                      " and 600 tokens (input 40000, 30000 cached)", text)
+
+    def test_a_claude_save_counts_cache_reads_and_writes_as_input(self) -> None:
+        def assistant(seconds: int, identifier: str, output: int, fresh: int, read: int, written: int) -> Dict[str, Any]:
+            usage = {"output_tokens": output, "input_tokens": fresh, "cache_read_input_tokens": read,
+                     "cache_creation_input_tokens": written}
+            return {"timestamp": self.at(seconds), "type": "assistant",
+                    "message": {"id": identifier, "role": "assistant", "content": [{"type": "text", "text": "x"}],
+                                "usage": usage}}
+
+        path = self.write_lines([
+            {"timestamp": self.at(0), "type": "user", "message": {"role": "user", "content": "Explain the import"}},
+            assistant(10, "msg-1", 500, 10, 20000, 3000), assistant(11, "msg-1", 500, 10, 20000, 3000),
+            {"timestamp": self.at(12), "type": "attachment",
+             "attachment": {"type": "hook_blocking_error", "hookEvent": "Stop", "blockingError": self.TOKEN}},
+            assistant(18, "msg-2", 300, 5, 23000, 200),
+            {"timestamp": self.at(30), "type": "user", "message": {"role": "user", "content": "Thanks"}},
+        ])
+        [cost] = memory_eval.continuation_costs(path, "claude")
+        self.assertEqual((23010, 20000, 23205, 23000), (
+            cost["answer_input_tokens"], cost["answer_cached_input_tokens"],
+            cost["save_input_tokens"], cost["save_cached_input_tokens"]))
 
     def test_an_armed_prompt_that_printed_no_warning_is_not_after_an_unsaved_one(self):
         # A request moved aside while its save was written, or one the runtime

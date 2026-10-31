@@ -8,8 +8,9 @@ rebuilds the project as it was at that prompt (the reconstruction
 `memory_eval.py` uses), runs a headless Codex session on the same prompt twice:
 
 - `off`: no hooks at all;
-- `capsule`: only the memory prompt hook (`working-memory-read.sh`), so the
-  arms differ by the Task Capsule and nothing else.
+- `capsule`: only the memory prompt hook (`working-memory-read.sh`) with the
+  `full` capsule profile, so the arms differ by the Task Capsule and nothing
+  else.
 
 It counts the tool calls before the agent first touches a file the original
 session changed (the task's *gold* files). A run stops at that touch, at
@@ -82,14 +83,17 @@ from accelerator_attach import _toml  # noqa: E402
 
 ARMS = ("off", "capsule", "navigation", "recall", "ticket")
 DEFAULT_ARMS = ("off", "capsule")
-# `navigation`, `recall` and `ticket` run the same prompt hook with these
-# settings in the corpus's runtime.json. Navigation: working state and recent
-# files, no documents and no manifest. Recall adds the task's own saves, with
-# a manifest only on a turn one of them matched. Ticket is recall with the
+# Every hooked arm runs the same prompt hook with these settings in the
+# corpus's runtime.json. Capsule: the full profile, named, since the editions'
+# default became recall (on 2026-10-22) and an arm left to the default would
+# have turned into recall unseen. Navigation: working state and recent files,
+# no documents and no manifest. Recall adds the task's own saves, with a
+# manifest only on a turn one of them matched. Ticket is recall with the
 # ticket files line on: the files of the earlier commits that name the
 # prompt's or the branch's ticket.
 HOOKED_ARMS = ("capsule", "navigation", "recall", "ticket")
 ARM_SETTINGS: Dict[str, Dict[str, Any]] = {
+    "capsule": {"capsule_profile": "full"},
     "navigation": {"capsule_profile": "navigation"},
     "recall": {"capsule_profile": "recall"},
     "ticket": {"capsule_profile": "recall", "ticket_files": True},
@@ -1428,6 +1432,7 @@ def summarize(result: Dict[str, Any], compare: Tuple[str, str] = DEFAULT_ARMS,
     cap = int(result.get("meta", {}).get("cap") or DEFAULT_CAP)
     metric = metric or str(result.get("meta", {}).get("metric") or "gold")
     pairs = []
+    paired_runs: Dict[str, List[Dict[str, Any]]] = {baseline: [], treatment: []}
     for task_key, item in sorted((result.get("items") or {}).items()):
         arms = {arm: runs if isinstance(runs, list) else [runs] for arm, runs in (item.get("arms") or {}).items()}
         if item.get("status") != "ok" or not all(arms.get(arm) for arm in compare):
@@ -1436,6 +1441,8 @@ def summarize(result: Dict[str, Any], compare: Tuple[str, str] = DEFAULT_ARMS,
             continue
         if not all(valid_arm(arm, arms[arm]) for arm in compare):
             continue
+        for arm in compare:
+            paired_runs[arm].extend(arms[arm])
         pairs.append({
             "id": task_key,
             baseline: sum(censored(run, cap, metric) for run in arms[baseline]) / len(arms[baseline]),
@@ -1472,8 +1479,34 @@ def summarize(result: Dict[str, Any], compare: Tuple[str, str] = DEFAULT_ARMS,
         # How often the ticket line reached the capsule: the mechanism, not
         # part of the verdict.
         summary["ticket_files_delivered"] = sum(1 for p in pairs if p[f"{treatment}_ticket"])
+    # What the paired runs cost, beside the verdict and never part of it.
+    summary["cost"] = {arm: arm_cost(paired_runs[arm]) for arm in compare}
     summary["verdict"] = verdict(summary)
     return summary
+
+
+def arm_cost(runs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Seconds, and the model's usage where Codex reported it, over an arm's
+    runs. Codex reports usage only when a turn completes: a run stopped at the
+    first gold touch has none, so the token means cover the runs that finished
+    and say nothing of the rest. The capsule estimate is the manifests' token
+    total, which counts documents only: a capsule without documents reads 0."""
+
+    def mean(values: Sequence[float]) -> Optional[float]:
+        return round(sum(values) / len(values), 1) if values else None
+
+    usages = [run["usage"] for run in runs if isinstance(run.get("usage"), dict)]
+    seconds = [float(run["seconds"]) for run in runs if isinstance(run.get("seconds"), (int, float))]
+    cost: Dict[str, Any] = {
+        "runs": len(runs),
+        "seconds_mean": mean(seconds),
+        "runs_with_usage": len(usages),
+        "capsule_tokens_mean": mean([run["capsule_tokens"] for run in runs
+                                     if isinstance(run.get("capsule_tokens"), int)]),
+    }
+    for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+        cost[f"{key}_mean"] = mean([usage[key] for usage in usages if isinstance(usage.get(key), int)])
+    return cost
 
 
 def verdict(summary: Dict[str, Any]) -> str:
@@ -1516,6 +1549,16 @@ def command_report(arguments: argparse.Namespace) -> int:
                   f"{treatment} {summary[f'saved_delivered_{treatment}']}")
         if "ticket_files_delivered" in summary:
             print(f"ticket files in the capsule: {summary['ticket_files_delivered']} of {summary['pairs']} pairs")
+        print("cost, not part of the verdict:")
+        for arm in compare:
+            cost = summary["cost"][arm]
+            tokens = ""
+            if cost["runs_with_usage"]:
+                tokens = (f"; over those, {cost['input_tokens_mean']} input ({cost['cached_input_tokens_mean']}"
+                          f" cached) and {cost['output_tokens_mean']} output tokens")
+            print(f"  {arm}: {cost['seconds_mean']} s a run; Codex usage on {cost['runs_with_usage']} of"
+                  f" {cost['runs']} runs (a run stopped at the touch has none){tokens};"
+                  f" capsule documents estimate {cost['capsule_tokens_mean']} tokens")
     print(f"verdict: {summary['verdict']}")
     return 0
 

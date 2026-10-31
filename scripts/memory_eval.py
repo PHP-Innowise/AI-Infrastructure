@@ -3000,18 +3000,40 @@ DOC_PATH = re.compile(
     r"(?<![\w-])((?:project-brain|memory-bank|specs|docs|tasks|\.agents/skills|\.claude/skills"
     r"|\.cursor/skills|\.codex/skills)/[\w./@-]+\.md|CHANGELOG\.md)"
 )
-KINDS = ("skill", "brain", "chunk", "task", "spec-doc", "changelog")
+KINDS = ("skill", "brain", "task-record", "chunk", "task", "spec-doc", "changelog")
+# A task's own Brain record, apart from the findings and decisions beside it:
+# what agents were seen opening is the working state, not the knowledge.
+TASK_RECORD_DIRS = ("project-brain/dynamic/tasks/", "project-brain/archive/task/")
 # The first line of a capsule as a hook prints it: the old banner, the
 # working line, or a layer/health line printed ahead of it when unhealthy.
 CAPSULE_START = re.compile(
     r"^(?:Memory refresh|working:|warming:|warning:|procedural:|semantic:|episodic:"
     r"|memory review:|codebase map:|phases:|brain-validation:)"
 )
+# A prompt hook may print this ahead of the capsule: the last answer's save
+# did not complete.
+HOOK_PREAMBLE = ("Previous native memory result was not saved completely.",)
+# What a prompt hook prints instead of a capsule when its refresh failed.
+HOOK_FAILURE = "Memory refresh unavailable"
+# A capsule names its memory in one of two forms. Since October each item is
+# a line "- memory|history|skill|policy <path> — <title>", its excerpt
+# indented below it. The September runtime printed the layer on a line of its
+# own ("semantic:") with each item indented under it, and a weak match again
+# as "weak-match: <path>". Every other line - working state, recent and
+# ticket files, the task's sources, the last turn, warnings, excerpts - names
+# paths the capsule did not hand over as memory; "task record: <path>" points
+# at the task's own record.
+CAPSULE_ITEM = re.compile(r"^- (?:memory|history|skill|policy) (.+?)(?: — |$)")
+SEPTEMBER_LAYERS = ("semantic:", "episodic:", "procedural:")
+SEPTEMBER_ITEM = re.compile(r"^  (\S.*?)(?: — |$)")
+WEAK_MATCH = "weak-match: "
+TASK_RECORD = "task record: "
 GENERIC_NAMES = {"skill.md", "readme.md", "index.md", "manifest.md"}
 COUNTERS = (
     "hook_turns", "turns_with_capsule", "turns_with_documents", "delivered_items",
     "delivered_touched", "delivered_mentioned", "turns_touching_delivered",
     "turns_mentioning_delivered", "touched_not_delivered", "turns_touching_other_docs",
+    "record_pointers", "record_pointers_touched",
     "agent_retrieve_cli", "agent_retrieve_mcp", "agent_context_cli",
 )
 
@@ -3019,6 +3041,8 @@ COUNTERS = (
 def doc_kind(path: str) -> str:
     if is_skill(path):
         return "skill"
+    if path.startswith(TASK_RECORD_DIRS):
+        return "task-record"
     if path.startswith("project-brain/"):
         return "brain"
     if path.startswith("memory-bank/chunks/"):
@@ -3059,15 +3083,206 @@ def mentioned(path: str, text: str) -> bool:
     )
 
 
+def capsule_text(text: str) -> Optional[str]:
+    """The capsule a prompt hook's output carries, past the lines a hook may
+    print ahead of it; "" for a refresh that failed, None for no capsule."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    start = 0
+    while start < len(lines) and (not lines[start].strip() or lines[start].strip() in HOOK_PREAMBLE):
+        start += 1
+    capsule = "\n".join(lines[start:])
+    if not CAPSULE_START.match(capsule):
+        return None
+    return "" if capsule.startswith(HOOK_FAILURE) else capsule
+
+
+def capsule_items(text: str) -> Tuple[Set[str], Set[str]]:
+    """The documents a capsule - or a retrieve's rendered answer - handed
+    over as memory items, and the task records it pointed at."""
+    items: Set[str] = set()
+    records: Set[str] = set()
+    layer = False
+    for line in text.replace("\\/", "/").splitlines():
+        if line in SEPTEMBER_LAYERS:
+            layer = True
+            continue
+        if line.startswith("  "):
+            # An item under a September layer line, else a current excerpt.
+            match = SEPTEMBER_ITEM.match(line) if layer else None
+            if match:
+                items |= doc_paths(match.group(1).split(" § ")[0])
+            continue
+        layer = False
+        match = CAPSULE_ITEM.match(line)
+        if match:
+            items |= doc_paths(match.group(1).split(" § ")[0])
+        elif line.startswith(WEAK_MATCH):
+            items |= doc_paths(line[len(WEAK_MATCH):])
+        elif line.startswith(TASK_RECORD):
+            records |= doc_paths(line[len(TASK_RECORD):])
+    return items, records
+
+
+def hook_capsule(stdout: str, content: str = "") -> Optional[str]:
+    """The capsule in a Claude Code prompt hook's output: plain stdout, or
+    the additionalContext of a JSON one; the attachment's content when the
+    stdout carries none."""
+    for text in (stdout, content):
+        if text.lstrip().startswith("{"):
+            try:
+                value = json.loads(text)
+            except ValueError:
+                value = None
+            output = value.get("hookSpecificOutput") if isinstance(value, dict) else None
+            if isinstance(output, dict) and isinstance(output.get("additionalContext"), str):
+                text = output["additionalContext"]
+        capsule = capsule_text(text)
+        if capsule is not None:
+            return capsule
+    return None
+
+
+def hook_context(payload: Dict[str, Any]) -> bool:
+    """Whether Codex marked a developer message as a hook's added context. A
+    rollout from before Codex marked them carries no mark: unknown, so yes."""
+    meta = payload.get("internal_chat_message_metadata_passthrough")
+    kinds = meta.get("content_item_kinds") if isinstance(meta, dict) else None
+    return not isinstance(kinds, list) or "hooks.additional_context" in kinds
+
+
+def output_text(value: object) -> str:
+    """A tool result's text. Codex wraps a shell's in {"output": ...}, newer
+    hosts send a list of text parts."""
+    if isinstance(value, str):
+        if value.lstrip().startswith("{"):
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                return value
+            if isinstance(parsed, dict) and isinstance(parsed.get("output"), str):
+                return parsed["output"]
+        return value
+    if isinstance(value, list):
+        return "\n".join(output_text(part.get("text") if isinstance(part, dict) else part) for part in value)
+    if isinstance(value, dict):
+        inner = next((value[key] for key in ("output", "content", "text") if key in value), None)
+        return output_text(inner) if inner is not None else json.dumps(value)
+    return ""
+
+
+def retrieved(text: str) -> Tuple[Set[str], Set[str]]:
+    """What a retrieve answered: its items and its task record, from the
+    rendered capsule or, with --json, from the capsule's JSON."""
+    if text.lstrip().startswith("{"):
+        try:
+            value = json.loads(text)
+        except ValueError:
+            value = None
+        if isinstance(value, dict):
+            capsule = value["capsule"] if isinstance(value.get("capsule"), dict) else value
+            items: Set[str] = set()
+            for layer in ("semantic", "episodic", "procedural"):
+                for item in capsule.get(layer) or []:
+                    if isinstance(item, dict) and isinstance(item.get("path"), str):
+                        items |= doc_paths(item["path"])
+            record = capsule.get("task_record")
+            return items, doc_paths(record) if isinstance(record, str) else set()
+    return capsule_items(text)
+
+
+def context_calls(blob: str) -> Iterator[bool]:
+    """Each `context.py` one tool call runs, and whether it is a retrieve."""
+    for match in re.finditer(r"context\.py", blob):
+        tail = re.sub(r"^[\s\"',\\\]\[]+", "", blob[match.end():match.end() + 80])
+        yield bool(re.match(r"(?:retrieve|context)\b", tail))
+
+
 def tool_calls(blob: str, name: str, turn: Dict[str, Any]) -> None:
     """Count the memory calls one tool call makes."""
     if name.endswith("memory_retrieve"):
         turn["retrieve_mcp"] += 1
-    for match in re.finditer(r"context\.py", blob):
+    for retrieve in context_calls(blob):
         turn["context_cli"] += 1
-        tail = re.sub(r"^[\s\"',\\\]\[]+", "", blob[match.end():match.end() + 80])
-        if re.match(r"(?:retrieve|context)\b", tail):
-            turn["retrieve_cli"] += 1
+        turn["retrieve_cli"] += retrieve
+
+
+class Retrievals:
+    """One session's explicit retrieve calls - the CLI's and the Memory
+    MCP's - what each answered, and which of the documents it named the
+    session opened afterwards.
+
+    A document counts once per session: returned when a retrieve first named
+    it, opened when a later tool call names its path. A call is paired with
+    its answer by the host's call ID; one without an ID is counted, unread.
+    Calls before `since` are not seen.
+    """
+
+    def __init__(self, since: Optional[datetime] = None) -> None:
+        self.since = since
+        self.pending: Set[str] = set()
+        self.counts: Counter = Counter()
+        self.returned: Dict[str, str] = {}
+        self.opened: Set[str] = set()
+        self.touched: Set[str] = set()
+
+    def call(self, identity: object, blob: str, name: str, at: object = None) -> None:
+        instant = parse_instant(at) if self.since is not None else None
+        if instant is not None and instant < self.since:
+            return
+        if name.endswith("memory_retrieve") or any(context_calls(blob)):
+            self.counts["calls"] += 1
+            if identity:
+                self.pending.add(str(identity))
+            return
+        paths = doc_paths(blob)
+        self.touched |= paths
+        self.opened |= {path for path in paths if path in self.returned}
+
+    def answer(self, identity: object, text: str) -> None:
+        if not identity or str(identity) not in self.pending:
+            return
+        self.pending.discard(str(identity))
+        self.counts["answers"] += 1
+        items, records = retrieved(text)
+        self.counts["answers_naming"] += bool(items or records)
+        for path in records:
+            self.returned.setdefault(path, "record")
+        for path in items:
+            self.returned.setdefault(path, "item")
+
+
+RETRIEVE_COUNTERS = ("sessions", "calls", "answers", "answers_naming", "items_returned",
+                     "items_opened", "records_pointed", "records_opened")
+
+
+def retrieval_summary(sessions: Sequence[Retrievals]) -> Dict[str, Any]:
+    """Explicit retrieves over sessions. As a baseline, the documents of each
+    kind a session that retrieved opened without any retrieve naming them."""
+    stats: Counter = Counter()
+    by_kind = {kind: Counter() for kind in KINDS}
+    for session in sessions:
+        if not session.counts["calls"]:
+            continue
+        stats["sessions"] += 1
+        stats.update(session.counts)
+        for path, how in session.returned.items():
+            opened = path in session.opened
+            if how == "record":
+                stats["records_pointed"] += 1
+                stats["records_opened"] += opened
+            else:
+                stats["items_returned"] += 1
+                stats["items_opened"] += opened
+                by_kind[doc_kind(path)]["returned"] += 1
+                by_kind[doc_kind(path)]["opened"] += opened
+        for path in session.touched - set(session.returned):
+            by_kind[doc_kind(path)]["otherwise"] += 1
+    summary: Dict[str, Any] = {name: stats.get(name, 0) for name in RETRIEVE_COUNTERS}
+    summary["by_kind"] = {
+        kind: {measure: by_kind[kind].get(measure, 0) for measure in ("returned", "opened", "otherwise")}
+        for kind in KINDS
+    }
+    return summary
 
 
 def new_turn(started: object) -> Dict[str, Any]:
@@ -3075,6 +3290,7 @@ def new_turn(started: object) -> Dict[str, Any]:
         "started": parse_instant(started),
         "output": False,
         "delivered": set(),
+        "records": set(),
         "touched": set(),
         "text": [],
         "active": False,
@@ -3147,10 +3363,21 @@ def read_records(path: Path) -> Iterator[Dict[str, Any]]:
         return
 
 
-def claude_turns(path: Path) -> List[Dict[str, Any]]:
+def deliver(turn: Dict[str, Any], capsule: Optional[str]) -> None:
+    """Add what a prompt hook's capsule handed over to its turn."""
+    if capsule:
+        turn["output"] = True
+        items, records = capsule_items(capsule)
+        turn["delivered"] |= items
+        turn["records"] |= records
+
+
+def claude_turns(path: Path, retrievals: Optional[Retrievals] = None) -> List[Dict[str, Any]]:
     """Turns of one Claude Code transcript: each starts at the prompt hook's
     output; the agent's tool calls and text belong to it until the next
-    human prompt. Hook outputs before any agent activity share one turn."""
+    human prompt. Hook outputs before any agent activity share one turn.
+    `retrievals`, when given, sees every tool call of the session and its
+    result, in a turn or not."""
     turns: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
     for record in read_records(path):
@@ -3165,26 +3392,33 @@ def claude_turns(path: Path) -> List[Dict[str, Any]]:
                 if current is None or current["active"]:
                     current = new_turn(record.get("timestamp"))
                     turns.append(current)
-                stdout = str(attachment.get("stdout") or "")
                 content = attachment.get("content")
                 content_text = content if isinstance(content, str) else (json.dumps(content) if content else "")
-                current["output"] = current["output"] or bool(stdout.strip() or content_text.strip())
-                current["delivered"] |= doc_paths(stdout + "\n" + content_text)
-            continue
-        if current is None:
+                deliver(current, hook_capsule(str(attachment.get("stdout") or ""), content_text))
             continue
         message = record.get("message") if isinstance(record.get("message"), dict) else {}
         if kind == "user":
-            if not record.get("toolUseResult") and not record.get("isMeta") and isinstance(message.get("content"), str):
-                if current["active"]:
-                    current = None
+            content = message.get("content")
+            if retrievals is not None and isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "tool_result":
+                        retrievals.answer(part.get("tool_use_id"), output_text(part.get("content")))
+            if (current is not None and current["active"] and not record.get("toolUseResult")
+                    and not record.get("isMeta") and isinstance(content, str)):
+                current = None
             continue
         if kind != "assistant":
             continue
+        parts = [part for part in message.get("content") or [] if isinstance(part, dict)]
+        if retrievals is not None:
+            for part in parts:
+                if part.get("type") == "tool_use":
+                    retrievals.call(part.get("id"), json.dumps(part.get("input") or {}), str(part.get("name") or ""),
+                                    record.get("timestamp"))
+        if current is None:
+            continue
         current["active"] = True
-        for part in message.get("content") or []:
-            if not isinstance(part, dict):
-                continue
+        for part in parts:
             if part.get("type") == "tool_use":
                 blob = json.dumps(part.get("input") or {})
                 current["touched"] |= doc_paths(blob)
@@ -3194,9 +3428,11 @@ def claude_turns(path: Path) -> List[Dict[str, Any]]:
     return turns
 
 
-def codex_turns(path: Path) -> List[Dict[str, Any]]:
+def codex_turns(path: Path, retrievals: Optional[Retrievals] = None) -> List[Dict[str, Any]]:
     """Turns of one Codex rollout: each starts at a developer message that is
-    the prompt hook's output (the capsule), as in claude_turns."""
+    the prompt hook's output (the capsule), as in claude_turns. The hook may
+    print the unsaved-result notice ahead of the capsule, and a Codex of
+    October 2026 or later marks the message as a hook's added context."""
     turns: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
     for record in read_records(path):
@@ -3211,24 +3447,31 @@ def codex_turns(path: Path) -> List[Dict[str, Any]]:
                 if isinstance(part, dict) and isinstance(part.get("text"), str)
             )
             role = payload.get("role")
-            if role == "developer" and CAPSULE_START.match(text.lstrip()):
+            capsule = capsule_text(text) if role == "developer" and hook_context(payload) else None
+            if capsule is not None:
                 if current is None or current["active"]:
                     current = new_turn(record.get("timestamp"))
                     turns.append(current)
-                current["output"] = True
-                current["delivered"] |= doc_paths(text)
+                deliver(current, capsule)
             elif role == "user" and not text.lstrip().startswith("<"):
                 if current is not None and current["active"]:
                     current = None
             elif role == "assistant" and current is not None:
                 current["active"] = True
                 current["text"].append(text)
-        elif item_type in ("function_call", "custom_tool_call", "local_shell_call") and current is not None:
-            current["active"] = True
+        elif item_type in ("function_call", "custom_tool_call", "local_shell_call"):
             raw = payload.get("arguments") or payload.get("input") or payload.get("action") or ""
             blob = raw if isinstance(raw, str) else json.dumps(raw)
-            current["touched"] |= doc_paths(blob)
-            tool_calls(blob, str(payload.get("name") or ""), current)
+            name = str(payload.get("name") or "")
+            if retrievals is not None:
+                retrievals.call(payload.get("call_id"), blob, name, record.get("timestamp"))
+            if current is not None:
+                current["active"] = True
+                current["touched"] |= doc_paths(blob)
+                tool_calls(blob, name, current)
+        elif item_type in ("function_call_output", "custom_tool_call_output", "local_shell_call_output"):
+            if retrievals is not None:
+                retrievals.answer(payload.get("call_id"), output_text(payload.get("output")))
     return turns
 
 
@@ -3241,6 +3484,8 @@ def tally(turns: Sequence[Dict[str, Any]], paths: Optional[Dict[str, Counter]] =
         stats["agent_retrieve_cli"] += turn["retrieve_cli"]
         stats["agent_retrieve_mcp"] += turn["retrieve_mcp"]
         stats["agent_context_cli"] += turn["context_cli"]
+        stats["record_pointers"] += len(turn["records"])
+        stats["record_pointers_touched"] += len(turn["records"] & turn["touched"])
         delivered = turn["delivered"]
         if not delivered:
             continue
@@ -3474,18 +3719,31 @@ def continuation_costs(path: Path, host: str) -> List[Dict[str, Any]]:
     `usage` (one response spans several records); Codex's, the cumulative
     `token_count`. A request is found by its marker wherever the host records
     it, never in the agent's own messages.
+
+    Where the host records them, the input tokens too, and how many of them
+    came from the cache: every model call of the save re-reads the
+    conversation, so its input dwarfs its output. Codex counts cached input
+    inside its input; Claude Code's input is its fresh, cache-written and
+    cache-read tokens together.
     """
     costs: List[Dict[str, Any]] = []
-    prompt: Optional[Tuple[datetime, int]] = None
+    prompt: Optional[Tuple[datetime, int, int, int]] = None
     pending: Optional[Dict[str, Any]] = None
     last: Optional[datetime] = None
-    output = 0
+    output = inputs = cached = 0
+    reports_input = False
     seen: set = set()
 
     def close() -> None:
         if pending is not None and last is not None:
             pending["save_seconds"] = max(0.0, (last - pending["at"]).total_seconds())
             pending["save_output_tokens"] = output - pending["output_at"]
+            if reports_input:
+                pending["save_input_tokens"] = inputs - pending["input_at"]
+                pending["save_cached_input_tokens"] = cached - pending["cached_at"]
+            else:
+                for key in ("answer_input_tokens", "answer_cached_input_tokens"):
+                    pending.pop(key, None)
             costs.append(pending)
 
     for record in read_records(path):
@@ -3496,6 +3754,10 @@ def continuation_costs(path: Path, host: str) -> List[Dict[str, Any]]:
                 total = payload["info"].get("total_token_usage")
                 if isinstance(total, dict) and isinstance(total.get("output_tokens"), int):
                     output = total["output_tokens"]
+                if isinstance(total, dict) and isinstance(total.get("input_tokens"), int):
+                    reports_input = True
+                    inputs = total["input_tokens"]
+                    cached = total["cached_input_tokens"] if isinstance(total.get("cached_input_tokens"), int) else 0
             role = payload.get("role") if payload.get("type") == "message" else None
             text = json.dumps(payload.get("content")) if role else ""
             asked = text
@@ -3511,6 +3773,13 @@ def continuation_costs(path: Path, host: str) -> List[Dict[str, Any]]:
                 if identifier not in seen and isinstance(usage.get("output_tokens"), int):
                     seen.add(identifier)
                     output += usage["output_tokens"]
+                    if isinstance(usage.get("input_tokens"), int):
+                        reports_input = True
+                        read = usage.get("cache_read_input_tokens")
+                        read = read if isinstance(read, int) else 0
+                        written = usage.get("cache_creation_input_tokens")
+                        inputs += usage["input_tokens"] + read + (written if isinstance(written, int) else 0)
+                        cached += read
             human = (record.get("type") == "user" and not record.get("toolUseResult")
                      and not record.get("isMeta") and isinstance(message.get("content"), str)
                      and not NATIVE_CONTINUATION.search(message["content"]))
@@ -3520,14 +3789,23 @@ def continuation_costs(path: Path, host: str) -> List[Dict[str, Any]]:
             continue
         if human:
             close()
-            pending, prompt = None, (at, output)
+            pending, prompt = None, (at, output, inputs, cached)
         elif request and pending is None and prompt is not None:
-            pending = {"at": at, "output_at": output, "ending": continuation_ending(asked),
+            pending = {"at": at, "output_at": output, "input_at": inputs, "cached_at": cached,
+                       "ending": continuation_ending(asked),
                        "answer_seconds": max(0.0, (at - prompt[0]).total_seconds()),
-                       "answer_output_tokens": output - prompt[1]}
+                       "answer_output_tokens": output - prompt[1],
+                       "answer_input_tokens": inputs - prompt[2],
+                       "answer_cached_input_tokens": cached - prompt[3]}
         last = at
     close()
-    return [{key: value for key, value in cost.items() if key not in ("at", "output_at")} for cost in costs]
+    internal = ("at", "output_at", "input_at", "cached_at")
+    return [{key: value for key, value in cost.items() if key not in internal} for cost in costs]
+
+
+# Input token medians, over the requests whose transcript reported input.
+INPUT_MEDIANS = ("save_input_tokens", "save_cached_input_tokens", "answer_input_tokens",
+                 "answer_cached_input_tokens")
 
 
 def continuation_medians(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -3538,10 +3816,15 @@ def continuation_medians(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
         return round(statistics.median(cost[key] for cost in costs), 1)
 
     shares = [cost["save_seconds"] / cost["answer_seconds"] for cost in costs if cost["answer_seconds"] > 0]
-    return {"requests": len(costs), "save_seconds": median("save_seconds"),
-            "save_output_tokens": median("save_output_tokens"),
-            "answer_seconds": median("answer_seconds"), "answer_output_tokens": median("answer_output_tokens"),
-            "time_share": round(statistics.median(shares), 2) if shares else None}
+    summary = {"requests": len(costs), "save_seconds": median("save_seconds"),
+               "save_output_tokens": median("save_output_tokens"),
+               "answer_seconds": median("answer_seconds"), "answer_output_tokens": median("answer_output_tokens"),
+               "time_share": round(statistics.median(shares), 2) if shares else None}
+    reported = [cost for cost in costs if "save_input_tokens" in cost]
+    if reported:
+        summary["requests_with_input"] = len(reported)
+        summary.update({key: round(statistics.median(cost[key] for cost in reported), 1) for key in INPUT_MEDIANS})
+    return summary
 
 
 def continuation_summary(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -3585,8 +3868,15 @@ def command_realized(arguments: argparse.Namespace) -> int:
     paths: Optional[Dict[str, Counter]] = {} if arguments.paths else None
     claude_used = [path for path in claude_files if recent(path)]
     codex_used = [path for path in codex_files if recent(path)]
-    claude_all = [turn for path in claude_used for turn in kept(claude_turns(path))]
-    codex_all = [turn for path in codex_used for turn in kept(codex_turns(path))]
+    retrievals: Dict[str, List[Retrievals]] = {"claude": [], "codex": []}
+
+    def read(host: str, path: Path) -> List[Dict[str, Any]]:
+        session = Retrievals(since)
+        retrievals[host].append(session)
+        return kept((claude_turns if host == "claude" else codex_turns)(path, session))
+
+    claude_all = [turn for path in claude_used for turn in read("claude", path)]
+    codex_all = [turn for path in codex_used for turn in read("codex", path)]
     report: Dict[str, Any] = {
         "project": str(project),
         "since": arguments.since,
@@ -3598,6 +3888,13 @@ def command_realized(arguments: argparse.Namespace) -> int:
         },
         "codex": {"transcripts": len(codex_used), **tally(codex_all, paths)},
         "total": {"transcripts": len(claude_used) + len(codex_used), **tally(claude_all + codex_all)},
+        # Whole sessions, not only turns a capsule opened: an agent that
+        # retrieves does so on a turn the hook printed nothing for, too.
+        "retrieve": {
+            "claude": retrieval_summary(retrievals["claude"]),
+            "codex": retrieval_summary(retrievals["codex"]),
+            "total": retrieval_summary(retrievals["claude"] + retrievals["codex"]),
+        },
         "native": native_funnel(state, since),
         "continuations": {
             "claude": continuation_summary([cost for path in claude_used for cost in continuation_costs(path, "claude")]),
@@ -3630,9 +3927,21 @@ REALIZED_ROWS = (
     ("turns mentioning a delivered item", "turns_mentioning_delivered"),
     ("other same-kind docs touched", "touched_not_delivered"),
     ("turns touching other docs", "turns_touching_other_docs"),
+    ("task record pointers", "record_pointers"),
+    ("  touched by the agent", "record_pointers_touched"),
     ("agent retrieve calls, CLI", "agent_retrieve_cli"),
     ("agent retrieve calls, MCP", "agent_retrieve_mcp"),
     ("agent context.py calls", "agent_context_cli"),
+)
+RETRIEVE_ROWS = (
+    ("sessions that retrieved", "sessions"),
+    ("retrieve calls", "calls"),
+    ("answers read", "answers"),
+    ("  naming a document", "answers_naming"),
+    ("documents returned", "items_returned"),
+    ("  opened afterwards", "items_opened"),
+    ("task records pointed at", "records_pointed"),
+    ("  opened afterwards", "records_opened"),
 )
 
 
@@ -3656,7 +3965,8 @@ def format_realized(report: Dict[str, Any]) -> str:
     for kind in KINDS:
         counts = report["total"]["by_kind"][kind]
         if counts["delivered"]:
-            lines.append(f"  {kind:<10} {counts['delivered']:>6} {counts['touched']:>6} {counts['mentioned']:>6}")
+            lines.append(f"  {kind:<11} {counts['delivered']:>6} {counts['touched']:>6} {counts['mentioned']:>6}")
+    lines.extend(format_retrievals(report["retrieve"], width))
     lines.extend(format_native(report["native"]))
     lines.extend(format_continuations(report["continuations"]))
     if "paths" in report:
@@ -3871,6 +4181,23 @@ NATIVE_ROWS = (
 )
 
 
+def format_retrievals(retrieve: Dict[str, Any], width: int) -> List[str]:
+    hosts = ("claude", "codex", "total")
+    lines = ["", "Explicit retrieves in whole sessions (CLI and Memory MCP):"]
+    if not retrieve["total"]["calls"]:
+        lines.append("  none")
+        return lines
+    lines.append(" " * width + "".join(host.rjust(9) for host in hosts))
+    for title, key in RETRIEVE_ROWS:
+        lines.append(title.ljust(width) + "".join(str(retrieve[host].get(key, 0)).rjust(9) for host in hosts))
+    lines.append("by kind, all hosts: returned / opened afterwards / opened unnamed")
+    for kind in KINDS:
+        counts = retrieve["total"]["by_kind"][kind]
+        if counts["returned"] or counts["otherwise"]:
+            lines.append(f"  {kind:<11} {counts['returned']:>6} {counts['opened']:>6} {counts['otherwise']:>6}")
+    return lines
+
+
 def format_continuations(continuations: Dict[str, Any]) -> List[str]:
     lines = ["", "Native save requests in the transcripts (median per request):"]
     for host, summary in continuations.items():
@@ -3878,9 +4205,16 @@ def format_continuations(continuations: Dict[str, Any]) -> List[str]:
             lines.append(f"  {host:<7} none")
             continue
         share = f", {summary['time_share']:.0%} of the answer's time" if summary["time_share"] is not None else ""
+        save_input = answer_input = ""
+        if "save_input_tokens" in summary:
+            save_input = (f" (input {summary['save_input_tokens']:.0f}, {summary['save_cached_input_tokens']:.0f}"
+                          f" cached, on {summary['requests_with_input']})")
+            answer_input = (f" (input {summary['answer_input_tokens']:.0f},"
+                            f" {summary['answer_cached_input_tokens']:.0f} cached)")
         lines.append(f"  {host:<7} {summary['requests']} request(s): +{summary['save_seconds']} s and"
-                     f" +{summary['save_output_tokens']:.0f} output tokens after an answer of"
-                     f" {summary['answer_seconds']} s and {summary['answer_output_tokens']:.0f} tokens{share}")
+                     f" +{summary['save_output_tokens']:.0f} output tokens{save_input} after an answer of"
+                     f" {summary['answer_seconds']} s and {summary['answer_output_tokens']:.0f} tokens"
+                     f"{answer_input}{share}")
         for ending, part in summary.get("endings", {}).items():
             lines.append(f"    {ending + ':':<9} {part['requests']} request(s): +{part['save_seconds']} s and"
                          f" +{part['save_output_tokens']:.0f} output tokens")
