@@ -438,6 +438,7 @@ def _memory_commands(version: str) -> List[Command]:
                                                       "tests.test_memory_miss_audit", "tests.test_memory_onnx",
                                                       "tests.test_memory_onnx_pilot", "tests.test_memory_outcome_ab",
                                                       "tests.test_memory_outcome_verify", "tests.test_memory_outcome_isolation",
+                                                      "tests.test_memory_delivery_proof",
                                                       "tests.test_memory_rerank_pilot",
                                                       "tests.test_memory_sqlite_vec_pilot",
                                                       "tests.test_memory_fact_consolidation",

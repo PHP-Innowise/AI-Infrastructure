@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import hashlib
 import os
 import shutil
 import subprocess
@@ -1211,6 +1212,58 @@ sys.exit(9 if mode=='bad-exit' else 0)
         self.assertTrue(result['completed'], result)
         self.assertEqual('finished', result['stopped'])
         self.assertEqual(11, result['usage']['input_tokens'])
+
+    def test_task_complete_exports_new_document_identity_without_gold(self):
+        content = 'public selected document\n'
+        (self.corpus / 'Doc.md').write_text(content)
+        image = hashlib.sha256(content.encode()).hexdigest()
+        manifest = {'schema_version': 4, 'id': '11111111-1111-4111-8111-111111111111',
+            'task_id': None, 'task_revision': None, 'entry_point': 'refresh',
+            'selected': [{'path': 'Doc.md', 'source_hash': image}]}
+        self.agent.write_text('import json\nfrom pathlib import Path\n'
+            'p=Path("memory-bank/local/retrieval-manifests");p.mkdir(parents=True)\n'
+            f'(p/"11111111-1111-4111-8111-111111111111.json").write_text({json.dumps(json.dumps(manifest))})\n'
+            'print(json.dumps({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}))\n')
+        result = ab.run_arm([sys.executable, str(self.agent)], self.corpus, [], 8, 5, endpoint='task-complete')
+        self.assertTrue(result['completed'])
+        doc = result['delivery_proof']['frames'][0]['selected'][0]
+        self.assertEqual('Doc.md', doc['path'])
+        self.assertEqual(image, doc['document_sha256'])
+        self.assertEqual('unknown', result['delivery_proof']['host_receipt'])
+
+    def test_default_governed_retrieve_is_counted_and_identified(self):
+        content = 'public explicit result\n'
+        (self.corpus / 'Doc.md').write_text(content)
+        manifest = {'schema_version': 4, 'id': '11111111-1111-4111-8111-111111111111',
+            'task_id': None, 'task_revision': None, 'entry_point': 'retrieve',
+            'selected': [{'path': 'Doc.md', 'source_hash': hashlib.sha256(content.encode()).hexdigest()}]}
+        self.agent.write_text('import json\nfrom pathlib import Path\n'
+            'p=Path("project-brain/control/retrieval-manifests");p.mkdir(parents=True)\n'
+            f'(p/"11111111-1111-4111-8111-111111111111.json").write_text({json.dumps(json.dumps(manifest))})\n'
+            'print(json.dumps({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}))\n')
+        result = ab.run_arm([sys.executable, str(self.agent)], self.corpus, [], 8, 5, endpoint='task-complete')
+        self.assertTrue(result['completed'])
+        self.assertEqual(1, result['manifests'].get('retrieve'))
+        self.assertFalse(result['capsule_delivered'])
+        frame = result['delivery_proof']['frames'][0]
+        self.assertEqual('explicit', frame['origin'])
+        self.assertEqual('Doc.md', frame['selected'][0]['path'])
+
+    def test_optional_proof_failure_does_not_change_native_completion(self):
+        with mock.patch('memory_delivery_proof.collect_delivery_proof', side_effect=RuntimeError('diagnostic only')):
+            result = self.run_agent()
+        self.assertTrue(result['completed'])
+        self.assertEqual('unknown', result['delivery_proof']['status'])
+
+    def test_private_entry_point_cannot_escape_through_aggregate_keys(self):
+        marker = 'PRIVATE-ENTRY-POINT-MARKER'
+        self.agent.write_text('import json\nfrom pathlib import Path\n'
+            'p=Path("memory-bank/local/retrieval-manifests");p.mkdir(parents=True)\n'
+            f'(p/"frame.json").write_text(json.dumps({{"entry_point":{{"secret":{marker!r}}}}}))\n'
+            'print(json.dumps({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}))\n')
+        result = ab.run_arm([sys.executable, str(self.agent)], self.corpus, [], 8, 5, endpoint='task-complete')
+        self.assertTrue(result['completed'])
+        self.assertNotIn(marker, json.dumps(result))
 
     def test_stdout_eof_allows_normal_process_cleanup(self):
         self.assertTrue(self.run_agent('closed')['completed'])

@@ -28,6 +28,16 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Private delivery identity observations — 2026-10-31
+
+- Complete-task experiments now retain bounded pre-run-known document
+  identities/hashes, optional local render-trace associations and separately
+  labelled post-run citation hash checks. Missing evidence remains unknown;
+  local metadata never claims host receipt, semantic verification or model use.
+- Keep diagnostics additive and private: no query, snippets or raw record
+  bodies are exported; diagnostic failure does not change task completion or
+  correctness. Installed runtime schemas, profiles and defaults are unchanged.
+
 ### Private outcome transport reliability — 2026-10-31
 
 - Preserve the system TLS trust bundle in the Linux read allowlist, allow

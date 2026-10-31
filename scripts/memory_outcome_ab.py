@@ -1339,15 +1339,25 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
             answer_artifact: Optional[Path] = None,
             environment: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """One headless session, stopped at the first gold touch, the cap or the
-    deadline. Only counts leave this function.
+    deadline. Complete-task diagnostics additionally retain safe private identities.
 
     ``saved`` names the documents a recall set's save added; the outcome says
     whether a hook capsule delivered one."""
     manifests = corpus / "memory-bank" / "local" / "retrieval-manifests"
     health = corpus / "memory-bank" / "local" / "refresh-health.ndjson"
     strict = endpoint == 'task-complete'
+    known_paths = set()
+    if strict:
+        try:
+            from memory_delivery_proof import snapshot_known_paths
+            known_paths = snapshot_known_paths(corpus)
+        except Exception:
+            pass  # Optional diagnostics cannot prevent a task from running.
     if strict:
         before, telemetry_complete = completion_manifest_paths(manifests)
+        shared_before, shared_complete = completion_manifest_paths(corpus / "project-brain/control/retrieval-manifests")
+        before |= shared_before
+        telemetry_complete &= shared_complete
         initial_health = completion_health(health, corpus)
         health_before = initial_health['lines']
         telemetry_complete &= initial_health['complete']
@@ -1417,6 +1427,9 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
             log.close()
     if strict:
         after, known_manifests = completion_manifest_paths(manifests)
+        shared_after, shared_complete = completion_manifest_paths(corpus / "project-brain/control/retrieval-manifests")
+        after |= shared_after
+        known_manifests &= shared_complete
         final_health = completion_health(health, corpus, health_before)
         telemetry_complete &= known_manifests and final_health['complete']
     else:
@@ -1440,7 +1453,11 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
             else:
                 manifest = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(manifest, dict): raise ValueError('invalid manifest')
-            point = str(manifest.get("entry_point"))
+            raw_point = manifest.get("entry_point")
+            if strict and (not isinstance(raw_point, str)
+                           or raw_point not in ('refresh', 'hook-context', 'retrieve', 'context')):
+                raise ValueError('invalid manifest entry point')
+            point = str(raw_point)
         except (OSError, ValueError, AttributeError, RecursionError):
             manifest, point = {}, "unreadable"
             if strict: telemetry_complete = False
@@ -1481,6 +1498,14 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
     }
     if endpoint == "task-complete":
         outcome['telemetry_complete'] = bool(telemetry_complete)
+        try:
+            from memory_delivery_proof import collect_delivery_proof
+            outcome['delivery_proof'] = collect_delivery_proof(corpus, after - before,
+                known_paths=known_paths, deadline=started + timeout)
+        except Exception:
+            outcome['delivery_proof'] = {'schema': 'memory-delivery-proof-v1', 'status': 'unknown',
+                'incomplete': True, 'producer_authenticated': False,
+                'host_receipt': 'unknown', 'model_use': 'unproven', 'frames': []}
         outcome["completed"] = (reason == "finished" and process.returncode == 0
                                 and counter.finished and not counter.failed)
         if answer_artifact is not None:
@@ -1606,6 +1631,7 @@ def complete_runtime_digest() -> str:
                    [(name, hashlib.sha256((ROOT / 'scripts' / name).read_bytes()).hexdigest())
                     for name in ('memory_outcome_ab.py', 'memory_outcome_verify.py',
                                  'memory_outcome_isolation.py', 'memory_eval.py',
+                                 'memory_delivery_proof.py',
                                  'memory_selective_retrieve_pilot.py', 'memory_consolidation_pilot.py',
                                  'memory_pilot_support.py')]])
 

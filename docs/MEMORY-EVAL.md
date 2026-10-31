@@ -1314,6 +1314,33 @@ ML downloads or dependencies.
 
 ## Optional complete-task endpoint
 
+### Private delivery observations
+
+Complete-task results additionally retain `delivery_proof`, a bounded
+maintainer-only projection of new retrieval manifests in the governed
+`project-brain/control/` or ignored `memory-bank/local/` directories. It names only
+safe paths present in the maintainer-owned pre-run snapshot, document hashes,
+frame/task UUIDs and origins (`automatic` versus `explicit`). It omits queries,
+excerpts, record bodies and arbitrary metadata. New agent-created paths outside
+that vocabulary remain unreported. Legacy first-touch output is unchanged.
+
+The projection distinguishes selected documents from optional local render
+traces. `trace-reported` means a matching local sidecar, not host ingestion.
+`producer_authenticated: false`, `host_receipt: unknown` and
+`model_use: unproven` are intentional. A matching document image can provide
+its declared record ID and stored citation hashes; a changed image cannot
+lend today's metadata to yesterday's delivery. Missing or partial digest coverage
+for declared sources remains unknown. Current citation checks are
+explicitly **post-run**, preserve historical expected hashes and establish
+byte identity only. They do not reverify a claim or authenticate a reviewer.
+
+Limits are 32 frames, 32 documents in total, 1 MiB per file, 8 MiB of reads and
+64 KiB of exported JSON. Expired deadlines/budgets mark collection incomplete.
+Missing traces, unsafe/hardlinked/special files, malformed JSON and unknown
+metadata never become positive evidence. Byte/work bounds do not promise
+preemption of a slow regular filesystem read. Optional collection failure
+does not change native completion, independent grading or treatment validity.
+
 The legacy `run` default is still `--endpoint first-touch`; its gold/recall
 metrics, verdict and hook-only treatment remain unchanged. The opt-in
 `task-complete` controller runs until the native turn AND CLI finish, or its
