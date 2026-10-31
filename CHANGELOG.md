@@ -28,6 +28,23 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Claude Code below the project root gets a long `AGENTS.md` whole — 2026-10-31
+
+- A session started below the project root gets `AGENTS.md` from the
+  dispatcher's `policy-N` entries, one hook output each, which Claude Code
+  keeps in the conversation only up to 10,000 characters. Four entries held
+  about 39,000, and the last took the rest whole, so Claude Code put that
+  entry into a file. bauherrenmappe's policy, 42,932 characters with the
+  project's own part first, lost its fourth entry that way - 17,360
+  characters holding every rule of the accelerator's: a session in `src/`
+  had the project's notes and none of the accelerator's rules. Six entries
+  now carry about 59,000, and a longer policy's last entry carries what fits
+  and names the line of `AGENTS.md` the rest begins at. `DISPATCH_VERSION`
+  is 5: the first session in the root of a project with this release puts
+  the new dispatcher and its two new entries into the person's settings.
+  Found by the policy check of `scripts/claude_code_bench.py --subfolder src`
+  on a synced copy of the project.
+
 ### The Harness's project panel says why an installed project is not kept current — 2026-10-31
 
 - For a project with its own installed accelerator the **Project** chip's

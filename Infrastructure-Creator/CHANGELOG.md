@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded dispatcher brings a long `AGENTS.md` below the root — 2026-10-31
+
+- As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`
+  and `claude_dispatch.sh` change in the asset (six `policy-N` entries,
+  `DISPATCH_VERSION` 5); the policy lock was rewritten.
+
 ### The seeded runtime records a capsule it could not build — 2026-10-31
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py`

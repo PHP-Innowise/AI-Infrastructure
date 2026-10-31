@@ -513,7 +513,10 @@ is kept by every sync. One client's 27 KB of notes put the policy past byte
 `install_accelerator.py --sync` reports it as `codex_policy_cut`, an install
 with Codex prints it on stderr, and `memory_eval.py install-status` names it.
 `scripts/codex_bench.py --target DIR --sync` shows whether the whole policy
-reached the model (`policy`, `policy_bytes`).
+reached the model (`policy`, `policy_bytes`). For Claude Code started below
+the project root, `scripts/claude_code_bench.py --target DIR --sync
+--subfolder src` does the same: until 2026-10-31 its dispatcher carried
+39,000 characters of the policy there and filed the rest away.
 
 ### Recover
 
