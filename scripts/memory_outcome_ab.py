@@ -34,8 +34,9 @@ touches a file the save cites (*needed*) or answers naming one.
 Maintainer-only and standard library only; never installed into a project.
 Sets and results name client paths and carry prompts: keep them outside this
 repository (the tool refuses an output inside the clone). The agent runs in
-Codex's read-only sandbox with `--ephemeral`, so neither the corpus nor
-`~/.codex/sessions` keeps what it did.
+Codex's workspace-write sandbox on a disposable corpus with `--ephemeral`.
+The opt-in task-complete endpoint additionally requires sealed inputs and an
+OS read allowlist; legacy first-touch runs retain their original behavior.
 
     memory_outcome_ab.py sample --projects next,scb --before 2026-10-07 \\
         --n 30 --seed 1 --exclude-set tuning-set.json --out ~/ab/set.json
@@ -81,7 +82,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import memory_eval as stand  # noqa: E402
 from accelerator_attach import _toml  # noqa: E402
 
-ARMS = ("off", "capsule", "navigation", "recall", "ticket")
+PILOT_ARMS = ("selective", "consolidate", "consolidate-verify")
+ARMS = ("off", "capsule", "navigation", "recall", "ticket", *PILOT_ARMS)
 DEFAULT_ARMS = ("off", "capsule")
 # Every hooked arm runs the same prompt hook with these settings in the
 # corpus's runtime.json. Capsule: the full profile, named, since the editions'
@@ -91,12 +93,17 @@ DEFAULT_ARMS = ("off", "capsule")
 # manifest only on a turn one of them matched. Ticket is recall with the
 # ticket files line on: the files of the earlier commits that name the
 # prompt's or the branch's ticket.
-HOOKED_ARMS = ("capsule", "navigation", "recall", "ticket")
+HOOKED_ARMS = ("capsule", "navigation", "recall", "ticket", *PILOT_ARMS)
 ARM_SETTINGS: Dict[str, Dict[str, Any]] = {
     "capsule": {"capsule_profile": "full"},
     "navigation": {"capsule_profile": "navigation"},
     "recall": {"capsule_profile": "recall"},
     "ticket": {"capsule_profile": "recall", "ticket_files": True},
+    "selective": {"capsule_profile": "recall"},
+    "consolidate": {"capsule_profile": "recall", "automatic_consolidation": True,
+                    "automatic_consolidation_verification": False},
+    "consolidate-verify": {"capsule_profile": "recall", "automatic_consolidation": True,
+                           "automatic_consolidation_verification": True},
 }
 # What a run counts: calls to the first gold touch, or for a recall set to the
 # first needed touch or an answer naming a needed file.
@@ -930,6 +937,11 @@ def corpus_branch(task: Dict[str, Any]) -> str:
     takes for the task ID. A session that ran on a ticket's branch keeps the
     ticket in it: the branch told the agent, and the runtime, which work it
     was."""
+    if 'served_task_id' in task:
+        name = task['served_task_id']
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9/_-]{0,150}', name):
+            raise OutcomeError('invalid served task branch')
+        return name
     name = f"ab/{stand.safe_name(str(task['id']))}"
     tickets = runtime().brain_runtime.ticket_ids(str(task.get("branch") or "").upper())
     return f"{name}-{tickets[0]}" if tickets else name
@@ -956,26 +968,45 @@ def plant_saves(task: Dict[str, Any], corpus: Path, env: Dict[str, str], timeout
     """
     saves = task.get("saves") or []
     if not saves:
+        if task.get('save_receipt'):
+            return admit_captured_save(task, corpus, env, timeout)
         return {}
     branch = corpus_branch(task)
+    source_task = task.get('source_task_id', branch)
+    if task.get('save_provenance', 'authored') != 'authored':
+        raise OutcomeError('injected saves are authored; observed/generated require captured receipts')
     before = saved_documents(corpus)
-    started = stand.run_runtime(corpus, ["start", "--task-id", branch, "--goal",
-                                         runtime().derive_goal(branch), "--json"], env, timeout)
+    started = stand.run_runtime(corpus, ["start", "--task-id", source_task, "--goal",
+                                         runtime().derive_goal(source_task), "--json"], env, timeout)
     if started["exit"] != 0:
         raise stand.Skip("plant-start-failed")
-    planted = {"records": 0, "promoted": 0}
+    source_uuid = json.loads(started['stdout'])['task_uuid']
+    planted = {"records": 0, "promoted": 0, 'source_task_uuid': source_uuid,
+               'served_task_uuid': source_uuid, 'save_provenance': 'authored', 'receipts': []}
     scratch.mkdir(parents=True, exist_ok=True)
     for number, save in enumerate(saves, start=1):
         request = scratch / f"{stand.safe_name(str(task['id']))}-save-{number}.json"
         request.write_text(json.dumps(save), encoding="utf-8")
-        saved = stand.run_runtime(corpus, ["record-result", "--task-id", branch, "--result-id", f"save-{number}",
+        saved = stand.run_runtime(corpus, ["record-result", "--task-id", source_task, "--result-id", f"save-{number}",
                                            "--revision", "auto", "--input", str(request), "--json"], env, timeout)
         request.unlink()
         if saved["exit"] != 0:
             raise stand.Skip("plant-save-failed")
         report = json.loads(saved["stdout"])
+        import memory_results
+        receipt = memory_results._receipt(corpus, source_uuid, f'save-{number}')
+        planted['receipts'].append({'result_id': f'save-{number}', 'task_uuid': source_uuid,
+                                   'sha256': hashlib.sha256(receipt.read_bytes()).hexdigest(),
+                                   'record_ids': [record['id'] for record in report.get('records') or []]})
         planted["records"] += sum(1 for record in report.get("records") or [] if record.get("state") == "created")
         planted["promoted"] += len(((report.get("promotion") or {}).get("promoted")) or [])
+    if source_task != branch:
+        served = stand.run_runtime(corpus, ['start', '--task-id', branch, '--goal', runtime().derive_goal(branch), '--json'], env, timeout)
+        if served['exit'] != 0:
+            raise stand.Skip('served-task-start-failed')
+        planted['served_task_uuid'] = json.loads(served['stdout'])['task_uuid']
+        if planted['source_task_uuid'] == planted['served_task_uuid']:
+            raise OutcomeError('cross-task save resolved to the same UUID')
     for arguments in (["add", "-A"], ["commit", "-q", "--no-verify", "-m", "memory: saved results"]):
         committed = subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false", *arguments],
                                    cwd=str(corpus), env=env, capture_output=True)
@@ -983,11 +1014,59 @@ def plant_saves(task: Dict[str, Any], corpus: Path, env: Dict[str, str], timeout
             raise stand.Skip("plant-commit-failed")
     if stand.run_runtime(corpus, ["index"], env, timeout)["exit"] != 0:
         raise stand.Skip("index-failed")
-    planted["documents"] = sorted(saved_documents(corpus) - before)
+    planted["documents"] = sorted(path for path in saved_documents(corpus) - before
+                                  if not path.startswith("project-brain/dynamic/tasks/"))
     return planted
 
 
-def hook_arguments(corpus: Path) -> List[str]:
+def admit_captured_save(task: Dict[str, Any], corpus: Path, env: Dict[str, str], timeout: float) -> Dict[str, Any]:
+    """Admit existing prompt-time knowledge with a captured native receipt.
+
+    This validates supplied save evidence, not the identity or honesty of its
+    author. No missing finding/chunk is recreated, and no authored injection is
+    relabelled as a naturally observed session.
+    """
+    rt = runtime()
+    import memory_results
+    import context_retrieval
+    proof = task['save_receipt']
+    saved_at, served_at = stand.parse_instant(task.get('saved_at')), stand.parse_instant(task.get('ts'))
+    if (not isinstance(proof, dict) or set(proof) != {'path', 'sha256'}
+            or task.get('save_provenance') not in ('observed', 'generated')
+            or saved_at is None or served_at is None or saved_at >= served_at):
+        raise OutcomeError('captured save requires provenance, receipt binding and an earlier save time')
+    path = Path(proof['path'])
+    if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != proof['sha256']:
+        raise OutcomeError('captured save receipt mismatch')
+    source = rt.brain_runtime.get_task(corpus, task['source_task_id'])
+    receipt = memory_results._read_receipt(path)
+    if (not receipt or receipt['task_id'] != source['id']
+            or not memory_results._valid_receipt(receipt, source['id'], receipt['result_id'], receipt['digest'])
+            or (receipt['task_revision'] is not None and receipt['task_revision'] > source['revision'])):
+        raise OutcomeError('captured receipt does not match the existing source task')
+    connection = sqlite3.connect(str(corpus / 'memory-bank/local/context.db'))
+    connection.row_factory = sqlite3.Row
+    try:
+        documents = context_retrieval.own_saved_documents(connection, corpus, source['id'])
+    finally:
+        connection.close()
+    if not documents:
+        raise OutcomeError('captured source knowledge absent from the prompt-time corpus')
+    served = stand.run_runtime(corpus, ['start', '--task-id', corpus_branch(task), '--goal',
+                                      rt.derive_goal(corpus_branch(task)), '--json'], env, timeout)
+    if served['exit'] != 0:
+        raise OutcomeError('served task could not be provisioned')
+    served_uuid = json.loads(served['stdout'])['task_uuid']
+    if task.get('source_task_id') != corpus_branch(task) and source['id'] == served_uuid:
+        raise OutcomeError('cross-task captured save resolved to one UUID')
+    return {'source_task_uuid': source['id'], 'served_task_uuid': served_uuid,
+            'save_provenance': task['save_provenance'], 'authorship_verified': False,
+            'saved_at': task['saved_at'], 'question_at': task['ts'], 'documents': documents,
+            'records': 0, 'promoted': 0,
+            'receipts': [{'result_id': receipt['result_id'], 'task_uuid': source['id'], 'sha256': proof['sha256']}]}
+
+
+def hook_arguments(corpus: Path, *, selective: bool = False) -> List[str]:
     """Codex session flags that run the corpus's memory prompt hook alone."""
     hooks = json.loads((corpus / ".codex" / "hooks.json").read_text(encoding="utf-8")).get("hooks") or {}
     groups = []
@@ -996,6 +1075,18 @@ def hook_arguments(corpus: Path) -> List[str]:
             handler for handler in group.get("hooks") or []
             if isinstance(handler, dict) and str(handler.get("command") or "").rstrip().endswith(PROMPT_HOOK)
         ]
+        if selective:
+            from memory_selective_retrieve_pilot import DEFAULT_RULES, wrap_hook_command
+            folder = corpus / 'memory-bank/local/experiments'
+            if any(parent.is_symlink() for parent in [folder, *folder.parents]):
+                raise OutcomeError('unsafe pilot hook location')
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            script, rules, audit = folder / 'selective.py', folder / 'rules.json', folder / 'route.jsonl'
+            shutil.copyfile(ROOT / 'scripts/memory_selective_retrieve_pilot.py', script)
+            rules.write_text(json.dumps(DEFAULT_RULES, ensure_ascii=False), encoding='utf-8')
+            handlers = [{**handler, 'command': wrap_hook_command(handler['command'], script=script,
+                rules_path=rules, audit_path=audit, runtime_dir=corpus / 'memory-bank/scripts')}
+                for handler in handlers]
         if handlers:
             groups.append({**group, "hooks": handlers})
     if not groups:
@@ -1012,7 +1103,7 @@ def codex_command(codex: str, corpus: Path, arm: str, prompt: str, model: Option
                "-s", "workspace-write", "-C", str(corpus)]
     if model:
         command += ["-m", model]
-    command += hook_arguments(corpus) if arm in HOOKED_ARMS else ["-c", "features.hooks=false"]
+    command += hook_arguments(corpus, selective=arm == 'selective') if arm in HOOKED_ARMS else ["-c", "features.hooks=false"]
     return [*command, prompt]
 
 
@@ -1042,7 +1133,10 @@ class Counter:
     events: a file change may name its path only once it completed.
     """
 
-    def __init__(self, corpus: Path, gold: Sequence[str], cap: int) -> None:
+    def __init__(self, corpus: Path, gold: Sequence[str], cap: int, *, endpoint: str = "first-touch") -> None:
+        if endpoint not in ("first-touch", "task-complete"):
+            raise OutcomeError("unknown endpoint")
+        self.endpoint = endpoint
         self.corpus = os.path.realpath(str(corpus))
         self.gold = set(gold)
         self.cap = cap
@@ -1051,11 +1145,15 @@ class Counter:
         self.numbers: Dict[str, int] = {}
         self.usage: Optional[Dict[str, Any]] = None
         self.finished = False
+        self.failed = False
         self.message = ""
 
     def feed(self, event: Dict[str, Any]) -> Optional[str]:
         """'gold' or 'cap' when the run should stop now, else None."""
         kind = event.get("type")
+        if kind in ("turn.failed", "error"):
+            self.failed = True
+            return "error" if self.endpoint == "task-complete" else None
         if kind == "turn.completed":
             self.usage = event.get("usage") if isinstance(event.get("usage"), dict) else None
             self.finished = True
@@ -1075,7 +1173,8 @@ class Counter:
                 self.numbers[identity] = number
         if self.first_gold is None and self.gold & set(event_paths(item, self.corpus)):
             self.first_gold = number
-            return "gold"
+            if self.endpoint == "first-touch":
+                return "gold"
         if self.calls >= self.cap:
             return "cap"
         return None
@@ -1107,6 +1206,68 @@ def health_lines(path: Path) -> int:
             return sum(1 for _ in handle)
     except OSError:
         return 0
+
+
+def completion_artifact(path: Path, corpus: Path) -> Optional[bytes]:
+    """Agent-writable telemetry is bounded, regular, no-follow and optional."""
+    from memory_pilot_support import safe_read
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return b''
+    except OSError:
+        return None
+    try:
+        return safe_read(corpus, path.relative_to(corpus).as_posix(), memory=True, limit=1048576)
+    except (OSError, ValueError):
+        return None
+
+
+def completion_manifest_paths(folder: Path) -> Tuple[Set[Path], bool]:
+    if any(path.is_symlink() for path in [folder, *folder.parents]): return set(), False
+    try:
+        if not folder.exists(): return set(), True
+        if not folder.is_dir(): return set(), False
+        result, complete, count = set(), True, 0
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                count += 1
+                if count > 1000: return result, False
+                if entry.name.endswith('.json'):
+                    if entry.is_file(follow_symlinks=False): result.add(Path(entry.path))
+                    else: complete = False
+        return result, complete
+    except OSError:
+        return set(), False
+
+
+def completion_json(raw: bytes) -> Any:
+    def integer(value):
+        if len(value) > 20: raise ValueError('telemetry integer exceeds limit')
+        return int(value)
+    def nonfinite(_): raise ValueError('nonfinite telemetry')
+    return json.loads(raw, parse_int=integer, parse_constant=nonfinite)
+
+
+def completion_health(path: Path, corpus: Path, skip: int = 0) -> Dict[str, Any]:
+    raw = completion_artifact(path, corpus)
+    result = {'lines': 0, 'complete': raw is not None, 'ticket': False, 'bytes': None}
+    if raw is None: return result
+    lines = raw.splitlines(); result['lines'] = len(lines)
+    for line in lines[skip:]:
+        try:
+            if len(line) > 16384: raise ValueError('oversized telemetry line')
+            record = completion_json(line)
+            if not isinstance(record, dict): raise ValueError('invalid health record')
+            shape = record.get('capsule')
+            if isinstance(shape, dict):
+                tickets = shape.get('ticket_files')
+                if type(tickets) is int and tickets > 0: result['ticket'] = True
+                size = shape.get('bytes')
+                if type(size) is int and 0 <= size <= 2**53 - 1:
+                    result['bytes'] = (result['bytes'] or 0) + size
+        except (ValueError, TypeError, RecursionError): result['complete'] = False
+    return result
 
 
 def ticket_files_delivered(path: Path, skip: int) -> bool:
@@ -1170,20 +1331,30 @@ def set_capsule_profile(corpus: Path, profile: str) -> None:
 
 def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
             timeout: float, events: Optional[Path] = None,
-            saved: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+            saved: Optional[Sequence[str]] = None, *, endpoint: str = "first-touch",
+            answer_artifact: Optional[Path] = None,
+            environment: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """One headless session, stopped at the first gold touch, the cap or the
     deadline. Only counts leave this function.
 
     ``saved`` names the documents a recall set's save added; the outcome says
     whether a hook capsule delivered one."""
     manifests = corpus / "memory-bank" / "local" / "retrieval-manifests"
-    before = set(manifests.glob("*.json")) if manifests.is_dir() else set()
     health = corpus / "memory-bank" / "local" / "refresh-health.ndjson"
-    health_before = health_lines(health)
-    counter = Counter(corpus, gold, cap)
+    strict = endpoint == 'task-complete'
+    if strict:
+        before, telemetry_complete = completion_manifest_paths(manifests)
+        initial_health = completion_health(health, corpus)
+        health_before = initial_health['lines']
+        telemetry_complete &= initial_health['complete']
+    else:
+        before = set(manifests.glob("*.json")) if manifests.is_dir() else set()
+        health_before = health_lines(health)
+    counter = Counter(corpus, gold, cap, endpoint=endpoint)
     started = time.monotonic()
     reason = "finished"
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment = environment if environment is not None else {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     process = subprocess.Popen(
         list(command), cwd=str(corpus), env=environment, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True,
@@ -1216,6 +1387,11 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
             except queue.Empty:
                 continue
             if line is None:
+                if endpoint == 'task-complete' and process.poll() is None:
+                    try:
+                        process.wait(timeout=max(.001, timeout - (time.monotonic() - started)))
+                    except subprocess.TimeoutExpired:
+                        reason = 'timeout'
                 break
             if log is not None:
                 log.write(line)
@@ -1235,7 +1411,12 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
         process.stdout.close()
         if log is not None:
             log.close()
-    after = set(manifests.glob("*.json")) if manifests.is_dir() else set()
+    if strict:
+        after, known_manifests = completion_manifest_paths(manifests)
+        final_health = completion_health(health, corpus, health_before)
+        telemetry_complete &= known_manifests and final_health['complete']
+    else:
+        after = set(manifests.glob("*.json")) if manifests.is_dir() else set()
     if reason == "finished" and process.returncode not in (0, None) and not counter.finished:
         reason = "error"
     # The policy has agents run `context.py retrieve` themselves, in either
@@ -1244,22 +1425,35 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
     capsule_tokens = 0
     saved_delivered = False
     for path in after - before:
+        if strict and time.monotonic() - started >= timeout:
+            telemetry_complete = False
+            break
         try:
-            manifest = json.loads(path.read_text(encoding="utf-8"))
+            if strict:
+                artifact = completion_artifact(path, corpus)
+                if artifact is None: raise ValueError('unsafe manifest')
+                manifest = completion_json(artifact)
+            else:
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict): raise ValueError('invalid manifest')
             point = str(manifest.get("entry_point"))
-        except (OSError, ValueError, AttributeError):
+        except (OSError, ValueError, AttributeError, RecursionError):
             manifest, point = {}, "unreadable"
+            if strict: telemetry_complete = False
         entry_points[point] = entry_points.get(point, 0) + 1
         if point in HOOK_ENTRY_POINTS:
             estimates = manifest.get("token_estimates") if isinstance(manifest, dict) else None
             if isinstance(estimates, dict) and isinstance(estimates.get("total"), (int, float)):
-                capsule_tokens += int(estimates["total"])
+                value = estimates['total']
+                if not strict or (type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 2**53 - 1):
+                    capsule_tokens += int(value)
+                else: telemetry_complete = False
             selected = manifest.get("selected") if isinstance(manifest, dict) else None
             if saved and isinstance(selected, list):
                 saved_delivered = saved_delivered or any(
                     isinstance(entry, dict) and entry.get("path") in saved for entry in selected)
     delivered = sum(count for point, count in entry_points.items() if point in HOOK_ENTRY_POINTS)
-    return {
+    outcome = {
         "stopped": reason,
         "calls": counter.calls,
         "calls_to_gold": counter.first_gold,
@@ -1272,18 +1466,29 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
         "capsule_delivered": delivered > 0,
         # Every prompt-hook refresh appends one health line, with or without
         # documents: the navigation profile writes no manifest but this.
-        "hook_ran": health_lines(health) > health_before,
-        "ticket_files_delivered": ticket_files_delivered(health, health_before),
+        "hook_ran": (final_health['lines'] if strict else health_lines(health)) > health_before,
+        "ticket_files_delivered": final_health['ticket'] if strict else ticket_files_delivered(health, health_before),
         "capsule_tokens": capsule_tokens,
         # What the hook printed, documents or not: the estimate above counts
         # documents only.
-        "capsule_bytes": printed_capsule_bytes(health, health_before),
+        "capsule_bytes": final_health['bytes'] if strict else printed_capsule_bytes(health, health_before),
         "manifests": dict(sorted(entry_points.items())),
         "exit": process.returncode,
     }
+    if endpoint == "task-complete":
+        outcome['telemetry_complete'] = bool(telemetry_complete)
+        outcome["completed"] = (reason == "finished" and process.returncode == 0
+                                and counter.finished and not counter.failed)
+        if answer_artifact is not None:
+            with os.fdopen(os.open(str(answer_artifact), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
+                           "w", encoding="utf-8") as stream:
+                stream.write(counter.message)
+    return outcome
 
 
 def command_run(arguments: argparse.Namespace) -> int:
+    if getattr(arguments, "endpoint", "first-touch") == "task-complete":
+        return command_run_complete(arguments)
     out = arguments.out.expanduser()
     if stand.inside_clone(out):
         raise OutcomeError(f"--out {out} is inside this clone: results name client paths")
@@ -1303,6 +1508,8 @@ def command_run(arguments: argparse.Namespace) -> int:
     arms = [arm.strip() for arm in arguments.arms.split(",") if arm.strip()]
     if not arms or any(arm not in ARMS for arm in arms):
         raise OutcomeError(f"--arms must name some of {', '.join(ARMS)}")
+    if any(arm in PILOT_ARMS for arm in arms):
+        raise OutcomeError('experimental pilot arms require --endpoint task-complete')
     cache = (arguments.cache or (stand.default_cache().parent / f"{stand.default_cache().name}-outcome")).expanduser().resolve()
     stand.prepare_cache(cache)
     work = cache / "runs" / f"{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
@@ -1385,6 +1592,413 @@ def command_run(arguments: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Opt-in whole-task controller. The legacy first-touch controller is unchanged.
+# ---------------------------------------------------------------------------
+
+def complete_runtime_digest() -> str:
+    from memory_outcome_verify import digest, snapshot_digest
+    return digest([snapshot_digest(ROOT / 'PHP Core' / 'memory-bank' / 'scripts'),
+                   snapshot_digest(ROOT / 'PHP Core' / 'project-brain' / 'config'),
+                   [(name, hashlib.sha256((ROOT / 'scripts' / name).read_bytes()).hexdigest())
+                    for name in ('memory_outcome_ab.py', 'memory_outcome_verify.py',
+                                 'memory_outcome_isolation.py', 'memory_eval.py',
+                                 'memory_selective_retrieve_pilot.py', 'memory_consolidation_pilot.py',
+                                 'memory_pilot_support.py')]])
+
+
+def complete_settings(arguments: argparse.Namespace) -> Dict[str, Any]:
+    arms = [arm.strip() for arm in arguments.arms.split(',') if arm.strip()]
+    if (len(arms) != 2 or len(set(arms)) != 2 or any(arm not in ARMS or arm == 'ticket' for arm in arms)
+            or type(arguments.repeat) is not int or arguments.repeat < 1
+            or type(arguments.cap) is not int or arguments.cap < 1
+            or not math.isfinite(arguments.timeout) or arguments.timeout <= 0
+            or not isinstance(arguments.model, str) or not arguments.model.strip()):
+        raise OutcomeError('task-complete requires two distinct arms, explicit model and positive budgets')
+    version = subprocess.run([arguments.codex, '--version'], capture_output=True, timeout=10)
+    if version.returncode != 0:
+        raise OutcomeError('native CLI version unavailable')
+    return {'arms': arms, 'repeat': arguments.repeat, 'cap': arguments.cap,
+            'timeout': arguments.timeout, 'model': arguments.model,
+            'codex_version': version.stdout.decode('utf-8', 'replace').strip(),
+            'endpoint': 'task-complete', 'retry_policy': 'none',
+            'git_history': 'public-snapshot-only'}
+
+
+def read_complete_tasks(path: Path) -> List[Dict[str, Any]]:
+    document = json.loads(path.read_text(encoding='utf-8'))
+    tasks = document.get('tasks') if isinstance(document, dict) else None
+    if (not isinstance(tasks, list) or not tasks or any(not isinstance(task, dict) for task in tasks)
+            or any(not isinstance(task.get('id'), str) or not task['id']
+                   or task.get('task_mode') not in ('answer', 'patch')
+                   or not isinstance(task.get('verifier_id'), str) for task in tasks)
+            or len({task['id'] for task in tasks}) != len(tasks)):
+        raise OutcomeError('invalid or duplicate completion tasks')
+    return tasks
+
+
+def complete_cases(path: Path, tasks: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    document = json.loads(path.read_text(encoding='utf-8'))
+    cases = document.get('cases') if isinstance(document, dict) else None
+    if not isinstance(cases, dict):
+        raise OutcomeError('verifiers must contain cases')
+    for task in tasks:
+        case = cases.get(task['verifier_id'])
+        if not isinstance(case, dict) or case.get('mode') != task['task_mode']:
+            raise OutcomeError('missing or mismatched private verifier')
+    return cases
+
+
+def complete_config_digest(base: Path, arm: str) -> str:
+    from memory_outcome_verify import digest
+    config = base / 'project-brain/config/runtime.json'
+    settings = json.loads(config.read_text(encoding='utf-8')) if config.is_file() else {}
+    settings.update(ARM_SETTINGS.get(arm) or {})
+    return digest(settings)
+
+
+def complete_private_root(paths: Sequence[Path]) -> Path:
+    root = Path(os.path.commonpath([str(path.resolve().parent) for path in paths]))
+    if root == Path(root.anchor) or any(stand.inside_clone(path) for path in paths):
+        raise OutcomeError('private completion inputs must share a directory outside the clone')
+    return root
+
+
+def validate_design(design: Any) -> None:
+    required = {'primary', 'quality_margin', 'minimum_tasks', 'power_rationale', 'selection',
+                'exclusion', 'secondary_benefit', 'stopping_rule', 'unknown_policy'}
+    if (not isinstance(design, dict) or set(design) != required
+            or design['primary'] != 'correctness' or design['stopping_rule'] != 'fixed-horizon'
+            or design['unknown_policy'] != 'insufficient'
+            or type(design['minimum_tasks']) is not int or design['minimum_tasks'] < 1
+            or type(design['quality_margin']) not in (int, float)
+            or not math.isfinite(design['quality_margin']) or not 0 <= design['quality_margin'] < 1
+            or any(not isinstance(design[key], str) or not design[key].strip()
+                   for key in ('power_rationale', 'selection', 'exclusion', 'secondary_benefit'))):
+        raise OutcomeError('design must seal correctness, margin, power, selection, exclusions and stopping/unknown rules')
+
+
+def complete_bindings(set_path: Path, verifiers: Path, cases: Dict[str, Any]) -> Dict[str, Any]:
+    from memory_outcome_verify import verifier_digest
+    receipts = {}
+    for task in read_complete_tasks(set_path):
+        proof = task.get('save_receipt')
+        if proof:
+            actual = hashlib.sha256(Path(proof['path']).read_bytes()).hexdigest()
+            if actual != proof['sha256']:
+                raise OutcomeError('captured receipt changed after selection')
+            receipts[task['id']] = actual
+    return {'set_sha256': hashlib.sha256(set_path.read_bytes()).hexdigest(), 'save_receipts': receipts,
+            'verifiers_sha256': hashlib.sha256(verifiers.read_bytes()).hexdigest(),
+            'verifier_artifacts': {key: verifier_digest(case) for key, case in sorted(cases.items())},
+            'runtime_sha256': complete_runtime_digest()}
+
+
+def write_complete(path: Path, result: Dict[str, Any]) -> None:
+    stand.write_json(path, result)
+    os.chmod(path, 0o600)
+
+
+def command_seal(arguments: argparse.Namespace) -> int:
+    """Prepare immutable corpora and a content-bound protocol, without a model."""
+    from memory_outcome_verify import digest, snapshot_digest
+    if arguments.out.exists():
+        raise OutcomeError('refusing to overwrite a sealed protocol')
+    private = complete_private_root([arguments.set, arguments.verifiers, arguments.design, arguments.out])
+    tasks = read_complete_tasks(arguments.set)
+    cases = complete_cases(arguments.verifiers, tasks)
+    design = json.loads(arguments.design.read_text(encoding='utf-8'))
+    validate_design(design)
+    # A label directory must not contain the growing protocol/result files.
+    for case in cases.values():
+        for raw in case.get('read_roots') or []:
+            root = Path(raw).resolve()
+            if root == private or private not in root.parents:
+                raise OutcomeError('oracle read_roots must be dedicated subdirectories of private inputs')
+    settings = complete_settings(arguments)
+    cache = arguments.cache.expanduser().resolve()
+    stand.prepare_cache(cache)
+    if private == cache or private in cache.parents or cache in private.parents:
+        raise OutcomeError('sealed corpora and private labels must be separate directories')
+    prepared = cache / 'sealed' / f'{time.time_ns()}-{os.getpid()}'
+    prepared.mkdir(parents=True, mode=0o700)
+    bases, editions = {}, {}
+    for task in tasks:
+        base = prepared / stand.safe_name(task['id'])
+        built = build_corpus(task, base, cache, arguments.projects_root.expanduser(), editions, arguments.timeout)
+        # The legacy corpus borrows an unrestricted history object store.
+        # Private runs cannot mount that store or expose historical secrets.
+        # Start a self-contained Git image of the already screened public tree.
+        stand.remove_tree(base / '.git')
+        env = stand.runtime_env(cache, stand.parse_instant(task['ts']), None)
+        stand.commit_corpus(base, env, None, None, corpus_branch(task))
+        seed_recent_files(task, base, built['project'], arguments.transcripts.expanduser(), arguments.codex_root.expanduser())
+        planted = plant_saves(task, base, stand.runtime_env(cache, stand.parse_instant(task['ts']), None),
+                              arguments.timeout, prepared / 'requests')
+        bases[task['id']] = {'path': str(base), 'sha256': snapshot_digest(base),
+                            'git_sha256': snapshot_digest(base / '.git'),
+                            'configs': {arm: complete_config_digest(base, arm) for arm in settings['arms']},
+                            'planted': planted, 'commit': built['commit'], 'edition': built['edition']}
+        variants = {}
+        for arm in settings['arms']:
+            if arm not in ('consolidate', 'consolidate-verify'): continue
+            from memory_consolidation_pilot import run_pilot
+            target = prepared / (stand.safe_name(task['id']) + '-' + arm)
+            replay = run_pilot(base, variant=arm, export=target)
+            if replay['validation_errors']:
+                raise OutcomeError('consolidation treatment failed canonical validation')
+            configure_corpus(target, ARM_SETTINGS[arm])
+            stand.commit_corpus(target, env, None, None, corpus_branch(task))
+            indexed = stand.run_runtime(target, ['index'], env, arguments.timeout)
+            if indexed['exit'] != 0: raise OutcomeError('consolidation treatment index unavailable')
+            # Rebuild derived knowledge, but preserve the exact same screened
+            # navigation history as baseline. Never copy locks/private cache.
+            rt = runtime()
+            source = rt.connect_read_only(base / 'memory-bank/local/context.db')
+            try: recent = rt.load_recent_files(source)
+            finally: source.close()
+            destination = rt.connect(target / 'memory-bank/local/context.db')
+            try: rt.record_recent_files(destination, [path for path in recent
+                if rt._recent_file_kept(path) and (target / path).is_file()])
+            finally: destination.close()
+            variants[arm] = {'path': str(target), 'sha256': snapshot_digest(target),
+                             'git_sha256': snapshot_digest(target / '.git'), 'replay': replay}
+        if variants: bases[task['id']]['variants'] = variants
+    protocol = {'schema': 'task-outcome-protocol-v1', 'settings': settings, 'design': design,
+                'bindings': complete_bindings(arguments.set, arguments.verifiers, cases), 'bases': bases}
+    protocol['seal_sha256'] = digest(protocol)
+    write_complete(arguments.out, protocol)
+    print('sealed protocol and prepared corpora; no model was called')
+    return 0
+
+
+def validate_complete_protocol(protocol: Dict[str, Any], set_path: Path, verifiers: Path,
+                               cases: Dict[str, Any], settings: Dict[str, Any]) -> None:
+    from memory_outcome_verify import digest, snapshot_digest
+    body = {key: value for key, value in protocol.items() if key != 'seal_sha256'}
+    if (protocol.get('schema') != 'task-outcome-protocol-v1'
+            or protocol.get('seal_sha256') != digest(body) or protocol.get('settings') != settings
+            or protocol.get('bindings') != complete_bindings(set_path, verifiers, cases)):
+        raise OutcomeError('sealed protocol/input/runtime/verifier mismatch')
+    validate_design(protocol.get('design'))
+    for base in protocol['bases'].values():
+        if (snapshot_digest(Path(base['path'])) != base['sha256']
+                or snapshot_digest(Path(base['path']) / '.git') != base['git_sha256']
+                or any(complete_config_digest(Path(base['path']), arm) != base['configs'][arm]
+                       for arm in settings['arms'])):
+            raise OutcomeError('sealed base/config mismatch')
+        for arm, variant in base.get('variants', {}).items():
+            path = Path(variant['path'])
+            if (arm not in settings['arms'] or snapshot_digest(path) != variant['sha256']
+                    or snapshot_digest(path / '.git') != variant['git_sha256']
+                    or complete_config_digest(path, arm) != base['configs'][arm]):
+                raise OutcomeError('sealed consolidation image mismatch')
+
+
+def command_run_complete(arguments: argparse.Namespace) -> int:
+    from memory_outcome_isolation import (IsolationError, prepare_agent_view, probe_agent_view)
+    from memory_outcome_verify import snapshot_digest, verify_task
+    if not arguments.protocol or not arguments.verifiers:
+        raise OutcomeError('task-complete requires --protocol and --verifiers')
+    if arguments.ids or arguments.events or arguments.keep:
+        raise OutcomeError('sealed completion refuses --ids, raw --events and --keep')
+    if arguments.out.exists() or stand.inside_clone(arguments.out):
+        raise OutcomeError('completion result must be a fresh file outside the clone')
+    tasks = read_complete_tasks(arguments.set)
+    cases = complete_cases(arguments.verifiers, tasks)
+    settings = complete_settings(arguments)
+    private = complete_private_root([arguments.set, arguments.verifiers, arguments.protocol, arguments.out])
+    protocol = json.loads(arguments.protocol.read_text(encoding='utf-8'))
+    validate_complete_protocol(protocol, arguments.set, arguments.verifiers, cases, settings)
+    if set(protocol['bases']) != {task['id'] for task in tasks}:
+        raise OutcomeError('sealed task membership mismatch')
+    slots = []
+    for index, task in enumerate(tasks):
+        for repeat in range(settings['repeat']):
+            order = settings['arms'] if (index + repeat) % 2 == 0 else list(reversed(settings['arms']))
+            for arm in order:
+                slots.append({'task_id': task['id'], 'arm': arm, 'repeat': repeat,
+                              'status': 'pending', 'attempts': []})
+    result = {'schema': 'task-outcome-complete-v1', 'protocol': protocol,
+              'meta': {'finished': False, 'interrupted': False}, 'slots': slots}
+    write_complete(arguments.out, result)  # fixed denominator before any agent process
+    task_map = {task['id']: task for task in tasks}
+    cache = arguments.cache.expanduser().resolve() if arguments.cache else Path(next(iter(protocol['bases'].values()))['path']).parent
+    stand.prepare_cache(cache)
+    work = cache / f'completion-{time.time_ns()}-{os.getpid()}'
+    work.mkdir(parents=True, mode=0o700)
+    try:
+        for ordinal, slot in enumerate(slots):
+            task, base = task_map[slot['task_id']], protocol['bases'][slot['task_id']]
+            corpus = work / str(ordinal)
+            attempt = {'ordinal': 0, 'completed': False, 'usage': None,
+                       'verification': {'status': 'unavailable', 'correct': None},
+                       'provider_attempt_coverage': 'unknown', 'total_provider_tokens': None}
+            slot.update(status='running', attempts=[attempt])
+            write_complete(arguments.out, result)
+            try:
+                # Check the entire seal before each execution; a prior task may
+                # not alter a later base, rubric, runtime or set unnoticed.
+                validate_complete_protocol(protocol, arguments.set, arguments.verifiers, cases, settings)
+                image = base.get('variants', {}).get(slot['arm'], base)
+                shutil.copytree(image['path'], corpus, symlinks=True)
+                if snapshot_digest(corpus) != image['sha256']:
+                    raise OutcomeError('arm source image mismatch')
+                configure_corpus(corpus, ARM_SETTINGS.get(slot['arm']) or {})
+                if complete_config_digest(corpus, slot['arm']) != base['configs'][slot['arm']]:
+                    raise OutcomeError('arm configuration mismatch')
+                command = codex_command(arguments.codex, corpus, slot['arm'], task['prompt'], arguments.model)
+                expected_route = None
+                if slot['arm'] == 'selective':
+                    from memory_selective_retrieve_pilot import DEFAULT_RULES, canonical_json
+                    expected_route = {
+                        'router_digest': hashlib.sha256((ROOT / 'scripts/memory_selective_retrieve_pilot.py').read_bytes()).hexdigest(),
+                        'rules_digest': hashlib.sha256(canonical_json(DEFAULT_RULES)).hexdigest(),
+                        'sanitizer_digest': hashlib.sha256((corpus / 'memory-bank/scripts/automatic_query.py').read_bytes()).hexdigest()}
+                view = prepare_agent_view(corpus, private, command=command)
+                if not probe_agent_view(view, arguments.verifiers):
+                    raise IsolationError('private read isolation could not be proven')
+                # Sibling artifact lies outside the mounted corpus and is not
+                # named in the agent command/environment/context.
+                answer = work / f'{ordinal}-answer.txt'
+                outcome = run_arm([*view['prefix'], '--', *view['command']], corpus, task.get('gold') or [],
+                                  arguments.cap, arguments.timeout, saved=(base.get('planted') or {}).get('documents'),
+                                  endpoint='task-complete', answer_artifact=answer, environment=view['env'])
+                if expected_route is not None:
+                    from memory_pilot_support import safe_read
+                    from memory_selective_retrieve_pilot import parse_observations
+                    try:
+                        raw = safe_read(corpus, 'memory-bank/local/experiments/route.jsonl', memory=True, limit=1048576)
+                        outcome['routing'] = parse_observations(raw, expected_route)
+                    except (OSError, ValueError):
+                        outcome['routing'] = {'status': 'unknown', 'records': [], 'producer_authenticated': False}
+                    label = task.get('needs_history')
+                    if type(label) is bool and outcome['routing']['status'] == 'observed':
+                        selected = any(row['profile'] == 'full' for row in outcome['routing']['records'])
+                        outcome['routing']['intent_class'] = ('TP' if selected else 'FN') if label else ('FP' if selected else 'TN')
+                    else: outcome['routing']['intent_class'] = None
+                attempt.update(outcome, isolation='linux-bwrap-allowlist-v1',
+                               runtime_sha256=protocol['bindings']['runtime_sha256'],
+                               config_sha256=base['configs'][slot['arm']])
+                # Completion and treatment compliance are separate. A broken
+                # hook does not become a selected successful-intersection pair.
+                attempt['treatment_valid'] = valid_arm(slot['arm'], [outcome])
+                if outcome['completed']:
+                    attempt['verification'] = verify_task(corpus, answer, cases[task['verifier_id']])
+                    expected = protocol['bindings']['verifier_artifacts'][task['verifier_id']]
+                    if attempt['verification']['verifier_digest'] != expected:
+                        attempt['verification'].update(status='unavailable', correct=None)
+                else:
+                    attempt['verification'] = {'status': 'not-completed', 'correct': False}
+                slot['status'] = 'finished'
+            except (OutcomeError, IsolationError, OSError, ValueError, subprocess.SubprocessError):
+                slot['status'] = 'unavailable'
+                attempt['failure'] = 'preflight-or-infrastructure-unavailable'
+            finally:
+                stand.remove_tree(corpus) if corpus.exists() else None
+                answer = work / f'{ordinal}-answer.txt'
+                answer.unlink(missing_ok=True)
+                write_complete(arguments.out, result)
+    except KeyboardInterrupt:
+        result['meta']['interrupted'] = True
+        for slot in slots:
+            if slot['status'] == 'running':
+                slot['status'] = 'interrupted'
+    finally:
+        result['meta']['finished'] = not result['meta']['interrupted']
+        write_complete(arguments.out, result)
+        stand.remove_tree(work)
+    return 1 if result['meta']['interrupted'] else 0
+
+
+def summarize_complete(result: Dict[str, Any]) -> Dict[str, Any]:
+    from memory_outcome_verify import digest
+    if result.get('schema') != 'task-outcome-complete-v1':
+        raise OutcomeError('task-complete report requires a completion result, not legacy gold/recall')
+    protocol = result.get('protocol')
+    if (not isinstance(protocol, dict) or protocol.get('schema') != 'task-outcome-protocol-v1'
+            or protocol.get('seal_sha256') != digest({k: v for k, v in protocol.items() if k != 'seal_sha256'})):
+        raise OutcomeError('completion report protocol seal mismatch')
+    validate_design(protocol.get('design'))
+    settings = protocol.get('settings')
+    if (not isinstance(settings, dict) or settings.get('endpoint') != 'task-complete'
+            or settings.get('retry_policy') != 'none' or type(settings.get('repeat')) is not int
+            or settings['repeat'] < 1 or not isinstance(settings.get('arms'), list)
+            or len(settings['arms']) != 2 or len(set(settings['arms'])) != 2
+            or any(arm not in ARMS for arm in settings['arms'])
+            or not isinstance(protocol.get('bases'), dict) or not protocol['bases']):
+        raise OutcomeError('invalid completion report protocol')
+    expected = {(task, arm, repeat) for task in result['protocol']['bases']
+                for arm in settings['arms'] for repeat in range(settings['repeat'])}
+    membership = [(slot.get('task_id'), slot.get('arm'), slot.get('repeat')) for slot in result['slots']]
+    if (any(type(slot.get('repeat')) is not int for slot in result['slots'])
+            or len(membership) != len(expected) or set(membership) != expected):
+        raise OutcomeError('completion result lost or duplicated planned slots')
+    summaries = {}
+    for arm in settings['arms']:
+        slots = [slot for slot in result['slots'] if slot['arm'] == arm]
+        attempts = [attempt for slot in slots for attempt in slot['attempts']]
+        last = [slot['attempts'][-1] if slot['attempts'] and slot['status'] == 'finished' else {} for slot in slots]
+        grades = [attempt.get('verification', {}).get('correct') for attempt in last]
+        known = [attempt.get('usage') for attempt in attempts]
+        usable = [usage for usage in known if isinstance(usage, dict)
+                  and all(type(usage.get(key)) is int and usage[key] >= 0 for key in ('input_tokens', 'output_tokens'))]
+        all_usage = (bool(slots) and all(slot['attempts'] and slot['status'] == 'finished' for slot in slots)
+                     and len(usable) == len(attempts))
+        cached = [usage['cached_input_tokens'] for usage in usable
+                  if type(usage.get('cached_input_tokens')) is int
+                  and 0 <= usage['cached_input_tokens'] <= usage['input_tokens']]
+        seconds = [attempt['seconds'] for attempt in attempts if type(attempt.get('seconds')) in (int, float)
+                   and math.isfinite(attempt['seconds']) and attempt['seconds'] >= 0]
+        calls = [attempt['calls'] for attempt in attempts if type(attempt.get('calls')) is int and attempt['calls'] >= 0]
+        summaries[arm] = {
+            'planned': len(slots), 'attempted': sum(bool(slot['attempts']) for slot in slots),
+            'unattempted': sum(not slot['attempts'] for slot in slots), 'attempts': len(attempts),
+            'completed': sum(attempt.get('completed') is True for attempt in last),
+            'verified': sum(grade is True or grade is False for grade in grades),
+            'correct': sum(grade is True for grade in grades), 'incorrect': sum(grade is False for grade in grades),
+            'unknown': sum(grade is not True and grade is not False for grade in grades),
+            'success_rate': sum(grade is True for grade in grades) / len(slots) if slots and all(type(g) is bool for g in grades) else None,
+            'attempts_with_usage': len(usable),
+            'known_host_reported_tokens': sum(usage['input_tokens'] + usage['output_tokens'] for usage in usable),
+            'known_input_tokens': sum(usage['input_tokens'] for usage in usable),
+            'known_output_tokens': sum(usage['output_tokens'] for usage in usable),
+            'known_cached_input_tokens': sum(cached), 'attempts_with_cached_usage': len(cached),
+            'observed_agent_seconds': round(sum(seconds), 4), 'attempts_with_seconds': len(seconds),
+            'observed_agent_calls': sum(calls), 'attempts_with_calls': len(calls),
+            'host_reported_tokens': sum(usage['input_tokens'] + usage['output_tokens'] for usage in usable) if all_usage else None,
+            'provider_attempt_coverage': 'unknown', 'total_provider_tokens': None,
+            'total_usd': None, 'cost_per_correct': None,
+        }
+    task_ids = sorted({slot['task_id'] for slot in result['slots']})
+    baseline, treatment = settings['arms']
+    differences = []
+    valid = bool(result.get('meta', {}).get('finished')) and not result.get('meta', {}).get('interrupted')
+    valid &= all(len(slot['attempts']) <= 1 for slot in result['slots'])
+    valid &= all(attempt.get('verification', {}).get('correct') is not True or attempt.get('completed') is True
+                 for slot in result['slots'] for attempt in slot['attempts'])
+    for task in task_ids:
+        values = {}
+        for arm in settings['arms']:
+            slots = [slot for slot in result['slots'] if slot['task_id'] == task and slot['arm'] == arm]
+            grades = [slot['attempts'][-1].get('verification', {}).get('correct')
+                      if slot['attempts'] and slot['status'] == 'finished' else None for slot in slots]
+            compliance = all(slot['attempts'] and slot['attempts'][-1].get('treatment_valid') is True for slot in slots)
+            valid &= len(slots) == settings['repeat'] and all(type(g) is bool for g in grades) and compliance
+            values[arm] = sum(g is True for g in grades) / len(grades) if grades else 0
+        differences.append(values[treatment] - values[baseline])
+    design = result['protocol']['design']
+    valid &= len(task_ids) >= design['minimum_tasks']
+    interval = list(bootstrap(differences)) if valid and len(differences) >= 2 else None
+    verdict = 'insufficient'
+    if interval is not None:
+        verdict = ('treatment-helps' if interval[0] > 0 else 'treatment-hurts'
+                   if interval[1] < -design['quality_margin'] else 'no-difference-shown')
+    return {'endpoint': 'task-complete', 'arms': summaries, 'tasks': len(task_ids),
+            'paired_unit': 'task', 'correctness_difference_ci95': interval, 'verdict': verdict,
+            'provider_cost_savings': None}
+
+
+# ---------------------------------------------------------------------------
 # report
 # ---------------------------------------------------------------------------
 
@@ -1434,13 +2048,17 @@ def valid_arm(arm: str, runs: Sequence[Dict[str, Any]]) -> bool:
 
     A result written before `hook_ran` existed only knows deliveries.
     """
+    if any(run.get('telemetry_complete') is False for run in runs): return False
     delivered = [bool(run.get("capsule_delivered")) for run in runs]
     ran = [run.get("hook_ran") for run in runs]
     if arm == "capsule":
         return all(delivered)
     if arm == "navigation":
         return all(value is True for value in ran) and not any(delivered)
-    if arm in ("recall", "ticket"):
+    if arm == 'selective':
+        return (all(value is True for value in ran)
+                and all(run.get('routing', {}).get('status') == 'observed' for run in runs))
+    if arm in ("recall", "ticket", "consolidate", "consolidate-verify"):
         # A manifest only on a turn one of the task's saves matched. A ticket
         # run counts whether or not its line came: the sample holds the cold
         # starts it can act on, and the report says how often it did.
@@ -1556,8 +2174,12 @@ def command_report(arguments: argparse.Namespace) -> int:
     if len(compare) != 2 or any(arm not in ARMS for arm in compare) or compare[0] == compare[1]:
         raise OutcomeError(f"--compare takes two different arms of {', '.join(ARMS)}")
     baseline, treatment = compare
-    if arguments.metric is not None and arguments.metric not in METRICS:
+    if arguments.metric is not None and arguments.metric not in (*METRICS, "task-complete"):
         raise OutcomeError(f"--metric is one of {', '.join(METRICS)}")
+    if arguments.metric == "task-complete":
+        summary = summarize_complete(result)
+        print(json.dumps(summary, indent=1))
+        return 0
     summary = summarize(result, compare, arguments.metric)
     if arguments.json:
         print(json.dumps(summary, indent=1))
@@ -1637,6 +2259,9 @@ def build_parser() -> argparse.ArgumentParser:
     recall.add_argument("--seed", type=int, required=True)
     recall.add_argument("--out", type=Path, required=True)
     run = commands.add_parser("run", help="each task with and without the capsule")
+    run.add_argument("--endpoint", choices=("first-touch", "task-complete"), default="first-touch")
+    run.add_argument("--protocol", type=Path)
+    run.add_argument("--verifiers", type=Path)
     run.add_argument("--set", type=Path, required=True)
     run.add_argument("--out", type=Path, required=True)
     run.add_argument("--projects-root", type=Path, default=Path.home() / "Desktop")
@@ -1660,6 +2285,19 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--compare", default=",".join(DEFAULT_ARMS),
                         help="baseline,treatment: two arms of the result")
     report.add_argument("--metric", help=f"one of {', '.join(METRICS)}; the result's own by default")
+    seal = commands.add_parser("seal", help="prepare completion corpora and seal a protocol; no model calls")
+    for option in ("set", "verifiers", "design", "out", "cache"):
+        seal.add_argument("--" + option, type=Path, required=True)
+    seal.add_argument("--projects-root", type=Path, default=Path.home() / "Desktop")
+    seal.add_argument("--transcripts", type=Path, default=Path.home() / ".claude/projects")
+    seal.add_argument("--codex-root", type=Path, default=Path.home() / ".codex/sessions")
+    seal.add_argument("--arms", default=",".join(DEFAULT_ARMS))
+    seal.add_argument("--repeat", type=int, default=1)
+    seal.add_argument("--cap", type=int, default=DEFAULT_CAP)
+    seal.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    seal.add_argument("--model", required=True)
+    seal.add_argument("--codex", default="codex")
+    seal.set_defaults(handler=command_seal)
     return parser
 
 
@@ -1674,8 +2312,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return command_recall_set(arguments)
         if arguments.command == "run":
             return command_run(arguments)
+        if arguments.command == 'seal':
+            return command_seal(arguments)
         return command_report(arguments)
-    except (OutcomeError, stand.EvalError) as error:
+    except (OutcomeError, stand.EvalError, OSError, ValueError, KeyError) as error:
         print(f"memory_outcome_ab: {error}", file=sys.stderr)
         return 2
 

@@ -1,5 +1,13 @@
 # Context and Memory
 
+Maintainer-only outcome and lifecycle pilots now exercise full task completion,
+cross-task recall, consolidation, current-fact projections and freshness review
+packets. They are described in [Memory Evaluation](MEMORY-EVAL.md) and
+[Memory Write Path](MEMORY-WRITE-PATH.md). Their reports are derived evidence;
+they do not change this authority hierarchy, install new providers, update
+client memory or enable consolidation by default. Facts without a supported
+explicit source stay unclassified, and a review packet is not verification.
+
 The accelerator separates current truth, active work, local retrieval, and
 durable learning so that continuity does not become a competing source of
 truth. This guide explains those boundaries and the reasoning behind them.

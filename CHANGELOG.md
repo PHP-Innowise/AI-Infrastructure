@@ -28,6 +28,30 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Offline memory lifecycle pilots and selective whole-task experiments — 2026-10-31
+
+- Added maintainer-only consolidation replay on physical copies, source-backed
+  scoped current-fact projections and read-only freshness review packets.
+  They preserve source provenance, explicit conflicts and verification boundaries;
+  installed memory configuration and both consolidation defaults stay unchanged.
+- Added sealed whole-task experimental arms for selective recall/full routing
+  through one original hook and frozen consolidation treatments. Reports reject
+  changed protocol membership and unplanned retries; incomplete cost/quality
+  evidence remains unknown. Public fixtures validate mechanics, not real-client
+  efficacy or complete provider savings.
+
+### Optional complete-task memory evaluation — 2026-10-31
+
+- Add a maintainer-only sealed `task-complete` endpoint beside the unchanged
+  first-touch default: independent answer/patch verification, fixed planned
+  slots, explicit incomplete outcomes and host-reported usage coverage.
+- Linux private runs require a proven bubblewrap read allowlist and prepared
+  public snapshot Git history. External oracle bytes and labels are bound to
+  the seal; patch drivers must return an explicit trusted completion receipt.
+- Distinguish authored replay saves from captured native receipts and compare
+  real source/served task UUIDs. Public fixtures establish mechanics only,
+  without model calls, a held-out efficacy result or runtime default changes.
+
 ### Claude Code below the project root gets a long `AGENTS.md` whole — 2026-10-31
 
 - A session started below the project root gets `AGENTS.md` from the

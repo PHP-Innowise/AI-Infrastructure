@@ -1,5 +1,56 @@
 # Memory Evaluation Stand
 
+## Experimental whole-task arms
+
+The opt-in `task-complete` endpoint also accepts `selective`, `consolidate`
+and `consolidate-verify`, each paired with one baseline in its own sealed run.
+These arms are refused by legacy first-touch runs. No installed profile,
+ranking, admission rule or write-path default is changed.
+
+`selective` starts with recall and wraps exactly one existing prompt hook.
+Bounded versioned RU/EN retrospective-decision cues select the existing full
+profile only for that request. The wrapper sanitizes a copy for routing but
+forwards the exact original payload, cwd, task, host, session and transcript to
+the original hook. It never bypasses the gate, broadens own-save membership,
+calls MCP, appends a second capsule or retries a failed hook. Routing failure
+falls back to recall before invoking the hook once.
+
+```bash
+python3 scripts/memory_outcome_ab.py seal --set /private/tasks.json --verifiers /private/verifiers.json --design /private/design.json --out /private/selective-protocol.json --cache /separate/corpus-cache --model MODEL --arms recall,selective
+python3 scripts/memory_outcome_ab.py run --endpoint task-complete --set /private/tasks.json --verifiers /private/verifiers.json --protocol /private/selective-protocol.json --out /private/selective-result.json --cache /separate/corpus-cache --model MODEL --arms recall,selective
+```
+
+The wrapper and public rules are copied into the run's corpus; a hook command
+never refers to a tooling path the agent's allowlist cannot read. Metadata-only
+router observations are transient under `memory-bank/local/experiments`, then
+validated/exported into the private result after the agent exits. Digests bind
+router, sanitizer and rules. Missing, unsafe or mismatched receipts give unknown
+treatment attribution, not an excluded successful pair. Receipts from a writable
+corpus are observations, **not authenticated proof of producer honesty**.
+No raw query, session ID or transcript path is included. Optional controller-only
+Boolean `needs_history` labels give TP/FP/FN/TN routing diagnostics; absent labels
+remain unknown and never reach the router. Explicit retrieve and all policy/tool
+availability stay equal in all arms. The router does not provide a new environment
+admission filter: scoped ambiguity must not be silently converted into a fact.
+
+The consolidation arms reproduce the existing pipeline on separate copies at
+`seal`, validate them, and bind each actual public treatment image and Git store
+before model execution. Derived indexes are rebuilt for the treatment and the
+same screened recent-file state is restored from baseline; no private locks or
+unrelated local caches are copied. Every repeat starts from that frozen image; new summary
+UUIDs are not regenerated per repeat. Baseline and treatment differ in the two
+declared consolidation flags and their resulting memory, with promotion settings
+otherwise preserved. The mechanical-only arm is not automatic verification.
+Independent resolution of each flag needs its own held-out result. See
+[the lifecycle pilot contracts](MEMORY-WRITE-PATH.md).
+
+Completion reports validate the embedded protocol seal and exact planned
+membership. A result violating the sealed no-retry policy cannot improve the
+quality verdict; observed attempt costs remain visible. Known agent calls/time
+and input/output/cached subsets are reported separately; none establishes full
+provider-attempt economics. Real held-out measurements of these new arms have
+not been established by public fixture tests.
+
 `scripts/memory_eval.py` measures what the prompt-time memory hook delivers,
 on each project **as it was when the prompt was written**. It is a
 repository-level maintainer tool: it is never installed into a project, it
@@ -81,8 +132,9 @@ the changed file, though it never delivers a saved result; `recall`
 the next day. That did not end the rule: every heuristic after it waits for
 its own run, as the `ticket` arm does. The stand counts the calls
 before the first touch of the file the task changed. It stops a run at that
-touch, so it does not see whether the task got done: that needs full-length
-runs and a way to check the result, and neither exists yet. The measures
+touch, so it does not see whether the task got done. The opt-in `task-complete`
+endpoint below adds full-length runs and independent checking; its public
+fixture tests do not establish an efficacy result on real held-out tasks. The measures
 before it score relevance labels, and real use has not shown that relevant
 delivery changes what an agent does. In September one of 287 delivered
 documents was opened.
@@ -1258,3 +1310,129 @@ complete refresh latency (including cold model startup); a model smoke test is
 not evidence of retrieval improvement. Keep models, queries, client corpora and
 result JSON outside Git. CI exercises stdlib fixtures and fake workers, without
 ML downloads or dependencies.
+
+
+## Optional complete-task endpoint
+
+The legacy `run` default is still `--endpoint first-touch`; its gold/recall
+metrics, verdict and hook-only treatment remain unchanged. The opt-in
+`task-complete` controller runs until the native turn AND CLI finish, or its
+sealed cap/deadline. `completed` describes execution, never correctness.
+
+Prepare private inputs together in a private directory **outside this clone**,
+and keep the separate corpus cache outside that directory. Add `task_mode`
+(`answer` or `patch`) and an opaque `verifier_id` to each existing task-set item.
+A verifier manifest has `{"cases":{"id":CASE}}`. An answer case is exactly
+`{"mode":"answer","equals":"the complete expected answer"}`: whitespace at
+its edges is ignored; mentioning the right file is not sufficient.
+
+A patch case has exactly `mode: patch`, `argv`, positive finite `timeout` and
+`read_roots`. Its executed oracle must be a sealed external executable or
+`[absolute_python, absolute_oracle_script, ...]`, under dedicated read-only
+`read_roots`, outside the candidate. Bare pytest/unittest discovery in the
+candidate and Python `-c`/`-m` wrappers are not independent oracles. On exit 0,
+the trusted driver must print exactly one JSON object:
+
+```json
+{"schema":"task-outcome-verifier-v1","completed":true,"correct":true}
+```
+
+The driver is trusted code: **it must isolate candidate execution from its own
+process and labels**, then independently check behavior. Importing arbitrary
+candidate code into the oracle's interpreter and trusting exit 0 is unsafe.
+The explicit receipt detects early exit without a verdict; it is not a general
+proof that an arbitrary driver cannot be subverted. Missing receipts, errors,
+invalid output, changing oracle/label bytes and timeout yield `unavailable`
+with `correct: null`. Patches are checked on a separate disposable copy after
+the agent stops, before its corpus is removed. Gold-bearing feedback is not
+sent back to the agent or used to select a better retry.
+
+The design JSON must contain exactly `primary: correctness`, numeric
+`quality_margin` in [0,1), positive integer `minimum_tasks`, nonempty
+`power_rationale`, `selection`, `exclusion`, `secondary_benefit`,
+`stopping_rule: fixed-horizon` and `unknown_policy: insufficient`.
+Power/sample size, margin, tuning exclusions and the variant are chosen before
+the real holdout, not inherited from the old navigation threshold. Example
+commands (these are not run by CI and call a model only at `run`):
+
+```bash
+python3 scripts/memory_outcome_ab.py seal --set /private/tasks.json --verifiers /private/verifiers.json --design /private/design.json --out /private/protocol.json --cache /separate/corpus-cache --model MODEL --arms off,recall
+python3 scripts/memory_outcome_ab.py run --endpoint task-complete --set /private/tasks.json --verifiers /private/verifiers.json --protocol /private/protocol.json --out /private/result.json --cache /separate/corpus-cache --model MODEL --arms off,recall
+python3 scripts/memory_outcome_ab.py report /private/result.json --metric task-complete --json
+```
+
+`seal` reconstructs the prompt-time public snapshots and saves immutable base
+images, config hashes per arm, runtime/CLI/input/oracle bindings, budgets and
+an explicit no-retry policy before any model process. Repeat and budget options
+must match between seal and run. Raw events, selective IDs and kept agent
+artifacts are refused by this private endpoint. Raw final answers exist only
+in a temporary private artifact outside the mounted agent corpus. Aggregates
+contain counts/digests rather than prompts, expected answers or transcripts.
+A seal is a content binding, not a signature authenticating its author's claims.
+
+Linux bubblewrap with usable user namespaces is mandatory. A probe executes in
+the actual mount allowlist and proves it cannot read the private manifest;
+unavailable isolation never falls back to ordinary host execution. Only the
+public OS/toolchain, the native CLI package, a fresh home with its read-only
+`auth.json`, and that run's writable corpus are visible. The outer namespace
+allows the native provider transport; the native workspace-write sandbox keeps
+its tool networking policy. No account config/trust file is written. This is
+not evidence of native Windows support or provider execution in CI.
+
+For this first private endpoint, Git is rebuilt from the screened public
+snapshot, with no borrowed object store or historical credential blobs. The
+sealed `git_history: public-snapshot-only` is an intentional limitation:
+history/ticket-dependent tasks are not faithful history replays, and the ticket
+arm is refused here. Other legacy endpoints retain their historical behavior.
+Candidate snapshots reject symlinks and special files and are bounded to
+100,000 files / 512 MiB; answer artifacts to 1 MiB. Unsupported snapshots yield
+unavailable evidence instead of dereferencing external paths or exhausting RAM.
+Post-exit health/manifests use nonblocking, no-follow regular-file reads, a
+1 MiB per-artifact limit and at most 1,000 manifest directory entries. Unsafe
+or oversized telemetry makes treatment attribution unknown; FIFO/link artifacts
+cannot block report collection. Remaining collection time is checked between
+manifests; this is not a universal hard filesystem-scheduling guarantee.
+
+Every task × arm × repeat slot is checkpointed before model work. Missing,
+duplicated or changed membership is refused in reports. Interrupted/unattempted
+slots and unknown grades cannot shrink the denominator into a perfect success
+rate. Timeout/cap/agent failure means not completed within its budget; uncertain
+infrastructure/verifier evidence stays unknown. The paired analysis groups
+repeats within task; it never treats them as independent tasks or selects the
+best retry. Incomplete plans/grades/treatments yield `insufficient`.
+
+Costs are observed host-reported input/output (cached input is already included)
+and elapsed time, not complete physical provider-attempt billing. All attempts
+in an imported result retain their observed cost. Missing usage remains unknown,
+not zero; a known subtotal is separate from covered whole-plan host usage.
+Provider totals, USD, savings and cost-per-correct stay unavailable. The existing
+`harness/src/harness/memory_benchmark_cost.py` supplied-observation ledger is not
+replaced or silently called complete: a CLI PID is not a physical provider
+attempt, and a local deterministic verifier is not a complete zero-attempt
+model judge.
+
+### Source and served tasks
+
+Legacy authored recall sets still save onto their own branch task. New cases
+may name `source_task_id` and `served_task_id`; the served ID is the corpus
+branch, and the controller records both real UUIDs and refuses a claimed
+cross-task pair resolving to one UUID. Newly injected `saves` are always
+`save_provenance: authored`, with native result receipt digests; calling such an
+injection observed/generated is refused.
+
+An existing save may instead carry `save_provenance: observed|generated`,
+`source_task_id`, `served_task_id`, earlier `saved_at`, and
+`save_receipt: {path, sha256}` binding a captured native result receipt. The
+source task and indexed own knowledge must already exist in the prompt-time
+snapshot, and the receipt must match that actual task UUID. No missing learning
+is recreated. The supplied provenance label is retained with
+`authorship_verified: false`: a receipt proves a save, not model/human identity,
+truth or absence of fabricated source evidence. Preserve source-session proof
+privately when making a real observed/generated claim. Changing the captured
+receipt after seal refuses execution.
+
+Public roundtrip tests exercise save on A, a different UUID B, full retrieve
+availability and absence from B's own recall. Their fixtures are not real
+client sessions or a causal long-term benefit measurement. Choose real later
+states with intervening work and without recent-file answer hints when sealing
+such a holdout; moving a clock alone does not establish long-term recall.

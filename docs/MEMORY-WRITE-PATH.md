@@ -1,5 +1,95 @@
 # Memory write path: consolidation, provenance and deterministic facts
 
+## Offline lifecycle pilots (2026-10-31)
+
+These maintainer-only tools use standard-library Python and never install a
+provider or change a client's configuration. They are local implementation and
+measurement infrastructure, not evidence of improved task outcomes. Both
+automatic consolidation defaults remain off. Live held-out acceptance follows
+`docs/MEMORY-EVAL.md`; first-touch and relevance improvements cannot enable them.
+
+### Consolidation on a copy
+
+```bash
+python3 scripts/memory_consolidation_pilot.py --root /private/project-snapshot --variant consolidate-verify --out /private/consolidation.json --export /private/new-treatment
+```
+
+Variants are `baseline`, `consolidate` (verification off), and
+`consolidate-verify`. The tool makes a physical bounded copy, excludes Git
+administration, credentials, attachment launchers and local caches, and never
+executes runtime code from the input. Public canonical skill/policy citations
+remain as data. A fresh isolated Python worker invokes the trusted canonical
+`auto_consolidate → auto_promote → auto_compact` for three boundaries. It checks
+its roots before mutation and verifies the input digest afterwards.
+
+The report includes step counts, event→finding revision→chunk mappings,
+validation and byte-idempotence of the last boundary, input/runtime dependency
+digests and, when exported, the actual export digest. The export omits local
+locks/caches. New UUIDs and verification dates mean replay is a reproducible
+recipe, not a promise of byte-identical fresh runs. Capture and seal one actual
+treatment image for repeated comparisons. `task_outcome: not-measured` and
+`human_reviewed: false` are intentional: mechanical folding and agent attestation
+are not independent human review. Promotion failure cannot be treated as an
+accessible durable replacement. Inputs over 20,000 regular files, 4 MiB per file
+or 64 MiB total are refused rather than silently truncated.
+
+### Current-fact projection
+
+```bash
+python3 scripts/memory_current_facts.py --root /private/project-snapshot --selectors /private/selectors.json --as-of 2026-10-31T00:00:00Z --json
+```
+
+The initial source format is **public JSON**, not free-text extraction. A
+selector identifies a scoped fact and extraction pointers; values and version
+metadata come from the source. For a source containing a `database` object:
+
+```json
+[{"id":"database-v2","namespace":"project/snapshot-frame","subject":"backend","predicate":"database","qualifiers":{"environment":"production"},"source":"specs/facts.json","pointer":"/database/value","recorded_at_pointer":"/database/recorded_at","lineage_pointer":"/database/lineage","revision_pointer":"/database/revision","valid_to_pointer":"/database/valid_to"}]
+```
+
+Use a namespace identifying the project and source frame; qualifiers distinguish
+applicable environments/components. RFC6901 pointers support escaped keys and
+scalar `false`, `0`, empty string and `null`. Metadata dates are aware instants,
+normalized to UTC; validity is `[valid_from, valid_to)`, with JSON null meaning
+an open end. Recorded-after-query facts cannot be backdated into the snapshot.
+Resolution rechecks time even when called separately from collection.
+
+Revisions order candidates only within an explicit shared lineage. An explicit
+unresolved conflict remains ambiguous even when its partner was not selected.
+Missing/unsupported/unsafe knowledge is unclassified; a digest mismatch is stale.
+An unknown candidate does not permit a confidently selected old fact. History,
+source digests and applicability survive in the output. Secret values and private
+or linked paths are not echoed. Claims are bounded to 2,000 characters and
+selector files to 1 MiB/1,000 selectors. No Brain/Bank schema changes or SQLite
+table is introduced; deletion of this derived output loses no authority.
+
+### Read-only freshness packet
+
+```bash
+python3 scripts/memory_freshness_plan.py --root /private/project-snapshot --limit 50 --json
+```
+
+This runs the real provenance audit on a physical copy and groups its findings
+into a deterministic review queue. Each entry preserves applicable reasons,
+safe cited paths, available expected/current digests and review dates; unsafe
+source details are withheld. Duplicate pairs remain unresolved. Queue limits
+report `total_candidates`, `returned`, `remaining` and `truncated`; they do **not**
+bound the existing O(n²) duplicate audit, which stays outside prompt hooks.
+
+Nothing calls reverify/retire/quarantine automatically. After reading a claim
+and checking its current canonical evidence, use the existing governed workflow:
+`bank-reverify` for a still-valid claim, correction with superseding promotion
+for a changed claim, `bank-retire` for ceased applicability, or `bank-quarantine`
+for unsafe knowledge. `bank-reverify` attests its caller's check; it does not
+perform that check or encode human identity. Unattended apply is deliberately
+absent: it needs an independently reviewed actor/evidence and under-lock source
+image contract, not a bulk digest refresh or a check followed by a separate
+unfenced mutation.
+
+The tools return unavailable/refusal for unsafe or unsupported snapshots. They
+are not a new authority, an automatic truth verifier, or a proof of benefit on
+real client tasks.
+
 The retrieval work on 2026-10-19 raised the delivered-document precision on the
 12-prompt stand to 21/31 useful, 10/31 noise, 11/12 useful turns. The remaining
 noise was not separable by another ranking filter: every candidate gate traded a
