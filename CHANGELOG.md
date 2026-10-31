@@ -28,6 +28,17 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Reproducible native memory A-to-B experiment — 2026-10-31
+
+- Add a maintainer-only private plan/run/inspect controller with two fixed
+  attempted slots, mode-bound screened snapshots, canonical full hooks,
+  isolated native homes and persistent temporary queues. Failed source saves
+  block the served stage; retries require a new plan.
+- Verify native result/receipt/proof and new durable knowledge before handing
+  it to a fresh task; retain pending observations and raw bounded evidence.
+  Offline fixtures exercise actual hooks and storage without provider calls.
+  Immediate availability remains separate from delayed outcome efficacy.
+
 ### Private delivery identity observations — 2026-10-31
 
 - Complete-task experiments now retain bounded pre-run-known document

@@ -1472,3 +1472,131 @@ availability and absence from B's own recall. Their fixtures are not real
 client sessions or a causal long-term benefit measurement. Choose real later
 states with intervening work and without recent-file answer hints when sealing
 such a holdout; moving a clock alone does not establish long-term recall.
+
+## Native producer and fresh consumer
+
+`scripts/memory_native_ab.py` makes the native A→B development procedure
+reproducible. It is a private maintainer tool, separate from the default
+first-touch stand and from a confirmatory task-outcome comparison.
+
+Create a UTF-8 private configuration with exactly these fields:
+
+```json
+{
+  "schema": "memory-native-ab-v1",
+  "project_snapshot": "/private/project-snapshot",
+  "source": {
+    "task_alias": "proof/source-alpha",
+    "prompt": "Inspect the current retry contract. Retain one new source-backed finding if warranted."
+  },
+  "served": {
+    "task_alias": "proof/served-omega",
+    "prompt": "Find the prior retry finding using explicit retrieve, recheck its sources and cite its MEM identifier."
+  },
+  "model": "gpt-6.1-sol",
+  "tool_cap": 40,
+  "deadline_seconds": 420
+}
+```
+
+Aliases must differ and be lowercase safe task names. Caps are integers
+1–100; stage deadlines are integer seconds 1–900. Unknown keys, malformed or
+linked inputs, detected secrets and overlapping paths are refused. No
+caller-supplied executable, hook, verifier, arbitrary environment or native
+configuration is admitted. The source path is a screened physical project
+snapshot; links, special files and hardlinks in admitted data are refused.
+
+```bash
+python3 -B scripts/memory_native_ab.py plan --config /private/native-ab.json --out /private/native-run
+python3 -B scripts/memory_native_ab.py run --run /private/native-run --stage source
+python3 -B scripts/memory_native_ab.py inspect --run /private/native-run
+python3 -B scripts/memory_native_ab.py run --run /private/native-run --stage served
+```
+
+Omit `--stage` to execute both stages. Planning binds the screened source
+bytes **and executable modes**, prompts, budgets and canonical runtime images.
+It creates owner-only `control/plan.json` and `control/state.json` with two
+planned slots before execution. Source/runtime drift refuses execution.
+Inspection reads existing artifacts without initializing a database or
+launching subprocesses. A crash may leave a running/uncertain slot or lock;
+inspection does not silently repair it, retry it or remove the prior evidence.
+
+Each stage receives a new physical `work/source` or `work/served` tree,
+independent Git metadata, native home and persistent private temporary root.
+Client execution configuration and local caches/history/queues/handoffs are
+excluded. Canonical executable runtime directories are replaced completely,
+including unknown project modules that could shadow trusted imports.
+Preparatory Git runs ignore inherited global/system configuration.
+The copy is committed as a clean screened baseline before native hooks run,
+so overlay files are not mistaken for task changes.
+
+Full canonical lifecycle hooks are configured per invocation. Existing source
+entries and runtime files are pinned read-only; memory/Brain/handoff mounts
+pin their ancestors while permitting owned data updates. The corpus root
+permits native sandbox denial stubs; unexpected public file additions block
+the handoff. Native auth is a separate read-only mount and
+is never copied. Read-isolation probes must deny the private plan, original
+project and sibling source corpus. There is no host fallback.
+
+A valid source capture needs an observed successful canonical native-result
+command, matching task/session/request/token, normalized payload digest,
+receipt and complete proof. Decisions and findings retain their distinct
+accepted/resolved states; learning-only saves and progress-only saves are
+distinguished. Only a newly created record and its newly promoted, fully
+source-matching chunk count toward A's new durable knowledge. A promotion
+sweep can also promote older records; its total is not A's learning count.
+
+This protocol explicitly defers manual `record-result`/`memory_write` capture
+until the native Stop continuation. A record written earlier in the same
+session may be valid project knowledge, but does not satisfy this experiment's
+native-capture criterion. `no-learning` classifies the native payload rather
+than claiming the entire session produced no knowledge. Capture is elicited
+under these instructions; arbitrary spontaneous extraction is not measured.
+
+The supported observed-save encoding is a direct canonical Python invocation,
+optionally inside the emitted exact-corpus `(cd ... && python3 ...)` wrapper,
+with literal JSON in a single-quoted heredoc. The runner requests that format
+in a generic instruction; it supplies no learning contents. Unsupported
+command encodings remain unproven. Shell/interpreter paths are pinned to
+trusted forms, and extracted command text is never executed by the verifier.
+Receipts and sidecars remain unsigned local evidence: producer authentication,
+semantic truth and human review are not established by matching hashes.
+
+Before the handoff, A must have no unresolved native requests, spooled/queued
+updates or pending turn observations. Its own completed observations may be
+settled through canonical `turn --flush` under **A's** identity only, after
+validated capture and healthy hooks; foreign task rows block this step.
+The runner verifies chunk bytes did not change and rechecks that A is clear.
+B never drains A's buffers. B's pending state remains in its private corpus;
+neither database deletion nor cleanup is described as lossless.
+
+B must resolve to a different task UUID and native session. Success requires
+an A chunk in an explicit-retrieve manifest, matching post-run document and
+complete citation hashes, and a render hash matching actual successful native
+tool stdout. The final answer must attribute that MEM record. The collector
+still reports local trace versus host/model receipt separately; observed
+consultation and attribution do not establish causal necessity or correctness.
+
+Native transport has bounded stdout/stderr, line size, answer size, turn count,
+tool count and time; continuations share the original stage budget. Process
+groups are cleaned even after the leader exits. Synchronous filesystem reads
+have byte/work limits and deadline checks, not hard-preemptible wall time.
+Raw streams and native process results are private, including results retained
+when later collection fails. All completed-turn usage observations and known
+subtotals are retained; missing/interrupted coverage and provider billing remain
+unknown. Failed A leaves B planned but blocked. A slot is never retried under
+the same plan; corrected runs need a new output and preserve prior failures.
+
+The public summary always says `cohort_role: development-smoke`,
+`natural_delayed_efficacy: false`, and leaves causal benefit/provider savings
+null. Pausing between stages does not turn a predetermined B question into a
+natural delayed task. The public offline adapter fixture exercises real hooks
+and storage without contacting a provider; its tests are not native model runs.
+
+For a later confirmatory comparison, collect genuinely new source sessions and
+natural later questions with intervening work, exclusion/family receipts and an
+independent private oracle. Exclude all development-exposed families and their
+RU/EN paraphrases. Existing outcome tooling supports two arms at a time: seal
+`recall↔selective` as primary and `recall↔full` as diagnostic comparisons.
+Cover absent knowledge, conflict, fact update and environment changes before
+reading outcomes. No eligible delayed dataset is implied by this runner.

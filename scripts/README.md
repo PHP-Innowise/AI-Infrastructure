@@ -497,6 +497,42 @@ python3 scripts/memory_fact_consolidation.py --input facts.json --json
   `tests/fixtures/fact-consolidation.json`; see
   [the write-path doc](../docs/MEMORY-WRITE-PATH.md).
 
+### `memory_native_ab.py`
+
+Maintainer-only native producer A → fresh consumer B availability experiment.
+This source-only tool leaves installed editions and original projects unchanged.
+`plan` and `inspect` do not invoke a model; `run` can make billable native
+Codex calls and requires Linux, usable Bubblewrap, Git, Bash and a signed-in CLI.
+
+```bash
+python3 -B scripts/memory_native_ab.py plan --config /private/native-ab.json --out /private/native-run
+python3 -B scripts/memory_native_ab.py run --run /private/native-run
+python3 -B scripts/memory_native_ab.py inspect --run /private/native-run
+```
+
+The exact JSON configuration and staged source/served commands are documented
+in [MEMORY-EVAL.md](../docs/MEMORY-EVAL.md#native-producer-and-fresh-consumer).
+Configuration and output must be separate from each other, the tooling clone
+and the original project. The output parent must already exist. Prompts,
+identities, receipts, source paths, native streams and pending state stay under
+the private run directory; stdout contains only fixed status/count fields.
+
+An immutable plan binds source bytes/modes, canonical runtime and budgets.
+Both planned slots persist before preparation; each slot is attempted once.
+Failed capture, progress-only saves, pending foreign observations and missing
+delivery remain distinct from successful capture/consultation. Corrected reruns
+require another output directory; automatic retry and failed-attempt deletion
+are unsupported. Read-only original sources and copied executable permissions
+are checked separately.
+
+Offline tests run actual canonical hooks, native-result storage, promotion and
+fresh-task retrieval through a public fake CLI. They contact no provider and
+do not establish real model behavior or causal task benefit:
+
+```bash
+python3 -B -m unittest tests.test_memory_native_ab tests.test_check
+```
+
 ### `memory_outcome_ab.py`
 
 **Purpose and status.** A maintainer-only measurement of task outcomes. It
