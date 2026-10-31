@@ -4,6 +4,53 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded dispatcher brings a long `AGENTS.md` below the root — 2026-10-31
+
+- As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`
+  and `claude_dispatch.sh` change in the asset (six `policy-N` entries,
+  `DISPATCH_VERSION` 5); the policy lock was rewritten.
+
+### The seeded runtime records a capsule it could not build — 2026-10-31
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime's capsule survives a profile it does not know — 2026-10-31
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
+  `brain_runtime.py` change in the asset (`automatic_capsule_profile`); the
+  policy lock was rewritten.
+
+### The seeded runtime's CLI answers the common refusals — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
+  `brain_runtime.py` change in the asset (`brain-validate`, the hint for an
+  evidence level passed as a status, where completion's revision is, what
+  to run instead of a second start, and how a missing task gets bound);
+  the policy lock was rewritten.
+
+### The seeded runtime leaves an undigested citation undigested — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime's health line names the host — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime counts the bytes a capsule printed — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset, and each `refresh-health.ndjson` capsule shape gains
+  `bytes`. The policy lock was rewritten.
+
+### The seeded runtime's chat snapshots leave out more Codex context — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day):
+  `context_continuity.py` changes in the asset; the policy lock was
+  rewritten.
+
 ### The seeded runtime keeps a verified record's checked versions — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`,

@@ -1128,6 +1128,27 @@ def ticket_files_delivered(path: Path, skip: int) -> bool:
     return False
 
 
+def printed_capsule_bytes(path: Path, skip: int) -> Optional[int]:
+    """The bytes of the capsules the refreshes after line ``skip`` of the
+    health journal printed, or None where no line counted them (a runtime
+    before 2026-10-30)."""
+    total: Optional[int] = None
+    try:
+        with path.open("rb") as handle:
+            for number, raw in enumerate(handle):
+                if number < skip:
+                    continue
+                try:
+                    shape = json.loads(raw).get("capsule")
+                except (ValueError, AttributeError):
+                    continue
+                if isinstance(shape, dict) and type(shape.get("bytes")) is int and shape["bytes"] >= 0:
+                    total = (total or 0) + shape["bytes"]
+    except OSError:
+        return None
+    return total
+
+
 def configure_corpus(corpus: Path, settings: Dict[str, Any]) -> None:
     """Write settings into a corpus's runtime.json."""
     config = corpus / "project-brain" / "config" / "runtime.json"
@@ -1254,6 +1275,9 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
         "hook_ran": health_lines(health) > health_before,
         "ticket_files_delivered": ticket_files_delivered(health, health_before),
         "capsule_tokens": capsule_tokens,
+        # What the hook printed, documents or not: the estimate above counts
+        # documents only.
+        "capsule_bytes": printed_capsule_bytes(health, health_before),
         "manifests": dict(sorted(entry_points.items())),
         "exit": process.returncode,
     }
@@ -1490,7 +1514,9 @@ def arm_cost(runs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     runs. Codex reports usage only when a turn completes: a run stopped at the
     first gold touch has none, so the token means cover the runs that finished
     and say nothing of the rest. The capsule estimate is the manifests' token
-    total, which counts documents only: a capsule without documents reads 0."""
+    total, which counts documents only: a capsule without documents reads 0.
+    The printed bytes are what the hook handed over, from the health journal
+    of a runtime of 2026-10-30 or later."""
 
     def mean(values: Sequence[float]) -> Optional[float]:
         return round(sum(values) / len(values), 1) if values else None
@@ -1503,6 +1529,8 @@ def arm_cost(runs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "runs_with_usage": len(usages),
         "capsule_tokens_mean": mean([run["capsule_tokens"] for run in runs
                                      if isinstance(run.get("capsule_tokens"), int)]),
+        "capsule_bytes_mean": mean([run["capsule_bytes"] for run in runs
+                                    if isinstance(run.get("capsule_bytes"), int)]),
     }
     for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
         cost[f"{key}_mean"] = mean([usage[key] for usage in usages if isinstance(usage.get(key), int)])
@@ -1556,9 +1584,11 @@ def command_report(arguments: argparse.Namespace) -> int:
             if cost["runs_with_usage"]:
                 tokens = (f"; over those, {cost['input_tokens_mean']} input ({cost['cached_input_tokens_mean']}"
                           f" cached) and {cost['output_tokens_mean']} output tokens")
+            printed = (f", printed {cost['capsule_bytes_mean']} bytes"
+                       if cost.get("capsule_bytes_mean") is not None else "")
             print(f"  {arm}: {cost['seconds_mean']} s a run; Codex usage on {cost['runs_with_usage']} of"
                   f" {cost['runs']} runs (a run stopped at the touch has none){tokens};"
-                  f" capsule documents estimate {cost['capsule_tokens_mean']} tokens")
+                  f" capsule documents estimate {cost['capsule_tokens_mean']} tokens{printed}")
     print(f"verdict: {summary['verdict']}")
     return 0
 

@@ -192,8 +192,9 @@ found damaged is quarantined and started afresh (the buffered turns stay in
 the quarantined file); a removed worktree's database is pruned; turns
 buffered after a task closed are dropped; and the buffer of a branch that
 gets no further turn is never flushed. A runtime update, a reindex and a
-process killed mid-checkpoint keep it: the Brain is written before the buffer
-is cleared, and a replayed flush neither loses nor repeats a path.
+process killed mid-checkpoint keep the buffer: the Brain is written before the
+buffer is cleared, and a replayed flush neither loses nor repeats a path. A
+turn killed that way may miss its own update of the recent files.
 
 The active provider is local `sqlite-fts5`: network access and embeddings are
 disabled. An external provider entry exists only as a disabled contract.
@@ -971,7 +972,12 @@ delivery hooks leave alone: rendering a withheld capsule would satisfy their
 What the automatic capsule carries is a separate setting:
 `CONTEXT_CAPSULE_PROFILE`, then `capsule_profile` in `runtime.json`, defaulting
 to `full`. The four editions and the generator's template ship `recall`; a
-project whose `runtime.json` names no profile keeps `full`.
+project whose `runtime.json` names no profile keeps `full`. A configured
+profile the runtime does not know - one a newer runtime wrote, or a typo -
+builds the `full` capsule, with a warning naming the value; before, it left
+every prompt without a capsule, as it did on 2026-10-30 when a sync from an
+older clone put four projects that say `recall` on a runtime without it.
+`--capsule-profile` with a bad value is still refused.
 
 - **`full`:** the established capsule — working state, recent files and the
   retrieved semantic and episodic documents.

@@ -175,6 +175,7 @@ class Scripted(BaseHTTPRequestHandler):
         tools = [tool.get("name") or tool.get("type") for tool in body.get("tools") or [] if isinstance(tool, dict)]
         with self.lock:
             self.requests.append({"since": since, "output": output, "tools": tools,
+                                  "system": body.get("instructions") or "",
                                   "tool_shapes": [{key: tool.get(key) for key in ("type", "name", "format")}
                                                   for tool in body.get("tools") or [] if isinstance(tool, dict)]})
             number = len(self.requests)
@@ -454,6 +455,17 @@ def inside(args: argparse.Namespace) -> int:
         "stderr_tail": done.stderr[-300:] if done.returncode else "",
         "helpers_stopped": helpers,
     }
+    # Every run: the policy reached the model - every line of the project's
+    # AGENTS.md, or the clone's in the developer instructions of an attached
+    # run - not cut by Codex's project_doc_max_bytes (32 KiB by default) nor
+    # left in a truncated hook output.
+    if args.attached:
+        import accelerator_attach as attach
+        policy = attach.policy(args.edition)
+    else:
+        policy = (project / "AGENTS.md").read_text(encoding="utf-8")
+    report["policy"] = bench.policy_heard(policy, Scripted.requests, overflow="Warning: truncated output")
+    report["policy_bytes"] = len(policy.encode("utf-8"))
     report["ok"] = report["saved"] and len(carried) == 1
     if args.sandbox == "read-only":
         # The turn can write nothing, so the Stop asks for no save: the
@@ -481,9 +493,6 @@ def inside(args: argparse.Namespace) -> int:
         heard = "\n".join(text for request in Scripted.requests for text in request["since"])
         report["setup"] = setup
         report["capsule"] = "working:" in heard
-        policy = (project / "AGENTS.md").read_text(encoding="utf-8").splitlines()
-        report["policy"] = (all(line in heard for line in policy if line.strip())
-                            and "Warning: truncated output" not in heard)
         tasks = [json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
                  for path in (project / "project-brain/dynamic/tasks").glob("*.md")]
         # A worktree on a branch: the branch names the task. One Codex made
@@ -521,6 +530,8 @@ def inside(args: argparse.Namespace) -> int:
         report["checkpoint"]["queue"] = [f"{line['event']}" + (f":{line['code']}" if line.get("code") else "")
                                          for line in journal if line.get("stage") == "queue"]
         report["ok"] = report["ok"] and report["checkpoint"]["ok"]
+    # Checked last: every verdict above is made anew in some runs.
+    report["ok"] = report["ok"] and report["policy"]
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 

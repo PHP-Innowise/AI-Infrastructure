@@ -462,6 +462,69 @@ On a detached HEAD there is no task, and the prompt hook stays silent -
 except during a rebase, where it reads the branch being rebased, and in a
 worktree Codex made, where it reads the task of the thread that owns it.
 
+## Every Prompt Says "Capsule unavailable"
+
+### Symptom
+
+Each prompt hook prints the refresh's own lines (`procedural: updated ...`,
+`phases: ...`) and `warning: Capsule unavailable: ... No task context was
+assembled this turn` instead of a capsule. The agent works with no task
+context, and nothing says so outside the conversation.
+
+### Diagnose
+
+From a clone of this repository,
+`python3 scripts/memory_eval.py install-status --project DIR` names what it
+can see: the commit the project was last synced from against the clone, the
+capsule profile against the profiles the project's runtime knows, and whether
+the last capsule asked for was built. Otherwise the warning's text says it:
+
+| After "Capsule unavailable:" | Cause | What to do |
+|---|---|---|
+| `Capsule profile must be full or navigation` (or another list) | `project-brain/config/runtime.json` names a profile the project's runtime does not know: the runtime is older than the setting. On 2026-10-30 a Harness sync from a clone on `main` took four projects synced from a newer branch back to `main`'s runtime this way. | Sync the project from a clone that has the commit it was synced from (`install_accelerator.py --sync --target DIR`), or set a profile the runtime knows. A runtime of 2026-10-31 or later builds the full capsule and says why instead. |
+| `Task ID must use letters, digits, ...` | A task ID given by hand or in `CONTEXT_TASK_ID` with a character the grammar refuses (a branch name is mapped to a valid ID). | Unset `CONTEXT_TASK_ID`, or use the ID the capsule names for the branch. |
+| `Working task not found` | A runtime from before 2026-10-06, which refused a branch whose task was not recorded yet. | Sync the project. |
+
+### Recover
+
+After the sync, `install-status` reads no problem, and the next prompt
+carries a capsule. A sync no longer takes a project back to a clone that
+lacks its commit, the Harness's included; the Harness's **Project** chip
+panel then says the project was left as it is.
+
+## Codex Does Not Follow the End of AGENTS.md
+
+### Symptom
+
+Codex sessions ignore rules near the end of a long `AGENTS.md` - Security,
+the memory rules - while Claude Code follows them.
+
+### Cause
+
+Codex reads at most `project_doc_max_bytes` of a project's `AGENTS.md` files,
+32 KiB by default, and the installer appends the policy after the project's
+own part. The editions' `.codex/config.toml` raises the limit to 128 KiB, but
+a project's own configuration - edited by the team, or an older release's -
+is kept by every sync. One client's 27 KB of notes put the policy past byte
+32,768: Codex 0.163 stopped reading it mid-line in Working Memory.
+
+### Diagnose
+
+`install_accelerator.py --sync` reports it as `codex_policy_cut`, an install
+with Codex prints it on stderr, and `memory_eval.py install-status` names it.
+`scripts/codex_bench.py --target DIR --sync` shows whether the whole policy
+reached the model (`policy`, `policy_bytes`). For Claude Code started below
+the project root, `scripts/claude_code_bench.py --target DIR --sync
+--subfolder src` does the same: until 2026-10-31 its dispatcher carried
+39,000 characters of the policy there and filed the rest away.
+
+### Recover
+
+Put `project_doc_max_bytes = 65536` (or the number the warning names) at the
+top of the project's `.codex/config.toml`, before any `[table]`: Codex reads
+it from a trusted project. A line in your own `~/.codex/config.toml` covers
+only your machine. Or shorten the project's own part of `AGENTS.md`.
+
 ## The Agent Saves After Every Answer
 
 ### Symptom

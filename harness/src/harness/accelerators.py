@@ -13,7 +13,9 @@ An installed copy is kept current instead: once per version of this clone,
 `install_accelerator.sync_installation` brings the project's untouched
 accelerator files and its runtime up to the clone, so every session in the
 project - including the native ones Harness never sees - runs today's
-memory. Nothing a person owns is written (see that function).
+memory. Nothing a person owns is written (see that function), and nothing
+goes back: a project last synced from a commit this clone lacks - a person's
+sync from a newer branch - keeps what it has, and its status says why.
 
 Codex runs a project's hooks only after their definitions were approved, so
 the accelerator's memory hooks never ran where nobody approved them in /hooks.

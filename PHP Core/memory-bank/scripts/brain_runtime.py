@@ -581,7 +581,8 @@ def configured_capsule_profile(repository: Path, requested: Optional[str] = None
     read this. A caller of `refresh` that is itself an explicit request - the
     MCP `memory_retrieve` tool, the evaluation stand - passes
     `--capsule-profile full`. A bad value is rejected here, like a bad
-    retrieval gate.
+    retrieval gate; the automatic entry points read the configured one
+    through automatic_capsule_profile, which builds the full capsule instead.
     """
     profile = (
         requested
@@ -592,6 +593,25 @@ def configured_capsule_profile(repository: Path, requested: Optional[str] = None
     if profile not in CAPSULE_PROFILES:
         raise BrainError("Capsule profile must be full, navigation or recall")
     return profile
+
+
+def automatic_capsule_profile(repository: Path, requested: Optional[str] = None) -> tuple[str, Optional[str]]:
+    """The automatic capsule's profile, and why it is not the one configured.
+
+    A configured profile this runtime does not know - one a newer runtime
+    wrote, or a typo - left every prompt without a capsule: on 2026-10-30 a
+    sync from an older clone put four projects whose runtime.json says
+    `recall` back on a runtime that knew only full and navigation, and each
+    prompt got an error in place of its working state. The automatic entry
+    points build the full capsule then and say why in its warnings; a
+    profile the caller names is still refused (configured_capsule_profile).
+    """
+    configured = os.environ.get("CONTEXT_CAPSULE_PROFILE") or load_config(repository).get("capsule_profile")
+    if requested or not configured or configured in CAPSULE_PROFILES:
+        return configured_capsule_profile(repository, requested), None
+    where = "CONTEXT_CAPSULE_PROFILE" if os.environ.get("CONTEXT_CAPSULE_PROFILE") else "capsule_profile"
+    return "full", (f"{where} {str(configured)[:40]!r} is unknown to this runtime "
+                    f"({', '.join(CAPSULE_PROFILES)}): full capsule delivered")
 
 
 def configured_ticket_files(repository: Path) -> bool:
@@ -2196,8 +2216,8 @@ def update_record(
             raise BrainError("attestation must be one of: " + ", ".join(ATTESTATIONS))
         # Knowledge that was checked: what promotion carries into the bank.
         checked = record["type"] in PROMOTABLE_STATES and record["authority"] == "verified"
-        revised = (progress is not None and progress != record["progress"]) or bool(
-            set(sources) - set(record["sources"]))
+        cited_now = [source for source in dict.fromkeys(sources) if source not in record["sources"]]
+        revised = (progress is not None and progress != record["progress"]) or bool(cited_now)
         if checked and revised and attestation != "person" and record_attestation(record) == "person":
             # The next agent must not be free to overwrite a person's check;
             # record-result holds the same revision.
@@ -2237,9 +2257,17 @@ def update_record(
                 record["status"], set()
             )
             if transition_to not in allowed:
+                # Agents pass an evidence level for a status: 15 of the 383
+                # context.py calls Codex made in one client project in
+                # September 2026 were `--transition verified` or `observed`.
+                hint = ""
+                if transition_to in AUTHORITIES:
+                    hint = f"; {transition_to} is an evidence level, not a {record['type']} status: " + (
+                        "set it with brain-update --authority verified" if transition_to == "verified"
+                        else "a record starts observed, and only brain-update --authority verified changes it")
                 raise BrainError(
                     f"Illegal {record['type']} transition: "
-                    f"{record['status']} -> {transition_to}"
+                    f"{record['status']} -> {transition_to}{hint}"
                 )
             timestamp = utc_now()
             record["transitions"].append(
@@ -2289,13 +2317,14 @@ def update_record(
             # checked: promotion copies them into the chunk, and retrieval
             # marks the item when a file now differs. A write that checks
             # nothing - progress, next steps, a lifecycle move - keeps them and
-            # fingerprints only a source cited for the first time. Re-taking
-            # them all let any edit clear "cited file changed" from a claim
-            # nobody checked again.
+            # fingerprints only a source this write cites for the first time.
+            # Re-taking them all let any edit clear "cited file changed" from
+            # a claim nobody checked again; an old citation that was never
+            # digested stays so, and keeps the record from promotion.
             known = {item["path"] for item in record["source_fingerprints"]}
             record["source_fingerprints"] = sorted(
                 [*record["source_fingerprints"], *source_fingerprints(repository, [
-                    source for source in record["sources"] if source.split("#", 1)[0] not in known])],
+                    source for source in cited_now if source.split("#", 1)[0] not in known])],
                 key=lambda item: item["path"],
             )
         else:

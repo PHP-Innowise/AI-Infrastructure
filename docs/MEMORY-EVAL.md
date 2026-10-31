@@ -108,6 +108,41 @@ outside the clone (it names the projects); its SHA-256 is
 `ff43fdbad191b748feacfce2a2a087d3bfdabb71108804ed250d2fdca9cd1a6f`. Until
 it reads `ticket-helps`, `ticket_files` stays off.
 
+### The every-turn save: a field check
+
+The save request after every answer is a write-path cost that was never
+weighed against a benefit: on 43 saves on copies of two client projects it
+took a median 17.1 s after an answer of 70.5 s, and in real sessions the
+knowledge it writes was not seen opened (`realized`, above). The four client
+projects run it since 2026-10-30 - but from 17:01 that day a Harness sync
+put them on `main`'s runtime, which refuses their `recall` profile, so until
+they are synced again their prompts carry no capsule and none of their
+turns counts toward the 50 below. What to read from their sessions, when,
+and what follows was written down before any of them ran it: the field
+counts of `funnel` and `realized --traces` from 2026-10-31, on the first
+Monday with 50 capsule turns for each of Claude Code and Codex (at the latest
+2027-02-01); if no knowledge item was opened on either host while the save
+costs a fifth of the answer's time or more on one, an outcome A/B of the
+every-turn save on continuation tasks comes next, before the default moves.
+The note is kept outside the clone (it names the projects); its SHA-256 is
+`83cf101c527e9341aa42c525d6cc6a0262f794ca1102cea39237cd40524edcee`.
+
+`scripts/memory_eval.py field-check --project <each> --since 2026-10-31`
+computes what the rule reads, per host, from the same transcripts `realized`
+reads: the capsule turns; K, the knowledge items (kinds `brain` and `chunk`)
+a later tool call opened, from capsules and explicit retrieves together; T,
+the task records opened, pointers and returned items together; S, the median
+save seconds over the median answer's; and which branch of the rule each
+host meets, or that a host is still below 50 capsule turns. Beside them, not
+part of the rule, it gives the Claude Code hook runs recorded and how many
+were not found: a hook that is not found decides the rule silently - and,
+per host, the prompt-hook turns whose refresh assembled no capsule, which
+are not capsule turns, so a host short of 50 may be short for them. Counts
+only. On
+the four projects' sessions from 2026-09-01 - before any save step ran there -
+it reads K = 0 on both hosts, T = 1 for Claude Code and 9 for Codex: the
+working-state path first.
+
 ## What a run does, per prompt
 
 Nothing is written into the project. All work happens in the cache (default
@@ -372,9 +407,60 @@ any retrieve naming them. In next's Codex sessions since 2026-09-01 (992
 read, 36 of them retrieved, 75 calls) the answers named 25 task records, 9
 of them opened afterwards, 4 findings and chunks, none opened, and
 `CHANGELOG.md` in 14 sessions, opened in 11. That runtime printed no `task
-record:` pointer; the records came as history items. In the same sessions'
-440 capsule turns the capsules delivered 54 items, 44 of them `CHANGELOG.md`
-(25 opened) and none of the rest opened.
+record:` pointer; the records came as history items. It also refused a task
+not recorded yet: 14 of the 23 calls that ran retrieve alone were answered
+"Working task not found", and 39 calls ran `start` first; the runtime answers
+such a retrieve since 2026-10-06. Codex heads a command's output with its own
+lines ("Script completed", the wall time, "Output:"), which `realized` reads
+past.
+
+`realized` also counts every hook run a Claude Code transcript records, by
+event: succeeded, failed - and of those, how many failed because the command
+was not found (exit 127) - and blocked. Claude Code records a tool hook's
+success only when the hook printed, so a quiet `PreToolUse` reads 0 there. In
+September 2026 two client projects' hooks were wired as relative
+`.claude/hooks/...` commands: below the project root none was found, 3,309
+times, and the Bash validator did not run there for a month. The wiring has
+named `"${CLAUDE_PROJECT_DIR}"` since; this count is how such a break shows.
+
+`realized --traces` sets the runtime's own record beside the host's. The
+runtime keeps a trace of every capsule it rendered (the last 200 by default,
+in `memory-bank/local/retrieval-traces`) with the digest of the text it
+printed and the items it showed; the manifest of the same ID names what asked
+for it. Each hook turn's capsule and each explicit retrieve's answer is
+matched to the trace whose digest it reproduces, each trace once. The report
+gives the renders in the window, the hook renders a transcript shows were
+handed over and those none shows - a refresh stopped at its budget after it
+printed, a host that dropped the capsule, a session whose transcript is not
+on this machine, and every Cursor session - the retrieve answers that match
+a render, and per host the hook capsules matched to a render, the items those
+renders showed and how many the turn touched. Counts only. The traces exist
+only where a runtime of 2026-10-13 or later rendered; a capsule from a recall
+profile turn without saves of its own renders without a search and leaves no
+trace. In the same sessions'
+440 prompt-hook turns, 140 carried a capsule. The other 300 printed
+"Capsule unavailable": "Working task not found" from the runtime of then
+(the prompt refresh has served a task not yet recorded since 2026-10-06), or
+an automatic-continuation conflict whose code no longer exists anywhere in
+this repository. The 140 delivered 54 items, 44 of them `CHANGELOG.md` (25
+opened), and none of the rest was opened. Until 2026-10-31 `realized` counted
+a turn whose refresh assembled no capsule as a turn with one, since the
+refresh's own layer lines come first; it now counts them apart. Over the four
+client projects from 2026-09-01 they are 448 of 931 prompt-hook turns - 300
+of next's 440 (Codex), 73 of scb's 147, 63 of bauherrenmappe's 216 and 12 of
+aea-partner's 128 - every one in September, for those two reasons.
+
+Read the Claude Code side of those months with one fact beside it: no Claude
+Code session in the four client projects had the memory policy. Each project
+keeps a `CLAUDE.md` of its own, and Claude Code reads `AGENTS.md` by itself
+only where there is none. The edition's `.claude/CLAUDE.md` imports it since
+2026-10-06; it reached three of the clients on 2026-10-08 and `next` on
+2026-10-18, after the last Claude Code session in each (2026-09-18 to
+2026-10-06), and none has run there since. Their transcripts show the
+instructions Claude Code loaded: the project's own `CLAUDE.md` in 191 of 386,
+`AGENTS.md` in none. Claude Code's "no retrieve,
+1 of 289 delivered documents opened" measures sessions that were never told
+to retrieve; Codex reads `AGENTS.md` itself, and did.
 Codex keeps a finished rollout compressed, as `rollout-*.jsonl.zst` (3,040 of
 3,099 on the maintainer machine in October 2026); `realized` reads those too,
 through Python 3.14's `compression.zstd` or else the `zstd` command. Without
@@ -409,15 +495,41 @@ in total, it counts:
   the `capsule` shape a runtime of 2026-10-30 or later records - the profile,
   the working state, how many recent files, ticket files and documents it
   carried, its token estimate - how many had each, by profile, and the median
-  tokens. An older
-  line has no shape and counts as `unknown`. A refresh line names no host and
-  also comes from an explicit request (the MCP retrieve, the CLI);
+  tokens. The estimate counts documents only, so a capsule of working state
+  and recent files reads 0; the bytes the capsule printed, recorded since a
+  later runtime of the same day, give the median printed size. An older
+  line has no shape and counts as `unknown`. A refresh line also comes from
+  an explicit request (the MCP retrieve, the CLI); a runtime of 2026-10-30 or
+  later names the host that asked (`cli` for an explicit request), and the
+  funnel counts capsules by host, an older line as `unknown`. A line that
+  asked for a capsule and got none - a profile the runtime refused, a task ID
+  it cannot read - says so (`"capsule": null`, since 2026-10-31) and counts
+  as "capsules asked for, none built", not as a capsule; on older runtimes it
+  wrote no shape and read as a capsule of `unknown` profile, which is how the
+  four clients' capsule-less turns after 2026-10-30 17:01 would have looked;
 - **the saves**: from `native-results.ndjson`, as `realized` reads it - armed,
   requested at Stop, made (saved or held), refused, failed or omitted,
   learnings written and chunks promoted, with every code and its count;
 - **what the project keeps**: task records, findings and decisions, and bank
   chunks, counted as files. The `--since` window applies to the journals, not
   to these.
+
+`install-status` answers the question before those counts: can memory run
+in the project at all? Per `--project`, from the project's own files: the
+commit its accelerator was last synced from and whether this clone has it
+(this clone's, behind it, or not in it - newer, or another line of work);
+the configured capsule profile and the profiles the project's runtime
+knows; the last prompt hook run, whether the last capsule asked for was
+built, and the last save step; and which instructions Claude Code loads.
+Each problem is one way memory went silent in the client projects: a
+profile the runtime refuses on every prompt (2026-10-30, after a sync from
+an older clone), a last capsule not built, a project's own `CLAUDE.md`
+without the edition's import (September), an `AGENTS.md` Codex cuts before
+the policy, and Claude Code hook commands that name `.claude/` relative to
+the folder a session starts in. It exits 1 when any project has a problem,
+prints no record text, and `--json` gives the same as JSON. On the four
+clients on the night of 2026-10-31 it named the refused `recall` profile in
+each and the cut policy in one.
 
 It prints counts and fixed codes only; `--json` gives the same numbers as
 JSON. A project where the hook ran but no capsule carried a recent file, or
@@ -568,7 +680,8 @@ report them too.
   nothing useful, at least one judged noise), `unjudged-only`, `silent`
   (nothing delivered, or the sanitizer left nothing to search).
 - **latency** - wall time of the refresh process on a warm index, p50 and p95.
-- **realized** - per host: prompt-hook turns, turns with a capsule and with
+- **realized** - per host: prompt-hook turns, those whose refresh assembled
+  no capsule ("Capsule unavailable"), turns with a capsule and with
   documents, delivered items the agent touched with a tool and mentioned in
   its text, by kind (skill, brain, task-record, chunk, task, spec-doc,
   changelog); the capsules' task record pointers and how many the agent
@@ -576,7 +689,10 @@ report them too.
   by the agent in those turns; and, as a baseline, documents of those kinds
   the agent opened that the capsule did not deliver. Then the explicit
   retrieves of whole sessions, what they returned and what was opened
-  afterwards. From the native result journal, per host: the
+  afterwards; the Claude Code hook runs by event, failed and not found among
+  them; and with `--traces` the renders the runtime made that a transcript
+  shows were handed over, and those none shows. From the native result
+  journal, per host: the
   automatic save funnel from prompt hook run to promoted chunk, and the codes
   of every skip, refusal and failure. From the transcripts, per host: how many
   save requests the Stop hook made and, as medians, the seconds and output
@@ -790,13 +906,16 @@ None says whether delivery changes what an agent does.
 - **Comparing arms:** `report --compare BASELINE,TREATMENT` compares any two
   arms of a result. The rule below then reads `<treatment>-helps` /
   `<treatment>-hurts`. Each run also records the token estimate of the
-  documents the hook's manifest delivered.
+  documents the hook's manifest delivered, and the bytes the hook's capsules
+  printed (`capsule_bytes`, from the health journal, None before the runtime
+  recorded them).
 - **Cost:** `report` prints, per arm and outside the verdict, the mean
   seconds of a run, on how many runs Codex reported its usage, the mean
-  input, cached and output tokens over those, and the documents' token
-  estimate. Codex reports usage only when a turn completes, so a run stopped
-  at the first gold touch has none; the estimate counts documents only, so a
-  recall or ticket capsule without one reads 0 whatever the hook printed.
+  input, cached and output tokens over those, the documents' token
+  estimate and the printed bytes. Codex reports usage only when a turn
+  completes, so a run stopped at the first gold touch has none; the estimate
+  counts documents only, so a recall or ticket capsule without one reads 0
+  tokens, and its printed bytes say what it cost.
 - **Repeats:** `--repeat` runs each arm several times; the order alternates by
   task and repeat.
 

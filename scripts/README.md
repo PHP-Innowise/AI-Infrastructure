@@ -279,6 +279,30 @@ wiring waits for a new hook that cannot be written. Each held-back file is
 listed under `kept` with a reason starting `held back:`, and `partial` says
 the project is not at the release (it is `null` otherwise).
 
+A sync never takes a project back. The record names the commit the project
+was last synced from (`source_commit`); from a clone that lacks it - the
+project was synced from a newer commit, or from another line of work - the
+sync writes nothing and its `error` says so, because it would replace newer
+files with older ones. At its start on 2026-10-30 the Harness, on a clone
+that follows `main`, put four projects synced from a memory branch back onto
+`main` that way, runtime, hooks and policy, and the capsule then failed on a
+setting only the newer runtime knew. A commit the clone has never seen stops
+the sync too, except in a shallow clone; no record, a source that is not a
+Git checkout, or the clone's own commit or a descendant of the project's
+syncs as before. `--allow-downgrade` is a person going back on purpose;
+nothing unattended passes it.
+
+Codex reads at most `project_doc_max_bytes` of a project's `AGENTS.md`, 32 KiB
+by default, and the policy is appended after the project's own part. The
+editions' `.codex/config.toml` raises the limit to 128 KiB, but a project's
+own configuration - one the team edited, or an older release's - is kept by
+every sync. Where Codex would then cut `AGENTS.md`, the sync's
+`codex_policy_cut` says how much it reads and the line to put at the top of
+`.codex/config.toml` (a trusted project's setting, which Codex 0.163 reads),
+and an install with Codex prints the same as `CODEX\tAGENTS.md\t...` on
+stderr. A person's own `~/.codex/config.toml` is not consulted: a teammate's
+differs.
+
 The edition README that `--merge-existing` installed as `ACCELERATOR.md`
 beside a project's own `README.md` follows the release by the same rules:
 the sync records it in `memory-bank/local/accelerator-install.json`, updates
@@ -736,6 +760,16 @@ the Stop hook's save step exactly as written. The JSON it saves holds
 backticks, `$`, brackets, an apostrophe, escapes and Cyrillic. Nothing leaves
 the machine and no tokens are spent.
 
+Every run also checks that the policy reached the model: every line of the
+project's `AGENTS.md` (the clone's, appended to the system prompt, with
+`--attached`) in what Claude Code sent, HTML comments aside, which it drops.
+The report names each `AGENTS.md` the first question carried and the label it
+came under (`policy_files`). The bench's project keeps a `CLAUDE.md` of its
+own, as client projects do; Claude Code then reads `AGENTS.md` only through
+the edition's `.claude/CLAUDE.md` import. Without that import the run fails:
+the four client projects' Claude Code sessions never had the policy until
+it arrived.
+
 With `--target DIR` it runs in a copy of an installed project instead of a
 fresh install. The copy leaves out dependency trees as the rollout
 rehearsal's does, and `--sync` first brings it up to this clone. The saved
@@ -860,6 +894,14 @@ the same work directory, `--target` and `--sync`. Codex runs a project's hooks
 only once their hashes are approved, and turns a Stop hook's block into a
 `<hook_prompt>` item of the same turn. The save after every answer depends on
 both, and on Codex's sandbox letting the save write the project.
+
+Every run checks the policy reached the model as the Claude Code bench does:
+every line of the project's `AGENTS.md` (the clone's, in the developer
+instructions, with `--attached`) in what Codex sent, none of it in a
+truncated hook output. Codex reads at most `project_doc_max_bytes` of the
+project's `AGENTS.md` files, 32 KiB by default, and the bench's Codex home
+leaves it there: a project whose own notes push the policy block past it
+fails, and the report's `policy_bytes` says by how much.
 
 The stand-in serves the Responses API. It follows the save step as written,
 reading XML entities as a model does. It answers through `exec_command`, or

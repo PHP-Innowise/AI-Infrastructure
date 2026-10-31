@@ -1803,3 +1803,142 @@ class ClaudeSaveStepTests(NativeCaptureFixture):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class NativeHostScenarioTests(NativeCaptureFixture):
+    """One scenario table across Claude Code, Codex and Cursor: the journal a
+    run of each leaves, step by step. Where the hosts differ, the difference is
+    written down as the expected value - the refusal Claude Code records is
+    read and Codex's and Cursor's are not, so those two hosts ask again; Cursor
+    runs a Stop for a cancelled turn, with status aborted - so a change to
+    either shows here rather than in a client's session."""
+
+    HOSTS = ('claude', 'codex', 'cursor')
+    SAME = {'S1': ['prompt:armed:None', 'stop:requested:None', 'save:saved:None', 'stop:skipped:recovery-saved',
+                   'prompt:armed:None'],
+            'S3': ['prompt:armed:None', 'stop:requested:None', 'save:refused:memory-result-v1:source_missing',
+                   'stop:failed:unsaved', 'prompt:armed:previous-failed'],
+            'S4a': ['prompt:armed:None', 'stop:requested:None', 'save:omitted:None', 'stop:skipped:recovery-omitted',
+                    'prompt:armed:None'],
+            'S5': ['prompt:armed:None', 'stop:requested:None', 'stop:skipped:phase-requested', 'stop:failed:unsaved',
+                   'stop:skipped:recovery-failed'],
+            'S8': ['prompt:armed:None', 'stop:requested:None', 'prompt:armed:previous-in-flight',
+                   'save:saved:in-flight', 'stop:skipped:recovery-saved', 'prompt:armed:None']}
+
+    def lines(self):
+        path = self.root/JOURNAL
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def drive(self, host, scenario):
+        """The journal events of one scenario on one host, in its own session."""
+        session = f'{scenario}-{host}'
+        events, request = [], {}
+
+        def step(args, data):
+            before = len(self.lines())
+            result = self.call(*args, data=data, ok=False)
+            events.extend(':'.join(str(line.get(k)) for k in ('stage', 'event', 'code'))
+                          for line in self.lines()[before:])
+            return result
+
+        def prompt(transcript=None):
+            data = ({'hook_event_name': 'beforeSubmitPrompt', 'conversation_id': session, 'prompt': 'Go on.'}
+                    if host == 'cursor' else {'hook_event_name': 'UserPromptSubmit', 'session_id': session,
+                                              'prompt': 'Go on.'})
+            if transcript:
+                data['transcript_path'] = transcript
+            result = step(('native-prompt', '--host', host, '--task-id', 'research', '--json'), data)
+            request['key'] = json.loads(result.stdout).get('request') or request.get('key')
+
+        def stop(active=False, status='completed', transcript=None):
+            data = ({'hook_event_name': 'stop', 'conversation_id': session, 'status': status,
+                     'loop_count': int(active)} if host == 'cursor'
+                    else {'hook_event_name': 'Stop', 'session_id': session, 'stop_hook_active': active})
+            if transcript:
+                data['transcript_path'] = transcript
+            result = step(('native-stop', '--host', host, '--task-id', 'research'), data)
+            if result.stdout.strip():
+                # The agent saves with the token of the step it was handed.
+                asked = re.search(r'INTERNAL_NATIVE_MEMORY_RESULT ([0-9a-f]{32})', requested(host, json.loads(result.stdout)))
+                request['token'] = asked.group(1)
+            return result
+
+        def token():
+            return request['token']
+
+        def save(data=None, skip=False):
+            args = ['native-result', '--request', request['key'], '--token', token()]
+            args += ['--skip', '--json'] if skip else ['--input', '-', '--json']
+            return step(args, None if skip else data or self.payload)
+
+        prompt()
+        if scenario == 'S1':
+            output = stop()
+            save(); stop(active=True); prompt()
+            return events, json.loads(output.stdout)
+        if scenario == 'S3':
+            stop(); save({**self.payload, 'learnings': [{**self.payload['learnings'][0], 'sources': ['missing.md']}]})
+            stop(active=True); prompt()
+        elif scenario == 'S4a':
+            stop(); save(skip=True); stop(active=True); prompt()
+        elif scenario == 'S4b':
+            stop()
+            transcript = self.root.parent/f'refused-{host}.jsonl'
+            command = {'type': 'tool_use', 'id': 'toolu_save', 'name': 'Bash', 'input': {
+                'command': f"cd x && echo -E '{{}}' | python3 memory-bank/scripts/context.py native-result "
+                           f"--request r --token {token()} --input - --json"}}
+            refusal = {'type': 'tool_result', 'tool_use_id': 'toolu_save', 'is_error': True, 'content': 'denied'}
+            transcript.write_text(json.dumps({'type': 'assistant', 'message': {'role': 'assistant',
+                                                                              'content': [command]}}) + '\n'
+                                  + json.dumps({'type': 'user', 'message': {'role': 'user', 'content': [refusal]},
+                                                'toolDenialKind': 'user-rejected'}) + '\n')
+            stop(active=True, transcript=str(transcript)); prompt(str(transcript)); stop(); prompt()
+        elif scenario == 'S5':
+            stop(); stop(); stop(active=True); stop(active=True)
+        elif scenario == 'S2b':
+            stop()
+            if host == 'cursor':
+                stop(active=True, status='aborted')
+            prompt(); stop(); stop(active=True); prompt()
+        elif scenario == 'S8':
+            stop(); prompt(); save(); stop(active=True); prompt()
+        return events, None
+
+    def test_a_normal_answer_and_each_hosts_step(self):
+        forms = {}
+        for host in self.HOSTS:
+            with self.subTest(host=host):
+                events, output = self.drive(host, 'S1')
+                self.assertEqual(self.SAME['S1'], events)
+                forms[host] = sorted(output)
+        self.assertEqual({'claude': ['hookSpecificOutput'], 'codex': ['decision', 'reason'],
+                          'cursor': ['followup_message']}, forms)
+
+    def test_the_rows_every_host_runs_alike(self):
+        for scenario in ('S3', 'S4a', 'S5', 'S8'):
+            for host in self.HOSTS:
+                with self.subTest(scenario=scenario, host=host):
+                    self.assertEqual(self.SAME[scenario], self.drive(host, scenario)[0])
+
+    def test_a_host_refusal_is_read_from_claude_codes_transcript_alone(self):
+        self.assertEqual(['prompt:armed:None', 'stop:requested:None', 'stop:failed:host-refused',
+                          'prompt:skipped:host-refused', 'stop:skipped:phase-declined',
+                          'prompt:skipped:host-refused'], self.drive('claude', 'S4b')[0])
+        for host in ('codex', 'cursor'):
+            with self.subTest(host=host):
+                # Asked again on the next turn: their refusals are not recorded where the runtime reads.
+                self.assertEqual(['prompt:armed:None', 'stop:requested:None', 'stop:failed:unsaved',
+                                  'prompt:armed:previous-failed', 'stop:requested:None',
+                                  'prompt:armed:previous-in-flight'], self.drive(host, 'S4b')[0])
+
+    def test_a_turn_cancelled_during_the_save(self):
+        later = ['stop:requested:None', 'stop:failed:unsaved', 'prompt:armed:previous-requested']
+        for host in ('claude', 'codex'):
+            with self.subTest(host=host):
+                # No Stop runs for the cancelled continuation; the next prompt
+                # finds it in flight, and the turn after says it was not saved.
+                self.assertEqual(['prompt:armed:None', 'stop:requested:None', 'prompt:armed:previous-in-flight',
+                                  *later], self.drive(host, 'S2b')[0])
+        # Cursor runs a Stop with status aborted, which settles nothing.
+        self.assertEqual(['prompt:armed:None', 'stop:requested:None', 'stop:skipped:not-completed',
+                          'prompt:armed:previous-in-flight', *later], self.drive('cursor', 'S2b')[0])

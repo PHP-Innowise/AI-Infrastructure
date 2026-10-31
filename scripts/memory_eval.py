@@ -3015,6 +3015,12 @@ CAPSULE_START = re.compile(
 HOOK_PREAMBLE = ("Previous native memory result was not saved completely.",)
 # What a prompt hook prints instead of a capsule when its refresh failed.
 HOOK_FAILURE = "Memory refresh unavailable"
+# What the runtime prints when its refresh ran and assembled no capsule - a
+# task ID it cannot read, a profile it refused - after the refresh's own
+# layer lines, which CAPSULE_START takes for a capsule. On 2026-10-30 a sync
+# left four client projects on a runtime that refused their profile, and
+# every prompt there printed this.
+CAPSULE_UNAVAILABLE = "warning: Capsule unavailable:"
 # A capsule names its memory in one of two forms. Since October each item is
 # a line "- memory|history|skill|policy <path> — <title>", its excerpt
 # indented below it. The September runtime printed the layer on a line of its
@@ -3030,7 +3036,7 @@ WEAK_MATCH = "weak-match: "
 TASK_RECORD = "task record: "
 GENERIC_NAMES = {"skill.md", "readme.md", "index.md", "manifest.md"}
 COUNTERS = (
-    "hook_turns", "turns_with_capsule", "turns_with_documents", "delivered_items",
+    "hook_turns", "turns_no_capsule_assembled", "turns_with_capsule", "turns_with_documents", "delivered_items",
     "delivered_touched", "delivered_mentioned", "turns_touching_delivered",
     "turns_mentioning_delivered", "touched_not_delivered", "turns_touching_other_docs",
     "record_pointers", "record_pointers_touched",
@@ -3093,7 +3099,9 @@ def capsule_text(text: str) -> Optional[str]:
     capsule = "\n".join(lines[start:])
     if not CAPSULE_START.match(capsule):
         return None
-    return "" if capsule.startswith(HOOK_FAILURE) else capsule
+    if capsule.startswith(HOOK_FAILURE) or any(line.startswith(CAPSULE_UNAVAILABLE) for line in lines[start:]):
+        return ""
+    return capsule
 
 
 def capsule_items(text: str) -> Tuple[Set[str], Set[str]]:
@@ -3150,10 +3158,20 @@ def hook_context(payload: Dict[str, Any]) -> bool:
     return not isinstance(kinds, list) or "hooks.additional_context" in kinds
 
 
+# Codex's freeform shell tool heads what a command printed with its own lines:
+# "Script completed" (or "Script running with cell ...", "Exit code: 0"), the
+# wall time, then "Output:". All 75 retrieves in next's September sessions
+# came back so, the 17 asked for --json among them.
+CODEX_OUTPUT_HEADER = re.compile(r"\A(?:Script |Exit code|Process exited|Chunk ID)[^\n]*\n(?:[^\n]*\n){0,4}?Output:\n")
+
+
 def output_text(value: object) -> str:
-    """A tool result's text. Codex wraps a shell's in {"output": ...}, newer
-    hosts send a list of text parts."""
+    """A tool result's text. Codex wraps a shell's in {"output": ...} or heads
+    it with its own lines, newer hosts send a list of text parts."""
     if isinstance(value, str):
+        header = CODEX_OUTPUT_HEADER.match(value)
+        if header:
+            return value[header.end():]
         if value.lstrip().startswith("{"):
             try:
                 parsed = json.loads(value)
@@ -3172,21 +3190,36 @@ def output_text(value: object) -> str:
 
 def retrieved(text: str) -> Tuple[Set[str], Set[str]]:
     """What a retrieve answered: its items and its task record, from the
-    rendered capsule or, with --json, from the capsule's JSON."""
-    if text.lstrip().startswith("{"):
-        try:
-            value = json.loads(text)
-        except ValueError:
-            value = None
-        if isinstance(value, dict):
-            capsule = value["capsule"] if isinstance(value.get("capsule"), dict) else value
-            items: Set[str] = set()
-            for layer in ("semantic", "episodic", "procedural"):
+    rendered capsule or, with --json, from the capsule's JSON. One call may
+    print several JSON documents - `start --json` and then the retrieve -
+    and the capsule is the one with memory layers."""
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        items: Set[str] = set()
+        records: Set[str] = set()
+        found = False
+        decoder = json.JSONDecoder()
+        position = 0
+        while position < len(stripped):
+            try:
+                value, position = decoder.raw_decode(stripped, position)
+            except ValueError:
+                break
+            while position < len(stripped) and stripped[position].isspace():
+                position += 1
+            capsule = value.get("capsule") if isinstance(value, dict) and isinstance(value.get("capsule"), dict) else value
+            if not isinstance(capsule, dict) or not any(layer in capsule for layer in LAYERS):
+                continue
+            found = True
+            for layer in LAYERS:
                 for item in capsule.get(layer) or []:
                     if isinstance(item, dict) and isinstance(item.get("path"), str):
                         items |= doc_paths(item["path"])
             record = capsule.get("task_record")
-            return items, doc_paths(record) if isinstance(record, str) else set()
+            if isinstance(record, str):
+                records |= doc_paths(record)
+        if found:
+            return items, records
     return capsule_items(text)
 
 
@@ -3224,6 +3257,8 @@ class Retrievals:
         self.returned: Dict[str, str] = {}
         self.opened: Set[str] = set()
         self.touched: Set[str] = set()
+        # The answers' text, for --traces to find the renders they show.
+        self.answers: List[str] = []
 
     def call(self, identity: object, blob: str, name: str, at: object = None) -> None:
         instant = parse_instant(at) if self.since is not None else None
@@ -3243,6 +3278,7 @@ class Retrievals:
             return
         self.pending.discard(str(identity))
         self.counts["answers"] += 1
+        self.answers.append(text)
         items, records = retrieved(text)
         self.counts["answers_naming"] += bool(items or records)
         for path in records:
@@ -3285,18 +3321,127 @@ def retrieval_summary(sessions: Sequence[Retrievals]) -> Dict[str, Any]:
     return summary
 
 
+def capsule_digests(text: str) -> Set[str]:
+    """The SHA-256 a render trace may hold for this printed capsule: with the
+    newline the printer ends it with, and without, should a host strip it."""
+    body = text.rstrip("\n")
+    return {hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            hashlib.sha256((body + "\n").encode("utf-8")).hexdigest()}
+
+
+# Where the runtime keeps one trace per capsule it rendered (the last 200 by
+# default), and the manifests that say what asked for each.
+TRACE_DIRECTORY = "memory-bank/local/retrieval-traces"
+MANIFEST_DIRECTORIES = ("project-brain/control/retrieval-manifests", "memory-bank/local/retrieval-manifests")
+HOOK_ENTRY_POINTS = ("refresh", "hook-context")
+RETRIEVE_ENTRY_POINTS = ("retrieve", "context")
+
+
+def render_traces(state: Path, since: Optional[datetime]) -> List[Dict[str, Any]]:
+    """The capsules the runtime rendered under ``state``, oldest first: each
+    one's digest, the entry point that asked for it and the items it showed.
+    A trace without a render, or before ``since``, is left out."""
+    traces: List[Dict[str, Any]] = []
+    folder = state / TRACE_DIRECTORY
+    if not folder.is_dir():
+        return traces
+    for path in folder.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        render = data.get("render") if isinstance(data, dict) else None
+        if not isinstance(render, dict) or not isinstance(render.get("sha256"), str):
+            continue
+        created = parse_instant(data.get("created_at"))
+        if since is not None and created is not None and created < since:
+            continue
+        entry = "unknown"
+        for directory in MANIFEST_DIRECTORIES:
+            try:
+                manifest = json.loads((state / directory / path.name).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(manifest, dict) and isinstance(manifest.get("entry_point"), str):
+                entry = manifest["entry_point"]
+                break
+        records = render.get("records") if isinstance(render.get("records"), list) else []
+        traces.append({
+            "sha256": render["sha256"], "entry": entry, "created": created,
+            "items": {normalise_path(record["path"]) for record in records
+                      if isinstance(record, dict) and isinstance(record.get("path"), str)},
+        })
+    traces.sort(key=lambda trace: trace["created"] or datetime.min.replace(tzinfo=timezone.utc))
+    return traces
+
+
+TRACE_COUNTERS = ("capsules", "with_trace", "trace_items", "trace_items_touched")
+
+
+def trace_report(traces: List[Dict[str, Any]], turns: Dict[str, List[Dict[str, Any]]],
+                 answers: Sequence[str]) -> Dict[str, Any]:
+    """Which rendered capsules a host's record shows it handed over.
+
+    A hook turn's capsule and an explicit retrieve's answer are matched to the
+    trace whose render digest they reproduce, each trace once. A hook trace
+    nothing matched was rendered and never seen in a transcript: a refresh
+    stopped at its budget after it printed, a host that dropped the capsule,
+    or a session whose transcript is not on this machine (Cursor keeps none).
+    """
+    pool: Dict[str, List[Dict[str, Any]]] = {}
+    for trace in traces:
+        pool.setdefault(trace["sha256"], []).append(trace)
+    matched: Set[int] = set()
+
+    def take(digests: Set[str]) -> Optional[Dict[str, Any]]:
+        for digest in sorted(digests):
+            for trace in pool.get(digest, ()):
+                if id(trace) not in matched:
+                    matched.add(id(trace))
+                    return trace
+        return None
+
+    hosts: Dict[str, Dict[str, int]] = {}
+    for host, host_turns in turns.items():
+        stats: Counter = Counter()
+        for turn in host_turns:
+            if not turn["output"]:
+                continue
+            stats["capsules"] += 1
+            trace = take(turn["digests"])
+            if trace is not None:
+                stats["with_trace"] += 1
+                stats["trace_items"] += len(trace["items"])
+                stats["trace_items_touched"] += len(trace["items"] & turn["touched"])
+        hosts[host] = {name: stats.get(name, 0) for name in TRACE_COUNTERS}
+    answered = sum(1 for answer in answers if take(capsule_digests(answer)) is not None)
+
+    def count(entries: Sequence[str], seen: bool) -> int:
+        return sum(1 for trace in traces if trace["entry"] in entries and (id(trace) in matched) == seen)
+
+    return {
+        "traces": len(traces),
+        "hook": {"handed": count(HOOK_ENTRY_POINTS, True), "not_seen": count(HOOK_ENTRY_POINTS, False)},
+        "retrieve": {"answered": answered, "not_seen": count(RETRIEVE_ENTRY_POINTS, False)},
+        "unknown_entry": sum(1 for trace in traces if trace["entry"] not in HOOK_ENTRY_POINTS + RETRIEVE_ENTRY_POINTS),
+        "hosts": hosts,
+    }
+
+
 def new_turn(started: object) -> Dict[str, Any]:
     return {
         "started": parse_instant(started),
         "output": False,
         "delivered": set(),
         "records": set(),
+        "digests": set(),
         "touched": set(),
         "text": [],
         "active": False,
         "retrieve_cli": 0,
         "retrieve_mcp": 0,
         "context_cli": 0,
+        "unassembled": False,
     }
 
 
@@ -3364,26 +3509,43 @@ def read_records(path: Path) -> Iterator[Dict[str, Any]]:
 
 
 def deliver(turn: Dict[str, Any], capsule: Optional[str]) -> None:
-    """Add what a prompt hook's capsule handed over to its turn."""
+    """Add what a prompt hook's capsule handed over to its turn; "" is a
+    refresh that ran and assembled none, a hook turn without a capsule."""
+    if capsule == "":
+        turn["unassembled"] = True
     if capsule:
         turn["output"] = True
         items, records = capsule_items(capsule)
         turn["delivered"] |= items
         turn["records"] |= records
+        turn["digests"] |= capsule_digests(capsule)
 
 
-def claude_turns(path: Path, retrievals: Optional[Retrievals] = None) -> List[Dict[str, Any]]:
+# How Claude Code records a hook's run, by attachment type; additional
+# context is an output channel, not an outcome. A hook whose command was not
+# found exits 127: in September 2026 the relative `.claude/hooks/...` commands
+# of two client projects failed so 3,309 times, mostly below the project root,
+# and the Bash validator did not run there for a month.
+HOOK_OUTCOMES = {"hook_success": "ok", "hook_non_blocking_error": "error", "hook_blocking_error": "blocked"}
+
+
+def claude_turns(path: Path, retrievals: Optional[Retrievals] = None,
+                 hooks: Optional[Counter] = None) -> List[Dict[str, Any]]:
     """Turns of one Claude Code transcript: each starts at the prompt hook's
     output; the agent's tool calls and text belong to it until the next
     human prompt. Hook outputs before any agent activity share one turn.
     `retrievals`, when given, sees every tool call of the session and its
-    result, in a turn or not."""
+    result, in a turn or not; `hooks` counts every hook's outcome by event."""
     turns: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
     for record in read_records(path):
         kind = record.get("type")
         if kind == "attachment":
             attachment = record.get("attachment")
+            if hooks is not None and isinstance(attachment, dict) and attachment.get("type") in HOOK_OUTCOMES:
+                event = str(attachment.get("hookEvent") or "unknown")
+                hooks[(event, HOOK_OUTCOMES[attachment["type"]])] += 1
+                hooks[(event, "not_found")] += attachment.get("exitCode") == 127
             if (
                 isinstance(attachment, dict)
                 and attachment.get("type") == "hook_success"
@@ -3481,6 +3643,7 @@ def tally(turns: Sequence[Dict[str, Any]], paths: Optional[Dict[str, Counter]] =
     for turn in turns:
         stats["hook_turns"] += 1
         stats["turns_with_capsule"] += bool(turn["output"])
+        stats["turns_no_capsule_assembled"] += bool(turn.get("unassembled")) and not turn["output"]
         stats["agent_retrieve_cli"] += turn["retrieve_cli"]
         stats["agent_retrieve_mcp"] += turn["retrieve_mcp"]
         stats["agent_context_cli"] += turn["context_cli"]
@@ -3839,24 +4002,22 @@ def continuation_summary(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
     return summary
 
 
-def command_realized(arguments: argparse.Namespace) -> int:
-    project = Path(arguments.project).expanduser().resolve()
-    if not project.is_dir():
-        raise EvalError(f"--project {arguments.project} is not a directory")
-    state = Path(arguments.state).expanduser().resolve() if arguments.state else project
-    if not state.is_dir():
-        raise EvalError(f"--state {arguments.state} is not a directory")
-    since: Optional[datetime] = None
-    if arguments.since:
-        day = parse_day(arguments.since)
-        if day is None or len(arguments.since.strip()) != 10:
-            raise EvalError("--since must be YYYY-MM-DD")
-        since = day_window(day)[0]
+def since_argument(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    day = parse_day(value)
+    if day is None or len(value.strip()) != 10:
+        raise EvalError("--since must be YYYY-MM-DD")
+    return day_window(day)[0]
+
+
+def project_sessions(project: Path, since: Optional[datetime], claude_root: Path,
+                     codex_root: Path) -> Dict[str, Any]:
+    """One project's sessions from ``since``, per host: the capsule turns, the
+    explicit retrieves and the native save requests' costs - what `realized`
+    and `field-check` count."""
     member = Membership(project)
-    claude_root = Path(arguments.claude_root).expanduser()
-    codex_root = Path(arguments.codex_root).expanduser()
     claude_files, folders, skipped_folders = claude_sources(claude_root, project, member)
-    UNREAD_COMPRESSED.clear()
     codex_files = codex_sources(codex_root, member)
 
     def recent(path: Path) -> bool:
@@ -3865,18 +4026,44 @@ def command_realized(arguments: argparse.Namespace) -> int:
     def kept(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return [turn for turn in turns if since is None or turn["started"] is None or turn["started"] >= since]
 
-    paths: Optional[Dict[str, Counter]] = {} if arguments.paths else None
-    claude_used = [path for path in claude_files if recent(path)]
-    codex_used = [path for path in codex_files if recent(path)]
+    used = {"claude": [path for path in claude_files if recent(path)],
+            "codex": [path for path in codex_files if recent(path)]}
     retrievals: Dict[str, List[Retrievals]] = {"claude": [], "codex": []}
-
-    def read(host: str, path: Path) -> List[Dict[str, Any]]:
+    turns: Dict[str, List[Dict[str, Any]]] = {"claude": [], "codex": []}
+    hooks: Counter = Counter()
+    for path in used["claude"]:
         session = Retrievals(since)
-        retrievals[host].append(session)
-        return kept((claude_turns if host == "claude" else codex_turns)(path, session))
+        retrievals["claude"].append(session)
+        turns["claude"].extend(kept(claude_turns(path, session, hooks)))
+    for path in used["codex"]:
+        session = Retrievals(since)
+        retrievals["codex"].append(session)
+        turns["codex"].extend(kept(codex_turns(path, session)))
+    return {
+        "folders": folders, "folders_skipped": skipped_folders, "used": used, "turns": turns,
+        "retrievals": retrievals,
+        "costs": {host: [cost for path in used[host] for cost in continuation_costs(path, host)]
+                  for host in ("claude", "codex")},
+        "hooks": hooks,
+    }
 
-    claude_all = [turn for path in claude_used for turn in read("claude", path)]
-    codex_all = [turn for path in codex_used for turn in read("codex", path)]
+
+def command_realized(arguments: argparse.Namespace) -> int:
+    project = Path(arguments.project).expanduser().resolve()
+    if not project.is_dir():
+        raise EvalError(f"--project {arguments.project} is not a directory")
+    state = Path(arguments.state).expanduser().resolve() if arguments.state else project
+    if not state.is_dir():
+        raise EvalError(f"--state {arguments.state} is not a directory")
+    since = since_argument(arguments.since)
+    UNREAD_COMPRESSED.clear()
+    sessions = project_sessions(project, since, Path(arguments.claude_root).expanduser(),
+                                Path(arguments.codex_root).expanduser())
+    paths: Optional[Dict[str, Counter]] = {} if arguments.paths else None
+    claude_used, codex_used = sessions["used"]["claude"], sessions["used"]["codex"]
+    claude_all, codex_all = sessions["turns"]["claude"], sessions["turns"]["codex"]
+    retrievals = sessions["retrievals"]
+    folders, skipped_folders = sessions["folders"], sessions["folders_skipped"]
     report: Dict[str, Any] = {
         "project": str(project),
         "since": arguments.since,
@@ -3885,6 +4072,10 @@ def command_realized(arguments: argparse.Namespace) -> int:
             "folders": folders,
             "folders_skipped": skipped_folders,
             **tally(claude_all, paths),
+            # Whole transcripts, as Claude Code recorded each hook's run.
+            "hooks": {event: {outcome: sessions["hooks"].get((event, outcome), 0)
+                              for outcome in ("ok", "error", "not_found", "blocked")}
+                      for event in sorted({event for event, _ in sessions["hooks"]})},
         },
         "codex": {"transcripts": len(codex_used), **tally(codex_all, paths)},
         "total": {"transcripts": len(claude_used) + len(codex_used), **tally(claude_all + codex_all)},
@@ -3896,10 +4087,11 @@ def command_realized(arguments: argparse.Namespace) -> int:
             "total": retrieval_summary(retrievals["claude"] + retrievals["codex"]),
         },
         "native": native_funnel(state, since),
-        "continuations": {
-            "claude": continuation_summary([cost for path in claude_used for cost in continuation_costs(path, "claude")]),
-            "codex": continuation_summary([cost for path in codex_used for cost in continuation_costs(path, "codex")]),
-        },
+        **({"traces": trace_report(
+            render_traces(state, since), {"claude": claude_all, "codex": codex_all},
+            [answer for host in ("claude", "codex") for session in retrievals[host] for answer in session.answers],
+        )} if arguments.traces else {}),
+        "continuations": {host: continuation_summary(sessions["costs"][host]) for host in ("claude", "codex")},
     }
     # Rollouts of any project: which project a log nobody could read ran in is unknown.
     report["codex"]["compressed_unread"] = len(UNREAD_COMPRESSED)
@@ -3918,6 +4110,7 @@ def command_realized(arguments: argparse.Namespace) -> int:
 REALIZED_ROWS = (
     ("transcripts read", "transcripts"),
     ("prompt-hook turns", "hook_turns"),
+    ("  the refresh assembled no capsule", "turns_no_capsule_assembled"),
     ("turns with a capsule", "turns_with_capsule"),
     ("turns with documents", "turns_with_documents"),
     ("delivered items", "delivered_items"),
@@ -3966,7 +4159,17 @@ def format_realized(report: Dict[str, Any]) -> str:
         counts = report["total"]["by_kind"][kind]
         if counts["delivered"]:
             lines.append(f"  {kind:<11} {counts['delivered']:>6} {counts['touched']:>6} {counts['mentioned']:>6}")
+    hooks = report["claude"].get("hooks") or {}
+    if hooks:
+        lines.append("")
+        lines.append("Claude Code hook runs it recorded, by event: ok / errors (command not found) / blocked"
+                     " - a tool hook that succeeds quietly is not recorded")
+        for event, counts in hooks.items():
+            lines.append(f"  {event:<18} {counts['ok']:>6} {counts['error']:>6} ({counts['not_found']})"
+                         f" {counts['blocked']:>6}")
     lines.extend(format_retrievals(report["retrieve"], width))
+    if "traces" in report:
+        lines.extend(format_traces(report["traces"], width))
     lines.extend(format_native(report["native"]))
     lines.extend(format_continuations(report["continuations"]))
     if "paths" in report:
@@ -3981,10 +4184,15 @@ def format_realized(report: Dict[str, Any]) -> str:
 
 
 FUNNEL_PROFILES = ("full", "navigation", "recall")
+# Who asked for a capsule; `cli` is an explicit request.
+FUNNEL_HOSTS = ("claude", "codex", "cursor", "cli")
+# Each median row and the per-capsule series it is taken over.
+FUNNEL_MEDIANS = {"median_tokens": "tokens", "median_bytes": "bytes"}
 FUNNEL_ROWS = (
     ("prompt hook runs", "hook_runs"),
     ("  timed out", "hook_timeouts"),
     ("  exited non-zero", "hook_failures"),
+    ("capsules asked for, none built", "no_capsule"),
     ("capsules built", "capsules"),
     ("  shape recorded", "shaped"),
     ("  with the working state", "with_working"),
@@ -3992,6 +4200,7 @@ FUNNEL_ROWS = (
     ("  with ticket files", "with_ticket_files"),
     ("  with documents", "with_documents"),
     ("  median tokens", "median_tokens"),
+    ("  median bytes printed", "median_bytes"),
     ("save requests armed", "armed"),
     ("save requested at Stop", "requested"),
     ("saves made", "made"),
@@ -4026,8 +4235,13 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
     refresh-health.ndjson, the save funnel in native-results.ndjson, and how
     many task records, findings, decisions and bank chunks the project keeps.
     No path, query or text is read into it, so a teammate can send the result.
-    A refresh line names no host and also comes from an explicit request (the
-    MCP retrieve, the CLI), so "capsules built" counts those too.
+    A refresh line also comes from an explicit request (the MCP retrieve, the
+    CLI), so "capsules built" counts those too; a runtime of 2026-10-30 or
+    later names the host that asked (`cli` for an explicit request), and an
+    older line counts as `unknown`. A line that asked for a capsule and got
+    none - a profile the runtime refused, a prompt it would not search - is
+    counted apart; an older runtime wrote no shape for it, so it read as a
+    capsule built.
     """
     def within(record: Dict[str, Any]) -> bool:
         at = parse_instant(record.get("at"))
@@ -4035,7 +4249,9 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
 
     counts: Counter = Counter()
     profiles: Counter = Counter()
+    hosts: Counter = Counter()
     tokens: List[int] = []
+    printed: List[int] = []
     for record in read_records(state / HEALTH_SERIES):
         if not within(record):
             continue
@@ -4046,7 +4262,14 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
             counts["hook_timeouts"] += status == 124
             counts["hook_failures"] += type(status) is int and status not in (0, 124)
         elif source in ("refresh", "hook-context"):
+            if "capsule" in record and record["capsule"] is None:
+                # Asked for and none assembled, which a runtime of 2026-10-31
+                # or later says: before, such a turn read as a capsule built.
+                counts["no_capsule"] += 1
+                continue
             counts["capsules"] += 1
+            host = record.get("host")
+            hosts[host if host in FUNNEL_HOSTS else "unknown"] += 1
             shape = record.get("capsule")
             if not isinstance(shape, dict):
                 # A runtime before the shape was recorded.
@@ -4063,6 +4286,11 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
             value = shape.get("tokens")
             if type(value) is int and value >= 0:
                 tokens.append(value)
+            # The estimate counts documents only; a runtime of 2026-10-30 or
+            # later also records what the capsule printed.
+            value = shape.get("bytes")
+            if type(value) is int and value >= 0:
+                printed.append(value)
     native = native_funnel(state, since)
     saves = native["total"]
     counts["armed"] = saves["armed"]
@@ -4076,10 +4304,13 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
     counts["findings_decisions"] = count_markdown(state, FUNNEL_FINDING_DIRS)
     counts["bank_chunks"] = count_markdown(state, ("memory-bank/chunks",))
     return {
-        **{key: counts.get(key, 0) for _, key in FUNNEL_ROWS if key != "median_tokens"},
+        **{key: counts.get(key, 0) for _, key in FUNNEL_ROWS if key not in FUNNEL_MEDIANS},
         "median_tokens": round(statistics.median(tokens)) if tokens else None,
+        "median_bytes": round(statistics.median(printed)) if printed else None,
         "tokens": tokens,
+        "bytes": printed,
         "profiles": {name: profiles.get(name, 0) for name in (*FUNNEL_PROFILES, "unknown")},
+        "hosts": {name: hosts.get(name, 0) for name in (*FUNNEL_HOSTS, "unknown")},
         "save_journal": native["journal"],
         "save_reasons": saves["reasons"],
     }
@@ -4088,12 +4319,15 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
 def funnel_total(projects: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     total: Dict[str, Any] = {}
     for _, key in FUNNEL_ROWS:
-        if key != "median_tokens":
+        if key not in FUNNEL_MEDIANS:
             total[key] = sum(project[key] for project in projects.values())
-    tokens = [value for project in projects.values() for value in project["tokens"]]
-    total["median_tokens"] = round(statistics.median(tokens)) if tokens else None
+    for key, series in FUNNEL_MEDIANS.items():
+        values = [value for project in projects.values() for value in project[series]]
+        total[key] = round(statistics.median(values)) if values else None
     total["profiles"] = {name: sum(project["profiles"][name] for project in projects.values())
                          for name in (*FUNNEL_PROFILES, "unknown")}
+    total["hosts"] = {name: sum(project["hosts"][name] for project in projects.values())
+                      for name in (*FUNNEL_HOSTS, "unknown")}
     reasons: Dict[str, Counter] = {}
     for project in projects.values():
         for step, codes in project["save_reasons"].items():
@@ -4119,6 +4353,8 @@ def format_funnel(report: Dict[str, Any]) -> str:
     lines.append("")
     lines.append("capsules by profile: " + ", ".join(
         f"{name} {report['total']['profiles'][name]}" for name in (*FUNNEL_PROFILES, "unknown")))
+    lines.append("capsules by host: " + ", ".join(
+        f"{name} {report['total']['hosts'][name]}" for name in (*FUNNEL_HOSTS, "unknown")))
     missing = [name for name, project in report["projects"].items() if not project["save_journal"]]
     if missing:
         lines.append("no save journal (a runtime before it, or no save step ran): " + ", ".join(missing))
@@ -4127,6 +4363,258 @@ def format_funnel(report: Dict[str, Any]) -> str:
         for step, codes in report["total"]["save_reasons"].items():
             lines.append(f"  {step}: " + ", ".join(f"{code} {count}" for code, count in codes.items()))
     return "\n".join(lines)
+
+
+# The sealed field check of the every-turn save (docs/MEMORY-EVAL.md, "The
+# every-turn save: a field check"): the kinds it counts as knowledge, the
+# capsule turns a host needs, and the share of the answer's time that matters.
+FIELD_KNOWLEDGE = ("brain", "chunk")
+FIELD_MIN_TURNS = 50
+FIELD_SAVE_SHARE = 0.20
+
+
+def field_counts(turns: Sequence[Dict[str, Any]], sessions: Sequence[Retrievals],
+                 costs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """One host's quantities for the field check: capsule turns; K, the
+    knowledge items a later tool call opened, from capsules and explicit
+    retrieves together; T, the task records opened, pointers and returned
+    items together; S, the median save seconds over the median answer's."""
+    knowledge = records = 0
+    for turn in turns:
+        opened = turn["delivered"] & turn["touched"]
+        knowledge += sum(1 for path in opened if doc_kind(path) in FIELD_KNOWLEDGE)
+        records += sum(1 for path in opened if doc_kind(path) == "task-record")
+        records += len(turn["records"] & turn["touched"])
+    for session in sessions:
+        for path, how in session.returned.items():
+            if path not in session.opened:
+                continue
+            if how == "record" or doc_kind(path) == "task-record":
+                records += 1
+            elif doc_kind(path) in FIELD_KNOWLEDGE:
+                knowledge += 1
+    share = None
+    if costs:
+        answer = statistics.median(cost["answer_seconds"] for cost in costs)
+        share = round(statistics.median(cost["save_seconds"] for cost in costs) / answer, 2) if answer > 0 else None
+    return {"capsule_turns": sum(1 for turn in turns if turn["output"]), "knowledge_opened": knowledge,
+            "task_records_opened": records, "save_requests": len(costs), "save_share": share}
+
+
+def field_rule(hosts: Dict[str, Dict[str, Any]], minimum: int) -> Dict[str, Any]:
+    """What the sealed rule says of these counts, host by host."""
+    counted = [host for host, counts in hosts.items() if counts["capsule_turns"] >= minimum]
+    ready = len(counted) == len(hosts)
+    if not counted:
+        return {"ready": False, "counted": [], "outcome": {}}
+    outcome: Dict[str, str] = {}
+    no_knowledge = all(hosts[host]["knowledge_opened"] == 0 for host in counted)
+    for host in counted:
+        counts = hosts[host]
+        share = counts["save_share"]
+        if no_knowledge and share is not None and share >= FIELD_SAVE_SHARE:
+            outcome[host] = "outcome A/B of the every-turn save on continuation tasks"
+        elif counts["task_records_opened"] > 0 and counts["knowledge_opened"] == 0:
+            outcome[host] = "working-state path first"
+        else:
+            outcome[host] = "report as is"
+    return {"ready": ready, "counted": counted, "outcome": outcome}
+
+
+def command_field_check(arguments: argparse.Namespace) -> int:
+    since = since_argument(arguments.since)
+    turns: Dict[str, List[Dict[str, Any]]] = {"claude": [], "codex": []}
+    retrievals: Dict[str, List[Retrievals]] = {"claude": [], "codex": []}
+    costs: Dict[str, List[Dict[str, Any]]] = {"claude": [], "codex": []}
+    hooks: Counter = Counter()
+    UNREAD_COMPRESSED.clear()
+    for given in arguments.project:
+        project = Path(given).expanduser().resolve()
+        if not project.is_dir():
+            raise EvalError(f"--project {given} is not a directory")
+        sessions = project_sessions(project, since, Path(arguments.claude_root).expanduser(),
+                                    Path(arguments.codex_root).expanduser())
+        hooks.update(sessions["hooks"])
+        for host in turns:
+            turns[host].extend(sessions["turns"][host])
+            retrievals[host].extend(sessions["retrievals"][host])
+            costs[host].extend(sessions["costs"][host])
+    hosts = {host: field_counts(turns[host], retrievals[host], costs[host]) for host in turns}
+    report = {"since": arguments.since, "projects": len(arguments.project), "min_turns": arguments.min_turns,
+              "hosts": hosts, "rule": field_rule(hosts, arguments.min_turns),
+              # Not part of the rule: a hook that is not found decides it
+              # silently, as the Bash validator did not run for a month.
+              "claude_hooks": {outcome: sum(count for (_, kind), count in hooks.items() if kind == outcome)
+                               for outcome in ("ok", "error", "not_found", "blocked")},
+              # Nor are the turns whose refresh assembled no capsule: they are
+              # not capsule turns, and a host short of 50 may be short for this.
+              "no_capsule_turns": {host: sum(1 for turn in turns[host] if turn.get("unassembled") and not turn["output"])
+                                   for host in turns},
+              "compressed_unread": len(UNREAD_COMPRESSED)}
+    if arguments.json:
+        print(json.dumps(report, indent=1, ensure_ascii=False))
+        return 0
+    since_text = f" since {arguments.since}" if arguments.since else ""
+    lines = [f"Field check of the every-turn save{since_text}, {report['projects']} project(s), counts only"]
+    for host, counts in hosts.items():
+        share = f"{counts['save_share']:.0%}" if counts["save_share"] is not None else "-"
+        lines.append(f"  {host:<7} capsule turns {counts['capsule_turns']}, knowledge opened (K)"
+                     f" {counts['knowledge_opened']}, task records opened (T) {counts['task_records_opened']},"
+                     f" save requests {counts['save_requests']}, save share of the answer (S) {share}")
+    runs = report["claude_hooks"]
+    lines.append(f"  Claude Code hook runs recorded: {runs['ok']} ok, {runs['error']} failed"
+                 f" ({runs['not_found']} not found), {runs['blocked']} blocked")
+    lost = report["no_capsule_turns"]
+    lines.append("  prompt-hook turns whose refresh assembled no capsule: "
+                 + ", ".join(f"{host} {count}" for host, count in lost.items()))
+    rule = report["rule"]
+    if not rule["ready"]:
+        lines.append(f"not ready: a host has fewer than {arguments.min_turns} capsule turns")
+    for host, outcome in rule["outcome"].items():
+        lines.append(f"  rule, {host}: {outcome}")
+    print("\n".join(lines))
+    return 0
+
+
+# What `install-status` reads in a project: the sync's record, the runtime's
+# configuration and the profiles its code knows, and the instruction files
+# each host loads.
+INSTALL_RECORD = "memory-bank/local/accelerator-install.json"
+RUNTIME_CONFIG = "project-brain/config/runtime.json"
+PROJECT_RUNTIME = "memory-bank/scripts/brain_runtime.py"
+CLAUDE_IMPORT = "@../AGENTS.md"
+
+
+def last_record(path: Path, keep: Callable[[Dict[str, Any]], bool]) -> Optional[Dict[str, Any]]:
+    found = None
+    for record in read_records(path):
+        if keep(record):
+            found = record
+    return found
+
+
+def project_install_status(project: Path) -> Dict[str, Any]:
+    """Whether memory can run in an installed project, from its own files.
+
+    Each check is one way memory went silent in the client projects: a sync
+    from an older clone that took the runtime back (2026-10-30), a capsule
+    profile the runtime refused on every prompt, Claude Code reading a
+    project's own CLAUDE.md and no AGENTS.md (September), Codex cutting a long
+    AGENTS.md before the policy, and hook commands found only from the
+    project root (3,309 times in September). Counts, flags and fixed texts
+    only: no record text, query or path inside the project leaves it.
+    """
+    def text(relative: str) -> Optional[str]:
+        try:
+            return (project / relative).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+    def loaded(relative: str) -> Dict[str, Any]:
+        try:
+            value = json.loads(text(relative) or "")
+        except ValueError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    record = loaded(INSTALL_RECORD)
+    commit = record.get("source_commit") if isinstance(record.get("source_commit"), str) else None
+    head = installer.source_commit(ROOT)
+    if commit is None:
+        clone = "no record of the commit it was synced from"
+    elif commit == head:
+        clone = "this clone's commit"
+    elif installer.installation_ahead(ROOT, commit):
+        clone = "not in this clone (newer, or another line of work)"
+    else:
+        clone = "behind this clone"
+    problems: List[str] = []
+    runtime = text(PROJECT_RUNTIME) or ""
+    declared = re.search(r"^CAPSULE_PROFILES = \(([^)]*)\)", runtime, re.M)
+    known = re.findall(r"[\"']([a-z-]+)[\"']", declared.group(1)) if declared else []
+    configured = loaded(RUNTIME_CONFIG).get("capsule_profile") or "full"
+    if known and configured not in known:
+        problems.append(
+            f"capsule_profile {str(configured)[:40]!r} is unknown to this project's runtime ({', '.join(known)}): "
+            + ("it delivers the full capsule instead" if "def automatic_capsule_profile" in runtime
+               else "every prompt goes without a capsule"))
+    hook = last_record(project / HEALTH_SERIES, lambda line: line.get("source") == "hook")
+    refresh = last_record(project / HEALTH_SERIES, lambda line: line.get("source") in ("refresh", "hook-context"))
+    if refresh is None:
+        capsule = None
+    elif "capsule" not in refresh:
+        capsule = "not recorded (an older runtime)"
+    else:
+        capsule = "none built" if refresh["capsule"] is None else "built"
+    if capsule == "none built":
+        problems.append("the last prompt that asked for a capsule got none")
+    save = last_record(project / NATIVE_JOURNAL, lambda line: bool(line.get("stage")))
+    own_claude = (project / "CLAUDE.md").is_file()
+    imported = CLAUDE_IMPORT in (text(".claude/CLAUDE.md") or "")
+    if own_claude and not imported and (project / ".claude").is_dir():
+        problems.append("Claude Code loads the project's own CLAUDE.md and no AGENTS.md: "
+                        f".claude/CLAUDE.md does not import it ({CLAUDE_IMPORT})")
+    cut = installer.codex_policy_cut(project) if (project / ".codex").is_dir() else None
+    if cut:
+        problems.append(cut)
+    settings = loaded(".claude/settings.json").get("hooks")
+    relative = sorted({
+        str(hook_entry.get("command")).split()[0].strip("\"'")
+        for groups in (settings.values() if isinstance(settings, dict) else [])
+        for group in (groups if isinstance(groups, list) else []) if isinstance(group, dict)
+        for hook_entry in (group.get("hooks") if isinstance(group.get("hooks"), list) else [])
+        if isinstance(hook_entry, dict) and isinstance(hook_entry.get("command"), str)
+        and re.match(r"^(?:(?:bash|sh)\s+)?\.?\.?/?\.claude/", hook_entry["command"].strip())
+    })
+    if relative:
+        problems.append(f"{len(relative)} Claude Code hook command(s) name .claude/ relative to the folder a "
+                        "session starts in: below the project root they are not found")
+    return {
+        "edition": record.get("edition"), "release": record.get("release"),
+        "source": commit[:12] if commit else None, "synced_at": record.get("synced_at"), "clone": clone,
+        "capsule_profile": configured, "profiles_known": known,
+        "last_prompt_hook": (hook or {}).get("at"), "last_capsule": capsule,
+        "last_save_step": f"{save.get('stage')}:{save.get('event')}" if save else None,
+        "last_save_at": (save or {}).get("at"),
+        "claude_policy": "own CLAUDE.md, AGENTS.md imported" if own_claude and imported
+                         else "own CLAUDE.md, no import" if own_claude else "AGENTS.md read by Claude Code itself",
+        "problems": problems,
+    }
+
+
+def format_install_status(projects: Dict[str, Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for name, status in projects.items():
+        release = " ".join(str(part) for part in (status["edition"], status["release"]) if part)
+        lines.append(f"{name} ({release or 'no install record'}; synced {status['synced_at'] or '-'} from "
+                     f"{status['source'] or '-'}: {status['clone']})")
+        known = ", ".join(status["profiles_known"]) or "-"
+        lines.append(f"  capsule profile: {status['capsule_profile']} (the runtime knows {known})")
+        lines.append(f"  last prompt hook: {status['last_prompt_hook'] or '-'}; last capsule: "
+                     f"{status['last_capsule'] or '-'}; last save step: {status['last_save_step'] or '-'}"
+                     f"{' at ' + status['last_save_at'] if status['last_save_at'] else ''}")
+        lines.append(f"  Claude Code policy: {status['claude_policy']}")
+        lines.extend(f"  problem: {problem}" for problem in status["problems"])
+        if not status["problems"]:
+            lines.append("  no problem found")
+    return "\n".join(lines)
+
+
+def command_install_status(arguments: argparse.Namespace) -> int:
+    projects: Dict[str, Dict[str, Any]] = {}
+    for given in arguments.project:
+        project = Path(given).expanduser().resolve()
+        if not project.is_dir():
+            raise EvalError(f"--project {given} is not a directory")
+        label = project.name or "project"
+        while label in projects:
+            label += "'"
+        projects[label] = project_install_status(project)
+    if arguments.json:
+        print(json.dumps({"projects": projects}, ensure_ascii=False, indent=2))
+    else:
+        print(format_install_status(projects))
+    return 1 if any(status["problems"] for status in projects.values()) else 0
 
 
 def command_funnel(arguments: argparse.Namespace) -> int:
@@ -4150,7 +4638,7 @@ def command_funnel(arguments: argparse.Namespace) -> int:
     if arguments.json:
         public = {
             "since": report["since"],
-            "projects": {name: {key: value for key, value in project.items() if key != "tokens"}
+            "projects": {name: {key: value for key, value in project.items() if key not in FUNNEL_MEDIANS.values()}
                          for name, project in projects.items()},
             "total": report["total"],
         }
@@ -4195,6 +4683,29 @@ def format_retrievals(retrieve: Dict[str, Any], width: int) -> List[str]:
         counts = retrieve["total"]["by_kind"][kind]
         if counts["returned"] or counts["otherwise"]:
             lines.append(f"  {kind:<11} {counts['returned']:>6} {counts['opened']:>6} {counts['otherwise']:>6}")
+    return lines
+
+
+TRACE_ROWS = (
+    ("hook capsules in transcripts", "capsules"),
+    ("  matched to a render trace", "with_trace"),
+    ("  items those renders showed", "trace_items"),
+    ("  of them touched", "trace_items_touched"),
+)
+
+
+def format_traces(traces: Dict[str, Any], width: int) -> List[str]:
+    lines = ["", f"Render traces in the window: {traces['traces']}"]
+    lines.append(f"  hook renders handed over (seen in a transcript): {traces['hook']['handed']}")
+    lines.append(f"  hook renders never seen in a transcript: {traces['hook']['not_seen']}")
+    lines.append(f"  retrieve answers matched to a render: {traces['retrieve']['answered']}"
+                 f" (retrieve renders unmatched: {traces['retrieve']['not_seen']})")
+    if traces["unknown_entry"]:
+        lines.append(f"  renders whose manifest is gone: {traces['unknown_entry']}")
+    hosts = traces["hosts"]
+    lines.append(" " * width + "".join(host.rjust(9) for host in hosts))
+    for title, key in TRACE_ROWS:
+        lines.append(title.ljust(width) + "".join(str(hosts[host][key]).rjust(9) for host in hosts))
     return lines
 
 
@@ -4330,7 +4841,20 @@ def build_parser() -> argparse.ArgumentParser:
     realized.add_argument("--since", help="only turns from this UTC date on (YYYY-MM-DD)")
     realized.add_argument("--json", action="store_true")
     realized.add_argument("--paths", action="store_true", help="also list delivered document paths")
+    realized.add_argument("--traces", action="store_true",
+                          help="match the runtime's render traces to what the transcripts show it handed over")
     realized.set_defaults(handler=command_realized)
+
+    field = commands.add_parser(
+        "field-check", help="the sealed field check of the every-turn save, from the transcripts; counts only")
+    field.add_argument("--project", action="append", required=True, help="a project directory; repeat for more")
+    field.add_argument("--claude-root", default="~/.claude/projects")
+    field.add_argument("--codex-root", default="~/.codex/sessions")
+    field.add_argument("--since", help="only sessions from this UTC date on (YYYY-MM-DD)")
+    field.add_argument("--min-turns", type=int, default=FIELD_MIN_TURNS,
+                       help="capsule turns a host needs to count (the sealed note's 50)")
+    field.add_argument("--json", action="store_true")
+    field.set_defaults(handler=command_field_check)
 
     funnel = commands.add_parser(
         "funnel", help="the memory funnel of one or more projects, from their journals; counts only")
@@ -4339,6 +4863,12 @@ def build_parser() -> argparse.ArgumentParser:
     funnel.add_argument("--since", help="only journal lines from this UTC date on (YYYY-MM-DD)")
     funnel.add_argument("--json", action="store_true")
     funnel.set_defaults(handler=command_funnel)
+
+    status = commands.add_parser(
+        "install-status", help="whether memory can run in installed projects, from their own files; exit 1 on a problem")
+    status.add_argument("--project", action="append", required=True, help="a project directory; repeat for more")
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(handler=command_install_status)
     return parser
 
 

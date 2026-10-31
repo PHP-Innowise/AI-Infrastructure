@@ -802,6 +802,7 @@ python3 memory-bank/scripts/context.py [--owner OWNER] brain-create TYPE \
   [--conflict UUID]... \
   [--privacy public|team|restricted|private] \
   [--authority inferred|observed|verified] \
+  [--attestation agent|person] \
   [--confidence 0..1] \
   [--json]
 ```
@@ -809,7 +810,10 @@ python3 memory-bank/scripts/context.py [--owner OWNER] brain-create TYPE \
 `TYPE` is `finding`, `bug`, `incident`, `decision`, or `event`. Tasks use
 `start`. Defaults are `privacy=team`, `authority=observed`, and
 `confidence=1.0`. Creation writes a UUID-named Brain record and rebuilds
-deterministic indexes. Non-task records do not receive handoffs.
+deterministic indexes. Non-task records do not receive handoffs. A record
+created `--authority verified` says who checked it: `agent` unless
+`--attestation person` (the Harness passes `person` for a person's pages);
+the attestation goes into its ledger as an `observed` -> `verified` entry.
 
 Initial statuses are `open` for findings and incidents, `reported` for bugs,
 `proposed` for decisions, and `recorded` for events. The schema and runtime
@@ -829,15 +833,27 @@ python3 memory-bank/scripts/context.py [--owner OWNER] brain-update \
   [--source PATH]... \
   [--conflict UUID]... \
   [--transition STATE] \
+  [--authority verified | --reverify] \
+  [--attestation agent|person] \
   [--reason TEXT] \
   [--json]
 ```
 
 Performs a required compare-and-swap revision update, verifies that the actor
 is in `authorized_owners`, validates type-specific lifecycle transitions,
-refreshes source fingerprints, appends transition history when transitioning,
-and rebuilds indexes. At least one field or transition is required. The default
-reason is `Record updated`.
+appends transition history when transitioning, and rebuilds indexes. At least
+one field or transition is required. The default reason is `Record updated`.
+
+`--authority verified` raises an observed record's evidence level, the one
+authority edge there is; `--reverify` says a verified record's claim was
+checked again. Either records who checked: `agent` unless `--attestation
+person`. Source fingerprints follow the sources on every write of an
+unverified record; a verified finding, bug, incident or decision keeps the
+versions that were checked through any write that checks nothing, and only
+`--authority verified` or `--reverify` takes them anew (a source the write
+cites for the first time is fingerprinted then). A person's verified claim is
+revised only with `--attestation person`. An evidence level passed as
+`--transition` is refused with how to set it.
 
 `--revision auto` resolves the current revision inside the runtime mutation
 lock, so an automated writer still performs a real compare-and-swap rather than
@@ -878,6 +894,8 @@ Side effects: creates or migrates the local database schema if necessary.
 ```bash
 python3 memory-bank/scripts/context.py validate [--json]
 ```
+
+`brain-validate` is accepted for the same command.
 
 Validates active and archived Brain records and control data, including strict
 schema keys, UUID/path consistency, legal status history, source freshness,

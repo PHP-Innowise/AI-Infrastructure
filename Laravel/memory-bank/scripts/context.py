@@ -57,6 +57,7 @@ from brain_runtime import (
     consolidate,
     CAPSULE_PROFILES,
     configured_capsule_profile,
+    automatic_capsule_profile,
     configured_mode,
     configured_retrieval_gate,
     configured_ticket_files,
@@ -3065,7 +3066,12 @@ def governed_binding(connection: sqlite3.Connection, task_id: str) -> sqlite3.Ro
         (task_id, task_id),
     ).fetchone()
     if row is None:
-        raise ContextError(f"Working task not found: {task_id}")
+        # The most frequent refusal agents met (35 of 383 calls in one
+        # client's September): say how a task comes to be bound here.
+        raise ContextError(
+            f"Working task not found: {task_id}; start records it (so does the first checkpoint), "
+            f"and rebind --task-id {task_id} binds one recorded on another machine"
+        )
     return row
 
 
@@ -3241,17 +3247,21 @@ def append_refresh_health(repository: Path, record: dict[str, object]) -> None:
         return
 
 
-def capsule_shape(repository: Path, capsule: object, requested_profile: Optional[str]) -> dict[str, object]:
+def capsule_shape(
+    repository: Path, capsule: object, requested_profile: Optional[str], text: Optional[str] = None,
+) -> dict[str, object]:
     """What a delivered capsule carried, as counts a usage funnel can add up.
 
     The profile that built it, whether it held the task's working state, how
-    many recent files, ticket files and documents it named, and its token
-    estimate. Never a
+    many recent files, ticket files and documents it named, its token
+    estimate, and the bytes of ``text``, the capsule as printed. The estimate
+    counts documents only, so a capsule of working state and recent files
+    read 0 tokens whatever it printed. Never a
     path, a title or a text: like the rest of the health record, it must not
     become a second channel for what the manifest keeps under privacy rules.
     """
     try:
-        profile: Optional[str] = configured_capsule_profile(repository, requested_profile)
+        profile: Optional[str] = automatic_capsule_profile(repository, requested_profile)[0]
     except (BrainError, OSError, ValueError):
         profile = None
     capsule = capsule if isinstance(capsule, dict) else {}
@@ -3270,6 +3280,7 @@ def capsule_shape(repository: Path, capsule: object, requested_profile: Optional
         "ticket_files": len(ticket.get("paths") or []) if isinstance(ticket, dict) else 0,
         "documents": count("selected"),
         "tokens": tokens if type(tokens) is int and tokens >= 0 else None,
+        "bytes": len((text + "\n").encode("utf-8")) if isinstance(text, str) else None,
     }
 
 
@@ -3517,11 +3528,11 @@ def assemble_capsule(
     # The automatic capsule may be configured to carry navigation only, or
     # navigation and the task's own saves; an explicit retrieval always
     # searches everything.
-    profile = (
-        configured_capsule_profile(repository, capsule_profile)
-        if entry_point in AUTOMATIC_ENTRY_POINTS
-        else "full"
-    )
+    profile = "full"
+    if entry_point in AUTOMATIC_ENTRY_POINTS:
+        profile, unknown_profile = automatic_capsule_profile(repository, capsule_profile)
+        if unknown_profile:
+            warnings.append(unknown_profile)
     if mode == "lightweight":
         # Local-only work has no governed task whose saves recall could keep,
         # so a recall capsule here is a navigation one.
@@ -5749,8 +5760,16 @@ def create_governed_task(
             # archives it - automatic compaction waits for five finished
             # records - and a new task for the same branch was refused. That
             # finished record, and no other, is archived now.
-            if "already exists" not in str(error) or not _finished_records_only(repository, task_id):
+            if "already exists" not in str(error):
                 raise
+            if not _finished_records_only(repository, task_id):
+                # The task under way: agents ran start at the top of every
+                # session (15 times in one client's September), and the
+                # refusal said nothing of what to run instead.
+                raise BrainError(
+                    f"{error}; it is the task under way: context.py get --task-id {task_id} reads it, "
+                    f"and update --task-id {task_id} --revision auto records progress"
+                ) from error
             compact(repository, only_external_id=task_id)
             task = create_task(repository, task_id, goal, files, sources, owner=owner)
         try:
@@ -9048,7 +9067,12 @@ def build_parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="show local context index counts")
     status.add_argument("--json", action="store_true")
 
-    validate = commands.add_parser("validate", help="validate active and archived Brain records")
+    # Agents reach for brain-validate beside brain-create, brain-update and
+    # brain-get: 9 of the 383 context.py calls Codex made in one client
+    # project in September 2026. _command reads it as validate.
+    validate = commands.add_parser(
+        "validate", aliases=["brain-validate"], help="validate active and archived Brain records"
+    )
     validate.add_argument("--json", action="store_true")
 
     parity = commands.add_parser(
@@ -9284,6 +9308,8 @@ def main() -> int:
 def _command() -> int:
     utf8_output()
     arguments = build_parser().parse_args()
+    if arguments.command == "brain-validate":
+        arguments.command = "validate"
     if arguments.project is not None:
         workspace_roots.serve_from(str(arguments.project))
     _branch_task_identity(arguments)
@@ -9684,9 +9710,12 @@ def _command() -> int:
                     result = {"episode_id": episode_id}
                 else:
                     if arguments.revision in (None, AUTO_REVISION):
+                        # Ending a task pins the revision a person or agent
+                        # read; agents passed `auto` (5 times in one client's
+                        # September), so say where the number is.
                         raise ContextError(
                             "Governed completion requires the current numeric "
-                            "--revision"
+                            f"--revision; context.py get --task-id {arguments.task_id} shows it"
                         )
                     result = complete_governed_task(
                         connection,
@@ -10395,6 +10424,7 @@ def _command() -> int:
                     # overwrite the rule with an empty one on every skipped
                     # turn, which is the opposite of what a skip means.
                     return 4
+                excerpts = None if arguments.json else capsule_excerpts(connection, result)
                 # Cursor's read path never enters the refresh branch, so
                 # without this the health series would systematically
                 # under-report the one client whose capsule is a turn stale.
@@ -10405,7 +10435,11 @@ def _command() -> int:
                         "mode": mode,
                         "omitted": result.get("omitted"),
                         "source": "hook-context",
-                        "capsule": capsule_shape(repository, result, None),
+                        "host": arguments.host,
+                        "capsule": capsule_shape(
+                            repository, result, None,
+                            None if excerpts is None else "\n".join(
+                                render_capsule_lines(result, excerpts, delivery_profile=delivery_profile))),
                     },
                 )
                 if delivery_admission is not None:
@@ -10413,7 +10447,7 @@ def _command() -> int:
                 if arguments.json:
                     print(serialize_capsule(result))
                 else:
-                    print_capsule(result, capsule_excerpts(connection, result), repository=repository, delivery_profile=delivery_profile)
+                    print_capsule(result, excerpts, repository=repository, delivery_profile=delivery_profile)
                 return 0
 
             if arguments.command == "refresh":
@@ -10609,9 +10643,18 @@ def _command() -> int:
                     "layers_updated": all(layers[layer] == "updated" for layer in DOCUMENT_LAYERS),
                     "warnings": len(warnings),
                     "source": "refresh",
+                    # The client that asked: a funnel can then count each
+                    # host's capsules, which the line never said.
+                    "host": arguments.host,
                 }
                 if capsule is not None:
-                    health_record["capsule"] = capsule_shape(repository, capsule, arguments.capsule_profile)
+                    health_record["capsule"] = capsule_shape(
+                        repository, capsule, arguments.capsule_profile, result.get("capsule_text"))
+                elif arguments.query is not None:
+                    # Asked for and none assembled - a refused prompt, a task
+                    # the runtime cannot read: the turn went without a
+                    # capsule, which a funnel must not count as one built.
+                    health_record["capsule"] = None
                 if source_notices:
                     health_record['source_notices'] = source_notices
                 def capture_diagnosis(render: Optional[dict[str, object]]) -> None:

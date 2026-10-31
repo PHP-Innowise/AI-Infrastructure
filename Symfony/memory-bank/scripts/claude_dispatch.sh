@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dispatch-version: 4 (DISPATCH_VERSION in claude_dispatch.py)
+# dispatch-version: 5 (DISPATCH_VERSION in claude_dispatch.py)
 # AI accelerator, Claude Code: an installed project's hook for a session
 # started in a folder below the project root, or in a worktree of it.
 #

@@ -28,6 +28,282 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Claude Code below the project root gets a long `AGENTS.md` whole — 2026-10-31
+
+- A session started below the project root gets `AGENTS.md` from the
+  dispatcher's `policy-N` entries, one hook output each, which Claude Code
+  keeps in the conversation only up to 10,000 characters. Four entries held
+  about 39,000, and the last took the rest whole, so Claude Code put that
+  entry into a file. bauherrenmappe's policy, 42,932 characters with the
+  project's own part first, lost its fourth entry that way - 17,360
+  characters holding every rule of the accelerator's: a session in `src/`
+  had the project's notes and none of the accelerator's rules. Six entries
+  now carry about 59,000, and a longer policy's last entry carries what fits
+  and names the line of `AGENTS.md` the rest begins at. `DISPATCH_VERSION`
+  is 5: the first session in the root of a project with this release puts
+  the new dispatcher and its two new entries into the person's settings.
+  Found by the policy check of `scripts/claude_code_bench.py --subfolder src`
+  on a synced copy of the project.
+
+### The Harness's project panel says why an installed project is not kept current — 2026-10-31
+
+- For a project with its own installed accelerator the **Project** chip's
+  panel said only that; the server's record of its last sync - an error,
+  such as a project synced from newer work than the server's clone, which
+  the sync now leaves alone, or a release held back in part - reached no
+  one. The panel now adds it (`installedSummary`).
+
+### `memory_eval.py install-status`: can memory run in a project at all — 2026-10-31
+
+- Per project, from its own files: the commit its accelerator was synced
+  from and whether this clone has it, the configured capsule profile against
+  the profiles the project's runtime knows, the last prompt hook run, whether
+  the last capsule asked for was built, the last save step, and which
+  instructions Claude Code loads. Each problem is a way memory went silent
+  in the client projects - a refused profile, a capsule not built, a
+  `CLAUDE.md` without the import, an `AGENTS.md` Codex cuts, hook commands
+  found only from the project root - and the command exits 1 on any. On the
+  four clients tonight it names the refused `recall` profile in each, after
+  the Harness's sync of 2026-10-30 at 17:01, and the cut policy in one.
+
+### `realized` no longer counts a refused capsule as a capsule turn — 2026-10-31
+
+- A prompt hook whose refresh assembled no capsule prints the refresh's layer
+  lines and "warning: Capsule unavailable: ...", and `realized` took the layer
+  lines for a capsule's start: each such turn counted as a turn with a
+  capsule. It is now a prompt-hook turn without one, counted apart ("the
+  refresh assembled no capsule"). Over the four client projects from
+  2026-09-01 that is 448 of 931 prompt-hook turns, all in September: 300 of
+  next's 440 Codex turns, 73 of scb's 147, 63 of bauherrenmappe's 216 and 12
+  of aea-partner's 128. Two refusals caused them: "Working task not found"
+  (276 messages; the prompt refresh serves an unrecorded task since
+  2026-10-06) and an automatic-continuation conflict (174) whose code is in
+  no branch of this repository. `docs/MEMORY-EVAL.md`'s "440 capsule turns"
+  for next's September is 140; the sealed field check counts `realized`'s
+  turns with a capsule, so a refused one no longer counts toward its 50.
+  `field-check` names them per host beside the rule, as it names the hooks
+  not found.
+
+### A capsule asked for and not built is recorded, and the funnel counts it apart — 2026-10-31
+
+- A `refresh` that was asked for a capsule (`--query`) and assembled none -
+  a task ID the runtime cannot read, a profile it refused - writes
+  `"capsule": null` in its `refresh-health.ndjson` line, and
+  `memory_eval.py funnel` counts such lines as "capsules asked for, none
+  built" instead of capsules built. Before, the line carried no shape, as an
+  old runtime's does, and read as a capsule of unknown profile: the four
+  clients' turns since the Harness's sync of 2026-10-30, every one without a
+  capsule, would have shown in the weekly funnel as capsules delivered.
+
+### Install and sync say when Codex would cut the project's policy — 2026-10-31
+
+- Codex reads at most `project_doc_max_bytes` of `AGENTS.md` (32 KiB by
+  default), and the installer appends the policy after the project's own
+  part. The editions' `.codex/config.toml` raises the limit to 128 KiB, but
+  a project's own configuration is kept by every sync: one client's 27 KB of
+  notes and a config without the key leave the policy past byte 32,768 out
+  of Codex (see the Codex bench entry below). `--sync` now reports it as
+  `codex_policy_cut`, with the line to add at the top of
+  `.codex/config.toml` - Codex 0.163 reads it from a trusted project, which
+  the bench showed: with it, the same copy gets the whole 43,260-byte
+  policy - and an install with Codex prints it on stderr
+  (`codex_policy_cut`).
+
+### Every Codex bench run checks the policy reached the model — 2026-10-31
+
+- `scripts/codex_bench.py` checks in every run what only `--worktree` checked:
+  every line of the project's `AGENTS.md` (the clone's, in the developer
+  instructions, attached) in what Codex sent, none of it in a truncated hook
+  output, and reports the policy's size (`policy_bytes`). An overflow note
+  fails it only beside policy text: Codex also cuts a long file the stand-in
+  prints, which on one client's copy failed a policy that had arrived whole.
+  On Codex 0.163 a fresh install passes. A synced copy of one client fails it: its
+  `AGENTS.md` is the team's 27 KB of notes with the edition's policy block
+  appended, 43,260 bytes, and Codex reads 32,768 by default
+  (`project_doc_max_bytes`), so the policy stops mid-line in Working Memory
+  and Subagents, Verification, Git Safety, Security, Memory Bank And Project
+  Brain and Definition Of Done never reach the model. That person's own
+  `~/.codex/config.toml` raises the limit to 64 KiB; nothing in the project
+  does.
+
+### The automatic capsule survives a profile the runtime does not know — 2026-10-31
+
+- A configured `capsule_profile` (or `CONTEXT_CAPSULE_PROFILE`) the runtime
+  does not know builds the `full` capsule, with the warning "capsule_profile
+  'X' is unknown to this runtime (full, navigation, recall): full capsule
+  delivered" (`automatic_capsule_profile`). Before, the automatic entry
+  points refused it, and every prompt went without a capsule: since the
+  Harness's sync of 2026-10-30 at 17:01, four client projects whose
+  `runtime.json` says `recall` run a runtime that knows only `full` and
+  `navigation`, and each prompt gets "Capsule unavailable" in place of its
+  working state. A profile the caller names (`--capsule-profile`) is still
+  refused, and the health record's `profile` is the one that built the
+  capsule.
+
+### Every Claude Code bench run checks the policy reached the model — 2026-10-30
+
+- `scripts/claude_code_bench.py` checks in every run - a fresh install,
+  `--target`, `--attached`, `--desktop`, plan mode - that every line of the
+  policy reached the model, HTML comments aside (Claude Code drops them), and
+  names each `AGENTS.md` the first question carried with its label
+  (`policy_heard`, `policy_files`). Only `--subfolder` and `--worktree`
+  checked it before, so a project's own `CLAUDE.md` keeping `AGENTS.md` out of
+  every client's Claude Code went unseen; the bench's project now keeps a
+  `CLAUDE.md` of its own, as client projects do. On Claude Code 2.1.278 the
+  edition's import loads the policy once, and without it the run fails. On
+  copies of the four clients the policy arrives once in each; as the Harness
+  left them the save shows as a hook error and nothing is saved, and synced
+  to this branch all four save.
+
+### A sync never takes a project back — 2026-10-30
+
+- `install_accelerator.py --sync`, and the Harness's sync of its registered
+  projects with it, writes nothing into a project last synced from a commit
+  the clone does not contain, and says so as the report's `error`
+  (`installation_ahead`). At 17:01 on 2026-10-30 the Harness started on a
+  clone at `main` (1cbdf9e7) and synced the four client projects that had
+  been synced from the memory stack that morning (adfeb5ab, then 8b20d5f1):
+  26-28 files each went back to `main` - runtime, hooks, the policy block -
+  with no backup. Their `runtime.json` keeps `capsule_profile: recall`,
+  which only the stack's runtime knows, so from then on every prompt there
+  gets "Capsule profile must be full or navigation" instead of a capsule,
+  and Claude Code's save step is the old `decision: block` form again. No
+  hook has run in those projects since. A commit the clone has never seen
+  stops the sync too, except in a shallow clone; `--allow-downgrade` is a
+  person going back on purpose.
+### Claude Code's usage numbers came from sessions without the memory policy — 2026-10-30
+
+- "Delivered documents go unused held for Claude Code alone" (below, from the
+  compressed rollouts) needs this beside it: no Claude Code session in the
+  four client projects loaded `AGENTS.md`. Each project keeps its own
+  `CLAUDE.md`, which keeps Claude Code from reading `AGENTS.md` by itself;
+  the edition's `.claude/CLAUDE.md` imports it since 2026-10-06 (4f1cf107).
+  It reached three clients on 2026-10-08 and `next` on 2026-10-18, after the
+  last Claude Code session in each, and none has run there since. Their
+  transcripts show the project's own `CLAUDE.md` loaded in 191 of 386 and
+  `AGENTS.md` in none.
+  `docs/MEMORY-EVAL.md` says so beside the numbers; the sealed field check
+  from 2026-10-31 is the first that reads Claude Code sessions told to
+  retrieve and save.
+
+### One scenario table holds the native save on Claude Code, Codex and Cursor — 2026-10-30
+
+- `tests/test_memory_native_capture.py` drives seven scenarios through the
+  native save on each host - a normal answer, a save the runtime refuses,
+  the agent declining, the host refusing the save command, a repeated Stop,
+  a turn cancelled during the save and a prompt sent while saving - and
+  holds the journal each leaves. Where the hosts differ the difference is
+  the expected value: only Claude Code's refusal is read, so Codex and
+  Cursor ask again on the next turn, and Cursor runs a Stop with status
+  aborted for a cancelled save, which settles nothing.
+
+### `realized` counts every Claude Code hook run, and the ones not found — 2026-10-30
+
+- Per event, the hook runs a Claude Code transcript records: succeeded,
+  failed (and of those, the command not found, exit 127) and blocked. In
+  September 2026 two client projects' hooks were wired as relative
+  `.claude/hooks/...` commands, and below the project root none was found:
+  3,309 times, the Bash validator among them, for a month, with nothing to
+  show it. Their wiring names `"${CLAUDE_PROJECT_DIR}"` since today's sync;
+  this count is how a break of that kind shows next time.
+
+### `memory_eval.py field-check` reads the sealed rule of the every-turn save — 2026-10-30
+
+- One command computes, over several projects' transcripts and per host,
+  what the sealed field check reads: capsule turns; K, the knowledge items a
+  later tool call opened, from capsules and explicit retrieves together; T,
+  the task records opened; S, the median save seconds over the median
+  answer's; and which branch of the rule each host meets, or that it is
+  still below 50 capsule turns; beside the rule, the Claude Code hook runs
+  recorded and how many were not found. `realized` and `field-check` share one
+  collector of a project's sessions. On the four client projects from
+  2026-09-01 (no save step then) it reads K = 0 on both hosts, T = 1 and 9:
+  the working-state path first.
+
+### The CLI answers the refusals agents met most — 2026-10-30
+
+- In the September 2026 sessions of the four client projects Codex ran
+  `context.py` 383 times; 79 of the calls failed on five refusals. Nine called
+  `brain-validate`, beside `brain-create`, `brain-update` and `brain-get`:
+  it is now an alias of `validate`. Fifteen passed an evidence level as a
+  status (`brain-update --transition verified`, or `observed`): the refusal
+  now says it is an evidence level and how it is set (`--authority
+  verified`; a record starts observed). Five passed
+  `complete --revision auto`; completion still pins the revision the caller
+  read, and the refusal now says `context.py get --task-id ID` shows it.
+  Fifteen ran `start` for the task already under way (the runtime of then
+  refused a retrieve before it); the refusal now names `get` to read it and
+  `update --revision auto` to record progress. Thirty-five met "Working task
+  not found" for a task not bound on that machine; it now says `start` (or
+  the first checkpoint) records one and `rebind` binds one recorded
+  elsewhere.
+
+### A verified record's citation that was never digested stays so — 2026-10-30
+
+- The fingerprint rule of the same day ("a verified record keeps the versions
+  that were checked") still took the file as it is now for an old citation
+  that had no fingerprint - a record from before fingerprints, three of them
+  in the client project next. Only a source the write itself cites for the
+  first time is fingerprinted now; an old citation never digested stays so,
+  and keeps the record from promotion as before.
+
+### A capsule's health line names the host that asked — 2026-10-30
+
+- `refresh` and `hook-context` write the `--host` they were given into their
+  `refresh-health.ndjson` line (`claude`, `codex`, `cursor`, or `cli` for an
+  explicit request), and `memory_eval.py funnel` counts capsules by host. A
+  report per host - capsules, saves, opens - is what the field measurement
+  needs, and the journals alone could not split capsules by client. The
+  shell's own line for a hook run still names none.
+
+### `realized --traces` sets the runtime's renders beside what the host recorded — 2026-10-30
+
+- The runtime keeps a trace of every capsule it rendered, with the digest of
+  the text it printed; `realized --traces` matches each hook turn's capsule
+  and each explicit retrieve's answer to the trace that digest names, each
+  trace once, and counts the hook renders a transcript shows were handed
+  over, those none shows (a refresh stopped at its budget after it printed,
+  a host that dropped the capsule, a transcript not on this machine), the
+  retrieve answers that match a render, and per host the items the matched
+  renders showed and how many the turn touched. Counts only. Checked against
+  a real `refresh` and `hook-context`: the printed text's digest is the
+  trace's.
+
+### A capsule's health line counts the bytes it printed — 2026-10-30
+
+- The capsule shape in `refresh-health.ndjson` gains `bytes`: the size of
+  the capsule as printed, by `refresh` and by a printing `hook-context`
+  (`None` for `--json`). Its `tokens` estimate counts documents only, so a
+  recall or navigation capsule of working state and recent files read 0
+  whatever it printed. Counts only, as before.
+- `memory_eval.py funnel` prints the median printed bytes beside the median
+  tokens, and `memory_outcome_ab.py` records each run's `capsule_bytes` and
+  prints their mean among the arm's costs: the sealed ticket run promises to
+  report what its capsules cost, and the document estimate cannot say.
+
+### Chat snapshots leave out the Codex context the turn reader leaves out — 2026-10-30
+
+- `context_continuity.py` kept as the person's words four envelopes Codex
+  writes into the user role that `context.py`'s turn reader takes for Codex's
+  own since 8b20d5f1: the plugins it recommends (`recommended_plugins`), the
+  user instructions beside AGENTS.md (`user_instructions`), an app's notice
+  that blocks edits (`external_codex_apps_writing_block_edits`) and a
+  subagent's report (`subagent_notification`). They came into every chat
+  snapshot that held them. A test now holds the two lists together and names
+  where they differ on purpose: the answer to the agent's question continues
+  a turn and is still the person's, and a notification starts a turn and is
+  not.
+
+### `realized` reads a retrieve's answer inside Codex's output wrapper — 2026-10-30
+
+- Codex heads what a command printed with its own lines ("Script completed"
+  or "Script running with cell ...", the wall time, "Output:"): every one of
+  the 75 retrieves in next's September sessions came back so, and a `--json`
+  answer then did not start with `{` and was not read. `realized` now reads
+  past those lines, and of several JSON documents one call printed (`start
+  --json` before the retrieve) takes the one with memory layers. The counts
+  of 2026-10-30 hold: the 17 JSON answers held one capsule.
+
 ### A verified record keeps the versions that were checked, and says who checked — 2026-10-30
 
 - `update_record` took every source fingerprint anew on any write, so a

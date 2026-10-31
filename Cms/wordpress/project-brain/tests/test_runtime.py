@@ -2997,6 +2997,16 @@ class CheckedFingerprintTest(RuntimeHarness):
         self.assertEqual(["specs/authority.md", "specs/limits.md"],
                          [item["path"] for item in cited["source_fingerprints"]])
 
+    def test_a_citation_never_digested_stays_undigested(self) -> None:
+        # A record from before fingerprints: a write that checks nothing must
+        # not take the file as it is now for the version that was checked.
+        self.verified_finding()
+        path, record, _ = brain.find_record(self.repository, self.record_id)
+        record["source_fingerprints"] = []
+        brain._write_record(self.repository, record, path)
+        self.edit_source()
+        self.assertEqual([], self.write(progress="Cobalt guard confirmed (tidied).")["source_fingerprints"])
+
     def test_an_unchecked_record_still_follows_its_sources(self) -> None:
         record = brain.create_record(self.repository, "finding", "FIND-OPEN", "Open question", [],
                                      [self.SOURCE], owner="alice")
@@ -3080,6 +3090,51 @@ class CheckedFingerprintTest(RuntimeHarness):
                            for path in (self.repository / "memory-bank/chunks").glob("MEM-*.md"))
         self.assertIn(checked, chunks)
         self.assertNotIn(current, chunks)
+
+
+class AgentCliSlipTest(RuntimeHarness):
+    """The two slips agents made most in a client project's September
+    sessions are answered: brain-validate is validate, and an evidence level
+    passed as a status says how to set it."""
+
+    def test_brain_validate_is_validate(self) -> None:
+        self.start("TASK-SLIP")
+        plain = self.run_cli("validate", "--json")
+        aliased = self.run_cli("brain-validate", "--json")
+        self.assertEqual((plain.returncode, plain.stdout), (aliased.returncode, aliased.stdout))
+
+    def test_an_evidence_level_passed_as_a_status_says_how_to_set_it(self) -> None:
+        created = json.loads(self.run_cli("brain-create", "finding", "--external-id", "FIND-SLIP", "--title",
+                                          "Cobalt guard", "--source", "specs/authority.md", "--json").stdout)
+        for level, how in (("verified", "set it with brain-update --authority verified"),
+                           ("observed", "a record starts observed, and only brain-update --authority verified "
+                                        "changes it")):
+            with self.subTest(level=level):
+                refused = self.run_cli("brain-update", "--record-id", created["id"], "--revision", "auto",
+                                       "--transition", level, "--json")
+                self.assertNotEqual(0, refused.returncode)
+                self.assertIn(f"Illegal finding transition: open -> {level}; {level} is an evidence level, "
+                              f"not a finding status: {how}", refused.stderr)
+        # A task not bound here says how one comes to be.
+        unknown = self.run_cli("get", "--task-id", "TASK-SLIP-NONE", "--json")
+        self.assertNotEqual(0, unknown.returncode)
+        self.assertIn("Working task not found: TASK-SLIP-NONE; start records it", unknown.stderr)
+        self.assertIn("rebind --task-id TASK-SLIP-NONE", unknown.stderr)
+        # A second start of the task under way says what to run instead.
+        self.start("TASK-SLIP-DONE")
+        again = self.run_cli("start", "--task-id", "TASK-SLIP-DONE", "--goal", "Apply the cobalt rule.", "--json")
+        self.assertNotEqual(0, again.returncode)
+        self.assertIn("it is the task under way: context.py get --task-id TASK-SLIP-DONE reads it", again.stderr)
+        # Completion pins a revision the caller read, and says where it is.
+        pinned = self.run_cli("complete", "--task-id", "TASK-SLIP-DONE", "--revision", "auto",
+                              "--outcome", "success", "--summary", "Done.")
+        self.assertNotEqual(0, pinned.returncode)
+        self.assertIn("context.py get --task-id TASK-SLIP-DONE shows it", pinned.stderr)
+        # A status the lifecycle does not allow says nothing more.
+        refused = self.run_cli("brain-update", "--record-id", created["id"], "--revision", "auto",
+                               "--transition", "accepted", "--json")
+        self.assertIn("Illegal finding transition: open -> accepted", refused.stderr)
+        self.assertNotIn("evidence level", refused.stderr)
 
 
 class ConsolidationPipelineTest(RuntimeHarness):
@@ -4623,16 +4678,52 @@ class RefreshHealthTest(RuntimeHarness):
         shapes = [json.loads(line).get("capsule") for line in path.read_text(encoding="utf-8").splitlines()]
         navigation, full = shapes[-2], shapes[-1]
         for shape in (navigation, full):
-            self.assertEqual({"profile", "working", "recent_files", "ticket_files", "documents", "tokens"},
+            self.assertEqual({"profile", "working", "recent_files", "ticket_files", "documents", "tokens", "bytes"},
                              set(shape))
             self.assertIsInstance(shape["working"], bool)
             self.assertIsInstance(shape["recent_files"], int)
             self.assertEqual(0, shape["ticket_files"])
+            # The printed capsule's size, which a capsule without documents has too.
+            self.assertIsInstance(shape["bytes"], int)
+            self.assertGreater(shape["bytes"], 0)
         self.assertEqual(("navigation", 0), (navigation["profile"], navigation["documents"]))
         self.assertEqual("full", full["profile"])
         text = path.read_text(encoding="utf-8")
         self.assertNotIn("cobalt", text)
         self.assertNotIn("TASK-SHAPE", text)
+
+    def test_a_capsule_asked_for_and_not_assembled_is_recorded_as_none(self) -> None:
+        # A runtime that refused the capsule wrote no shape, as one before
+        # shapes did, and a funnel counted the turn as a capsule built.
+        refused = self.run_cli("refresh", "--query", "cobalt authority", "--task-id", "TASK:ODD",
+                               "--ephemeral", "--json")
+        self.assertEqual(0, refused.returncode, refused.stderr)
+        self.assertTrue(any("Capsule unavailable" in warning for warning in json.loads(refused.stdout)["warnings"]))
+        path = self.repository / "memory-bank/local/refresh-health.ndjson"
+        line = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertIn("capsule", line)
+        self.assertIsNone(line["capsule"])
+        self.assertNotIn("cobalt", path.read_text(encoding="utf-8"))
+        # A refresh that asked for no capsule says nothing of one.
+        self.assertEqual(0, self.run_cli("refresh").returncode)
+        self.assertNotIn("capsule", json.loads(path.read_text(encoding="utf-8").splitlines()[-1]))
+
+    def test_a_hook_context_line_counts_the_bytes_it_prints(self) -> None:
+        self.start("TASK-HOOK-SHAPE")
+        printed = self.run_cli("hook-context", "--task-id", "TASK-HOOK-SHAPE")
+        self.assertEqual(0, printed.returncode, printed.stderr)
+        path = self.repository / "memory-bank/local/refresh-health.ndjson"
+        line = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(("hook-context", "cli"), (line["source"], line["host"]))
+        self.assertEqual(len(printed.stdout.encode("utf-8")), line["capsule"]["bytes"])
+        # The host a hook names is the line's, for a funnel to split by.
+        self.assertEqual(0, self.run_cli("refresh", "--query", "cobalt authority", "--task-id", "TASK-HOOK-SHAPE",
+                                         "--ephemeral", "--host", "codex").returncode)
+        self.assertEqual("codex", json.loads(path.read_text(encoding="utf-8").splitlines()[-1])["host"])
+        # The JSON form prints no capsule text, and says nothing of its size.
+        self.assertEqual(0, self.run_cli("hook-context", "--task-id", "TASK-HOOK-SHAPE", "--json").returncode)
+        line = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertIsNone(line["capsule"]["bytes"])
 
 
 class MemoryProbeTest(RuntimeHarness):
@@ -16571,18 +16662,25 @@ class CapsuleProfileTest(BankFixture):
         self.assertIn("Cerulean rollout waits for the cobalt authority", text)
         self.assertNotIn("MEM-20260101-aaaaaaaa", text)
 
-    def test_an_unknown_profile_is_refused_without_failing_the_turn(self) -> None:
-        # The prompt hook never fails a turn: a bad profile leaves the turn
-        # without a capsule and says why, as a bad index does.
+    def test_an_unknown_configured_profile_delivers_the_full_capsule_and_says_why(self) -> None:
+        # A setting a newer runtime wrote, read by an older one: on 2026-10-30
+        # a refusal here left four projects without a capsule on every prompt.
         self.start()
         self.configure(capsule_profile="documents-only")
         result = self.run_cli("refresh", "--query", "cerulean rollout", "--task-id", "TASK-1",
                               "--ephemeral", "--json")
         self.assertEqual(0, result.returncode, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertIsNone(payload["capsule"])
-        self.assertTrue(any("Capsule profile must be full, navigation or recall" in warning
-                            for warning in payload["warnings"]), payload["warnings"])
+        self.assertIsNotNone(payload["capsule"])
+        self.assertIn("working: TASK-1", payload["capsule_text"])
+        unknown = ("capsule_profile 'documents-only' is unknown to this runtime (full, navigation, recall): "
+                   "full capsule delivered")
+        self.assertIn(unknown, payload["warnings"])
+        self.assertIn(unknown, payload["capsule_text"])
+        # Named by the caller, a bad profile is still refused.
+        named = self.run_cli("refresh", "--query", "cerulean rollout", "--task-id", "TASK-1",
+                             "--ephemeral", "--json", "--capsule-profile", "documents-only")
+        self.assertNotEqual(0, named.returncode)
 
 
 if __name__ == "__main__":

@@ -1356,6 +1356,174 @@ class InstallSyncTest(unittest.TestCase):
         )
 
 
+class SyncNeverBackTest(unittest.TestCase):
+    """A sync never takes a project back to a clone that lacks its commit.
+
+    The Harness keeps its registered projects current from its own clone, on
+    main: at its next start, four projects a person had synced from a memory
+    branch went back onto main, runtime, hooks and policy, with nobody asked.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="sync never back ")
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name)
+        # A clone of its own, under Git, so a test can move it between commits.
+        self.clone = base / "clone"
+        shutil.copytree(ROOT / "install" / "inventories", self.clone / "install" / "inventories")
+        shutil.copytree(ROOT / "Symfony", self.clone / "Symfony")
+        self.git = ("git", "-C", str(self.clone), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                    "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null")
+        run("git", "init", "--quiet", str(self.clone))
+        run(*self.git, "add", "-A")
+        run(*self.git, "commit", "--quiet", "-m", "release")
+        self.older = run(*self.git, "rev-parse", "HEAD").stdout.strip()
+        self.runtime = "memory-bank/scripts/context.py"
+        self.target = base / "project"
+        self.target.mkdir()
+        run("git", "init", "--quiet", str(self.target))
+        installed = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone),
+            "--edition", "Symfony", "--tool", "claude", "--target", str(self.target),
+        )
+        self.assertEqual(0, installed.returncode, installed.stderr)
+
+    def sync(self, *extra: str) -> tuple[int, dict]:
+        result = run(sys.executable, str(INSTALLER), "--source-root", str(self.clone),
+                     "--sync", "--target", str(self.target), *extra)
+        return result.returncode, json.loads(result.stdout)
+
+    def newer_runtime(self) -> None:
+        """A runtime fix committed on top of the release, as on a memory branch."""
+        source = self.clone / "Symfony" / self.runtime
+        source.write_text(source.read_text(encoding="utf-8") + "\n# a newer fix\n", encoding="utf-8")
+        run(*self.git, "commit", "--quiet", "-am", "a newer fix")
+
+    def project_runtime(self) -> str:
+        return (self.target / self.runtime).read_text(encoding="utf-8")
+
+    def test_a_clone_behind_the_projects_commit_leaves_it_as_it_is(self) -> None:
+        self.newer_runtime()
+        self.assertEqual(0, self.sync()[0])
+        self.assertIn("# a newer fix", self.project_runtime())
+        run(*self.git, "checkout", "--quiet", self.older)
+        code, report = self.sync()
+        self.assertEqual(1, code)
+        self.assertIn("does not contain", report["error"])
+        self.assertEqual([], report["changed"])
+        self.assertIn("# a newer fix", self.project_runtime())
+        # A person going back on purpose.
+        code, report = self.sync("--allow-downgrade")
+        self.assertEqual((0, None), (code, report["error"]))
+        self.assertNotIn("# a newer fix", self.project_runtime())
+
+    def test_a_clone_ahead_of_the_projects_commit_brings_it_forward(self) -> None:
+        self.assertEqual(0, self.sync()[0])
+        self.newer_runtime()
+        code, report = self.sync()
+        self.assertEqual((0, None), (code, report["error"]))
+        self.assertIn("# a newer fix", self.project_runtime())
+
+    def test_a_commit_this_clone_has_never_seen_stops_the_sync(self) -> None:
+        self.assertEqual(0, self.sync()[0])
+        record = self.target / "memory-bank/local/accelerator-install.json"
+        data = json.loads(record.read_text(encoding="utf-8"))
+        data["source_commit"] = "f" * 40
+        record.write_text(json.dumps(data), encoding="utf-8")
+        self.newer_runtime()
+        code, report = self.sync()
+        self.assertEqual(1, code)
+        self.assertIn("ffffffffffff", report["error"])
+        self.assertNotIn("# a newer fix", self.project_runtime())
+
+    def test_no_record_no_git_or_the_same_commit_never_stops_it(self) -> None:
+        ahead = install_accelerator.installation_ahead
+        self.assertIsNone(ahead(self.clone, None))
+        self.assertIsNone(ahead(self.clone, "not a commit"))
+        self.assertIsNone(ahead(self.clone, self.older))
+        plain = Path(self._tmp.name) / "plain"
+        plain.mkdir()
+        self.assertIsNone(ahead(plain, self.older))
+
+    def test_the_flag_needs_a_sync(self) -> None:
+        result = run(sys.executable, str(INSTALLER), "--edition", "Symfony", "--target", str(self.target),
+                     "--allow-downgrade")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("--allow-downgrade requires --sync", result.stderr)
+
+
+class CodexPolicyCutTest(unittest.TestCase):
+    """Codex reads 32 KiB of AGENTS.md by default, and the policy comes last.
+
+    One project's own notes pushed the policy it was given past the limit:
+    Verification, Security and the memory rules never reached Codex there.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="codex policy cut ")
+        self.addCleanup(self._tmp.cleanup)
+        self.target = Path(self._tmp.name) / "project"
+        (self.target / ".codex").mkdir(parents=True)
+
+    def write(self, policy_bytes: int, config: str | None = None) -> None:
+        (self.target / "AGENTS.md").write_bytes(b"# Team notes\n" + b"x" * (policy_bytes - 13))
+        if config is not None:
+            (self.target / ".codex/config.toml").write_text(config, encoding="utf-8")
+
+    def test_a_policy_within_the_limit_or_a_raised_limit_is_read_whole(self) -> None:
+        cut = install_accelerator.codex_policy_cut
+        self.write(32 * 1024)
+        self.assertIsNone(cut(self.target))
+        self.write(43_260, "project_doc_max_bytes = 65536\n\n[features]\nhooks = true\n")
+        self.assertIsNone(cut(self.target))
+
+    def test_past_the_limit_the_report_names_the_setting_that_reads_it_whole(self) -> None:
+        self.write(43_260, "[features]\nhooks = true\n")
+        reason = install_accelerator.codex_policy_cut(self.target)
+        self.assertIn("AGENTS.md is 43260 bytes and Codex reads 32768", reason)
+        self.assertIn("project_doc_max_bytes = 65536 at the top of .codex/config.toml", reason)
+        # Under a table the key is that table's, not Codex's limit.
+        self.write(43_260, "[agents]\nproject_doc_max_bytes = 65536\n")
+        self.assertIsNotNone(install_accelerator.codex_policy_cut(self.target))
+        # A limit raised, but not enough; or lowered below the file.
+        self.write(70_000, "project_doc_max_bytes = 65536\n")
+        self.assertIn("project_doc_max_bytes = 131072", install_accelerator.codex_policy_cut(self.target))
+        self.write(20_000, "project_doc_max_bytes = 16384  # kept short\n")
+        self.assertIn("Codex reads 16384 of it", install_accelerator.codex_policy_cut(self.target))
+
+    def test_a_sync_says_so_where_the_projects_codex_config_lacks_the_limit(self) -> None:
+        # The edition's config.toml raises the limit; one the team edited -
+        # or an older release's - stays as it is through every sync.
+        project = Path(self._tmp.name) / "noted"
+        project.mkdir()
+        run("git", "init", "--quiet", str(project))
+        (project / "AGENTS.md").write_text("# Team notes\n\n" + "Keep invoices per tenant.\n" * 1400,
+                                           encoding="utf-8")
+        installed = run(sys.executable, str(INSTALLER), "--edition", "Symfony", "--tool", "codex",
+                        "--target", str(project), "--merge-existing")
+        self.assertEqual(0, installed.returncode, installed.stderr)
+        config = project / ".codex/config.toml"
+        edited = "".join(line for line in config.read_text(encoding="utf-8").splitlines(keepends=True)
+                         if not line.startswith("project_doc_max_bytes"))
+        config.write_text(edited + "\n# the team's own line\n", encoding="utf-8")
+        synced = run(sys.executable, str(INSTALLER), "--sync", "--target", str(project))
+        report = json.loads(synced.stdout)
+        self.assertIn("AGENTS.md is", report["codex_policy_cut"])
+        self.assertIn("unless a person's own Codex configuration raises the limit", report["codex_policy_cut"])
+        self.assertNotIn("project_doc_max_bytes =", config.read_text(encoding="utf-8").split("[", 1)[0])
+
+    def test_the_editions_own_codex_config_reads_the_policy_whole(self) -> None:
+        project = Path(self._tmp.name) / "fresh"
+        project.mkdir()
+        run("git", "init", "--quiet", str(project))
+        (project / "AGENTS.md").write_text("# Team notes\n\n" + "Keep invoices per tenant.\n" * 1400,
+                                           encoding="utf-8")
+        installed = run(sys.executable, str(INSTALLER), "--edition", "Symfony", "--tool", "codex",
+                        "--target", str(project), "--merge-existing")
+        self.assertEqual(0, installed.returncode, installed.stderr)
+        self.assertNotIn("CODEX\tAGENTS.md", installed.stderr)
+
+
 class SyncOfAnOlderReleaseTest(unittest.TestCase):
     """A sync never leaves a project with a newer release's files over its older runtime or wiring.
 
