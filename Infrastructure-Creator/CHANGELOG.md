@@ -4,6 +4,15 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime keeps a verified record's checked versions — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`,
+  `context.py` and `PROTOCOL.md` change in the asset. A verified record keeps
+  the fingerprints taken when it was checked through writes that check
+  nothing, `brain-create`/`brain-update` record who checked (`--attestation`,
+  `agent` by default, `--reverify`), and a person's verified claim is revised
+  only by a person. The policy lock was rewritten.
+
 ### The seeded runtime can name a ticket's files, switched off — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py` and

@@ -854,7 +854,9 @@ class TaskContext:
                 raise SessionError('The linked task record cannot change.')
             if options.get('record_id'):
                 fields['record_id'] = options['record_id']
-        response = self._knowledge('run', session['project_id'], {'bank': options['bank'], **fields}, _root=workspace)
+        # A person's operation on the linked task, from the session's page.
+        response = self._knowledge('run', session['project_id'], {'bank': options['bank'], **fields}, _root=workspace,
+                                   _attestation='person')
         if action == 'rebind' and response.get('ok'):
             result = response.get('result')
             record_id = result.get('task_uuid') if isinstance(result, dict) else None

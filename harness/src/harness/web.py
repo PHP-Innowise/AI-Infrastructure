@@ -514,7 +514,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path.startswith('/api/projects/') and path.endswith('/knowledge') and len(path.split('/')) == 5:
                 if urlsplit(self.path).query:
                     raise SessionError('Invalid project knowledge request.')
-                self.reply(200, self.server.knowledge.run(path.split('/')[3], data))
+                # A person's request: a verification made here is theirs.
+                self.reply(200, self.server.knowledge.run(path.split('/')[3], data, _attestation='person'))
             elif path.startswith('/api/projects/') and path.endswith('/memory-use/check') and len(path.split('/')) == 6:
                 if urlsplit(self.path).query or set(data) - {'bank'} or not isinstance(data.get('bank', ''), str):
                     raise SessionError('Invalid eligibility check request.')

@@ -76,9 +76,11 @@ class MemoryRuntimeReliabilityTests(unittest.TestCase):
                     reason="Literal example [attestation:" + embedded + "]",
                 )
                 self.assertEqual(explicit, self.brain.record_attestation(verified))
+                # Checked again with its claim unchanged: an agent may re-check
+                # what a person verified, but not rewrite it.
                 revised = self.brain.update_record(
                     self.repository, record["id"], expected_revision=verified["revision"],
-                    progress="The parcel boundary was checked again.", next_steps=[],
+                    progress=None, next_steps=[],
                     files=[], sources=[], actor="alice", reverify=True, attestation=embedded,
                     reason="Previous example [attestation:" + explicit + "]",
                 )

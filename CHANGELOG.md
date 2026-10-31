@@ -28,6 +28,33 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A verified record keeps the versions that were checked, and says who checked — 2026-10-30
+
+- `update_record` took every source fingerprint anew on any write, so a
+  `brain-update --progress` that only tidied a verified finding's wording
+  moved its fingerprints to the current files: retrieval stopped marking it
+  "cited file changed", and a re-promotion carried the new digests into the
+  chunk, for a claim nobody had checked again. A verified finding, bug,
+  incident or decision now keeps the fingerprints taken when it was checked
+  through every write that checks nothing (progress, next steps, a lifecycle
+  move), and only a source cited for the first time is fingerprinted then.
+  An observed record follows its sources as before.
+- `brain-create --authority verified` and `brain-update --authority
+  verified` recorded nobody as the checker; the one real knowledge corpus in
+  a client project was written that way. They now record `agent` unless
+  `--attestation person` says otherwise. `brain-update --reverify` checks a
+  verified claim again: its fingerprints are taken anew and the ledger says
+  who checked. A record created verified writes its attestation into an
+  `observed` -> `verified` ledger entry, which every runtime's validator
+  accepts.
+- A person's verified claim is revised only with attestation `person`, as
+  `record-result` already held it: before, a `brain-update --progress` from
+  an agent rewrote it silently.
+- The Harness passes `--attestation=person` for what a person does on its
+  project and session pages, where the runtime declares
+  `BRAIN_ATTESTATION_FLAG` near the top of `context.py`; an older runtime is
+  not handed the flag.
+
 ### The maintainer tools measure the retrieves agents make and what a save costs — 2026-10-30
 
 - `memory_eval.py realized` reads every explicit retrieve in the sessions it

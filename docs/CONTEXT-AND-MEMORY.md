@@ -1534,6 +1534,21 @@ unattended is written as observed and raised to verified with the reason
 "agent-attested, not reviewed by a person", so its own ledger says who
 attested it before promotion tags the chunk `auto-promoted`.
 
+The commands an agent verifies with say who checked too. `brain-create
+--authority verified` and `brain-update --authority verified` (or
+`--reverify`, a verified claim checked again) record `agent` unless
+`--attestation person` says a person did; until 2026-10-30 they recorded
+nobody, and a record so verified carries no mark. The Harness passes `person`
+for what a person does on its pages, where the runtime takes the flag. A
+verified finding, bug, incident or decision keeps the source fingerprints
+taken when it was checked through every write that checks nothing - progress,
+next steps, a lifecycle move - and only a source cited for the first time is
+fingerprinted then; retrieval and promotion compare the checked version with
+the file now. Before, any such write took them anew, so an edit cleared
+"cited file changed" from a claim nobody checked again. A person's verified
+claim is revised only with `--attestation person`, as `record-result` holds
+it.
+
 There is no reviewer in the automatic mode, and the runtime refuses to pretend
 otherwise. `reviewer` stays null, `review_mode` is `automatic`, the outcome is
 recorded as `approved-without-review`, and the resulting chunk carries an

@@ -686,6 +686,14 @@ class KnowledgeManager:
         The marker only widens a person's refresh, so a platform without
         O_NOFOLLOW (Windows) reads it too, from a regular file that is not a link.
         """
+        return self._runtime_marker(project_id, info, _root, b'CAPSULE_PROFILE_FLAG = "capsule-profile-v1"')
+
+    def supports_brain_attestation(self, project_id, info, _root=None):
+        """Whether brain-create and brain-update take --attestation (marker, as
+        above). It only says a person checked what a person did here."""
+        return self._runtime_marker(project_id, info, _root, b'BRAIN_ATTESTATION_FLAG = "brain-attestation-v1"')
+
+    def _runtime_marker(self, project_id, info, _root, marker):
         descriptor = None
         try:
             layout = self.layout(project_id, _root)
@@ -694,12 +702,12 @@ class KnowledgeManager:
                 if not stat.S_ISREG(os.lstat(scripts / 'context.py').st_mode):
                     return False
                 with open(scripts / 'context.py', 'rb') as handle:
-                    return b'CAPSULE_PROFILE_FLAG = "capsule-profile-v1"' in handle.read(8192)
+                    return marker in handle.read(8192)
             descriptor = os.open(scripts / 'context.py', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                 return False
-            return b'CAPSULE_PROFILE_FLAG = "capsule-profile-v1"' in os.read(descriptor, 8192)
+            return marker in os.read(descriptor, 8192)
         except (OSError, KeyError, TypeError):
             return False
         finally:
@@ -729,9 +737,11 @@ class KnowledgeManager:
                 except OSError:
                     pass  # Uncertain closure must not retry a reused fd number.
 
-    def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None, _host=None, _guard=None, _io_observer=None, _source_hints=None, _provenance_response=False):
+    def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None, _host=None, _guard=None, _io_observer=None, _source_hints=None, _provenance_response=False, _attestation=None):
         if not isinstance(data, dict) or not isinstance(data.get('action'), str) or data['action'] not in ACTION_FIELDS:
             raise SessionError('Select a supported knowledge operation.')
+        if _attestation not in (None, 'agent', 'person'):
+            raise SessionError('Invalid internal attestation.')
         action = data['action']
         if _source_hints is not None and action not in ('retrieve', 'refresh'):
             raise SessionError('Source hints require an internal retrieval operation.')
@@ -751,6 +761,12 @@ class KnowledgeManager:
             layout = self.layout(project_id, _root)
             root = layout['folder'] / info['root']
             self._preflight(root)
+            if (_attestation is not None and action in ('brain-create', 'brain-update')
+                    and self.supports_brain_attestation(project_id, info, _root)):
+                # The runtime takes a verification through these commands for
+                # an agent's; one a person made here is the person's, and only
+                # a person may revise a claim a person verified.
+                arguments[1:1] = ['--attestation=' + _attestation]
             if action in ('retrieve', 'refresh'):
                 options = []
                 if _ephemeral:

@@ -2946,6 +2946,142 @@ class AuthorityLifecycleTest(RuntimeHarness):
         )
 
 
+class CheckedFingerprintTest(RuntimeHarness):
+    """A verified record's fingerprints are the versions that were checked,
+    and the ledger says who checked them, on every write path."""
+
+    SOURCE = "specs/authority.md"
+
+    def write(self, **changes) -> dict:
+        record = brain.get_record(self.repository, self.record_id)
+        fields = {"progress": None, "next_steps": [], "files": [], "sources": [], **changes}
+        return brain.update_record(self.repository, self.record_id, expected_revision=record["revision"],
+                                   actor="alice", **fields)
+
+    def verified_finding(self, attestation: str = "agent") -> dict:
+        record = brain.create_record(self.repository, "finding", "FIND-CHECKED",
+                                     "Cobalt guard closes the request gap", [], [self.SOURCE], owner="alice")
+        self.record_id = record["id"]
+        return self.write(progress="Cobalt guard confirmed.", authority="verified",
+                          attestation=attestation, reason="Verified against the spec")
+
+    def digest(self, record: dict, path: str = SOURCE) -> str:
+        return next(item["sha256"] for item in record["source_fingerprints"] if item["path"] == path)
+
+    def edit_source(self) -> str:
+        (self.repository / self.SOURCE).write_text("# Authority\n\nThe rule moved.\n", encoding="utf-8")
+        return brain.fingerprint(self.repository, self.SOURCE)["sha256"]
+
+    def test_a_write_that_checks_nothing_keeps_the_checked_versions(self) -> None:
+        checked = self.digest(self.verified_finding())
+        current = self.edit_source()
+        tidied = self.write(progress="Cobalt guard confirmed (wording tidied).")
+        self.assertEqual(checked, self.digest(tidied))
+        self.assertFalse(brain.sources_are_fresh(self.repository, tidied))
+        resolved = self.write(transition_to="resolved", reason="Resolved")
+        self.assertEqual(checked, self.digest(resolved))
+        # Checking it again is what moves the fingerprints, and says who did.
+        again = self.write(reverify=True, attestation="agent", reason="Re-checked the moved rule")
+        self.assertEqual(current, self.digest(again))
+        self.assertTrue(brain.sources_are_fresh(self.repository, again))
+        self.assertEqual("agent", brain.record_attestation(again))
+
+    def test_a_source_cited_for_the_first_time_is_fingerprinted_now(self) -> None:
+        checked = self.digest(self.verified_finding())
+        self.edit_source()
+        (self.repository / "specs/limits.md").write_text("# Limits\n", encoding="utf-8")
+        cited = self.write(sources=["specs/limits.md"])
+        self.assertEqual(checked, self.digest(cited))
+        self.assertEqual(brain.fingerprint(self.repository, "specs/limits.md")["sha256"],
+                         self.digest(cited, "specs/limits.md"))
+        self.assertEqual(["specs/authority.md", "specs/limits.md"],
+                         [item["path"] for item in cited["source_fingerprints"]])
+
+    def test_an_unchecked_record_still_follows_its_sources(self) -> None:
+        record = brain.create_record(self.repository, "finding", "FIND-OPEN", "Open question", [],
+                                     [self.SOURCE], owner="alice")
+        self.record_id = record["id"]
+        current = self.edit_source()
+        self.assertEqual(current, self.digest(self.write(progress="Still looking.")))
+
+    def test_a_persons_verified_claim_is_revised_only_by_a_person(self) -> None:
+        self.verified_finding(attestation="person")
+        for attestation in (None, "agent"):
+            with self.subTest(attestation=attestation), self.assertRaisesRegex(
+                    brain.BrainError, "only a person revises it"):
+                self.write(progress="An agent's rewrite.", attestation=attestation)
+        with self.assertRaisesRegex(brain.BrainError, "only a person revises it"):
+            self.write(reverify=True, attestation="agent", progress="An agent's re-check.")
+        # A lifecycle move or a next step revises nothing.
+        self.write(transition_to="resolved", reason="Resolved")
+        revised = self.write(reverify=True, attestation="person", progress="The person's correction.")
+        self.assertEqual("person", brain.record_attestation(revised))
+
+    def test_a_record_created_verified_says_who_checked_it(self) -> None:
+        for attestation in ("agent", "person"):
+            with self.subTest(attestation=attestation):
+                record = brain.create_record(self.repository, "decision", f"DEC-{attestation}", "Keep cobalt",
+                                             [], [self.SOURCE], owner="alice", authority="verified",
+                                             attestation=attestation)
+                brain.validate_record(record)
+                self.assertEqual(attestation, brain.record_attestation(record))
+        with self.assertRaisesRegex(brain.BrainError, "who checked a verified record"):
+            brain.create_record(self.repository, "decision", "DEC-OBSERVED", "Keep cobalt", [], [self.SOURCE],
+                                owner="alice", attestation="agent")
+
+    def test_the_cli_records_who_checked(self) -> None:
+        created = json.loads(self.run_cli(
+            "brain-create", "finding", "--external-id", "FIND-CLI", "--title", "Cobalt guard",
+            "--source", self.SOURCE, "--authority", "verified", "--json").stdout)
+        self.assertEqual("agent", brain.record_attestation(created))
+        person = json.loads(self.run_cli(
+            "brain-create", "finding", "--external-id", "FIND-PERSON", "--title", "Cobalt guard",
+            "--source", self.SOURCE, "--authority", "verified", "--attestation", "person", "--json").stdout)
+        self.assertEqual("person", brain.record_attestation(person))
+        observed = json.loads(self.run_cli(
+            "brain-create", "finding", "--external-id", "FIND-LATER", "--title", "Cobalt guard",
+            "--source", self.SOURCE, "--attestation", "person", "--json").stdout)
+        self.assertEqual(("observed", ""), (observed["authority"], brain.record_attestation(observed)))
+        verified = json.loads(self.run_cli(
+            "brain-update", "--record-id", observed["id"], "--revision", "auto", "--authority", "verified",
+            "--reason", "Verified", "--json").stdout)
+        self.assertEqual("agent", brain.record_attestation(verified))
+        current = self.edit_source()
+        rechecked = self.run_cli("brain-update", "--record-id", observed["id"], "--revision", "auto",
+                                 "--reverify", "--reason", "Re-checked", "--json")
+        self.assertEqual(0, rechecked.returncode, rechecked.stderr)
+        self.assertEqual(current, self.digest(json.loads(rechecked.stdout)))
+        refused = self.run_cli("brain-update", "--record-id", person["id"], "--revision", "auto",
+                               "--progress", "An agent's rewrite.", "--json")
+        self.assertNotEqual(0, refused.returncode)
+        self.assertIn("only a person revises it", refused.stderr)
+        accepted = self.run_cli("brain-update", "--record-id", person["id"], "--revision", "auto",
+                                "--progress", "The person's note.", "--attestation", "person", "--json")
+        self.assertEqual(0, accepted.returncode, accepted.stderr)
+
+    def test_an_edit_after_promotion_keeps_the_chunk_marked_changed(self) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"mode": "governed", "automatic_promotion": True}), encoding="utf-8")
+        created = json.loads(self.run_cli(
+            "brain-create", "finding", "--external-id", "FIND-PROMOTED", "--title", "Cobalt guard",
+            "--source", self.SOURCE, "--json").stdout)
+        for change in (("--authority", "verified"), ("--progress", "Cobalt guard confirmed.",
+                                                     "--transition", "resolved")):
+            done = self.run_cli("brain-update", "--record-id", created["id"], "--revision", "auto",
+                                *change, "--json")
+            self.assertEqual(0, done.returncode, done.stderr)
+        checked = self.digest(brain.get_record(self.repository, created["id"]))
+        current = self.edit_source()
+        tidied = self.run_cli("brain-update", "--record-id", created["id"], "--revision", "auto",
+                              "--progress", "Cobalt guard confirmed, wording tidied.", "--json")
+        self.assertEqual(0, tidied.returncode, tidied.stderr)
+        chunks = "\n".join(path.read_text(encoding="utf-8")
+                           for path in (self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        self.assertIn(checked, chunks)
+        self.assertNotIn(current, chunks)
+
+
 class ConsolidationPipelineTest(RuntimeHarness):
     """The pipeline had no producers, so its emptiness was unreportable."""
 
@@ -9042,7 +9178,8 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
                 "from": "observed",
                 "to": "verified",
                 "actor": "local",
-                "reason": "Verified: authority source re-read",
+                # The command says who checked: the agent, unless a person did.
+                "reason": "Verified: authority source re-read [attestation:agent]",
             },
             {
                 key: authority_transition[key]

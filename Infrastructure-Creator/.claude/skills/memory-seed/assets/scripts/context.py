@@ -8,6 +8,8 @@ SOURCE_PROVENANCE_PROFILE = "local-source-provenance-v1"
 # For helpers that read these markers instead of starting the CLI: refresh
 # takes --capsule-profile, so an explicit request can ask for the full capsule.
 CAPSULE_PROFILE_FLAG = "capsule-profile-v1"
+# brain-create and brain-update take --attestation: who checked the claim.
+BRAIN_ATTESTATION_FLAG = "brain-attestation-v1"
 
 import argparse
 import contextlib
@@ -8866,6 +8868,14 @@ def build_parser() -> argparse.ArgumentParser:
     create_brain.add_argument(
         "--authority", choices=("inferred", "observed", "verified"), default="observed"
     )
+    create_brain.add_argument(
+        "--attestation",
+        choices=("agent", "person"),
+        help=(
+            "who checked a record created --authority verified: agent (the "
+            "default) or person; recorded in its ledger"
+        ),
+    )
     create_brain.add_argument("--confidence", type=float, default=1.0)
     create_brain.add_argument("--json", action="store_true")
 
@@ -8969,6 +8979,23 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "promote the record's evidence level; only the observed -> "
             "verified transition is accepted"
+        ),
+    )
+    update_brain.add_argument(
+        "--reverify",
+        action="store_true",
+        help=(
+            "a verified record's claim was checked again: its sources are "
+            "fingerprinted now and the ledger says who checked"
+        ),
+    )
+    update_brain.add_argument(
+        "--attestation",
+        choices=("agent", "person"),
+        help=(
+            "who stands behind the claim this call writes: agent (the default "
+            "with --authority verified or --reverify) or person; a person's "
+            "verified claim is revised only by a person"
         ),
     )
     update_brain.add_argument("--reason", default="Record updated")
@@ -9952,6 +9979,10 @@ def _command() -> int:
                     confidence=arguments.confidence,
                     goal=arguments.goal,
                     conflicts=conflicts,
+                    # Agents create records through this command: a verified
+                    # one is theirs to vouch for unless a person says so.
+                    attestation=(arguments.attestation or "agent")
+                    if arguments.authority == "verified" else None,
                 )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
@@ -9982,9 +10013,15 @@ def _command() -> int:
                     and arguments.transition is None
                     and arguments.phase is None
                     and arguments.authority is None
+                    and not arguments.reverify
                     and not arguments.replace_next_steps
                 ):
                     raise ContextError("Brain record update requires a changed field")
+                # A verification through this command is the agent's unless a
+                # person says so; a write that verifies nothing records no
+                # attestation, but a person's says who may revise their claim.
+                verifying = arguments.authority == "verified" or arguments.reverify
+                attestation = arguments.attestation or ("agent" if verifying else None)
                 reject_secrets(
                     "Brain record",
                     ([progress] if progress else [])
@@ -10010,6 +10047,8 @@ def _command() -> int:
                         phase=arguments.phase,
                         authority=arguments.authority,
                         reason=arguments.reason,
+                        attestation=attestation,
+                        reverify=arguments.reverify,
                         replace_next_steps=arguments.replace_next_steps,
                     )
                 promotion = promote_on_resolution(repository, result, owner)
