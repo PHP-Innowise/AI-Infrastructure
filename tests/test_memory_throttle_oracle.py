@@ -1,5 +1,6 @@
 """Future oracle v2 uses synthetic copies, never completed-study artifacts."""
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -35,6 +36,31 @@ class OracleContractTests(unittest.TestCase):
         self.assertIn('--unshare-net', command)
         self.assertIn('--unshare-pid', command)
         self.assertIsInstance(execute.call_args.kwargs['startup_marker'], bytes)
+
+    def test_programs_and_system_folders_as_the_system_lays_them_out(self):
+        # Debian and Ubuntu, as on GitHub's runners: /usr/bin/php links through
+        # /etc/alternatives, which the namespace does not mount, and /lib64
+        # leads to usr/lib64. Folders bound as Arch lays them out held no PHP.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'usr/bin').mkdir(parents=True)
+            (root / 'usr/lib64').mkdir()
+            (root / 'bin').symlink_to('usr/bin')
+            (root / 'lib64').symlink_to('usr/lib64')
+            (root / 'lib').mkdir()
+            self.assertEqual(['--symlink', 'usr/bin', '/bin', '--ro-bind', str(root / 'lib'), '/lib',
+                              '--symlink', 'usr/lib64', '/lib64'], oracle.system_links(str(root)))
+            php = root / 'usr/bin/php8.3'
+            php.write_bytes(b'')
+            (root / 'alternatives').mkdir()
+            (root / 'alternatives/php').symlink_to(php)
+            (root / 'php').symlink_to(root / 'alternatives/php')
+            with mock.patch.object(oracle, 'PHP', str(root / 'php')), \
+                    mock.patch.object(oracle, 'execute', return_value={}) as execute:
+                oracle.nested(b'<?php', b'<?php', b'<?php')
+            command = execute.call_args[0][0]
+            self.assertIn(os.path.realpath(php), command)
+            self.assertNotIn(str(root / 'php'), command)
 
 
 @unittest.skipUnless(AVAILABLE, 'Linux, PHP and Bubblewrap required')
@@ -74,10 +100,14 @@ class IsolatedOracleTests(unittest.TestCase):
         script_file = ROOT / 'scripts/memory_throttle_oracle_v2.py'
         source_file = FIXTURES / 'source.php'
         test_file = FIXTURES / 'public-test.php'
+        # Sealed as the files the links lead to, and the PHP named to the
+        # oracle: the verifier seals no link, and its namespace has no
+        # /etc/alternatives for one to lead through.
+        php = os.path.realpath(oracle.PHP)
         case = {'mode': 'patch', 'argv': [sys.executable, str(script_file),
-                '--source', str(source_file), '--public-test', str(test_file)],
+                '--source', str(source_file), '--public-test', str(test_file), '--php', php],
                 'timeout': 90, 'read_roots': [str(script_file), str(source_file), str(test_file),
-                                             oracle.PHP, oracle.BWRAP]}
+                                             php, os.path.realpath(oracle.BWRAP)]}
         for script, correct in ((self.script, True), (self.unresolved, False)):
             with self.subTest(resolved=correct):
                 artifact.write_bytes(script)

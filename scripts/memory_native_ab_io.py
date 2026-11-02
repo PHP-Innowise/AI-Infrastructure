@@ -40,6 +40,14 @@ def overlaps(a, b):
     return a == b or a in b.parents or b in a.parents
 
 
+def change_time_ns(image):
+    """st_ctime_ns as stat and fstat both report it: Python 3.12+ on Windows
+    gives os.stat() and os.lstat() the creation time there and os.fstat() the
+    last change time, and both the creation time as st_birthtime_ns."""
+    birth = getattr(image, 'st_birthtime_ns', None) if os.name == 'nt' else None
+    return image.st_ctime_ns if birth is None else birth
+
+
 def read_file(path, limit=MAX_FILE):
     path = ordinary(path)
     descriptors = []
@@ -65,7 +73,7 @@ def read_file(path, limit=MAX_FILE):
             if size > limit: raise PilotError('file byte limit')
         after = os.fstat(fd)
         named = os.stat(path.name,dir_fd=parent,follow_symlinks=False) if os.name=='posix' else path.lstat()
-        identity = lambda s: (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_nlink,s.st_mode)
+        identity = lambda s: (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,change_time_ns(s),s.st_nlink,s.st_mode)
         if identity(before) != identity(after) or identity(after) != identity(named):
             raise PilotError('file changed while reading')
         return b''.join(chunks), stat.S_IMODE(before.st_mode) & 0o777

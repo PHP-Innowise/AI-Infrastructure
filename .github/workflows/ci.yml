@@ -240,8 +240,9 @@ jobs:
     # The memory runtime's own regression steps, split from installation:
     # together they ran about 1000 s of that job's 20 minutes, and each
     # half now runs beside the other. The runtime is declared for Python 3.9
-    # and later, so it runs on that floor too.
-    timeout-minutes: 15
+    # and later, so it runs on that floor too. Its 3.x leg took 14 of 15
+    # minutes on 2026-10-31, before the A-to-B runner's two steps joined it.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:

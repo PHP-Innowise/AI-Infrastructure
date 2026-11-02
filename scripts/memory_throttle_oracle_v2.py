@@ -37,6 +37,22 @@ class InfrastructureUnknown(Exception):
     pass
 
 
+def system_links(root='/'):
+    """/bin, /lib and /lib64 laid out as this system lays them out.
+
+    Arch links /lib64 to usr/lib, Debian and Ubuntu to usr/lib64, where their
+    loader is; a system without a merged /usr keeps folders, bound read-only.
+    """
+    mounts = []
+    for name in ('bin', 'lib', 'lib64'):
+        path = os.path.join(root, name)
+        if os.path.islink(path):
+            mounts += ['--symlink', os.readlink(path), '/' + name]
+        elif os.path.isdir(path):
+            mounts += ['--ro-bind', path, '/' + name]
+    return mounts
+
+
 def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
@@ -195,15 +211,16 @@ def nested(script, source, test, argument='relative', *, lint=False, shadow_sour
                                 '--ro-bind', str(shadow_file), '/shadow/EntryFetchThrottle.php']
         command = [BWRAP, '--die-with-parent', '--new-session', '--unshare-pid', '--as-pid-1',
                    '--unshare-net', '--unshare-ipc', '--unshare-uts', '--tmpfs', '/',
-                   '--ro-bind', '/usr', '/usr', '--symlink', 'usr/bin', '/bin',
-                   '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib', '/lib64',
+                   '--ro-bind', '/usr', '/usr', *system_links(),
                    '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--dir', '/work',
                    '--ro-bind', str(program), '/work/verification/throttle_regression.php',
                    '--ro-bind', str(source_file), '/work/' + SOURCE_REL.as_posix(),
                    '--ro-bind', str(test_file), '/work/' + TEST_REL.as_posix(),
                    *collision_mounts, '--chdir', '/work', '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin',
                    '--setenv', 'LANG', 'C.UTF-8', '--setenv', 'TZ', 'UTC', '--',
-                   PHP, '-n', '-d', 'zend.assertions=-1',
+                   # The file it resolves to: Debian and Ubuntu link
+                   # /usr/bin/php through /etc/alternatives, not mounted here.
+                   os.path.realpath(PHP), '-n', '-d', 'zend.assertions=-1',
                    '-d', 'memory_limit=128M', '-d', 'max_execution_time=4',
                    '-d', 'disable_functions=' + DISABLED]
         if argument == 'bare-collision':
@@ -340,10 +357,15 @@ def evaluate(candidate, source_file, test_file):
 
 
 def main():
+    global PHP
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--public-test', type=Path, required=True)
+    # A trusted case names the PHP it sealed: in the verifier's namespace a
+    # link through /etc/alternatives leads nowhere.
+    parser.add_argument('--php', default=PHP)
     args = parser.parse_args()
+    PHP = args.php
     try:
         correct, _ = evaluate(Path.cwd(), args.source, args.public_test)
         print(json.dumps({'schema': 'task-outcome-verifier-v1', 'completed': True, 'correct': correct}, separators=(',', ':')))

@@ -179,7 +179,9 @@ def linked_reparse(image: os.stat_result) -> bool:
     junction - or cannot be told apart from one. Other reparse points (a
     OneDrive placeholder, a deduplicated file) are the file itself with its
     storage elsewhere; refusing them switched the Brain off on such volumes."""
-    if not getattr(image, 'st_file_attributes', 0) & 0x400:
+    # A stat built from fields - the portable NT backend's, which refuses
+    # every reparse point before it builds one - has the attribute as None.
+    if not (getattr(image, 'st_file_attributes', None) or 0) & 0x400:
         return False
     tag = getattr(image, 'st_reparse_tag', 0)
     return not tag or tag in workspace_roots.LINK_REPARSE_TAGS

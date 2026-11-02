@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime promotes on Windows again — 2026-11-02
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`
+  changes in the asset (`linked_reparse` takes a stat without attributes for
+  no reparse point); the policy lock was rewritten.
+
 ### The seeded dispatcher brings a long `AGENTS.md` below the root — 2026-10-31
 
 - As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`

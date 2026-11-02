@@ -248,6 +248,14 @@ class BrainScaleTests(unittest.TestCase):
             with self.assertRaisesRegex(self.brain.BrainError, 'inventory unavailable'):
                 self.titles()
 
+    def test_a_stat_built_from_fields_is_no_reparse_point(self):
+        # The portable NT backend builds its stats from fields once it has
+        # refused every reparse point: the attributes are None there, and
+        # `None & 0x400` failed every promotion on Windows.
+        image = types.SimpleNamespace(st_file_attributes=None, st_reparse_tag=None)
+        self.assertFalse(self.brain.linked_reparse(image))
+        self.assertTrue(self.brain.linked_reparse(types.SimpleNamespace(st_file_attributes=0x400)))
+
     def test_the_save_frontier_follows_every_record_change(self):
         first = self.results._domain_image(self.root)
         self.assertEqual(first, self.results._domain_image(self.root))

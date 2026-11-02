@@ -565,15 +565,19 @@ The trusted patch case invokes:
 ```bash
 python3 /tooling/scripts/memory_throttle_oracle_v2.py \
   --source /private/public/EntryFetchThrottle.php \
-  --public-test /private/public/EntryFetchThrottleTest.php
+  --public-test /private/public/EntryFetchThrottleTest.php \
+  --php /usr/bin/php8.3
 ```
 
 Use the candidate root as cwd. It must contain the unchanged public files at
 `packages/website-public-api/app/src/Service/EntryFetchThrottle.php` and
 `packages/website-public-api/app/tests/Unit/Service/EntryFetchThrottleTest.php`,
 and the produced `verification/throttle_regression.php`. Seal the script,
-the two public files and `/usr/bin/php`/`/usr/bin/bwrap` as **individual** verifier
-read roots; never mount a directory holding private reference fixtures.
+the two public files and the files `/usr/bin/php` and `/usr/bin/bwrap` resolve to
+as **individual** verifier read roots, and name that PHP with `--php`: Debian and
+Ubuntu link `/usr/bin/php` through `/etc/alternatives`, a link the verifier does
+not seal and its namespace cannot follow. Never mount a directory holding
+private reference fixtures.
 The generic patch verifier binds that implementation and rubric into its digest.
 The stdout receipt keeps the existing `task-outcome-verifier-v1` interface;
 infrastructure failures remain unknown rather than false candidate labels.

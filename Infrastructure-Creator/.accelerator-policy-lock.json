@@ -98,7 +98,7 @@
     ".agents/skills/memory-seed/assets/project-brain/templates/task.md": "54d713e2810c65ad5619fd322ac77869952e3ac041129263d5a13fce4f5e5fd1",
     ".agents/skills/memory-seed/assets/runtime-contract.json": "64522a0fa2fab417e806fc4be611e3f25e97a844256607f449f5d911f2684e4a",
     ".agents/skills/memory-seed/assets/scripts/automatic_query.py": "13e09d26050f26bf4ba15af6c034ea236c1b2ee85c0fa7937f399f27e1987933",
-    ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "30e68ea6dccb9931886af6b764f9f9e3aae55005c2c58f59f993c906b8a149be",
+    ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "b3ef569f8f7b3dbe520cc7cf1ab5fcffe84bf23d70c2ef52055e0487b97e17f1",
     ".agents/skills/memory-seed/assets/scripts/claude_dispatch.py": "949dfedefa55110e0a001cff992cb6666775e8f5c8007c91e817d34f09a4e9c0",
     ".agents/skills/memory-seed/assets/scripts/claude_dispatch.sh": "923b19bf5453d1fab2a3cf64a047eca4b91411c7afd6db29e9c51a6f44a16627",
     ".agents/skills/memory-seed/assets/scripts/claude_subfolders.py": "e8c25ccdd281f87aa7f18749bfa4f242b347653ab6a76327c4068b7688c6f136",
@@ -180,7 +180,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "e7dd23bf6e0d7322041f514c6a26b22a3117012e9c095a09e47bf082a2c5e50a",
+  "policy_digest": "3f095e82c3e385985945b06e9b893a17f905beb9a4ecdaf74ff883b82b98379e",
   "release": "2.5.0",
   "schema_version": 1
 }

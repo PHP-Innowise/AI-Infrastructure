@@ -75,6 +75,18 @@ class ImageTests(unittest.TestCase):
         with mock.patch.object(io.os,'open',side_effect=swap):
             with self.assertRaises((ValueError,OSError)):io.read_file(self.script)
 
+    def test_a_file_compares_with_its_own_path_as_windows_reports_them(self):
+        # Python 3.12+ on Windows: st_ctime_ns is the creation time from a
+        # path and the last change from an open file, which read every file
+        # there as changed while it was read. Both give st_birthtime_ns.
+        from types import SimpleNamespace
+        opened = SimpleNamespace(st_ctime_ns=2, st_birthtime_ns=1)
+        named = SimpleNamespace(st_ctime_ns=1, st_birthtime_ns=1)
+        with mock.patch.object(io.os, 'name', 'nt'):
+            self.assertEqual(io.change_time_ns(named), io.change_time_ns(opened))
+        if os.name != 'nt':
+            self.assertNotEqual(io.change_time_ns(named), io.change_time_ns(opened))
+
     def test_plan_schema_numeric_and_unknown_keys_fail_closed(self):
         base={'schema':'memory-native-ab-v1','project_snapshot':str(self.source),
               'source':{'task_alias':'proof/source-alpha','prompt':'Research checked code'},

@@ -34,6 +34,25 @@ edition's own files remain in that edition's changelog.
   controls that verify the exact CLI-selected source. Frozen prior experiments
   and their original verdicts remain unchanged.
 
+- Oracle v2 runs on Debian and Ubuntu, GitHub's runners among them: there
+  `/usr/bin/php` links through `/etc/alternatives`, which its namespace does
+  not mount, and `/lib64` leads to `usr/lib64`, where the namespace's Arch
+  layout found no loader - no PHP started, and the verifier refused the link
+  as a sealed root. It runs the file the link resolves to, or the PHP a
+  trusted case names with `--php`, and lays out `/bin`, `/lib` and `/lib64`
+  as the system does. CI's memory job may take 25 minutes: its 3.x leg took
+  14 of 15 before the runner's two steps joined it.
+
+- Promotion works on Windows again. The publication's directory check asks
+  `linked_reparse` about a stat the portable NT backend built from fields,
+  whose `st_file_attributes` is None, and `None & 0x400` raised a TypeError
+  in every promotion - a save's included, and the Stop hook recorded no
+  turn. Such a stat is no reparse point: that backend refuses every one
+  before it builds a stat. The native A/B pilot's `read_file` compares a
+  file's open and named images by `st_birthtime_ns` on Windows, where Python
+  3.12+ gives `st_ctime_ns` the last change from an open file and the
+  creation time from a path, so every file read as changed while read.
+
 - Wire public response-contract v2 into the opt-in task-complete stand: seal an
   approved common citation snapshot and complete stdin prompt, expose citation
   bytes read-only, retain bounded chronological answers, and run literal checks

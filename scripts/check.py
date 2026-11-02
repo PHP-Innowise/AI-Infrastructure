@@ -659,7 +659,7 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
             matrix=True,
             title=f"memory (matrix: Python {', '.join(MEMORY_PYTHONS)})",
             job="memory",
-            timeout_minutes=15,
+            timeout_minutes=25,
             weight=95,
             commands=tuple(command for version in MEMORY_PYTHONS for command in _memory_commands(version)),
         ),
