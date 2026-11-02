@@ -1,11 +1,14 @@
 """Maintainer native A/B controller: private plans, safe images and bounded sessions."""
+import contextlib
 import hashlib
+from datetime import date, timedelta
 import json
 import os
 from pathlib import Path
 import stat
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -409,6 +412,82 @@ class CaptureEvidenceTests(unittest.TestCase):
         finally:case.doCleanups()
 
 
+class MemoryPreparationTests(unittest.TestCase):
+    def setUp(self):
+        import memory_native_ab
+        self.controller = memory_native_ab
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.corpus = self.root / 'copy'
+        self.calls = []
+        self.env = self.controller.child_env()
+        self.env.update(HOME=str(self.root), TMPDIR=str(self.root), PYTHONDONTWRITEBYTECODE='1')
+
+    def image(self, *, source='rules.md', invalid=False):
+        today = date.today()
+        metadata = dict(id='MEM-9001', title='Amber retry boundary', type='constraint',
+                        status='active', scope=['tooling'], tags=['retry'],
+                        created=today.isoformat(), last_verified=today.isoformat(),
+                        review_after=(today + timedelta(days=365)).isoformat(),
+                        sources=[source], supersedes=[], superseded_by=None)
+        if invalid:
+            metadata['type'] = 'invalid-kind'
+        chunk = ('---\n' + json.dumps(metadata) + '\n---\n# Amber retry boundary\n'
+                 'Only idempotent requests can be retried.\n').encode()
+        return [('memory-bank/chunks/MEM-9001-amber-retry.md', chunk, 0o640),
+                ('rules.md', b'Only idempotent requests can be retried.\n', 0o644)]
+
+    def trusted(self, label, command):
+        self.calls.append(label)
+        checked = subprocess.run(command, cwd=self.corpus, env=self.env,
+                                 capture_output=True, timeout=30)
+        if checked.returncode:
+            raise io.PilotError(label + ': ' + checked.stdout.decode() + checked.stderr.decode())
+        return checked.stdout
+
+    def test_imported_chunks_rebuild_newer_blank_catalog_and_search_index(self):
+        from memory_native_ab_admission import MaterializedGate
+        image = self.image()
+        io.copy_image(image, self.corpus)
+        self.controller.install_runtime(self.corpus)
+        gate = MaterializedGate(self.corpus, image)
+        chunk = self.corpus / image[0][0]
+        os.utime(chunk, (1, 1))  # Fresh overlay INDEX is newer; mtime healing skips it.
+        index = self.corpus / 'memory-bank/INDEX.md'
+        self.assertNotIn('MEM-9001', index.read_text())
+        self.controller.prepare_memory(self.trusted)
+        self.assertIn('MEM-9001', index.read_text())
+        self.assertEqual((image[0][1], image[0][2]), io.read_file(chunk))
+        with contextlib.closing(sqlite3.connect(self.corpus / 'memory-bank/local/context.db')) as db:
+            self.assertIn(image[0][0], {row[0] for row in db.execute('SELECT path FROM documents')})
+        before = (index.read_bytes(), index.stat().st_mtime_ns)
+        self.controller.prepare_memory(self.trusted)
+        self.assertEqual(before, (index.read_bytes(), index.stat().st_mtime_ns))
+        gate.seal_generated()
+        gate.checkpoint()
+        self.assertTrue(gate.verify()['verified'])
+
+    def test_empty_bank_prepares_and_each_validation_failure_stops_indexing(self):
+        for variant in ('empty', 'metadata', 'missing-source'):
+            with self.subTest(variant=variant):
+                self.corpus = self.root / variant
+                image = [] if variant == 'empty' else self.image(
+                    source='absent.md' if variant == 'missing-source' else 'rules.md',
+                    invalid=variant == 'metadata')
+                io.copy_image(image, self.corpus)
+                self.controller.install_runtime(self.corpus)
+                self.calls.clear()
+                if variant == 'empty':
+                    self.controller.prepare_memory(self.trusted)
+                    self.assertEqual(['bank-reindex', 'bank-validate', 'brain-validate', 'index'], self.calls)
+                else:
+                    with self.assertRaisesRegex(ValueError, 'bank-validate'):
+                        self.controller.prepare_memory(self.trusted)
+                    self.assertEqual(['bank-reindex', 'bank-validate'], self.calls)
+                    self.assertEqual((image[0][1], image[0][2]), io.read_file(self.corpus / image[0][0]))
+
+
 class ControllerTests(unittest.TestCase):
     def setUp(self):
         try: import memory_native_ab as controller
@@ -522,6 +601,12 @@ print('native-preflight-ok')
         self.assertEqual(1,len(a['new_chunks']))
         self.assertEqual(a['new_chunks'],b['delivered_chunks'])
         self.assertTrue(b['hooks_healthy'])
+        for stage in ('source', 'served'):
+            self.assertIn('validation passed',
+                (self.run / 'control' / (stage + '-bank-validate.stdout')).read_text())
+        for chunk in a['new_chunks']:
+            self.assertIn(Path(chunk).name,
+                (self.run / 'work/served/memory-bank/INDEX.md').read_text())
         self.assertFalse((self.run/'work/served/memory-bank/local/native-ab/home'/
                          a['sessions'][0]).exists())
 
@@ -572,6 +657,34 @@ print('native-preflight-ok')
         self.assertEqual(1,summary['attempted']);self.assertEqual('blocked-source',summary['stages']['served'])
         self.assertFalse((self.run/'work/served').exists())
         with self.assertRaises(ValueError):self.controller.run(self.run)
+
+    @unittest.skipUnless(sys.platform == 'linux' and shutil.which('bwrap'), 'Linux bubblewrap fixture')
+    def test_invalid_imported_bank_fails_before_git_and_native_dispatch(self):
+        fixture = MemoryPreparationTests()
+        fixture.setUp()
+        try:
+            # Text is safe to admit, but its active source is missing: Bank
+            # validation must reject it rather than silently dropping it.
+            for name, raw, mode in fixture.image(source='absent.md'):
+                target = self.source / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw)
+                target.chmod(mode)
+            self.controller.plan(self.config, self.run)
+            original = self.controller.run_process
+            def no_native(*args, **kwargs):
+                self.assertFalse(kwargs.get('native', True), 'invalid bank reached model dispatch')
+                return original(*args, **kwargs)
+            with mock.patch.object(self.controller, 'native_command', return_value=[sys.executable, 'unused.py']), \
+                 mock.patch.object(self.controller, 'run_process', side_effect=no_native):
+                result = self.controller.run(self.run, stage='source')
+            self.assertEqual('failed', result['stages']['source'])
+            self.assertFalse((self.run / 'work/source/.git').exists())
+            self.assertIn('absent.md', (self.run / 'control/source-bank-validate.stderr').read_text())
+            self.assertFalse((self.run / 'control/source-index.stdout').exists())
+            self.assertFalse((self.run / 'work/served').exists())
+        finally:
+            fixture.doCleanups()
 
     def test_stale_reader_cannot_overwrite_a_finished_attempt_after_lock(self):
         self.controller.plan(self.config,self.run)

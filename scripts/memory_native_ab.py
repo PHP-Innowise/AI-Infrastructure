@@ -77,6 +77,22 @@ def install_runtime(corpus):
             raise io.PilotError('non-executable canonical hook')
 
 
+def prepare_memory(trusted):
+    """Rebuild and check derived memory after admission, before native dispatch.
+
+    Overlay can supply a blank INDEX for imported chunks. Reindex explicitly:
+    timestamp-based healing can mistake that new blank file for a current one.
+    The caller supplies its bounded runner/private environment and receipts.
+    This must follow MaterializedGate construction: locks/indexes create local
+    state, which is deliberately forbidden in an initially admitted image.
+    """
+    cli = [sys.executable, '-B', 'memory-bank/scripts/context.py']
+    trusted('bank-reindex', [*cli, 'reindex-bank', '--json'])
+    trusted('bank-validate', [sys.executable, '-B', 'memory-bank/scripts/validate.py'])
+    trusted('brain-validate', [*cli, 'brain-validate'])
+    trusted('index', [*cli, 'index', '--json'])
+
+
 def make_view(corpus, private, task_alias, command, *, credentials=True):
     from memory_outcome_isolation import prepare_agent_view
     evidence = corpus / 'memory-bank/local/native-ab'
@@ -275,6 +291,7 @@ def execute_stage(run_root, seal, role, source_result=None):
             raise io.PilotError('trusted preparation failed')
         return io.read_file(target, 1024*1024)[0]
 
+    prepare_memory(trusted)
     trusted('git', ['git', 'init', '-q', '--initial-branch', task['task_alias']])
     identity = io._json(trusted('start', [sys.executable, '-B', 'memory-bank/scripts/context.py',
         'start', '--task-id', task['task_alias'], '--goal', 'Independent native-memory research', '--json']))

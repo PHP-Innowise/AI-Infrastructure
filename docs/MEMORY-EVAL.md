@@ -1526,6 +1526,19 @@ such a holdout; moving a clock alone does not establish long-term recall.
 
 ## Native producer and fresh consumer
 
+Trusted preparation rebuilds `memory-bank/INDEX.md` unconditionally after the
+materialized admission gate is constructed, runs the separate Bank validator
+(`memory-bank/scripts/validate.py`), validates Brain, then refreshes SQLite.
+`context.py validate` alone validates Brain and cannot establish Bank validity.
+Any failure stops before native dispatch and retains the failed attempt and
+preparation receipts. Reindexing changes only the derived catalog; it does not
+re-attest, repair, promote or discard imported knowledge. A timestamp shortcut
+is insufficient when a fresh blank INDEX is newer than the imported chunks.
+Custom controllers must invoke `memory_native_ab.prepare_memory(trusted)` in
+the same post-admission, private-environment, bounded-receipt phase, before
+baseline capture and sealing. Running it in `install_runtime()` would create
+local locks/indexes before the fresh-image admission check.
+
 `scripts/memory_native_ab.py` makes the native A→B development procedure
 reproducible. It is a private maintainer tool, separate from the default
 first-touch stand and from a confirmatory task-outcome comparison.

@@ -28,6 +28,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Rebuild and validate imported Memory Bank catalogs before native A/B dispatch,
+  then refresh SQLite under the existing admission and timeout boundaries.
+  Add an opt-in EntryFetchThrottle oracle v2 with conflicting `include_path`
+  controls that verify the exact CLI-selected source. Frozen prior experiments
+  and their original verdicts remain unchanged.
+
 - Wire public response-contract v2 into the opt-in task-complete stand: seal an
   approved common citation snapshot and complete stdin prompt, expose citation
   bytes read-only, retain bounded chronological answers, and run literal checks

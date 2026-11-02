@@ -263,7 +263,7 @@ jobs:
         # parsing run here on a synthetic project, with one real refresh.
         run: python3 -m unittest tests.test_memory_eval tests.test_memory_graph_pilot tests.test_memory_miss_audit tests.test_memory_onnx tests.test_memory_onnx_pilot tests.test_memory_outcome_ab tests.test_memory_outcome_verify tests.test_memory_response_contract tests.test_memory_response_intake tests.test_memory_outcome_isolation tests.test_memory_delivery_proof tests.test_memory_rerank_pilot tests.test_memory_sqlite_vec_pilot tests.test_memory_fact_consolidation tests.test_memory_history_series tests.test_memory_current_facts tests.test_memory_consolidation_pilot tests.test_memory_freshness_plan tests.test_memory_selective_retrieve_pilot
       - name: Native A-to-B memory maintainer runner (offline)
-        run: python3 -m unittest tests.test_memory_native_ab tests.test_memory_native_admission
+        run: python3 -m unittest tests.test_memory_native_ab tests.test_memory_native_admission tests.test_memory_throttle_oracle
       - name: Memory snapshot and failed-refresh boundaries
         run: python3 -m unittest tests.test_memory_runtime_reliability
       - name: Native memory source diagnostics and complete-governance boundaries

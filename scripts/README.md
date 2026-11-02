@@ -519,6 +519,14 @@ Fresh Git/index binaries and external read-only provider authentication are
 explicit derived-state/transport exceptions, not claims of text screening or
 universal secret absence. See `docs/MEMORY-EVAL.md`, “Mandatory snapshot admission”.
 
+After constructing the materialized admission gate, trusted preparation always
+runs `reindex-bank`, the separate Bank `validate.py`, Brain validation and SQLite
+`index`, retaining bounded receipts before any native dispatch. A blank or newer
+Markdown INDEX cannot hide imported chunks. Invalid knowledge blocks the attempt;
+preparation never changes chunk contents or silently removes invalid records.
+Custom controllers reusing `install_runtime()` must call `prepare_memory(trusted)`
+at that same post-admission point with their private, bounded receipt runner.
+
 The exact JSON configuration and staged source/served commands are documented
 in [MEMORY-EVAL.md](../docs/MEMORY-EVAL.md#native-producer-and-fresh-consumer).
 Configuration and output must be separate from each other, the tooling clone
@@ -541,6 +549,43 @@ do not establish real model behavior or causal task benefit:
 ```bash
 python3 -B -m unittest tests.test_memory_native_ab tests.test_check
 ```
+
+### `memory_throttle_oracle_v2.py`
+
+Opt-in, task-specific external artifact oracle for a **newly sealed**
+EntryFetchThrottle regression-harness task. This portable successor preserves
+the previous 56 finite controls and adds two bare-filename `include_path`
+collisions: a selected good source must pass with a broken shadow, and a selected
+broken source must fail with a good shadow. Resolve the requested source to an
+absolute path before requiring it. Both sources are readonly public code, not
+private labels. Finite mutations do not establish exhaustive correctness.
+
+The trusted patch case invokes:
+
+```bash
+python3 /tooling/scripts/memory_throttle_oracle_v2.py \
+  --source /private/public/EntryFetchThrottle.php \
+  --public-test /private/public/EntryFetchThrottleTest.php
+```
+
+Use the candidate root as cwd. It must contain the unchanged public files at
+`packages/website-public-api/app/src/Service/EntryFetchThrottle.php` and
+`packages/website-public-api/app/tests/Unit/Service/EntryFetchThrottleTest.php`,
+and the produced `verification/throttle_regression.php`. Seal the script,
+the two public files and `/usr/bin/php`/`/usr/bin/bwrap` as **individual** verifier
+read roots; never mount a directory holding private reference fixtures.
+The generic patch verifier binds that implementation and rubric into its digest.
+The stdout receipt keeps the existing `task-outcome-verifier-v1` interface;
+infrastructure failures remain unknown rather than false candidate labels.
+Each untrusted execution retains nested PID/network isolation, a trusted PHP
+startup handshake, bounded time/output and no access to the oracle or reference.
+Linux, PHP and Bubblewrap are required; no model calls or installation are used
+by its synthetic regression tests.
+
+This is a future contract revision, not a regrade of a frozen study. Select and
+seal it explicitly for new tasks; never replace an existing study's oracle or
+replay its B artifacts. Existing study data, outcomes and installed defaults
+remain unchanged.
 
 ### `memory_outcome_ab.py`
 
