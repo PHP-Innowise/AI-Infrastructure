@@ -1224,6 +1224,43 @@ not require a task and does not create a manifest.
 `context` is a compatibility alias. New operational guidance should use
 `retrieve`.
 
+Immediately before delivery receipts, governed retrieval rechecks the working
+task and delivered source images. An unavailable or denied task loses its
+working text, resolved UUID/revision/path, last-turn report and links seeded
+only by its touched files or ticket preferences. Recall also withdraws its
+task-owned scope. The caller's original task label and independently requested
+public evidence can remain. An eligible concurrent rewrite is distinct: its
+old working text is withheld with `working_changed`, while its valid pointer
+and independent evidence remain. This final custody pass only removes content;
+it does not refill slots or rerank candidates.
+Navigation and empty recall also withdraw unavailable task-derived query terms
+and resolved labels, including when the task disappeared before assembly.
+A checked public Cursor topic for a genuinely unprovisioned task can still
+continue; it does not depend on a missing task's private working text.
+
+The optional `Last turn` hint reads at most 64 KiB from an ordinary, singly
+linked `memory-bank/local/last-turn-report.json`, through held native directory
+handles. Linked parents, special files, concurrent image changes and malformed
+reports quietly omit this hint. Report publication uses the same rooted I/O,
+syncs the temporary file before replacement, and accepts at most 1 MiB of local
+diagnostics; a report larger than the delivery limit remains local. Missing
+secure host primitives omit the hint rather than falling back to path-following
+I/O. A summary longer than 4096 characters yields a fixed too-large notice
+before regex screening; this bounds processing of punctuation-heavy diagnostics.
+Smaller complete summaries pass the existing secret/privacy guard before the
+600-character display limit. Sensitive text yields a fixed notice that diagnostics
+were withheld. Local diagnostics are not rewritten by either delivery guard. These
+best-effort operations preserve process cancellation, including when ordinary
+cleanup fails. This advisory report is not durable memory or verification of
+the preceding task's result.
+
+Cursor rule maintenance also preserves cancellation when releasing its shared
+lock or closing held directories. Cleanup uses the exception actually leaving
+the operation, including a new cancellation during unlock; an error already
+handled by the caller is not treated as pending. Owned unlock, descriptor close
+and process-lock release are attempted in order. An ordinary cleanup failure
+without a pending exception retains the existing incomplete/preserved fallback.
+
 In lightweight mode, `retrieve` and `context` build a simpler layered packet
 from the local task, document search, and local episodes. They do not run the
 governed manifest and eligibility pipeline.
@@ -1298,6 +1335,13 @@ A conflict partner can still be excluded for privacy, ownership, authority,
 lifecycle, or freshness. The runtime must not leak it merely to complete the
 pair.
 
+Delivered records say `recorded conflict; verify sources` when a conflict
+relationship exists, including an incoming one. The relation is historical
+evidence, not a claim that it remains unresolved or that both sides were
+delivered. Partner identifiers and paths appear only when that partner survives
+eligibility and final packing. Changing the warning changes conversation
+novelty even if the record body itself is unchanged.
+
 Supersession represents replacement, not disagreement. A superseded record is
 excluded from active retrieval and can be compacted. Relationships require a
 replacement backlink: the old record's `superseded_by` and the replacement's
@@ -1322,9 +1366,14 @@ not express that second case at all.
 Closing a period is an operation, not an editing convention: `context.py
 bank-retire --id MEM-... --valid-to YYYY-MM-DD [--superseded-by MEM-...]`
 writes the chunk, the other side of any replacement link, and the regenerated
-index under one lock, validates the bank, and restores every touched file if
-anything fails. Doing it by hand leaves the bank invalid between the first
-edit and the last.
+index under one lock and validates the bank. A bounded checkpoint records both
+chunk images before the first change. Before commit, ordinary failures restore
+them immediately; process death leaves recovery custody for the next mutation,
+which rolls back the exact chunks and rebuilds the index. Checkpoint removal
+is the commit point. Unknown edits stop recovery without being overwritten;
+unlocked readers can see pending state until that boundary. See
+[retirement recovery](OPERATIONS.md#bank-retire). Doing it by hand leaves the
+bank invalid between the first edit and the last.
 
 Every bank write — promotion, compaction, `bank-reverify`, `bank-retire` — is
 refused for what it introduces, judged against the bank as it stood before

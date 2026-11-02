@@ -14,6 +14,7 @@ import time
 from itertools import islice
 
 import memory_native_ab_io as io
+import memory_native_ab_admission as admission
 from memory_native_ab_session import run_process
 from memory_native_ab_evidence import capture, metadata, command_args
 from memory_pilot_support import child_env
@@ -44,7 +45,8 @@ def runtime_digest():
         raw, mode = io.read_file(path)
         rows.append((path.name, io.sha(raw), mode))
     for name in ('memory_outcome_ab.py', 'memory_outcome_isolation.py',
-                 'memory_delivery_proof.py', 'memory_pilot_support.py', 'memory_eval.py'):
+                 'memory_delivery_proof.py', 'memory_pilot_support.py', 'memory_eval.py',
+                 'install_accelerator.py'):
         raw, mode = io.read_file(ROOT / 'scripts' / name)
         rows.append((name, io.sha(raw), mode))
     return io.digest(rows)
@@ -67,6 +69,7 @@ def install_runtime(corpus):
         source = CANON / 'project-brain/config' / name
         if source.exists():
             shutil.copyfile(source, corpus / 'project-brain/config' / name)
+            (corpus / 'project-brain/config' / name).chmod(0o644)
     for name in ('memory-bank', 'project-brain', '.context-handoff'):
         (corpus / name).mkdir(exist_ok=True, mode=0o700)
     for path in (corpus / '.codex/hooks').glob('*.sh'):
@@ -83,6 +86,11 @@ def make_view(corpus, private, task_alias, command, *, credentials=True):
     prefix = list(view['prefix'])
     position = next((i for i, x in enumerate(prefix)
         if x == '--ro-bind' and prefix[i + 2] == '/home/agent/.codex/auth.json'), len(prefix))
+    if position < len(prefix):
+        # Empty mountpoint only: account contents remain on their external RO
+        # transport mount and never enter a corpus file or admission report.
+        fd = os.open(evidence / 'home/auth.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
     prefix[position:position] = ['--bind', str(evidence / 'home'), '/home/agent/.codex']
     for i, value in enumerate(prefix):
         if value == '--tmpfs' and prefix[i+1] == '/tmp':
@@ -167,6 +175,21 @@ def application_digest(image):
                             if not row[0].startswith(('memory-bank/', 'project-brain/'))])
 
 
+def _stdout_frame_match(render, outputs, *, deadline=None):
+    size, expected = render.get('frame_bytes'), render.get('frame_sha256')
+    if (render.get('status') != 'trace-reported' or type(size) is not int
+            or not 1 <= size <= io.MAX_FILE or not isinstance(expected, str)):
+        return None
+    found = None
+    for output in outputs:
+        io.check_deadline(deadline)
+        if len(output) >= size and io.sha(output[:size]) == expected:
+            if len(output) == size:
+                return 'whole'
+            found = 'prefix'
+    return found
+
+
 def delivery(corpus, identity, events, before_manifests, known, expected, *, deadline=None):
     from memory_delivery_proof import collect_delivery_proof
     import memory_outcome_ab as ab
@@ -176,7 +199,7 @@ def delivery(corpus, identity, events, before_manifests, known, expected, *, dea
     if len(paths) > 1000:
         raise io.PilotError('manifest scan bound')
     proof = collect_delivery_proof(corpus, paths, known_paths=known, deadline=deadline)
-    outputs = set()
+    outputs = []
     for line in io.read_file(events, 8*1024*1024)[0].splitlines():
         io.check_deadline(deadline)
         event = io._json(line)
@@ -186,8 +209,9 @@ def delivery(corpus, identity, events, before_manifests, known, expected, *, dea
         if item.get('type') != 'command_execution' or item.get('exit_code') != 0:
             continue
         argv = command_args(item.get('command', ''), corpus)
-        if argv and argv[0] in ('retrieve', 'context'):
-            outputs.add(io.sha(item.get('aggregated_output', '').encode()))
+        output = item.get('aggregated_output')
+        if argv and argv[0] in ('retrieve', 'context') and isinstance(output, str):
+            outputs.append(output.encode('utf-8'))
     found = []
     for frame in proof['frames']:
         io.check_deadline(deadline)
@@ -195,9 +219,11 @@ def delivery(corpus, identity, events, before_manifests, known, expected, *, dea
             continue
         for doc in frame['selected']:
             if (doc['path'] in expected and doc['document_state'] == 'match' and doc['sources']
-                    and all(r['state'] == 'match' for r in doc['sources'])
-                    and doc['render'].get('frame_sha256') in outputs):
-                found.append(doc['path'])
+                    and all(r['state'] == 'match' for r in doc['sources'])):
+                match = _stdout_frame_match(doc['render'], outputs, deadline=deadline)
+                if match:
+                    doc['render']['native_stdout_match'] = match
+                    found.append(doc['path'])
     return proof, sorted(set(found))
 
 
@@ -220,17 +246,26 @@ def execute_stage(run_root, seal, role, source_result=None):
 
     if role == 'source':
         image = io.snapshot(Path(config['project_snapshot']), deadline=deadline)
+        if io.image_digest(image) != seal['source_sha256']:
+            raise io.PilotError('source changed after plan')
     else:
         image = io.snapshot(work / 'source', deadline=deadline)
         if io.image_digest(image) != source_result['handoff_sha256']:
             raise io.PilotError('source handoff changed')
+    admission.admit_image(image, deadline=deadline)
     io.copy_image(image, corpus)
     remaining()
     install_runtime(corpus)
+    gate = admission.MaterializedGate(corpus, image, deadline=deadline)
     remaining()
     env = child_env()
     env.update(PYTHONDONTWRITEBYTECODE='1', GIT_OPTIONAL_LOCKS='0', PROJECT_BRAIN_OWNER='local',
                GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM='1')
+    # Trusted preparation also gets a private home; no user worktree registry,
+    # Git configuration or temporary queue is carried into these copies.
+    prep_home, prep_tmp = control / (role + '-prep-home'), control / (role + '-prep-tmp')
+    prep_home.mkdir(mode=0o700); prep_tmp.mkdir(mode=0o700)
+    env.update(HOME=str(prep_home), TMPDIR=str(prep_tmp))
 
     def trusted(label, command):
         target = control / (role + '-' + label + '.stdout')
@@ -262,6 +297,7 @@ def execute_stage(run_root, seal, role, source_result=None):
     folders = ('memory-bank/local/retrieval-manifests', 'project-brain/control/retrieval-manifests')
     before_manifests = {p.relative_to(corpus).as_posix()
                        for name in folders for p in (corpus / name).glob('*.json')}
+    gate.seal_generated()
     view = make_view(corpus, control, task['task_alias'], command)
     probes = [str(control / 'plan.json'), config['project_snapshot']]
     if role == 'served':
@@ -273,6 +309,10 @@ def execute_stage(run_root, seal, role, source_result=None):
         native=False, env=view['env'], max_bytes=4096)
     if not checked['completed']:
         raise io.PilotError('read-isolation probe failed')
+    # Mount setup may create empty target directories inside the private /tmp.
+    # Admit that actual tree after the trusted probe, before any model process.
+    io.write_json(control / (role + '-admission.json'), gate.checkpoint())
+    io.write_json(control / (role + '-admission-verified.json'), gate.verify())
     events = control / (role + '-events.jsonl')
     result = run_process([*view['prefix'], '--', *view['command']], corpus, events,
         timeout=remaining(), cap=config['tool_cap'], env=view['env'],
@@ -339,8 +379,10 @@ def plan(config_path, output):
     config_path, output = Path(config_path), Path(output)
     config = io.load_config(config_path)
     source, _, output = io.validate_roots(Path(config['project_snapshot']), config_path, output)
+    image = io.snapshot(source)
+    admitted = admission.admit_image(image)
     seal = {'schema': FORMAT, 'config': config,
-        'source_sha256': io.image_digest(io.snapshot(source)), 'runtime_sha256': runtime_digest(),
+        'source_sha256': io.image_digest(image), 'source_admission': admitted, 'runtime_sha256': runtime_digest(),
         'created_at': time.time(), 'cohort_role': 'development-smoke'}
     output.mkdir(mode=0o700)
     control = output / 'control'

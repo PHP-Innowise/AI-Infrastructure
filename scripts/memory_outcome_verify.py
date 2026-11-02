@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import stat
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,8 @@ import time
 from typing import Any, Dict
 
 from memory_outcome_isolation import IsolationError, verifier_command
+from memory_native_ab_io import ordinary, read_file
+from memory_pilot_support import strict_json
 
 MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024
 MAX_SNAPSHOT_FILES = 100000
@@ -21,14 +24,7 @@ MAX_ANSWER_BYTES = 1024 * 1024
 
 
 def file_digest(path: Path) -> str:
-    value = hashlib.sha256()
-    with path.open('rb') as stream:
-        while True:
-            block = stream.read(1024 * 1024)
-            if not block:
-                break
-            value.update(block)
-    return value.hexdigest()
+    return hashlib.sha256(read_file(path, MAX_SNAPSHOT_BYTES)[0]).hexdigest()
 
 
 def digest(value: Any) -> str:
@@ -43,6 +39,9 @@ def snapshot_digest(root: Path) -> str:
     Restricting links deliberately refuses escaping and race-prone candidate
     snapshots instead of dereferencing something outside the disposable tree.
     """
+    root = ordinary(root)
+    if not root.is_dir():
+        raise ValueError('candidate must be an ordinary existing directory')
     result, size = [], 0
     for base, dirs, files in os.walk(root, followlinks=False):
         folder = Path(base)
@@ -63,18 +62,65 @@ def snapshot_digest(root: Path) -> str:
 
 def verifier_digest(case: Dict[str, Any]) -> str:
     """Bind the rubric AND implementation/label bytes, never argv alone."""
+    if (not isinstance(case, dict) or not isinstance(case.get('read_roots', []), list)
+            or not isinstance(case.get('argv', []), list)
+            or any(not isinstance(raw, str) for raw in [*case.get('read_roots', []), *case.get('argv', [])])):
+        raise ValueError('invalid verifier artifacts')
     images = []
     for raw in case.get('read_roots') or []:
         path = Path(raw)
         if path.is_symlink() or not path.exists():
             raise ValueError('unsafe verifier artifact')
-        images.append((str(path.resolve()), snapshot_digest(path) if path.is_dir()
-                       else file_digest(path)))
-    for raw in case.get('argv') or []:
+        images.append((str(path.resolve()), _oracle_digest(path)))
+    for index, raw in enumerate(case.get('argv') or []):
         path = Path(raw)
         if path.is_absolute() and path.is_file():
-            images.append((str(path.resolve()), file_digest(path)))
+            # The host interpreter may be a normal system symlink; private
+            # implementation and label paths must remain ordinary artifacts.
+            path = path.resolve() if index == 0 else path
+            images.append((str(path.resolve()), _oracle_digest(path)))
     return digest([case, images])
+
+
+def _oracle_file_image(path: Path, limit: int):
+    before = path.lstat()
+    if stat.S_IMODE(before.st_mode) & 0o7000:
+        raise ValueError('special oracle permission bits refused')
+    raw, mode = read_file(path, limit)
+    after = path.lstat()
+    identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns,
+                             item.st_ctime_ns, item.st_mode)
+    if identity(before) != identity(after):
+        raise ValueError('oracle artifact changed while reading')
+    return raw, mode
+
+
+def _oracle_digest(root: Path) -> str:
+    """Seal all readable oracle artifacts, including hidden labels and modes."""
+    root = ordinary(root)
+    if not root.is_dir():
+        raw, mode = _oracle_file_image(root, MAX_SNAPSHOT_BYTES)
+        return digest(['file', hashlib.sha256(raw).hexdigest(), mode])
+    result = [('.', 'directory', stat.S_IMODE(root.stat().st_mode))]
+    total = 0
+    def fail(error):
+        raise error
+    for base, directories, files in os.walk(root, followlinks=False, onerror=fail):
+        folder = Path(base)
+        directories.sort()
+        for name in [*directories, *sorted(files)]:
+            if len(result) >= MAX_SNAPSHOT_FILES:
+                raise ValueError('oracle artifact count exceeded')
+            path = folder/name
+            image = path.lstat()
+            relative = path.relative_to(root).as_posix()
+            if stat.S_ISDIR(image.st_mode):
+                result.append((relative, 'directory', stat.S_IMODE(image.st_mode)))
+            else:
+                raw, mode = _oracle_file_image(path, MAX_SNAPSHOT_BYTES - total)
+                total += len(raw)
+                result.append((relative, 'file', hashlib.sha256(raw).hexdigest(), mode))
+    return digest(sorted(result))
 
 
 def verify_task(snapshot: Path, answer_artifact: Path, trusted_case: Dict[str, Any]) -> Dict[str, Any]:
@@ -84,9 +130,7 @@ def verify_task(snapshot: Path, answer_artifact: Path, trusted_case: Dict[str, A
     try:
         result['verifier_digest'] = verifier_digest(trusted_case)
         image = snapshot_digest(snapshot)
-        if answer_artifact.stat().st_size > MAX_ANSWER_BYTES:
-            return result
-        answer = answer_artifact.read_bytes()
+        answer, _ = read_file(answer_artifact, MAX_ANSWER_BYTES)
         result['artifact_digest'] = digest([image, hashlib.sha256(answer).hexdigest()])
         mode = trusted_case.get('mode')
         if mode == 'answer':
@@ -131,7 +175,7 @@ def verify_task(snapshot: Path, answer_artifact: Path, trusted_case: Dict[str, A
                     raw_receipt = output.read(65537)
             if checked.returncode != 0 or len(raw_receipt) > 65536:
                 return result
-            receipt = json.loads(raw_receipt)
+            receipt = strict_json(raw_receipt)
             if (not isinstance(receipt, dict) or set(receipt) != {'schema', 'completed', 'correct'}
                     or receipt['schema'] != 'task-outcome-verifier-v1'
                     or receipt['completed'] is not True or type(receipt['correct']) is not bool):

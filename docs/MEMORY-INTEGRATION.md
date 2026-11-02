@@ -72,14 +72,14 @@ python3 memory-bank/scripts/mcp_config.py --root . --tool claude --tool codex --
 
 Native clients still control workspace trust and MCP tool approval. Accept project
 MCP in Claude's `/mcp`, trust the Codex project, and enable the Cursor project MCP.
-Allow the four memory tools through the client's supported approval settings when
+Allow the five memory tools through the client's supported approval settings when
 automatic calls are desired. Configuration alone is not a grant of trust, and
 registration does not force the agent to use every retrieved claim.
 See [Claude MCP](https://code.claude.com/docs/en/mcp),
 [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), and
 [Cursor MCP](https://cursor.com/docs/mcp).
 
-## Four tools
+## Five tools
 
 Cursor's installed hooks use a persistent-rule delivery profile. Short replies
 such as `yes do it`, `да`, and `fix it` may use the last safe substantive query
@@ -97,6 +97,9 @@ their existing history and repeat behavior. This is local delivery behavior;
 it does not establish model quality or provider-token savings.
 
 - `memory_status`: check installed memory health.
+- `memory_source_fingerprints`: read CRLF-neutral hashes for 1–10 canonical
+  `sources` without provisioning a task or attesting truth. Use the complete
+  image only after checking the claim against those files.
 - `memory_retrieve`: pass the current `task_id` and a concise module/class/ticket
   `query` before complex work, after compaction/scope changes and before uncovered
   decisions. Optional `paths` link canonical sources. Verify cited claims. The
@@ -109,6 +112,11 @@ it does not establish model quality or provider-token savings.
   sanitized `progress`, up to three `next_steps`, and up to three reusable
   findings/decisions. Each learning needs `type`, `title`, `consequence` and
   1–10 canonical project `sources`. Set `verified: true` after checking claims.
+  An explicit existing-claim review preserves its type/title/source set and
+  adds `record_id` (Brain UUID), original numeric `expected_revision`, and
+  the complete checked `source_fingerprints`. Missing/protected references
+  are held rather than recreated; changed checked evidence can supersede
+  the old promoted chunk while preserving its body and history.
   Records explicitly say **agent-attested, not human-reviewed**: the verification's
   ledger entry carries `[attestation:agent]`, a chunk promoted from it is tagged
   `agent-attested`, and the capsule marks such knowledge where it delivers it.
@@ -217,7 +225,7 @@ or writes outside a read-only scope.
 
 ## Verify
 
-Confirm all four tools appear in each configured client. Retrieve for a fresh task,
+Confirm all five tools appear in each configured client. Retrieve for a fresh task,
 checkpoint with a goal, record a source-backed result, then replay the same ID/content
 and confirm no duplicates. Inspect Harness **Knowledge → Memory use**, run
 `context.py validate --json` and `memory-bank/scripts/validate.py`. Distinguish real
@@ -285,9 +293,34 @@ How the continuation ends depends on who reads the session. A headless run (`cod
 
 Every other session repeats, Cursor's included. `repeat` always repeats and `brief` never does; `CONTEXT_NATIVE_RESULT_ANSWER` sets it for one session. An unknown value repeats, and the journal's `requested` line carries `native-result:invalid-answer-setting`: the save itself is asked for either way.
 
-The step carries its rules - the JSON fields, the schema example, what belongs in learnings - in full only while the conversation lacks them. Every answer used to carry about 2,600 characters, and Claude Code's terminal showed them whole each time. The Stop reads the transcript's last 2 MiB: when a full step is there after the last compaction record, the step carries its commands, its ending and a pointer back to those rules, about 900 characters less. After a compaction, or without a readable transcript, the full step comes back. Cursor gets the full step every time: how its transcript records a summarized conversation could not be checked. `"native_result_instruction": "full"` in `runtime.json` (or `CONTEXT_NATIVE_RESULT_INSTRUCTION=full`) sends it every time; an unknown value does too.
+The step carries its rules - the JSON fields, the schema example, what belongs in learnings - in full only while the conversation lacks them. Every answer used to carry about 2,600 characters, and Claude Code's terminal showed them whole each time. The Stop reads the transcript's last 2 MiB: when a full step is there after the last compaction record, the step carries its commands, its ending and a pointer back to those rules, about 900 characters less. After a compaction, or without a readable transcript, the full step comes back. The latest full step must also match the current ordinary/proposal-only capture policy; changing that policy sends a fresh full step rather than inheriting a prior restriction. Cursor gets the full step every time: how its transcript records a summarized conversation could not be checked. `"native_result_instruction": "full"` in `runtime.json` (or `CONTEXT_NATIVE_RESULT_INSTRUCTION=full`) sends it every time; an unknown value does too.
 
 The save takes two more model calls, and Claude Code counts them against `--max-turns` (`maxTurns` in the Agent SDK). A headless run whose answer comes in its last two allowed calls ends with `error_max_turns` and no `result`; the Stop hook is told neither the limit nor the count. Give such a run two more turns, or set `CONTEXT_NATIVE_RESULT_REQUEST=off` for it (`docs/TROUBLESHOOTING.md`).
+
+### Optional capture-decision diagnostics
+
+Current `record-result`, prepared requests and MCP `memory_record_result` accept an
+optional `capture_decision`: `selected` requires at least one normalized checked
+learning; `no_reusable_knowledge` and `insufficiently_checked` require none.
+The field alone cannot create a task or bypass the existing nothing-to-record
+check. Without it, request normalization, digests and prepared wire images retain
+their legacy format; diagnostic interpretation is unknown. Supplied decisions
+are bound to the request digest and retained through Harness/MCP/native saves.
+
+This records the caller's selection reason. `selected` does not prove persistence:
+records may still be held. Inspect submitted, written, existing, held and promoted
+counts separately. Native evaluation counts decisions only for completed,
+non-repeat saved/held observations; missing, invalid or inconsistent metadata
+counts as `capture_unknown`. Refusals and errors stay separate. Journals include
+only the fixed enum, never a free-text reason or learning body.
+
+Harness preserves a valid original draft's identity if subsequent source
+filtering removes every selected learning; the final progress-only request omits
+the decision rather than inventing a reason. Existing omission diagnostics and
+bounds remain. A legacy command-chain runtime cannot bind this new field and
+reports that limitation with any partial saved work. Use matching updated core
+and Harness versions. Default native prompts and automatic draft instructions
+are unchanged; no extra extractor or forced finding was added.
 
 ### Decisions and known limits of the native save
 

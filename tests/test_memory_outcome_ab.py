@@ -1093,6 +1093,39 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':11,'output_tok
                 for slot in result['slots']:
                     self.assertIs(correct, slot['attempts'][0]['verification']['correct'])
 
+    def test_real_unfinished_continuation_never_reaches_positive_verifier(self):
+        import memory_outcome_isolation as isolation
+        probe = self.root / 'probe'; probe.mkdir()
+        try: view = isolation.prepare_agent_view(probe, self.private, credentials=False)
+        except isolation.IsolationError as error: self.skipTest(str(error))
+        if not isolation.probe_agent_view(view, self.verifiers): self.skipTest('Linux namespace unavailable')
+        original_build = self.build
+        def build(*args):
+            built = original_build(*args)
+            agent = args[1] / 'agent.py'
+            agent.write_text(agent.read_text() + "\nprint(json.dumps({'type':'turn.started'}),flush=True)\n")
+            return built
+        with mock.patch.object(self, 'build', side_effect=build):
+            self.seal()
+        def command(codex, corpus, arm, prompt, model):
+            return [sys.executable, str(corpus / 'agent.py'), arm]
+        with mock.patch.object(ab, 'codex_command', side_effect=command), \
+                mock.patch.dict(os.environ, {'CODEX_HOME': str(self.root / 'no-credentials')}), \
+                mock.patch('memory_outcome_verify.verify_task') as verify:
+            self.assertEqual(0, ab.main(['run', *self.options, '--endpoint', 'task-complete',
+                                        '--protocol', str(self.protocol), '--out', str(self.result)]))
+        verify.assert_not_called()
+        result = json.loads(self.result.read_text())
+        for slot in result['slots']:
+            attempt = slot['attempts'][0]
+            self.assertFalse(attempt['completed'])
+            self.assertIsNone(attempt['verification']['correct'])
+            self.assertIsNone(attempt['usage'])
+            self.assertEqual({'input_tokens': 11, 'output_tokens': 3}, attempt['known_usage'])
+        report = ab.summarize_complete(result)['arms']['recall']
+        self.assertEqual((0, 1, 14), (report['correct'], report['unknown'], report['known_host_reported_tokens']))
+        self.assertIsNone(report['host_reported_tokens'])
+
 
 class WholeCompletionReportTests(unittest.TestCase):
     def slot(self, task, arm, correct=None, completed=True, usage=None):
@@ -1145,6 +1178,36 @@ class WholeCompletionReportTests(unittest.TestCase):
         self.assertEqual(9, report['host_reported_tokens'])
         self.assertIsNone(report['total_provider_tokens'])
 
+    def test_partial_turn_usage_is_retained_without_double_count_or_complete_total(self):
+        first = self.slot('a', 'off', True, usage={'input_tokens': 10, 'output_tokens': 2,
+                                                  'cached_input_tokens': 4})
+        first['attempts'][0].update(known_usage={'input_tokens': 10, 'output_tokens': 2,
+                                                'cached_input_tokens': 4}, usage_complete=True,
+                                   usage_coverage={'completed_turns': 1, 'field_turns': {
+                                       'input_tokens': 1, 'output_tokens': 1, 'cached_input_tokens': 1}})
+        partial = self.slot('b', 'off', None, completed=False)
+        partial['attempts'][0].update(known_usage={'input_tokens': 5, 'output_tokens': 0,
+                                                  'cached_input_tokens': 2}, usage_complete=False,
+                                     usage_coverage={'completed_turns': 1, 'field_turns': {
+                                         'input_tokens': 1, 'output_tokens': 0, 'cached_input_tokens': 1}})
+        slots = [first, partial, self.slot('a', 'recall', True), self.slot('b', 'recall', True)]
+        report = ab.summarize_complete(self.result(slots))['arms']['off']
+        self.assertEqual(17, report['known_host_reported_tokens'])
+        self.assertEqual((15, 2, 6), (report['known_input_tokens'], report['known_output_tokens'],
+                                     report['known_cached_input_tokens']))
+        self.assertEqual((1, 2, 2, 1), (report['attempts_with_usage'], report['attempts_with_known_usage'],
+                                        report['attempts_with_known_input_usage'], report['attempts_with_known_output_usage']))
+        self.assertIsNone(report['host_reported_tokens'])
+
+    def test_complete_multiturn_usage_is_counted_once(self):
+        off = self.slot('a', 'off', True, usage={'input_tokens': 30, 'output_tokens': 5})
+        off['attempts'][0].update(known_usage={'input_tokens': 30, 'output_tokens': 5},
+                                 usage_complete=True, usage_coverage={'completed_turns': 2,
+                                     'field_turns': {'input_tokens': 2, 'output_tokens': 2}})
+        report = ab.summarize_complete(self.result([off, self.slot('a', 'recall', True)]))['arms']['off']
+        self.assertEqual(35, report['known_host_reported_tokens'])
+        self.assertEqual(35, report['host_reported_tokens'])
+
     def test_interruption_keeps_all_slots_and_attempt_costs(self):
         slots=[self.slot(str(i),'off',False,usage={'input_tokens':11,'output_tokens':3}) for i in range(3)]
         slots += [{'task_id':str(i),'arm':'off','repeat':0,'status':'pending','attempts':[]} for i in range(3,8)]
@@ -1177,6 +1240,120 @@ class CompletedTaskTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.corpus = Path(self.temp.name)
         self.agent = self.corpus / 'agent.py'
+
+    def run_events(self, events, cap=20, endpoint='task-complete'):
+        self.agent.write_text('import json\nfor event in ' + repr(events)
+                              + ': print(json.dumps(event), flush=True)\n', encoding='utf-8')
+        return ab.run_arm([sys.executable, str(self.agent)], self.corpus, [], cap, 5,
+                          endpoint=endpoint, answer_artifact=self.corpus / 'answer.txt')
+
+    @staticmethod
+    def event_turn(answer, usage, tool=False):
+        events = [{'type': 'turn.started'}]
+        if tool:
+            events += [{'type': kind, 'item': {'id': 'item_0', 'type': 'command_execution',
+                                              'command': 'true'}}
+                       for kind in ('item.started', 'item.completed')]
+        return events + [
+            {'type': 'item.completed', 'item': {'id': 'answer', 'type': 'agent_message', 'text': answer}},
+            {'type': 'turn.completed', 'usage': usage}]
+
+    def test_unfinished_later_turn_cannot_reuse_completion_or_answer(self):
+        result = self.run_events(self.event_turn('42', {'input_tokens': 10, 'output_tokens': 2})
+                                 + [{'type': 'turn.started'}])
+        self.assertFalse(result['completed'])
+        self.assertEqual('', (self.corpus / 'answer.txt').read_text())
+        self.assertIsNone(result['usage'])
+        self.assertFalse(result['usage_complete'])
+        self.assertEqual({'input_tokens': 10, 'output_tokens': 2}, result['known_usage'])
+
+    def test_completed_turns_sum_usage_and_reused_tool_ids(self):
+        first = {'input_tokens': 10, 'output_tokens': 2, 'cached_input_tokens': 4,
+                 'reasoning_output_tokens': 1}
+        second = {'input_tokens': 20, 'output_tokens': 3, 'cached_input_tokens': 6,
+                  'reasoning_output_tokens': 2}
+        result = self.run_events(self.event_turn('first', first, tool=True)
+                                 + self.event_turn('second', second, tool=True))
+        self.assertTrue(result['completed'])
+        self.assertEqual(2, result['calls'])
+        self.assertEqual({'input_tokens': 30, 'output_tokens': 5, 'cached_input_tokens': 10,
+                          'reasoning_output_tokens': 3}, result['usage'])
+        self.assertEqual([first, second], result['usage_events'])
+        self.assertTrue(result['usage_complete'])
+        self.assertEqual('second', (self.corpus / 'answer.txt').read_text())
+
+    def test_reused_tool_id_in_next_turn_still_reaches_cap(self):
+        events = self.event_turn('first', {'input_tokens': 10, 'output_tokens': 2}, tool=True)
+        events += self.event_turn('second', {'input_tokens': 20, 'output_tokens': 3}, tool=True)
+        result = self.run_events(events, cap=2)
+        self.assertEqual(('cap', 2, False), (result['stopped'], result['calls'], result['completed']))
+        self.assertIsNone(result['usage'])
+        self.assertEqual({'input_tokens': 10, 'output_tokens': 2}, result['known_usage'])
+
+    def test_timeout_after_completed_turn_retains_known_usage(self):
+        events = self.event_turn('first', {'input_tokens': 10, 'output_tokens': 2})
+        events += [{'type': 'turn.started'}]
+        self.agent.write_text('import json,time\nfor event in ' + repr(events)
+                              + ': print(json.dumps(event), flush=True)\ntime.sleep(10)\n')
+        result = ab.run_arm([sys.executable, str(self.agent)], self.corpus, [], 20, .2,
+                            endpoint='task-complete', answer_artifact=self.corpus / 'answer.txt')
+        self.assertEqual(('timeout', False), (result['stopped'], result['completed']))
+        self.assertIsNone(result['usage'])
+        self.assertFalse(result['usage_complete'])
+        self.assertEqual({'input_tokens': 10, 'output_tokens': 2}, result['known_usage'])
+
+    def test_duplicate_terminal_or_late_item_cannot_complete(self):
+        terminal = {'type': 'turn.completed', 'usage': {'input_tokens': 10, 'output_tokens': 2}}
+        for late in (terminal,
+                     {'type': 'item.started', 'item': {'id': 'late', 'type': 'command_execution'}},
+                     {'type': 'item.completed', 'item': {'id': 'late', 'type': 'agent_message', 'text': 'late'}},
+                     {'type': 'item.completed', 'item': []}):
+            with self.subTest(late=late):
+                result = self.run_events([terminal, late])
+                self.assertFalse(result['completed'])
+                self.assertEqual('error', result['stopped'])
+                self.assertIsNone(result['usage'])
+                self.assertEqual({'input_tokens': 10, 'output_tokens': 2}, result['known_usage'])
+
+    def test_incomplete_or_invalid_usage_keeps_known_subtotals(self):
+        cases = [
+            (None, 10, 2), ({}, 10, 2),
+            ({'input_tokens': True, 'output_tokens': 3}, 10, 5),
+            ({'input_tokens': -1, 'output_tokens': 3}, 10, 5),
+            ({'input_tokens': 20, 'output_tokens': False}, 30, 2),
+            ({'input_tokens': 20, 'output_tokens': 3, 'cached_input_tokens': -1}, 30, 5),
+            ({'input_tokens': 20, 'output_tokens': 3, 'cached_input_tokens': True}, 30, 5),
+            ({'input_tokens': 20, 'output_tokens': 3, 'cached_input_tokens': 21}, 30, 5),
+            ({'input_tokens': 20, 'output_tokens': 3, 'reasoning_output_tokens': 4}, 30, 5),
+        ]
+        for usage, known_input, known_output in cases:
+            with self.subTest(usage=usage):
+                result = self.run_events(self.event_turn('first', {'input_tokens': 10, 'output_tokens': 2})
+                                         + self.event_turn('second', usage))
+                self.assertTrue(result['completed'])
+                self.assertIsNone(result['usage'])
+                self.assertFalse(result['usage_complete'])
+                self.assertEqual(known_input, result['known_usage']['input_tokens'])
+                self.assertEqual(known_output, result['known_usage']['output_tokens'])
+                self.assertEqual(2, result['usage_coverage']['completed_turns'])
+                self.assertNotIn('cached_input_tokens', result['known_usage'])
+
+    def test_optional_usage_missing_in_one_turn_is_partial_not_zero(self):
+        first = {'input_tokens': 10, 'output_tokens': 2, 'cached_input_tokens': 4}
+        second = {'input_tokens': 20, 'output_tokens': 3}
+        result = self.run_events(self.event_turn('first', first) + self.event_turn('second', second))
+        self.assertTrue(result['usage_complete'])
+        self.assertEqual({'input_tokens': 30, 'output_tokens': 5}, result['usage'])
+        self.assertEqual(4, result['known_usage']['cached_input_tokens'])
+        self.assertEqual(1, result['usage_coverage']['field_turns']['cached_input_tokens'])
+
+    def test_first_touch_retains_legacy_usage_and_item_identity(self):
+        events = self.event_turn('first', {'input_tokens': 10, 'output_tokens': 2}, tool=True)
+        events += self.event_turn('second', {'input_tokens': 20, 'output_tokens': 3}, tool=True)
+        result = self.run_events(events, endpoint='first-touch')
+        self.assertEqual(1, result['calls'])
+        self.assertEqual({'input_tokens': 20, 'output_tokens': 3}, result['usage'])
+        self.assertFalse({'completed', 'known_usage', 'usage_events', 'usage_complete', 'usage_coverage'} & result.keys())
 
     def run_agent(self, ending='complete', cap=8, timeout=5):
         code = '''import json,sys,time,os

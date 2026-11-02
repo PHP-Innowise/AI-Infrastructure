@@ -105,6 +105,37 @@ calls. Run the new local suite with:
 python3 -m unittest tests.test_memory_benchmark_cost
 ```
 
+## Incremental acquisition comparison
+
+`compare_incremental(baseline, treatment, acquisition_baseline=..., acquisition_treatment=...)`
+compares supplied ledger snapshots over the same fixed horizon and usage profile.
+The two later-work snapshots contribute query + reader; judge is added only to
+the experiment total. Their ordinary source-task build phase is excluded.
+Acquisition is supplied separately for each arm:
+
+```python
+acquisition = {
+    'scope': 'memory-only',
+    'common_task_excluded': True,
+    'ledger': acquisition_ledger.snapshot(),
+}
+```
+
+Only that ledger's build phase contributes acquisition. It must describe just
+the extra memory work, including failed attempts and retries. An unobserved
+acquisition is unknown; a baseline with no such work needs explicit observed
+zero. Unobserved query/reader/judge phases in an acquisition ledger do not hide
+a complete build observation.
+
+The result separates incremental acquisition, future work and total, then
+amortizes by the planned horizon. Tokens, USD and summed component time propagate
+unknown independently. Cached input/reasoning remain subsets. Cost per correct
+answer requires consistent complete supplied grading and a positive correct
+count; contradictory imported grading is refused. Common task A is excluded
+only by the supplier's explicit scope assertion. This helper neither measures
+hidden provider work nor changes native outcome reports' unknown billing or
+attempt coverage. It does not establish savings from tokens alone.
+
 This suite validates accounting semantics. Actual upstream integration, physical
 attempt coverage, hidden work, provider/model behavior, invoice completeness,
 quality and net token savings remain pending. Do not substitute these arithmetic

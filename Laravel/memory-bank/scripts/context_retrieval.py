@@ -2258,10 +2258,18 @@ def _cursor_nt_backend():
                 os.close(root)
         else:
             fd = _open_relative(dir_fd, path, FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        failed = False
         try:
             return fstat(fd)
+        except BaseException:
+            failed = True
+            raise
         finally:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except Exception:
+                if not failed:
+                    raise
 
     def mkdir(name, mode=0o777, *, dir_fd=None):
         if dir_fd is None:
@@ -2274,6 +2282,7 @@ def _cursor_nt_backend():
         access = DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES
         options = FILE_DIRECTORY_FILE if directory else FILE_NON_DIRECTORY_FILE
         fd = _open_relative(parent_fd, name, access, FILE_OPEN, options)
+        failed = False
         try:
             deleting = ctypes.c_ubyte(1)
             status = IO_STATUS_BLOCK()
@@ -2281,8 +2290,15 @@ def _cursor_nt_backend():
                              FileDispositionInformation)
             if result < 0:
                 _raise(result)
+        except BaseException:
+            failed = True
+            raise
         finally:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except Exception:
+                if not failed:
+                    raise
 
     def unlink(name, *, dir_fd=None):
         if dir_fd is None:
@@ -2315,22 +2331,38 @@ def _cursor_nt_backend():
             raise ValueError('replace requires trusted source and destination directories on Windows.')
         fd = _open_relative(src_dir_fd, source, DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
                             FILE_OPEN, FILE_NON_DIRECTORY_FILE)
+        failed = False
         try:
             atomic_replace_open(fd, dst_dir_fd, destination)
+        except BaseException:
+            failed = True
+            raise
         finally:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except Exception:
+                if not failed:
+                    raise
 
     def publish_absent(source, destination, *, src_dir_fd, dst_dir_fd):
         fd = _open_relative(src_dir_fd, source, DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
                             FILE_OPEN, FILE_NON_DIRECTORY_FILE)
+        failed = False
         try:
             info = _rename_information(dst_dir_fd, destination, False)
             status = IO_STATUS_BLOCK()
             result = _nt_set(HANDLE(raw_handle(fd)), ctypes.byref(status), info, len(info), FileRenameInformation)
             if result < 0:
                 _raise(result)
+        except BaseException:
+            failed = True
+            raise
         finally:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except Exception:
+                if not failed:
+                    raise
 
     return SimpleNamespace(WINDOWS=True, open=open, fstat=fstat, stat=stat,
                            mkdir=mkdir, unlink=unlink, replace=replace,
@@ -2361,10 +2393,18 @@ def _cursor_safe_directory(path: Path, *, files=None) -> list[int]:
         image = path.lstat()
     else:
         descriptor = files.open_root(path)
+        failed = False
         try:
             image = files.fstat(descriptor)
+        except BaseException:
+            failed = True
+            raise
         finally:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except Exception:
+                if not failed:
+                    raise
     if (not stat.S_ISDIR(image.st_mode) or stat.S_ISLNK(image.st_mode)
             or getattr(image, "st_reparse_tag", 0) in workspace_roots.LINK_REPARSE_TAGS):
         raise OSError("unsupported directory custody")
@@ -2387,7 +2427,10 @@ def _cursor_directory(parent: int, name: str, *, create: bool = False, files=Non
             raise OSError("directory custody changed")
         return descriptor
     except BaseException:
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        except Exception:
+            pass
         raise
 
 
@@ -2412,6 +2455,7 @@ def _cursor_image(parent: Optional[int], name: str, limit: int, *, files=None, l
     if not stat.S_ISREG(named.st_mode) or named.st_nlink != links or named.st_size > limit:
         raise OSError("unsupported file custody")
     descriptor = files.open(name, os.O_RDONLY | files.O_NOFOLLOW | files.O_NONBLOCK, dir_fd=parent)
+    failed = False
     try:
         opened = files.fstat(descriptor)
         if _cursor_identity(opened) != _cursor_identity(named):
@@ -2429,8 +2473,27 @@ def _cursor_image(parent: Optional[int], name: str, limit: int, *, files=None, l
             raise OSError("file custody changed")
         raw.decode("utf-8", "strict")
         return raw, _cursor_identity(final)
+    except BaseException:
+        failed = True
+        raise
     finally:
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        except Exception:
+            if not failed:
+                raise
+
+
+def _cursor_cleanup_exit(operation, *arguments):
+    """An ExitStack callback that preserves its actual pending exception."""
+    def cleanup(error_type, error, traceback):
+        try:
+            operation(*arguments)
+        except Exception:
+            if error_type is None:
+                raise
+        return False
+    return cleanup
 
 
 @contextlib.contextmanager
@@ -2455,14 +2518,14 @@ def _cursor_lock(root: Path, parent: int, *, files=None):
         brain_runtime._LOCKS_GUARD.release()
     if not process_lock.acquire(blocking=False):
         raise OSError("busy")
-    descriptor = None
-    locked = False
-    depths = getattr(brain_runtime._LOCK_STATE, "depths", {})
-    brain_runtime._LOCK_STATE.depths = depths
-    depth = depths.get(key, 0)
-    try:
+    with contextlib.ExitStack() as cleanup:
+        cleanup.push(_cursor_cleanup_exit(process_lock.release))
+        depths = getattr(brain_runtime._LOCK_STATE, "depths", {})
+        brain_runtime._LOCK_STATE.depths = depths
+        depth = depths.get(key, 0)
         descriptor = files.open("runtime.lock", os.O_RDWR | os.O_CREAT | files.O_NOFOLLOW | files.O_NONBLOCK,
                              0o600, dir_fd=parent)
+        cleanup.push(_cursor_cleanup_exit(os.close, descriptor))
         opened = files.fstat(descriptor)
         named = files.stat("runtime.lock", dir_fd=parent, follow_symlinks=False)
         if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
@@ -2474,7 +2537,14 @@ def _cursor_lock(root: Path, parent: int, *, files=None):
                 msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
             else:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            locked = True
+
+            def unlock():
+                if windows:
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            cleanup.push(_cursor_cleanup_exit(unlock))
         depths[key] = depth + 1
         try:
             yield
@@ -2483,20 +2553,6 @@ def _cursor_lock(root: Path, parent: int, *, files=None):
                 depths[key] = depth
             else:
                 depths.pop(key, None)
-    finally:
-        try:
-            if descriptor is not None:
-                try:
-                    if locked:
-                        if windows:
-                            os.lseek(descriptor, 0, os.SEEK_SET)
-                            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
-                        else:
-                            fcntl.flock(descriptor, fcntl.LOCK_UN)
-                finally:
-                    os.close(descriptor)
-        finally:
-            process_lock.release()
 
 
 def _cursor_publish_absent(parent: int, temporary: str, name: str) -> None:
@@ -2522,14 +2578,17 @@ def _cursor_publish_absent(parent: int, temporary: str, name: str) -> None:
     os.link(temporary, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
 
 
-def _cursor_publish(parent: int, name: str, payload: bytes, expected, limit: int, *, files=None) -> None:
+def _cursor_publish(parent: int, name: str, payload: bytes, expected, limit: int, *, files=None,
+                    sync_file: bool = False) -> None:
     files = os if files is None else files
     if len(payload) > limit:
         raise OSError("publication admission bound")
     temporary = ".cursor-rule-" + new_uuid() + ".tmp"
     descriptor = files.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | files.O_NOFOLLOW,
                          0o600, dir_fd=parent)
+    publication_failed = False
     try:
+        write_failed = False
         try:
             pending = memoryview(payload)
             while pending:
@@ -2537,8 +2596,17 @@ def _cursor_publish(parent: int, name: str, payload: bytes, expected, limit: int
                 if count <= 0:
                     raise OSError("incomplete write")
                 pending = pending[count:]
+            if sync_file:
+                os.fsync(descriptor)
+        except BaseException:
+            write_failed = True
+            raise
         finally:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except Exception:
+                if not write_failed:
+                    raise
         if _cursor_image(parent, name, limit, **({} if files is os else {"files": files})) != expected:
             raise OSError("file custody changed")
         if expected is None:
@@ -2548,11 +2616,17 @@ def _cursor_publish(parent: int, name: str, payload: bytes, expected, limit: int
                 _cursor_publish_absent(parent, temporary, name)
         else:
             files.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+    except BaseException:
+        publication_failed = True
+        raise
     finally:
         try:
             files.unlink(temporary, dir_fd=parent)
         except FileNotFoundError:
             pass  # replace consumed our temporary name
+        except Exception:
+            if not publication_failed:
+                raise
 
 
 def _cursor_receipt(raw: bytes) -> dict[str, Any]:
@@ -2953,7 +3027,7 @@ def cursor_rule(repository: Path, action: str, *, task: str = "", phase: str = "
         with contextlib.ExitStack() as stack:
             root_fd = (os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) if files is os
                        else files.open_root(root))
-            stack.callback(os.close, root_fd)
+            stack.push(_cursor_cleanup_exit(os.close, root_fd))
             root_image = files.fstat(root_fd)
             if [root_image.st_dev, root_image.st_ino] != root_identity:
                 return result
@@ -2972,7 +3046,7 @@ def cursor_rule(repository: Path, action: str, *, task: str = "", phase: str = "
                     if name in (".cursor", "rules") and _cursor_linked_entry(parent, name, files):
                         linked.append(name)
                     raise
-                stack.callback(os.close, fd)
+                stack.push(_cursor_cleanup_exit(os.close, fd))
                 directories[(parent, name)] = fd
                 return fd
             def intact():
@@ -5453,6 +5527,18 @@ def excerpt_window(
 
 
 def delivery_identity(
+    connection: sqlite3.Connection, item: dict[str, Any], query: str
+) -> tuple[str, str]:
+    key, revision = _content_delivery_identity(connection, item, query)
+    if _conflict_recorded(item):
+        # A metadata-only dispute changes what a conversation must be told,
+        # even when the quoted answering section is byte-identical. Ordinary
+        # identities stay unchanged; removal of the warning also releases it.
+        revision = hashlib.sha256(("recorded-conflict\0" + revision).encode("utf-8")).hexdigest()
+    return key, revision
+
+
+def _content_delivery_identity(
     connection: sqlite3.Connection, item: dict[str, Any], query: str
 ) -> tuple[str, str]:
     """What handing this item gives a conversation: (key, revision).
@@ -8509,8 +8595,19 @@ def host_loaded_paths(repository: Path, host: str) -> set[str]:
     return loaded
 
 
-def _public_item(item: dict[str, Any]) -> dict[str, Any]:
+def _conflict_recorded(item: dict[str, Any]) -> bool:
+    return bool(item.get("conflicts") or item.get("match") == "conflict"
+                or item.get("conflict_recorded") is True)
+
+
+def _public_item(item: dict[str, Any], visible_records: Optional[set[str]] = None) -> dict[str, Any]:
     public = {key: item[key] for key in _PUBLIC_ITEM_KEYS}
+    # A dispute remains visible when its partner is unavailable. Its private
+    # identity does not: expose relations only to records delivered here.
+    public["conflicts"] = [record_id for record_id in item["conflicts"]
+                           if visible_records is not None and record_id in visible_records]
+    if _conflict_recorded(item):
+        public["conflict_recorded"] = True
     if item.get("match") not in (None, "covered"):
         public["match"] = item["match"]
     if item.get("selection"):
@@ -8533,15 +8630,15 @@ def _public_item(item: dict[str, Any]) -> dict[str, Any]:
 def _capsule_projection(selected: list[dict[str, Any]], local_episode_selected: list[dict[str, Any]]) -> dict[str, Any]:
     """Preserve the exact category/history/related ordering of capsule layers."""
     groups = {category: [] for category in BUDGETS}
-    # Conflict partners are both delivered by contract; the capsule names the
-    # other side so a reader does not have to infer it from a bare mark.
+    # Name only delivered partners. A layer, text ceiling, novelty receipt or
+    # custody check may withhold the other side; the generic warning survives.
     paths_by_record = {
         item.get("record_id"): str(item.get("path"))
         for item in selected
         if isinstance(item.get("record_id"), str) and item.get("path")
     }
     for item in selected:
-        public = _public_item(item)
+        public = _public_item(item, set(paths_by_record))
         conflicts = item.get("conflicts")
         if isinstance(conflicts, list):
             partners = [
@@ -8581,6 +8678,39 @@ def _capsule_projection(selected: list[dict[str, Any]], local_episode_selected: 
     semantic.sort(key=lambda item: (item.get("selection") == "source-hint",
                                    item.get("selection") in ("source-link", *AUTOMATIC_LINK_SELECTIONS)))
     return {"categories": groups, "procedural": procedural, "semantic": semantic, "episodic": episodic}
+
+
+def _reconcile_public_conflicts(capsule: dict[str, Any], selected: list[dict[str, Any]]) -> None:
+    """Prune relation metadata after packing/custody without refilling views."""
+    originals = {item["path"]: item for item in selected}
+    records = {item["record_id"]: item["path"] for item in selected if item.get("record_id")}
+    groups = capsule.get("categories")
+    views = [capsule.get(key, []) for key in ("procedural", "semantic", "episodic", "selected")]
+    if isinstance(groups, dict):
+        views.extend(groups.values())
+    for view in views:
+        if not isinstance(view, list):
+            continue
+        for public in view:
+            if not isinstance(public, dict):
+                continue
+            original = originals.get(public.get("path"))
+            if original is None:
+                continue
+            visible = {record_id for record_id in original["conflicts"]
+                       if record_id in records and record_id != original.get("record_id")}
+            # Packing may have omitted/clipped relation metadata. Intersect
+            # what it retained; adding even valid paths here can cross its
+            # serialized ceiling and cannot count as a packed delivery.
+            if "conflicts" in public:
+                public["conflicts"] = [record_id for record_id in public["conflicts"] if record_id in visible]
+            partners = {records[record_id] for record_id in visible}
+            if "conflict" in public:
+                public["conflict"] = [path for path in public["conflict"] if path in partners]
+                if not public["conflict"]:
+                    public.pop("conflict")
+            if "conflict_recorded" in public and _conflict_recorded(original):
+                public["conflict_recorded"] = True
 
 
 SOURCE_PROVENANCE_PROFILE = 'local-source-provenance-v1'
@@ -8703,6 +8833,9 @@ def own_saved_documents(
     """
     try:
         _, task, _ = find_task(repository, task_uuid)
+        validate_record(task)
+        if not record_is_eligible(repository, task, load_config(repository))[0]:
+            return []
         twins = json.loads(load_index_state(connection).get(TASK_TWINS_KEY) or "{}")
     except (BrainError, OSError, UnicodeError, ValueError, sqlite3.Error):
         return []
@@ -8772,6 +8905,7 @@ def retrieve(
     source_provenance_sink: Optional[dict[str, Any]] = None,
     admit_delivery: Optional[Callable[[], None]] = None,
     scope: Optional[list[str]] = None,
+    requested_task_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Assemble governed context and record the manifest that justifies it.
 
@@ -8861,6 +8995,7 @@ def retrieve(
         validate_record(task)
     initial_working_image = _working_record_image(task, task_body) if task is not None else None
     config = load_config(repository)
+    admitted_task = task if task is not None and record_is_eligible(repository, task, config)[0] else None
     trace = RetrievalTrace(config, trace_paths)
     ensure_metadata_tables(connection)
     trace._current_source_policy = _CurrentSourcePolicy(connection, repository)
@@ -8875,8 +9010,9 @@ def retrieve(
     # Recorded history has its own search over the whole request: events and
     # local episodes share one slot beside the changelog's.
     request_text = query if history_text is None else history_text
-    known_tickets = _known_ticket_prefixes(connection, task)
-    request_tickets = _request_tickets(request_text, task, known_tickets)
+    known_tickets = _known_ticket_prefixes(connection, admitted_task)
+    prompt_tickets = _request_tickets(request_text, None, known_tickets)
+    request_tickets = _request_tickets(request_text, admitted_task, known_tickets)
     history = history_query(connection, request_text) if scope is None else None
     if history is not None:
         history["tickets"] = request_tickets
@@ -8884,6 +9020,10 @@ def retrieve(
     event_candidates, episode_candidates = (
         _history_candidates(connection, history, trace=trace) if history else ([], [])
     )
+    task_ticket_events = {
+        item['path'] for item in event_candidates
+        if item.get('_ticket_match') and not (prompt_tickets & _ticket_ids(str(item.get('title') or ''), known_tickets))
+    }
     # Taken before any filter runs, so "nothing matched" cannot be confused
     # with "everything that matched was withheld".
     matched_layers = {item["layer"] for item in candidates}
@@ -8954,10 +9094,10 @@ def retrieve(
                 task_path.relative_to(repository).as_posix(),
                 handoff_path(repository, task["id"]).relative_to(repository).as_posix(),
             }
-        task_files = list(reversed(task["files"])) if task is not None else []
+        task_files = list(reversed(admitted_task["files"])) if admitted_task is not None else []
         seeds = [(path, "prompt") for path in automatic_seeds.get("prompt", [])[:PROMPT_SEED_LIMIT]]
         touched = [
-            path for path in [*automatic_seeds.get("touched", []), *task_files]
+            path for path in [*(automatic_seeds.get("touched", []) if task is None or admitted_task is not None else []), *task_files]
             if _file_link_problem(path) is None
         ]
         seeds += [(path, "touch") for path in list(dict.fromkeys(touched))[:TOUCH_SEED_LIMIT]]
@@ -9363,6 +9503,7 @@ def retrieve(
     groups, procedural, semantic, episodic = (projection[key] for key in ("categories", "procedural", "semantic", "episodic"))
     result: dict[str, Any] = {
         "query": query,
+        "query_source": query_source,
         "task_id": task["external_id"] if task is not None else None,
         "task_uuid": own_id,
         "task_revision": task["revision"] if task is not None else None,
@@ -9388,7 +9529,8 @@ def retrieve(
         "procedural": procedural,
         "semantic": semantic,
         "episodic": episodic,
-        "selected": [_public_item(item) for item in selected],
+        "selected": [_public_item(item, {row["record_id"] for row in selected if row.get("record_id")})
+                     for item in selected],
         # A layer with no candidate at all is a different fact from a layer
         # whose candidates were filtered out downstream, and only the first
         # one means "memory has nothing here". Recorded before any budget or
@@ -9458,14 +9600,30 @@ def retrieve(
         except (BrainError, OSError, UnicodeError, ValueError, TypeError):
             working_current = False
     working_withdrawn = task is not None and not working_current
+    working_denied = working_withdrawn and not working_changed
     derived_withdrawn = working_withdrawn and query_source in ("task", "continuation")
+    scoped_withdrawn = working_denied and scope is not None
     if working_withdrawn:
         result["working"] = None
+        result.pop("capsule_text", None)
         if working_changed:
             result["working_changed"] = True
+    if working_denied:
+        # The caller knows its requested label, not necessarily the UUID or
+        # external id resolved from the now unavailable authority record.
+        result.update(task_id=requested_task_id if requested_task_id is not None else task_identifier,
+                      task_uuid=None, task_revision=None, task_record=None, last_turn=None)
+        result.pop("working_changed", None)
+        result["warnings"] = [*result.get("warnings", []), "Working task eligibility unavailable."]
+        task, own_id = None, None
+        baseline_key = _retrieval_baseline_key("no-task", host, entry_point, delivery_profile)
+        baseline_expected = _receipt_expectation(baseline_snapshot, baseline_key)
+        previous = baseline_snapshot.get(baseline_key)
     if derived_withdrawn:
-        query, query_source = task_identifier, "task-id"
+        query = requested_task_id if requested_task_id is not None else task_identifier
+        query_source = "task-id"
         result["query"] = query
+    if derived_withdrawn or scoped_withdrawn:
         local_episode_selected = []
         # This also applies to an episode-only capsule: packed views are
         # delivery, even when there are no selected document rows to prune.
@@ -9491,8 +9649,18 @@ def retrieve(
             else:
                 current_paths.add(item["path"])
         dropped = {item["path"] for item in selected if item["path"] not in current_paths}
-        if derived_withdrawn:
+        if derived_withdrawn or scoped_withdrawn:
             dropped.update(item["path"] for item in selected)
+        if working_denied:
+            # An independently public document does not authorize disclosing
+            # its association with a denied task's touched files. Explicit
+            # prompt links and ordinary query matches remain independent.
+            task_links = {item["path"] for item in selected if item.get("selection") == "touch-link"}
+            dropped.update(task_links)
+            dropped.update(task_ticket_events)
+            custody_excluded.extend({"path": path, "reason": "working-unavailable"} for path in task_links)
+            custody_excluded.extend({"path": path, "reason": "working-unavailable"}
+                                    for path in task_ticket_events if path in {item['path'] for item in selected})
         if dropped:
             filter_excluded.extend(custody_excluded)
             selected = [item for item in selected if item["path"] not in dropped]
@@ -9520,7 +9688,7 @@ def retrieve(
             result["categories"] = {key: [item for item in items if item.get("path") in allowed]
                                     for key, items in result.get("categories", {}).items()}
             result["gate"] = gate
-    if (pack is not None or hint_candidates or derived_withdrawn) and not withheld:
+    if (pack is not None or hint_candidates or derived_withdrawn or scoped_withdrawn or working_denied) and not withheld:
         # A packed-out hint was never delivered either. Its proposed identity
         # must not poison the next turn's repeat gate or baseline receipt.
         signature = _retrieval_signature(query,
@@ -9541,6 +9709,7 @@ def retrieve(
                           categories={key: [] for key in result.get("categories", {})})
     if hint_stats is not None:
         hint_stats["delivered"] = sum(item.get("selection") == "source-hint" for item in selected)
+    _reconcile_public_conflicts(result, selected)
     usage = _token_usage(selected, local_episode_selected)
     trace.funnel_boundary("selected_post_pack", selected)
     trace.exclusions((item for item in layer_excluded if item["reason"] == "capsule-limit"), "capsule")

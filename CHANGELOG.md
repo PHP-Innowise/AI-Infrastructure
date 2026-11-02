@@ -28,6 +28,165 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Wire public response-contract v2 into the opt-in task-complete stand: seal an
+  approved common citation snapshot and complete stdin prompt, expose citation
+  bytes read-only, retain bounded chronological answers, and run literal checks
+  in an independent network-isolated worker before the existing task oracle.
+  Legacy tasks, installed memory defaults and frozen studies remain unchanged.
+
+### Opt-in memory lifecycle extensions — 2026-11-01
+
+- Derive retirement fixture decision dates from their canonical publication
+  validity start so the existing lifecycle assertions remain stable across days.
+- Add future-only response-contract v2 with a complete public citation corpus
+  and pure supplied-byte range/quote checks; preserve v1 render bytes and
+  bindings, distinguish source drift from reader errors, and leave installed
+  defaults, existing callers and frozen study grades unchanged.
+- Add opt-in maintainer response contracts with shared rendering/checking, last
+  marked-answer selection and exact review bindings; preserve known failures,
+  unknowns and external-oracle/custody boundaries without enabling a runtime.
+- Restore complete runtime module graphs around publication fixtures so later
+  combined suites cannot inherit modules from deleted temporary projects.
+- Recheck native-save owner and complete scope before a read-only spool fallback;
+  retain unexpected failed drain attempts for bounded exact replay.
+- Require the final native turn for whole-task completion, count repeated tool
+  IDs per turn, and retain complete/partial multi-turn token observations.
+- Bind hidden oracle labels, empty directories and modes; reject blocking
+  special artifacts and ambiguous duplicate-key grading receipts.
+- Observe exact complete retrieval frame prefixes in batched native stdout,
+  distinguishing them from whole-output matches without changing old studies.
+- Preserve executable modes in lifecycle copies and their snapshot identity;
+  fence retirement source drift and use consistent UTF-8 evidence packet limits.
+- Resolve admitted canonical JSON above weaker fact summaries while retaining
+  explicit conflicts, unavailable evidence, complete history and scope boundaries.
+- Recognize observed literal native-save cat pipelines without a subshell and
+  double-quoted native-cwd root arguments. Preserve literal JSON, exact task/
+  session/receipt validation and original frozen experiment results; unsupported
+  shell encodings remain unknown rather than being executed.
+- Route bounded historical-state inquiries as well as past decisions in the
+  selective pilot; retain version-1 rules, compact ordinary requests and exact
+  original hook transport, including long prompts.
+- Add optional digest-bound capture decisions through canonical saves, prepared
+  requests, MCP and Harness, with separate selection and persistence counters.
+  Absent fields preserve legacy images; default capture prompts are unchanged.
+- Project explicit Brain/Bank fact selectors with source pins, project admission,
+  attestation, scope, time and conflict boundaries; keep the derived view offline.
+- Capture bounded source evidence and replay checked maintenance only on new
+  physical copies, requiring a currently applicable successor, renewing explicitly
+  confirmed overdue claims, preserving history and exposing partial effects.
+- Extend opt-in Bank-only maintenance to canonical archived agent-attested
+  findings: preserve immutable origins during unchanged renewal/no-op and guarded
+  retirement; hold source changes, revisions and legacy attestations without
+  changing decision lifecycles or installed defaults.
+- Compare supplied incremental memory acquisition and later-work costs without
+  charging ordinary task A; refuse inconsistent grading and preserve independent
+  unknown token, billing and timing coverage.
+- Keep retrieval/consolidation experiments opt-in pending their own sealed
+  held-out task-outcome evidence; fixture correctness does not establish benefit.
+
+### Memory reliability and evidence boundaries — 2026-10-31
+
+- Recheck working-state eligibility and final source custody for navigation and
+  empty recall, including policy/source changes during packing. Refresh full
+  native instructions when the effective capture policy changes.
+- Withdraw denied full-context task identities, task-derived links, ticket
+  preferences and recall scope before delivery receipts. Keep independent
+  prompt evidence and distinguish an eligible concurrent task rewrite.
+- Withdraw unavailable task-derived query terms in navigation and empty
+  recall, including deletion/corruption between query construction and
+  assembly; preserve checked public-topic continuation for warming tasks.
+- Bound and anchor optional last-turn report reads and writes, reject linked
+  parents and special files, and preserve cancellation through cleanup failures.
+  Check the complete advisory summary against the existing secret/privacy guard
+  before clipping; withhold sensitive diagnostics without failing the capsule.
+  Use a fixed notice above 4096 summary characters to bound regex work.
+- Preserve cancellation through public Cursor lock and directory cleanup,
+  including cancellation first raised during unlock. Drain owned resources
+  while retaining ordinary cleanup failures and the existing fallback.
+- Persist bounded promotion publication checkpoints before multi-file effects,
+  recover exact owned effects after process death, and refuse foreign images.
+  Use rooted directory operations and atomic exclusive first publication on
+  supported Linux, macOS and Windows filesystems; bootstrap first-save folders.
+- Checkpoint `bank-retire` before changing either side of a replacement link.
+  An unfinished operation rolls back on the next cooperative mutation; a
+  completed checkpoint removal commits it. Preserve foreign edits, bound
+  target reads, and cover real process death and repeated recovery failures.
+- Render recorded conflicts honestly without exposing withheld partners, and
+  refresh conversation novelty when a conflict warning changes.
+- Fence unfinished semantic publication against task revisions, refuse malformed
+  fingerprint containers, and preserve predecessors through repeated rollback
+  failures. Persist explicit verification identities for clock-independent
+  successor decisions; legacy equal-image metadata edits do not assert rechecks.
+- Keep event consolidation tied to the original checked source image, retain
+  events until their successor is available, and require real JSON booleans for
+  automatic lifecycle flags. Normalize offline fact timestamps to UTC and keep
+  digest mismatches stale across retiming.
+- Distinguish unique submitted/existing/held learnings from actual writes in
+  content-free native diagnostics; preserve unknown coverage for older rows.
+  Correct held-reference notices and exercise copied MCP runtimes in fresh
+  processes so cached canonical modules cannot hide missing dependencies.
+- Screen subscript credential assignments and structured authentication headers
+  before experimental snapshots enter Git, indexes or model inputs.
+
+### Independently verified memory proposals — 2026-10-31
+
+- Add an off-by-default review-verified mode: the working agent stages a
+  correction without publishing it. A trusted external controller exports full
+  admitted sources and original claims for a separately isolated reviewer.
+- Require complete clause/evidence and boundary-case coverage, immutable first
+  authorization, a finished primary result, and exact source/task/memory fences
+  before guarded publication. Reject or unresolved verdicts preserve knowledge;
+  canonical completed replay survives removed sources and expired sessions.
+- Keep agent attestation distinct from human review. JSON identities and hashes
+  ensure consistency only; host-enforced read-only knowledge and separate
+  reviewer/controller processes remain mandatory. No default is enabled.
+
+### Explicit pre-answer memory review stage — 2026-10-31
+
+- Add an off-by-default review mode and scoped memory-review CLI with explicit
+  confirm/correct/defer decisions before the final answer. Reuse guarded semantic
+  results and passive replay while leaving native closing saves unchanged.
+- Fence exact record/source images, actor/task/config/runtime/checkout and the
+  first accepted decision set. Keep plans/status local and bounded; deferral
+  does not verify or renew knowledge. Preserve root-aware commands and bounded
+  refusal of malformed metadata.
+
+
+### Experimental ordinary-session maintenance — 2026-10-31
+
+- Add an off-by-default, task/actor-scoped queue of up to three exact returned
+  semantic source images. Normal native saves can suggest explicit rechecks of
+  encountered agent-attested claims whose canonical sources changed.
+- Recheck current permissions and exact MEM-to-Brain provenance; omit unsafe,
+  expired or unseen changed records. Preserve ordinary saves, cached-short
+  instructions, source attestation boundaries and existing guarded replay.
+
+
+### Explicit existing-knowledge revalidation — 2026-10-31
+
+- Allow a checked learning to name its original record UUID, revision and
+  complete canonical source image across tasks. Preserve ordinary learning
+  identities and passive completed replay; hold protected, stale, mismatched
+  or missing references without creating orphan findings.
+- Pin the inspected source image, preserve person/agent attestation, and
+  promote explicitly rechecked evidence through successor chunks even when
+  the consequence text is unchanged. Keep predecessor bodies and reciprocal
+  supersession links; ordinary edits and reads do not verify knowledge.
+- Carry references through native, CLI, MCP and Harness saves, refuse their
+  legacy create-only fallback, and expose read-only CRLF-neutral citation
+  hashes without opening SQLite or provisioning a task.
+
+### Mandatory native experiment snapshot admission — 2026-10-31
+
+- Refuse known credential carriers, unsupported binary/encoding, unsafe paths
+  and incomplete or changed materialized inputs before launching a model.
+  Scan source and handoff data before creating Git/index copies; bind the
+  exact final file/directory inventory and modes after trusted preparation.
+- Pin canonical runtime bytes separately from user data, declare the origin
+  of fresh Git/index binaries and keep provider credentials on their external
+  read-only transport mount. No redaction, admission bypass or installed
+  runtime/default change is introduced.
+
 ### Observed native save pipeline recognition — 2026-10-31
 
 - Recognize literal `cat` quoted-heredoc pipelines into the exact-corpus native

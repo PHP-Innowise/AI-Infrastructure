@@ -118,7 +118,7 @@ def prepared(value, task_id, result_id, revision, owner, reason):
                    for k in ('scope', 'digest'))):
         raise SessionError(INCOMPLETE)
     request = value['request']
-    if (not isinstance(request, dict) or set(request) - {'progress', 'next_steps', 'learnings', 'verified'}
+    if (not isinstance(request, dict) or set(request) - {'progress', 'next_steps', 'learnings', 'verified', 'capture_decision'}
             or request.get('verified') is not True or 'learnings' not in request):
         raise SessionError(INCOMPLETE)
     draft = memory_draft.submission(request)
@@ -126,6 +126,8 @@ def prepared(value, task_id, result_id, revision, owner, reason):
                   'next_steps': draft['next_steps'] if 'next_steps' in request else None,
                   'learnings': draft['learnings']}
     wire = {'learnings': draft['learnings'], 'verified': True}
+    if 'capture_decision' in draft:
+        normalized['capture_decision'] = wire['capture_decision'] = draft['capture_decision']
     for field in ('progress', 'next_steps'):
         if normalized[field] is not None:
             wire[field] = normalized[field]

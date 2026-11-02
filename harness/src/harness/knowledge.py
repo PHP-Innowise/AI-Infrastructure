@@ -116,7 +116,9 @@ else:
         records.append(record)
         if record['id'] not in already and eligible(record):
             candidates.append({**record, 'promotion_content': promotion_content(record)})
-    promotions = [item for _, item in iter_promotions(root)]
+    # Publication images are internal crash-recovery custody, not page data.
+    promotions = [{key: value for key, value in item.items() if key != 'publication'}
+                  for _, item in iter_promotions(root)]
     if len(promotions) > 500:
         raise ValueError('Too many promotions for this view.')
     print(json.dumps({'task': get_task(root, request['task_id']) if request.get('task_id') else None,

@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+from itertools import islice
 import re
 import shlex
 import shutil
@@ -29,7 +30,7 @@ from brain_runtime import (BrainError, BrainRecordNotFound, atomic_json, atomic_
                            brain_root, linked_reparse, load_config, mutation_lock)
 from memory_results import (PROOF_PROFILE, _text, _attempt, _read_attempt, _read_receipt,
                             check_task_id, normalize, prepared_scope, record_result,
-                            refusal_code, request_digest, writable_task)
+                            refusal_code, request_digest, writable_task, learning_id)
 
 PROFILE = 'native-result-challenge-v1'
 REASON = 'Automatic native result; agent-attested, not reviewed by a person'
@@ -58,7 +59,7 @@ UNWRITABLE = frozenset({errno.EROFS, errno.EACCES, errno.EPERM})
 JOURNAL_LINES_PER_TURN = 8
 # Trimmed back to the kept lines once the file passes this many bytes a kept
 # line: an append stays one write, and a trim is rare.
-JOURNAL_LINE_BYTES = 128
+JOURNAL_LINE_BYTES = 256
 
 
 def _journal(root, host, stage, event, code=None, **counts):
@@ -276,7 +277,7 @@ IN_FLIGHT_SECONDS = 10 * 60
 # the transcript cannot say. `full` sends it every time;
 # CONTEXT_NATIVE_RESULT_INSTRUCTION overrides `native_result_instruction`.
 NATIVE_INSTRUCTIONS = ('auto', 'full')
-FULL_RULES = 'Exact schema example (replace placeholders, never save the example)'
+FULL_RULES = 'Native result reference schema v1.'
 RULES_TAIL_BYTES = 2 * 1024 * 1024
 COMPACTION_RECORDS = (b'"subtype":"compact_boundary"', b'"type":"compacted"')
 
@@ -288,7 +289,12 @@ def configured_instruction(root):
     return value if value in NATIVE_INSTRUCTIONS else 'full'
 
 
-def _rules_in_context(payload):
+def _rules_marker(root):
+    policy='proposal-only' if maintenance_mode(root)=='review-verified' else 'ordinary'
+    return FULL_RULES+' Capture policy '+policy+'.'
+
+
+def _rules_in_context(payload, marker):
     """Whether the conversation still holds a full save step: its rules are
     in the transcript's last 2 MiB, after the last compaction record."""
     path = payload.get('transcript_path')
@@ -308,7 +314,10 @@ def _rules_in_context(payload):
     # record carries a retained context with earlier steps in it, which the
     # model no longer sees.
     begin = 0 if start < 0 else (tail.find(b'\n', start) + 1 or len(tail))
-    return tail.find(FULL_RULES.encode(), begin) >= 0
+    latest=tail.rfind(FULL_RULES.encode(),begin)
+    # Legacy markers, or a newer full step from another capture policy, must
+    # not lend their ordinary/proposal-only restrictions to the current turn.
+    return latest>=0 and tail.startswith(marker.encode(),latest)
 
 
 def configured_answer(root):
@@ -704,6 +713,811 @@ def _adapter():
     return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
+# Encounter hints are disposable, task/actor scoped and never attest a check.
+# No manifest scan, bank audit or search runs in the Stop hook.
+MAINTENANCE_PROFILE = 'native-memory-encounters-v1'
+MAINTENANCE_LIMIT = 3
+MAINTENANCE_TTL = 3600
+
+
+def maintenance_mode(root):
+    value = os.environ.get('CONTEXT_NATIVE_MEMORY_MAINTENANCE')
+    return value if value is not None else load_config(root).get('native_memory_maintenance', 'off')
+
+
+def maintenance_enabled(root):
+    value=maintenance_mode(root)
+    return isinstance(value,str) and value in {'encountered', 'review', 'review-verified'}
+
+
+def _maintenance_file(root, owner, task_id):
+    key = hashlib.sha256(json.dumps([_project(root), owner, check_task_id(task_id)]).encode()).hexdigest()
+    directory = brain_root(root) / 'local' / 'native-maintenance'
+    for path in (directory.parent.parent, directory.parent, directory):
+        if os.path.lexists(path):
+            image = path.lstat()
+            if not stat.S_ISDIR(image.st_mode) or linked_reparse(image):
+                raise BrainError('native-result:unsafe-maintenance-storage')
+    path = directory / (key + '.json')
+    if os.path.lexists(path):
+        image = path.lstat()
+        if not stat.S_ISREG(image.st_mode) or image.st_nlink != 1 or linked_reparse(image):
+            raise BrainError('native-result:unsafe-maintenance-storage')
+    return path
+
+
+def _maintenance_image(root, name):
+    from pathlib import PurePosixPath
+    if (not isinstance(name, str) or len(name) > 1024 or '\\' in name
+            or str(PurePosixPath(name)) != name or '..' in PurePosixPath(name).parts
+            or not re.fullmatch(r'(?:memory-bank/chunks/[^/]+|project-brain/dynamic/(?:findings|decisions)/[^/]+)\.md', name)):
+        raise BrainError('native-result:invalid-maintenance-source')
+    path = workspace_roots.resolve(root, name)
+    for parent in (path, *list(path.parents)[:len(PurePosixPath(name).parts)-1]):
+        image = parent.lstat()
+        if parent.is_symlink() or linked_reparse(image):
+            raise BrainError('native-result:unsafe-maintenance-source')
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0))
+    try:
+        image = os.fstat(descriptor)
+        if not stat.S_ISREG(image.st_mode) or image.st_nlink != 1 or image.st_size > 65536:
+            raise BrainError('native-result:invalid-maintenance-source')
+        with os.fdopen(descriptor, 'rb', closefd=False) as handle:
+            raw = handle.read(65537)
+        after=os.fstat(descriptor);named=path.lstat()
+        identity=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns,value.st_mode,value.st_nlink)
+        if identity(image)!=identity(after) or identity(after)!=identity(named):
+            raise BrainError('native-result:maintenance-source-changed')
+    finally:
+        os.close(descriptor)
+    if len(raw) > 65536: raise BrainError('native-result:invalid-maintenance-source')
+    return raw.decode('utf-8').replace('\r\n', '\n'), hashlib.sha256(raw.replace(b'\r\n', b'\n')).hexdigest()
+
+
+def observe_maintenance(root, capsule, task_id, *, owner):
+    """Remember at most three final returned references, not proof of reading.
+
+    Same actor/task scope deliberately permits a later session of that task.
+    A new retrieval replaces this disposable packet; publication/read failures
+    never affect ordinary context or saves. No task is created for a hint.
+    """
+    try:
+        if not maintenance_enabled(root) or not task_id or not isinstance(capsule, dict): return
+        if not capsule.get('manifest') or capsule.get('manifest_publication') == 'unconfirmed': return
+        _text(owner, 'owner', 200)
+        from context_retrieval import _capsule_index_images
+        images = _capsule_index_images(capsule)
+        if images is None: return
+        paths = {row.get('path') for row in capsule.get('semantic', []) if isinstance(row, dict)}
+        rows = []
+        for name, indexed in sorted(images.items()):
+            if name not in paths: continue
+            try:
+                _, digest = _maintenance_image(root, name)
+                if not isinstance(indexed, tuple) or hashlib.sha256(indexed[2].encode('utf-8')).hexdigest() != digest: continue
+                rows.append({'path': name, 'sha256': digest})
+            except (BrainError, OSError, ValueError, UnicodeError): continue
+            if len(rows) == MAINTENANCE_LIMIT: break
+        if not rows: return
+        with mutation_lock(root):
+            path = _maintenance_file(root, owner, task_id)
+            atomic_json(path, {'profile': MAINTENANCE_PROFILE, 'at': time.time(),
+                              'task_uuid': capsule.get('task_uuid'), 'rows': rows})
+            # Storage is bounded separately from native challenge files.
+            others = list(path.parent.glob('*.json'))
+            if len(others) > MAX_STATES:
+                for old in sorted(others, key=lambda item: item.lstat().st_mtime_ns)[:len(others)-MAX_STATES]:
+                    if old != path and HEX.fullmatch(old.stem) and not old.is_symlink(): old.unlink()
+    except (BrainError, OSError, ValueError, TypeError, KeyError, UnicodeError):
+        return
+
+
+def maintenance_candidates(root, state):
+    """Current admission of old encounter images; not an automatic truth check."""
+    try:
+        if not maintenance_enabled(root): return []
+        from brain_runtime import parse_markdown_record, record_attestation, canonical_source_image
+        from memory_results import checked_fingerprints, CLOSED_STATE
+        from validate import indexed_secret_policy_reason, memory_temporal_reason
+        value = _read_receipt(_maintenance_file(root, state['owner'], state['task_id']))
+        if (not isinstance(value, dict) or set(value) != {'profile', 'at', 'task_uuid', 'rows'}
+                or value['profile'] != MAINTENANCE_PROFILE or type(value['at']) not in (int, float)
+                or not math.isfinite(value['at']) or not 0 <= time.time()-value['at'] <= MAINTENANCE_TTL
+                or value['task_uuid'] is not None and value['task_uuid'] != state['task_uuid']
+                or not isinstance(value['rows'], list) or not 1 <= len(value['rows']) <= MAINTENANCE_LIMIT): return []
+        config = load_config(root); hints = []; seen = set()
+        for row in value['rows']:
+            try:
+                if not isinstance(row, dict) or set(row) != {'path', 'sha256'}: continue
+                text, digest = _maintenance_image(root, row['path'])
+                if digest != row['sha256']: continue
+                if indexed_secret_policy_reason(text): continue
+                record_path = row['path']
+                metadata, _ = parse_markdown_record(Path(row['path']), text=text)
+                if row['path'].startswith('memory-bank/'):
+                    if metadata.get('status') != 'active' or memory_temporal_reason(metadata): continue
+                    links = [pin for pin in metadata.get('source_digests', [])
+                             if isinstance(pin, dict) and isinstance(pin.get('path'), str)
+                             and pin['path'].startswith(('project-brain/dynamic/findings/', 'project-brain/dynamic/decisions/'))]
+                    if len(links) != 1: continue
+                    text, digest = _maintenance_image(root, links[0]['path'])
+                    if digest != links[0].get('sha256'): continue
+                    if indexed_secret_policy_reason(text): continue
+                    record_path = links[0]['path']
+                    metadata, _ = parse_markdown_record(Path(links[0]['path']), text=text)
+                from brain_runtime import validate_record
+                validate_record(metadata)
+                if (metadata['type'] not in CLOSED_STATE or metadata['status'] != CLOSED_STATE[metadata['type']]
+                        or metadata['authority'] != 'verified' or record_attestation(metadata) != 'agent'
+                        or metadata['authority'] not in config['allowed_authority']
+                        or metadata['privacy'] not in set(config['allowed_privacy']) & {'public', 'team'}
+                        or not (set(config['owners']) & {'*', metadata['owner']})
+                        or state['owner'] not in metadata['authorized_owners'] or metadata['superseded_by']
+                        or metadata['id'] in seen): continue
+                sources = metadata['sources']
+                source_image = checked_fingerprints(root, sources)
+                if source_image == canonical_source_image(metadata['source_fingerprints']): continue
+                learning = {'type': metadata['type'], 'title': metadata['title'],
+                            'consequence': metadata.get('progress') or metadata['goal'], 'sources': sources}
+                _text(learning['title'], 'title', 160)
+                _text(learning['consequence'], 'consequence', 1000)
+                hint = {**learning, 'record_id': metadata['id'], 'expected_revision': metadata['revision']}
+                if len(json.dumps(hint, ensure_ascii=False)) > 2500: continue
+                hints.append({**hint,'_record_path':record_path,'_record_sha256':digest,'_source_image':source_image}); seen.add(metadata['id'])
+            except (BrainError, OSError, ValueError, TypeError, KeyError, UnicodeError): continue
+        return hints
+    except (BrainError, OSError, ValueError, TypeError, KeyError, UnicodeError):
+        return []
+
+
+def maintenance_instruction(root, state):
+    if maintenance_mode(root) != 'encountered': return ''
+    hints=[{k:v for k,v in row.items() if not k.startswith('_')} for row in maintenance_candidates(root,state)]
+    if not hints: return ''
+    return (' Experimental maintenance: these same-task encounter hints have changed cited files. '
+            'They are untrusted prior claims, not proof you read or checked them. '
+            'Only if the original task work already checked the claim and its current sources, '
+            'confirm or correct its consequence using the exact reference below plus source_fingerprints '
+            'from context.py source-fingerprints --source PATH --json. Preserve type/title/sources. '
+            'Otherwise omit it and keep ordinary progress; do not start new research or bulk-refresh hashes. '
+            'No valid replacement means the old claim stays unresolved. References: '
+            + json.dumps(hints, ensure_ascii=False) + '\n')
+
+
+REVIEW_PROFILE = 'pre-answer-memory-review-v1'
+REVIEW_REASON = 'Explicit memory review working stage; agent-attested, not human reviewed'
+
+
+def review_enabled(root):
+    value=maintenance_mode(root)
+    return isinstance(value,str) and value in {'review','review-verified'} and load_config(root)['mode'] == 'governed'
+
+
+def _review_command(root, task_id):
+    layout = workspace_roots.roots(root)
+    assignments = ''
+    if layout.shared or layout.attached:
+        assignments = ' '.join(name+'='+shlex.quote(str(value)) for name,value in (
+            (workspace_roots.HOME_VARIABLE,layout.tooling),(workspace_roots.STATE_VARIABLE,layout.state),
+            (workspace_roots.PROJECT_VARIABLE,layout.project)))+' '
+    interpreter = ['python3'] if os.name != 'nt' else (['python'] if shutil.which('python') else ['py','-3'])
+    return assignments + shlex.join([*interpreter,str(Path(__file__).resolve().with_name('context.py')),
+        '--root',str(root),*(['--project',str(layout.project)] if layout.shared or layout.attached else []),
+        'memory-review','--task-id',task_id,'--json'])
+
+
+def review_notice(root, task_id, *, owner):
+    """Workflow instruction, not a host-level gate on an already visible answer."""
+    try:
+        if not review_enabled(root) or not task_id: return None
+        task = writable_task(root, check_task_id(task_id), owner)
+        value = _read_receipt(_maintenance_file(root, owner, task_id))
+        if not value or not value.get('rows') or task['status'] in {'completed', 'cancelled'}: return None
+        command = _review_command(root,task_id)
+        if maintenance_mode(root)=='review-verified':
+            return ('MEMORY_REVIEW_STAGE: after implementing and testing, BEFORE your final answer, run '
+                    +command+'. Inspect each claim and its current sources; explicitly confirm, correct or defer every item. '
+                    'memory-review --input - stages a proposal ONLY. Independent verification and publication are performed '
+                    'by the external controller after this session. Do not write reusable knowledge through other commands. '
+                    'The native closing save must use learnings=[] and ordinary progress. Report pending review, never claim publication.')
+        return ('MEMORY_REVIEW_STAGE: after implementing and testing, BEFORE your final answer, run '
+                + command + '. Read each offered claim and its current cited sources; explicitly confirm, '
+                'correct or defer every item using memory-review --input -. This sanctioned working-stage '
+                'command applies checked references; the later native Stop still saves your answer progress. '
+                'If unavailable, report deferred review. Hashes alone are not verification.')
+    except (BrainError, OSError, ValueError, TypeError):
+        return None
+
+
+def _review_file(root, owner, task_id, identifier, *, receipt=False):
+    if not isinstance(identifier, str) or not TOKEN.fullmatch(identifier):
+        raise BrainError('memory-review:invalid-plan')
+    directory = _maintenance_file(root, owner, task_id).parent / 'reviews'
+    if os.path.lexists(directory):
+        image = directory.lstat()
+        if not stat.S_ISDIR(image.st_mode) or linked_reparse(image):
+            raise BrainError('memory-review:unsafe-storage')
+    result = directory / (identifier + ('-result' if receipt else '') + '.json')
+    if os.path.lexists(result):
+        image = result.lstat()
+        if not stat.S_ISREG(image.st_mode) or image.st_nlink != 1 or linked_reparse(image):
+            raise BrainError('memory-review:unsafe-storage')
+    return result
+
+
+def _review_read(source, *, limit=65536):
+    """Bounded local plans are larger than the 4 KiB result-proof envelope."""
+    if not os.path.lexists(source): return None
+    descriptor = os.open(source,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0)|getattr(os,'O_BINARY',0))
+    try:
+        before=os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>limit: return None
+        with os.fdopen(descriptor,'rb',closefd=False) as handle:raw=handle.read(limit+1)
+        after=os.fstat(descriptor);named=source.lstat()
+        identity=lambda image:(image.st_dev,image.st_ino,image.st_size,image.st_mtime_ns,image.st_ctime_ns,image.st_mode,image.st_nlink)
+        if len(raw)>limit or identity(before)!=identity(after) or identity(after)!=identity(named): return None
+        def unique(pairs):
+            value={}
+            for key,item in pairs:
+                if key in value:raise ValueError('duplicate key')
+                value[key]=item
+            return value
+        def constant(_):raise ValueError('nonfinite number')
+        try:value=json.loads(raw,object_pairs_hook=unique,parse_constant=constant)
+        except (ValueError,UnicodeError,RecursionError):return None
+        return value if isinstance(value,dict) else None
+    finally:
+        os.close(descriptor)
+
+
+def memory_review_plan(root, task_id, *, owner):
+    if not review_enabled(root): raise BrainError('memory-review:disabled')
+    task_id = check_task_id(task_id)
+    with mutation_lock(root):
+        task = writable_task(root, task_id, owner)
+        if task['status'] in {'completed','cancelled'}: raise BrainError('memory-review:task-closed')
+        candidates = maintenance_candidates(root, {'owner':owner,'task_id':task_id,'task_uuid':task['id']})
+        if not candidates:
+            return {'profile':REVIEW_PROFILE,'state':'unavailable','plan_id':None,'records':[],
+                    'reason':'No safely admitted changed-source encounter; no claim was verified.'}
+        identifier = uuid4().hex
+        plan = {'profile':REVIEW_PROFILE,'plan_id':identifier,'owner':owner,'project':_project(root),
+                'task_id':task_id,'task_uuid':task['id'],'task_revision':task['revision'],'at':time.time(),
+                'scope':prepared_scope(root,owner,REVIEW_REASON,'agent'),'adapter':_adapter(),
+                'checkout':_checkout(root),'records':candidates}
+        if maintenance_mode(root)=='review-verified':plan['verification_required']=True
+        destination = _review_file(root,owner,task_id,identifier)
+        if len(json.dumps(plan,ensure_ascii=False,sort_keys=True,indent=2).encode('utf-8'))>65535:
+            raise BrainError('memory-review:plan-too-large')
+        atomic_json(destination, plan)
+        # Bounded local replay history; authoritative result proofs are not pruned.
+        from itertools import islice
+        old = list(islice(destination.parent.glob('*.json'), 2*MAX_STATES+1))
+        if len(old) > 2*MAX_STATES:
+            for item in sorted(old,key=lambda p:p.lstat().st_mtime_ns)[:len(old)-2*MAX_STATES]:
+                if item != destination and not item.is_symlink(): item.unlink()
+        return {'profile':REVIEW_PROFILE,'state':'review-required','plan_id':identifier,
+                'verification_required':bool(plan.get('verification_required')),
+                'task_id':task_id,'task_uuid':task['id'],'records':[
+                    {k:v for k,v in row.items() if not k.startswith('_')} for row in candidates],
+                'instructions':'Open every claim and necessary current cited source now. Submit one decision per record. '
+                    'confirm/correct require top-level verified=true and source_fingerprints from checked sources; '
+                    'correct additionally supplies consequence. defer requires a short reason and does not renew knowledge. '
+                    'Preserve exact type/title/sources. A title or source-set change requires separate review.',
+                'submit_command':_review_command(root,task_id)+' --input -',
+                'submit_schema':{'plan_id':identifier,'verified':True,
+                    'decisions':'one object for every offered record; use the exact field set below'},
+                'decision_fields':{'confirm':['record_id','action','source_fingerprints'],
+                    'correct':['record_id','action','source_fingerprints','consequence'],
+                    'defer':['record_id','action','reason']}}
+
+
+def _validate_review_plan(root,plan,task_id,identifier,owner,task_uuid):
+    plan_fields={'profile','plan_id','owner','project','task_id','task_uuid','task_revision','at',
+                 'scope','adapter','checkout','records'}
+    if isinstance(plan,dict) and plan.get('verification_required') is True:plan_fields.add('verification_required')
+    if (not isinstance(plan,dict) or set(plan)!=plan_fields
+            or type(plan.get('task_revision')) is not int or plan['task_revision']<1
+            or type(plan.get('at')) not in (int,float) or not math.isfinite(plan['at']) or plan['at']<0
+            or plan.get('profile') != REVIEW_PROFILE or plan.get('plan_id') != identifier
+            or plan.get('owner') != owner or plan.get('project') != _project(root) or plan.get('task_id') != task_id
+            or not isinstance(plan.get('task_uuid'),str)
+            or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',plan['task_uuid'])
+            or plan.get('task_uuid') != task_uuid or plan.get('scope') != prepared_scope(root,owner,REVIEW_REASON,'agent')
+            or plan.get('adapter') != _adapter() or plan.get('checkout') != _checkout(root)
+            or not isinstance(plan.get('records'),list) or not 1 <= len(plan['records']) <= MAINTENANCE_LIMIT):
+        raise BrainError('memory-review:plan-unavailable-or-scope-changed')
+    reference_fields={'type','title','consequence','sources','record_id','expected_revision',
+                      '_record_path','_record_sha256','_source_image'}
+    identifiers=set()
+    for row in plan['records']:
+        if (not isinstance(row,dict) or set(row)!=reference_fields
+                or not isinstance(row['record_id'],str)
+                or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',row['record_id'])
+                or row['record_id'] in identifiers or type(row['expected_revision']) is not int or row['expected_revision']<1
+                or not isinstance(row['_record_path'],str) or not isinstance(row['_record_sha256'],str)
+                or not HEX.fullmatch(row['_record_sha256'])):
+            raise BrainError('memory-review:plan-unavailable')
+        normalize(root,{'progress':None,'verified':True,'learnings':[
+            {**{k:row[k] for k in ('type','title','consequence','sources','record_id','expected_revision')},
+             'source_fingerprints':row['_source_image']}]},check_files=False)
+        identifiers.add(row['record_id'])
+    return {r['record_id']:r for r in plan['records']}
+
+
+def memory_review_apply(root, task_id, data, *, owner):
+    """Explicit semantic work boundary; native save wire/replay is unchanged."""
+    if not review_enabled(root): raise BrainError('memory-review:disabled')
+    if (not isinstance(data,dict) or set(data)-{'plan_id','verified','decisions'}
+            or not {'plan_id','decisions'} <= set(data) or type(data.get('verified',False)) is not bool):
+        raise BrainError('memory-review:invalid-decisions')
+    task_id = check_task_id(task_id);identifier = data['plan_id']
+    from brain_runtime import canonical_source_image
+    from memory_results import checked_fingerprints, request_digest
+    with mutation_lock(root):
+        task = writable_task(root,task_id,owner)
+        plan = _review_read(_review_file(root,owner,task_id,identifier))
+        offered = _validate_review_plan(root,plan,task_id,identifier,owner,task['id'])
+        if maintenance_mode(root)=='review-verified' and plan.get('verification_required') is not True:
+            raise BrainError('memory-review:verification-required')
+        decisions=data['decisions']
+        if not isinstance(decisions,list) or len(decisions)!=len(offered): raise BrainError('memory-review:decide-every-record')
+        checked=[];deferred=[];seen=set()
+        for decision in decisions:
+            if (not isinstance(decision,dict) or not isinstance(decision.get('record_id'),str)
+                    or decision['record_id'] not in offered or decision['record_id'] in seen
+                    or not isinstance(decision.get('action'),str)):
+                raise BrainError('memory-review:invalid-or-duplicate-record')
+            seen.add(decision['record_id']);row=offered[decision['record_id']];action=decision.get('action')
+            if action=='defer':
+                if set(decision)!={'record_id','action','reason'}:raise BrainError('memory-review:invalid-defer')
+                deferred.append({'record_id':row['record_id'],'reason':_text(decision['reason'],'defer reason',300)})
+                continue
+            fields={'record_id','action','source_fingerprints'} | ({'consequence'} if action=='correct' else set())
+            if action not in {'confirm','correct'} or set(decision)!=fields or data.get('verified') is not True:
+                raise BrainError('memory-review:checked-agent-attestation-required')
+            pins=canonical_source_image(decision['source_fingerprints'])
+            if pins != row['_source_image']: raise BrainError('memory-review:checked-image-does-not-match-plan')
+            checked.append({k:row[k] for k in ('type','title','consequence','sources','record_id','expected_revision')})
+            checked[-1]['source_fingerprints']=pins
+            if action=='correct':checked[-1]['consequence']=_text(decision['consequence'],'consequence',1000)
+        payload={'progress':None,'learnings':checked,'verified':True}
+        normalized=normalize(root,payload,check_files=False) if checked else None
+        incoming=hashlib.sha256(json.dumps(data,sort_keys=True,ensure_ascii=False,allow_nan=False).encode()).hexdigest()
+        destination=_review_file(root,owner,task_id,identifier,receipt=True)
+        receipt=_review_read(destination)
+        if os.path.lexists(destination) and (not isinstance(receipt,dict) or receipt.get('input_sha256') != incoming
+                or set(receipt)!={'profile','plan_id','input_sha256','result_id','state'}
+                or not isinstance(receipt.get('state'),str)
+                or receipt['state'] not in ({'started','applied','held','deferred','proposed'} if plan.get('verification_required') else {'started','applied','held','deferred'})
+                or receipt.get('result_id') != 'review-'+identifier
+                or receipt.get('plan_id') != identifier or receipt.get('profile') != REVIEW_PROFILE):
+            raise BrainError('memory-review:decisions-already-frozen-or-unavailable')
+        if receipt and ((checked and receipt['state']=='deferred')
+                        or (not checked and receipt['state'] in {'applied','held','proposed'})):
+            raise BrainError('memory-review:receipt-state-does-not-match-decisions')
+        if checked and receipt and receipt['state']=='proposed':
+            return _semantic_propose(root,plan,payload,incoming,deferred)
+        result_id='review-'+identifier
+        digest=request_digest(task['id'],normalized) if checked else None
+        proof=_read_attempt(_attempt(root,task['id'],result_id,digest)) if checked else None
+        known=bool(proof and proof.get('task_id')==task['id'] and proof.get('result_id')==result_id
+                   and proof.get('digest')==digest and proof.get('owner')==owner and proof.get('attestation')=='agent'
+                   and proof.get('state') in {'started','complete'})
+        if not known and not (not checked and receipt and receipt['state']=='deferred'):
+            if (type(plan.get('at')) not in (int,float) or not math.isfinite(plan['at'])
+                    or not 0 <= time.time()-plan['at'] <= MAINTENANCE_TTL
+                    or task['revision'] != plan['task_revision'] or task['status'] in {'completed','cancelled'}):
+                raise BrainError('memory-review:plan-expired-or-task-changed')
+            for row in plan['records']:
+                # Deferral never claims a check and need not read missing sources.
+                if row['record_id'] not in {r['record_id'] for r in checked}:continue
+                _,current=_maintenance_image(root,row['_record_path'])
+                if current!=row['_record_sha256'] or checked_fingerprints(root,row['sources'])!=row['_source_image']:
+                    raise BrainError('memory-review:claim-or-source-changed')
+        if receipt is None:
+            receipt={'profile':REVIEW_PROFILE,'plan_id':identifier,'input_sha256':incoming,
+                     'result_id':result_id,'state':'started'}
+            atomic_json(destination,receipt)
+        if not checked:
+            reply={'profile':REVIEW_PROFILE,'state':'deferred','plan_id':identifier,'deferred':deferred,
+                   'records':[],'attestation':'not-performed','replayed':receipt['state']=='deferred'}
+        elif plan.get('verification_required'):
+            reply=_semantic_propose(root,plan,payload,incoming,deferred)
+            atomic_json(destination,{**receipt,'state':'proposed'})
+            return reply
+        else:
+            saved=record_result(root,task['id'],result_id,plan['task_revision'],payload,owner=owner,
+                                reason=REVIEW_REASON,attestation='agent',prepared=plan['scope'])
+            held=any(row['state'] not in {'updated','existing'} for row in saved['records'])
+            held=held or bool(saved['promotion'].get('failed') or saved['promotion'].get('blocked'))
+            reply={'profile':REVIEW_PROFILE,'state':'held' if held else 'applied','plan_id':identifier,
+                   'deferred':deferred,'result':saved,'attestation':'agent','replayed':saved['replayed']}
+        atomic_json(destination,{**receipt,'state':reply['state']})
+        return reply
+
+
+# Provider-free workflow gate. Publication is a trusted-controller operation;
+# the primary namespace must mount canonical knowledge read-only. Actor names
+# and these local JSON digests do not authenticate an independent model.
+SEMANTIC_PROFILE = 'memory-semantic-proposal-v1'
+SEMANTIC_PACKET = 'memory-semantic-packet-v1'
+SEMANTIC_VERDICT = 'memory-semantic-verdict-v1'
+SEMANTIC_AUTH = 'memory-semantic-controller-v1'
+SEMANTIC_LIMIT = 1024 * 1024
+
+
+def _semantic_digest(value):
+    try:
+        return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False,allow_nan=False,
+                                        separators=(',',':')).encode('utf-8')).hexdigest()
+    except (ValueError,TypeError,UnicodeError,RecursionError) as error:
+        raise BrainError('semantic-review:invalid-json-image') from error
+
+
+def _semantic_path(root,owner,task_id,identifier,suffix='proposal'):
+    result=_review_file(root,owner,task_id,identifier).with_name(identifier+'-'+suffix+'.json')
+    if os.path.lexists(result):
+        image=result.lstat()
+        if not stat.S_ISREG(image.st_mode) or image.st_nlink!=1 or linked_reparse(image):
+            raise BrainError('semantic-review:unsafe-storage')
+    return result
+
+
+def _semantic_write(destination,value):
+    if len(json.dumps(value,ensure_ascii=False,sort_keys=True,indent=2).encode('utf-8'))>SEMANTIC_LIMIT-1:
+        raise BrainError('semantic-review:packet-too-large')
+    atomic_json(destination,value)
+
+
+def _semantic_propose(root,plan,payload,incoming,deferred):
+    normalized=normalize(root,payload,check_files=False)
+    # The legacy promotion renderer folds whitespace. Never approve one text
+    # then silently publish another, especially literal NBSP/formfeed examples.
+    for row in normalized['learnings']:
+        if row['consequence']!=' '.join(row['consequence'].split()):
+            raise BrainError('semantic-review:rendering-would-change-claim')
+    effective={'progress':None,'verified':True,'learnings':normalized['learnings']}
+    value={'profile':SEMANTIC_PROFILE,'proposal_id':plan['plan_id'],'plan':plan,
+           'input_sha256':incoming,'payload':effective,'deferred':deferred}
+    digest=_semantic_digest(value);value['sha256']=digest
+    destination=_semantic_path(root,plan['owner'],plan['task_id'],plan['plan_id'])
+    if os.path.lexists(destination):
+        previous=_review_read(destination,limit=SEMANTIC_LIMIT)
+        if previous!=value:raise BrainError('semantic-review:proposal-already-frozen-or-unavailable')
+    else:_semantic_write(destination,value)
+    return {'profile':SEMANTIC_PROFILE,'state':'proposal-staged','proposal_id':plan['plan_id'],
+            'proposal_sha256':digest,'applied':False,'verification_required':True,
+            'attestation':'agent-proposal','deferred':deferred,
+            'next':'External controller must independently verify before publication; native save uses learnings=[].'}
+
+
+def _semantic_load(root,task_id,identifier,expected,owner):
+    value=_review_read(_semantic_path(root,owner,task_id,identifier),limit=SEMANTIC_LIMIT)
+    if (not isinstance(value,dict) or set(value)!={'profile','proposal_id','plan','input_sha256','payload','deferred','sha256'}
+            or value['profile']!=SEMANTIC_PROFILE or value['proposal_id']!=identifier
+            or not isinstance(expected,str) or not HEX.fullmatch(expected) or value['sha256']!=expected
+            or _semantic_digest({k:v for k,v in value.items() if k!='sha256'})!=expected):
+        raise BrainError('semantic-review:proposal-unavailable')
+    plan=value['plan']
+    if not isinstance(plan,dict) or plan.get('verification_required') is not True:
+        raise BrainError('semantic-review:proposal-scope-changed')
+    offered=_validate_review_plan(root,plan,task_id,identifier,owner,plan.get('task_uuid'))
+    if (not isinstance(value['input_sha256'],str) or not HEX.fullmatch(value['input_sha256'])
+            or not isinstance(value['payload'],dict) or set(value['payload'])!={'progress','verified','learnings'}
+            or value['payload']['progress'] is not None or value['payload']['verified'] is not True
+            or not isinstance(value['deferred'],list)):
+        raise BrainError('semantic-review:invalid-proposal')
+    normalized=normalize(root,value['payload'],check_files=False)
+    seen=set()
+    for learning in normalized['learnings']:
+        identifier=learning.get('record_id')
+        if identifier not in offered or identifier in seen:
+            raise BrainError('semantic-review:foreign-or-duplicate-reference')
+        previous=offered[identifier]
+        if any(learning[k]!=previous[k] for k in ('type','title','sources','expected_revision')) or learning['source_fingerprints']!=previous['_source_image']:
+            raise BrainError('semantic-review:reference-changed')
+        if learning['consequence']!=' '.join(learning['consequence'].split()):
+            raise BrainError('semantic-review:rendering-would-change-claim')
+        seen.add(identifier)
+    for row in value['deferred']:
+        if (not isinstance(row,dict) or set(row)!={'record_id','reason'}
+                or not isinstance(row['record_id'],str) or row['record_id'] not in offered or row['record_id'] in seen):
+            raise BrainError('semantic-review:invalid-deferral')
+        _text(row['reason'],'defer reason',300);seen.add(row['record_id'])
+    if seen!=set(offered) or not normalized['learnings']:
+        raise BrainError('semantic-review:incomplete-proposal')
+    return value
+
+
+def _semantic_clauses(text,prefix):
+    # Segmentation is only a complete checklist, never a truth classifier.
+    # No Unicode whitespace/case normalization precedes hashing or comparison.
+    if not isinstance(text,str) or not text:raise BrainError('semantic-review:empty-claim')
+    starts=[0,*[m.start() for m in re.finditer(r'(?<=[.!?;])(?=[ \t\r\n])|(?<=\n)',text)],len(text)]
+    starts=sorted(set(starts));rows=[]
+    for begin,end in zip(starts,starts[1:]):
+        if begin==end:continue
+        fragment=text[begin:end]
+        rows.append({'id':prefix+'-'+str(len(rows)),'text':fragment,
+                     'sha256':hashlib.sha256(fragment.encode('utf-8')).hexdigest()})
+    return rows
+
+
+def _semantic_current(root,proposal,task,*,fresh=True):
+    plan=proposal['plan']
+    if task['id']!=plan['task_uuid'] or task['status'] in {'completed','cancelled'}:
+        raise BrainError('semantic-review:task-changed')
+    if fresh and (type(plan.get('at')) not in (int,float) or not math.isfinite(plan['at'])
+                  or not 0<=time.time()-plan['at']<=MAINTENANCE_TTL):
+        raise BrainError('semantic-review:proposal-expired')
+    from memory_results import checked_fingerprints
+    indexed={row['record_id']:row for row in plan['records']}
+    for learning in proposal['payload']['learnings']:
+        row=indexed[learning['record_id']]
+        _,digest=_maintenance_image(root,row['_record_path'])
+        if digest!=row['_record_sha256'] or checked_fingerprints(root,row['sources'])!=learning['source_fingerprints']:
+            raise BrainError('semantic-review:record-or-source-changed')
+
+
+def _semantic_sources(root,proposal):
+    from memory_results import check_source
+    from brain_runtime import _line_ending_neutral
+    from validate import indexed_secret_policy_reason
+    sources={pin['path']:pin['sha256'] for row in proposal['payload']['learnings'] for pin in row['source_fingerprints']}
+    rows=[];total=0
+    for name,expected in sorted(sources.items()):
+        check_source(root,name)
+        source=workspace_roots.resolve(root,name)
+        descriptor=os.open(source,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0)|getattr(os,'O_BINARY',0))
+        try:
+            before=os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>262144:
+                raise BrainError('semantic-review:source-unavailable')
+            with os.fdopen(descriptor,'rb',closefd=False) as handle:raw=handle.read(262145)
+            after=os.fstat(descriptor);named=source.lstat()
+            identity=lambda image:(image.st_dev,image.st_ino,image.st_size,image.st_mtime_ns,image.st_ctime_ns,image.st_nlink,image.st_mode)
+            if len(raw)>262144 or identity(before)!=identity(after) or identity(after)!=identity(named):
+                raise BrainError('semantic-review:source-changed')
+        finally:os.close(descriptor)
+        try:text=raw.decode('utf-8')
+        except UnicodeError as error:raise BrainError('semantic-review:source-unavailable') from error
+        if '\0' in text or indexed_secret_policy_reason(text) or hashlib.sha256(_line_ending_neutral(raw)).hexdigest()!=expected:
+            raise BrainError('semantic-review:source-unavailable')
+        total+=len(raw)
+        if total>524288:raise BrainError('semantic-review:source-budget')
+        rows.append({'path':name,'sha256':expected,'raw_sha256':hashlib.sha256(raw).hexdigest(),'text':text})
+    return rows
+
+
+def semantic_review_export(root,task_id,identifier,expected,*,owner):
+    """Trusted host exports after primary exit. No model invocation or writes."""
+    if maintenance_mode(root)!='review-verified':raise BrainError('semantic-review:disabled')
+    with mutation_lock(root):
+        proposal=_semantic_load(root,task_id,identifier,expected,owner)
+        task=writable_task(root,task_id,owner);_semantic_current(root,proposal,task)
+        from brain_runtime import find_record,parse_markdown_record
+        from validate import indexed_secret_policy_reason,memory_temporal_reason
+        task_path,_,_=find_record(root,task['id']);task_hash=hashlib.sha256(task_path.read_bytes()).hexdigest()
+        sources=_semantic_sources(root,proposal);records=[]
+        old={r['record_id']:r for r in proposal['plan']['records']}
+        chunks=sorted(islice(workspace_roots.resolve(root,'memory-bank/chunks').glob('*.md'),2001))
+        if len(chunks)>2000:raise BrainError('semantic-review:chunk-budget')
+        for learning in proposal['payload']['learnings']:
+            previous=old[learning['record_id']];memories=[]
+            for chunk in chunks:
+                name='memory-bank/chunks/'+chunk.name
+                text,digest=_maintenance_image(root,name)
+                metadata,body=parse_markdown_record(Path(name),text=text)
+                links=metadata.get('sources')
+                if (not isinstance(links,list) or len(links)>100 or any(not isinstance(link,str) for link in links)
+                        or not isinstance(metadata.get('id'),str) or not metadata['id']
+                        or not isinstance(metadata.get('privacy','team'),str)
+                        or not isinstance(metadata.get('authority','observed'),str)):
+                    raise BrainError('semantic-review:memory-unavailable')
+                if metadata.get('status')=='active' and previous['_record_path'] in links:
+                    config=load_config(root)
+                    if (metadata.get('privacy','team') not in set(config['allowed_privacy']) & {'public','team'}
+                            or metadata.get('authority','observed') not in config['allowed_authority']
+                            or memory_temporal_reason(metadata)
+                            or indexed_secret_policy_reason(text)):
+                        raise BrainError('semantic-review:memory-not-admitted')
+                    memories.append({'id':metadata['id'],'path':name,'body':body,'sha256':digest})
+            records.append({'record_id':learning['record_id'],'title':learning['title'],
+                'old_consequence':previous['consequence'],'proposed_consequence':learning['consequence'],
+                'old_clauses':_semantic_clauses(previous['consequence'],'old'),
+                'new_clauses':_semantic_clauses(learning['consequence'],'new'),
+                'sources':learning['sources'],'old_memories':memories})
+        packet={'profile':SEMANTIC_PACKET,'proposal_id':identifier,'proposal_sha256':expected,
+                'task_id':task_id,'task_uuid':task['id'],'owner':owner,'project':_project(root),
+                'task_revision':task['revision'],'task_sha256':task_hash,'sources':sources,
+                'source_snapshot_sha256':_semantic_digest(sources),'records':records}
+        packet['sha256']=_semantic_digest(packet)
+        if len(json.dumps(packet,ensure_ascii=False,indent=2).encode())>SEMANTIC_LIMIT:
+            raise BrainError('semantic-review:packet-too-large')
+        return packet
+
+
+def semantic_verdict_check(packet,verdict):
+    """Validate evidence coverage/bindings. The external reviewer judges truth."""
+    if (not isinstance(verdict,dict) or set(verdict)!={'profile','packet_sha256','proposal_sha256','verdict','records'}
+            or verdict.get('profile')!=SEMANTIC_VERDICT or verdict.get('packet_sha256')!=packet['sha256']
+            or verdict.get('proposal_sha256')!=packet['proposal_sha256']
+            or not isinstance(verdict.get('verdict'),str) or verdict['verdict'] not in {'accept','reject','unresolved'}
+            or not isinstance(verdict.get('records'),list) or len(verdict['records'])!=len(packet['records'])):
+        raise BrainError('semantic-review:invalid-verdict')
+    records={row['record_id']:row for row in packet['records']};sources={s['path']:s for s in packet['sources']};seen=set();accepted=True
+    def evidence(rows):
+        if not isinstance(rows,list) or not 1<=len(rows)<=5:raise BrainError('semantic-review:missing-evidence')
+        for cite in rows:
+            if (not isinstance(cite,dict) or set(cite)!={'path','sha256','quote'}
+                    or not isinstance(cite.get('path'),str) or cite['path'] not in sources
+                    or cite['sha256']!=sources[cite['path']]['sha256']
+                    or not isinstance(cite['quote'],str) or not 1<=len(cite['quote'])<=500
+                    or cite['quote'] not in sources[cite['path']]['text']):
+                raise BrainError('semantic-review:invalid-evidence')
+    for review in verdict['records']:
+        if (not isinstance(review,dict) or set(review)!={'record_id','old_clauses','new_clauses','boundary_checks'}
+                or not isinstance(review.get('record_id'),str) or review['record_id'] not in records or review['record_id'] in seen):
+            raise BrainError('semantic-review:invalid-record-review')
+        seen.add(review['record_id']);record=records[review['record_id']]
+        for key in ('old_clauses','new_clauses'):
+            offered={r['id']:r for r in record[key]};rows=review[key];used=set()
+            if not isinstance(rows,list) or len(rows)!=len(offered):raise BrainError('semantic-review:incomplete-coverage')
+            for row in rows:
+                if (not isinstance(row,dict) or set(row)!={'id','sha256','status','reason','evidence'}
+                        or not isinstance(row.get('id'),str) or row['id'] not in offered or row['id'] in used
+                        or row['sha256']!=offered[row['id']]['sha256'] or not isinstance(row.get('status'),str)):
+                    raise BrainError('semantic-review:invalid-clause-review')
+                allowed=({'retained','changed-with-evidence','removed-with-evidence','unresolved'} if key=='old_clauses'
+                         else {'supported','contradicted','unresolved'})
+                if row['status'] not in allowed:raise BrainError('semantic-review:invalid-clause-status')
+                _text(row['reason'],'clause reason',500);evidence(row['evidence']);used.add(row['id'])
+                if row['status'] in {'contradicted','unresolved'}:accepted=False
+        checks=review['boundary_checks']
+        if not isinstance(checks,list) or not 1<=len(checks)<=10:raise BrainError('semantic-review:missing-boundary-checks')
+        for check in checks:
+            if (not isinstance(check,dict) or set(check)!={'case','status','evidence'}
+                    or not isinstance(check.get('status'),str) or check['status'] not in {'supported','contradicted','unresolved'}):
+                raise BrainError('semantic-review:invalid-boundary-check')
+            _text(check['case'],'boundary case',500);evidence(check['evidence'])
+            if check['status']!='supported':accepted=False
+    return {'state':('accepted' if accepted else 'unresolved') if verdict['verdict']=='accept' else verdict['verdict'],
+            'publish':bool(verdict['verdict']=='accept' and accepted)}
+
+
+def _semantic_packet_check(packet,proposal):
+    fields={'profile','proposal_id','proposal_sha256','task_id','task_uuid','owner','project',
+            'task_revision','task_sha256','sources','source_snapshot_sha256','records','sha256'}
+    plan=proposal['plan']
+    if (not isinstance(packet,dict) or set(packet)!=fields or packet['profile']!=SEMANTIC_PACKET
+            or any(packet[k]!=plan[k] for k in ('task_id','task_uuid','owner','project'))
+            or packet['proposal_id']!=plan['plan_id'] or packet['proposal_sha256']!=proposal['sha256']
+            or type(packet['task_revision']) is not int or packet['task_revision']<1
+            or not isinstance(packet['task_sha256'],str) or not HEX.fullmatch(packet['task_sha256'])
+            or _semantic_digest({k:v for k,v in packet.items() if k!='sha256'})!=packet['sha256']
+            or not isinstance(packet['sources'],list) or not isinstance(packet['records'],list)):
+        raise BrainError('semantic-review:packet-changed')
+    from brain_runtime import _line_ending_neutral
+    pins={p['path']:p['sha256'] for row in proposal['payload']['learnings'] for p in row['source_fingerprints']}
+    sources={}
+    for row in packet['sources']:
+        if (not isinstance(row,dict) or set(row)!={'path','sha256','raw_sha256','text'}
+                or not isinstance(row['path'],str) or row['path'] not in pins or row['path'] in sources
+                or row['sha256']!=pins[row['path']] or not isinstance(row['text'],str)
+                or hashlib.sha256(row['text'].encode('utf-8')).hexdigest()!=row['raw_sha256']
+                or hashlib.sha256(_line_ending_neutral(row['text'].encode('utf-8'))).hexdigest()!=row['sha256']):
+            raise BrainError('semantic-review:invalid-packet-source')
+        sources[row['path']]=row
+    if set(sources)!=set(pins) or packet['source_snapshot_sha256']!=_semantic_digest(packet['sources']):
+        raise BrainError('semantic-review:incomplete-packet-source')
+    offered={row['record_id']:row for row in plan['records']};seen=set()
+    proposed={row['record_id']:row for row in proposal['payload']['learnings']}
+    for row in packet['records']:
+        if (not isinstance(row,dict) or set(row)!={'record_id','title','old_consequence','proposed_consequence',
+                                                  'old_clauses','new_clauses','sources','old_memories'}
+                or not isinstance(row['record_id'],str) or row['record_id'] not in proposed or row['record_id'] in seen):
+            raise BrainError('semantic-review:invalid-packet-record')
+        previous=offered[row['record_id']];current=proposed[row['record_id']]
+        if (row['title']!=current['title'] or row['sources']!=current['sources']
+                or row['old_consequence']!=previous['consequence'] or row['proposed_consequence']!=current['consequence']
+                or row['old_clauses']!=_semantic_clauses(previous['consequence'],'old')
+                or row['new_clauses']!=_semantic_clauses(current['consequence'],'new')
+                or not isinstance(row['old_memories'],list) or len(row['old_memories'])>2000):
+            raise BrainError('semantic-review:packet-claim-changed')
+        for memory in row['old_memories']:
+            if (not isinstance(memory,dict) or set(memory)!={'id','path','body','sha256'}
+                    or any(not isinstance(memory[k],str) for k in memory)
+                    or not HEX.fullmatch(memory['sha256'])):
+                raise BrainError('semantic-review:invalid-packet-memory')
+        seen.add(row['record_id'])
+    if seen!=set(proposed):raise BrainError('semantic-review:incomplete-packet-records')
+
+
+def semantic_controller_input(root,name):
+    """Only host-owned files outside all three accelerator/project roots.
+
+    This is a placement check, not authentication. OS isolation keeps these
+    files and this publishing entry point outside the primary's control.
+    """
+    source=Path(name)
+    if not source.is_absolute():raise BrainError('semantic-review:external-input-required')
+    resolved=source.resolve(strict=True)
+    for anchor in workspace_roots.roots(root)[:3]:
+        try:resolved.relative_to(anchor.resolve())
+        except ValueError:continue
+        raise BrainError('semantic-review:external-input-required')
+    value=_review_read(source,limit=SEMANTIC_LIMIT)
+    if value is None:raise BrainError('semantic-review:external-input-unavailable')
+    return value
+
+
+def semantic_review_apply(root,task_id,identifier,expected,packet,authorization,*,owner):
+    """Trusted controller only, outside the primary's read-only knowledge view.
+
+    No actor-name/JSON field authenticates a model. The host must capture an
+    independent isolated process and keep this authorization outside primary
+    control. All digests below provide consistency, not signatures.
+    """
+    if maintenance_mode(root)!='review-verified':raise BrainError('semantic-review:disabled')
+    with mutation_lock(root):
+        proposal=_semantic_load(root,task_id,identifier,expected,owner)
+        _semantic_packet_check(packet,proposal)
+        if (not isinstance(authorization,dict) or set(authorization)!={'profile','packet_sha256','primary_request','reviewer_session','verdict'}
+                or authorization['profile']!=SEMANTIC_AUTH or authorization['packet_sha256']!=packet['sha256']
+                or not isinstance(authorization.get('primary_request'),str) or not HEX.fullmatch(authorization['primary_request'])
+                or not isinstance(authorization.get('reviewer_session'),str)
+                or not re.fullmatch(r'[A-Za-z0-9._:-]{1,160}',authorization['reviewer_session'])):
+            raise BrainError('semantic-review:controller-authorization-unavailable')
+        assessment=semantic_verdict_check(packet,authorization['verdict'])
+        authorization_hash=_semantic_digest(authorization)
+        binding={'profile':SEMANTIC_AUTH,'packet_sha256':packet['sha256'],'authorization_sha256':authorization_hash}
+        destination=_semantic_path(root,owner,task_id,identifier,'authorization')
+        previous=_review_read(destination)
+        if os.path.lexists(destination) and previous!=binding:
+            raise BrainError('semantic-review:authorization-already-frozen-or-unavailable')
+        normalized=normalize(root,proposal['payload'],check_files=False)
+        task_uuid=proposal['plan']['task_uuid'];digest=request_digest(task_uuid,normalized)
+        result_id='semantic-'+authorization_hash[:48]
+        from memory_results import _receipt,_valid_receipt
+        completed_receipt=_valid_receipt(_read_receipt(_receipt(root,task_uuid,result_id)),task_uuid,result_id,digest)
+        proof=_read_attempt(_attempt(root,task_uuid,result_id,digest))
+        known=completed_receipt or bool(proof and proof.get('state') in {'started','complete'} and proof.get('owner')==owner
+                   and proof.get('task_id')==task_uuid and proof.get('result_id')==result_id and proof.get('digest')==digest
+                   and proof.get('attestation')=='agent')
+        if known and previous!=binding:raise BrainError('semantic-review:authorization-unavailable')
+        # A completed canonical result is passive: a newer prompt, expiration,
+        # source removal or task archival must not turn replay into new work.
+        if not (completed_receipt or known and proof['state']=='complete'):
+            state=_read(root,authorization['primary_request'])
+            if (state is None or state['phase']!='saved' or state['owner']!=owner or state['task_id']!=task_id
+                    or state['task_uuid']!=task_uuid or not _proven(root,state)
+                    or state['session']==hashlib.sha256(authorization['reviewer_session'].encode()).hexdigest()):
+                raise BrainError('semantic-review:primary-unfinished-or-same-session')
+        if not assessment['publish']:
+            if previous is None:_semantic_write(destination,binding)
+            return {'profile':SEMANTIC_AUTH,'state':assessment['state'],'applied':False,'attestation':'not-performed'}
+        if not known:
+            from brain_runtime import find_record
+            task=writable_task(root,task_id,owner);_semantic_current(root,proposal,task)
+            task_path,_,_=find_record(root,task['id'])
+            if (packet['task_uuid']!=task['id'] or packet['task_revision']!=task['revision']
+                    or packet['task_sha256']!=hashlib.sha256(task_path.read_bytes()).hexdigest()
+                    or _semantic_sources(root,proposal)!=packet['sources']):
+                raise BrainError('semantic-review:task-or-packet-source-changed')
+            # Re-export checks the old active memory body and admission too.
+            if semantic_review_export(root,task_id,identifier,expected,owner=owner)!=packet:
+                raise BrainError('semantic-review:publication-frontier-changed')
+        if previous is None:_semantic_write(destination,binding)
+        result=record_result(root,task_uuid,result_id,packet['task_revision'],proposal['payload'],owner=owner,
+                             reason=REVIEW_REASON,attestation='agent',prepared=proposal['plan']['scope'])
+        held=any(row['state'] not in {'updated','existing'} for row in result['records'])
+        held=held or bool(result['promotion'].get('failed') or result['promotion'].get('blocked'))
+        return {'profile':SEMANTIC_AUTH,'state':'held' if held else 'applied','applied':not held,
+                'attestation':'agent','reviewer_session':authorization['reviewer_session'],'result_id':result_id,
+                'proposal_sha256':expected,'packet_sha256':packet['sha256'],'result':result}
+
+
 def _instruction(root,key,state,*,brief=False,host=None,full=True,entered=False,back=None):
     tooling=Path(__file__).resolve().parents[2]
     interpreter=['python3']
@@ -760,16 +1574,17 @@ def _instruction(root,key,state,*,brief=False,host=None,full=True,entered=False,
         ask='Use your shell tool to pipe one JSON object into this exact command: (' \
             +enter+cli('--input','-','--json')+')\n'
         skip='use the same command replacing --input - with --skip. '
-    rules=('JSON: progress (summary, at most 1000 characters), optional next_steps '
+    rules=(_rules_marker(root)+' JSON: progress (summary, at most 1000 characters), optional next_steps '
         '(at most 3 strings of 300 characters; omit to preserve the current plan), '
         'learnings (at most 3 objects with type finding|decision, title, consequence, sources). '
         'Exact schema example (replace placeholders, never save the example): '
         '{"progress":"summary","verified":true,"learnings":[{"type":"finding",'
         '"title":"checked rule","consequence":"reusable consequence","sources":["checked-file.php"]}]}. '
         'verified is a TOP-LEVEL boolean, NEVER a field inside a learning. '
-        'Only NEW or corrected reusable consequences belong in learnings. If this task only '
-        'recalls or rechecks an already recorded rule, use learnings=[] and save progress only; '
-        'never create another finding merely to say that an old rule was verified again. '
+        'New consequences use ordinary learnings. To recheck or correct an inspected existing claim, '
+        'preserve its type/title/sources and add its exact record_id, expected_revision and checked '
+        'source_fingerprints (read with context.py source-fingerprints --source PATH --json). '
+        'Do not create a duplicate finding. Recalling alone uses learnings=[] and progress only. '
         'Use only canonical project-relative source files you actually checked. Set verified=true '
         'only when you personally checked every learning against current sources; this is agent '
         'attestation, never human review. Empty learnings is valid. No raw requests, transcripts, '
@@ -777,9 +1592,11 @@ def _instruction(root,key,state,*,brief=False,host=None,full=True,entered=False,
         # The conversation holds the full step from an earlier answer.
         'The JSON follows the rules of the full save step earlier in this conversation: progress, optional '
         'next_steps, learnings with checked sources, and verified as a top-level boolean. ')
+    if maintenance_mode(root)=='review-verified':
+        rules+=' Independent-review mode: use learnings=[]; reusable knowledge is proposal-only and published by the external controller. '
     body=('This is an internal continuation: do not announce routine memory operations. Save only the result of the work already performed in this session. Do not repeat the task, '
         'edit application files, run tests, delegate, or mark the task completed. '
-        +ask+rules+'If no project result is safe to save, '+skip+
+        +ask+rules+maintenance_instruction(root,state)+'If no project result is safe to save, '+skip+
         'Check the command result. '
         +('The person has already read your answer above this continuation: after a successful save or skip, '
           'do not repeat it or mention routine memory operations; end with no further text or one short line. '
@@ -889,7 +1706,7 @@ def _stop(step, root, task_id, host, payload, *, owner, mode, entered=False, ser
         # Cursor's transcript, when it keeps one, and how it records a
         # summarized conversation could not be checked here: it gets the
         # full step every time, as before.
-        full=configured_instruction(root)=='full' or host=='cursor' or not _rules_in_context(payload)
+        full=configured_instruction(root)=='full' or host=='cursor' or not _rules_in_context(payload,_rules_marker(root))
         where=payload.get('cwd')
         instruction=_instruction(root,key,state,brief=brief,host=host,full=full,entered=entered,
                                  back=where if (isinstance(where,str) and os.path.isabs(where)
@@ -914,7 +1731,7 @@ def save(root,key,token,data,*,owner,mode,provision,skip=False,spooled=False,ser
             # project read-only: the save's first write, the runtime lock,
             # fails before anything is written.
             if spooled or error.errno not in UNWRITABLE or not _under(error.filename, brain_root(root)): raise
-            return _spool(step,root,key,token,data,skip=skip)
+            return _spool(step,root,key,token,data,owner=owner,skip=skip)
 
 
 def _under(path, base):
@@ -935,7 +1752,16 @@ def _own(image):
     return not linked_reparse(image) and (not hasattr(os, 'getuid') or image.st_uid == os.getuid())
 
 
-def _spool(step, root, key, token, data, *, skip):
+def _check_save_scope(root, state, owner):
+    if state['owner'] != owner or state['project'] != _project(root):
+        raise BrainError('native-result:request-unavailable')
+    if (time.time()-state['updated'] > 24*60*60 or state['updated'] > time.time()+60
+            or state['checkout'] != _checkout(root) or state['adapter'] != _adapter()
+            or state['scope'] != prepared_scope(root,owner,REASON,'agent')):
+        raise BrainError('native-result:scope-changed')
+
+
+def _spool(step, root, key, token, data, *, owner, skip):
     """The project cannot be written from here. The request and the result
     are checked as a save checks them, so the agent can still correct a
     refused one, and the result waits in the spool for the session's next
@@ -947,6 +1773,7 @@ def _spool(step, root, key, token, data, *, skip):
     if state is None or state['token'] != token or state['phase'] != 'requested':
         raise BrainError('native-result:request-unavailable')
     step.host = state['host']
+    _check_save_scope(root, state, owner)
     if not skip: normalize(root, data, check_files=True)
     record = {'profile': SPOOL_PROFILE, 'token': token, 'skip': bool(skip), 'data': None if skip else data,
               'created': time.time()}
@@ -1043,9 +1870,10 @@ def drain(root, task_id, host, payload, *, owner, mode, provision, served=None):
                                 skip=record['skip'],spooled=True,served=served)
                 except BrainError:
                     pass  # journaled as the save's refusal; the Stop settles the request
-                finally:
-                    try: attempt.unlink()
-                    except OSError: pass
+                # Unexpected failures leave this named attempt available for
+                # the next bounded drain, just as a killed hook does.
+                try: attempt.unlink()
+                except OSError: pass
     return result
 
 
@@ -1071,10 +1899,7 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip,spooled=False,ser
             raise BrainError('native-result:request-unavailable')
         if begun and (state['task_uuid'] is None or state['revision'] is None):
             raise BrainError('native-result:invalid-state')
-        if (time.time()-state['updated'] > 24*60*60 or state['updated'] > time.time()+60
-                or state['checkout'] != _checkout(root) or state['adapter'] != _adapter()
-                or state['scope'] != prepared_scope(root,owner,REASON,'agent')):
-            raise BrainError('native-result:scope-changed')
+        _check_save_scope(root, state, owner)
         if skip:
             if state['digest'] is not None: raise BrainError('native-result:save-already-started')
             state['phase']='omitted';_write(root,slot,state)
@@ -1139,4 +1964,8 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip,spooled=False,ser
         return step(result,state['phase'],repeat or ('spooled' if spooled else 'in-flight' if slot != key
                                                      else 'rebased' if rebased else None),
                     learnings=sum(item['state'] in {'created','completed','updated'} for item in result['records']),
-                    promoted=len((result['promotion'] or {}).get('promoted') or ()))
+                    submitted=len({learning_id(state['task_uuid'],row) for row in normalized['learnings']}),
+                    existing=sum(item['state'] in {'existing','archived'} for item in result['records']),
+                    held=sum(item['state'] in {'differs','archived-differs','missing'} for item in result['records']),
+                    promoted=len((result['promotion'] or {}).get('promoted') or ()),
+                    **({'capture_decision': normalized['capture_decision']} if 'capture_decision' in normalized else {}))

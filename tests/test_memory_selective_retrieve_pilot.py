@@ -94,5 +94,59 @@ raise SystemExit(7)
         record['router_digest'] = '0' * 64
         self.assertEqual('unknown', parse_observations(json.dumps(record).encode(), expected)['status'])
 
+    def test_default_routes_past_states_without_decision_words(self):
+        from memory_selective_retrieve_pilot import choose_profile, DEFAULT_RULES
+        for query in ('Какой порог был раньше?', 'Какой лимит действовал в прошлом месяце?',
+                      'Which timeout was configured before the migration?',
+                      'Recover the former cleanup retention.',
+                      'What was the old limit and what is configured currently?'):
+            with self.subTest(query=query):
+                self.assertEqual('full', choose_profile(query, DEFAULT_RULES))
+
+    def test_current_procedural_and_continuation_stay_compact(self):
+        from memory_selective_retrieve_pilot import choose_profile, DEFAULT_RULES
+        for query in ('Почему тест падает?', 'What is the current timeout?',
+                      'Добавь previous_item в новый DTO', 'Implement a previousStatus property',
+                      'Как выполнять проверку миграций?', 'Дальше', 'Continue'):
+            with self.subTest(query=query):
+                self.assertEqual('recall', choose_profile(query, DEFAULT_RULES))
+
+    def test_route_reports_purpose_without_exposing_query(self):
+        from memory_selective_retrieve_pilot import DEFAULT_RULES
+        self.rules.write_text(json.dumps(DEFAULT_RULES), encoding='utf-8')
+        for query, reason, profile in [
+            ('Какой порог был раньше?', 'historical-state', 'full'),
+            ('Почему раньше отказались от Redis?', 'historical-decision', 'full'),
+            ('What is the current timeout?', 'current-state', 'recall'),
+            ('How to run the review workflow?', 'procedural', 'recall'),
+            ('Дальше', 'continuation', 'recall')]:
+            with self.subTest(query=query):
+                raw, result = self.run_wrapper(query, '--enabled')
+                self.assertEqual(7, result.returncode)
+                self.assertEqual(raw, (self.root/'input.bin').read_bytes())
+                record=json.loads(self.audit.read_text().splitlines()[-1])
+                self.assertEqual(reason, record['reason'])
+                self.assertEqual(profile, record['profile'])
+                self.assertNotIn(query, json.dumps(record))
+
+    def test_legacy_rules_keep_their_original_routing(self):
+        from memory_selective_retrieve_pilot import choose_profile
+        legacy={'version':1,'historical':['раньше','why'],'decisions':['отказались','reject']}
+        self.assertEqual('recall',choose_profile('Какой порог был раньше?',legacy))
+        self.assertEqual('full',choose_profile('why reject Redis',legacy))
+
+    def test_long_prompt_routing_keeps_clipped_query_within_bound_and_original_transport(self):
+        from memory_selective_retrieve_pilot import DEFAULT_RULES
+        self.rules.write_text(json.dumps(DEFAULT_RULES),encoding='utf-8')
+        prefix='What was the previous timeout? '
+        for length in (24000,24001,30000):
+            with self.subTest(length=length):
+                prompt=prefix+'x'*(length-len(prefix))
+                raw,result=self.run_wrapper(prompt,'--enabled')
+                self.assertEqual(7,result.returncode)
+                self.assertEqual(raw,(self.root/'input.bin').read_bytes())
+                record=json.loads(self.audit.read_text().splitlines()[-1])
+                self.assertEqual(('full','historical-state'),(record['profile'],record['reason']))
+
 
 if __name__ == '__main__': unittest.main()

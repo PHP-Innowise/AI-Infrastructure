@@ -28,6 +28,118 @@ class StubSessions:
 
 
 class ParseTests(unittest.TestCase):
+    def test_capture_decisions_survive_parsing_submission_and_source_filtering(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'specs').mkdir()
+            (root / 'specs/authority.md').write_text('Cobalt allocation rule.\n')
+            for decision in ('selected', 'no_reusable_knowledge', 'insufficiently_checked'):
+                data = {'progress': 'Checked Cobalt.', 'capture_decision': decision,
+                        'learnings': [LEARNING] if decision == 'selected' else []}
+                with self.subTest(decision=decision):
+                    parsed = memory_draft.parse(reply(data))
+                    self.assertEqual(decision, parsed['capture_decision'])
+                    kept, skipped = memory_draft.usable(root, parsed)
+                    self.assertEqual([], skipped)
+                    self.assertEqual(decision, memory_draft.submission(kept)['capture_decision'])
+            self.assertNotIn('capture_decision', memory_draft.parse(reply({'progress': 'Checked.'})))
+
+    def test_capture_decision_cannot_contradict_the_original_selection(self):
+        invalid = [{'progress': 'Checked.', 'capture_decision': value, 'learnings': []}
+                   for value in (None, True, [], {}, 'unknown', 'selected')]
+        invalid += [{'progress': 'Checked.', 'verified': True, 'learnings': [LEARNING],
+                     'capture_decision': decision}
+                    for decision in ('no_reusable_knowledge', 'insufficiently_checked')]
+        for data in invalid:
+            with self.subTest(decision=data['capture_decision']):
+                with self.assertRaises(SessionError):
+                    memory_draft.submission(data)
+                self.assertIsNone(memory_draft.parse(reply(data)))
+
+    def test_fully_filtered_capture_keeps_original_decision_and_existing_omission_bound(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            data = {'progress': 'Cobalt checked.', 'capture_decision': 'selected', 'learnings': [
+                {**LEARNING, 'title': f'Cobalt rule {number}'} for number in range(3)]}
+            parsed = memory_draft.parse(reply(data))
+            kept, skipped = memory_draft.usable(Path(temporary), parsed)
+            self.assertEqual('selected', parsed['capture_decision'])
+            self.assertNotIn('capture_decision', kept)
+            self.assertEqual([], kept['learnings'])
+            self.assertEqual(['unsourced'] * 3, [item['reason'] for item in skipped])
+            self.assertEqual('Cobalt checked.', memory_draft.submission(kept)['progress'])
+
+    def test_old_runtime_reports_unsupported_capture_decision_after_saving_progress(self):
+        from types import SimpleNamespace
+        from harness.task_context import TaskContext
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); (root / 'project').mkdir(); calls = []
+            def call(*args, **fields):
+                calls.append(args[3])
+                return {'id': 'task', 'revision': 2}
+            stub = SimpleNamespace(
+                _bound=lambda session: (None, {'task_id': 'cobalt', 'bank': {}}, str(root), {'root': 'project'}),
+                _knowledge=lambda *args, **kwargs: {'task': {'id': 'task', 'revision': 1, 'status': 'active'}},
+                _call=call)
+            result = TaskContext._save_memory_chain(stub, {'id': 'session', 'project_id': 'project'},
+                {'progress': 'Cobalt checked.', 'learnings': [], 'capture_decision': 'no_reusable_knowledge'})
+            self.assertEqual(['brain-update'], calls)
+            self.assertEqual({'id': 'task', 'revision': 2}, result['saved']['task'])
+            self.assertFalse(result['ok'])
+            self.assertIn('Capture decisions require', result['error'])
+
+    def reference(self, **changes):
+        return {**LEARNING,'record_id':'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','expected_revision':2,
+                'source_fingerprints':[{'path':'specs/authority.md','sha256':'a'*64}],**changes}
+
+    def test_reference_fields_survive_parse_submission_and_automatic_filter(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'specs').mkdir();(root/'specs/authority.md').write_text('Cobalt allocation rule.\n')
+            ref=self.reference(title='Cobalt  allocation needs one owner')
+            parsed=memory_draft.parse(reply({'progress':'Checked','learnings':[ref]}))
+            usable,skipped=memory_draft.usable(root,parsed)
+            self.assertEqual([],skipped);self.assertEqual(ref,usable['learnings'][0])
+            self.assertEqual(ref,memory_draft.submission(usable)['learnings'][0])
+
+    def test_invalid_reference_is_never_reinterpreted_as_new_knowledge(self):
+        for field in ('record_id','expected_revision','source_fingerprints'):
+            ref=self.reference();del ref[field]
+            parsed=memory_draft.parse(reply({'progress':'Checked','learnings':[ref]}))
+            self.assertEqual([],parsed['learnings'])
+            with self.assertRaises(SessionError):
+                memory_draft.submission({'progress':'Checked','learnings':[ref],'verified':True})
+
+    def test_filter_never_salvages_partial_checked_source_set(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'specs').mkdir();(root/'specs/authority.md').write_text('Cobalt rule.\n')
+            ref=self.reference(sources=['specs/authority.md','specs/missing.md'],source_fingerprints=[
+                {'path':'specs/authority.md','sha256':'a'*64},{'path':'specs/missing.md','sha256':'b'*64}])
+            kept,skipped=memory_draft.usable(root,{'progress':'Checked','learnings':[ref]})
+            self.assertEqual([],kept['learnings']);self.assertEqual(1,len(skipped))
+
+    def test_conflicting_reference_images_are_all_withheld(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'specs').mkdir();(root/'specs/authority.md').write_text('Cobalt rule.\n')
+            kept,skipped=memory_draft.usable(root,{'progress':'Checked','learnings':[
+                self.reference(),self.reference(expected_revision=3)]})
+            self.assertEqual([],kept['learnings']);self.assertEqual(['conflict','conflict'],[s['reason'] for s in skipped])
+
+    def test_old_runtime_keeps_progress_but_never_creates_reference_target(self):
+        from types import SimpleNamespace
+        from harness.task_context import TaskContext
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);project=root/'project';(project/'specs').mkdir(parents=True)
+            (project/'specs/authority.md').write_text('Cobalt rule.\n');calls=[]
+            def call(*args,**fields):
+                action=args[3];calls.append(action)
+                if action=='brain-create':raise AssertionError('Reference became a new record')
+                return {'id':'task','revision':2}
+            stub=SimpleNamespace(_bound=lambda s:(None,{'task_id':'cobalt','bank':{}},str(root),{'root':'project'}),
+                _knowledge=lambda *args,**kwargs:{'task':{'id':'task','revision':1,'status':'active'}},_call=call)
+            result=TaskContext._save_memory_chain(stub,{'id':'session','project_id':'project'},
+                {'progress':'Cobalt checked.','learnings':[self.reference()],'verified':True})
+            self.assertFalse(result['ok']);self.assertEqual(['brain-update'],calls)
+            self.assertEqual('unsupported-runtime',result['skipped'][0]['reason'])
+
     def test_reported_memory_use_is_bounded_and_never_proves_reading(self):
         path = 'memory-bank/chunks/known.md'
         draft = memory_draft.parse(reply({'progress': 'Checked', 'used_memory': [path, path, '../foreign.md']}))
@@ -360,12 +472,23 @@ class UnattendedSaveTests(unittest.TestCase):
         replayed = memory_draft.summary("drafted", {"ok": True, "skipped": [], "saved": {"task": None, "records": [
             {"type": "finding", "title": "One owner", "state": "differs"},
             {"type": "decision", "title": "Retry once", "state": "missing"}]}})
-        self.assertIn("Kept as recorded, with a different consequence than this run's: finding “One owner”", replayed)
+        self.assertIn("Left unchanged: finding “One owner”; this run did not replace it.", replayed)
         self.assertIn("Removed from project memory since this run saved it: decision “Retry once”.", replayed)
+
         stopped = memory_draft.summary("drafted", {"ok": False, "error": "The runtime refused content matching its "
                                                    "secret-protection rules.", "saved": {"task": {"id": "t"}, "records": []}})
         self.assertTrue(stopped.endswith("Stopped: The runtime refused content matching its secret-protection rules. "
                                          "What is listed was saved."), stopped)
+
+    def test_reference_holds_do_not_claim_that_absent_or_protected_knowledge_was_saved(self):
+        result={'ok':True,'saved':{'task':{'id':'t'},'records':[
+            {'type':'finding','title':'Absent rule','state':'differs','reason':'record-not-found','revision':None},
+            {'type':'finding','title':'Protected rule','state':'differs','reason':'person-or-unknown-attestation','revision':4}]}}
+        text=memory_draft.summary('drafted',result)
+        self.assertIn('refers to a record that no longer exists (record-not-found)',text)
+        self.assertIn('Left unchanged: finding “Protected rule” at revision 4 (person-or-unknown-attestation)',text)
+        self.assertNotIn('different consequence',text)
+        self.assertIn("Saved to project memory: the task's progress",text)
 
 
 if __name__ == "__main__":

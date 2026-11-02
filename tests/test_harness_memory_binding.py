@@ -28,6 +28,26 @@ REASON = memory_draft.AUTOMATIC_REASON
 
 
 class NativePreparedTests(unittest.TestCase):
+    def test_reference_survives_preparation_and_completed_passive_replay(self):
+        original=self.results.record_result(self.root,self.task['id'],'reference-source',1,DRAFT,owner='local',reason=REASON)
+        identifier=original['records'][0]['id'];target=self.brain.get_record(self.root,identifier)
+        branch=self.brain.create_task(self.root,'CEDAR-RECHECK','Recheck known Cedar claim',[],[],owner='local')
+        (self.root/SOURCE).write_text('# Cedar allocation\n\nSame owner rule; another detail added.\n')
+        learning={**copy.deepcopy(DRAFT['learnings'][0]),'record_id':identifier,'expected_revision':target['revision'],
+                  'source_fingerprints':self.results.checked_fingerprints(self.root,DRAFT['learnings'][0]['sources'])}
+        data={'progress':'Cedar rechecked.','learnings':[learning],'verified':True}
+        value=self.results.prepare_result(self.root,branch['id'],'explicit-review',1,data,owner='local',reason=REASON)
+        self.assertEqual(learning,value['request']['learnings'][0])
+        wire=memory_draft.submission({**value['request'],'verified':True})
+        self.assertEqual(learning,wire['learnings'][0])
+        result=self.results.record_result(self.root,branch['id'],'explicit-review',1,value['request'],
+            owner='local',reason=REASON,prepared=value['scope'])
+        self.assertEqual(identifier,result['records'][0]['id']);self.assertEqual('updated',result['records'][0]['state'])
+        before=self.brain.get_record(self.root,identifier);(self.root/SOURCE).unlink()
+        replay=self.results.record_result(self.root,branch['id'],'explicit-review',1,value['request'],
+            owner='local',reason=REASON,prepared=value['scope'],replay_only=True)
+        self.assertTrue(replay['replayed']);self.assertEqual(before,self.brain.get_record(self.root,identifier))
+
     def setUp(self):
         sys.path.insert(0, str(SCRIPTS))
         try:
@@ -65,6 +85,20 @@ class NativePreparedTests(unittest.TestCase):
         self.assertNotIn('next_steps', omitted['request'])
         self.assertEqual([], self.value['request']['next_steps'])
         self.assertEqual(before, self.images())
+
+    def test_capture_decision_survives_prepared_wire_and_independent_digest_validation(self):
+        for decision in ('selected', 'no_reusable_knowledge', 'insufficiently_checked'):
+            data = {**DRAFT, 'capture_decision': decision,
+                    'learnings': DRAFT['learnings'] if decision == 'selected' else []}
+            with self.subTest(decision=decision):
+                value = self.prepare(data)
+                self.assertEqual(decision, value['request']['capture_decision'])
+                checked = memory_attempts.prepared(value, self.task['id'], 'cedar-prepared', 1, 'local', REASON)
+                self.assertEqual(value, checked)
+                changed = copy.deepcopy(value)
+                changed['request'].pop('capture_decision')
+                with self.assertRaises(sessions.SessionError):
+                    memory_attempts.prepared(changed, self.task['id'], 'cedar-prepared', 1, 'local', REASON)
 
     def test_transcript_body_and_reason_fail_before_retention(self):
         before = self.images()
@@ -183,6 +217,42 @@ class HarnessBindingTests(unittest.TestCase):
 
     def binding(self):
         return memory_attempts.lookup(self.store, self.sid, self.generation)
+
+    def capture_draft(self, data):
+        self.store._event(self.sid, {'kind': 'result', 'text': '```memory-draft\n' + json.dumps(data) + '\n```'})
+        self.event_id = self.store.events(self.sid)[-1]['id']
+        self.data = memory_draft.latest(self.store, self.sid)['draft']
+
+    def test_capture_decision_survives_automatic_binding_and_passive_replay(self):
+        self.capture_draft({**DRAFT, 'capture_decision': 'selected'})
+        first = self.save()
+        self.assertTrue(first['ok'], first)
+        self.assertEqual('selected', self.binding()['prepared']['request']['capture_decision'])
+        self.assertEqual('selected', first['saved']['capture_decision'])
+        (self.project / SOURCE).unlink()
+        second = self.save()
+        self.assertTrue(second['ok'], second)
+        self.assertEqual('selected', second['saved']['capture_decision'])
+
+    def test_fully_filtered_capture_retains_original_identity_and_progress_on_replay(self):
+        self.capture_draft({**DRAFT, 'capture_decision': 'selected', 'learnings': [
+            {**DRAFT['learnings'][0], 'title': f'Cedar checked rule {number}'} for number in range(3)]})
+        (self.project / SOURCE).unlink()
+        first = self.save()
+        self.assertTrue(first['ok'], first)
+        self.assertIsNotNone(first['saved']['task'])
+        self.assertEqual('selected', self.data['capture_decision'])
+        binding = self.binding()
+        self.assertEqual(3, binding['skipped_count'])
+        self.assertEqual([], binding['prepared']['request']['learnings'])
+        self.assertNotIn('capture_decision', binding['prepared']['request'])
+        self.assertNotIn('capture_decision', first['saved'])
+        (self.project / SOURCE).write_text('# Cedar source returned\n')
+        second = self.save()
+        self.assertTrue(second['ok'], second)
+        self.assertEqual(binding, self.binding())
+        self.assertEqual([], second['saved']['records'])
+        self.assertEqual(3, len(second['skipped']))
 
     def test_first_save_freezes_before_mutation_then_replays_without_source_filter(self):
         first = self.save()

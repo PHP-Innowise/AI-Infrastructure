@@ -71,6 +71,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -111,6 +112,12 @@ METRICS = ("gold", "recall")
 DEFAULT_CAP = 40
 DEFAULT_TIMEOUT = 900.0
 TOOL_ITEMS = ("command_execution", "file_change", "mcp_tool_call", "web_search")
+USAGE_FIELDS = ('input_tokens', 'output_tokens', 'cached_input_tokens',
+                'cache_write_input_tokens', 'reasoning_output_tokens')
+
+
+def token_count(value: Any) -> bool:
+    return type(value) is int and 0 <= value <= 2**53 - 1
 SHELLS = {"bash", "sh", "zsh", "dash"}
 # Files the memory system itself writes are not what a task is about.
 NOT_GOLD = re.compile(
@@ -1133,7 +1140,8 @@ class Counter:
     events: a file change may name its path only once it completed.
     """
 
-    def __init__(self, corpus: Path, gold: Sequence[str], cap: int, *, endpoint: str = "first-touch") -> None:
+    def __init__(self, corpus: Path, gold: Sequence[str], cap: int, *, endpoint: str = "first-touch",
+                 response_contract: Optional[Dict[str, Any]] = None) -> None:
         if endpoint not in ("first-touch", "task-complete"):
             raise OutcomeError("unknown endpoint")
         self.endpoint = endpoint
@@ -1147,6 +1155,34 @@ class Counter:
         self.finished = False
         self.failed = False
         self.message = ""
+        self.usage_events: List[Dict[str, int]] = []
+        self.known_usage = {'input_tokens': 0, 'output_tokens': 0}
+        self.usage_field_turns = {'input_tokens': 0, 'output_tokens': 0}
+        self.usage_complete = True
+        self.response_limits = response_contract['limits'] if response_contract is not None else None
+        self.messages: List[str] = []
+        self.message_bytes = 0
+        self.message_overflow = False
+
+    def completed_usage(self, usage: Any) -> None:
+        """Keep validated per-turn observations without treating missing fields as zero."""
+        values = usage if isinstance(usage, dict) else {}
+        safe = {key: values[key] for key in USAGE_FIELDS if token_count(values.get(key))}
+        for part, whole in (('cached_input_tokens', 'input_tokens'),
+                            ('cache_write_input_tokens', 'input_tokens'),
+                            ('reasoning_output_tokens', 'output_tokens')):
+            if part in safe and (whole not in safe or safe[part] > safe[whole]):
+                del safe[part]
+        if (any(key not in safe for key in ('input_tokens', 'output_tokens'))
+                or any(key in values and key not in safe for key in USAGE_FIELDS)):
+            self.usage_complete = False
+        self.usage_events.append(safe)
+        for key, value in safe.items():
+            self.known_usage[key] = self.known_usage.get(key, 0) + value
+            self.usage_field_turns[key] = self.usage_field_turns.get(key, 0) + 1
+        self.usage = ({key: value for key, value in self.known_usage.items()
+                       if self.usage_field_turns[key] == len(self.usage_events)}
+                      if self.usage_complete else None)
 
     def feed(self, event: Dict[str, Any]) -> Optional[str]:
         """'gold' or 'cap' when the run should stop now, else None."""
@@ -1158,14 +1194,44 @@ class Counter:
             # Native reconnect diagnostics can precede a successful turn.
             # Keep the original deadline; turn.failed or CLI exit is terminal.
             return None
+        if self.endpoint == 'task-complete' and kind == 'turn.started':
+            # Native item IDs may restart in a continuation. Only its own
+            # terminal event and answer can establish final completion.
+            self.finished = False
+            self.message = ''
+            self.numbers = {}
+            return None
         if kind == "turn.completed":
-            self.usage = event.get("usage") if isinstance(event.get("usage"), dict) else None
+            if self.endpoint == 'task-complete':
+                if self.finished:
+                    self.failed = True
+                    return 'error'
+                self.completed_usage(event.get('usage'))
+            else:
+                self.usage = event.get("usage") if isinstance(event.get("usage"), dict) else None
             self.finished = True
             return None
+        if (self.endpoint == 'task-complete' and kind in ('item.started', 'item.completed')
+                and (self.finished or not isinstance(event.get('item'), dict))):
+            self.failed = True
+            return 'error'
         item = event.get("item") if isinstance(event.get("item"), dict) else {}
         if kind == "item.completed" and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
             # The last one is the answer a finished turn gave.
             self.message = item["text"]
+            if self.response_limits is not None:
+                try:
+                    size = len(self.message.encode('utf-8'))
+                except UnicodeError:
+                    size = self.response_limits['max_message_bytes'] + 1
+                if (self.message_overflow or len(self.messages) >= self.response_limits['max_messages']
+                        or size > self.response_limits['max_message_bytes']
+                        or self.message_bytes + size > self.response_limits['max_total_bytes']):
+                    self.message_overflow = True
+                    self.message = ''
+                else:
+                    self.messages.append(self.message)
+                    self.message_bytes += size
         if kind not in ("item.started", "item.completed") or item.get("type") not in TOOL_ITEMS:
             return None
         identity = str(item.get("id") or "")
@@ -1337,7 +1403,9 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
             timeout: float, events: Optional[Path] = None,
             saved: Optional[Sequence[str]] = None, *, endpoint: str = "first-touch",
             answer_artifact: Optional[Path] = None,
-            environment: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+            environment: Optional[Dict[str, str]] = None,
+            response_contract: Optional[Dict[str, Any]] = None,
+            prompt_input: Optional[bytes] = None) -> Dict[str, Any]:
     """One headless session, stopped at the first gold touch, the cap or the
     deadline. Complete-task diagnostics additionally retain safe private identities.
 
@@ -1364,15 +1432,33 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
     else:
         before = set(manifests.glob("*.json")) if manifests.is_dir() else set()
         health_before = health_lines(health)
-    counter = Counter(corpus, gold, cap, endpoint=endpoint)
+    if response_contract is not None:
+        from memory_response_contract import validate_contract
+        response_contract = validate_contract(response_contract)
+        if endpoint != 'task-complete' or response_contract['schema'] != 'memory-response-contract-v2':
+            raise OutcomeError('response capture requires the opt-in v2 completion endpoint')
+    counter = Counter(corpus, gold, cap, endpoint=endpoint, response_contract=response_contract)
     started = time.monotonic()
     reason = "finished"
     environment = environment if environment is not None else {
         key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    process = subprocess.Popen(
-        list(command), cwd=str(corpus), env=environment, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True,
-    )
+    input_stream = None
+    try:
+        if prompt_input is not None:
+            from memory_response_intake import MAX_PROMPT_BYTES
+            if type(prompt_input) is not bytes or len(prompt_input) > MAX_PROMPT_BYTES or response_contract is None:
+                raise OutcomeError('invalid complete v2 prompt transport')
+            input_stream = tempfile.TemporaryFile()
+            input_stream.write(prompt_input)
+            input_stream.seek(0)
+        process = subprocess.Popen(
+            list(command), cwd=str(corpus), env=environment,
+            stdin=input_stream if input_stream is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    finally:
+        if input_stream is not None:
+            input_stream.close()
     assert process.stdout is not None
     # A session can go quiet for minutes while the model thinks; a reader
     # thread keeps the deadline enforceable without a blocking readline.
@@ -1508,10 +1594,27 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
                 'host_receipt': 'unknown', 'model_use': 'unproven', 'frames': []}
         outcome["completed"] = (reason == "finished" and process.returncode == 0
                                 and counter.finished and not counter.failed)
+        outcome['usage_complete'] = bool(outcome['completed'] and counter.usage_complete)
+        outcome['usage'] = counter.usage if outcome['usage_complete'] else None
+        outcome['known_usage'] = dict(counter.known_usage)
+        outcome['usage_events'] = list(counter.usage_events)
+        outcome['usage_coverage'] = {'completed_turns': len(counter.usage_events),
+                                     'field_turns': dict(counter.usage_field_turns)}
+        if response_contract is not None:
+            from memory_response_intake import digest
+            outcome['response_capture'] = {'schema': 'memory-assistant-capture-v1',
+                'messages': counter.messages, 'overflow': counter.message_overflow}
+            outcome['response_capture_sha256'] = digest(outcome['response_capture'])
         if answer_artifact is not None:
             with os.fdopen(os.open(str(answer_artifact), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
                            "w", encoding="utf-8") as stream:
-                stream.write(counter.message)
+                if response_contract is None:
+                    stream.write(counter.message)
+                else:
+                    json.dump(outcome['response_capture'], stream, ensure_ascii=False)
+        if prompt_input is not None:
+            outcome['prompt_transport'] = {'method': 'stdin', 'bytes': len(prompt_input),
+                'sha256': hashlib.sha256(prompt_input).hexdigest(), 'model_receipt': 'unknown'}
     return outcome
 
 
@@ -1624,16 +1727,18 @@ def command_run(arguments: argparse.Namespace) -> int:
 # Opt-in whole-task controller. The legacy first-touch controller is unchanged.
 # ---------------------------------------------------------------------------
 
-def complete_runtime_digest() -> str:
+def complete_runtime_digest(*, response: bool = False) -> str:
     from memory_outcome_verify import digest, snapshot_digest
     return digest([snapshot_digest(ROOT / 'PHP Core' / 'memory-bank' / 'scripts'),
                    snapshot_digest(ROOT / 'PHP Core' / 'project-brain' / 'config'),
                    [(name, hashlib.sha256((ROOT / 'scripts' / name).read_bytes()).hexdigest())
                     for name in ('memory_outcome_ab.py', 'memory_outcome_verify.py',
                                  'memory_outcome_isolation.py', 'memory_eval.py',
+                                 'memory_native_ab_io.py',
                                  'memory_delivery_proof.py',
                                  'memory_selective_retrieve_pilot.py', 'memory_consolidation_pilot.py',
-                                 'memory_pilot_support.py')]])
+                                 'memory_pilot_support.py') +
+                    (('memory_response_contract.py', 'memory_response_intake.py') if response else ())]])
 
 
 def complete_settings(arguments: argparse.Namespace) -> Dict[str, Any]:
@@ -1675,6 +1780,11 @@ def complete_cases(path: Path, tasks: Sequence[Dict[str, Any]]) -> Dict[str, Any
         case = cases.get(task['verifier_id'])
         if not isinstance(case, dict) or case.get('mode') != task['task_mode']:
             raise OutcomeError('missing or mismatched private verifier')
+        if 'response_contract' in task:
+            from memory_response_intake import configuration
+            configuration(task, case)
+        elif 'response' in case:
+            raise OutcomeError('response verifier requires explicit public v2 opt-in')
     return cases
 
 
@@ -1720,7 +1830,8 @@ def complete_bindings(set_path: Path, verifiers: Path, cases: Dict[str, Any]) ->
     return {'set_sha256': hashlib.sha256(set_path.read_bytes()).hexdigest(), 'save_receipts': receipts,
             'verifiers_sha256': hashlib.sha256(verifiers.read_bytes()).hexdigest(),
             'verifier_artifacts': {key: verifier_digest(case) for key, case in sorted(cases.items())},
-            'runtime_sha256': complete_runtime_digest()}
+            'runtime_sha256': complete_runtime_digest(response=any('response_contract' in task
+                for task in read_complete_tasks(set_path)))}
 
 
 def write_complete(path: Path, result: Dict[str, Any]) -> None:
@@ -1793,6 +1904,14 @@ def command_seal(arguments: argparse.Namespace) -> int:
             variants[arm] = {'path': str(target), 'sha256': snapshot_digest(target),
                              'git_sha256': snapshot_digest(target / '.git'), 'replay': replay}
         if variants: bases[task['id']]['variants'] = variants
+        if 'response_contract' in task:
+            from memory_response_intake import prepare, source_map
+            response_case = cases[task['verifier_id']]
+            bases[task['id']]['response'] = prepare(task, response_case, base,
+                prepared / ('response-' + stand.safe_name(task['id'])))
+            # One shared public contract means one common citation corpus.
+            for variant in variants.values():
+                source_map(Path(variant['path']), task['response_contract'])
     protocol = {'schema': 'task-outcome-protocol-v1', 'settings': settings, 'design': design,
                 'bindings': complete_bindings(arguments.set, arguments.verifiers, cases), 'bases': bases}
     protocol['seal_sha256'] = digest(protocol)
@@ -1810,7 +1929,8 @@ def validate_complete_protocol(protocol: Dict[str, Any], set_path: Path, verifie
             or protocol.get('bindings') != complete_bindings(set_path, verifiers, cases)):
         raise OutcomeError('sealed protocol/input/runtime/verifier mismatch')
     validate_design(protocol.get('design'))
-    for base in protocol['bases'].values():
+    tasks = {task['id']: task for task in read_complete_tasks(set_path)}
+    for task_id, base in protocol['bases'].items():
         if (snapshot_digest(Path(base['path'])) != base['sha256']
                 or snapshot_digest(Path(base['path']) / '.git') != base['git_sha256']
                 or any(complete_config_digest(Path(base['path']), arm) != base['configs'][arm]
@@ -1822,6 +1942,12 @@ def validate_complete_protocol(protocol: Dict[str, Any], set_path: Path, verifie
                     or snapshot_digest(path / '.git') != variant['git_sha256']
                     or complete_config_digest(path, arm) != base['configs'][arm]):
                 raise OutcomeError('sealed consolidation image mismatch')
+        task = tasks[task_id]
+        if 'response_contract' in task:
+            from memory_response_intake import validate_prepared
+            validate_prepared(task, cases[task['verifier_id']], base['response'])
+        elif 'response' in base:
+            raise OutcomeError('unexpected sealed response intake')
 
 
 def command_run_complete(arguments: argparse.Namespace) -> int:
@@ -1876,7 +2002,19 @@ def command_run_complete(arguments: argparse.Namespace) -> int:
                 configure_corpus(corpus, ARM_SETTINGS.get(slot['arm']) or {})
                 if complete_config_digest(corpus, slot['arm']) != base['configs'][slot['arm']]:
                     raise OutcomeError('arm configuration mismatch')
-                command = codex_command(arguments.codex, corpus, slot['arm'], task['prompt'], arguments.model)
+                response_options = {}
+                citation_root = None
+                prompt = task['prompt']
+                if 'response_contract' in task:
+                    from memory_response_intake import validate_prepared
+                    citation_root = work / f'{ordinal}-citations'
+                    shutil.copytree(base['response']['path'], citation_root, symlinks=True)
+                    _, prompt_raw = validate_prepared(task, cases[task['verifier_id']], base['response'], citation_root)
+                    response_options = {'response_contract': task['response_contract'], 'prompt_input': prompt_raw}
+                    prompt = '-'  # Native exec reads the complete prompt from stdin, not one bounded argv element.
+                    attempt['response_intake'] = dict(base['response'])
+                    attempt['response_intake'].pop('path')
+                command = codex_command(arguments.codex, corpus, slot['arm'], prompt, arguments.model)
                 expected_route = None
                 if slot['arm'] == 'selective':
                     from memory_selective_retrieve_pilot import DEFAULT_RULES, canonical_json
@@ -1884,7 +2022,8 @@ def command_run_complete(arguments: argparse.Namespace) -> int:
                         'router_digest': hashlib.sha256((ROOT / 'scripts/memory_selective_retrieve_pilot.py').read_bytes()).hexdigest(),
                         'rules_digest': hashlib.sha256(canonical_json(DEFAULT_RULES)).hexdigest(),
                         'sanitizer_digest': hashlib.sha256((corpus / 'memory-bank/scripts/automatic_query.py').read_bytes()).hexdigest()}
-                view = prepare_agent_view(corpus, private, command=command)
+                view_options = {'citation_snapshot': citation_root} if citation_root is not None else {}
+                view = prepare_agent_view(corpus, private, command=command, **view_options)
                 if not probe_agent_view(view, arguments.verifiers):
                     raise IsolationError('private read isolation could not be proven')
                 # Sibling artifact lies outside the mounted corpus and is not
@@ -1892,7 +2031,19 @@ def command_run_complete(arguments: argparse.Namespace) -> int:
                 answer = work / f'{ordinal}-answer.txt'
                 outcome = run_arm([*view['prefix'], '--', *view['command']], corpus, task.get('gold') or [],
                                   arguments.cap, arguments.timeout, saved=(base.get('planted') or {}).get('documents'),
-                                  endpoint='task-complete', answer_artifact=answer, environment=view['env'])
+                                  endpoint='task-complete', answer_artifact=answer, environment=view['env'], **response_options)
+                # Preserve current-run evidence and costs before any grading or
+                # post-run infrastructure check can fail, including incomplete turns.
+                attempt.update(outcome, isolation='linux-bwrap-allowlist-v1',
+                               runtime_sha256=protocol['bindings']['runtime_sha256'],
+                               config_sha256=base['configs'][slot['arm']])
+                if citation_root is not None:
+                    from memory_response_contract import make_artifact
+                    context = {'protocol_sha256': protocol['seal_sha256'], 'slot_id': f'slot-{ordinal}',
+                        'verifier_sha256': protocol['bindings']['verifier_artifacts'][task['verifier_id']],
+                        'source_image_sha256': base['response']['source_image_sha256']}
+                    attempt['response_artifact'] = make_artifact(task['response_contract'],
+                        outcome['response_capture']['messages'], context)
                 if expected_route is not None:
                     from memory_pilot_support import safe_read
                     from memory_selective_retrieve_pilot import parse_observations
@@ -1913,7 +2064,16 @@ def command_run_complete(arguments: argparse.Namespace) -> int:
                 # hook does not become a selected successful-intersection pair.
                 attempt['treatment_valid'] = valid_arm(slot['arm'], [outcome])
                 if outcome['completed']:
-                    attempt['verification'] = verify_task(corpus, answer, cases[task['verifier_id']])
+                    if citation_root is None:
+                        attempt['verification'] = verify_task(corpus, answer, cases[task['verifier_id']])
+                    else:
+                        from memory_response_intake import grade
+                        validate_complete_protocol(protocol, arguments.set, arguments.verifiers, cases, settings)
+                        attempt['verification'] = grade(corpus, answer, cases[task['verifier_id']], task,
+                            base['response'], citation_root, context,
+                            capture_sha256=attempt['response_capture_sha256'])
+                        if attempt['verification'].get('response', {}).get('artifact') != attempt['response_artifact']:
+                            attempt['verification'].update(status='unavailable', correct=None)
                     expected = protocol['bindings']['verifier_artifacts'][task['verifier_id']]
                     if attempt['verification']['verifier_digest'] != expected:
                         attempt['verification'].update(status='unavailable', correct=None)
@@ -1930,6 +2090,9 @@ def command_run_complete(arguments: argparse.Namespace) -> int:
                 stand.remove_tree(corpus) if corpus.exists() else None
                 answer = work / f'{ordinal}-answer.txt'
                 answer.unlink(missing_ok=True)
+                citation_root = work / f'{ordinal}-citations'
+                if citation_root.exists():
+                    stand.remove_tree(citation_root)
                 write_complete(arguments.out, result)
     except KeyboardInterrupt:
         result['meta']['interrupted'] = True
@@ -1941,6 +2104,29 @@ def command_run_complete(arguments: argparse.Namespace) -> int:
         write_complete(arguments.out, result)
         stand.remove_tree(work)
     return 1 if result['meta']['interrupted'] else 0
+
+
+def completion_known_usage(attempt: Dict[str, Any]) -> Dict[str, int]:
+    """Known subtotals are distinct from complete whole-attempt usage."""
+    coverage, known = attempt.get('usage_coverage'), attempt.get('known_usage')
+    if isinstance(coverage, dict) and isinstance(known, dict):
+        turns, counts = coverage.get('completed_turns'), coverage.get('field_turns')
+        if type(turns) is not int or turns < 1 or not isinstance(counts, dict):
+            return {}
+        return {key: known[key] for key in USAGE_FIELDS
+                if token_count(known.get(key)) and type(counts.get(key)) is int
+                and 0 < counts[key] <= turns}
+    # Older completion artifacts carry one whole-attempt observation only.
+    usage = attempt.get('usage')
+    if not isinstance(usage, dict) or not all(token_count(usage.get(k)) for k in ('input_tokens', 'output_tokens')):
+        return {}
+    result = {key: usage[key] for key in USAGE_FIELDS if token_count(usage.get(key))}
+    for part, whole in (('cached_input_tokens', 'input_tokens'),
+                        ('cache_write_input_tokens', 'input_tokens'),
+                        ('reasoning_output_tokens', 'output_tokens')):
+        if part in result and result[part] > result[whole]:
+            del result[part]
+    return result
 
 
 def summarize_complete(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -1972,14 +2158,13 @@ def summarize_complete(result: Dict[str, Any]) -> Dict[str, Any]:
         attempts = [attempt for slot in slots for attempt in slot['attempts']]
         last = [slot['attempts'][-1] if slot['attempts'] and slot['status'] == 'finished' else {} for slot in slots]
         grades = [attempt.get('verification', {}).get('correct') for attempt in last]
-        known = [attempt.get('usage') for attempt in attempts]
-        usable = [usage for usage in known if isinstance(usage, dict)
-                  and all(type(usage.get(key)) is int and usage[key] >= 0 for key in ('input_tokens', 'output_tokens'))]
+        known = [completion_known_usage(attempt) for attempt in attempts]
+        usable = [attempt['usage'] for attempt in attempts if isinstance(attempt.get('usage'), dict)
+                  and attempt.get('usage_complete') is not False
+                  and all(token_count(attempt['usage'].get(key)) for key in ('input_tokens', 'output_tokens'))]
         all_usage = (bool(slots) and all(slot['attempts'] and slot['status'] == 'finished' for slot in slots)
                      and len(usable) == len(attempts))
-        cached = [usage['cached_input_tokens'] for usage in usable
-                  if type(usage.get('cached_input_tokens')) is int
-                  and 0 <= usage['cached_input_tokens'] <= usage['input_tokens']]
+        cached = [usage['cached_input_tokens'] for usage in known if 'cached_input_tokens' in usage]
         seconds = [attempt['seconds'] for attempt in attempts if type(attempt.get('seconds')) in (int, float)
                    and math.isfinite(attempt['seconds']) and attempt['seconds'] >= 0]
         calls = [attempt['calls'] for attempt in attempts if type(attempt.get('calls')) is int and attempt['calls'] >= 0]
@@ -1992,9 +2177,12 @@ def summarize_complete(result: Dict[str, Any]) -> Dict[str, Any]:
             'unknown': sum(grade is not True and grade is not False for grade in grades),
             'success_rate': sum(grade is True for grade in grades) / len(slots) if slots and all(type(g) is bool for g in grades) else None,
             'attempts_with_usage': len(usable),
-            'known_host_reported_tokens': sum(usage['input_tokens'] + usage['output_tokens'] for usage in usable),
-            'known_input_tokens': sum(usage['input_tokens'] for usage in usable),
-            'known_output_tokens': sum(usage['output_tokens'] for usage in usable),
+            'attempts_with_known_usage': sum('input_tokens' in usage or 'output_tokens' in usage for usage in known),
+            'attempts_with_known_input_usage': sum('input_tokens' in usage for usage in known),
+            'attempts_with_known_output_usage': sum('output_tokens' in usage for usage in known),
+            'known_host_reported_tokens': sum(usage.get('input_tokens', 0) + usage.get('output_tokens', 0) for usage in known),
+            'known_input_tokens': sum(usage.get('input_tokens', 0) for usage in known),
+            'known_output_tokens': sum(usage.get('output_tokens', 0) for usage in known),
             'known_cached_input_tokens': sum(cached), 'attempts_with_cached_usage': len(cached),
             'observed_agent_seconds': round(sum(seconds), 4), 'attempts_with_seconds': len(seconds),
             'observed_agent_calls': sum(calls), 'attempts_with_calls': len(calls),

@@ -46,6 +46,8 @@ REQUEST = (
     "transcripts. "
     "Normal saves need no learning revision. For a deliberate correction with an inspected record, "
     "you may include its positive integer expected_revision. "
+    "For an inspected existing claim, also supply record_id and the complete checked source_fingerprints "
+    "from context.py source-fingerprints, preserving its title/type/source set; never duplicate it. "
     "List at most 10 used_memory paths; [] is valid. This is your report of use, not proof of reading. "
 )
 AUTOMATIC = ("The Harness saves the draft to project memory as written, with no review, "
@@ -61,6 +63,50 @@ def instruction():
 
 def _clip(value, limit):
     return " ".join(value.split())[:limit] if isinstance(value, str) else ""
+
+
+def _reference(item, sources):
+    """A reference is indivisible: never filter its target or checked sources."""
+    if 'record_id' not in item and 'source_fingerprints' not in item:
+        return {}
+    identifier=item.get('record_id')
+    try:
+        valid=isinstance(identifier,str) and str(uuid.UUID(identifier))==identifier and uuid.UUID(identifier).version==4
+    except (ValueError,TypeError,AttributeError):
+        valid=False
+    if not valid or type(item.get('expected_revision')) is not int or item['expected_revision']<1:
+        raise SessionError('Existing knowledge needs record_id and its original expected_revision.')
+    pins=item.get('source_fingerprints')
+    if not isinstance(pins,list) or not 1<=len(pins)<=SOURCE_COUNT:
+        raise SessionError('Existing knowledge needs its checked source_fingerprints.')
+    image={}
+    for pin in pins:
+        if (not isinstance(pin,dict) or set(pin)!={'path','sha256'}
+                or not isinstance(pin['sha256'],str) or not re.fullmatch('[0-9a-f]{64}',pin['sha256'])):
+            raise SessionError('Invalid checked source image.')
+        relative=_source(pin['path'])
+        if '#' in relative or (relative in image and image[relative]!=pin['sha256']):
+            raise SessionError('Invalid checked source image.')
+        image[relative]=pin['sha256']
+    if not 1<=len(sources)<=SOURCE_COUNT or set(image)!={source.split('#',1)[0] for source in sources}:
+        raise SessionError('An existing claim needs its complete checked source image.')
+    return {'record_id':identifier,'expected_revision':item['expected_revision'],
+            'source_fingerprints':[{'path':path,'sha256':image[path]} for path in sorted(image)]}
+
+
+CAPTURE_DECISIONS = ('selected', 'no_reusable_knowledge', 'insufficiently_checked')
+
+
+def _capture_decision(data, learnings):
+    """Optional selection metadata; absence is unknown, not a negative finding."""
+    if 'capture_decision' not in data:
+        return {}
+    decision = data['capture_decision']
+    if not isinstance(decision, str) or decision not in CAPTURE_DECISIONS:
+        raise SessionError('Use selected, no_reusable_knowledge or insufficiently_checked for capture_decision.')
+    if (decision == 'selected') != bool(learnings):
+        raise SessionError('selected needs a learning; other capture decisions need empty learnings.')
+    return {'capture_decision': decision}
 
 
 def parse(text):
@@ -94,6 +140,19 @@ def parse(text):
             "sources": [source.strip() for source in sources
                         if isinstance(source, str) and source.strip()][:SOURCE_COUNT],
         }
+        if 'record_id' in item or 'source_fingerprints' in item:
+            try:
+                if (not isinstance(item.get('sources'),list) or not 1<=len(sources)<=SOURCE_COUNT
+                        or any(not isinstance(s,str) or not s.strip() for s in sources)):
+                    continue
+                learning['sources']=list(dict.fromkeys(_source(s) for s in sources))
+                if any(not isinstance(item.get(k),str) or not item[k].strip() or len(item[k].strip())>limit
+                       for k,limit in [('title',TITLE_LIMIT),('consequence',CONSEQUENCE_LIMIT)]):
+                    continue
+                learning.update(title=item['title'].strip(),consequence=item['consequence'].strip())
+                learning.update(_reference(item,learning['sources']))
+            except SessionError:
+                continue
         if "expected_revision" in item:
             if type(item["expected_revision"]) is int and item["expected_revision"] >= 1:
                 learning["expected_revision"] = item["expected_revision"]
@@ -104,6 +163,10 @@ def parse(text):
         "next_steps": [step for step in (_clip(item, STEP_LIMIT) for item in steps) if step][:STEP_COUNT],
         "learnings": learnings[:LEARNING_COUNT],
     }
+    try:
+        result.update(_capture_decision(data, result['learnings']))
+    except SessionError:
+        return None
     if "used_memory" in data:
         values = data["used_memory"] if isinstance(data["used_memory"], list) else []
         result["used_memory"] = list(dict.fromkeys(value.strip() for value in values
@@ -241,7 +304,7 @@ def _source(value):
 
 def submission(data):
     """A reviewed draft as the page sends it, held to the limits saving relies on."""
-    if not isinstance(data, dict) or set(data) - {"progress", "next_steps", "learnings", "verified", "used_memory"}:
+    if not isinstance(data, dict) or set(data) - {"progress", "next_steps", "learnings", "verified", "used_memory", "capture_decision"}:
         raise SessionError("Invalid memory draft.")
     progress = data.get("progress", "")
     if not isinstance(progress, str) or len(progress) > PROGRESS_LIMIT:
@@ -259,7 +322,7 @@ def submission(data):
     kept = []
     for item in learnings:
         fields = {"type", "title", "consequence", "sources"}
-        if (not isinstance(item, dict) or not fields <= set(item) or set(item) - fields - {"expected_revision"}
+        if (not isinstance(item, dict) or not fields <= set(item) or set(item) - fields - {"expected_revision","record_id","source_fingerprints"}
                 or item["type"] not in KINDS):
             raise SessionError("Each learning needs a type, a title, a consequence and sources.")
         title = _text(item["title"], "learning title", TITLE_LIMIT * 4).strip()
@@ -276,12 +339,14 @@ def submission(data):
             if type(item["expected_revision"]) is not int or item["expected_revision"] < 1:
                 raise SessionError("Learning expected_revision must be a positive original revision.")
             kept[-1]["expected_revision"] = item["expected_revision"]
+        kept[-1].update(_reference(item,kept[-1]['sources']))
     # Saving writes each learning as verified evidence; that word has to be the person's.
     if kept and data.get("verified") is not True:
         raise SessionError("Confirm that you checked each kept learning against its sources.")
+    capture = _capture_decision(data, kept)
     if not progress and not steps and not kept:
         raise SessionError("Nothing to save: write progress, a next step or a learning.")
-    return {"progress": progress, "next_steps": steps, "learnings": kept}
+    return {"progress": progress, "next_steps": steps, "learnings": kept, **capture}
 
 
 def _unusable(root, source):
@@ -334,6 +399,8 @@ def usable(root, draft, known=()):
     The kept draft still goes
     through `submission`, under the same limits as a reviewed one.
     """
+    capture = _capture_decision(draft, draft.get('learnings') or [])
+
     def plain(value, limit):
         if not isinstance(value, str):
             return ""
@@ -351,6 +418,20 @@ def usable(root, draft, known=()):
                 sources.append(source)
         learning = {"type": item.get("type"), "title": plain(item.get("title"), TITLE_LIMIT),
                     "consequence": plain(item.get("consequence"), CONSEQUENCE_LIMIT), "sources": sources}
+        if 'record_id' in item or 'source_fingerprints' in item:
+            try:
+                # Do not salvage a reference by silently dropping a citation.
+                original=list(dict.fromkeys(_source(s) for s in item.get('sources',[])))
+                if len(original)!=len(sources):
+                    raise SessionError('A checked source is unavailable.')
+                learning.update(_reference(item,sources))
+                for field,limit in [('title',TITLE_LIMIT),('consequence',CONSEQUENCE_LIMIT)]:
+                    value=_text(item.get(field),'existing learning '+field,limit*4).strip()
+                    if not value or len(value)>limit:
+                        raise SessionError('Invalid existing claim text.')
+                    learning[field]=value
+            except (SessionError,TypeError):
+                prepared.append((learning,None));continue
         if "expected_revision" in item:
             if type(item["expected_revision"]) is not int or item["expected_revision"] < 1:
                 prepared.append((learning, None))
@@ -359,8 +440,10 @@ def usable(root, draft, known=()):
         if not (learning["type"] in KINDS and learning["title"] and learning["consequence"] and sources):
             identity = None
         else:
-            identity = (learning["type"], learning["title"].casefold(), tuple(sorted(sources)))
-            consequences.setdefault(identity, set()).add(learning["consequence"])
+            identity = (('record',learning['record_id']) if 'record_id' in learning else
+                        (learning["type"], learning["title"].casefold(), tuple(sorted(sources))))
+            signature=json.dumps(learning,sort_keys=True) if 'record_id' in learning else learning['consequence']
+            consequences.setdefault(identity, set()).add(signature)
         prepared.append((learning, identity))
     kept, skipped, seen = [], [], set()
     for learning, identity in prepared:
@@ -378,8 +461,13 @@ def usable(root, draft, known=()):
         skipped.append({"title": learning["title"] or "an untitled learning", "reason": reason})
     steps = [step for step in (plain(step, STEP_LIMIT) for step in draft.get("next_steps") or []) if step]
     # The agent attests its own learnings here; the records' ledger says no person did.
+    # Filtering cannot decide why the agent should have selected nothing.
+    # Retain its original draft identity, leave the final decision unknown,
+    # and keep the existing per-learning omissions without adding a fourth.
+    if capture.get('capture_decision') == 'selected' and not kept:
+        capture = {}
     return {"progress": plain(draft.get("progress"), PROGRESS_LIMIT), "next_steps": steps[:STEP_COUNT],
-            "learnings": kept[:LEARNING_COUNT], "verified": bool(kept)}, skipped
+            "learnings": kept[:LEARNING_COUNT], "verified": bool(kept), **capture}, skipped
 
 
 def summary(state, result=None):
@@ -403,12 +491,17 @@ def summary(state, result=None):
         text += " Already in project memory: " + "; ".join(named(r) for r in already) + "."
     held = [record for record in records if record.get("state") in ("differs", "archived-differs")]
     if held:
-        text += (" Kept as recorded, with a different consequence than this run's: "
-                 + "; ".join(named(r) for r in held)
-                 + " (verified by a person, someone else's, archived or moved on).")
         for record in held:
-            if type(record.get('revision')) is int and record.get('reason'):
-                text += f" Retained {named(record)} at revision {record['revision']} ({record['reason']})."
+            reason=record.get('reason')
+            if reason=='record-not-found':
+                text += f" Not saved: {named(record)} refers to a record that no longer exists ({reason})."
+            elif reason:
+                revision=(f" at revision {record['revision']}" if type(record.get('revision')) is int else '')
+                text += f" Left unchanged: {named(record)}{revision} ({reason})."
+            else:
+                # Legacy responses provide no reason; avoid asserting who
+                # verified the record or whether its consequence differs.
+                text += f" Left unchanged: {named(record)}; this run did not replace it."
     # A replay names a learning it saved before whose record was removed since; it does not write it again.
     removed = [record for record in records if record.get("state") == "missing"]
     if removed:

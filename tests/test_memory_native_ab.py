@@ -171,6 +171,63 @@ class ProcessTests(unittest.TestCase):
         self.assertEqual(0o600,stat.S_IMODE((self.root/'events.jsonl').stat().st_mode))
 
 
+class DeliveryEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        import memory_native_ab as native
+        self.native = native
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.events = self.root / 'events.jsonl'
+        self.frame = 'Checked memory: отказ от Redis.\n'.encode('utf-8')
+        self.document = 'memory-bank/chunks/MEM-20261101-aabbccdd-rule.md'
+
+    def observe(self, output, *, command=None, exit_code=0, task='task-a', render=None):
+        document = {'path': self.document, 'document_state': 'match',
+                    'sources': [{'state': 'match'}], 'render': {
+                        'status': 'trace-reported', 'frame_sha256': io.sha(self.frame),
+                        'frame_bytes': len(self.frame)}}
+        if render is not None:
+            document['render'].update(render)
+        proof = {'frames': [{'task_uuid': task, 'origin': 'explicit', 'selected': [document]}]}
+        event = {'type': 'item.completed', 'item': {'type': 'command_execution',
+                 'exit_code': exit_code,
+                 'command': command or 'python3 memory-bank/scripts/context.py retrieve --query Redis',
+                 'aggregated_output': output}}
+        self.events.write_text(json.dumps(event) + '\n', encoding='utf-8')
+        with mock.patch('memory_delivery_proof.collect_delivery_proof', return_value=proof):
+            return self.native.delivery(self.root, {'task_uuid': 'task-a'}, self.events,
+                                        set(), {self.document}, [self.document])
+
+    def test_exact_frame_and_frame_prefix_of_batched_output_are_observed(self):
+        for suffix, match in [('', 'whole'), ('following source text\n', 'prefix')]:
+            with self.subTest(suffix=suffix):
+                proof, found = self.observe(self.frame.decode() + suffix,
+                    command='python3 memory-bank/scripts/context.py retrieve --query Redis && cat source.txt')
+                self.assertEqual([self.document], found)
+                self.assertEqual(match, proof['frames'][0]['selected'][0]['render']['native_stdout_match'])
+
+    def test_only_a_complete_exact_byte_prefix_matches(self):
+        for output in ['leading text\n' + self.frame.decode(), self.frame.decode()[:-1],
+                       self.frame.decode().replace('Redis', 'Memcached'),
+                       self.frame.decode().replace('\n', '\r\n')]:
+            with self.subTest(output=output):
+                self.assertEqual([], self.observe(output)[1])
+
+    def test_canonical_successful_retrieval_and_task_binding_remain_required(self):
+        for options in [{'command': 'echo memory'}, {'exit_code': 1}, {'task': 'other-task'},
+                        {'command': '/tmp/python3 memory-bank/scripts/context.py retrieve'}]:
+            with self.subTest(options=options):
+                self.assertEqual([], self.observe(self.frame.decode(), **options)[1])
+
+    def test_nontext_stdout_and_invalid_frame_lengths_remain_unknown(self):
+        for output in [None, 42, {'text': self.frame.decode()}]:
+            with self.subTest(output=output):
+                self.assertEqual([], self.observe(output)[1])
+        for size in [True, 0, -1, len(self.frame) + 1, 2**40]:
+            with self.subTest(size=size):
+                self.assertEqual([], self.observe(self.frame.decode(), render={'frame_bytes': size})[1])
+
+
 class CaptureEvidenceTests(unittest.TestCase):
     def test_unrelated_heredoc_and_nontext_commands_are_ignored(self):
         import memory_native_ab_evidence as evidence
@@ -195,10 +252,40 @@ class CaptureEvidenceTests(unittest.TestCase):
                     ' --input - --json)')
         payload={'progress':'Checked $(not-executed) and `literal` text.','verified':True,'learnings':[]}
         for cat in ('cat','/bin/cat','/usr/bin/cat'):
-            script=cat+" <<'JSON' | "+invocation+'\n'+json.dumps(payload)+'\nJSON'
-            for command in (script,'/usr/bin/bash -lc '+shlex.quote(script)):
-                with self.subTest(cat=cat,wrapped=command!=script):
-                    self.assertEqual(('a'*64,'b'*32,payload),evidence.save_call(command,root))
+            for target in (invocation,invocation.split(' && ',1)[1][:-1]):
+                script=cat+" <<'JSON' | "+target+'\n'+json.dumps(payload)+'\nJSON'
+                for command in (script,'/usr/bin/bash -lc '+shlex.quote(script)):
+                    with self.subTest(cat=cat,grouped=target==invocation,wrapped=command!=script):
+                        self.assertEqual(('a'*64,'b'*32,payload),evidence.save_call(command,root))
+
+    def test_double_quoted_pwd_root_preserves_literal_payload(self):
+        import memory_native_ab_evidence as evidence
+        root=Path('/public/project with spaces')
+        direct=('python3 memory-bank/scripts/context.py --root "$PWD" native-result --request '+
+                'a'*64+' --token '+'b'*32+' --input - --json')
+        payload={'progress':'Literal $HOME and $(never-run).','verified':True,'learnings':[]}
+        for invocation in (direct,'(cd '+shlex.quote(str(root))+' && '+direct+')'):
+            for script in (invocation+" <<'JSON'\n"+json.dumps(payload)+'\nJSON',
+                           "cat <<'JSON' | "+invocation+'\n'+json.dumps(payload)+'\nJSON'):
+                for command in (script,'/usr/bin/bash -lc '+shlex.quote(script)):
+                    with self.subTest(command=command):
+                        self.assertEqual(('a'*64,'b'*32,payload),evidence.save_call(command,root))
+
+    def test_pwd_root_rejects_other_expansions_literal_variables_and_shell_steps(self):
+        import memory_native_ab_evidence as evidence
+        root=Path('/public/project')
+        direct=('python3 memory-bank/scripts/context.py --root "$PWD" native-result --request '+
+                'a'*64+' --token '+'b'*32+' --input - --json')
+        invalid=[direct.replace('"$PWD"',value) for value in
+                 ("'$PWD'",'$PWD','"${PWD}"','"$HOME"','"$PWD/other"','"$(pwd)"')]
+        invalid += ['PWD=/outside '+direct,'(cd /outside && '+direct+')',
+                    direct.replace('--root "$PWD"','--root "$PWD" --root /outside'),
+                    direct.replace('--root "$PWD"',"'--root' \"$PWD\""),
+                    direct+' && echo extra',direct+' > /tmp/other']
+        for invocation in invalid:
+            for script in (invocation+" <<'JSON'\n{}\nJSON",
+                           "cat <<'JSON' | "+invocation+'\n{}\nJSON'):
+                with self.subTest(command=script):self.assertIsNone(evidence.save_call(script,root))
 
     def test_cat_pipeline_rejects_other_commands_roots_and_nonliteral_input(self):
         import memory_native_ab_evidence as evidence
@@ -307,11 +394,16 @@ class CaptureEvidenceTests(unittest.TestCase):
                 ' && python3 memory-bank/scripts/context.py --root '+shlex.quote(str(case.root))+
                 ' native-result --request '+path.stem+' --token '+state['token']+
                 ' --input - --json)\n'+json.dumps(payload)+'\nJSON')
-            event['item']['command']='/usr/bin/bash -lc '+shlex.quote(pipeline)
-            events.write_text(json.dumps(event)+'\n')
-            checked=evidence.capture(case.root,{'task_id':'research','task_uuid':state['task_uuid']},'session-a',events,before)
-            self.assertTrue(checked['native_saved']);self.assertEqual([],checked['record_ids'])
-            self.assertEqual([],checked['new_chunks'])
+            plain=("cat <<'JSON' | python3 memory-bank/scripts/context.py --root "+shlex.quote(str(case.root))+
+                ' native-result --request '+path.stem+' --token '+state['token']+
+                ' --input - --json\n'+json.dumps(payload)+'\nJSON')
+            pwd_script=script.replace('context.py native-result','context.py --root "$PWD" native-result')
+            for observed in (pipeline,plain,pwd_script):
+                event['item']['command']='/usr/bin/bash -lc '+shlex.quote(observed)
+                events.write_text(json.dumps(event)+'\n')
+                checked=evidence.capture(case.root,{'task_id':'research','task_uuid':state['task_uuid']},'session-a',events,before)
+                self.assertTrue(checked['native_saved']);self.assertEqual([],checked['record_ids'])
+                self.assertEqual([],checked['new_chunks'])
             self.assertFalse(evidence.capture(case.root,{'task_id':'research','task_uuid':state['task_uuid']},
                                               'other-session',events,before)['native_saved'])
         finally:case.doCleanups()

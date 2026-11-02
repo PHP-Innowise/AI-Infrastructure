@@ -1,5 +1,22 @@
 # Memory Evaluation Stand
 
+## Declared response contracts for future studies
+
+The maintainer-only [response contract helper](MEMORY-RESPONSE-CONTRACT.md)
+renders and checks the same declared answer/citation limits, keeps the last
+explicitly marked attempt, and binds independent review to the exact message,
+slot, source image, verifier and protocol. A positive review never rescues a
+known machine failure. The caller retains immutable current-run custody and
+checks source truth in its private oracle.
+
+New private controllers may opt into this pure helper. The task-complete stand
+also supports explicit per-task `response_contract` v2, with a sealed common
+citation snapshot, complete stdin prompt and isolated same-byte evidence check.
+Tasks without that field retain legacy behavior. Preflight references against
+both shape and literal source bytes. Equivalent identifier forms or exact
+required forms belong in the public task; custom grader disclosure remains
+author-supplied. Existing frozen studies retain their original grades.
+
 ## Experimental whole-task arms
 
 The opt-in `task-complete` endpoint also accepts `selective`, `consolidate`
@@ -8,8 +25,13 @@ These arms are refused by legacy first-touch runs. No installed profile,
 ranking, admission rule or write-path default is changed.
 
 `selective` starts with recall and wraps exactly one existing prompt hook.
-Bounded versioned RU/EN retrospective-decision cues select the existing full
-profile only for that request. The wrapper sanitizes a copy for routing but
+Bounded versioned RU/EN cues select the existing full profile only for that
+request. Version 2 distinguishes historical-state inquiries (including past
+limits without decision words), historical decisions, current-state questions,
+procedural requests and continuations. Mixed past/current inquiries can request
+history; ordinary requests stay on recall. Version 1 rules remain supported.
+These are purpose cues, not semantic understanding or an environment filter.
+The wrapper sanitizes a copy for routing but
 forwards the exact original payload, cwd, task, host, session and transcript to
 the original hook. It never bypasses the gate, broadens own-save membership,
 calls MCP, appends a second capsule or retries a failed hook. Routing failure
@@ -562,6 +584,9 @@ in total, it counts:
 - **the saves**: from `native-results.ndjson`, as `realized` reads it - armed,
   requested at Stop, made (saved or held), refused, failed or omitted,
   learnings written and chunks promoted, with every code and its count;
+  newer save rows also distinguish unique submitted/existing/held learnings;
+  absent or inconsistent selection counters remain unknown, never inferred
+  from zero writes. Exact replays do not double-count the selection;
 - **what the project keeps**: task records, findings and decisions, and bank
   chunks, counted as files. The `--since` window applies to the journals, not
   to these.
@@ -1314,6 +1339,18 @@ ML downloads or dependencies.
 
 ## Optional complete-task endpoint
 
+### Explicit v2 response intake
+
+A public task may declare `response_contract` v2; its private verifier then
+provides `response: {reference, answer_field}`. Answer cases grade exactly one
+nonnullable string field through the existing equals oracle. Patch cases use
+`answer_field: null` and retain the external patch oracle. See the
+[complete input, custody and failure contract](MEMORY-RESPONSE-CONTRACT.md#explicit-task-complete-integration).
+Both arms receive the same read-only citation corpus. It is extra common public
+context: `off` disables hooks, not physical memory. Treatment-only historical
+knowledge must not leak through this image in an absence-control experiment.
+Passing this integration proves evaluation plumbing, not memory benefit.
+
 ### Private delivery observations
 
 Complete-task results additionally retain `delivery_proof`, a bounded
@@ -1345,6 +1382,10 @@ The legacy `run` default is still `--endpoint first-touch`; its gold/recall
 metrics, verdict and hook-only treatment remain unchanged. The opt-in
 `task-complete` controller runs until the native turn AND CLI finish, or its
 sealed cap/deadline. `completed` describes execution, never correctness.
+For multiple native turns, only the last active turn can establish completion;
+an unfinished continuation cannot reuse an earlier answer. Tool IDs are scoped
+to each turn while calls, the cap and deadline remain cumulative. Duplicate
+terminal events and items after a terminal event invalidate completion.
 
 Prepare private inputs together in a private directory **outside this clone**,
 and keep the separate corpus cache outside that directory. Add `task_mode`
@@ -1373,6 +1414,12 @@ invalid output, changing oracle/label bytes and timeout yield `unavailable`
 with `correct: null`. Patches are checked on a separate disposable copy after
 the agent stops, before its corpus is removed. Gold-bearing feedback is not
 sent back to the agent or used to select a better retry.
+Oracle seals include every file and directory under each declared read root,
+including `.git`, `__pycache__`, empty directories and ordinary permission bits.
+Candidate snapshot exclusions are not label exclusions. Bounded, nonblocking
+regular-file reads reject special answer/label files; duplicate receipt keys
+are invalid rather than selecting the last value.
+Special file permission bits are refused; only ordinary file modes are supported.
 
 The design JSON must contain exactly `primary: correctness`, numeric
 `quality_margin` in [0,1), positive integer `minimum_tasks`, nonempty
@@ -1432,6 +1479,10 @@ Costs are observed host-reported input/output (cached input is already included)
 and elapsed time, not complete physical provider-attempt billing. All attempts
 in an imported result retain their observed cost. Missing usage remains unknown,
 not zero; a known subtotal is separate from covered whole-plan host usage.
+Completed-turn usage is accumulated across continuations. `known_usage`,
+`usage_events` and per-field turn coverage retain partial observations; `usage`
+is unavailable when a required turn observation or final completion is missing.
+Optional cached/reasoning fields with partial coverage remain known subtotals.
 Provider totals, USD, savings and cost-per-correct stay unavailable. The existing
 `harness/src/harness/memory_benchmark_cost.py` supplied-observation ledger is not
 replaced or silently called complete: a CLI PID is not a physical provider
@@ -1546,6 +1597,50 @@ distinguished. Only a newly created record and its newly promoted, fully
 source-matching chunk count toward A's new durable knowledge. A promotion
 sweep can also promote older records; its total is not A's learning count.
 
+#### Mandatory snapshot admission
+
+Planning screens the held selected image before creating the output. Each
+stage screens its own held image again before copying, Git staging or context
+indexing; the source copy must match the sealed source digest. B independently
+screens new A knowledge even when its handoff hash matches. This gate has no
+configuration/environment bypass and never edits or redacts an input.
+
+The bounded policy rejects known credential assignments and containers,
+including quoted/escaped JSON keys, YAML key/type/value carriers, literal
+registry credentials, opaque `EV[...]`, private-key material and URL userinfo.
+Default-looking and numeric passwords are credentials too. Exact
+`[REDACTED_PRIVATE_VALUE]` / `[REDACTED]` scalars and narrowly defined whole
+environment references are supported. In YAML-like colon assignments,
+references must be quoted; ambiguous suffixes, folded values, comments and
+unsupported credential expressions require a separately reviewed projection.
+For non-JSON secret-container declarations, all `value` fields in the file
+must be screened. Invalid UTF-8, NUL/C0 controls and unsupported binaries fail
+closed. This is known-pattern admission, not proof that arbitrary encoded
+secrets or personal information cannot exist.
+
+After the canonical overlay, a fresh materialized gate checks every file,
+required runtime/hook presence and held application bytes/modes. Canonical
+trust requires exact path, bytes and ordinary mode, never a directory prefix.
+Intentional installer merges are checked explicitly. Trusted preparation
+creates fresh Git and index state from admitted inputs in a private HOME/TMP;
+their opaque binaries are separately declared derived state. Preexisting Git
+history/databases cannot acquire that trust. Their identities are fixed before
+mount setup, while all other generated text remains screened.
+
+After the trusted namespace probe creates its mountpoint directories, the
+gate screens the complete actual tree, binds file/directory identities and
+modes (including the private root), and verifies it immediately before model
+dispatch. Unknown paths, missing files, chmod or byte changes block launch.
+The external read-only provider-auth mount is an explicit transport exception;
+only its empty mode-0600 mountpoint is present in the physical corpus. The gate
+does not claim that the native process has no access to provider credentials.
+
+Private `source-admission.json` / `served-admission.json` and matching verified
+receipts contain policy IDs, aggregate counts and digests, without matched
+values, snippets or unsafe filenames. Gate/controller bytes participate in the
+runtime seal. A refusal retains the attempted slot and blocks downstream work;
+it does not count as a correct answer or a correctly empty native save.
+
 This protocol explicitly defers manual `record-result`/`memory_write` capture
 until the native Stop continuation. A record written earlier in the same
 session may be valid project knowledge, but does not satisfy this experiment's
@@ -1576,6 +1671,11 @@ B must resolve to a different task UUID and native session. Success requires
 an A chunk in an explicit-retrieve manifest, matching post-run document and
 complete citation hashes, and a render hash matching actual successful native
 tool stdout. The final answer must attribute that MEM record. The collector
+accepts the complete exact UTF-8 frame at the start of a successful canonical
+retrieve's output, even when a later command appends text; `native_stdout_match`
+distinguishes `whole` and `prefix`. Leading text, partial/changed frames and
+unrelated commands remain unobserved. This does not authenticate the producer.
+The collector
 still reports local trace versus host/model receipt separately; observed
 consultation and attribution do not establish causal necessity or correctness.
 

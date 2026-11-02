@@ -30,7 +30,7 @@ def overlaps(a: Path, b: Path) -> bool:
 
 
 def prepare_agent_view(corpus: Path, private_root: Path, *, command: Sequence[str] = (),
-                       credentials: bool = True) -> Dict[str, Any]:
+                       credentials: bool = True, citation_snapshot: Path = None) -> Dict[str, Any]:
     if sys.platform != 'linux' or not shutil.which('bwrap'):
         raise IsolationError('task-complete requires Linux bubblewrap read isolation')
     corpus, private_root = corpus.resolve(), private_root.resolve()
@@ -66,6 +66,19 @@ def prepare_agent_view(corpus: Path, private_root: Path, *, command: Sequence[st
     prefix += ['--bind', str(corpus), str(corpus), '--chdir', str(corpus), '--clearenv',
                '--setenv', 'HOME', '/home/agent', '--setenv', 'CODEX_HOME', '/home/agent/.codex',
                '--setenv', 'PATH', '/usr/local/bin:/usr/bin:/bin', '--setenv', 'LANG', 'C.UTF-8']
+    if citation_snapshot is not None:
+        from memory_response_intake import MOUNT_NAME
+        from memory_native_ab_io import ordinary
+        citation_snapshot = ordinary(citation_snapshot)
+        if (not citation_snapshot.is_dir() or overlaps(citation_snapshot, corpus)
+                or overlaps(citation_snapshot, private_root)
+                or any(overlaps(citation_snapshot, root) for root in roots)):
+            raise IsolationError('citation snapshot overlaps private or mutable roots')
+        mount = corpus / MOUNT_NAME
+        if mount.exists() or mount.is_symlink():
+            raise IsolationError('reserved citation mount path already exists')
+        mount.mkdir(mode=0o700)
+        prefix += ['--ro-bind', str(citation_snapshot), str(mount)]
     if credentials and auth.is_file():
         prefix += ['--ro-bind', str(auth.resolve()), '/home/agent/.codex/auth.json']
     normalized = [str(Path(shutil.which(command[0])).resolve()), *command[1:]] if command else []

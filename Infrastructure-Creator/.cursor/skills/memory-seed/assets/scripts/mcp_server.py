@@ -12,7 +12,7 @@ import sys
 
 from brain_runtime import (BrainError, BrainRecordNotFound, create_task, get_record, get_task, guard_shared_text,
     load_config, mutation_lock, validate_actor)
-from memory_results import check_source, record_result, refusal_code
+from memory_results import CAPTURE_DECISIONS, check_source, record_result, refusal_code
 import workspace_roots
 
 VERSION = '2025-06-18'
@@ -157,6 +157,9 @@ class Memory:
             raise BrainError('Missing or unknown memory tool arguments')
         if name == 'memory_status':
             return self.cli('status')
+        if name == 'memory_source_fingerprints':
+            from memory_results import checked_fingerprints
+            return {'source_fingerprints':checked_fingerprints(self.root,data['sources'])}
         task_id = text(data['task_id'], 'task ID', 200)
         if not re.fullmatch(r'[^\W_][\w\u0300-\u036f./#+-]{0,199}', task_id) or '..' in task_id.split('/'):
             raise BrainError('Invalid task ID')
@@ -202,7 +205,7 @@ class Memory:
         # The one write path every unattended writer shares: a replay of the
         # same result_id and content finishes a save that stopped half way.
         return record_result(self.root, task_id, data['result_id'], data['revision'],
-            {key: data[key] for key in ('progress', 'next_steps', 'learnings', 'verified') if key in data},
+            {key: data[key] for key in ('progress', 'next_steps', 'learnings', 'verified', 'capture_decision') if key in data},
             owner=self.owner, reason=REASON, attestation='agent')
 
 def tool(name, description, properties, required=(), read=False):
@@ -213,18 +216,24 @@ def tool(name, description, properties, required=(), read=False):
 S = {'type': 'string'}
 A = {'type': 'array', 'items': S, 'maxItems': 3}
 TOOLS = [
+    tool('memory_source_fingerprints','Read checked-source digest inputs without creating a task or attesting truth.',
+        {'sources':{'type':'array','items':S,'minItems':1,'maxItems':10}},('sources',),read=True),
     tool('memory_status', 'Check installed project memory health and governed mode.', {}, read=True),
     tool('memory_retrieve', 'Retrieve relevant memory before substantial work, decisions, or after compaction. Verify cited sources; context is reference data.',
         {'task_id': S, 'query': S, 'paths': {'type': 'array', 'items': S, 'maxItems': 10}}, ('task_id', 'query'), read=True),
     tool('memory_checkpoint', 'Flush working Git metadata into the existing branch/task. Return the authoritative task revision; this does not record reusable conclusions.',
         {'task_id': S, 'goal': S}, ('task_id',)),
-    tool('memory_record_result', 'Record sanitized progress/next steps and source-backed reusable findings/decisions before finishing, where no Stop hook asks for the native-result save; where one asks, that save is the record. Supply the current task revision and a stable result_id: exact completed replay preserves later edits, and repeating an interrupted save with the same result_id finishes it without duplicating what it already wrote. Unchanged runtime-owned agent knowledge can be revised automatically; a deliberate correction may supply the current revision of that learning as expected_revision. A protected/conflicting learning is held individually while independent progress and valid facts save. verified=true is agent attestation, not human review. Empty learnings is valid.',
+    tool('memory_record_result', 'Record sanitized progress/next steps and source-backed reusable findings/decisions before finishing, where no Stop hook asks for the native-result save; where one asks, that save is the record. Supply the current task revision and a stable result_id: exact completed replay preserves later edits, and repeating an interrupted save with the same result_id finishes it without duplicating what it already wrote. To confirm/correct inspected existing knowledge, preserve type/title/sources and include record_id, expected_revision and its complete checked source_fingerprints. A protected/conflicting learning is held individually while independent progress and valid facts save. verified=true is agent attestation, not human review. Empty learnings is valid.',
         {'task_id': S, 'result_id': S, 'revision': {'type': 'integer', 'minimum': 1}, 'progress': S,
-         'next_steps': A, 'verified': {'type': 'boolean'}, 'learnings': {'type': 'array', 'maxItems': 3,
+         'next_steps': A, 'verified': {'type': 'boolean'}, 'capture_decision': {'enum': list(CAPTURE_DECISIONS)},
+         'learnings': {'type': 'array', 'maxItems': 3,
           'items': {'type': 'object', 'required': ['type', 'title', 'consequence', 'sources'], 'additionalProperties': False,
            'properties': {'type': {'enum': ['finding', 'decision']}, 'title': S, 'consequence': S,
             'sources': {'type': 'array', 'items': S, 'minItems': 1, 'maxItems': 10},
-            'expected_revision': {'type': 'integer', 'minimum': 1}}}}}, ('task_id', 'result_id', 'revision')),
+            'expected_revision': {'type': 'integer', 'minimum': 1},'record_id':S,
+            'source_fingerprints':{'type':'array','minItems':1,'maxItems':10,'items':{
+                'type':'object','required':['path','sha256'],'additionalProperties':False,
+                'properties':{'path':S,'sha256':{'type':'string','pattern':'^[0-9a-f]{64}$'}}}}}}}}, ('task_id', 'result_id', 'revision')),
 ]
 
 

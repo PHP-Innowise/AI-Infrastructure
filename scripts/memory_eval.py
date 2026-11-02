@@ -3772,7 +3772,9 @@ NATIVE_COUNTERS = (
     "prompt_hook_runs", "armed", "armed_after_incomplete", "continuations",
     "stop_hook_runs", "stop_hook_timeouts", "stop_hook_failures", "requested",
     "requested_brief", "saved", "held", "omitted", "failed", "refused", "errors",
-    "learnings_written", "chunks_promoted",
+    "learnings_written", "chunks_promoted", "learnings_submitted", "learnings_existing",
+    "learnings_held", "selection_observed", "selection_unknown",
+    "capture_selected", "capture_no_reusable_knowledge", "capture_insufficiently_checked", "capture_unknown",
 )
 
 
@@ -3809,6 +3811,21 @@ def native_step(counts: Counter, reasons: Dict[str, Counter], record: Dict[str, 
             for field, counter in (("learnings", "learnings_written"), ("promoted", "chunks_promoted")):
                 value = record.get(field)
                 counts[counter] += value if type(value) is int and value > 0 else 0
+            if code != 'repeat':
+                fields=(('submitted','learnings_submitted'),('existing','learnings_existing'),('held','learnings_held'))
+                observed=all(type(record.get(field)) is int and 0<=record[field]<=3 for field,_ in fields)
+                written=record.get('learnings')
+                observed=bool(observed and type(written) is int and 0<=written<=3
+                              and written+record['existing']+record['held']==record['submitted'])
+                counts['selection_observed' if observed else 'selection_unknown']+=1
+                if observed:
+                    for field,counter in fields:counts[counter]+=record[field]
+                decision = record.get('capture_decision')
+                known_decision = (isinstance(decision, str) and decision in
+                                  ('selected', 'no_reusable_knowledge', 'insufficiently_checked'))
+                consistent = bool(observed and known_decision
+                                  and ((decision == 'selected') == (record['submitted'] > 0)))
+                counts['capture_' + decision if consistent else 'capture_unknown'] += 1
         counts["refused"] += event == "refused"
     counts["errors"] += event == "error"
     if code is not None:
@@ -4666,6 +4683,10 @@ NATIVE_ROWS = (
     ("errors", "errors"),
     ("learnings written", "learnings_written"),
     ("chunks promoted", "chunks_promoted"),
+    ("capture decision: selected", "capture_selected"),
+    ("  no reusable knowledge", "capture_no_reusable_knowledge"),
+    ("  insufficiently checked", "capture_insufficiently_checked"),
+    ("  unknown", "capture_unknown"),
 )
 
 

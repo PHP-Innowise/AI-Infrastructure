@@ -9,6 +9,14 @@ Engine is a disposable lexical index and local binding/cache.
 - Record and control IDs are UUIDv4 values. External ticket IDs are aliases.
 - Every mutation holds `project-brain/local/runtime.lock` and uses atomic file
   replacement.
+- `bank-retire` records bounded before/after chunk images in
+  `control/bank-retirement.json` before its first effect. Checkpoint removal
+  commits the operation. A remaining checkpoint is uncommitted: the next
+  outer mutation restores the exact prior chunks and rebuilds Memory Bank's
+  derived index under the shared lock. Unknown edits stop recovery. Preserve
+  the checkpoint with authoritative state until recovery completes; deleting
+  local SQLite does not replace this recovery. Unlocked readers may observe
+  pending effects before the next mutation, and recovery does not verify truth.
 - Records use strict JSON frontmatter, an optimistic integer `revision`, and an
   append-only transition history.
 - Only an authorized owner may mutate a record. Stale expected revisions fail.

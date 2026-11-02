@@ -644,8 +644,12 @@ class TaskContext:
         request = {'learnings': [{'type': item['type'], 'title': item['title'], 'consequence': item['consequence'],
                                   'sources': item['sources'],
                                   **({'expected_revision': item['expected_revision']}
-                                     if 'expected_revision' in item else {})} for item in draft['learnings']],
+                                     if 'expected_revision' in item else {}),
+                                  **({key:item[key] for key in ('record_id','source_fingerprints')}
+                                     if 'record_id' in item else {})} for item in draft['learnings']],
                    'verified': True}
+        if 'capture_decision' in draft:
+            request['capture_decision'] = draft['capture_decision']
         if draft['progress'] or draft['next_steps']:
             # The draft is the current plan, including an empty completed
             # plan; remove steps the run may have finished.
@@ -729,11 +733,13 @@ class TaskContext:
                     **({'revision': item['revision']} if type(item.get('revision')) is int and item['revision'] > 0 else {}),
                     **({'reason': item['reason']} if item.get('reason') in
                        ('archived', 'kind-conflict', 'revision-conflict', 'not-authorized', 'person-or-unknown-attestation',
-                        'original-image-unproven') else {})}
+                        'original-image-unproven','record-not-found','reference-mismatch','not-verified-terminal') else {})}
                    for item in outcome.get('records') or [] if isinstance(item, dict)]
         promotion = outcome.get('promotion') if isinstance(outcome.get('promotion'), dict) else None
         saved = {'task': outcome.get('task') if isinstance(outcome.get('task'), dict) else None,
                  'records': records, 'promotion': promotion}
+        if outcome.get('capture_decision') in memory_draft.CAPTURE_DECISIONS:
+            saved['capture_decision'] = outcome['capture_decision']
         return {'ok': True, 'saved': saved, 'skipped': skipped, 'error': None}
 
     def _save_memory_chain(self, session, data, *, automatic=False, known=(), generation=None, _guard=None):
@@ -752,6 +758,10 @@ class TaskContext:
                         'skipped': skipped, 'error': None}
         draft = memory_draft.submission(data)
         memory_draft.check_sources(root, draft)
+        referenced=[item for item in draft['learnings'] if 'record_id' in item]
+        if referenced:
+            skipped.extend({'title':item['title'],'reason':'unsupported-runtime'} for item in referenced)
+            draft['learnings']=[item for item in draft['learnings'] if 'record_id' not in item]
         task = self._knowledge('inspect', session['project_id'], options['bank'], _root=workspace,
                                task_id=options.get('record_id') or options['task_id'], task_only=True)['task']
         if task.get('status') in ('completed', 'cancelled'):
@@ -804,7 +814,10 @@ class TaskContext:
         except (SessionError, KeyError, TypeError) as error:
             message = str(error) if isinstance(error, SessionError) else 'The runtime returned an unexpected record.'
             return {'ok': False, 'saved': saved, 'skipped': skipped, 'error': message}
-        return {'ok': True, 'saved': saved, 'skipped': skipped, 'error': None}
+        unsupported_capture = 'capture_decision' in draft
+        return {'ok': not bool(referenced) and not unsupported_capture, 'saved': saved, 'skipped': skipped,
+                'error': ('Existing-knowledge review requires a current record-result runtime.' if referenced else
+                          'Capture decisions require a current record-result runtime.' if unsupported_capture else None)}
 
     def checkpoint(self, session, since=None):
         """Run the turn checkpoint for a provider whose headless mode fires no Stop hook.

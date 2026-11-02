@@ -1,13 +1,15 @@
 """Real canonical consolidation/promotion on physical copies, never the input."""
 import json
+import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import memory_consolidation_pilot as pilot
-from memory_pilot_support import canonical_module
+from memory_pilot_support import canonical_module, snapshot_digest
 
 
 class ConsolidationPilotTests(unittest.TestCase):
@@ -61,6 +63,29 @@ class ConsolidationPilotTests(unittest.TestCase):
         self.assertEqual([], list((export / 'memory-bank/chunks').glob('*.md')))
         self.assertEqual('observed', result['mappings'][0]['authority'])
         self.assertEqual(2, len(result['mappings'][0]['events']))
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX executable hook fixture')
+    def test_export_preserves_actual_prompt_hook_execution(self):
+        hooks = self.root/'.codex/hooks'; hooks.mkdir(parents=True)
+        hook = hooks/'working-memory-read.sh'
+        hook.write_text("#!/bin/sh\nprintf 'fixture-hook-ok\\n'\n"); hook.chmod(0o751)
+        configuration = Path(pilot.ROOT)/'PHP Core/.codex/hooks.json'
+        (self.root/'.codex/hooks.json').write_bytes(configuration.read_bytes())
+        command = json.loads(configuration.read_text())['hooks']['UserPromptSubmit'][0]['hooks'][0]['command']
+        self.assertEqual(0, subprocess.run(['/bin/sh', '-c', command], cwd=self.root,
+                                         capture_output=True).returncode)
+        export = self.base/'export'
+        pilot.run_pilot(self.root, variant='consolidate-verify', export=export)
+        after = subprocess.run(['/bin/sh', '-c', command], cwd=export, capture_output=True)
+        self.assertEqual(0, after.returncode, after.stderr)
+        self.assertEqual(0o751, (export/'.codex/hooks/working-memory-read.sh').stat().st_mode & 0o777)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX mode identity fixture')
+    def test_mode_only_change_is_part_of_snapshot_identity(self):
+        source = self.root/'specs/authority.md'; source.chmod(0o644)
+        before = snapshot_digest(self.root)
+        source.chmod(0o755)
+        self.assertNotEqual(before, snapshot_digest(self.root))
 
     def test_baseline_and_copy_refuse_attachment_and_external_links(self):
         self.event(1); self.event(2)

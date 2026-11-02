@@ -23,17 +23,23 @@ def citations(root, meta, field, deadline=None):
     declared=meta.get('sources');rows=meta.get(field)
     if not isinstance(rows,list) or not isinstance(declared,list) or not 1<=len(rows)<=16:
         return False
-    names=[]
+    try:
+        expected_names={relative_path(name.split('#',1)[0],memory=True).as_posix() for name in declared}
+    except (ValueError,TypeError,AttributeError):
+        return False
+    names={}
     for row in rows:
         check_deadline(deadline)
         if not isinstance(row,dict):return False
-        name=relative_path(row.get('path'),memory=True).as_posix();names.append(name)
+        name=relative_path(row.get('path'),memory=True).as_posix()
         expected=row.get('sha256')
         if not isinstance(expected,str) or not re.fullmatch('[0-9a-f]{64}',expected):return False
+        if name in names and names[name]!=expected:return False
+        names[name]=expected
         data=read_file(root/name)[0]
         if b'\0' not in data[:8192]:data=data.replace(b'\r\n',b'\n')
         if sha(data)!=expected:return False
-    return len(set(names))==len(names) and set(names)==set(declared)
+    return set(names)==expected_names
 
 
 def shell_script(command):
@@ -46,11 +52,23 @@ def shell_script(command):
     return command
 
 
+def _quoted_pwd_root(script,prefix,remaining):
+    """Recognize the literal native-cwd spelling without expanding shell input."""
+    flags=list(islice(re.finditer(r'(?<!\S)--root[ \t]+"\$PWD"(?=[ \t]|$)',script),2))
+    if len(flags)!=1:return False
+    flag=flags[0]
+    try:
+        return shlex.split(script[:flag.start()])==prefix and shlex.split(script[flag.end():])==remaining
+    except ValueError:
+        return False
+
+
 def canonical_args(script,root):
     if not isinstance(script,str):return None
     script=script.strip()
     grouped=script.startswith('(') and script.endswith(')')
-    try:argv=shlex.split(script[1:-1] if grouped else script)
+    invocation=script[1:-1] if grouped else script
+    try:argv=shlex.split(invocation)
     except ValueError:return None
     if grouped:
         if argv[:3]!=['cd',str(root),'&&']:return None
@@ -62,6 +80,10 @@ def canonical_args(script,root):
         return None
     args=argv[2:]
     if args[:2]==['--root',str(root)]:args=args[2:]
+    elif args[:2]==['--root','$PWD']:
+        prefix=(['cd',str(root),'&&'] if grouped else [])+argv[:2]
+        if not _quoted_pwd_root(invocation,prefix,args[2:]):return None
+        args=args[2:]
     return args
 
 
@@ -77,7 +99,7 @@ def save_call(command, root):
     script=shell_script(command)
     if script is None:return None
     pipe=re.fullmatch(r"(?:cat|/bin/cat|/usr/bin/cat)[ \t]+<<[ \t]*'([A-Za-z0-9_]+)'"
-                      r"[ \t]*\|[ \t]*(\([^\n]+\))[ \t]*\n(.*?)\n\1\s*",script,re.S)
+                      r"[ \t]*\|[ \t]*([^\n]+)[ \t]*\n(.*?)\n\1\s*",script,re.S)
     if pipe:
         invocation,body=pipe[2],pipe[3]
     else:
@@ -153,13 +175,15 @@ def capture(root, identity, session_id, events_path, before, *, deadline=None):
                 record_path='project-brain/dynamic/'+('findings' if learning['type']=='finding' else 'decisions')+'/'+record_id+'.md'
                 record=metadata(root/record_path)
                 closed='resolved' if learning['type']=='finding' else 'accepted'
-                if (row.get('external_id')!=external or record.get('external_id')!=external
+                expected_external=record.get('external_id') if 'record_id' in learning else external
+                if (('record_id' in learning and record_id!=learning['record_id'])
+                        or row.get('external_id')!=expected_external or record.get('external_id')!=expected_external
                         or record.get('id')!=record_id or record.get('type')!=learning['type']
                         or row.get('type')!=learning['type'] or record.get('title')!=learning['title']
                         or set(record.get('sources',[]))!=set(learning['sources'])
                         or row.get('status')!=record.get('status') or row.get('revision')!=record.get('revision')
                         or row.get('state') not in ('created','updated','completed')
-                        or record.get('status')!=closed or record.get('goal')!=learning['consequence']
+                        or record.get('status')!=closed or mr._consequence(record)!=' '.join(learning['consequence'].split())
                         or not citations(root,record,'source_fingerprints',deadline)):raise PilotError('learning mismatch')
                 ids.append(record_id)
                 if row['state']!='created' or record_path in before:continue

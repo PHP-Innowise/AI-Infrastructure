@@ -356,3 +356,131 @@ class Ledger:
         with self._lock:
             self._frozen = True
             return copy.deepcopy(self._snapshot())
+
+
+def compare_incremental(baseline, treatment, *, acquisition_baseline, acquisition_treatment):
+    """Compare supplied memory-only acquisition and later-work observations.
+
+    Each acquisition wrapper explicitly declares ``scope=memory-only`` and
+    ``common_task_excluded=True``. Its ledger's build phase is the acquisition
+    observation; other acquisition phases may be unobserved. The later ledgers'
+    build phases are deliberately excluded: ordinary source-task work is not a
+    memory acquisition charge. Identity, completeness and billing remain the
+    supplying observer's assertions, never proof of provider/invoice coverage.
+    """
+    dimensions = {'tokens': 'tokens', 'usd_micros': 'billing', 'component_ns': 'timing'}
+
+    def checked(report):
+        try:
+            if (type(report) is not dict or report.get('profile') != PROFILE
+                    or report.get('usage_profile') != USAGE_PROFILE
+                    or type(report.get('horizon')) is not int or not 1 <= report['horizon'] <= MAX_HORIZON
+                    or type(report.get('phases')) is not dict or set(report['phases']) != set(PHASES)
+                    or len(json.dumps(report, allow_nan=False).encode()) > SNAPSHOT_BYTES):
+                raise LedgerError('comparison_schema')
+            if 'grading' in report:
+                grade = report['grading']
+                if (type(grade) is not dict
+                        or set(grade) != {'observed', 'known_correct', 'correct', 'complete', 'conflicting'}
+                        or any(type(grade[name]) is not int or not 0 <= grade[name] <= report['horizon']
+                               for name in ('observed', 'known_correct', 'conflicting'))
+                        or grade['known_correct'] > grade['observed']
+                        or grade['observed'] + grade['conflicting'] > report['horizon']
+                        or type(grade['complete']) is not bool
+                        or grade['complete'] != (grade['observed'] == report['horizon'])
+                        or (grade['complete'] and (type(grade['correct']) is not int
+                                                  or grade['correct'] != grade['known_correct']))
+                        or (not grade['complete'] and grade['correct'] is not None)):
+                    raise LedgerError('comparison_grading')
+            for phase, row in report['phases'].items():
+                expected = 1 if phase == 'build' else report['horizon']
+                if (type(row) is not dict or type(row.get('expected_units')) is not int
+                        or row['expected_units'] != expected
+                        or type(row.get('attempts')) is not int or not 0 <= row['attempts'] <= MAX_ATTEMPTS
+                        or type(row.get('complete')) is not dict or type(row.get('overflow')) is not bool
+                        or type(row.get('outcomes')) is not dict
+                        or set(row['outcomes']) != set((*OUTCOMES, 'pending', 'conflict'))
+                        or any(counter(value) is None for value in row['outcomes'].values())
+                        or sum(row['outcomes'].values()) != row['attempts']):
+                    raise LedgerError('comparison_schema')
+                flags = row['complete']
+                for flag in ('coverage', *dimensions.values()):
+                    if type(flags.get(flag)) is not bool:
+                        raise LedgerError('comparison_schema')
+                for metric, flag in dimensions.items():
+                    value = row.get(metric)
+                    if ((value is not None and counter(value) is None)
+                            or (flags[flag] and (not flags['coverage'] or value is None or row['overflow']))):
+                        raise LedgerError('comparison_schema')
+                for name in ('input_tokens','output_tokens','cached_input_tokens','reasoning_output_tokens'):
+                    if row.get(name) is not None and counter(row[name]) is None:
+                        raise LedgerError('comparison_schema')
+                if flags['tokens'] and (row.get('input_tokens') is None or row.get('output_tokens') is None
+                        or row['input_tokens']+row['output_tokens']!=row['tokens']):
+                    raise LedgerError('comparison_schema')
+                if ((row.get('cached_input_tokens') is not None and (row.get('input_tokens') is None
+                        or row['cached_input_tokens']>row['input_tokens']))
+                        or (row.get('reasoning_output_tokens') is not None and (row.get('output_tokens') is None
+                        or row['reasoning_output_tokens']>row['output_tokens']))):
+                    raise LedgerError('comparison_schema')
+                if flags['coverage'] and (row.get('closed_units') != expected
+                        or row.get('finished_attempts') != row['attempts']
+                        or row['outcomes']['pending'] or row['outcomes']['conflict']):
+                    raise LedgerError('comparison_schema')
+            return report
+        except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError) as error:
+            if isinstance(error, LedgerError):
+                raise
+            raise LedgerError('comparison_schema') from None
+
+    later = {'baseline': checked(baseline), 'treatment': checked(treatment)}
+    acquisition = {}
+    for arm, supplied in [('baseline', acquisition_baseline), ('treatment', acquisition_treatment)]:
+        if (type(supplied) is not dict or set(supplied) != {'scope', 'common_task_excluded', 'ledger'}
+                or supplied['scope'] != 'memory-only' or supplied['common_task_excluded'] is not True):
+            raise LedgerError('acquisition_scope')
+        acquisition[arm] = checked(supplied['ledger'])
+    horizon = baseline['horizon']
+    if any(report['horizon'] != horizon for report in [*later.values(), *acquisition.values()]):
+        raise LedgerError('comparison_horizon')
+
+    def summed(rows, metric):
+        flag = dimensions[metric]
+        if any(not row['complete']['coverage'] or not row['complete'][flag] or row['overflow'] for row in rows):
+            return None
+        value = sum(row[metric] for row in rows)
+        return value if value <= COUNTER_LIMIT else None
+
+    arms, metrics = {}, {}
+    for arm in later:
+        source = acquisition[arm]['phases']['build']
+        future = [later[arm]['phases'][name] for name in ('query', 'reader')]
+        judge = later[arm]['phases']['judge']
+        grade = later[arm].get('grading')
+        correct = (grade.get('correct') if type(grade) is dict and grade.get('complete') is True else None)
+        if correct is not None and (type(correct) is not int or not 0 <= correct <= horizon):
+            raise LedgerError('comparison_grading')
+        arms[arm] = {'acquisition_attempts': source['attempts'],
+            'acquisition_outcomes': dict(source['outcomes']),
+            'product_attempts': source['attempts'] + sum(row['attempts'] for row in future),
+            'future_outcomes': {outcome: sum(row['outcomes'][outcome] for row in future)
+                                for outcome in (*OUTCOMES, 'pending', 'conflict')},
+            'metrics': {}}
+        for metric in dimensions:
+            product = summed([source, *future], metric)
+            arms[arm]['metrics'][metric] = {'acquisition': summed([source], metric),
+                'future': summed(future, metric), 'product': product,
+                'experiment': summed([source, *future, judge], metric),
+                'per_correct': product / correct if correct and product is not None else None}
+    for metric in dimensions:
+        left, right = (arms[arm]['metrics'][metric] for arm in ('baseline', 'treatment'))
+        def difference(key):
+            return right[key] - left[key] if right[key] is not None and left[key] is not None else None
+        delta = difference('product')
+        metrics[metric] = {'baseline': left['product'], 'treatment': right['product'],
+            'incremental_acquisition': difference('acquisition'), 'incremental_future': difference('future'),
+            'incremental_total': delta, 'amortized_incremental': delta / horizon if delta is not None else None,
+            'savings': -delta if delta is not None else None}
+    return {'profile': 'memory-incremental-comparison-v1', 'usage_profile': USAGE_PROFILE,
+            'evidence': 'supplied-observations', 'acquisition_scope': 'memory-only',
+            'common_task_excluded': True, 'horizon': horizon, 'arms': arms, 'metrics': metrics}

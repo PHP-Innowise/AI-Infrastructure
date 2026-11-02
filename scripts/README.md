@@ -510,6 +510,15 @@ python3 -B scripts/memory_native_ab.py run --run /private/native-run
 python3 -B scripts/memory_native_ab.py inspect --run /private/native-run
 ```
 
+Native experiments have mandatory snapshot admission before output/copy/index
+creation and immediately before each model launch. It checks known credential
+carriers and the actual materialized inventory, modes and canonical provenance;
+it rejects unsupported binary/encoding and changed inputs. It never redacts or
+offers a bypass. Use a separately reviewed source projection when needed.
+Fresh Git/index binaries and external read-only provider authentication are
+explicit derived-state/transport exceptions, not claims of text screening or
+universal secret absence. See `docs/MEMORY-EVAL.md`, “Mandatory snapshot admission”.
+
 The exact JSON configuration and staged source/served commands are documented
 in [MEMORY-EVAL.md](../docs/MEMORY-EVAL.md#native-producer-and-fresh-consumer).
 Configuration and output must be separate from each other, the tooling clone
@@ -1452,6 +1461,30 @@ source-only and not installed.
   Maintainers should prefer fixing repository-owned links over adding
   exceptions.
 - **CI relationship:** read by the `links` job through `check_links.py`.
+
+## memory_response_contract.py
+
+Pure stdlib support for new private task-outcome controllers: render and check
+the same public response constraints, select the last marked answer, and bind
+an independent review to exact message/run identities. Expected factual values
+stay in the separate private oracle. The helper performs no file or model work
+and is opt-in; old task sets do not invoke it automatically. See the
+[public contract and caller boundaries](../docs/MEMORY-RESPONSE-CONTRACT.md).
+
+Version 1 remains shape-only with identical rendering and bindings. Future
+callers can explicitly choose v2 to publish a complete bounded path/raw-SHA/size
+citation corpus and check literal quotes against supplied immutable UTF-8 bytes.
+The pure helper performs no source reads; context drift raises `ValueError`,
+separate from reader range/quote errors. The completion stand can now explicitly
+adopt v2 per task through `memory_response_intake.py`: sealed common source copy,
+full stdin prompt, read-only evidence mount, bounded chronological answer capture
+and same-context isolated literal checking before its existing task oracle.
+Installed runtime defaults remain unchanged. No old study is regraded.
+
+```bash
+python3 -B -m unittest tests.test_memory_response_contract
+python3 -B -m unittest tests.test_memory_response_intake
+```
 
 ## Maintainer Workflow
 

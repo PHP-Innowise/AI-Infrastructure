@@ -6,8 +6,10 @@ import copy
 import importlib
 import io
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +17,25 @@ from unittest import mock
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "PHP Core/memory-bank/scripts"
+
+
+def installed_mcp_exchange(root,method,params):
+    """A fresh installed process cannot borrow cached canonical modules."""
+    messages=[{'jsonrpc':'2.0','id':0,'method':'initialize','params':{
+        'protocolVersion':'2025-06-18','capabilities':{},'clientInfo':{'name':'test','version':'1'}}},
+        {'jsonrpc':'2.0','method':'notifications/initialized'},
+        {'jsonrpc':'2.0','id':1,'method':method,'params':params}]
+    environment={key:value for key,value in os.environ.items()
+                 if key not in {'PYTHONPATH','PYTHONHOME'} and not key.startswith(('ACCELERATOR_','CONTEXT_','PROJECT_BRAIN_'))}
+    environment.update(PROJECT_BRAIN_OWNER='local',GIT_OPTIONAL_LOCKS='0',PYTHONDONTWRITEBYTECODE='1')
+    result=subprocess.run([sys.executable,'-s','-B',str(root/'memory-bank/scripts/mcp_server.py'),'--root',str(root)],
+        cwd=root,env=environment,input=''.join(json.dumps(m)+'\n' for m in messages),
+        capture_output=True,text=True,timeout=20)
+    if result.returncode:raise RuntimeError('Installed MCP process failed: '+result.stderr[-2000:])
+    responses=[json.loads(line) for line in result.stdout.splitlines()]
+    if len(responses)!=2 or responses[1].get('id')!=1 or 'result' not in responses[1]:
+        raise RuntimeError('Installed MCP response unavailable')
+    return responses[1]['result']
 
 
 class MemoryResultReplayTests(unittest.TestCase):
@@ -86,12 +107,58 @@ class MemoryResultReplayTests(unittest.TestCase):
     def memory(self):
         shutil.copytree(SCRIPTS, self.root / "memory-bank/scripts",
                         ignore=shutil.ignore_patterns("__pycache__"))
-        spec = importlib.util.spec_from_file_location(
-            "harbor_mcp_runtime", self.root / "memory-bank/scripts/mcp_server.py")
-        installed = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(installed)
-        with mock.patch.dict("os.environ", {"PROJECT_BRAIN_OWNER": "local"}):
-            return installed.Memory(self.root)
+        fixture=self
+        class InstalledMemory:
+            def call(self,name,arguments):
+                reply=installed_mcp_exchange(fixture.root,'tools/call',{'name':name,'arguments':arguments})
+                if reply.get('isError'):
+                    raise fixture.brain.BrainError(reply['content'][0]['text'])
+                return reply['structuredContent']
+        return InstalledMemory()
+
+    def test_absent_capture_decision_preserves_legacy_normalization_and_digest(self):
+        expected = {key: self.data[key] for key in ('progress', 'next_steps', 'learnings')}
+        normalized = self.results.normalize(self.root, self.data)
+        self.assertEqual(expected, normalized)
+        self.assertEqual(self.results.request_digest(self.task['id'], expected),
+                         self.results.request_digest(self.task['id'], normalized))
+        self.assertNotIn('capture_decision', self.record())
+
+    def test_capture_decisions_are_optional_content_bound_to_exact_replay(self):
+        for decision in ('selected', 'no_reusable_knowledge', 'insufficiently_checked'):
+            data = {**self.data, 'capture_decision': decision,
+                    'learnings': self.data['learnings'] if decision == 'selected' else []}
+            with self.subTest(decision=decision):
+                saved = self.record(result_id=decision, data=data, revision='auto')
+                self.assertEqual(decision, saved['capture_decision'])
+                self.assertEqual(decision, self.results.normalize(self.root, data)['capture_decision'])
+                before = self.shared_images()
+                replay = self.record(result_id=decision, data=data, revision='auto')
+                self.assertTrue(replay['replayed'])
+                self.assertEqual(before, self.shared_images())
+        changed = {**self.data, 'learnings': [], 'capture_decision': 'no_reusable_knowledge'}
+        with self.assertRaisesRegex(self.brain.BrainError, 'different content'):
+            self.record(result_id='insufficiently_checked', data=changed, revision='auto')
+
+    def test_invalid_capture_decisions_and_decision_alone_write_nothing(self):
+        before = self.shared_images()
+        invalid = [{**self.data, 'capture_decision': value}
+                   for value in (None, True, [], {}, 'unknown', 'no_reusable_knowledge', 'insufficiently_checked')]
+        invalid += [{'progress': 'Harbor checked.', 'learnings': [], 'capture_decision': 'selected'},
+                    {'capture_decision': 'no_reusable_knowledge'}]
+        for data in invalid:
+            with self.subTest(decision=data['capture_decision']), self.assertRaises(self.brain.BrainError):
+                self.record(data=data)
+        self.assertEqual(before, self.shared_images())
+        self.assertFalse((self.root / 'project-brain/control/result-attempts').exists())
+        self.assertFalse((self.root / 'project-brain/local/results').exists())
+
+    def test_missing_installed_dependency_cannot_be_hidden_by_canonical_imports(self):
+        memory=self.memory()
+        (self.root/'memory-bank/scripts/memory_results.py').unlink()
+        with self.assertRaisesRegex(RuntimeError,'memory_results'):
+            memory.call('memory_record_result',{'task_id':self.task['id'],'result_id':'missing-dependency',
+                                               'revision':1,**self.data})
 
     def enable_promotion(self):
         (self.root / "memory-bank/README.md").write_text("# Harbor Memory Bank\n")
@@ -375,7 +442,7 @@ class MemoryResultReplayTests(unittest.TestCase):
                    **self.data}
         before = self.shared_images()
         self.assertTrue(memory.call("memory_record_result", payload)["replayed"])
-        with self.assertRaisesRegex(self.brain.BrainError, "different content"):
+        with self.assertRaisesRegex(self.brain.BrainError, "result_id_reused"):
             memory.call("memory_record_result", {**payload, "progress": "Different harbor result"})
         self.assertEqual(before, self.shared_images())
 
@@ -385,13 +452,15 @@ class MemoryResultReplayTests(unittest.TestCase):
                    **self.data}
         before = self.shared_images()
         for revision in ("auto", "1", True, 0, 1.0):
-            with self.subTest(revision=revision), self.assertRaisesRegex(self.brain.BrainError, "positive integer"):
+            # The public protocol redacts malformed-argument details; the
+            # valid call below proves this is not a broken MCP dependency.
+            with self.subTest(revision=revision), self.assertRaisesRegex(self.brain.BrainError, "^Memory operation failed"):
                 memory.call("memory_record_result", {**payload, "revision": revision})
             self.assertEqual(before, self.shared_images())
         saved = memory.call("memory_record_result", payload)
         self.assertFalse(saved["replayed"])
         before = self.shared_images()
-        with self.assertRaisesRegex(self.brain.BrainError, "Stale task revision"):
+        with self.assertRaisesRegex(self.brain.BrainError, "stale_revision"):
             memory.call("memory_record_result", {**payload, "result_id": "new-harbor-run"})
         self.assertEqual(before, self.shared_images())
 

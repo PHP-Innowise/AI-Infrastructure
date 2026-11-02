@@ -2984,6 +2984,45 @@ class InstallStatusTest(unittest.TestCase):
 
 
 class FunnelTest(unittest.TestCase):
+    def test_capture_decisions_are_distinct_from_persistence_and_repeats(self):
+        counts = memory_eval.Counter(); reasons = {}
+        empty = {'stage': 'save', 'event': 'saved', 'learnings': 0, 'promoted': 0,
+                 'submitted': 0, 'existing': 0, 'held': 0}
+        selected = {**empty, 'capture_decision': 'selected', 'submitted': 1, 'learnings': 1}
+        for row in (selected, {**selected, 'event': 'held', 'learnings': 0, 'held': 1},
+                    {**selected, 'code': 'repeat'},
+                    {**empty, 'capture_decision': 'no_reusable_knowledge'},
+                    {**empty, 'capture_decision': 'insufficiently_checked'}, empty,
+                    {**empty, 'capture_decision': 'unexpected private text'},
+                    {**selected, 'capture_decision': 'no_reusable_knowledge'},
+                    {**selected, 'event': 'refused'}):
+            memory_eval.native_step(counts, reasons, row)
+        summary = memory_eval.native_summary(counts, reasons)
+        self.assertEqual((2, 1, 1, 3), tuple(summary[key] for key in (
+            'capture_selected', 'capture_no_reusable_knowledge', 'capture_insufficiently_checked', 'capture_unknown')))
+        self.assertEqual(1, summary['learnings_held'])
+        self.assertEqual(1, summary['refused'])
+        self.assertNotIn('private text', json.dumps(summary))
+
+    def test_selection_counters_keep_legacy_unknown_and_do_not_count_exact_replay_twice(self):
+        counts=memory_eval.Counter();reasons={}
+        for row in [
+            {'stage':'save','event':'saved','learnings':0,'promoted':0},
+            {'stage':'save','event':'saved','learnings':0,'promoted':0,'submitted':0,'existing':0,'held':0},
+            {'stage':'save','event':'saved','learnings':0,'promoted':0,'submitted':1,'existing':1,'held':0},
+            {'stage':'save','event':'saved','code':'repeat','submitted':1,'existing':1,'held':0},
+        ]:memory_eval.native_step(counts,reasons,row)
+        self.assertEqual((2,1),(counts['selection_observed'],counts['selection_unknown']))
+        self.assertEqual((1,1,0),(counts['learnings_submitted'],counts['learnings_existing'],counts['learnings_held']))
+
+    def test_impossible_selection_counts_remain_unknown(self):
+        counts=memory_eval.Counter()
+        for row in ({'submitted':0,'existing':3,'held':3,'learnings':0},
+                    {'submitted':1,'existing':0,'held':0,'learnings':False}):
+            memory_eval.native_step(counts,{},dict(stage='save',event='saved',**row))
+        self.assertEqual(2,counts['selection_unknown']);self.assertEqual(0,counts['selection_observed'])
+        self.assertEqual(0,counts['learnings_submitted']);self.assertEqual(0,counts['learnings_existing'])
+
     """The memory funnel of several projects, from their journals alone."""
 
     SECRET = "invoice rounding for ACME"

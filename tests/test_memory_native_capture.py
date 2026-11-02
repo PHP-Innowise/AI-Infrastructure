@@ -1,5 +1,6 @@
 """Automatic native Stop continuation and guarded semantic-result saves."""
 import contextlib
+import errno
 from datetime import datetime, timedelta
 import hashlib
 import importlib
@@ -18,7 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 JOURNAL = 'memory-bank/local/native-results.ndjson'
 # All a journal line may hold: when, which host, which step, a short code, the
 # Stop hook's exit status and two counts - never text, paths or identifiers.
-JOURNAL_FIELDS = {'at','host','stage','event','code','status','learnings','promoted','answer'}
+JOURNAL_FIELDS = {'at','host','stage','event','code','status','learnings','promoted','answer',
+                  'submitted','existing','held','capture_decision'}
 
 
 def requested(host,output):
@@ -137,6 +139,21 @@ class NativeCaptureFixture(unittest.TestCase):
 
 
 class NativeCaptureTests(NativeCaptureFixture):
+    def test_invalid_capture_decision_refuses_before_task_provisioning_and_can_be_corrected(self):
+        self.begin(); self.stop()
+        for data in ({'capture_decision': 'no_reusable_knowledge'},
+                     {'progress': 'Amber checked.', 'capture_decision': 'selected', 'learnings': []},
+                     {**self.payload, 'capture_decision': 'no_reusable_knowledge'}):
+            with self.subTest(data=data):
+                self.save(data, ok=False)
+                self.assertEqual([], self.records('tasks'))
+                state = self.state()[1]
+                self.assertIsNone(state['task_uuid']); self.assertIsNone(state['digest'])
+        saved = json.loads(self.save({'progress': 'Amber checked.', 'learnings': [],
+                                      'capture_decision': 'insufficiently_checked'}).stdout)
+        self.assertEqual('insufficiently_checked', saved['capture_decision'])
+        self.assertEqual([], saved['records'])
+
     def test_a_turn_mends_the_bank_index_a_stopped_promotion_left_behind(self):
         # A promotion writes its chunk, then INDEX.md. Stopped between the two
         # - Ctrl-C, a budget, a kill - it left a chunk the index did not name,
@@ -309,7 +326,7 @@ class NativeCaptureTests(NativeCaptureFixture):
         hook('working-memory-write.sh',{'hook_event_name':'Stop','session_id':'session-a',
                                        'stop_hook_active':True,'last_assistant_message':'Saved.'})
         self.assertEqual(before,self.authority())
-        with sqlite3.connect(self.root/'memory-bank/local/context.db') as connection:
+        with contextlib.closing(sqlite3.connect(self.root/'memory-bank/local/context.db')) as connection:
             self.assertEqual(0,connection.execute('SELECT count(*) FROM turn_deltas').fetchone()[0])
 
     def test_empty_or_unverified_result_does_not_provision_task(self):
@@ -389,13 +406,35 @@ class NativeCaptureTests(NativeCaptureFixture):
                     native.save(self.root,candidate.stem,state['token'],self.payload,
                         owner='tester',mode='governed',provision=lambda task:None)
         before=self.authority()
+        chunk,=(self.root/'memory-bank/chunks').glob('*.md')
+        frozen_chunk=chunk.read_bytes()
+        frozen_id=json.loads(chunk.read_text().split('---',2)[1])['id']
+        proposal_path,= [path for path in before if path.startswith('project-brain/control/promotions/')]
+        proposal_before=json.loads(before[proposal_path])
+        self.assertEqual('reviewed',proposal_before['status'])
+        self.assertIn('publication',proposal_before)
+        source_before=(self.root/'rules.md').read_bytes()
         result=json.loads(self.save().stdout)
         self.assertTrue(result['replayed'])
-        self.assertEqual([],result['promotion']['promoted'])
-        self.assertEqual(1,len(result['promotion']['failed']))
-        self.assertIn('near-duplicate',result['promotion']['failed'][0]['reason'])
+        self.assertEqual([frozen_id],[row['memory_id'] for row in result['promotion']['promoted']])
+        self.assertEqual([],result['promotion']['failed'])
         self.assertEqual(1,len(list((self.root/'memory-bank/chunks').glob('*.md'))))
-        self.assertEqual(before,self.authority())
+        self.assertEqual(frozen_chunk,chunk.read_bytes())
+        after=self.authority()
+        self.assertEqual({path:raw for path,raw in before.items() if path!=proposal_path},
+                         {path:raw for path,raw in after.items() if path!=proposal_path})
+        proposal_after=json.loads(after[proposal_path])
+        self.assertEqual(proposal_before['id'],proposal_after['id'])
+        self.assertEqual('applied',proposal_after['status'])
+        self.assertNotIn('publication',proposal_after)
+        self.assertEqual(source_before,(self.root/'rules.md').read_bytes())
+        self.assertIn(chunk.name,(self.root/'memory-bank/INDEX.md').read_text())
+        with self.runtime() as (_,_,brain):
+            self.assertEqual([],brain.validate_bank(self.root/'memory-bank'))
+        again=json.loads(self.save().stdout)
+        self.assertTrue(again['replayed'])
+        self.assertEqual([],again['promotion']['promoted'])
+        self.assertEqual(after,self.authority())
 
     def test_foreign_actor_cannot_consume_challenge(self):
         self.begin();self.stop()
@@ -574,6 +613,67 @@ class NativeCaptureTests(NativeCaptureFixture):
         result=self.call('native-prompt','--host','codex','--task-id','research','--json',data={
             'hook_event_name':'UserPromptSubmit','session_id':'session-a'},ok=False)
         self.assertNotEqual(0,result.returncode);self.assertEqual([],list(outside.iterdir()))
+
+
+class NativeSpoolRecoveryTests(NativeCaptureFixture):
+    def prepare_request(self):
+        self.call('start', '--task-id', 'research', '--goal', 'Inspect routing')
+        self.begin(); self.stop()
+        candidate, state = self.state()
+        return candidate, state, self.root.parent / 'isolated-spool'
+
+    def test_read_only_fallback_rechecks_owner_and_all_scope_fences(self):
+        candidate, state, spool = self.prepare_request()
+        before = self.authority()
+        variants = [('owner', None), ('updated', state['updated'] - 24*60*60 - 1),
+                    ('updated', state['updated'] + 120), ('scope', '0'*64),
+                    ('checkout', '0'*64), ('adapter', '0'*64)]
+        with self.runtime() as (native, _, brain):
+            readonly = OSError(errno.EROFS, 'Read-only public fixture', str(native.brain_root(self.root)))
+            with mock.patch.object(native, '_spool_dirs', return_value=[spool]), \
+                 mock.patch.object(native, 'mutation_lock', side_effect=readonly):
+                for field, value in variants:
+                    with self.subTest(field=field, value=value):
+                        changed = dict(state)
+                        if field != 'owner': changed[field] = value
+                        candidate.write_text(json.dumps(changed))
+                        with self.assertRaises(brain.BrainError):
+                            native.save(self.root, candidate.stem, state['token'], self.payload,
+                                owner='other-owner' if field == 'owner' else 'tester',
+                                mode='governed', provision=lambda task: None)
+                        self.assertEqual([], list(spool.glob('*.json')))
+                        self.assertEqual(before, self.authority())
+        candidate.write_text(json.dumps(state))
+
+    def test_transient_drain_error_retains_attempt_and_recovers_exactly_once(self):
+        candidate, state, spool = self.prepare_request()
+        with self.runtime() as (native, results, _):
+            readonly = OSError(errno.EROFS, 'Read-only public fixture', str(native.brain_root(self.root)))
+            with mock.patch.object(native, '_spool_dirs', return_value=[spool]):
+                with mock.patch.object(native, 'mutation_lock', side_effect=readonly):
+                    queued = native.save(self.root, candidate.stem, state['token'], self.payload,
+                        owner='tester', mode='governed', provision=lambda task: None)
+                self.assertEqual('spooled', queued['state'])
+                payload = {'session_id': 'session-a'}
+                def drain():
+                    return native.drain(self.root, 'research', 'codex', payload, owner='tester',
+                                        mode='governed', provision=lambda task: None)
+                with mock.patch.object(results, 'update_record',
+                                       side_effect=OSError(errno.EIO, 'Transient public close failure')):
+                    with self.assertRaises(OSError): drain()
+                attempts = list(spool.glob('*.json'))
+                self.assertEqual(1, len(attempts))
+                self.assertTrue(attempts[0].name.endswith('.attempt1.json'))
+                self.assertEqual(['open'], [row['status'] for row in self.records('findings')])
+                recovered = drain()
+                self.assertIsInstance(recovered, dict)
+                self.assertEqual('saved', self.state()[1]['phase'])
+                self.assertEqual([], list(spool.glob('*.json')))
+                self.assertEqual(['resolved'], [row['status'] for row in self.records('findings')])
+                self.assertEqual(1, len(list((self.root/'memory-bank/chunks').glob('*.md'))))
+                before = self.authority()
+                self.assertIsNone(drain())
+                self.assertEqual(before, self.authority())
 
 
 class NativeFunnelJournalTests(NativeCaptureFixture):
@@ -1208,8 +1308,10 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.begin();self.stop()
         line=self.one(self.written(self.save),'save','saved')
         self.assertEqual((1,1),(line['learnings'],line['promoted']))
+        self.assertEqual((1,0,0),(line['submitted'],line['existing'],line['held']))
         line=self.one(self.written(self.save),'save','saved','repeat')
         self.assertEqual((0,0),(line['learnings'],line['promoted']))
+
         self.begin();self.stop();candidate,state=self.state()
         self.one(self.written(lambda:self.call('native-result','--request',candidate.stem,'--token',state['token'],
                                               '--skip','--json')),'save','omitted')
@@ -1218,6 +1320,46 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
                  'expected_revision':99}
         line=self.one(self.written(lambda:self.save({**self.payload,'learnings':[changed]})),'save','held')
         self.assertEqual((0,0),(line['learnings'],line['promoted']))
+
+    def test_journal_distinguishes_empty_selection_from_an_existing_learning(self):
+        self.begin();self.stop();self.save()
+        self.begin();self.stop()
+        line=self.one(self.written(self.save),'save','saved')
+        self.assertEqual((1,1,0,0),(line['submitted'],line['existing'],line['held'],line['learnings']))
+        self.begin();self.stop()
+        line=self.one(self.written(lambda:self.save({'progress':'Checked the current task.','learnings':[]})),
+                      'save','saved')
+        self.assertEqual((0,0,0,0),(line['submitted'],line['existing'],line['held'],line['learnings']))
+
+    def test_journal_capture_decision_is_optional_metadata_separate_from_written_and_held(self):
+        for decision in (None, 'selected', 'no_reusable_knowledge', 'insufficiently_checked'):
+            self.begin(); self.stop()
+            data = {**self.payload, 'learnings': self.payload['learnings'] if decision == 'selected' else []}
+            if decision is not None:
+                data['capture_decision'] = decision
+            with self.subTest(decision=decision):
+                line = self.one(self.written(lambda: self.save(data)), 'save', 'saved')
+                if decision is None:
+                    self.assertNotIn('capture_decision', line)
+                else:
+                    self.assertEqual(decision, line['capture_decision'])
+                self.assertEqual(int(decision == 'selected'), line['submitted'])
+                self.assertLessEqual(set(line), JOURNAL_FIELDS)
+        self.begin(); self.stop()
+        changed = {**self.payload['learnings'][0], 'consequence': 'Amber retries no request.',
+                   'expected_revision': 99}
+        line = self.one(self.written(lambda: self.save({**self.payload, 'learnings': [changed],
+                                                       'capture_decision': 'selected'})), 'save', 'held')
+        self.assertEqual(('selected', 0, 1), (line['capture_decision'], line['learnings'], line['held']))
+
+    def test_duplicate_submitted_learnings_count_one_distinct_selection(self):
+        self.begin();self.stop()
+        data={**self.payload,'learnings':self.payload['learnings']*2}
+        line=self.one(self.written(lambda:self.save(data)),'save','saved')
+        self.assertEqual((1,1,0),(line['submitted'],line['learnings'],line['existing']))
+        self.begin();self.stop()
+        line=self.one(self.written(lambda:self.save(data)),'save','saved')
+        self.assertEqual((1,0,1),(line['submitted'],line['learnings'],line['existing']))
 
     def test_a_save_after_a_failed_stop_is_counted_late(self):
         self.interrupt_save()
@@ -1704,12 +1846,55 @@ class NativeInstructionTests(NativeCaptureFixture):
                 self.assertIn('exact command: ',later)
                 self.assertLess(len(later),len(first)-800)
 
+    def test_old_save_rules_are_replaced_once_after_reference_schema_upgrade(self):
+        old=self.FULL+': old JSON schema. Rechecks use learnings=[] and progress only.'
+        for host in ('claude','codex'):
+            with self.subTest(host=host):
+                previous=self.transcript('old-'+host+'.jsonl',{'type':'user','message':{'content':old}})
+                current=self.ask(host=host,session=host+'-upgrade',transcript=previous)
+                self.assertIn(self.FULL,current);self.assertIn('source_fingerprints',current)
+                self.assertIn('Native result reference schema v1.',current)
+                retained=self.transcript('new-'+host+'.jsonl',{'type':'user','message':{'content':current}})
+                following=self.ask(host=host,session=host+'-upgraded-later',transcript=retained)
+                self.assertNotIn(self.FULL,following);self.assertIn(self.BACK,following)
+
     def test_cursor_gets_the_full_step_every_time(self):
         # Its transcript format and how it records a summarized conversation
         # are unknown here, so nothing tells a short step is safe.
         first=self.ask(host='cursor',session='cursor-first')
         held=self.transcript('cursor.jsonl',{'type':'user','message':{'content':first}})
         self.assertIn(self.FULL,self.ask(host='cursor',session='cursor-later',transcript=held))
+
+    def test_capture_policy_changes_replace_the_latest_full_step(self):
+        for host in ('claude','codex'):
+            for following in ('off','review'):
+                with self.subTest(host=host,following=following):
+                    ordinary=self.ask(host=host,session=host+'-ordinary-'+following)
+                    verified=self.ask(host=host,session=host+'-verified-'+following,
+                        env={'CONTEXT_NATIVE_MEMORY_MAINTENANCE':'review-verified'})
+                    self.assertIn('Independent-review mode: use learnings=[]',verified)
+                    # An earlier ordinary step is present too: only the last
+                    # full policy may license a short pointer back to it.
+                    held=self.transcript(host+'-mixed-'+following+'.jsonl',
+                        {'type':'user','message':{'content':ordinary}},
+                        {'type':'user','message':{'content':verified}})
+                    current=self.ask(host=host,session=host+'-reset-'+following,transcript=held,
+                        env={'CONTEXT_NATIVE_MEMORY_MAINTENANCE':following})
+                    self.assertIn(self.FULL,current)
+                    self.assertNotIn('Independent-review mode: use learnings=[]',current)
+                    held=self.transcript(host+'-reset-held-'+following+'.jsonl',
+                        {'type':'user','message':{'content':current}})
+                    later=self.ask(host=host,session=host+'-reset-later-'+following,transcript=held,
+                        env={'CONTEXT_NATIVE_MEMORY_MAINTENANCE':following})
+                    self.assertIn(self.BACK,later);self.assertNotIn(self.FULL,later)
+
+    def test_ordinary_rules_do_not_license_a_short_proposal_only_step(self):
+        first=self.ask(host='codex',session='ordinary-to-proposal')
+        held=self.transcript('ordinary-to-proposal.jsonl',{'type':'user','message':{'content':first}})
+        verified=self.ask(host='codex',session='proposal-after-ordinary',transcript=held,
+            env={'CONTEXT_NATIVE_MEMORY_MAINTENANCE':'review-verified'})
+        self.assertIn(self.FULL,verified)
+        self.assertIn('Independent-review mode: use learnings=[]',verified)
 
     def test_the_full_step_comes_back_after_a_compaction_or_without_a_transcript(self):
         first=self.ask(session='before')

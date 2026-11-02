@@ -1,7 +1,9 @@
 """Public independent outcome oracles; no models or private dataset."""
 import json
+import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -68,6 +70,79 @@ class VerifierTests(unittest.TestCase):
         first=verify.verifier_digest(case)
         oracle.write_text('raise SystemExit(1)')
         self.assertNotEqual(first,verify.verifier_digest(case))
+
+    def test_oracle_seal_includes_hidden_labels_empty_directories_and_modes(self):
+        private = self.root/'private'; private.mkdir()
+        driver = private/'oracle.py'; driver.write_text('print("public oracle")\n')
+        case = {'mode': 'patch', 'argv': [sys.executable, str(driver)],
+                'timeout': 2, 'read_roots': [str(private)]}
+        for folder in ('.git', '__pycache__'):
+            label = private/folder/'expected.txt'; label.parent.mkdir()
+            label.write_text('42')
+            first = verify.verifier_digest(case)
+            label.write_text('41')
+            self.assertNotEqual(first, verify.verifier_digest(case), folder)
+        first = verify.verifier_digest(case)
+        (private/'empty-label-group').mkdir()
+        self.assertNotEqual(first, verify.verifier_digest(case))
+        if os.name == 'posix':
+            first = verify.verifier_digest(case); driver.chmod(0o755)
+            self.assertNotEqual(first, verify.verifier_digest(case))
+
+    def test_duplicate_receipt_keys_cannot_report_success(self):
+        private = self.root/'private'; private.mkdir()
+        oracle = private/'oracle.py'
+        case = {'mode': 'patch', 'argv': [sys.executable, str(oracle)],
+                'timeout': 2, 'read_roots': [str(private)]}
+        receipts = [
+            '{"schema":"task-outcome-verifier-v1","completed":true,"correct":false,"correct":true}',
+            '{"schema":"task-outcome-verifier-v1","completed":false,"completed":true,"correct":true}',
+        ]
+        with patch.object(verify, 'verifier_command', side_effect=lambda snapshot, argv, roots: list(argv)):
+            for receipt in receipts:
+                with self.subTest(receipt=receipt):
+                    oracle.write_text('print(' + repr(receipt) + ')\n')
+                    self.assertIsNone(verify.verify_task(self.snapshot, self.answer, case)['correct'])
+
+    def test_missing_and_linked_empty_candidate_roots_are_unavailable(self):
+        self.answer.write_text('42')
+        case = {'mode': 'answer', 'equals': '42'}
+        self.assertIsNone(verify.verify_task(self.root/'missing', self.answer, case)['correct'])
+        linked = self.root/'linked-candidate'
+        try: linked.symlink_to(self.snapshot, target_is_directory=True)
+        except (OSError, NotImplementedError): return
+        self.assertIsNone(verify.verify_task(linked, self.answer, case)['correct'])
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX special mode fixture')
+    def test_special_oracle_permission_bits_are_refused(self):
+        oracle = self.root/'oracle.py'; oracle.write_text('print("unused")\n')
+        case = {'mode': 'patch', 'argv': [sys.executable, str(oracle)],
+                'timeout': 2, 'read_roots': [str(oracle)]}
+        oracle.chmod(0o4644)
+        with self.assertRaises(ValueError): verify.verifier_digest(case)
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'POSIX special file fixture')
+    def test_special_answer_and_oracle_files_are_refused_without_blocking(self):
+        oracle = self.root/'oracle.py'; oracle.write_text('print("unused")\n')
+        fifo = self.root/'label'; os.mkfifo(fifo)
+        nested = self.root/'private'; nested.mkdir(); os.mkfifo(nested/'label')
+        code = ('import json,sys;from pathlib import Path;sys.path.insert(0,sys.argv[1]);'
+                'import memory_outcome_verify as v;'
+                'case=json.loads(sys.argv[4]);'
+                'print(json.dumps(v.verify_task(Path(sys.argv[2]),Path(sys.argv[3]),case)))')
+        for answer, case in [
+            (fifo, {'mode': 'answer', 'equals': '42'}),
+            (self.answer, {'mode': 'patch', 'argv': [sys.executable, str(oracle)],
+                          'timeout': .01, 'read_roots': [str(fifo)]}),
+            (self.answer, {'mode': 'patch', 'argv': [sys.executable, str(oracle)],
+                          'timeout': .01, 'read_roots': [str(nested)]}),
+        ]:
+            with self.subTest(answer=answer.name, case=case):
+                result = subprocess.run([sys.executable, '-B', '-c', code,
+                    str(Path(verify.__file__).parent), str(self.snapshot), str(answer), json.dumps(case)],
+                    capture_output=True, timeout=2)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIsNone(json.loads(result.stdout)['correct'])
 
     def test_candidate_owned_test_discovery_is_not_an_independent_oracle(self):
         (self.snapshot/'test_fake.py').write_text('import unittest\n')

@@ -73,7 +73,8 @@ def relative_path(value: str, *, memory: bool = False) -> PurePosixPath:
     return path
 
 
-def safe_read(root: Path, value: str, *, memory: bool = False, limit: int = MAX_FILE) -> bytes:
+def _source_image(root: Path, value: str, *, memory: bool = False,
+                  limit: int = MAX_FILE) -> tuple[bytes, int]:
     parts = relative_path(value, memory=memory).parts
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
@@ -108,12 +109,23 @@ def safe_read(root: Path, value: str, *, memory: bool = False, limit: int = MAX_
             chunks.append(chunk); size += len(chunk)
             if size > limit:
                 raise PilotError('source exceeds byte limit')
-        return b''.join(chunks)
+        after = os.fstat(fd)
+        named = (os.stat(parts[-1], dir_fd=descriptors[-2], follow_symlinks=False)
+                 if os.name == 'posix' else path.lstat())
+        identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns,
+                                 item.st_ctime_ns, item.st_mode)
+        if identity(image) != identity(after) or identity(after) != identity(named):
+            raise PilotError('source changed while reading')
+        return b''.join(chunks), stat.S_IMODE(image.st_mode) & 0o777
     except (OSError, ValueError) as error:
         raise PilotError('source unavailable or unsafe') from error
     finally:
         for fd in reversed(descriptors):
             os.close(fd)
+
+
+def safe_read(root: Path, value: str, *, memory: bool = False, limit: int = MAX_FILE) -> bytes:
+    return _source_image(root, value, memory=memory, limit=limit)[0]
 
 
 def strict_json(raw: bytes) -> Any:
@@ -130,7 +142,7 @@ def strict_json(raw: bytes) -> Any:
     return value
 
 
-def snapshot_files(root: Path) -> list[tuple[str, bytes]]:
+def _snapshot_image(root: Path) -> list[tuple[str, bytes, int]]:
     if root.is_symlink() or not root.is_dir() or root.resolve() == ROOT:
         raise PilotError('use an ordinary project snapshot, not the tooling clone')
     result, total = [], 0
@@ -153,27 +165,33 @@ def snapshot_files(root: Path) -> list[tuple[str, bytes]]:
             path = folder / name
             if path.is_symlink() or not path.is_file():
                 continue
-            raw = safe_read(root, value, memory=True)
+            raw, mode = _source_image(root, value, memory=True)
             total += len(raw)
             if total > MAX_TREE or len(result) >= 20000:
                 raise PilotError('snapshot exceeds pilot limits')
-            result.append((value, raw))
+            result.append((value, raw, mode))
     return result
 
 
+def snapshot_files(root: Path) -> list[tuple[str, bytes]]:
+    return [(name, raw) for name, raw, _ in _snapshot_image(root)]
+
+
 def snapshot_digest(root: Path) -> str:
-    return digest([(name, hashlib.sha256(raw).hexdigest()) for name, raw in snapshot_files(root)])
+    return digest([(name, hashlib.sha256(raw).hexdigest(), mode)
+                   for name, raw, mode in _snapshot_image(root)])
 
 
 def copy_snapshot(root: Path, destination: Path) -> str:
-    files = snapshot_files(root)
+    files = _snapshot_image(root)
     destination.mkdir(mode=0o700)
-    for name, raw in files:
+    for name, raw, mode in files:
         path = destination / name
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open('xb') as stream:
             stream.write(raw)
-    return digest([(name, hashlib.sha256(raw).hexdigest()) for name, raw in files])
+        path.chmod(mode)
+    return digest([(name, hashlib.sha256(raw).hexdigest(), mode) for name, raw, mode in files])
 
 
 def child_env() -> dict[str, str]:

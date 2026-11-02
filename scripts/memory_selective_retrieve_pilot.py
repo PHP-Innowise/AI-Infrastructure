@@ -15,9 +15,24 @@ import subprocess
 import sys
 import time
 
-DEFAULT_RULES = {'version': 1,
-    'historical': ['раньше', 'ранее', 'почему', 'прошлый', 'previous', 'why', 'remember'],
-    'decisions': ['отказались', 'решили', 'выбрали', 'решение', 'reject', 'decided', 'decision', 'chose']}
+DEFAULT_RULES = {
+    'version': 2,
+    'historical': ['раньше', 'ранее', 'прежде', 'в прошлом', 'до изменения',
+                   'previous', 'previously', 'earlier', 'former', 'formerly',
+                   'before', 'used to', 'old', 'as of'],
+    'decisions': ['отказались', 'решили', 'выбрали', 'приняли решение',
+                  'rejected', 'decided', 'chose', 'did we choose', 'did we reject'],
+    'inquiries': ['какой', 'какая', 'какое', 'какие', 'что', 'как', 'почему', 'зачем',
+                  'когда', 'найди', 'вспомни', 'what', 'which', 'how', 'why', 'when',
+                  'recover', 'recall', 'find', 'explain'],
+    'current': ['сейчас', 'теперь', 'текущий', 'актуальный', 'current', 'currently', 'today'],
+    'procedural': ['как выполнять', 'порядок действий', 'процедура', 'инструкция',
+                   'how to', 'workflow', 'procedure'],
+    'continuations': ['дальше', 'продолжай', 'продолжи', 'делай', 'сделай',
+                       'continue', 'go ahead'],
+}
+ROUTE_REASONS = {'historical-state', 'historical-decision', 'current-state',
+                 'procedural', 'continuation', 'ordinary'}
 MAX_PAYLOAD = 1024 * 1024
 
 
@@ -26,12 +41,15 @@ def canonical_json(value) -> bytes:
                       allow_nan=False).encode('utf-8')
 
 
-def choose_profile(query: str, rules: dict) -> str:
-    if (not isinstance(query, str) or not isinstance(rules, dict)
-            or set(rules) != {'version', 'historical', 'decisions'}
-            or type(rules['version']) is not int or rules['version'] != 1):
+def choose_route(query: str, rules: dict) -> tuple[str, str]:
+    if (not isinstance(query, str) or len(query) > 24000 or not isinstance(rules, dict)
+            or type(rules.get('version')) is not int or rules['version'] not in (1, 2)):
         raise ValueError('invalid routing rules')
-    for name in ('historical', 'decisions'):
+    groups = ({'historical', 'decisions'} if rules['version'] == 1 else
+              {'historical', 'decisions', 'inquiries', 'current', 'procedural', 'continuations'})
+    if set(rules) != groups | {'version'}:
+        raise ValueError('invalid routing rules')
+    for name in groups:
         values = rules[name]
         if (not isinstance(values, list) or not 1 <= len(values) <= 64
                 or any(not isinstance(v, str) or not v.strip() or len(v) > 80
@@ -40,7 +58,25 @@ def choose_profile(query: str, rules: dict) -> str:
     folded = ' ' + ' '.join(re.findall(r'\w+', query.casefold())) + ' '
     matches = lambda name: any(' ' + ' '.join(re.findall(r'\w+', value.casefold())) + ' ' in folded
                                for value in rules[name])
-    return 'full' if matches('historical') and matches('decisions') else 'recall'
+    if rules['version'] == 1:
+        historical = matches('historical') and matches('decisions')
+        return ('full', 'historical-decision') if historical else ('recall', 'ordinary')
+    if any(folded == ' ' + ' '.join(re.findall(r'\w+', value.casefold())) + ' '
+           for value in rules['continuations']):
+        return 'recall', 'continuation'
+    inquiry = '?' in query or any(folded.startswith(' ' + ' '.join(
+        re.findall(r'\w+', value.casefold())) + ' ') for value in rules['inquiries'])
+    if inquiry and (matches('historical') or matches('decisions')):
+        return 'full', 'historical-decision' if matches('decisions') else 'historical-state'
+    if matches('procedural'):
+        return 'recall', 'procedural'
+    if inquiry and matches('current'):
+        return 'recall', 'current-state'
+    return 'recall', 'ordinary'
+
+
+def choose_profile(query: str, rules: dict) -> str:
+    return choose_route(query, rules)[0]
 
 
 def append_audit(path: Path, record: dict) -> bool:
@@ -60,7 +96,7 @@ def append_audit(path: Path, record: dict) -> bool:
 
 def route_payload(raw: bytes, rules_path: Path, runtime_dir: Path) -> tuple[str, dict]:
     started = time.monotonic_ns()
-    record = {'schema': 'memory-selective-route-v1', 'profile': 'recall', 'reason': 'routing-unavailable',
+    record = {'schema': 'memory-selective-route-v2', 'profile': 'recall', 'reason': 'routing-unavailable',
               'rules_digest': None, 'router_digest': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'sanitizer_digest': None}
     try:
@@ -68,7 +104,7 @@ def route_payload(raw: bytes, rules_path: Path, runtime_dir: Path) -> tuple[str,
         data = json.loads(raw.decode('utf-8'))
         prompt = data.get('prompt')
         if not isinstance(prompt, str): raise ValueError('prompt unavailable')
-        if len(prompt) > 24000: prompt = prompt[:16000] + '\n' + prompt[-8000:]
+        if len(prompt) > 24000: prompt = prompt[:15999] + '\n' + prompt[-8000:]
         if rules_path.stat().st_size > 16384: raise ValueError('oversized rules')
         rules = json.loads(rules_path.read_text(encoding='utf-8'))
         sanitizer = runtime_dir / 'automatic_query.py'
@@ -79,9 +115,8 @@ def route_payload(raw: bytes, rules_path: Path, runtime_dir: Path) -> tuple[str,
         try: spec.loader.exec_module(module)
         finally: sys.dont_write_bytecode = old
         query = module.sanitize_automatic_query(prompt)
-        record['profile'] = choose_profile(query, rules)
+        record['profile'], record['reason'] = choose_route(query, rules)
         record['rules_digest'] = hashlib.sha256(canonical_json(rules)).hexdigest()
-        record['reason'] = 'historical-decision' if record['profile'] == 'full' else 'ordinary'
     except (OSError, ValueError, TypeError, AttributeError, ImportError, TimeoutError, RecursionError):
         pass
     record['routing_ns'] = time.monotonic_ns() - started
@@ -96,11 +131,18 @@ def parse_observations(raw: bytes, expected: dict) -> dict:
         keys = {'schema', 'profile', 'reason', 'rules_digest', 'router_digest', 'sanitizer_digest', 'routing_ns', 'hook_exit'}
         if not records or len(records) > 1000: return unknown
         for row in records:
-            if (not isinstance(row, dict) or set(row) != keys or row['schema'] != 'memory-selective-route-v1'
+            if (not isinstance(row, dict) or set(row) != keys
+                    or row['schema'] not in ('memory-selective-route-v1', 'memory-selective-route-v2')
                     or row['profile'] not in ('recall', 'full')
-                    or row['reason'] not in ('routing-unavailable', 'historical-decision', 'ordinary')
+                    or row['reason'] not in ROUTE_REASONS | {'routing-unavailable'}
                     or type(row['routing_ns']) is not int or row['routing_ns'] < 0
                     or type(row['hook_exit']) is not int): return unknown
+            if row['schema'] == 'memory-selective-route-v1' and row['reason'] not in (
+                    'routing-unavailable', 'historical-decision', 'ordinary'):
+                return unknown
+            if ((row['reason'].startswith('historical-') and row['profile'] != 'full')
+                    or (not row['reason'].startswith('historical-') and row['profile'] != 'recall')):
+                return unknown
             for key, value in expected.items():
                 if row.get(key) != value and not (row['reason'] == 'routing-unavailable'
                                                   and key != 'router_digest' and row.get(key) is None):
