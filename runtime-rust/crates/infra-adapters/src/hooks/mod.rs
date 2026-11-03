@@ -23,6 +23,14 @@ pub const ROLES: &[&str] = &[
     "context-continuity",
     "local-context",
 ];
+/// Roles that only read or record memory. Their own failure never refuses a
+/// prompt, a stop or a session start: hosts read exit 2 there as a refusal.
+pub const MEMORY_ROLES: &[&str] = &[
+    "working-memory-read",
+    "working-memory-write",
+    "context-continuity",
+    "local-context",
+];
 #[derive(Clone, Debug)]
 pub struct Context {
     pub roots: Roots,
@@ -33,6 +41,9 @@ pub struct Context {
     pub inferred: bool,
     pub entered: bool,
     pub other_worktree: bool,
+    /// The host's session directory when it lies outside the project these
+    /// hooks are bound to and outside that project's repository.
+    pub outside: Option<PathBuf>,
     pub budget: Duration,
 }
 pub fn first<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -143,6 +154,74 @@ pub fn task(project: &Path) -> Result<Option<String>> {
     }
     Ok(None)
 }
+/// The session directory the host names when every such directory lies
+/// outside the bound roots and outside the project's repository. Claude Code's
+/// `CLAUDE_PROJECT_DIR` stays where the session started when its shell changes
+/// directory, so it is preferred to `cwd`; Cursor names `workspace_roots`.
+/// Installed wiring carries the absolute paths of the checkout it was
+/// installed in, so a copy or a second clone of the project would otherwise
+/// read and record the original checkout's memory.
+fn outside_session(host: &str, payload: &Value, roots: &Roots) -> Option<PathBuf> {
+    let started = std::env::var("CLAUDE_PROJECT_DIR")
+        .ok()
+        .filter(|path| host == "claude" && !path.is_empty());
+    let named = match (started, payload["cwd"].as_str()) {
+        (Some(started), _) => vec![started],
+        (None, Some(cwd)) => vec![cwd.to_owned()],
+        (None, None) => payload["workspace_roots"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let directories = named
+        .iter()
+        .filter_map(|path| valid_path(Some(path), 4096))
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    let mut repository = None;
+    for directory in &directories {
+        if roots.contains(directory).unwrap_or(true) {
+            return None;
+        }
+        let ours = repository.get_or_insert_with(|| {
+            GitFrame::discover(&roots.project)
+                .ok()
+                .flatten()
+                .and_then(|frame| frame.common_dir().ok())
+        });
+        if ours.is_some()
+            && GitFrame::discover(directory)
+                .ok()
+                .flatten()
+                .and_then(|frame| frame.common_dir().ok())
+                == *ours
+        {
+            return None;
+        }
+    }
+    directories.into_iter().next()
+}
+/// What a hook prints when it does nothing for this turn.
+pub fn passed(host: &str, role: &str) -> Output {
+    if host == "cursor" && role == "working-memory-read" {
+        Output::text("{\"continue\": true}\n")
+    } else {
+        Output::default()
+    }
+}
+fn outside_notice(session: &Path, project: &Path) -> Output {
+    Output::text(format!(
+        "Memory not consulted: this session runs in {}, outside the project these hooks are bound to ({}). Installed hook wiring names the checkout it was installed in; install the accelerator in this checkout to give it its own memory.\nWorking memory was NOT consulted this turn. Read the canonical sources directly.\n",
+        session.display(),
+        project.display()
+    ))
+}
 impl Context {
     pub fn new(root: &Path, host: &str, raw: &[u8]) -> Result<Self> {
         if !["claude", "codex", "cursor"].contains(&host) {
@@ -161,9 +240,12 @@ impl Context {
             .unwrap_or_else(|| json!({}));
         let mut entered = false;
         let mut other_worktree = false;
+        // Git metadata of the session directory that cannot be read only means
+        // that directory is no linked worktree of this project; the hooks of
+        // this project still run.
         if let Some(start) = valid_path(payload["cwd"].as_str(), 4096).filter(|path| path.is_dir())
             && let (Some(theirs), Some(mine)) = (
-                GitFrame::discover(&start)?,
+                GitFrame::discover(&start).ok().flatten(),
                 GitFrame::discover(&roots.project)?,
             )
             && theirs.top != mine.top
@@ -193,6 +275,11 @@ impl Context {
                 }
             }
         }
+        let outside = if other_worktree || entered {
+            None
+        } else {
+            outside_session(host, &payload, &roots)
+        };
         let task = task(&roots.project)?;
         let inferred = std::env::var("CONTEXT_TASK_ID")
             .ok()
@@ -211,6 +298,7 @@ impl Context {
             inferred,
             entered,
             other_worktree,
+            outside,
             budget: Duration::from_secs_f64(seconds),
         })
     }
@@ -396,26 +484,17 @@ pub fn execute(root: &Path, host: &str, role: &str, raw: &[u8]) -> Result<Output
     if !ROLES.contains(&role) {
         return Err(RuntimeError::invalid("Unknown hook role"));
     }
-    let pass = || {
-        if host == "cursor" && role == "working-memory-read" {
-            Output::text("{\"continue\": true}\n")
-        } else {
-            Output::default()
-        }
-    };
+    let pass = || passed(host, role);
     if std::env::var("CONTEXT_MEMORY_RECOVERY").as_deref() == Ok("1")
-        && [
-            "working-memory-read",
-            "working-memory-write",
-            "context-continuity",
-            "local-context",
-        ]
-        .contains(&role)
+        && MEMORY_ROLES.contains(&role)
     {
         return Ok(pass());
     }
     let context = match Context::new(root, host, raw) {
         Ok(context) => context,
+        // The shell guard never lets a command through because its own
+        // context failed: it then checks the command from the bound root.
+        Err(_) if role == "bash-validator" => return guards::bash_without_context(root, raw),
         Err(_) => return Ok(pass()),
     };
     if host == "claude"
@@ -430,8 +509,21 @@ pub fn execute(root: &Path, host: &str, role: &str, raw: &[u8]) -> Result<Output
     {
         return Ok(pass());
     }
-    match role {
-        "bash-validator" => guards::bash(&context),
+    if let Some(session) = &context.outside
+        && MEMORY_ROLES.contains(&role)
+    {
+        return Ok(
+            if host != "cursor" && ["working-memory-read", "local-context"].contains(&role) {
+                outside_notice(session, &context.roots.project)
+            } else {
+                pass()
+            },
+        );
+    }
+    let result = match role {
+        "bash-validator" => {
+            guards::bash(&context).or_else(|_| guards::bash_without_context(root, raw))
+        }
         "file-naming-validator" => guards::file_naming(&context),
         "loop-detection" => guards::edit_loop(&context),
         "subagent-gate" => guards::subagent_gate(&context),
@@ -439,23 +531,28 @@ pub fn execute(root: &Path, host: &str, role: &str, raw: &[u8]) -> Result<Output
         "working-memory-read" => memory::read(&context),
         "working-memory-write" => memory::write(&context),
         "local-context" => banner::render(&context),
-        "context-continuity" => {
-            if context.other_worktree {
-                return Ok(pass());
-            }
-            let value = infra_core::chat_continuity::execute(
-                &infra_core::RuntimeContext::new(
-                    context.roots.clone(),
-                    std::env::var("PROJECT_BRAIN_OWNER").unwrap_or_else(|_| "local".into()),
-                    infra_core::RuntimeConfig::load(&context.roots)?.mode(None)?,
-                )?,
-                &context.host,
-                "hook",
-                &context.raw,
-                &json!({}),
-            )?;
-            Output::envelope(value)
-        }
+        "context-continuity" => continuity(&context),
         _ => Err(RuntimeError::invalid("Unknown hook role")),
+    };
+    if MEMORY_ROLES.contains(&role) {
+        return Ok(result.unwrap_or_else(|_| pass()));
     }
+    result
+}
+fn continuity(context: &Context) -> Result<Output> {
+    if context.other_worktree {
+        return Ok(Output::default());
+    }
+    let value = infra_core::chat_continuity::execute(
+        &infra_core::RuntimeContext::new(
+            context.roots.clone(),
+            std::env::var("PROJECT_BRAIN_OWNER").unwrap_or_else(|_| "local".into()),
+            infra_core::RuntimeConfig::load(&context.roots)?.mode(None)?,
+        )?,
+        &context.host,
+        "hook",
+        &context.raw,
+        &json!({}),
+    )?;
+    Output::envelope(value)
 }

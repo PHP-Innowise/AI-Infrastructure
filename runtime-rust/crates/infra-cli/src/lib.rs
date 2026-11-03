@@ -55,6 +55,21 @@ fn input(limit: usize, needed: bool) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+/// Hook input within the command limit. A memory role given more passes the
+/// turn (`None`): a refusal there would block the person's prompt or stop.
+fn hook_input(host: &str, role: &str) -> Result<Option<Vec<u8>>> {
+    match input(4 * 1024 * 1024, !std::io::stdin().is_terminal()) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error)
+            if error.kind == infra_core::ErrorKind::InvalidInput
+                && hooks::MEMORY_ROLES.contains(&role)
+                && ["claude", "codex", "cursor"].contains(&host) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
 fn inherited(code: i32) -> Output {
     Output {
         code,
@@ -422,11 +437,15 @@ pub fn run(raw: &[String]) -> Result<Output> {
             }
             let (host, role) = (&rest[0], &rest[1]);
             let request = parse(&rest[2..], "hook")?.value;
-            let root = request["root"]
-                .as_str()
-                .map(PathBuf::from)
-                .unwrap_or(memory::tooling(&request)?);
-            let bytes = input(4 * 1024 * 1024, !std::io::stdin().is_terminal())?;
+            // An explicit root is used as given: resolving the fallback eagerly
+            // failed for a missing root and let the shell guard's command run.
+            let root = match request["root"].as_str() {
+                Some(root) => PathBuf::from(root),
+                None => memory::tooling(&request)?,
+            };
+            let Some(bytes) = hook_input(host, role)? else {
+                return Ok(hooks::passed(host, role));
+            };
             hooks::execute(&root, host, role, &bytes)
         }
         "hook-find" => {
@@ -440,7 +459,9 @@ pub fn run(raw: &[String]) -> Result<Output> {
                 .ok_or_else(|| {
                     RuntimeError::unavailable("No host hook wiring above the working directory")
                 })?;
-            let bytes = input(4 * 1024 * 1024, !std::io::stdin().is_terminal())?;
+            let Some(bytes) = hook_input(&rest[0], &rest[1])? else {
+                return Ok(hooks::passed(&rest[0], &rest[1]));
+            };
             hooks::execute(&root, &rest[0], &rest[1], &bytes)
         }
         "mcp" => {
@@ -483,10 +504,10 @@ pub fn run(raw: &[String]) -> Result<Output> {
         "dispatch-install" => {
             let (host, args) = operation(rest, None)?;
             let request = parse(args, "dispatch-install")?.value;
-            let root = request["root"]
-                .as_str()
-                .map(PathBuf::from)
-                .unwrap_or(memory::tooling(&request)?);
+            let root = match request["root"].as_str() {
+                Some(root) => PathBuf::from(root),
+                None => memory::tooling(&request)?,
+            };
             Output::json(&dispatch::install(&root, host, None)?)
         }
         "repo" => {

@@ -1,9 +1,12 @@
 use super::{Context, first, project_root, strings};
 use crate::TailTrim;
 use crate::{counters, output::Output, shell};
-use infra_core::{Result, RuntimeConfig, RuntimeError};
+use infra_core::{Result, Roots, RuntimeConfig, RuntimeError};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 fn allowed_tool(payload: &Value, names: &[&str]) -> bool {
     let tools = strings(payload, &["tool_name"]);
     tools.is_empty()
@@ -19,36 +22,73 @@ fn allowed_tool(payload: &Value, names: &[&str]) -> bool {
 fn context(event: &str, message: &str) -> Result<Output> {
     Output::json(&json!({"hookSpecificOutput":{"hookEventName":event,"additionalContext":message}}))
 }
+/// The framework the runtime configuration names. An unreadable
+/// configuration names none, and the generic rules then apply.
+fn framework(roots: &Roots) -> Option<String> {
+    RuntimeConfig::load(roots)
+        .ok()
+        .map(|config| config.value["framework"].as_str().unwrap_or("core").into())
+}
+const INVALID_POLICY: &str = "BLOCKED: native hook policy data or custody is invalid. Restore the approved generated policy before running shell commands.";
+/// The shell rules for a root; `None` when its generated policy is invalid.
+fn shell_policy(tooling: &Path, framework: Option<&str>) -> Option<shell::Policy> {
+    match crate::hook_policy::load(tooling, framework) {
+        Ok(Some(policy)) => Some(shell::Policy::from_hook_policy(policy)),
+        Ok(None) => Some(shell::Policy::for_framework(framework.unwrap_or("core"))),
+        Err(_) => None,
+    }
+}
+fn refusal(command: &str, policy: &shell::Policy) -> Option<Output> {
+    let category = match shell::validate(command, policy) {
+        Ok(category) => category,
+        Err(error) => Some(error.to_string()),
+    };
+    category.map(|category| {
+        Output::error(
+            2,
+            format!(
+                "BLOCKED: Command refused (rule category: {category}).\n   This operation is blocked. See AGENTS.md."
+            ),
+        )
+    })
+}
+/// Checks the command when the hook context itself cannot be built (Git
+/// metadata, a state directory or the root that cannot be read). It uses the
+/// bound root's policy when that root still exists and the generic rules
+/// otherwise; the repetition counters are skipped.
+pub fn bash_without_context(root: &Path, raw: &[u8]) -> Result<Output> {
+    let payload = serde_json::from_slice::<Value>(raw)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let command = strings(&payload, &["command", "cmd"]).join("\n");
+    if command.is_empty() {
+        return Ok(Output::default());
+    }
+    let policy = if root.is_dir() {
+        let framework = Roots::installed(root)
+            .ok()
+            .and_then(|roots| framework(&roots));
+        let Some(policy) = shell_policy(root, framework.as_deref()) else {
+            return Ok(Output::error(2, INVALID_POLICY));
+        };
+        policy
+    } else {
+        shell::Policy::for_framework("core")
+    };
+    Ok(refusal(&command, &policy).unwrap_or_default())
+}
 pub fn bash(scope: &Context) -> Result<Output> {
     let command = strings(&scope.payload, &["command", "cmd"]).join("\n");
     if command.is_empty() {
         return Ok(Output::default());
     }
-    let framework = RuntimeConfig::load(&scope.roots)?.value["framework"]
-        .as_str()
-        .unwrap_or("core")
-        .to_string();
-    let policy = match crate::hook_policy::load(&scope.roots.tooling, Some(&framework)) {
-        Ok(Some(policy)) => shell::Policy::from_hook_policy(policy),
-        Ok(None) => shell::Policy::for_framework(&framework),
-        Err(_) => {
-            return Ok(Output::error(
-                2,
-                "BLOCKED: native hook policy data or custody is invalid. Restore the approved generated policy before running shell commands.",
-            ));
-        }
+    let framework = framework(&scope.roots);
+    let Some(policy) = shell_policy(&scope.roots.tooling, framework.as_deref()) else {
+        return Ok(Output::error(2, INVALID_POLICY));
     };
-    let category = match shell::validate(&command, &policy) {
-        Ok(category) => category,
-        Err(error) => Some(error.to_string()),
-    };
-    if let Some(category) = category {
-        return Ok(Output::error(
-            2,
-            format!(
-                "BLOCKED: Command refused (rule category: {category}).\n   This operation is blocked. See AGENTS.md."
-            ),
-        ));
+    if let Some(blocked) = refusal(&command, &policy) {
+        return Ok(blocked);
     }
     if shell::polling(&command) {
         return Ok(Output::default());

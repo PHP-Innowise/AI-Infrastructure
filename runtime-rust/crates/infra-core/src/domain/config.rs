@@ -19,7 +19,13 @@ impl RuntimeConfig {
         let path = roots.brain_root().join("config/runtime.json");
         match std::fs::symlink_metadata(&path) {
             Ok(_) => {
-                let incoming: Value = super::json::parse(&fs::read_text(&path)?)?;
+                // Name the file: a parser message alone ("JSON key must be
+                // text" for a merge-conflict marker) does not say what to fix.
+                let incoming: Value =
+                    super::json::parse(&fs::read_text(&path)?).map_err(|error| RuntimeError {
+                        message: format!("{}: invalid JSON ({})", path.display(), error.message),
+                        ..error
+                    })?;
                 let object = incoming.as_object().ok_or_else(|| {
                     RuntimeError::invalid("Project Brain configuration must be an object")
                 })?;

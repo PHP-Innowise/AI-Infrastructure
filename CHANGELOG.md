@@ -30,6 +30,23 @@ edition's own files remain in that edition's changelog.
   the native checks had never run in CI. A step now sets `CARGO_TARGET_DIR`
   from `RUNNER_TEMP` (forward slashes, for Git Bash on Windows), and an
   emitter test admits only the contexts job-level `env` provides.
+- The shell guard no longer lets a command through when its own context
+  fails. A `.git` file naming a missing repository in the project or in the
+  session directory, an unreadable state directory, a project root that no
+  longer exists or an unreadable `runtime.json` all made `rm -rf /` pass with
+  exit 0 or 1. The guard now checks the command from the bound root alone
+  (its generated policy, else the generic rules), and the CLI resolves the
+  fallback root only when `--root` is absent.
+- A memory hook's own failure passes the turn. A conflicted or invalid
+  `project-brain/config/runtime.json` made `context-continuity` exit 2, which
+  refused every prompt and every stop, also with `stop_hook_active`; hook input
+  over 4 MiB did the same. The configuration error now names the file.
+- Memory hooks skip a session outside the project their wiring is bound to
+  (for Claude Code, the directory the session started in; otherwise `cwd` or
+  Cursor's `workspace_roots`). Installed wiring names the absolute checkout it
+  was installed in, so a second clone or a copy on the same machine read and
+  recorded the original checkout's memory. They now say so instead and record
+  nothing; the shell guard still applies.
 
 - Move executable project logic into the Rust workspace and one native
   `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation
