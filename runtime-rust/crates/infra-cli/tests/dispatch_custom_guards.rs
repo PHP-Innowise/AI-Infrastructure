@@ -10,9 +10,20 @@ use std::{
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
+    sync::{Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 const ENGINE: &str = "memory-bank/bin/infra-engine";
+/// Each case writes executables and then starts them: an engine copy and
+/// guard scripts. A child another case forks meanwhile inherits the open
+/// write descriptor until it execs, and starting the file then fails with
+/// ETXTBSY. One case at a time also keeps their engine copies (two of
+/// 130 MB in a debug build) from filling a shared temporary filesystem. A
+/// case holds the lock for its whole run: some keep several fixtures.
+static SERIAL: Mutex<()> = Mutex::new(());
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
 const GUARD_OUT: &[u8] = b"{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"private fixture guard\"}}\n";
 const GUARD_ERR: &[u8] = b"fixture custom guard diagnostic\n";
 fn write(path: &Path, bytes: impl AsRef<[u8]>) {
@@ -353,6 +364,7 @@ fn authority(root: &Path, host: &str, name: &str) -> BTreeMap<PathBuf, Vec<u8>> 
 
 #[test]
 fn global_update_preserves_another_legacy_claude_custom_guard_below_its_root() {
+    let _serial = serial();
     let f = Fixture::new();
     let legacy = f.legacy("claude", "bash-validator.sh");
     let before = authority(&legacy, "claude", "bash-validator.sh");
@@ -366,6 +378,7 @@ fn global_update_preserves_another_legacy_claude_custom_guard_below_its_root() {
 }
 #[test]
 fn global_update_preserves_a_codex_custom_guard_and_its_served_worktree_scope() {
+    let _serial = serial();
     let f = Fixture::new();
     let legacy = f.legacy("codex", "bash-validator.sh");
     f.git(
@@ -415,6 +428,7 @@ fn global_update_preserves_a_codex_custom_guard_and_its_served_worktree_scope() 
 }
 #[test]
 fn exact_native_declaration_does_not_execute_a_decoy_legacy_role_script() {
+    let _serial = serial();
     let f = Fixture::new();
     let native = f.native("claude");
     f.guard(&native, "claude", "bash-validator.sh");
@@ -432,6 +446,7 @@ fn exact_native_declaration_does_not_execute_a_decoy_legacy_role_script() {
 }
 #[test]
 fn registration_and_dispatch_preserve_a_safe_custom_named_project_guard() {
+    let _serial = serial();
     let mut observed = Vec::new();
     for name in ["team-policy.sh", "policy-1.sh"] {
         let f = Fixture::new();
@@ -485,6 +500,7 @@ fn registration_and_dispatch_preserve_a_safe_custom_named_project_guard() {
 
 #[test]
 fn mixed_native_and_legacy_declarations_for_the_same_hook_require_explicit_review() {
+    let _serial = serial();
     let f = Fixture::new();
     let native = f.native("claude");
     f.guard(&native, "claude", "bash-validator.sh");

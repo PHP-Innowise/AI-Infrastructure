@@ -133,6 +133,13 @@ edition's own files remain in that edition's changelog.
   it was refused ("Working branch changed before delivery") exactly while a
   conflict was being resolved. The hooks and the delivery check now read one
   definition, `GitFrame::working_identity`.
+- Rust contract tests now pin what the retired Python suites pinned for
+  `install --sync` (new release, project edits, tracked files, Codex trust,
+  downgrades, links, ignore entries, the edition README), the guard hooks on
+  all three hosts, and one task's memory across sessions, a commit, branches
+  and a rebase for Claude Code, Codex and Cursor. The dispatcher guard tests
+  run one at a time: a case that forked while another wrote an engine copy
+  made starting it fail with "Text file busy".
 
 - Move executable project logic into the Rust workspace and one native
   `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation
