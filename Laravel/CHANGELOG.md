@@ -11,6 +11,15 @@ it at the top of every session.
 
 ## Unreleased
 
+- `.codex/hooks/README.md` describes the Codex hook command the installer now
+  writes: it starts the checkout's `memory-bank/bin/infra-engine` directly,
+  found from Git's top level, and runs the role's `.codex/hooks/<role>.sh`
+  only without that engine - the launcher uses the main checkout's engine in a
+  linked worktree and refuses guarded commands when none is installed. The
+  README still spelled out the Python-era launcher that walked up to the
+  nearest `.codex/hooks.json`. Details in the root
+  [`CHANGELOG.md`](../CHANGELOG.md).
+
 - Route this edition's policy, memory/checkpoint skills, host hooks, MCP and
   skill-creator helpers through the native Rust `infra-engine` runtime
   (`infra-engine.exe` on Windows). Replace retired Python entry points in tool

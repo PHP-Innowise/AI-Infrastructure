@@ -38,13 +38,17 @@ No `matcher` is set on any group: each script self-filters on its input before d
 
 ## Wiring
 
-Every command in `.codex/hooks.json` is the same root-finding launcher; only the trailing script name changes:
+The installer writes every command in `.codex/hooks.json` in one form; only the role changes, and `<prefix>` is the project's path below Git's top level with a trailing slash (`apps/shop/`), empty when the project is the top:
 
 ```sh
-sh -c 'd=$(pwd); until [ -f "$d/.codex/hooks.json" ]; do [ -n "$d" ] || { echo "$1: no .codex/hooks.json at or above the working directory" >&2; exit 127; }; d=${d%/*}; done; exec "$d/.codex/hooks/$1"' sh bash-validator.sh
+sh -c 'r="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/<prefix>"; e="$r"memory-bank/bin/infra-engine; [ -x "$e" ] && exec "$e" hook codex bash-validator --root "$r"; exec "$r".codex/hooks/bash-validator.sh'
 ```
 
-Codex runs hooks in the session's working directory through the user's login shell (`$SHELL -lc`) and exports no project-root variable, so a bare `.codex/hooks/<script>.sh` exits 127 whenever Codex starts in a subdirectory - a non-blocking failure that silently disables the guard. The launcher walks from that directory towards `/` to the nearest directory holding `.codex/hooks.json` - the project that declared the hook - and runs only that project's `.codex/hooks/<script>.sh`, so it works from any subdirectory, without Git, and when the project sits inside a larger repository. It never looks past that project: a missing script exits 127 with the path it expected, instead of running a same-named script from an ancestor directory such as `~/.codex/hooks/` (Codex's own user-hook directory). Handing the walk to `sh` keeps it independent of the login shell (bash, zsh, fish). Codex trusts each hook by the hash of its definition: after an update that changes these commands, the changed hooks stay skipped until you review and trust them again in `/hooks`.
+Codex runs hooks in the session's working directory through the user's login shell (`$SHELL -lc`) and exports no project-root variable, so a bare `.codex/hooks/<role>.sh` exits 127 whenever Codex starts in a subdirectory - a non-blocking failure that silently disables the guard. The command finds the project from Git's top level instead, so it works from any subdirectory and when the project sits inside a larger repository; outside Git the session's directory stands in for the top level, so there Codex must start in the project root. Handing the command to `sh` keeps it independent of the login shell (bash, zsh, fish).
+
+The checkout's engine, `memory-bank/bin/infra-engine`, starts directly, and the role's launcher, `.codex/hooks/<role>.sh`, runs only when that engine is absent. A linked worktree has the committed hooks but no engine of its own, since Git ignores it: there the launcher runs the main checkout's engine. With no engine installed, `bash-validator.sh` refuses every command with an install hint, `local-context.sh` reports at session start that the hooks and memory are off, and the other hooks pass the turn. Native Windows installations bind the absolute engine and root of the machine that installed them instead.
+
+Codex trusts each hook by the hash of its definition: after an update that changes these commands, the changed hooks stay skipped until you review and trust them again in `/hooks`. A sync therefore leaves an installed `.codex/hooks.json` as it is unless given `--rewire-codex` (with `--update-tracked` once the file is committed); until then the commands of an earlier installation, which run the launcher alone, keep working.
 
 `working-memory-read.sh` and `working-memory-write.sh` are wired here to
 `UserPromptSubmit` and `Stop`, the same events they use under Claude Code.
@@ -70,8 +74,8 @@ never appears, check the payload keys before assuming the wiring is wrong.
 
 `context-continuity.sh` is wired on `SessionStart` (with
 `additionalContextLimit: 6000`), `UserPromptSubmit` and `Stop` through the same
-root-finding launcher as the other hooks; the payload's `hook_event_name`
-selects the action. A prompt (`prompt`) or a final answer
+command as the other hooks; the payload's `hook_event_name` selects the
+action. A prompt (`prompt`) or a final answer
 (`last_assistant_message`, or the visible transcript the hook names) is
 appended to a per-chat snapshot under the ignored `.context-handoff/` - in an
 attached session, under the launcher's state directory instead. At
