@@ -123,6 +123,9 @@ edition's own files remain in that edition's changelog.
   install wrote where the project had none, nor puts back a removed copy. The
   edition README follows the release only where an install placed it beside
   the project's own, and the project's `README.md` is never written.
+- The edit-loop guard counts the `path` a Cursor or Codex edit names, as the
+  Python hooks did, and Codex's repeat and edit-loop messages name the
+  `systematic-debugger` skill instead of a `/debugger` command Codex lacks.
 
 - Move executable project logic into the Rust workspace and one native
   `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation

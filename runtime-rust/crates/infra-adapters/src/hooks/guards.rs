@@ -29,6 +29,15 @@ fn framework(roots: &Roots) -> Option<String> {
         .ok()
         .map(|config| config.value["framework"].as_str().unwrap_or("core").into())
 }
+/// Where a guard sends a repeated failure. Codex has no slash commands, so
+/// its messages name the skill instead.
+fn debugger(host: &str) -> &'static str {
+    if host == "codex" {
+        "systematic-debugger"
+    } else {
+        "/debugger"
+    }
+}
 const INVALID_POLICY: &str = "BLOCKED: native hook policy data or custody is invalid. Restore the approved generated policy before running shell commands.";
 /// The shell rules for a root; `None` when its generated policy is invalid.
 fn shell_policy(tooling: &Path, framework: Option<&str>) -> Option<shell::Policy> {
@@ -103,17 +112,18 @@ pub fn bash(scope: &Context) -> Result<Output> {
         Ok(count) => count,
         Err(_) => return Ok(Output::default()),
     };
+    let debugger = debugger(&scope.host);
     if count >= 12 {
         return Ok(Output::error(
             2,
             format!(
-                "BLOCKED: this exact command has run {count} times this session.\n   Repeating it again is not a new attempt. Either change the\n   command (narrow it, add the failing case, read the output\n   differently) or escalate to /debugger for a root cause."
+                "BLOCKED: this exact command has run {count} times this session.\n   Repeating it again is not a new attempt. Either change the\n   command (narrow it, add the failing case, read the output\n   differently) or escalate to {debugger} for a root cause."
             ),
         ));
     }
     if count >= 6 {
         let message = format!(
-            "WARNING: this exact command has run {count} times this session. If it keeps failing, /debugger instead of another rerun."
+            "WARNING: this exact command has run {count} times this session. If it keeps failing, {debugger} instead of another rerun."
         );
         return if scope.host == "cursor" {
             Ok(Output::error(1, message))
@@ -256,8 +266,17 @@ pub fn edit_loop(scope: &Context) -> Result<Output> {
         return Ok(Output::default());
     }
     let mut paths = BTreeSet::new();
-    if let Some(path) =
-        first(&scope.payload, "file_path").or_else(|| first(&scope.payload, "notebook_path"))
+    // Cursor and Codex payloads may name the edited file `path`; Claude
+    // Code's NotebookEdit names it `notebook_path`.
+    if let Some(path) = first(&scope.payload, "file_path")
+        .or_else(|| {
+            if scope.host == "claude" {
+                None
+            } else {
+                first(&scope.payload, "path")
+            }
+        })
+        .or_else(|| first(&scope.payload, "notebook_path"))
     {
         paths.insert(path.into());
     } else {
@@ -266,6 +285,7 @@ pub fn edit_loop(scope: &Context) -> Result<Output> {
     let mut warnings = vec![];
     let mut blocked = vec![];
     let root = project_root(&scope.roots.project);
+    let debugger = debugger(&scope.host);
     for path in paths {
         let count = match counters::advance(&root, &scope.payload, "edit", &path, false) {
             Ok(count) => count,
@@ -273,9 +293,9 @@ pub fn edit_loop(scope: &Context) -> Result<Output> {
         };
         let shown = path.replace(['\\', '"'], "");
         if count >= 10 {
-            blocked.push(format!("BLOCKED: File '{shown}' edited {count} times this session.\n   This looks like a repeated-edit loop. Consider:\n   - /debugger to investigate the root cause\n   - Reassessing your approach"));
+            blocked.push(format!("BLOCKED: File '{shown}' edited {count} times this session.\n   This looks like a repeated-edit loop. Consider:\n   - {debugger} to investigate the root cause\n   - Reassessing your approach"));
         } else if count >= 7 {
-            warnings.push(format!("WARNING: File '{shown}' edited {count} times this session. If you're stuck in a loop, consider using /debugger."));
+            warnings.push(format!("WARNING: File '{shown}' edited {count} times this session. If you're stuck in a loop, consider using {debugger}."));
         }
     }
     if !blocked.is_empty() {
