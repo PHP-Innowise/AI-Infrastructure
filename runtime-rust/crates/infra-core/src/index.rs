@@ -104,6 +104,16 @@ fn stamp(path: &Path) -> Result<SourceStamp> {
     })
 }
 fn walk_markdown(directory: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
+    let mut found = Vec::new();
+    walk_markdown_metadata(directory, &mut found)?;
+    output.extend(found.into_iter().map(|(path, _)| path));
+    Ok(())
+}
+/// `walk_markdown` with the metadata each file was admitted by.
+fn walk_markdown_metadata(
+    directory: &Path,
+    output: &mut Vec<(PathBuf, std::fs::Metadata)>,
+) -> Result<()> {
     if !fs::admit_directory(directory)? {
         return Ok(());
     }
@@ -116,10 +126,10 @@ fn walk_markdown(directory: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
             continue;
         }
         if metadata.is_dir() {
-            walk_markdown(&path, output)?;
+            walk_markdown_metadata(&path, output)?;
         } else if metadata.is_file() && path.extension().is_some_and(|extension| extension == "md")
         {
-            output.push(path);
+            output.push((path, metadata));
         }
     }
     Ok(())
@@ -911,7 +921,13 @@ pub fn refresh_index(
             .unwrap_or(".agents"),
     );
     let canonical = effective.as_str();
-    let (parity_drift, skill_fingerprint) = skill_parity(&context.roots, canonical)?;
+    let (parity_drift, skill_fingerprint) = reused_skill_parity(
+        store,
+        &stored,
+        &context.roots,
+        canonical,
+        std::time::SystemTime::now(),
+    )?;
     let reusable = if incremental
         && stored.get("config-fingerprint") == Some(&config_fingerprint)
         && stored.get("secret-policy-fingerprint") == Some(&policy_fingerprint)
@@ -1030,20 +1046,68 @@ pub fn effective_canonical_edition(repository: &Path, configured: &str) -> Strin
     }
     configured.into()
 }
+/// Index state that keeps the last skill parity beside the image of the
+/// copies it was computed from.
+const SKILL_PARITY_IMAGE: &str = "skill-parity-image";
+/// File timestamps can be as coarse as two seconds (FAT), so an edit made just
+/// after an image could repeat them: only older copies make an image reusable.
+const SKILL_COPIES_SETTLED: std::time::Duration = std::time::Duration::from_secs(3);
 pub fn skill_parity(roots: &crate::Roots, canonical: &str) -> Result<(Vec<Value>, String)> {
-    let effective = effective_canonical_edition(&roots.tooling, canonical);
-    let canonical = effective.as_str();
-    let mut logical = BTreeMap::<String, BTreeMap<String, Vec<u8>>>::new();
+    skill_copies(roots, canonical)?.parity()
+}
+/// `skill_parity` without reading a copy while every copy keeps the identity,
+/// size and timestamps it had when the kept parity was computed: reading and
+/// fingerprinting all of them otherwise costs most of a prompt's refresh.
+fn reused_skill_parity(
+    store: &mut Store,
+    stored: &BTreeMap<String, String>,
+    roots: &crate::Roots,
+    canonical: &str,
+    now: std::time::SystemTime,
+) -> Result<(Vec<Value>, String)> {
+    let copies = skill_copies(roots, canonical)?;
+    let image = now
+        .checked_sub(SKILL_COPIES_SETTLED)
+        .and_then(|settled| copies.image(settled));
+    if let Some(image) = &image
+        && let Some(kept) = stored
+            .get(SKILL_PARITY_IMAGE)
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        && kept["image"] == image.as_str()
+        && let (Some(drift), Some(fingerprint)) =
+            (kept["drift"].as_array(), kept["fingerprint"].as_str())
+    {
+        return Ok((drift.clone(), fingerprint.into()));
+    }
+    let (drift, fingerprint) = copies.parity()?;
+    if let Some(image) = image {
+        // A parity that cannot be kept is computed again by the next refresh.
+        let _ = store.put_state(&BTreeMap::from([(
+            SKILL_PARITY_IMAGE.to_string(),
+            json!({"image":image,"drift":drift,"fingerprint":fingerprint}).to_string(),
+        )]));
+    }
+    Ok((drift, fingerprint))
+}
+/// The mirrored skill copies, keyed by logical path, found without reading them.
+struct SkillCopies {
+    canonical: String,
+    editions: BTreeSet<String>,
+    copies: Vec<(String, &'static str, PathBuf, std::fs::Metadata)>,
+}
+fn skill_copies(roots: &crate::Roots, canonical: &str) -> Result<SkillCopies> {
+    let canonical = effective_canonical_edition(&roots.tooling, canonical);
     let mut editions = BTreeSet::new();
+    let mut copies = Vec::new();
     for edition in [".agents", ".claude", ".cursor", ".codex"] {
         let directory = roots.tooling.join(edition).join("skills");
         if !fs::admit_directory(&directory)? {
             continue;
         }
         editions.insert(edition.to_string());
-        let mut paths = Vec::new();
-        walk_markdown(&directory, &mut paths)?;
-        for path in paths {
+        let mut found = Vec::new();
+        walk_markdown_metadata(&directory, &mut found)?;
+        for (path, metadata) in found {
             let relative = path
                 .strip_prefix(&directory)
                 .map_err(|_| RuntimeError::policy("Skill path escapes root"))?;
@@ -1054,43 +1118,122 @@ pub fn skill_parity(roots: &crate::Roots, canonical: &str) -> Result<(Vec<Value>
             if key == "SKILL FLOW.md" || key.starts_with("skill-creator/") {
                 continue;
             }
+            copies.push((key, edition, path, metadata));
+        }
+    }
+    Ok(SkillCopies {
+        canonical,
+        editions,
+        copies,
+    })
+}
+impl SkillCopies {
+    /// Their drift from the canonical tree and the fingerprint of their contents.
+    fn parity(&self) -> Result<(Vec<Value>, String)> {
+        let canonical = self.canonical.as_str();
+        let mut logical = BTreeMap::<String, BTreeMap<String, Vec<u8>>>::new();
+        for (key, edition, path, _) in &self.copies {
             logical
-                .entry(key)
+                .entry(key.clone())
                 .or_default()
-                .insert(edition.into(), fs::read_regular(&path)?);
+                .insert((*edition).into(), fs::read_regular(path)?);
         }
-    }
-    let fingerprint = sha256(serde_json::to_string(&logical)?.as_bytes());
-    let mut drift = Vec::new();
-    for (key, copies) in logical {
-        let Some(authority) = copies.get(canonical) else {
-            drift.push(json!({"logical_path":key,"canonical":canonical,"mismatched":copies.keys().collect::<Vec<_>>(),"reason":"absent from canonical"}));
-            continue;
-        };
-        let mismatched = copies
-            .iter()
-            .filter(|(edition, bytes)| edition.as_str() != canonical && *bytes != authority)
-            .map(|(edition, _)| edition.clone())
-            .collect::<BTreeSet<_>>();
-        let missing = editions
-            .iter()
-            .filter(|edition| !copies.contains_key(*edition))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !mismatched.is_empty() || !missing.is_empty() {
-            let all = mismatched
+        let fingerprint = sha256(serde_json::to_string(&logical)?.as_bytes());
+        let mut drift = Vec::new();
+        for (key, copies) in logical {
+            let Some(authority) = copies.get(canonical) else {
+                drift.push(json!({"logical_path":key,"canonical":canonical,"mismatched":copies.keys().collect::<Vec<_>>(),"reason":"absent from canonical"}));
+                continue;
+            };
+            let mismatched = copies
                 .iter()
-                .cloned()
-                .chain(missing.iter().cloned())
+                .filter(|(edition, bytes)| edition.as_str() != canonical && *bytes != authority)
+                .map(|(edition, _)| edition.clone())
                 .collect::<BTreeSet<_>>();
-            let mut entry = json!({"logical_path":key,"canonical":canonical,"mismatched":all,"reason":if !mismatched.is_empty(){"content differs"}else{"missing from mirror"}});
-            if !missing.is_empty() {
-                entry["missing"] = json!(missing);
+            let missing = self
+                .editions
+                .iter()
+                .filter(|edition| !copies.contains_key(*edition))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !mismatched.is_empty() || !missing.is_empty() {
+                let all = mismatched
+                    .iter()
+                    .cloned()
+                    .chain(missing.iter().cloned())
+                    .collect::<BTreeSet<_>>();
+                let mut entry = json!({"logical_path":key,"canonical":canonical,"mismatched":all,"reason":if !mismatched.is_empty(){"content differs"}else{"missing from mirror"}});
+                if !missing.is_empty() {
+                    entry["missing"] = json!(missing);
+                }
+                drift.push(entry);
             }
-            drift.push(entry);
         }
+        Ok((drift, fingerprint))
     }
-    Ok((drift, fingerprint))
+    /// A digest of every copy's identity, size and timestamps, or None while a
+    /// copy changed after `settled`.
+    fn image(&self, settled: std::time::SystemTime) -> Option<String> {
+        let settled = settled
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        let mut rows = vec![json!(self.canonical), json!(self.editions)];
+        for (key, edition, _, metadata) in &self.copies {
+            let (stamp, latest) = copy_stamp(metadata)?;
+            if latest >= settled {
+                return None;
+            }
+            rows.push(json!([key, edition, stamp]));
+        }
+        Some(sha256(serde_json::to_string(&rows).ok()?.as_bytes()))
+    }
+}
+/// What a skill copy is judged unchanged by without reading it: its identity,
+/// size and timestamps, with the latest of those timestamps in nanoseconds.
+fn copy_stamp(metadata: &std::fs::Metadata) -> Option<(Value, u128)> {
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // The change time follows every write and cannot be set back.
+        let changed = u128::try_from(metadata.ctime()).ok()? * 1_000_000_000
+            + u128::try_from(metadata.ctime_nsec()).ok()?;
+        Some((
+            json!([
+                metadata.dev(),
+                metadata.ino(),
+                metadata.mode(),
+                metadata.size(),
+                modified.to_string(),
+                changed.to_string()
+            ]),
+            modified.max(changed),
+        ))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        Some((
+            json!([
+                metadata.file_size(),
+                metadata.creation_time(),
+                metadata.file_attributes(),
+                modified.to_string()
+            ]),
+            modified,
+        ))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = modified;
+        None
+    }
 }
 fn paths(conn: &Connection) -> Result<BTreeSet<String>> {
     let mut statement = conn.prepare("SELECT path FROM documents")?;
@@ -1131,4 +1274,68 @@ pub(crate) const DOCUMENT_SELECT: &str = "d.path,d.layer,d.kind,d.title,d.summar
 pub fn load_document(conn: &Connection, path: &str) -> Result<Option<Document>> {
     use rusqlite::OptionalExtension;
     Ok(conn.query_row(&format!("SELECT {DOCUMENT_SELECT} FROM documents d JOIN document_metadata m ON m.path=d.path WHERE d.path=?1"),[path],document_from_row).optional()?)
+}
+
+#[cfg(test)]
+mod skill_parity_reuse_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+    struct Directory(PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn fixture() -> (Directory, crate::Roots, Store) {
+        let root =
+            std::env::temp_dir().join(format!("infra-skill-parity-{}", uuid::Uuid::new_v4()));
+        for edition in [".agents", ".claude"] {
+            let skill = root.join(edition).join("skills/demo");
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(skill.join("SKILL.md"), "# Demo\n").unwrap();
+        }
+        let temp = Directory(root.clone());
+        let roots = crate::Roots::installed(&root).unwrap();
+        let store = Store::open(root.join("context.db"), Default::default()).unwrap();
+        (temp, roots, store)
+    }
+    fn reuse(store: &mut Store, roots: &crate::Roots, now: SystemTime) -> (Vec<Value>, String) {
+        let stored = store.state().unwrap();
+        reused_skill_parity(store, &stored, roots, ".agents", now).unwrap()
+    }
+    #[test]
+    fn a_settled_image_reuses_the_kept_parity_until_a_copy_changes() {
+        let (_temp, roots, mut store) = fixture();
+        let later = SystemTime::now() + Duration::from_secs(60);
+        let first = reuse(&mut store, &roots, later);
+        assert_eq!(first, skill_parity(&roots, ".agents").unwrap());
+        assert!(first.0.is_empty(), "identical copies have no drift");
+        // A kept parity is returned without reading a copy while the image holds.
+        let mut kept: Value =
+            serde_json::from_str(&store.state().unwrap()[SKILL_PARITY_IMAGE]).unwrap();
+        kept["fingerprint"] = json!("kept");
+        store
+            .put_state(&BTreeMap::from([(
+                SKILL_PARITY_IMAGE.to_string(),
+                kept.to_string(),
+            )]))
+            .unwrap();
+        assert_eq!(reuse(&mut store, &roots, later).1, "kept");
+        std::fs::write(
+            roots.tooling.join(".claude/skills/demo/SKILL.md"),
+            "# Demo, edited\n",
+        )
+        .unwrap();
+        let edited = reuse(&mut store, &roots, later);
+        assert_eq!(edited, skill_parity(&roots, ".agents").unwrap());
+        assert_ne!(edited.1, first.1);
+        assert_eq!(edited.0[0]["reason"], "content differs");
+    }
+    #[test]
+    fn copies_changed_too_recently_are_read_and_their_image_is_not_kept() {
+        let (_temp, roots, mut store) = fixture();
+        let parity = reuse(&mut store, &roots, SystemTime::now());
+        assert_eq!(parity, skill_parity(&roots, ".agents").unwrap());
+        assert!(!store.state().unwrap().contains_key(SKILL_PARITY_IMAGE));
+    }
 }
