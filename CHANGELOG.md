@@ -165,6 +165,25 @@ edition's own files remain in that edition's changelog.
   a copy of the engine now has `cp` write it (`tests/support/executable.rs`),
   so no write descriptor is left in the test process for a child to inherit;
   `portable_cli` failed that way in one run of three.
+- The Harness's Update restarts only on an engine and a browser interface built
+  from the sources the clone moved to. It fast-forwarded the clone and then
+  restarted on whatever engine `repo artifacts` had last assembled, checked
+  only against that engine's own checksum: a temporary clone updated across a
+  change to the engine and the interface came back on a pinned copy of the old
+  engine, without the new code, and served the Wasm built before the change.
+  `infra-cli/build.rs` now embeds the SHA-256 of the sources the engine
+  compiles (`Cargo.lock`, `.cargo/`, each package's `Cargo.toml`, `build.rs`
+  and `src/`, and every repository file they `include!`, `include_str!`,
+  `include_bytes!` or `#[path]`; not tests or documentation);
+  `capabilities --json` reports it as `source`, assembly copies it into
+  `runtime-capabilities.json`, and `repo build-ui` records its own sources as
+  `source_sha256` in `abi-manifest.json`. After the fast-forward the Harness
+  recomputes both from the clone. A pull that changes no compiled input
+  restarts as before; otherwise the server keeps running, new runs stay held,
+  and the update answers `restart-required` with the commands that rebuild
+  the engine and the interface. Update after the rebuild restarts on them. An
+  engine or interface built before this change records no sources and is not
+  restarted on.
 
 - Move executable project logic into the Rust workspace and one native
   `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation

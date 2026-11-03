@@ -438,18 +438,41 @@ While the clone lacks commits, an **Update** button sits at the right of the
 page header, on every page and at every width. Hovering over it shows the new
 commits.
 
-A click runs four steps:
+A click runs five steps:
 
 1. It fast-forwards the clone.
-2. It rewrites the installed application from it, because the icon or entry
+2. It checks that the engine assembled in the clone and the browser interface
+   were built from the sources the clone now has.
+3. It rewrites the installed application from it, because the icon or entry
    may have changed.
-3. It restarts the server on the new code.
-4. It reloads the page.
+4. It restarts the server on that engine.
+5. It reloads the page.
 
 Projects attached to the clone take their edition from it, so they update with
 it.
 
 `./accelerator-app update` does the same from a terminal.
+
+Each engine names the sources it was compiled from, and the interface build
+records its own (see [`runtime-rust/README.md`](../runtime-rust/README.md)).
+A pull that changes none of the files they are compiled from, as most
+documentation, skill and test changes do, leaves both current, and the server
+restarts on the engine already assembled. A pull that changes one of those
+files, which includes a few edition files the engine embeds, such as
+`PHP Core/.mcp.json`, needs a rebuild: the clone updates, but the server keeps
+running the previous version and holds new runs, and the update names what to
+run in the clone, of these:
+
+```bash
+cargo build --release --locked --manifest-path runtime-rust/Cargo.toml --bin infra-engine
+./infra-engine repo build-ui
+./infra-engine repo artifacts --write --include-generator
+```
+
+Then press **Update** again, or run `./accelerator-app update`, and the server
+restarts on the rebuilt engine. Stopping the server with
+`./accelerator-app stop` and starting it with `./accelerator-app open` starts
+the rebuilt version too.
 
 Only a fast-forward is ever applied, and some states hold the update back:
 
@@ -459,12 +482,14 @@ Only a fast-forward is ever applied, and some states hold the update back:
 | A local change is in the way | The update is refused and the clone is left as it was. |
 | Runs are in progress | The update waits until they finish or are stopped, because a restart would interrupt them. |
 | The clone is not on a branch that follows a remote | Nothing is offered, and the status says why. |
+| The engine or the interface was built from other sources | The clone updates, the server keeps running and holds new runs, and the status names the rebuild. |
 
 From the update's check that no run is in progress until the server has
 restarted, a new session, follow-up or check is refused with a note to start it
 once the page has reloaded, so the restart interrupts nothing. An update that
-fails or finds nothing to apply, or a server that cannot restart itself, lets
-runs start again.
+fails before the clone moves, or finds nothing to apply, lets runs start
+again. Once the clone has moved, runs stay held until the server restarts on
+it, and the refusal says why.
 
 To keep checks off, set `HARNESS_UPDATE_CHECK=0` in the server's environment.
 

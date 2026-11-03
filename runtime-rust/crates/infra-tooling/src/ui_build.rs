@@ -568,6 +568,11 @@ fn wasm_bindgen_version(snapshot: &SourceSnapshot) -> Result<String> {
     }
     Ok(versions.remove(0))
 }
+/// Digest of the sources a UI build under `root` would compile, as the build
+/// records it in `abi-manifest.json`.
+pub fn source_sha256(root: &Path) -> Result<String> {
+    Ok(SourceSnapshot::capture(&infra_core::fs::absolute(root)?)?.digest())
+}
 /// Build after the workspace has been composed and its lockfile resolved. The
 /// default is offline and locked; tool installation and target installation are
 /// explicit operator actions, never automatic fallbacks in the browser server.
@@ -740,8 +745,10 @@ pub fn build(root: &Path, request: &Value) -> Result<Value> {
         }
         let js_hash = common::sha256(&javascript);
         let wasm_hash = common::sha256(&wasm);
+        // The source digest lets a Harness update tell whether this pair was
+        // compiled from the sources the clone now has.
         let manifest = common::json_bytes(
-            &json!({"schema_version":1,"js_sha256":js_hash,"wasm_sha256":wasm_hash}),
+            &json!({"schema_version":1,"js_sha256":js_hash,"wasm_sha256":wasm_hash,"source_sha256":source.digest()}),
         )?;
         source.verify()?;
         cargo.verify()?;

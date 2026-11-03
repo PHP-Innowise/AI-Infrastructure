@@ -31,3 +31,6 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.150", features = ["preserve_order","arbitrary_precision","raw_value"] }
 chrono = "=0.4.45"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread","macros","net","process","signal","io-util","sync","time"] }
+
+[build-dependencies]
+sha2 = "=0.11.0"

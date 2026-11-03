@@ -62,6 +62,16 @@ Installation identifies the selected engine in
 `engine_capabilities` fields. Seed assets use their separate
 `native-artifacts.json` descriptor to verify the bundled engine by hash.
 
+Each engine also names the sources it was compiled from. `crates/infra-cli/build.rs`
+embeds the SHA-256 that `infra_tooling::source_identity` computes over the
+compiled inputs (`Cargo.lock`, `.cargo/`, each package's `Cargo.toml`,
+`build.rs` and `src/`, and every repository file they include);
+`capabilities --json` reports it as `source`, and assembly copies it into
+`runtime-capabilities.json`. `repo build-ui` records the digest of the UI
+sources as `source_sha256` in `abi-manifest.json`. The Harness's Update
+restarts only on an engine and interface whose recorded sources match the
+clone; a change to that scheme is a new `source_identity::SCHEME`.
+
 Repository operations use `./infra-engine repo <operation>`. Installed memory
 operations use `memory-bank/bin/infra-engine memory <operation>`. See each
 command's `--help` for arguments. The native check catalog is

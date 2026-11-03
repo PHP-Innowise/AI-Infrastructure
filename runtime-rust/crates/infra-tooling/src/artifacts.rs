@@ -232,7 +232,9 @@ pub fn assemble(
     }
     let mut report = Vec::new();
     for (base, path, metadata) in destinations {
-        let value = serde_json::json!({"schema_version":1,"engine":"infra-engine","capability_profile":"infra-engine-v1","version":descriptor["version"],"target":target,"path":path,"sha256":digest,"bytes":bytes.len(),"capabilities":capabilities});
+        // "source" names the sources the engine was compiled from; a Harness
+        // update restarts only on an engine whose sources match the clone.
+        let value = serde_json::json!({"schema_version":1,"engine":"infra-engine","capability_profile":"infra-engine-v1","version":descriptor["version"],"target":target,"path":path,"sha256":digest,"bytes":bytes.len(),"capabilities":capabilities,"source":descriptor["source"]});
         if write {
             let mut files = infra_core::bank::publication::PublicationFiles::new(&base)?;
             let previous = files.read(&path, MAX_ENGINE as usize)?;

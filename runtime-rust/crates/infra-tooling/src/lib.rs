@@ -27,6 +27,7 @@ pub mod stabilization;
 pub mod temp;
 
 pub mod release;
+pub mod source_identity;
 pub mod ui_build;
 
 pub mod wasm_assets;

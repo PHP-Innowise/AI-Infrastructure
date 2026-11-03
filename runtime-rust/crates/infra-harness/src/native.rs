@@ -1,6 +1,6 @@
 //! Production composition. Every route group has a concrete native manager.
 use crate::{
-    Result,
+    HarnessError, Result,
     accelerators::Accelerators,
     bindings::{ResultsBridge, SessionLinks, SystemBridge, SystemWorkflow, SystemsDomain},
     blackboard::CoreBlackboards,
@@ -202,7 +202,17 @@ impl ServicesFactory for NativeFactory {
                     config.source.clone(),
                 )?),
             });
-            let updates = Updates::new(config.source.clone(), Arc::downgrade(&sessions), control);
+            let updates = Updates::new(
+                config.source.clone(),
+                Arc::<Sessions>::downgrade(&sessions),
+                control,
+                runtime_engine["capabilities"]
+                    .as_array()
+                    .cloned()
+                    .ok_or_else(|| {
+                        HarnessError::invalid("Current native capabilities are unavailable.")
+                    })?,
+            );
             let project = Arc::new(crate::projects::ProjectDomain {
                 store: store.clone(),
             });

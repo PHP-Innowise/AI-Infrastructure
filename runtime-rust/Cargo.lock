@@ -1136,6 +1136,7 @@ dependencies = [
  "infra-tooling",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

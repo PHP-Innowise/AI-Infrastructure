@@ -119,8 +119,16 @@ impl App {
         if !crate::store::exact(
             &manifest,
             &["schema_version", "js_sha256", "wasm_sha256"],
-            &[],
+            &["source_sha256"],
         ) || manifest["schema_version"] != 1
+            || !manifest.get("source_sha256").is_none_or(|digest| {
+                digest.as_str().is_some_and(|digest| {
+                    digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+            })
             || manifest["js_sha256"] != store::sha(&assets["/assets/infra_ui.js"].bytes)
             || manifest["wasm_sha256"] != store::sha(&assets["/assets/infra_ui_bg.wasm"].bytes)
         {

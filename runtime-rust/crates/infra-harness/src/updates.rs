@@ -1,4 +1,9 @@
 //! Clone fast-forward updates with an admission hold and verified native handoff.
+//!
+//! The restart runs only an engine and a browser interface compiled from the
+//! sources the clone has after the fast-forward. Both record the digest of
+//! their sources; when either differs, the server keeps running, new runs stay
+//! held, and the update says what to rebuild before Update is pressed again.
 use crate::{
     HarnessError, Result, projects,
     services::{Domain, Payload, Reply},
@@ -8,7 +13,7 @@ use crate::{
 use infra_core::bank::publication::PublicationFiles;
 use infra_tooling::{
     artifacts::{Artifact, native_target},
-    installer::Installer,
+    source_identity, ui_build, wasm_assets,
 };
 use serde_json::{Value, json};
 use std::{
@@ -21,14 +26,45 @@ use std::{
 };
 const HOLD: &str =
     "The Harness is updating and then restarts. Start new work once the page has reloaded.";
+const HELD: &str = "New runs stay held until the Harness restarts.";
+/// Rebuild steps, in the order they run from the clone.
+const BUILD_ENGINE: &str =
+    "cargo build --release --locked --manifest-path runtime-rust/Cargo.toml --bin infra-engine";
+const BUILD_INTERFACE: &str = "./infra-engine repo build-ui";
+const ASSEMBLE_ENGINE: &str = "./infra-engine repo artifacts --write --include-generator";
 pub trait Restart: Send + Sync {
     fn refresh_application(&self, engine: &Path, expected_sha256: &str) -> Result<Vec<String>>;
     fn handoff(&self, engine: &Path, report: &Value) -> Result<bool>;
 }
+/// Admission of new runs, held from the update's start until the restart.
+pub trait Admission: Send + Sync {
+    fn hold(&self, reason: &str) -> Result<()>;
+    fn release(&self) -> Result<()>;
+}
+impl Admission for Sessions {
+    fn hold(&self, reason: &str) -> Result<()> {
+        Sessions::hold(self, reason)
+    }
+    fn release(&self) -> Result<()> {
+        Sessions::release(self)
+    }
+}
+/// Why the engine or the browser interface cannot serve the clone's sources.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stale {
+    /// Nothing usable was built for this platform.
+    Missing,
+    /// The build does not record the sources it came from.
+    Unrecorded,
+    /// The build came from other sources.
+    Other,
+}
 pub struct Updates {
     root: PathBuf,
-    sessions: Weak<Sessions>,
+    sessions: Weak<dyn Admission>,
     restart: Arc<dyn Restart>,
+    /// What the running engine can do; a restart needs at least as much.
+    capabilities: Vec<Value>,
     state: Mutex<Value>,
     checked: Mutex<Option<Instant>>,
     serial: Mutex<()>,
@@ -38,11 +74,17 @@ pub struct Updates {
     me: Weak<Self>,
 }
 impl Updates {
-    pub fn new(root: PathBuf, sessions: Weak<Sessions>, restart: Arc<dyn Restart>) -> Arc<Self> {
+    pub fn new(
+        root: PathBuf,
+        sessions: Weak<dyn Admission>,
+        restart: Arc<dyn Restart>,
+        capabilities: Vec<Value>,
+    ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             root,
             sessions,
             restart,
+            capabilities,
             state: Mutex::new(
                 json!({"state":"unknown","detail":"","checked_at":null,"behind":0,"ahead":0,"commits":[],"branch":null,"upstream":null,"version":null}),
             ),
@@ -54,7 +96,7 @@ impl Updates {
             me: me.clone(),
         })
     }
-    fn runner(&self) -> Result<Arc<Sessions>> {
+    fn runner(&self) -> Result<Arc<dyn Admission>> {
         self.sessions
             .upgrade()
             .ok_or_else(|| HarnessError::unavailable("The session runner is stopping."))
@@ -196,6 +238,13 @@ impl Updates {
             .map_err(|_| HarnessError::unavailable("Update state unavailable."))?
             .clone())
     }
+    fn set(&self, value: Value) -> Result<()> {
+        *self
+            .state
+            .lock()
+            .map_err(|_| HarnessError::unavailable("Update state unavailable."))? = value;
+        Ok(())
+    }
     fn check(&self, fetch: bool) -> Result<Value> {
         let _serial = self
             .serial
@@ -261,13 +310,16 @@ impl Updates {
         }
         Ok(())
     }
-    fn native_engine(&self) -> Result<(PathBuf, String)> {
+    /// The assembled engine compiled from the sources the clone has now.
+    fn native_engine(&self) -> Result<std::result::Result<(PathBuf, String), Stale>> {
         let target = native_target()?;
-        let required = Installer::new(&self.root)?.engine_capabilities()?;
-        let required = required["capabilities"]
-            .as_array()
-            .ok_or_else(|| HarnessError::invalid("Current native capabilities are unavailable."))?;
+        let sources = source_identity::engine(&self.root).map_err(|error| {
+            HarnessError::unavailable(format!(
+                "The clone's engine sources could not be read: {error}"
+            ))
+        })?;
         let mut files = PublicationFiles::new(&self.root)?;
+        let mut stale = Stale::Missing;
         for edition in ["PHP Core", "Laravel", "Symfony", "Cms/wordpress"] {
             let name = format!("{edition}/memory-bank/runtime-capabilities.json");
             let Some(raw) = files.read(&name, 1024 * 1024)? else {
@@ -276,12 +328,24 @@ impl Updates {
             let meta = crate::strict_json::parse(&raw, 1024 * 1024)?;
             if meta["engine"] != "infra-engine"
                 || meta["target"] != target
-                || !required.iter().all(|v| {
+                || !self.capabilities.iter().all(|v| {
                     meta["capabilities"]
                         .as_array()
                         .is_some_and(|a| a.contains(v))
                 })
             {
+                continue;
+            }
+            if meta["source"]["scheme"] != source_identity::SCHEME
+                || !meta["source"]["sha256"].is_string()
+            {
+                if stale == Stale::Missing {
+                    stale = Stale::Unrecorded;
+                }
+                continue;
+            }
+            if meta["source"]["sha256"] != sources.sha256.as_str() {
+                stale = Stale::Other;
                 continue;
             }
             let artifact = Artifact {
@@ -306,14 +370,83 @@ impl Updates {
                     .map(str::to_owned)
                     .collect(),
             };
-            return Ok((
+            return Ok(Ok((
                 artifact.verify(&self.root.join(edition))?,
                 artifact.sha256.clone(),
-            ));
+            )));
         }
-        Err(HarnessError::unavailable(
-            "The updated clone has no verified native engine for this platform and capability set. New runs remain held until a compatible engine is installed and the server restarts.",
-        ))
+        Ok(Err(stale))
+    }
+    /// Whether the browser interface the restarted server would load was
+    /// compiled from the clone's interface sources.
+    fn interface(&self) -> Result<std::result::Result<(), Stale>> {
+        let sources = ui_build::source_sha256(&self.root)?;
+        let Ok(assets) = wasm_assets::read_verified(&mut PublicationFiles::new(&self.root)?) else {
+            return Ok(Err(Stale::Missing));
+        };
+        Ok(match assets.source_sha256 {
+            Some(built) if built == sources => Ok(()),
+            Some(_) => Err(Stale::Other),
+            None => Err(Stale::Unrecorded),
+        })
+    }
+    /// Hands the server over to the engine and interface built from the
+    /// clone's sources, or refuses and says what to rebuild.
+    fn restart(&self, from: &Value, changes: &Value) -> Result<Value> {
+        let version = self.value(&["rev-parse", "--short", "HEAD"])?;
+        let (engine, digest) = match (self.native_engine()?, self.interface()?) {
+            (Ok(engine), Ok(())) => engine,
+            (engine, interface) => {
+                return Err(HarnessError {
+                    status: 409,
+                    code: "restart-required",
+                    message: rebuild(
+                        version.as_deref().unwrap_or("a new version"),
+                        engine.err(),
+                        interface.err(),
+                    ),
+                });
+            }
+        };
+        let mut report = json!({"ok":true,"from":from,"to":version,"changes":changes,"restarting":false,"engine":engine,"engine_sha256":digest});
+        report["application"] = match self.restart.refresh_application(&engine, &digest) {
+            Ok(paths) => json!(paths),
+            Err(error) => json!([format!(
+                "The application entry was not refreshed: {}",
+                error.message
+            )]),
+        };
+        report["restarting"] = self.restart.handoff(&engine, &report)?.into();
+        if report["restarting"] != true {
+            self.resume()?;
+        }
+        Ok(report)
+    }
+    /// Records a failed update. Before the fast-forward nothing changed and
+    /// runs resume. After it the clone is ahead of the running server, so runs
+    /// stay held until a restart, and the error says so.
+    fn settle(&self, mut error: HarnessError) -> HarnessError {
+        let Ok(mut state) = self.status() else {
+            return error;
+        };
+        if state["source_updated"] == true {
+            if error.code != "restart-required" {
+                error.message = format!(
+                    "The clone was updated, but the Harness could not restart on it ({}). {HELD}",
+                    error.message.trim_end_matches('.')
+                );
+            }
+            state["state"] = "restart-required".into();
+            if let Ok(runner) = self.runner() {
+                let _ = runner.hold(&error.message);
+            }
+        } else {
+            state["state"] = "failed".into();
+            let _ = self.resume();
+        }
+        state["detail"] = error.message.clone().into();
+        let _ = self.set(state);
+        error
     }
     pub async fn apply(&self) -> Result<Value> {
         let _apply = self
@@ -321,9 +454,16 @@ impl Updates {
             .try_lock()
             .map_err(|_| HarnessError::conflict("The update is already running."))?;
         if self.held.load(Ordering::Acquire) {
-            return Err(HarnessError::conflict(
-                "An update is waiting for the Harness to restart.",
-            ));
+            let state = self.status()?;
+            if state["state"] != "restart-required" {
+                return Err(HarnessError::conflict(
+                    "An update is waiting for the Harness to restart.",
+                ));
+            }
+            // The clone has already moved; a rebuild since may let the restart through.
+            return self
+                .restart(&state["from"], &state["changes"])
+                .map_err(|error| self.settle(error));
         }
         self.runner()?.hold(HOLD)?;
         self.held.store(true, Ordering::Release);
@@ -334,20 +474,13 @@ impl Updates {
                 .map_err(|_| HarnessError::unavailable("Update state unavailable."))?;
             let status = self.compute(true);
             if status["state"] == "current" {
-                *self
-                    .state
-                    .lock()
-                    .map_err(|_| HarnessError::unavailable("Update state unavailable."))? = status;
+                self.set(status)?;
                 return Ok(
                     json!({"ok":true,"current":true,"restarting":false,"detail":"This clone is already up to date."}),
                 );
             }
             if status["state"] != "available" {
-                *self
-                    .state
-                    .lock()
-                    .map_err(|_| HarnessError::unavailable("Update state unavailable."))? =
-                    status.clone();
+                self.set(status.clone())?;
                 return Err(HarnessError::conflict(
                     status["detail"]
                         .as_str()
@@ -357,10 +490,7 @@ impl Updates {
             let mut updating = status.clone();
             updating["state"] = "updating".into();
             updating["detail"] = "Updating…".into();
-            *self
-                .state
-                .lock()
-                .map_err(|_| HarnessError::unavailable("Update state unavailable."))? = updating;
+            self.set(updating)?;
             let upstream = status["upstream"].as_str().unwrap_or("");
             let merged = self.git(
                 &[
@@ -377,59 +507,60 @@ impl Updates {
                     Self::reason(&merged)
                 )));
             }
-            let version = self.value(&["rev-parse", "--short", "HEAD"])?;
             let mut updated = status.clone();
             updated["state"] = "updated".into();
             updated["source_updated"] = true.into();
-            updated["version"] = json!(version);
+            updated["from"] = status["version"].clone();
+            updated["changes"] = status["behind"].clone();
+            updated["version"] = json!(self.value(&["rev-parse", "--short", "HEAD"])?);
             updated["behind"] = 0.into();
             updated["commits"] = json!([]);
             updated["detail"] = "The clone updated; preparing the verified native restart.".into();
-            *self
-                .state
-                .lock()
-                .map_err(|_| HarnessError::unavailable("Update state unavailable."))? = updated;
-            let (engine, digest) = self.native_engine()?;
-            let mut report = json!({"ok":true,"from":status["version"],"to":version,"changes":status["behind"],"restarting":false,"engine":engine,"engine_sha256":digest});
-            report["application"] = match self.restart.refresh_application(&engine, &digest) {
-                Ok(paths) => json!(paths),
-                Err(error) => json!([format!(
-                    "The application entry was not refreshed: {}",
-                    error.message
-                )]),
-            };
-            report["restarting"] = self.restart.handoff(&engine, &report)?.into();
-            if report["restarting"] != true {
-                self.resume()?;
-            }
-            Ok(report)
+            self.set(updated)?;
+            self.restart(&status["version"], &status["behind"])
         })();
-        match &result {
-            Ok(value) if value["current"] == true => {
-                self.resume()?;
-            }
-            Err(error) => {
-                let source_changed = self.status()?["source_updated"] == true;
-                let mut failed = self.status()?;
-                failed["state"] = if source_changed {
-                    "restart-required"
-                } else {
-                    "failed"
-                }
-                .into();
-                failed["detail"] = error.message.clone().into();
-                *self
-                    .state
-                    .lock()
-                    .map_err(|_| HarnessError::unavailable("Update state unavailable."))? = failed;
-                if !source_changed {
+        match result {
+            Ok(value) => {
+                if value["current"] == true {
                     self.resume()?;
                 }
+                Ok(value)
             }
-            _ => {}
+            Err(error) => Err(self.settle(error)),
         }
-        result
     }
+}
+/// Explains what the clone lacks for a restart and how to provide it.
+fn rebuild(version: &str, engine: Option<Stale>, interface: Option<Stale>) -> String {
+    let mut problems = Vec::new();
+    let mut commands = vec![BUILD_ENGINE];
+    if let Some(stale) = engine {
+        problems.push(match stale {
+            Stale::Missing => "it has no assembled engine for this platform",
+            Stale::Unrecorded => {
+                "its assembled engine does not record which sources it was built from"
+            }
+            Stale::Other => "its assembled engine was built from other sources",
+        });
+    }
+    if let Some(stale) = interface {
+        problems.push(match stale {
+            Stale::Missing => "its browser interface is not built",
+            Stale::Unrecorded => {
+                "its browser interface does not record which sources it was built from"
+            }
+            Stale::Other => "its browser interface was built from other sources",
+        });
+        commands.push(BUILD_INTERFACE);
+    }
+    if engine.is_some() {
+        commands.push(ASSEMBLE_ENGINE);
+    }
+    format!(
+        "The clone is now at {version}, but {}, so the Harness kept running its previous version. In the clone, run `{}`, then press Update again or run `./accelerator-app update`. Stopping the Harness with `./accelerator-app stop` and starting it with `./accelerator-app open` also starts the rebuilt version. {HELD}",
+        problems.join(" and "),
+        commands.join("`, then `"),
+    )
 }
 impl Domain for Updates {
     fn execute<'a>(&'a self, op: &'a str, request: Value) -> Reply<'a> {
@@ -454,5 +585,335 @@ impl Domain for Updates {
             };
             Ok(Payload::Json(value))
         })
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, process::Command};
+
+    struct Gate(Mutex<Option<String>>);
+    impl Admission for Gate {
+        fn hold(&self, reason: &str) -> Result<()> {
+            *self.0.lock().unwrap() = Some(reason.into());
+            Ok(())
+        }
+        fn release(&self) -> Result<()> {
+            *self.0.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+    /// Records the engine of each handoff instead of starting a server.
+    #[derive(Default)]
+    struct Handoffs(Mutex<Vec<PathBuf>>);
+    impl Restart for Handoffs {
+        fn refresh_application(&self, _: &Path, _: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn handoff(&self, engine: &Path, _: &Value) -> Result<bool> {
+            self.0.lock().unwrap().push(engine.into());
+            Ok(true)
+        }
+    }
+    fn git(directory: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "user.name=Harness",
+                "-c",
+                "user.email=harness@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false", "-c"])
+            .arg(format!(
+                "core.hooksPath={}",
+                if cfg!(windows) { "NUL" } else { "/dev/null" }
+            ))
+            .arg("-C")
+            .arg(directory)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().into()
+    }
+    fn write(root: &Path, name: &str, bytes: impl AsRef<[u8]>) {
+        let path = root.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    /// An upstream repository, its bare origin and the clone the Harness runs from.
+    struct Fixture {
+        _temporary: tempfile::TempDir,
+        upstream: PathBuf,
+        clone: PathBuf,
+        gate: Arc<Gate>,
+        handoffs: Arc<Handoffs>,
+        updates: Arc<Updates>,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let temporary = tempfile::tempdir().unwrap();
+            let upstream = temporary.path().join("upstream");
+            let clone = temporary.path().join("clone");
+            fs::create_dir(&upstream).unwrap();
+            git(&upstream, &["init", "--quiet", "--initial-branch=main"]);
+            for (name, text) in [
+                (
+                    ".gitignore",
+                    "/runtime-rust/target/\n**/memory-bank/bin/\n**/memory-bank/runtime-capabilities.json\n",
+                ),
+                ("README.md", "# Accelerators\n"),
+                (
+                    "runtime-rust/Cargo.toml",
+                    "[workspace]\nmembers = [\"crates/*\"]\n",
+                ),
+                ("runtime-rust/Cargo.lock", "version = 4\n"),
+                ("runtime-rust/crates/infra-cli/Cargo.toml", "[package]\n"),
+                (
+                    "runtime-rust/crates/infra-cli/src/lib.rs",
+                    "pub fn run() {}\n",
+                ),
+                (
+                    "runtime-rust/crates/infra-cli/tests/cli.rs",
+                    "#[test]\nfn runs() {}\n",
+                ),
+                ("runtime-rust/crates/infra-ui/Cargo.toml", "[package]\n"),
+                (
+                    "runtime-rust/crates/infra-ui/src/lib.rs",
+                    "pub fn render() {}\n",
+                ),
+            ] {
+                write(&upstream, name, text);
+            }
+            git(&upstream, &["add", "--all"]);
+            git(&upstream, &["commit", "--quiet", "--message", "base"]);
+            git(
+                temporary.path(),
+                &["clone", "--quiet", "--bare", "upstream", "origin.git"],
+            );
+            git(&upstream, &["remote", "add", "origin", "../origin.git"]);
+            git(
+                temporary.path(),
+                &["clone", "--quiet", "origin.git", "clone"],
+            );
+            let gate = Arc::new(Gate(Mutex::new(None)));
+            let handoffs = Arc::new(Handoffs::default());
+            let admission: Weak<dyn Admission> = Arc::<Gate>::downgrade(&gate);
+            let updates = Updates::new(
+                clone.clone(),
+                admission,
+                handoffs.clone(),
+                vec![json!("harness")],
+            );
+            Self {
+                _temporary: temporary,
+                upstream,
+                clone,
+                gate,
+                handoffs,
+                updates,
+            }
+        }
+        /// Commits upstream changes for the clone to update to.
+        fn publish(&self, changes: &[(&str, &str)]) {
+            for (name, text) in changes {
+                write(&self.upstream, name, text);
+            }
+            git(
+                &self.upstream,
+                &["commit", "--quiet", "--all", "--message", "change"],
+            );
+            git(&self.upstream, &["push", "--quiet", "origin", "main"]);
+        }
+        /// The digests builds record of the clone's engine and interface sources.
+        fn sources(&self) -> (String, String) {
+            (
+                source_identity::engine(&self.clone).unwrap().sha256,
+                ui_build::source_sha256(&self.clone).unwrap(),
+            )
+        }
+        /// Places an engine as `repo artifacts --write` does.
+        fn assemble(&self, sources: Option<String>) {
+            let engine = format!("infra-engine built from {sources:?}").into_bytes();
+            write(
+                &self.clone,
+                "PHP Core/memory-bank/bin/infra-engine",
+                &engine,
+            );
+            let descriptor = json!({"schema_version":1,"engine":"infra-engine","capability_profile":"infra-engine-v1","version":"0.1.0","target":native_target().unwrap(),"path":"memory-bank/bin/infra-engine","sha256":store::sha(&engine),"bytes":engine.len(),"capabilities":["harness","memory"],"source":sources.map(|sha256|json!({"scheme":source_identity::SCHEME,"sha256":sha256}))});
+            write(
+                &self.clone,
+                "PHP Core/memory-bank/runtime-capabilities.json",
+                serde_json::to_vec(&descriptor).unwrap(),
+            );
+        }
+        /// Publishes an interface as `repo build-ui` does.
+        fn build_interface(&self, sources: Option<String>) {
+            let javascript = b"export default async function init() {}\n".as_slice();
+            let wasm = b"\0asm\x01\0\0\0".as_slice();
+            let mut manifest = json!({"schema_version":1,"js_sha256":store::sha(javascript),"wasm_sha256":store::sha(wasm)});
+            if let Some(sources) = sources {
+                manifest["source_sha256"] = sources.into();
+            }
+            let directory = "runtime-rust/target/wasm-ui";
+            write(&self.clone, &format!("{directory}/infra_ui.js"), javascript);
+            write(&self.clone, &format!("{directory}/infra_ui_bg.wasm"), wasm);
+            write(
+                &self.clone,
+                &format!("{directory}/abi-manifest.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            );
+        }
+        fn build_both(&self) {
+            let (engine, interface) = self.sources();
+            self.assemble(Some(engine));
+            self.build_interface(Some(interface));
+        }
+        fn held(&self) -> Option<String> {
+            self.gate.0.lock().unwrap().clone()
+        }
+        fn handoffs(&self) -> Vec<PathBuf> {
+            self.handoffs.0.lock().unwrap().clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn new_engine_sources_hold_the_restart_until_a_rebuilt_engine_is_assembled() {
+        let fixture = Fixture::new();
+        fixture.build_both();
+        fixture.publish(&[(
+            "runtime-rust/crates/infra-cli/src/lib.rs",
+            "pub fn run() { println!(\"new\"); }\n",
+        )]);
+        let error = fixture.updates.apply().await.unwrap_err();
+        assert_eq!(error.code, "restart-required");
+        assert!(
+            error
+                .message
+                .contains("but its assembled engine was built from other sources, so"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains(&format!(
+                "run `{BUILD_ENGINE}`, then `{ASSEMBLE_ENGINE}`, then press Update again"
+            )),
+            "{}",
+            error.message
+        );
+        // The clone moved; the server stays as it was and new runs say why.
+        assert_eq!(
+            git(&fixture.clone, &["rev-parse", "HEAD"]),
+            git(&fixture.upstream, &["rev-parse", "HEAD"])
+        );
+        assert!(fixture.handoffs().is_empty());
+        let status = fixture.updates.status().unwrap();
+        assert_eq!(status["state"], "restart-required");
+        assert_eq!(status["detail"], error.message.as_str());
+        assert_eq!(fixture.held().as_deref(), Some(error.message.as_str()));
+        // Update again after the rebuild: the restart runs the rebuilt engine.
+        fixture.build_both();
+        let report = fixture.updates.apply().await.unwrap();
+        assert_eq!(report["restarting"], true);
+        assert_eq!(report["changes"], 1);
+        let handoffs = fixture.handoffs();
+        assert_eq!(handoffs.len(), 1);
+        assert!(handoffs[0].ends_with("PHP Core/memory-bank/bin/infra-engine"));
+        assert_eq!(
+            report["engine_sha256"],
+            store::sha(&fs::read(&handoffs[0]).unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_outside_the_compiled_sources_restarts_on_the_assembled_engine() {
+        let fixture = Fixture::new();
+        fixture.build_both();
+        fixture.publish(&[
+            ("README.md", "# Accelerators, revised\n"),
+            (
+                "runtime-rust/crates/infra-cli/tests/cli.rs",
+                "#[test]\nfn still_runs() {}\n",
+            ),
+        ]);
+        let report = fixture.updates.apply().await.unwrap();
+        assert_eq!(report["restarting"], true);
+        assert_eq!(
+            report["to"],
+            git(&fixture.clone, &["rev-parse", "--short", "HEAD"])
+        );
+        assert_eq!(fixture.handoffs().len(), 1);
+        assert_eq!(fixture.held().as_deref(), Some(HOLD));
+    }
+
+    #[tokio::test]
+    async fn an_interface_from_other_sources_holds_the_restart_until_it_is_rebuilt() {
+        let fixture = Fixture::new();
+        fixture.build_both();
+        // The engine's workspace holds the interface crate, so both go stale.
+        fixture.publish(&[(
+            "runtime-rust/crates/infra-ui/src/lib.rs",
+            "pub fn render() { /* new */ }\n",
+        )]);
+        let error = fixture.updates.apply().await.unwrap_err();
+        assert!(
+            error.message.contains(&format!(
+                "but its assembled engine was built from other sources and its browser interface was built from other sources, so the Harness kept running its previous version. In the clone, run `{BUILD_ENGINE}`, then `{BUILD_INTERFACE}`, then `{ASSEMBLE_ENGINE}`, then press Update again"
+            )),
+            "{}",
+            error.message
+        );
+        fixture.assemble(Some(fixture.sources().0));
+        let error = fixture.updates.apply().await.unwrap_err();
+        assert!(
+            error.message.contains(&format!(
+                "but its browser interface was built from other sources, so the Harness kept running its previous version. In the clone, run `{BUILD_ENGINE}`, then `{BUILD_INTERFACE}`, then press"
+            )),
+            "{}",
+            error.message
+        );
+        assert!(fixture.handoffs().is_empty());
+        fixture.build_interface(Some(fixture.sources().1));
+        assert_eq!(fixture.updates.apply().await.unwrap()["restarting"], true);
+        assert_eq!(fixture.handoffs().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn builds_that_do_not_record_their_sources_are_never_restarted() {
+        let fixture = Fixture::new();
+        fixture.assemble(None);
+        fixture.build_interface(None);
+        fixture.publish(&[("README.md", "# Accelerators, revised\n")]);
+        let error = fixture.updates.apply().await.unwrap_err();
+        assert!(
+            error.message.contains("but its assembled engine does not record which sources it was built from and its browser interface does not record which sources it was built from,"),
+            "{}",
+            error.message
+        );
+        assert!(fixture.handoffs().is_empty());
+        let fresh = Fixture::new();
+        fresh.publish(&[("README.md", "# Accelerators, revised\n")]);
+        let error = fresh.updates.apply().await.unwrap_err();
+        assert!(
+            error.message.contains(
+                "but it has no assembled engine for this platform and its browser interface is not built,"
+            ),
+            "{}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn a_current_clone_releases_the_hold() {
+        let fixture = Fixture::new();
+        let report = fixture.updates.apply().await.unwrap();
+        assert_eq!(report["current"], true);
+        assert_eq!(fixture.held(), None);
+        assert_eq!(fixture.updates.status().unwrap()["state"], "current");
     }
 }

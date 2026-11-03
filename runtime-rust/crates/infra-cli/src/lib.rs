@@ -209,7 +209,11 @@ fn memory_help() -> Output {
     ))
 }
 pub fn capabilities() -> Value {
-    json!({"engine":"infra-engine","version":env!("CARGO_PKG_VERSION"),"capability_profile":"infra-engine-v1","capabilities":["memory","brain","bank","hooks","mcp","install","attach","kit","collect","creator","system","harness","serve","app","eval","qa","pilot","bench","continuity","skill-tools","routing-eval","release","memory-queue-worker-v1","memory-eval-clock-v1","hook-policy-v1"]})
+    // Embedded by build.rs; empty when the build could not read its sources.
+    let source = env!("INFRA_ENGINE_SOURCE_SHA256");
+    let source = (!source.is_empty())
+        .then(|| json!({"scheme":infra_tooling::source_identity::SCHEME,"sha256":source}));
+    json!({"engine":"infra-engine","version":env!("CARGO_PKG_VERSION"),"capability_profile":"infra-engine-v1","capabilities":["memory","brain","bank","hooks","mcp","install","attach","kit","collect","creator","system","harness","serve","app","eval","qa","pilot","bench","continuity","skill-tools","routing-eval","release","memory-queue-worker-v1","memory-eval-clock-v1","hook-policy-v1"],"source":source})
 }
 fn memory_command(rest: &[String], controlled: bool) -> Result<Output> {
     let arguments = match arguments::memory(rest) {

@@ -99,6 +99,9 @@ type Image = (u64, u64, u32, u64, u64, i128, i128);
 pub struct VerifiedAssets {
     pub javascript: Vec<u8>,
     pub wasm: Vec<u8>,
+    /// Digest of the UI sources the pair was compiled from, when the build
+    /// recorded it (see `ui_build::source_sha256`).
+    pub source_sha256: Option<String>,
     root: (u64, u64, u32),
     directories: BTreeMap<String, (u64, u64, u32)>,
     images: BTreeMap<String, Image>,
@@ -150,10 +153,18 @@ pub fn read_verified_paths(
     let object = manifest
         .as_object()
         .filter(|object| {
-            object.len() == 3
-                && ["schema_version", "js_sha256", "wasm_sha256"]
-                    .iter()
-                    .all(|key| object.contains_key(*key))
+            ["schema_version", "js_sha256", "wasm_sha256"]
+                .iter()
+                .all(|key| object.contains_key(*key))
+                && object.keys().all(|key| {
+                    [
+                        "schema_version",
+                        "js_sha256",
+                        "wasm_sha256",
+                        "source_sha256",
+                    ]
+                    .contains(&key.as_str())
+                })
         })
         .ok_or_else(|| RuntimeError::invalid("UI artifact manifest fields differ"))?;
     let digest = |name| {
@@ -193,9 +204,15 @@ pub fn read_verified_paths(
     {
         return Err(RuntimeError::invalid("UI artifact ABI pair invalid"));
     }
+    let source_sha256 = if object.contains_key("source_sha256") {
+        Some(digest("source_sha256")?)
+    } else {
+        None
+    };
     let result = VerifiedAssets {
         javascript,
         wasm,
+        source_sha256,
         root: files.root_identity(),
         directories: files.directory_identities()?,
         images,
