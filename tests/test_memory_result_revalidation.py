@@ -115,12 +115,14 @@ class RevalidationTests(RevalidationFixture):
         self.assertEqual(1,len(result['promotion']['promoted']))
 
     def test_persistent_index_failure_rolls_back_predecessor_and_can_replay(self):
-        self.change_source();reference=self.reference();replace=self.brain.os.replace
+        self.change_source();reference=self.reference();write=self.brain._PublicationFiles.write
         original=self.old_chunk.read_bytes()
-        def failed(source,destination,**kwargs):
-            if Path(destination).name=='INDEX.md':raise PermissionError('index remains unavailable')
-            return replace(source,destination,**kwargs)
-        with mock.patch.object(self.brain.os,'replace',side_effect=failed):
+        # The publication's own write, which Windows does through the NT
+        # backend: os.replace failed the index on POSIX only.
+        def failed(files,relative,content,expected):
+            if Path(relative).name=='INDEX.md':raise PermissionError('index remains unavailable')
+            return write(files,relative,content,expected)
+        with mock.patch.object(self.brain._PublicationFiles,'write',autospec=True,side_effect=failed):
             with self.assertRaises(PermissionError):self.save(self.b,'persistent-index',reference)
         self.assertEqual(original,self.old_chunk.read_bytes())
         self.assertEqual(1,sum(m['status']=='active' for m,_ in self.bodies().values()))
@@ -325,6 +327,7 @@ class RevalidationTests(RevalidationFixture):
         self.assertEqual(before,after)
 
 
+from tests.hook_shell import BASH
 from tests.test_memory_native_capture import NativeCaptureFixture
 
 
@@ -340,7 +343,10 @@ class NativeReferenceTests(NativeCaptureFixture):
         self.assertEqual(0,found.returncode,found.stderr)
         notice=json.loads(found.stdout)['memory_review']
         command=notice.split('run ',1)[1].split('. Read',1)[0]
-        result=subprocess.run(command,cwd=subdirectory,env=self.env,shell=True,capture_output=True,text=True,timeout=10)
+        # Quoted for bash, which the hosts run it with - Git Bash on Windows;
+        # cmd.exe, which shell=True starts there, kept the quotes in the path.
+        if BASH is None:self.skipTest('no bash to run the command with')
+        result=subprocess.run([BASH,'-c',command],cwd=subdirectory,env=self.env,capture_output=True,text=True,timeout=10)
         self.assertEqual(0,result.returncode,result.stderr)
         self.assertEqual('unavailable',json.loads(result.stdout)['state'])
 
@@ -794,7 +800,7 @@ class SemanticReviewTests(RevalidationFixture):
 
     def test_complete_full_source_packet_does_not_change_authority(self):
         _,reply=self.stage();before=self.authority();packet=self.export(reply)
-        self.assertEqual(before,self.authority());self.assertEqual(self.source.read_text(),packet['sources'][0]['text'])
+        self.assertEqual(before,self.authority());self.assertEqual(self.source.read_bytes().decode('utf-8'),packet['sources'][0]['text'])
         self.assertEqual(self.record_id,packet['records'][0]['record_id'])
         self.assertEqual(1,len(packet['records'][0]['old_memories']))
 
@@ -883,7 +889,7 @@ class SemanticReviewTests(RevalidationFixture):
         _,reply=self.stage();packet=self.export(reply);before=self.authority()
         self.change_source()
         with self.assertRaises(self.brain.BrainError):self.publish(reply,packet)
-        self.source.write_text(packet['sources'][0]['text'])
+        self.source.write_bytes(packet['sources'][0]['text'].encode('utf-8'))
         original=self.old_chunk.read_bytes();self.old_chunk.write_bytes(original+b'Changed body.\n')
         with self.assertRaisesRegex(self.brain.BrainError,'frontier-changed'):self.publish(reply,packet)
         self.old_chunk.write_bytes(original)
