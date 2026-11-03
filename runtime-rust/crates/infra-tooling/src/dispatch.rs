@@ -231,16 +231,13 @@ pub fn execute(operation: &str, request: &Value) -> Result<Value> {
                 request["max_text_bytes"].as_u64().unwrap_or(16384) as usize,
             )?)?)
         }
+        // The launch an installation of `root` commits: portable, or bound to
+        // the given engine on native Windows (see crate::launch).
         "hook-handler" => {
             let home = infra_core::fs::absolute(&root)?;
             let engine = path(request, "engine", None)?;
-            crate::attach::hook_handler(
-                &engine,
-                &home,
-                string(request, "host")?,
-                string(request, "role")?,
-                cfg!(windows),
-            )
+            crate::attach::HookLaunch::installed(&home, &engine, cfg!(windows))
+                .handler(string(request, "host")?, string(request, "role")?)
         }
         "native-handler" => {
             let engine = path(request, "engine", None)?;

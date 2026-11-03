@@ -2377,9 +2377,7 @@ fn native_release_payload(path: &str, bytes: &[u8], target: &Path) -> Result<Vec
     crate::attach::normalize_hook_configuration(
         bytes,
         host,
-        target,
-        &target.join(ENGINE),
-        cfg!(windows),
+        &crate::attach::HookLaunch::installed(target, &target.join(ENGINE), cfg!(windows)),
     )
 }
 

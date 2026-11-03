@@ -2,7 +2,7 @@
   "schema_version": 1,
   "edition": "Laravel",
   "release": "2.0.0",
-  "policy_digest": "c72fcb9cb9c7acc72646b29c71936ea7d8e6f6e5c4b1d688a94ca2ccbca3ccf2",
+  "policy_digest": "6a222faca7966e90415cdd1acab991304c23fc32b3e8e08a9fcbba074f59212d",
   "agent_models": {
     "api-designer-agent": "sonnet",
     "architect-agent": "opus",
@@ -236,7 +236,7 @@
     ".claude/settings.json": "cb7caad8cc389faf970b781c82b89b4ccedcdc848b1a761492dc2a426d864424",
     ".claude/skills/SKILL FLOW.md": "cb232196c83923028fffeb49bc88433001b1c68d009664ec8b99cf44517186f6",
     ".claude/skills/skill-creator/SKILL.md": "2bbb24b3a0c0d398734eafe15daeb6e5fbbe7dec3394b66eb3d9b046182a886e",
-    ".codex/config.toml": "2f4d82d9894b1cfefb545c9103f5d162babfca781afda8205ef51a8f213e4bdd",
+    ".codex/config.toml": "2299ee0820b37029c5b28fa64a341a39e0d1c30f1adc403c69ca0e19b7b0edc1",
     ".codex/hooks.json": "515418220f54447b03098b8c1d032924e46d8a33a521ec3c5adb53b710a15789",
     ".cursor/hooks.json": "2a1ffd89930a41a0772cc8850803bd5cab158c28c54dd837c6c93bbc435c2701",
     ".cursor/rules/accelerator-workflow.mdc": "af7986b75156c4a6fe58d69bedcab24db6a3299a9f232ccc3daac2827feae19c",

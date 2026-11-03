@@ -208,13 +208,12 @@ pub fn handler(root: &Path, host: &str, role: &str) -> Result<Value> {
     if !hooks::ROLES.contains(&role) && !(host == "claude" && role == "notification") {
         return Err(RuntimeError::invalid("Unknown native hook role"));
     }
-    infra_tooling::attach::hook_handler(
-        &hooks::installed_engine(root),
+    infra_tooling::attach::HookLaunch::installed(
         root,
-        host,
-        role,
+        &hooks::installed_engine(root),
         cfg!(windows),
     )
+    .handler(host, role)
 }
 /// Shell-form callers use this only for hosts whose canonical helper has no args.
 pub fn command(root: &Path, host: &str, role: &str) -> Result<String> {
@@ -452,7 +451,9 @@ impl NativeGateServices for Gate {
             _ => unreachable!(),
         };
         if owned.contains_key(mcp) {
-            if host == "codex" {
+            // The registration an installation of the final target writes.
+            let expected = infra_tooling::mcp_config::entry(host, &delivery)?;
+            let good = if host == "codex" {
                 let data = fs::read_text(&target.join(mcp))
                     .ok()
                     .and_then(|text| text.parse::<toml::Value>().ok());
@@ -460,50 +461,32 @@ impl NativeGateServices for Gate {
                     .as_ref()
                     .and_then(|value| value.get("mcp_servers"))
                     .and_then(|value| value.get("harness_memory"));
-                let good = entry
+                entry
                     .and_then(|entry| entry.get("command"))
                     .and_then(toml::Value::as_str)
-                    .is_some_and(|command| {
-                        Path::new(command) == hooks::installed_engine(&delivery)
-                    })
+                    .is_some_and(|command| expected["command"] == command)
                     && entry
                         .and_then(|entry| entry.get("args"))
                         .and_then(toml::Value::as_array)
                         .is_some_and(|args| {
                             args.iter()
-                                .filter_map(toml::Value::as_str)
+                                .map(|arg| arg.as_str().map(Value::from).unwrap_or(Value::Null))
                                 .collect::<Vec<_>>()
-                                == vec![
-                                    "mcp",
-                                    "--root",
-                                    delivery.to_str().unwrap_or(""),
-                                    "--host",
-                                    host,
-                                ]
-                        });
-                if !good {
-                    errors.push(format!(
-                        "{mcp}: portable Memory MCP registration is missing or changed"
-                    ));
-                }
+                                == expected["args"].as_array().cloned().unwrap_or_default()
+                        })
             } else {
-                let data = fs::read_text(&target.join(mcp))
+                fs::read_text(&target.join(mcp))
                     .ok()
-                    .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-                let entry = data
-                    .as_ref()
-                    .map(|value| &value["mcpServers"]["harness-memory"]);
-                let expected_args = serde_json::json!(["mcp", "--root", delivery, "--host", host]);
-                let good = entry.is_some_and(|entry| {
-                    entry["command"].as_str().is_some_and(|command| {
-                        Path::new(command) == hooks::installed_engine(&delivery)
-                    }) && entry["args"] == expected_args
-                });
-                if !good {
-                    errors.push(format!(
-                        "{mcp}: portable Memory MCP registration is missing or changed"
-                    ));
-                }
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .is_some_and(|value| {
+                        let entry = &value["mcpServers"]["harness-memory"];
+                        entry["command"] == expected["command"] && entry["args"] == expected["args"]
+                    })
+            };
+            if !good {
+                errors.push(format!(
+                    "{mcp}: portable Memory MCP registration is missing or changed"
+                ));
             }
         }
         Ok(errors)

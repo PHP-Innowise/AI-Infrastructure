@@ -179,9 +179,16 @@ pub fn strict_json(bytes: &[u8]) -> Result<Value> {
     }
     Ok(value)
 }
+/// The registration an installation or generation writes for `root`: portable
+/// (see `crate::launch`), or bound to the absolute engine on native Windows.
 pub fn entry(host: &str, root: &Path) -> Result<Value> {
     host_path(host)?;
     let root = long_path(&safe::absolute(root)?)?;
+    if crate::launch::enabled()
+        && let Ok(Some(prefix)) = crate::launch::prefix(&root)
+    {
+        return crate::launch::mcp_entry(host, &prefix);
+    }
     Ok(
         json!({"type":"stdio","command":root.join(ENGINE),"args":["mcp","--root",root,"--host",host]}),
     )
@@ -190,6 +197,9 @@ fn normalized(value: &str) -> String {
     value.replace('\\', "/").to_lowercase()
 }
 fn launcher(command: &str, args: &[Value], host: &str) -> bool {
+    if crate::launch::owned_mcp(command, args, host) {
+        return true;
+    }
     // Historical Python signatures are recognized as migration ownership data;
     // they are never executed or returned as an active server configuration.
     let legacy = match command {
@@ -261,14 +271,20 @@ pub fn owned(value: &Value, host: &str) -> bool {
             .is_some_and(|(command, args)| launcher(command, args, host))
 }
 fn owned_block(block: &str) -> Result<bool> {
-    const SOURCE_NOTE: &str = "# Source template: native install/generation binds the final absolute executable and root.";
+    // The earlier wording is accepted so an older shipped template still merges.
+    const SOURCE_NOTES: [&str; 2] = [
+        "# Source template: installation writes the portable launch (a bound one on native Windows).",
+        "# Source template: native install/generation binds the final absolute executable and root.",
+    ];
     let mut lines = block
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect::<Vec<_>>();
     // This exact source-only annotation belongs to the shipped relative
     // template. Other comments and edits still fail closed below.
-    let source_template = lines.first().copied() == Some(SOURCE_NOTE);
+    let source_template = lines
+        .first()
+        .is_some_and(|line| SOURCE_NOTES.contains(line));
     if source_template {
         lines.remove(0);
     }
@@ -659,7 +675,7 @@ mod native_source_template_tests {
             std::process::id()
         ));
         let source = include_str!("../../../../PHP Core/.codex/config.toml");
-        let note = "# Source template: native install/generation binds the final absolute executable and root.";
+        let note = "# Source template: installation writes the portable launch (a bound one on native Windows).";
         assert!(
             source.contains(note),
             "exercise the actual annotated source"

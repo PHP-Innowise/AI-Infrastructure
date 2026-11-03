@@ -2,7 +2,7 @@
   "schema_version": 1,
   "edition": "Cms/wordpress",
   "release": "2.0.0",
-  "policy_digest": "0e3a4fc2da31eadade8a2f34023fed7a415a881e152626bbdd767fdd546ebf44",
+  "policy_digest": "20558f974334931457b3b6055792afb8b9614b731c2823e7bc4025407af08d21",
   "agent_models": {
     "api-designer-agent": "sonnet",
     "architect-agent": "sonnet",
@@ -240,7 +240,7 @@
     ".claude/settings.json": "e12ae494e1ead97e88bf518bf90ef22e5eee9b7e4a8660894be0d29f6fb58c0a",
     ".claude/skills/SKILL FLOW.md": "4c48bccdd0dc852fe62b5b2a7ce1ae5d627702416e432a2cae687f2a71a5ce96",
     ".claude/skills/skill-creator/SKILL.md": "2bbb24b3a0c0d398734eafe15daeb6e5fbbe7dec3394b66eb3d9b046182a886e",
-    ".codex/config.toml": "8db027a2fb5a337d5fb10d68cc843ee371a089abe1e150754aefef9e96fb84d7",
+    ".codex/config.toml": "8a2437e8abacb73786ddee91bfb27e808b7408dfeca107fa5d80f778f9078634",
     ".codex/hooks.json": "515418220f54447b03098b8c1d032924e46d8a33a521ec3c5adb53b710a15789",
     ".cursor/hooks.json": "2a1ffd89930a41a0772cc8850803bd5cab158c28c54dd837c6c93bbc435c2701",
     ".cursor/rules/accelerator-workflow.mdc": "b8f7fc57fc48d91eff7efc38bd37722456691dd1b52fe34023cd0c675ece9d83",

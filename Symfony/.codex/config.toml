@@ -27,7 +27,7 @@ enabled = false
 
 # Project memory is registered automatically; see memory-bank/MCP.md.
 # BEGIN HARNESS MEMORY MCP
-# Source template: native install/generation binds the final absolute executable and root.
+# Source template: installation writes the portable launch (a bound one on native Windows).
 [mcp_servers.harness_memory]
 command = "./memory-bank/bin/infra-engine"
 args = ["mcp", "--root", ".", "--host", "codex"]

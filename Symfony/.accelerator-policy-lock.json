@@ -2,7 +2,7 @@
   "schema_version": 1,
   "edition": "Symfony",
   "release": "2.0.0",
-  "policy_digest": "76466810a394e658f8c1a2735e5bcd0aaf95e95774bd01c8c45dec6f253dab57",
+  "policy_digest": "3cd4dac691bbbc844a5a01ca4f60ad3d7faf0370029cf535b33400060496e44d",
   "agent_models": {
     "api-designer-agent": "sonnet",
     "api-platform-designer-agent": "sonnet",
@@ -248,7 +248,7 @@
     ".claude/settings.json": "b4f80eaa59c396e57ca6d54fcccc70698e5a7ae92ee4ac64f3b5efef8e63e57d",
     ".claude/skills/SKILL FLOW.md": "866fd4a6a0ebeafb7033ac06ff2209bcfc328621458d4c00c935605a9d268813",
     ".claude/skills/skill-creator/SKILL.md": "c43aae4aefa340dd0089b43e92e81afa0f64c048ba45123d44b13372ca976ae8",
-    ".codex/config.toml": "e49af45b49bd1fb27db7c05d2bf570ec0b754bb843b0ea58ba25aa23a4d76b76",
+    ".codex/config.toml": "0ad0f0bc8b830ffc0bd4152ee00dbb781633c37430656e573abb63443aca21ac",
     ".codex/hooks.json": "515418220f54447b03098b8c1d032924e46d8a33a521ec3c5adb53b710a15789",
     ".cursor/hooks.json": "2a1ffd89930a41a0772cc8850803bd5cab158c28c54dd837c6c93bbc435c2701",
     ".cursor/rules/accelerator-workflow.mdc": "7d0125b363af86456164901e8f3df2f01fa3cc4941200045e1aa5f070a45df2c",

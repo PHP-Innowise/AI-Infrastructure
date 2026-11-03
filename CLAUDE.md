@@ -97,9 +97,16 @@ infra-engine attach run --project /path/to/project --tool codex
 ```
 
 Review a dry-run's collisions before installation. Source hook and MCP
-configuration files are templates: the native installer or generator binds the
-selected executable and final target root before they are used. Do not replace
-that materialization with shell ancestor searches or a Python bootstrap.
+configuration files are templates. Installation and generation commit a
+portable form that names no path of the installing machine: the host names the
+checkout (`$CLAUDE_PROJECT_DIR`, Cursor's project root and `${workspaceFolder}`,
+Git's top level for Codex) and the committed launchers in `.claude/hooks/`,
+`.cursor/hooks/` and `.codex/hooks/` run that checkout's ignored engine, or the
+main checkout's in a linked worktree (`runtime-rust/crates/infra-tooling/src/launch.rs`).
+A teammate's clone needs only `infra-engine install --merge-existing`, which
+adds the engine. Native Windows installations and attached overlays bind the
+absolute executable and root. Do not replace either with a shell ancestor
+search or a Python bootstrap.
 
 ### Installed memory and native applications
 

@@ -769,7 +769,7 @@ fn native_mcp_source_templates_materialize_but_edited_managed_blocks_are_refused
     assert!(materialized.contains(&serde_json::to_string(&target.join(ENGINE_PATH)).unwrap()));
     let source = String::from_utf8(source).unwrap();
     for edited in [
-        source.replace("# Source template: native install/generation binds the final absolute executable and root.",
+        source.replace("# Source template: installation writes the portable launch (a bound one on native Windows).",
             "# A client-edited managed annotation"),
         source.replace("./memory-bank/bin/infra-engine", "./client-server"),
     ] {
@@ -1520,13 +1520,12 @@ fn pristine_schema_one_sync_installs_native_engine_rewires_hooks_and_preserves_a
         ("PreToolUse", "bash-validator"),
         ("UserPromptSubmit", "working-memory-read"),
     ] {
-        let expected = infra_tooling::attach::hook_handler(
-            &installed,
+        let expected = infra_tooling::attach::HookLaunch::installed(
             &fixture.target,
-            "claude",
-            role,
+            &installed,
             cfg!(windows),
         )
+        .handler("claude", role)
         .unwrap();
         assert!(
             settings["hooks"][event]
@@ -1547,7 +1546,21 @@ fn pristine_schema_one_sync_installs_native_engine_rewires_hooks_and_preserves_a
             "native {role} handler is missing"
         );
     }
-    assert!(!settings["hooks"].to_string().contains(".sh"));
+    // Only native launches remain. On POSIX they are the generated exec-only
+    // launchers named through $CLAUDE_PROJECT_DIR, not the legacy scripts.
+    if cfg!(windows) {
+        assert!(!settings["hooks"].to_string().contains(".sh"));
+    } else {
+        assert!(
+            !settings["hooks"]
+                .to_string()
+                .contains("${CLAUDE_PROJECT_DIR}")
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.target.join(".claude/hooks/bash-validator.sh")).unwrap(),
+            infra_cli::hooks::shim("claude", "bash-validator", false).unwrap()
+        );
+    }
     assert!(
         !settings["hooks"]
             .to_string()

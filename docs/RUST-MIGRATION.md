@@ -30,8 +30,11 @@ There is no Python runtime fallback. The native artifact must be explicitly
 built or supplied before installation. Installer plans capture actual source
 bytes, modes and identities; reviewed plans publish under conflict checks.
 Generated projects receive the engine, native contract, schemas and a bounded
-declarative hook policy. Hook and MCP commands are materialized against the
-final target root, including when generation uses a temporary staging root.
+declarative hook policy. Hook and MCP commands are materialized for the final
+target, including when generation uses a temporary staging root: on POSIX in a
+portable form that names no machine path, so every clone of the target works
+once its own engine is installed; on native Windows bound to the absolute engine
+and root ([native host compatibility](NATIVE-HOST-COMPATIBILITY.md)).
 
 Project Brain Markdown/JSON authority and Memory Bank chunks stay authoritative;
 SQLite's indexed knowledge is rebuildable. The database also holds unfinished

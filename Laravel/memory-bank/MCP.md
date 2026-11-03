@@ -34,12 +34,18 @@ other servers and settings. SQLite FTS5 is part of the native runtime.
   table, parsed and merged natively.
 - Cursor: `.cursor/mcp.json` contains one managed memory server.
 
-Each entry invokes the final absolute `memory-bank/bin/infra-engine` path
-(`infra-engine.exe` on Windows) with `mcp --root FINAL_PROJECT --host HOST`.
-Generation can stage elsewhere while binding the eventual delivery root.
-Source templates are materialized before use. Moving an installation requires
-native re-registration for its new root; there is no ancestor-project fallback
-or interpreter bootstrap. Registration writes only project configuration.
+On POSIX each entry names no path of the installing machine: a small `sh -c`
+launcher finds this checkout's `memory-bank/bin/infra-engine` through
+`CLAUDE_PROJECT_DIR` (set by Claude Code in the server's environment),
+Cursor's `${workspaceFolder}` or Git's top level (Codex), and runs
+`mcp --root CHECKOUT --host HOST`; a linked worktree uses its main checkout's
+engine. Every clone works once its own engine is installed. On native Windows
+each entry invokes the absolute `memory-bank/bin/infra-engine.exe` with
+`mcp --root FINAL_PROJECT --host HOST`, and moving the installation requires
+native re-registration for its new root. Generation can stage elsewhere while
+registering the eventual delivery root. Source templates are materialized
+before use; there is no ancestor-project fallback or interpreter bootstrap.
+Registration writes only project configuration.
 
 A foreign server using the managed memory name, malformed configuration,
 symlinks and edited managed Codex blocks block registration rather than

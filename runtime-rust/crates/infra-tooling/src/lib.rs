@@ -17,6 +17,7 @@ pub mod changelog;
 pub mod checker;
 pub mod collect;
 pub mod kit;
+pub mod launch;
 pub mod mcp_config;
 pub mod php;
 pub mod process;

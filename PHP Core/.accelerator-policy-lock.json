@@ -2,7 +2,7 @@
   "schema_version": 1,
   "edition": "PHP Core",
   "release": "2.0.0",
-  "policy_digest": "88c6c7bcee1f2984bde32788a78724b6deea060e602323cc7a4f178a2c205a73",
+  "policy_digest": "ddba953de2114e20c1ee0f42e8e9197977220be38d7c8cce99e1be622f2d97c5",
   "agent_models": {
     "api-designer-agent": "sonnet",
     "architect-agent": "opus",
@@ -200,7 +200,7 @@
     ".claude/settings.json": "378c2922a4861e1fcfda4d4fe5aaaf73a2c44256d06d61efc10ede789fbd6e03",
     ".claude/skills/SKILL FLOW.md": "886a5eeebd80ce356d32442f137795f0bd73b564ff4e4c1c28e054846e86abf5",
     ".claude/skills/skill-creator/SKILL.md": "2bbb24b3a0c0d398734eafe15daeb6e5fbbe7dec3394b66eb3d9b046182a886e",
-    ".codex/config.toml": "2f4d82d9894b1cfefb545c9103f5d162babfca781afda8205ef51a8f213e4bdd",
+    ".codex/config.toml": "2299ee0820b37029c5b28fa64a341a39e0d1c30f1adc403c69ca0e19b7b0edc1",
     ".codex/hooks.json": "515418220f54447b03098b8c1d032924e46d8a33a521ec3c5adb53b710a15789",
     ".cursor/hooks.json": "2a1ffd89930a41a0772cc8850803bd5cab158c28c54dd837c6c93bbc435c2701",
     ".cursor/rules/accelerator-workflow.mdc": "ccd9981be92179bf32946b0110c5004d8af404e420ba868dbbf72d5586410cc4",

@@ -19,8 +19,10 @@ either of those, see the [Open-Source Kit](open-source-kit/README.md).
 
 - Clone or check out the accelerator repository separately from the target.
 - Use the verified native `infra-engine` release for this platform
-  (`infra-engine.exe` on Windows). Installation binds each hook and MCP
-  handler to the final native executable and project root.
+  (`infra-engine.exe` on Windows). The engine is copied to
+  `memory-bank/bin/` and ignored by Git; the hook and MCP wiring the project
+  commits names no path of your machine (see
+  [Teammates and Other Checkouts](#teammates-and-other-checkouts)).
 - Put the target project in a clean, recoverable Git state.
 - Back up existing AI configuration, policies, Memory Bank, and Project Brain
   data.
@@ -232,6 +234,34 @@ Also run the target project's normal Composer validation, tests, formatter,
 static analysis, and framework checks. Confirm that
 `memory-bank/local/context.db` is ignored and that the selected AI client loads
 its skills and hooks.
+
+## Teammates and Other Checkouts
+
+Commit the installation like any other project files. The wiring names no
+path of the machine it was installed on:
+
+- Claude Code runs `"$CLAUDE_PROJECT_DIR"/.claude/hooks/<role>.sh`;
+- Cursor runs `.cursor/hooks/<role>.sh` from the project root;
+- Codex resolves `.codex/hooks/<role>.sh` from `git rev-parse --show-toplevel`,
+  so a session started in a subdirectory finds it;
+- the memory MCP entries start a small launcher that finds the engine the same
+  way.
+
+Each launcher runs `memory-bank/bin/infra-engine` of its checkout. A linked
+Git worktree has no engine of its own (the engine is ignored by Git) and uses
+the one installed in its repository's main checkout.
+
+A fresh clone has no engine until it is installed there. Until then the shell
+guard refuses every command with an install hint, and the memory hooks pass
+the turn. The teammate runs, from their own accelerator clone:
+
+```bash
+./infra-engine install --edition "PHP Core" --target /path/to/their/clone --merge-existing
+```
+
+The committed files are reported unchanged and only the engine is added, so
+the install leaves no diff to commit. Native Windows installations still bind
+the absolute engine and root of the machine that installed them.
 
 ## Infrastructure-Creator: Generate a Custom Installation
 

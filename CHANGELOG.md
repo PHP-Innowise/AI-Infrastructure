@@ -41,12 +41,27 @@ edition's own files remain in that edition's changelog.
   `project-brain/config/runtime.json` made `context-continuity` exit 2, which
   refused every prompt and every stop, also with `stop_hook_active`; hook input
   over 4 MiB did the same. The configuration error now names the file.
-- Memory hooks skip a session outside the project their wiring is bound to
-  (for Claude Code, the directory the session started in; otherwise `cwd` or
-  Cursor's `workspace_roots`). Installed wiring names the absolute checkout it
-  was installed in, so a second clone or a copy on the same machine read and
-  recorded the original checkout's memory. They now say so instead and record
-  nothing; the shell guard still applies.
+- Installed and generated hook and MCP wiring is portable on POSIX. The
+  installer wrote the installing machine's absolute engine and root into the
+  committed `.claude/settings.json`, `.codex/hooks.json`, `.cursor/hooks.json`,
+  `.mcp.json`, `.cursor/mcp.json` and `.codex/config.toml`, while the engine
+  itself is ignored by Git: in a teammate's clone no hook ran (exit 127, which
+  hosts treat as a non-blocking error, so the shell guard was off), their
+  install collided on the wiring and `--sync` refused the clone. The host now
+  names the checkout (`$CLAUDE_PROJECT_DIR`, Cursor's project root and
+  `${workspaceFolder}`, Git's top level for Codex through `sh -c`, whatever
+  the login shell) and the committed `.claude|.cursor|.codex/hooks/*.sh`
+  launchers run that checkout's engine, or the main checkout's in a linked
+  worktree. Without an engine the shell guard refuses with an install hint
+  and the memory roles pass the turn. A teammate's `install --merge-existing`
+  only adds the engine and leaves no diff. The dispatcher and the generator
+  gate accept the portable form, `repo hook-handler` returns it, and native
+  Windows installations keep the bound launch.
+- Memory hooks skip a session outside the project their (older, absolute)
+  wiring is bound to (for Claude Code, the directory the session started in;
+  otherwise `cwd` or Cursor's `workspace_roots`): a second clone or a copy on
+  the same machine read and recorded the original checkout's memory. They now
+  say so instead and record nothing; the shell guard still applies.
 
 - Move executable project logic into the Rust workspace and one native
   `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation

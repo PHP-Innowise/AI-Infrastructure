@@ -534,13 +534,44 @@ pub fn hook_handler(
         windows,
     )
 }
-fn rewrite_handler(
-    handler: &mut Value,
-    host: &str,
-    home: &Path,
-    engine: &Path,
-    windows: bool,
-) -> Result<()> {
+/// How hooks are launched. Attached overlays and native Windows installations
+/// bind one checkout's absolute engine and root; installed and generated
+/// projects elsewhere commit the portable form of `crate::launch`.
+#[derive(Clone, Debug)]
+pub enum HookLaunch {
+    Bound {
+        engine: PathBuf,
+        home: PathBuf,
+        windows: bool,
+    },
+    Portable {
+        prefix: String,
+    },
+}
+impl HookLaunch {
+    /// The launch an installation or generation writes into `home`.
+    pub fn installed(home: &Path, engine: &Path, windows: bool) -> Self {
+        if !windows && let Ok(Some(prefix)) = crate::launch::prefix(home) {
+            return Self::Portable { prefix };
+        }
+        Self::Bound {
+            engine: engine.into(),
+            home: home.into(),
+            windows,
+        }
+    }
+    pub fn handler(&self, host: &str, role: &str) -> Result<Value> {
+        match self {
+            Self::Bound {
+                engine,
+                home,
+                windows,
+            } => hook_handler(engine, home, host, role, *windows),
+            Self::Portable { prefix } => crate::launch::hook_handler(host, role, prefix),
+        }
+    }
+}
+fn rewrite_handler(handler: &mut Value, host: &str, launch: &HookLaunch) -> Result<()> {
     if !handler.is_object()
         || handler.get("type").is_some_and(|value| value != "command")
         || host == "claude" && handler["type"] != "command"
@@ -551,7 +582,7 @@ fn rewrite_handler(
     }
     let mut known = None;
     for role in native_roles(host) {
-        let expected = hook_handler(engine, home, host, role, windows)?;
+        let expected = launch.handler(host, role)?;
         if same_launch(handler, &expected) || source_hook_identity(handler, host, role).is_some() {
             known = Some(role.to_string());
             break;
@@ -568,7 +599,7 @@ fn rewrite_handler(
         }
         role
     };
-    let launch = hook_handler(engine, home, host, &role, windows)?;
+    let launch = launch.handler(host, &role)?;
     let handler = handler
         .as_object_mut()
         .ok_or_else(|| RuntimeError::invalid("Hook handler must be an object"))?;
@@ -582,13 +613,7 @@ fn rewrite_handler(
     }
     Ok(())
 }
-fn rewrite_hook_groups(
-    groups: &mut Value,
-    host: &str,
-    home: &Path,
-    engine: &Path,
-    windows: bool,
-) -> Result<()> {
+fn rewrite_hook_groups(groups: &mut Value, host: &str, launch: &HookLaunch) -> Result<()> {
     let object = groups
         .as_object_mut()
         .ok_or_else(|| RuntimeError::invalid("Host hooks must be an object"))?;
@@ -599,10 +624,10 @@ fn rewrite_hook_groups(
         {
             if let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) {
                 for handler in handlers {
-                    rewrite_handler(handler, host, home, engine, windows)?;
+                    rewrite_handler(handler, host, launch)?;
                 }
             } else if group["command"].is_string() {
-                rewrite_handler(group, host, home, engine, windows)?;
+                rewrite_handler(group, host, launch)?;
             }
         }
     }
@@ -612,15 +637,13 @@ fn rewrite_hook_groups(
 pub fn normalize_hook_configuration(
     bytes: &[u8],
     host: &str,
-    home: &Path,
-    engine: &Path,
-    windows: bool,
+    launch: &HookLaunch,
 ) -> Result<Vec<u8>> {
     let mut value: Value = serde_json::from_slice(bytes)?;
     let hooks = value
         .get_mut("hooks")
         .ok_or_else(|| RuntimeError::invalid("Release host configuration has no hook map"))?;
-    rewrite_hook_groups(hooks, host, home, engine, windows)?;
+    rewrite_hook_groups(hooks, host, launch)?;
     common::json_bytes(&value)
 }
 fn hooks(home: &Path, host: &str, engine: &Path) -> Result<Value> {
@@ -633,7 +656,12 @@ fn hooks(home: &Path, host: &str, engine: &Path) -> Result<Value> {
     });
     let value = common::read_json(&path)?;
     let mut hooks = value["hooks"].clone();
-    rewrite_hook_groups(&mut hooks, host, home, engine, cfg!(windows))?;
+    let launch = HookLaunch::Bound {
+        engine: engine.into(),
+        home: home.into(),
+        windows: cfg!(windows),
+    };
+    rewrite_hook_groups(&mut hooks, host, &launch)?;
     Ok(hooks)
 }
 fn validate_attach_operation(operation: &str) -> Result<()> {
@@ -1352,8 +1380,11 @@ pub fn installed_hook_trust_selection(
     };
     let expected_engine = project.join(binary);
     let source = safe::read_regular(&home.join(".codex/hooks.json"))?;
-    let materialized =
-        normalize_hook_configuration(&source, "codex", &project, &expected_engine, cfg!(windows))?;
+    let materialized = normalize_hook_configuration(
+        &source,
+        "codex",
+        &HookLaunch::installed(&project, &expected_engine, cfg!(windows)),
+    )?;
     let shipped = launches(&serde_json::from_slice::<Value>(&materialized)?)?;
     let mut files = PublicationFiles::new(&project)?;
     let local = files
@@ -1625,6 +1656,19 @@ pub fn classify_native_hook(
     } else {
         "memory-bank/bin/infra-engine"
     });
+    if let HookLaunch::Portable { prefix } = HookLaunch::installed(&home, &engine, cfg!(windows)) {
+        for role in &roles {
+            if same_launch(handler, &crate::launch::hook_handler(host, role, &prefix)?) {
+                return Ok(Some(NativeHookIdentity {
+                    host: host.into(),
+                    role: (*role).into(),
+                    engine: "memory-bank/bin/infra-engine".into(),
+                    root: ".".into(),
+                    source_template: false,
+                }));
+            }
+        }
+    }
     for role in roles {
         let expected = hook_handler(&engine, &home, host, role, cfg!(windows))?;
         if same_launch(handler, &expected) {

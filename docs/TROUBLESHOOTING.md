@@ -148,6 +148,35 @@ quiet hook is not proof of safety.
 
 Do not add fake Codex command or one-skill agent trees.
 
+## A Clone Refuses Every Command, or Memory Is Bound Elsewhere
+
+### Symptom
+
+In a fresh clone every shell command is refused with `BLOCKED: no accelerator
+engine is installed for <checkout>`, and the session banner says the hooks and
+memory are off. Or, in a project installed before the portable wiring, a
+session prints `Memory not consulted: this session runs in <dir>, outside the
+project these hooks are bound to (<project>)`.
+
+### Cause
+
+The engine (`memory-bank/bin/infra-engine`) is ignored by Git, so a clone has
+none until it is installed there; the committed launchers then refuse shell
+commands rather than let them through unchecked. Older installations wrote the
+absolute path of the installing machine's engine and root into the hook and
+MCP configuration: elsewhere that path is absent, and a second checkout on the
+same machine ran the first checkout's engine, whose memory hooks now skip a
+session outside it.
+
+### Recover
+
+Install the accelerator in the checkout you work in (dry run first, as in
+[install/README.md](../install/README.md#teammates-and-other-checkouts)): with
+portable wiring it only adds the engine and leaves no diff. An older
+installation becomes portable through `--sync --update-tracked` (add
+`--rewire-codex` when Codex hooks are installed); commit the rewritten wiring
+once.
+
 ## Native Engine or SQLite FTS5 Is Unavailable
 
 Use the platform's installed `memory-bank/bin/infra-engine` (`.exe` on Windows). Verify the native release and its resources were installed together, then run `memory-bank/bin/infra-engine capabilities --json` and `memory-bank/bin/infra-engine memory index` during the validation phase. A runtime error remains an unavailable result; reinstall through the native installer rather than introducing an interpreter fallback.

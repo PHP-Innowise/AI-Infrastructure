@@ -435,8 +435,25 @@ pub fn shim(host: &str, role: &str, windows: bool) -> Result<String> {
     } else {
         "infra-engine"
     };
+    // The engine is ignored by Git, so a fresh clone has none until it is
+    // installed there: the shell guard then refuses rather than letting every
+    // command through, and the other roles pass the turn. Hosts differ only in
+    // the literal host argument, which the tool mirrors substitute.
+    let install = "From an accelerator clone run: infra-engine install --edition <edition> --target <this checkout> --merge-existing";
+    let missing = match role {
+        "bash-validator" => format!(
+            "  echo \"BLOCKED: no accelerator engine is installed for $TOOLING_ROOT. {install}\" >&2\n  exit 2\n"
+        ),
+        // A continuation every host accepts on its prompt event.
+        "working-memory-read" => "  echo '{\"continue\": true}'\n  exit 0\n".into(),
+        "local-context" => format!(
+            "  echo \"No accelerator engine is installed for $TOOLING_ROOT: its hooks and memory are off. {install}\"\n  exit 0\n"
+        ),
+        _ => "  exit 0\n".into(),
+    };
     Ok(format!(
-        "#!/bin/sh\n# Compatibility entrypoint; the complete hook implementation is Rust.\nTOOLING_ROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")/../..\" && pwd -P) || exit 127\nexec \"$TOOLING_ROOT/memory-bank/bin/{binary}\" hook {host} {role} --root \"$TOOLING_ROOT\" \"$@\"\n"
+        "#!/bin/sh\n# Launcher; the complete hook implementation is Rust. It runs the engine of\n# this checkout or, in a linked worktree, the one of its main checkout.\nTOOLING_ROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")/../..\" && pwd -P) || exit 127\nENGINE=$TOOLING_ROOT/memory-bank/bin/{binary}\n{fallback}if [ ! -x \"$ENGINE\" ]; then\n{missing}fi\nexec \"$ENGINE\" hook {host} {role} --root \"$TOOLING_ROOT\" \"$@\"\n",
+        fallback = infra_tooling::launch::worktree_fallback("TOOLING_ROOT", "ENGINE", binary)
     ))
 }
 /// Local desktop notification transport; no shell or hook-input interpolation.

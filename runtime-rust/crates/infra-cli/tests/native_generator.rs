@@ -700,13 +700,18 @@ fn exercise_generated_pipeline(
                 .is_empty()
         );
     }
+    // A registration bound to the absolute staging engine names discarded staging.
+    let bound = format!(
+        "{}\n[mcp_servers.harness_memory]\ncommand = {}\nargs = {}\nenabled = true\n{}\n",
+        infra_tooling::mcp_config::BEGIN,
+        serde_json::to_string(&stage.join(installed)).unwrap(),
+        serde_json::to_string(&json!(["mcp", "--root", stage, "--host", "codex"])).unwrap(),
+        infra_tooling::mcp_config::END
+    );
     write(
         stage,
         ".codex/config.toml",
-        format!(
-            "[features]\nhooks = true\n\n{}",
-            infra_tooling::mcp_config::codex_block(stage).unwrap()
-        ),
+        format!("[features]\nhooks = true\n\n{bound}"),
     );
     let errors = gate
         .validate_host(stage, delivery, "codex", &owned)

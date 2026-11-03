@@ -4,6 +4,16 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Generated hooks and MCP work in every clone of the target — 2026-11-03
+
+- As the editions' do (root `CHANGELOG.md`, same day): on POSIX the generated
+  hook and MCP wiring names no path of the generating machine, `repo
+  hook-handler` returns that portable launch for the final target, and the
+  compatibility launchers fall back to the main checkout's engine in a linked
+  worktree and refuse shell commands when no engine is installed. `hook-forge`
+  and `bootstrap-verifier` describe the portable form; the policy lock was
+  rewritten. Native Windows output keeps the bound absolute launch.
+
 ### Native runtime and deterministic generator helpers — 2026-11-02
 
 - Seed the platform's native `infra-engine` with its versioned runtime contract,

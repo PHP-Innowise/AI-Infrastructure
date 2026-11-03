@@ -2,9 +2,17 @@
 
 The installed runtime is the Rust executable at `memory-bank/bin/infra-engine` (`infra-engine.exe` on Windows). Attached sessions use the selected native engine explicitly and pass the accelerator root as an argument. The runtime does not require Python.
 
-`infra_tooling::attach::native_handler` formats host launch fields from an absolute executable and literal argv. `hook_handler` supplies `hook HOST ROLE --root ABSOLUTE_ROOT`. Installer, attached sessions, generator output and native semantic gates share this formatter.
+Installed and generated projects on POSIX commit a portable launch (`infra_tooling::launch`), so a clone on another machine or at another path works once its own engine is installed:
 
-On POSIX, the host receives an ordinary shell command containing `exec` and individually quoted literal arguments. The shell performs no policy, root discovery or memory work.
+| Host | Hook command | Memory MCP |
+| --- | --- | --- |
+| Claude Code | `"$CLAUDE_PROJECT_DIR"/.claude/hooks/ROLE.sh` (the notification role runs the engine under `$CLAUDE_PROJECT_DIR` directly) | `sh -c LAUNCHER sh mcp --host claude`; Claude Code sets `CLAUDE_PROJECT_DIR` in the server's environment |
+| Cursor | `.cursor/hooks/ROLE.sh`, run from the project root | `sh -c LAUNCHER sh ${workspaceFolder} mcp --host cursor` |
+| Codex | `sh -c 'exec "$(git rev-parse --show-toplevel 2>/dev/null \|\| pwd)/PREFIX.codex/hooks/ROLE.sh"'`, independent of the login shell Codex uses and of the session's subdirectory; `PREFIX` is the install root below the Git top level | `sh -c LAUNCHER sh mcp --host codex` from Git's top level |
+
+Each `ROLE.sh` launcher and the MCP `LAUNCHER` script run `memory-bank/bin/infra-engine` of their checkout. A linked worktree, which Git gives no copy of the ignored engine, uses the engine and root of the same directory in its main checkout (`git rev-parse --git-common-dir`). Without an engine, the shell guard's launcher exits 2 with an install hint, the prompt launcher answers `{"continue": true}`, the session launcher prints a notice and the others exit 0. The MCP launcher script carries no `${` (hosts expand those), single quote or backslash. Installer, generator output (`repo hook-handler`), the dispatcher and native semantic gates share this formatter.
+
+`infra_tooling::attach::native_handler` formats bound launch fields from an absolute executable and literal argv, and `hook_handler` supplies `hook HOST ROLE --root ABSOLUTE_ROOT`. Attached sessions, user-level dispatchers and native Windows installations use them. On POSIX the host then receives an ordinary shell command containing `exec` and individually quoted literal arguments; the shell performs no policy, root discovery or memory work.
 
 On native Windows:
 

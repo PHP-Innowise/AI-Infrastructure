@@ -265,7 +265,13 @@ pub(super) fn materialize(
     let hooks = image
         .get(HOOKS)
         .ok_or_else(|| RuntimeError::not_found("Cursor hook configuration is absent"))?;
-    let hooks = normalize_hook_configuration(&hooks.0, "cursor", &home, engine, cfg!(windows))?;
+    // An attached overlay lives outside the project: it binds this machine's engine.
+    let launch = super::HookLaunch::Bound {
+        engine: engine.into(),
+        home: home.clone(),
+        windows: cfg!(windows),
+    };
+    let hooks = normalize_hook_configuration(&hooks.0, "cursor", &launch)?;
     image.insert(HOOKS.into(), (hooks, 0o600));
     let mcp = image
         .get(MCP)

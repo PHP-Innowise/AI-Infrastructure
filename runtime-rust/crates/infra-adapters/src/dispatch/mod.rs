@@ -177,14 +177,18 @@ fn project_launch(root: &Path, host: &str, hook: &Value) -> Option<ProjectLaunch
     if hook["type"].as_str().is_some_and(|kind| kind != "command") {
         return None;
     }
+    // The committed launch of this installation, and the machine-bound one an
+    // earlier installation wrote, both name a native role.
+    let engine = hooks::installed_engine(root);
+    let installed = infra_tooling::attach::HookLaunch::installed(root, &engine, cfg!(windows));
     for role in hooks::ROLES {
-        if let Ok(expected) = infra_tooling::attach::hook_handler(
-            &hooks::installed_engine(root),
-            root,
-            host,
-            role,
-            cfg!(windows),
-        ) && launch(hook) == expected
+        if [
+            installed.handler(host, role),
+            infra_tooling::attach::hook_handler(&engine, root, host, role, cfg!(windows)),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|expected| launch(hook) == expected)
         {
             return Some(ProjectLaunch::Native(role));
         }
