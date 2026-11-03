@@ -92,7 +92,7 @@ edition's own files remain in that edition's changelog.
   policy refused because a rule hit the backtracking limit is now answered
   when that rule's literals are absent from it.
 - Hooks are faster again and the Rust test suite takes under 3 minutes
-  instead of about 21 (hook medians on settled copies of one installed
+  instead of about 17 (hook medians on settled copies of one installed
   project, before → after): prompt memory 34 → 25 ms, stop memory 34 → 25 ms,
   session start 50 → 27 ms, context continuity 11.5 → 9 ms; the shell guard
   stays at 7 ms. Every prompt read the 252 skill copies of three mirrors and
@@ -111,8 +111,8 @@ edition's own files remain in that edition's changelog.
   child's exit is noticed when its output ends instead of at the next poll,
   and children are spawned without forking the engine. Test builds optimize
   dependencies (workspace code stays unoptimized): `native_generator` went
-  from 546 to 24 s and `native_install` from 342 to 18 s, which keeps the
-  30-minute CI job within its limit.
+  from 460–486 to 23–26 s and `native_install` from 264–289 to 17–19 s, which
+  keeps the 30-minute CI job within its limit.
 - The Harness page shows its own updates again. Since the move to Rust the
   Update button never appeared: the Wasm interface waited for an `available`
   flag that `GET /api/app/update` does not send (it reports `state`), filled
