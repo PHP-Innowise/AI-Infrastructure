@@ -1,4 +1,6 @@
 //! Actual native attached-state admission with child-only configuration isolation.
+#[path = "support/executable.rs"]
+mod executable;
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -47,7 +49,7 @@ impl Sandbox {
         } else {
             "infra-engine"
         });
-        fs::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary).unwrap();
+        executable::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary);
         Self {
             state: root.join("private state base"),
             root,

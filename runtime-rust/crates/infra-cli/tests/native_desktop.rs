@@ -1,5 +1,7 @@
 //! Actual desktop CLI effects are confined to child-only HOME/XDG directories.
 #![cfg(target_os = "linux")]
+#[path = "support/executable.rs"]
+mod executable;
 use serde_json::json;
 use std::{
     collections::BTreeMap,
@@ -84,7 +86,7 @@ impl Sandbox {
         fs::create_dir(&data).unwrap();
         fs::create_dir(&config).unwrap();
         let binary = base.join("infra-engine");
-        fs::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary).unwrap();
+        executable::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary);
         Self {
             root,
             source,
@@ -410,7 +412,7 @@ fn native_desktop_exec_has_one_key_and_canonical_two_layer_path_escaping() {
     let directory = fixture.root.path().join("trusted\nsecond\nliteral $`\\\t");
     fs::create_dir(&directory).unwrap();
     let engine = directory.join("infra-engine");
-    fs::copy(&fixture.binary, &engine).unwrap();
+    executable::copy(&fixture.binary, &engine);
     fixture.binary = engine;
     fixture.assert_ok(&fixture.run("install"));
     let desktop = fs::read_to_string(fixture.entry()).unwrap();
@@ -438,7 +440,7 @@ fn native_desktop_exec_has_one_key_and_canonical_two_layer_path_escaping() {
         let directory = fixture.root.path().join(name);
         fs::create_dir(&directory).unwrap();
         let engine = directory.join("infra-engine");
-        fs::copy(&fixture.binary, &engine).unwrap();
+        executable::copy(&fixture.binary, &engine);
         fixture.binary = engine;
         let before = (
             tree(&fixture.home),

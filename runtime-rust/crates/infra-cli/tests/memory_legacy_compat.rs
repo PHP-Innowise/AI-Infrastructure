@@ -1,5 +1,7 @@
 //! Native compatibility checks use only disposable, explicitly seeded SQLite files.
 //! A separate Store connection attaches the legacy file without initializing it.
+#[path = "support/executable.rs"]
+mod executable;
 use infra_core::{Roots, RuntimeContext, Store};
 use serde_json::{Value, json};
 use std::{
@@ -84,7 +86,7 @@ impl Fixture {
         } else {
             "memory-bank/bin/infra-engine"
         });
-        fs::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary).unwrap();
+        executable::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary);
         let git = Command::new("git")
             .args(["-c", "init.templateDir=", "init", "-q"])
             .arg(&project)

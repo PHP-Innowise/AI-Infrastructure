@@ -1,6 +1,8 @@
 //! Public CLI contracts from an installed executable with no source checkout.
 //! Every subprocess uses a private working directory and child-only environment
 //! removal; the parent process environment and working directory are untouched.
+#[path = "support/executable.rs"]
+mod executable;
 use infra_cli::{arguments, counters, shell};
 use serde_json::Value;
 use std::{
@@ -66,8 +68,7 @@ impl InstalledCli {
         } else {
             "infra-engine"
         });
-        fs::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary)
-            .expect("copy the actual unified executable into an installed layout");
+        executable::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary);
         Self { root, work, binary }
     }
 

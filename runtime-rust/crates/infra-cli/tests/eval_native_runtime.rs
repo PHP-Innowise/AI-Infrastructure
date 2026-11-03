@@ -4,6 +4,8 @@ use infra_eval::process::{Budget, CommandSpec};
 
 #[path = "support/eval_process_driver.rs"]
 mod eval_process_driver;
+#[path = "support/executable.rs"]
+mod executable;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -241,7 +243,7 @@ fn public_memory_eval_accepts_hardlinked_selected_native_runtime_without_a_provi
         fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap();
     let selected = fixture.root.join("selected").join(ENGINE_NAME);
     let second = fixture.root.join("selected/second-engine-image");
-    fs::copy(original_engine, &selected).unwrap();
+    executable::copy(original_engine, &selected);
     private_mode(&selected, 0o700);
     fs::hard_link(&selected, &second).unwrap();
     let selected_sha = digest(&selected);
@@ -480,14 +482,14 @@ fn public_native_ab_plan_admits_only_the_canonical_engine_outside_data_budgets()
     let repository =
         fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap();
     let selected = fixture.root.join("selected").join(ENGINE_NAME);
-    fs::copy(cargo_engine, &selected).unwrap();
+    executable::copy(cargo_engine, &selected);
     private_mode(&selected, 0o700);
     let original_sha = digest(cargo_engine);
     assert_eq!(digest(&selected), original_sha);
     let snapshot = fixture.root.join("native-snapshot");
     let installed = snapshot.join("memory-bank/bin").join(ENGINE_NAME);
     fs::create_dir_all(installed.parent().unwrap()).unwrap();
-    fs::copy(cargo_engine, &installed).unwrap();
+    executable::copy(cargo_engine, &installed);
     private_mode(&installed, 0o755);
     let engine_bytes = fs::metadata(&installed).unwrap().len();
     assert!(
@@ -599,7 +601,7 @@ fn public_outcome_seal_consolidation_retains_the_selected_native_engine_without_
     let repository =
         fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap();
     let selected = fixture.root.join("selected").join(ENGINE_NAME);
-    fs::copy(cargo_engine, &selected).unwrap();
+    executable::copy(cargo_engine, &selected);
     private_mode(&selected, 0o700);
     let engine_sha = digest(&selected);
     assert_eq!(engine_sha, digest(cargo_engine));

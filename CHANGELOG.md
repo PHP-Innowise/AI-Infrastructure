@@ -139,7 +139,10 @@ edition's own files remain in that edition's changelog.
   all three hosts, and one task's memory across sessions, a commit, branches
   and a rebase for Claude Code, Codex and Cursor. The dispatcher guard tests
   run one at a time: a case that forked while another wrote an engine copy
-  made starting it fail with "Text file busy".
+  made starting it fail with "Text file busy". Every other test that starts
+  a copy of the engine now has `cp` write it (`tests/support/executable.rs`),
+  so no write descriptor is left in the test process for a child to inherit;
+  `portable_cli` failed that way in one run of three.
 
 - Move executable project logic into the Rust workspace and one native
   `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation

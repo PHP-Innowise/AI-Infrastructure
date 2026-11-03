@@ -1,4 +1,6 @@
 //! Public migration contracts use disposable local state and never invoke models.
+#[path = "support/executable.rs"]
+mod executable;
 use infra_cli::arguments;
 use infra_core::ErrorKind;
 use serde_json::{Value, json};
@@ -252,7 +254,7 @@ fn onnx_status_remainder_does_not_load_assets_or_run_a_worker() {
     } else {
         "infra-engine"
     });
-    fs::copy(env!("CARGO_BIN_EXE_infra-engine"), &engine).unwrap();
+    executable::copy(env!("CARGO_BIN_EXE_infra-engine"), &engine);
     let assets = f.root.join("absent model assets");
     let ort = f.root.join("absent ORT library");
     let worker = f.root.join("absent worker");
@@ -443,7 +445,7 @@ fn cost_attribution_default_uses_home_transcripts_outside_a_checkout() {
     } else {
         "standalone-engine"
     });
-    fs::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary).unwrap();
+    executable::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary);
     let transcripts = f.root.join("home/.claude/projects/cost-project");
     fs::create_dir_all(&transcripts).unwrap();
     fs::write(

@@ -3,6 +3,8 @@
 //! commands until the engine is installed there, a teammate's install only adds
 //! the engine, and a linked worktree uses its main checkout's engine.
 #![cfg(unix)]
+#[path = "support/executable.rs"]
+mod executable;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -447,7 +449,12 @@ fn committed_launchers_are_the_generated_ones_and_find_their_root() {
     .unwrap();
     let engine = root.join("memory-bank/bin/infra-engine");
     fs::create_dir_all(engine.parent().unwrap()).unwrap();
-    fs::write(&engine, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+    // Written aside and copied by a process of its own: a case's child must
+    // not hold the stand-in open for writing when the launcher starts it.
+    let script = engine.with_file_name("infra-engine stand-in");
+    fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+    executable::copy(&script, &engine);
+    fs::remove_file(&script).unwrap();
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();

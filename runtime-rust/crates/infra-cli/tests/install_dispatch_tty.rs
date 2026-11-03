@@ -1,6 +1,8 @@
 //! Real Linux terminal installation, with private host configuration only.
 //! No host/model client is started and no trust/approval file is written.
 #![cfg(target_os = "linux")]
+#[path = "support/executable.rs"]
+mod executable;
 use infra_core::domain::uuid4;
 use serde_json::{Value, json};
 use std::{
@@ -173,7 +175,7 @@ impl Fixture {
         // The source image is deliberately hardlinked, independently of Cargo's
         // own links. This is an executable source, never a data-file exception.
         let binary = root.join("selected native engine");
-        fs::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary).unwrap();
+        executable::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary);
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         fs::hard_link(&binary, root.join("same selected native image")).unwrap();
         assert_eq!(fs::metadata(&binary).unwrap().nlink(), 2);

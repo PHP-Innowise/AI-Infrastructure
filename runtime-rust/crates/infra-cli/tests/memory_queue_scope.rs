@@ -1,6 +1,8 @@
 //! Real disposable SQLite databases exercise the public native queue selector.
 //! Child-only TMPDIR/CODEX_HOME keep queue and client state inside the fixture.
 #![cfg(unix)]
+#[path = "support/executable.rs"]
+mod executable;
 use serde_json::Value;
 use std::{
     fs,
@@ -40,7 +42,7 @@ impl Fixture {
         )
         .unwrap();
         let binary = project.join("memory-bank/bin/infra-engine");
-        fs::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary).unwrap();
+        executable::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary);
         let git = Command::new("git")
             .args(["-c", "init.templateDir=", "init", "-q"])
             .arg(&project)

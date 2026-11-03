@@ -1,5 +1,7 @@
 //! Public compatibility runs the real installed-style native engine in disposable roots.
 //! No old Python, providers, trust writes, or parent environment mutation.
+#[path = "support/executable.rs"]
+mod executable;
 use infra_core::{BrainRepository, CreateRecord, Roots, RuntimeContext, Store, UpdateRecord};
 use serde_json::{Value, json};
 use std::{
@@ -62,7 +64,7 @@ impl Fixture {
         } else {
             "memory-bank/bin/infra-engine"
         });
-        fs::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary).unwrap();
+        executable::copy(env!("CARGO_BIN_EXE_infra-engine"), &binary);
         let fixture = Self {
             root,
             project,
