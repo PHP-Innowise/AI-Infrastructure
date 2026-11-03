@@ -137,6 +137,17 @@ fn source_git(mut error: RuntimeError) -> RuntimeError {
     error.code = Some("source-git".into());
     error
 }
+/// A Codex thread identifier: a lowercase hyphenated UUID.
+fn codex_thread(id: &str) -> bool {
+    let groups = id.split('-').collect::<Vec<_>>();
+    groups.len() == 5
+        && groups.iter().zip([8, 4, 4, 4, 12]).all(|(group, length)| {
+            group.len() == length
+                && group
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
 fn strip_lf(mut text: &str) -> &str {
     while let Some(previous) = text.strip_suffix('\n') {
         text = previous;
@@ -436,6 +447,54 @@ impl GitFrame {
         String::from_utf8(result.stdout)
             .map(|text| Some(strip_lf(&text).into()))
             .map_err(|_| RuntimeError::invalid("Git branch is not UTF-8"))
+    }
+    /// The branch a checkout works on: its current branch, else the branch a
+    /// rebase rewrites or a bisect started from (both detach HEAD on the
+    /// commits they visit, and the branch is still the work in hand), else
+    /// the Codex thread that owns a detached worktree. The hooks name their
+    /// task by it and a capsule is delivered only while it still holds, so
+    /// both must read it the same way.
+    pub fn working_identity(&self) -> Result<Option<String>> {
+        if let Some(branch) = self.branch()?.filter(|branch| !branch.is_empty()) {
+            return Ok(Some(branch));
+        }
+        for name in ["rebase-merge/head-name", "rebase-apply/head-name"] {
+            if let Ok(value) = fs::read_to_string(self.admin.join(name))
+                && let Some(branch) = value
+                    .lines()
+                    .next()
+                    .and_then(|value| value.strip_prefix("refs/heads/"))
+                    .filter(|value| !value.is_empty())
+            {
+                return Ok(Some(branch.into()));
+            }
+        }
+        // A bisect started on a detached HEAD names a commit, not a branch.
+        if let Ok(value) = fs::read_to_string(self.admin.join("BISECT_START"))
+            && let Some(branch) = value.lines().next().filter(|value| {
+                !value.is_empty()
+                    && !(matches!(value.len(), 40 | 64)
+                        && value.bytes().all(|b| b.is_ascii_hexdigit()))
+            })
+        {
+            return Ok(Some(branch.into()));
+        }
+        let path = self.admin.join("codex-thread.json");
+        if let Ok(meta) = fs::symlink_metadata(&path)
+            && !crate::fs::linked(&meta)
+            && meta.is_file()
+            && meta.len() <= 4096
+        {
+            let value: Value =
+                serde_json::from_slice(&crate::fs::read_regular(&path)?).unwrap_or(Value::Null);
+            if value["version"] == 1
+                && let Some(id) = value["ownerThreadId"].as_str()
+                && codex_thread(id)
+            {
+                return Ok(Some(format!("codex-thread/{id}")));
+            }
+        }
+        Ok(None)
     }
     fn pinned(&self) -> Vec<OsString> {
         let mut admin = OsString::from("--git-dir=");

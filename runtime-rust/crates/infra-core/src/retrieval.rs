@@ -1872,11 +1872,15 @@ fn rebase_explicit_working(
     })();
     let _ = operation;
 }
+/// The hook named its task by the branch the checkout works on; the capsule
+/// is delivered only while that still holds. During a rebase or a bisect,
+/// or in a Codex thread's detached worktree, HEAD names no branch, and the
+/// working identity is what the hook read (`GitFrame::working_identity`).
 fn admit_branch(context: &RuntimeContext, request: &RetrievalRequest) -> Result<()> {
     if let Some(expected) = &request.expected_branch {
         let frame = crate::git::GitFrame::discover(&context.roots.project)?
             .ok_or_else(|| RuntimeError::unavailable("Git source context unavailable"))?;
-        if frame.branch()?.as_deref() != Some(expected) {
+        if frame.working_identity()?.as_deref() != Some(expected) {
             return Err(RuntimeError::conflict(
                 "Working branch changed before delivery",
             ));

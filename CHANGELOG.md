@@ -126,6 +126,13 @@ edition's own files remain in that edition's changelog.
 - The edit-loop guard counts the `path` a Cursor or Codex edit names, as the
   Python hooks did, and Codex's repeat and edit-loop messages name the
   `systematic-debugger` skill instead of a `/debugger` command Codex lacks.
+- A prompt during a rebase or a bisect reads its branch's memory again. The
+  hooks named the task by the branch being rebased (or the one a bisect
+  started from, or the Codex thread owning a detached worktree), but the
+  capsule was delivered only while `git symbolic-ref` named that branch, so
+  it was refused ("Working branch changed before delivery") exactly while a
+  conflict was being resolved. The hooks and the delivery check now read one
+  definition, `GitFrame::working_identity`.
 
 - Move executable project logic into the Rust workspace and one native
   `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation

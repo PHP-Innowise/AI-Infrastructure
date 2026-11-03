@@ -120,45 +120,7 @@ pub fn task(project: &Path) -> Result<Option<String>> {
     let Some(frame) = GitFrame::discover(project)? else {
         return Ok(None);
     };
-    if let Some(branch) = frame.branch()?.filter(|branch| !branch.is_empty()) {
-        return Ok(Some(branch));
-    }
-    for name in ["rebase-merge/head-name", "rebase-apply/head-name"] {
-        if let Ok(value) = std::fs::read_to_string(frame.admin.join(name))
-            && let Some(branch) = value
-                .lines()
-                .next()
-                .and_then(|value| value.strip_prefix("refs/heads/"))
-                .filter(|value| !value.is_empty())
-        {
-            return Ok(Some(branch.into()));
-        }
-    }
-    if let Ok(value) = std::fs::read_to_string(frame.admin.join("BISECT_START"))
-        && let Some(branch) = value.lines().next().filter(|value| {
-            !value.is_empty()
-                && !(matches!(value.len(), 40 | 64) && value.bytes().all(|b| b.is_ascii_hexdigit()))
-        })
-    {
-        return Ok(Some(branch.into()));
-    }
-    let path = frame.admin.join("codex-thread.json");
-    if let Ok(meta) = std::fs::symlink_metadata(&path)
-        && !infra_core::fs::linked(&meta)
-        && meta.is_file()
-        && meta.len() <= 4096
-    {
-        let value: Value =
-            serde_json::from_slice(&infra_core::fs::read_regular(&path)?).unwrap_or(Value::Null);
-        if value["version"] == 1
-            && let Some(id) = value["ownerThreadId"].as_str()
-            && regex::Regex::new(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
-                .is_ok_and(|p| p.is_match(id))
-        {
-            return Ok(Some(format!("codex-thread/{id}")));
-        }
-    }
-    Ok(None)
+    frame.working_identity()
 }
 /// The session directory the host names when every such directory lies
 /// outside the bound roots and outside the project's repository. Claude Code's
