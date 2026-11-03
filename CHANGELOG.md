@@ -62,6 +62,26 @@ edition's own files remain in that edition's changelog.
   otherwise `cwd` or Cursor's `workspace_roots`): a second clone or a copy on
   the same machine read and recorded the original checkout's memory. They now
   say so instead and record nothing; the shell guard still applies.
+- Hooks answer several times faster than after the move to Rust and no slower
+  than the Python runtime did (medians on fresh copies of one installed
+  project, before → after, Python in brackets): prompt memory 305 → 34 ms
+  (129), stop memory 507 → 39 ms (187), context continuity 151 → 12 ms (67),
+  session start 285 → 50 ms (216), shell guard 40 → 7 ms (7). Each engine
+  process compiled the whole secret and privacy policy (about 137 ms of
+  `fancy_regex`) before its first check; a rule now compiles on first use and
+  is skipped for a text that lacks its necessary literals (the Python
+  runtime's mask prefilters, pinned to the exact expression and flags, plus
+  the private and query rules). The task-ID grammar unrolled `{0,199}` over
+  Unicode classes (about 55 ms per check, three checks per prompt), and query
+  tokenizing compiled 22 Russian alias expressions for every word; constant
+  grammars compile once per process. A command reuses a Git frame while the
+  checkout ancestry and administrative files are unchanged, child exits are
+  noticed within a twentieth of their run instead of a fixed 5 ms tick, the
+  guards no longer infer the task from the branch, the queue worker is
+  admitted only when commands are queued, and the launchers find their root
+  without `dirname`. Hook output is unchanged, except that a text the old
+  policy refused because a rule hit the backtracking limit is now answered
+  when that rule's literals are absent from it.
 
 - Move executable project logic into the Rust workspace and one native
   `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation

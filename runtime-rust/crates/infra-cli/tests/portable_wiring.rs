@@ -404,3 +404,73 @@ fn a_clone_works_after_installing_only_its_engine() {
         "{report}"
     );
 }
+
+#[test]
+fn committed_launchers_are_the_generated_ones_and_find_their_root() {
+    let source = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap();
+    let mut compared = 0;
+    for edition in [
+        "Laravel",
+        "Symfony",
+        "PHP Core",
+        "Cms/wordpress",
+        "Infrastructure-Creator",
+    ] {
+        for host in ["claude", "cursor", "codex"] {
+            for role in infra_cli::hooks::ROLES {
+                let path = source.join(format!("{edition}/.{host}/hooks/{role}.sh"));
+                let Ok(committed) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                assert_eq!(
+                    committed,
+                    infra_cli::hooks::shim(host, role, false).unwrap(),
+                    "{}",
+                    path.display()
+                );
+                compared += 1;
+            }
+        }
+    }
+    assert!(compared >= 123, "{compared} launchers");
+    // Hosts name launchers by a path; one run by its bare name from its own
+    // directory finds the same root, as `dirname` did.
+    let fixture = Fixture::new();
+    let root = fixture.root.join("project");
+    let hooks = root.join(".claude/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let launcher = hooks.join("loop-detection.sh");
+    fs::write(
+        &launcher,
+        infra_cli::hooks::shim("claude", "loop-detection", false).unwrap(),
+    )
+    .unwrap();
+    let engine = root.join("memory-bank/bin/infra-engine");
+    fs::create_dir_all(engine.parent().unwrap()).unwrap();
+    fs::write(&engine, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let expected = fs::canonicalize(&root).unwrap();
+    for (cwd, name) in [
+        (&hooks, "loop-detection.sh"),
+        (&root, ".claude/hooks/loop-detection.sh"),
+        (&root, launcher.to_str().unwrap()),
+    ] {
+        let output = Command::new("sh")
+            .arg(name)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert_eq!(
+            text(&output.stdout),
+            format!(
+                "hook\nclaude\nloop-detection\n--root\n{}\n",
+                expected.display()
+            ),
+            "{name}: {}",
+            text(&output.stderr)
+        );
+    }
+}

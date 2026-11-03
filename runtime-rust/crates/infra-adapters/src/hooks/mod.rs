@@ -31,6 +31,12 @@ pub const MEMORY_ROLES: &[&str] = &[
     "context-continuity",
     "local-context",
 ];
+/// Roles that act on the session's task, which is inferred from the branch.
+const TASK_ROLES: &[&str] = &[
+    "working-memory-read",
+    "working-memory-write",
+    "subagent-dispatch",
+];
 #[derive(Clone, Debug)]
 pub struct Context {
     pub roots: Roots,
@@ -224,6 +230,11 @@ fn outside_notice(session: &Path, project: &Path) -> Output {
 }
 impl Context {
     pub fn new(root: &Path, host: &str, raw: &[u8]) -> Result<Self> {
+        Self::create(root, host, raw, true)
+    }
+    /// Without `with_task` the session's task is not inferred from the branch,
+    /// which costs Git queries the guards do not need.
+    fn create(root: &Path, host: &str, raw: &[u8], with_task: bool) -> Result<Self> {
         if !["claude", "codex", "cursor"].contains(&host) {
             return Err(RuntimeError::invalid("Unsupported hook host"));
         }
@@ -280,7 +291,11 @@ impl Context {
         } else {
             outside_session(host, &payload, &roots)
         };
-        let task = task(&roots.project)?;
+        let task = if with_task {
+            task(&roots.project)?
+        } else {
+            None
+        };
         let inferred = std::env::var("CONTEXT_TASK_ID")
             .ok()
             .is_none_or(|value| value.is_empty());
@@ -438,7 +453,9 @@ pub fn shim(host: &str, role: &str, windows: bool) -> Result<String> {
     // The engine is ignored by Git, so a fresh clone has none until it is
     // installed there: the shell guard then refuses rather than letting every
     // command through, and the other roles pass the turn. Hosts differ only in
-    // the literal host argument, which the tool mirrors substitute.
+    // the literal host argument, which the tool mirrors substitute. The
+    // directory comes from `$0` without `dirname`, one process fewer on every
+    // hook call.
     let install = "From an accelerator clone run: infra-engine install --edition <edition> --target <this checkout> --merge-existing";
     let missing = match role {
         "bash-validator" => format!(
@@ -452,7 +469,7 @@ pub fn shim(host: &str, role: &str, windows: bool) -> Result<String> {
         _ => "  exit 0\n".into(),
     };
     Ok(format!(
-        "#!/bin/sh\n# Launcher; the complete hook implementation is Rust. It runs the engine of\n# this checkout or, in a linked worktree, the one of its main checkout.\nTOOLING_ROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")/../..\" && pwd -P) || exit 127\nENGINE=$TOOLING_ROOT/memory-bank/bin/{binary}\n{fallback}if [ ! -x \"$ENGINE\" ]; then\n{missing}fi\nexec \"$ENGINE\" hook {host} {role} --root \"$TOOLING_ROOT\" \"$@\"\n",
+        "#!/bin/sh\n# Launcher; the complete hook implementation is Rust. It runs the engine of\n# this checkout or, in a linked worktree, the one of its main checkout.\ncase $0 in */*) TOOLING_ROOT=${{0%/*}}/../.. ;; *) TOOLING_ROOT=../.. ;; esac\nTOOLING_ROOT=$(CDPATH= cd -- \"$TOOLING_ROOT\" && pwd -P) || exit 127\nENGINE=$TOOLING_ROOT/memory-bank/bin/{binary}\n{fallback}if [ ! -x \"$ENGINE\" ]; then\n{missing}fi\nexec \"$ENGINE\" hook {host} {role} --root \"$TOOLING_ROOT\" \"$@\"\n",
         fallback = infra_tooling::launch::worktree_fallback("TOOLING_ROOT", "ENGINE", binary)
     ))
 }
@@ -507,7 +524,7 @@ pub fn execute(root: &Path, host: &str, role: &str, raw: &[u8]) -> Result<Output
     {
         return Ok(pass());
     }
-    let context = match Context::new(root, host, raw) {
+    let context = match Context::create(root, host, raw, TASK_ROLES.contains(&role)) {
         Ok(context) => context,
         // The shell guard never lets a command through because its own
         // context failed: it then checks the command from the bound root.
