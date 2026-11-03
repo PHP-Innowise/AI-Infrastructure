@@ -83,6 +83,131 @@ class CursorRuleTests(unittest.TestCase):
         self.assertEqual('preserved', self.call('retire')['state'])
         self.assertEqual(old, (self.rule.read_bytes(), self.receipt.read_bytes()))
 
+    def cleanup_case(self, phase, cleanup_point, primary_type):
+        import fcntl
+        self.assertIn(self.call('retire')['state'], ('removed', 'absent'))
+        old = self.owned()
+        real_open, real_close, real_fstat = os.open, os.close, os.fstat
+        real_flock, real_directory = fcntl.flock, self.r._cursor_directory
+        primary = primary_type('Cancel Cursor maintenance') if primary_type else None
+        cleanup = OSError('Synthetic owned cleanup failure')
+        state = {}
+
+        def opened(name, *arguments, **options):
+            descriptor = real_open(name, *arguments, **options)
+            if name == 'runtime.lock':
+                state['lock_fd'] = descriptor
+            if name == self.root:
+                state['root_fd'] = descriptor
+            return descriptor
+
+        def directory(parent, name, **options):
+            descriptor = real_directory(parent, name, **options)
+            if name == 'rules':
+                state['rules_fd'] = descriptor
+            return descriptor
+
+        def metadata(descriptor):
+            if phase == 'acquisition' and descriptor == state.get('lock_fd'):
+                state['primary_reached'] = True
+                raise primary
+            return real_fstat(descriptor)
+
+        def closed(descriptor):
+            result = real_close(descriptor)
+            if phase == 'cleanup-directory' and descriptor == state.get('rules_fd'):
+                state['primary_reached'] = True
+                raise primary
+            selected = {'close': 'lock_fd', 'root-close': 'root_fd',
+                        'directory-close': 'rules_fd'}.get(cleanup_point)
+            if selected and descriptor == state.get(selected) and not state.get('cleanup_failed'):
+                state['cleanup_failed'] = True
+                raise cleanup
+            return result
+
+        def flock(descriptor, operation):
+            if descriptor == state.get('lock_fd') and operation & fcntl.LOCK_UN:
+                if phase == 'cleanup-lock':
+                    state['primary_reached'] = True
+                    raise primary
+                if cleanup_point == 'unlock':
+                    state['cleanup_failed'] = True
+                    raise cleanup
+            return real_flock(descriptor, operation)
+
+        def cancelled_publication(*arguments, **options):
+            state['primary_reached'] = True
+            raise primary
+
+        escaped = None
+        result = None
+        # The forwarding recorder keeps the real descriptor-relative capability.
+        with mock.patch.object(os, 'supports_dir_fd', os.supports_dir_fd | {opened}), \
+                mock.patch.object(os, 'open', opened), mock.patch.object(os, 'close', closed), \
+                mock.patch.object(os, 'fstat', metadata), mock.patch.object(fcntl, 'flock', flock), \
+                mock.patch.object(self.r, '_cursor_directory', directory):
+            try:
+                if phase == 'body' and primary is not None:
+                    with mock.patch.object(self.r, '_cursor_publish', side_effect=cancelled_publication):
+                        result = self.call(capsule=CHANGED)
+                else:
+                    result = self.call(capsule=CHANGED)
+            except BaseException as error:
+                escaped = error
+
+        key = str((self.root / 'project-brain/local/runtime.lock').resolve())
+        registry_lock = self.r.brain_runtime._LOCKS[key]
+        acquired = []
+        def other_thread():
+            held = registry_lock.acquire(blocking=False)
+            acquired.append(held)
+            if held:
+                registry_lock.release()
+        thread = threading.Thread(target=other_thread)
+        thread.start()
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive(), 'Lock control exceeded its watchdog')
+        self.assertEqual([True], acquired, 'Process lock was not released')
+        self.assertNotIn(key, self.r.brain_runtime._LOCK_STATE.depths)
+        committed = phase in ('cleanup-lock', 'cleanup-directory') or primary is None
+        if not committed:
+            self.assertEqual(old, (self.rule.read_bytes(), self.receipt.read_bytes()))
+        next_result = self.call(capsule=CHANGED if committed else CAPSULE)
+        self.assertEqual('unchanged', next_result['state'])
+        if cleanup_point != 'healthy':
+            self.assertTrue(state.get('cleanup_failed'), 'Requested failure was not reached')
+        if primary is not None:
+            self.assertTrue(state.get('primary_reached'), 'Cancellation was not reached')
+            self.assertIs(primary, escaped, 'Cleanup swallowed or replaced cancellation')
+        else:
+            self.assertIsNone(escaped)
+            self.assertEqual('written' if cleanup_point == 'healthy' else 'incomplete', result['state'])
+
+    def test_cancellation_survives_owned_lock_and_directory_cleanup(self):
+        for phase, cleanup in (('body', 'close'), ('body', 'unlock'),
+                               ('acquisition', 'close'), ('body', 'directory-close'),
+                               ('body', 'root-close')):
+            for primary in (KeyboardInterrupt, SystemExit):
+                with self.subTest(phase=phase, cleanup=cleanup, primary=primary.__name__):
+                    self.cleanup_case(phase, cleanup, primary)
+
+    def test_cleanup_cancellation_survives_a_later_ordinary_close_failure(self):
+        for phase, cleanup in (('cleanup-lock', 'close'), ('cleanup-directory', 'root-close')):
+            for primary in (KeyboardInterrupt, SystemExit):
+                with self.subTest(phase=phase, primary=primary.__name__):
+                    self.cleanup_case(phase, cleanup, primary)
+
+    def test_healthy_cancellation_still_propagates(self):
+        for phase in ('body', 'acquisition'):
+            for primary in (KeyboardInterrupt, SystemExit):
+                with self.subTest(phase=phase, primary=primary.__name__):
+                    self.cleanup_case(phase, 'healthy', primary)
+
+    def test_ordinary_cleanup_failure_keeps_public_fallback_and_releases_locks(self):
+        for cleanup in ('healthy', 'close', 'unlock', 'directory-close', 'root-close'):
+            with self.subTest(cleanup=cleanup):
+                self.cleanup_case('body', cleanup, None)
+
     def test_exact_body_keeps_inode_and_changed_excerpt_renews_custody(self):
         self.owned(); inode = self.rule.stat().st_ino
         self.assertEqual('unchanged', self.call()['state'])

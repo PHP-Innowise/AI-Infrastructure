@@ -325,7 +325,12 @@ the installed memory hooks as Claude Code and Codex would - the capsule, the
 Stop hook's save request, the save itself and the next session's recall -
 without starting a model or writing to the project. `--sync` never changes
 `project-brain/config/runtime.json`, so the rehearsal's `config` profile is
-the capsule the project will run.
+the capsule the project will run. After the sync,
+`python3 scripts/memory_eval.py install-status --project DIR` says whether
+memory can run there at all - the commit the project was synced from against
+this clone, the capsule profile against its runtime, the last capsule and
+save, the Claude Code import of `AGENTS.md`, a policy Codex cuts - and exits 1
+on any problem.
 
 The rehearsal runs the hooks as the hosts would, but it cannot see what the
 hosts themselves do with them. On Linux, two more commands run the installed

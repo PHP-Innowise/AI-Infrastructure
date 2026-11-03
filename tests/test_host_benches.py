@@ -125,6 +125,65 @@ class ClaudeStandInTest(unittest.TestCase):
         self.assertFalse(claude_code_bench.queued_ok(landed, warning))
 
 
+class PolicyHeardTest(unittest.TestCase):
+    """Every run checks the policy reached the model: a project's own CLAUDE.md
+    kept AGENTS.md from every client's Claude Code until it was imported."""
+
+    POLICY = "# AGENTS.md - Policy Rules\n\n- MUST run retrieve.\n- MUST NOT save twice.\n"
+
+    def test_every_line_in_the_conversation_or_the_system_prompt_counts(self) -> None:
+        loaded = [{"since": ["Contents of /p/AGENTS.md (project instructions):\n" + self.POLICY], "system": ""}]
+        self.assertTrue(claude_code_bench.policy_heard(self.POLICY, loaded))
+        lent = [{"since": ["How are invoices numbered?"], "system": "Claude Code.\n" + self.POLICY}]
+        self.assertTrue(claude_code_bench.policy_heard(self.POLICY, lent))
+
+    def test_a_line_missing_or_kept_in_an_overflow_file_fails(self) -> None:
+        own_claude_md_only = [{"since": ["Contents of /p/CLAUDE.md:\n# Shop\n"], "system": ""}]
+        self.assertFalse(claude_code_bench.policy_heard(self.POLICY, own_claude_md_only))
+        cut = [{"since": [self.POLICY.replace("- MUST NOT save twice.\n", "")], "system": ""}]
+        self.assertFalse(claude_code_bench.policy_heard(self.POLICY, cut))
+        overflow = [{"since": [self.POLICY + "\nOutput too large (40KB). Full output saved to /tmp/x.txt"],
+                     "system": ""}]
+        self.assertFalse(claude_code_bench.policy_heard(self.POLICY, overflow))
+
+    def test_codex_reads_the_policy_up_to_its_byte_limit_and_names_its_own_overflow(self) -> None:
+        # Codex reads at most project_doc_max_bytes of AGENTS.md: a policy
+        # block past it never arrives, whatever came before it did.
+        cut = [{"since": ["# AGENTS.md instructions for /p\n<INSTRUCTIONS>\n"
+                          + self.POLICY[:self.POLICY.index("- MUST NOT")]], "system": "Codex base instructions"}]
+        self.assertFalse(claude_code_bench.policy_heard(self.POLICY, cut, overflow="Warning: truncated output"))
+        whole = [{"since": [self.POLICY], "system": ""}]
+        self.assertTrue(claude_code_bench.policy_heard(self.POLICY, whole, overflow="Warning: truncated output"))
+        noted = [{"since": [self.POLICY + "\nWarning: truncated output (original token count: 9000)"], "system": ""}]
+        self.assertFalse(claude_code_bench.policy_heard(self.POLICY, noted, overflow="Warning: truncated output"))
+        # A long file the stand-in printed is cut too: no policy beside the note.
+        read = [{"since": [self.POLICY, '{"name": "acme/shop"}\nWarning: truncated output (original token count: 9000)'],
+                 "system": ""}]
+        self.assertTrue(claude_code_bench.policy_heard(self.POLICY, read, overflow="Warning: truncated output"))
+
+    def test_html_comments_claude_code_drops_are_not_asked_for(self) -> None:
+        managed = ("## Team notes\n\n<!-- BEGIN ACCELERATOR MANAGED POLICY -->\n" + self.POLICY
+                   + "<!-- END ACCELERATOR MANAGED POLICY -->\n")
+        loaded = [{"since": ["Contents of /p/AGENTS.md:\n## Team notes\n\n" + self.POLICY], "system": ""}]
+        self.assertTrue(claude_code_bench.policy_heard(managed, loaded))
+        self.assertFalse(claude_code_bench.policy_heard(managed + "- MUST cite sources.\n", loaded))
+
+    def test_the_loaded_files_come_from_the_first_question_with_each_load_counted(self) -> None:
+        requests = [{"since": [], "system": "title"},
+                    {"since": ["Contents of /p/CLAUDE.md:\n#\nContents of /p/AGENTS.md (project instructions):\nx",
+                               "Contents of /p/AGENTS.md (the project's policy), part 1 of 2:\nx"], "system": ""},
+                    {"since": ["Contents of /p/sub/AGENTS.md:\ny"], "system": ""}]
+        self.assertEqual(claude_code_bench.policy_files(requests),
+                         ["/p/AGENTS.md (project instructions)", "/p/AGENTS.md (the project's policy), part 1 of 2"])
+        self.assertEqual(claude_code_bench.policy_files([]), [])
+
+    def test_the_bench_project_keeps_a_claude_md_of_its_own(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            project = claude_code_bench.shop(Path(folder))
+            self.assertTrue((project / "CLAUDE.md").is_file())
+            self.assertFalse((project / "AGENTS.md").exists())
+
+
 class CodexHelpersTest(unittest.TestCase):
     """Codex's helpers outlive the bench's run unless it stops them."""
 

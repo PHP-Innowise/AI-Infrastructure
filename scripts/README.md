@@ -279,6 +279,30 @@ wiring waits for a new hook that cannot be written. Each held-back file is
 listed under `kept` with a reason starting `held back:`, and `partial` says
 the project is not at the release (it is `null` otherwise).
 
+A sync never takes a project back. The record names the commit the project
+was last synced from (`source_commit`); from a clone that lacks it - the
+project was synced from a newer commit, or from another line of work - the
+sync writes nothing and its `error` says so, because it would replace newer
+files with older ones. At its start on 2026-10-30 the Harness, on a clone
+that follows `main`, put four projects synced from a memory branch back onto
+`main` that way, runtime, hooks and policy, and the capsule then failed on a
+setting only the newer runtime knew. A commit the clone has never seen stops
+the sync too, except in a shallow clone; no record, a source that is not a
+Git checkout, or the clone's own commit or a descendant of the project's
+syncs as before. `--allow-downgrade` is a person going back on purpose;
+nothing unattended passes it.
+
+Codex reads at most `project_doc_max_bytes` of a project's `AGENTS.md`, 32 KiB
+by default, and the policy is appended after the project's own part. The
+editions' `.codex/config.toml` raises the limit to 128 KiB, but a project's
+own configuration - one the team edited, or an older release's - is kept by
+every sync. Where Codex would then cut `AGENTS.md`, the sync's
+`codex_policy_cut` says how much it reads and the line to put at the top of
+`.codex/config.toml` (a trusted project's setting, which Codex 0.163 reads),
+and an install with Codex prints the same as `CODEX\tAGENTS.md\t...` on
+stderr. A person's own `~/.codex/config.toml` is not consulted: a teammate's
+differs.
+
 The edition README that `--merge-existing` installed as `ACCELERATOR.md`
 beside a project's own `README.md` follows the release by the same rules:
 the sync records it in `memory-bank/local/accelerator-install.json`, updates
@@ -472,6 +496,100 @@ python3 scripts/memory_fact_consolidation.py --input facts.json --json
 - **CI relationship:** `tests/test_memory_fact_consolidation.py` and
   `tests/fixtures/fact-consolidation.json`; see
   [the write-path doc](../docs/MEMORY-WRITE-PATH.md).
+
+### `memory_native_ab.py`
+
+Maintainer-only native producer A → fresh consumer B availability experiment.
+This source-only tool leaves installed editions and original projects unchanged.
+`plan` and `inspect` do not invoke a model; `run` can make billable native
+Codex calls and requires Linux, usable Bubblewrap, Git, Bash and a signed-in CLI.
+
+```bash
+python3 -B scripts/memory_native_ab.py plan --config /private/native-ab.json --out /private/native-run
+python3 -B scripts/memory_native_ab.py run --run /private/native-run
+python3 -B scripts/memory_native_ab.py inspect --run /private/native-run
+```
+
+Native experiments have mandatory snapshot admission before output/copy/index
+creation and immediately before each model launch. It checks known credential
+carriers and the actual materialized inventory, modes and canonical provenance;
+it rejects unsupported binary/encoding and changed inputs. It never redacts or
+offers a bypass. Use a separately reviewed source projection when needed.
+Fresh Git/index binaries and external read-only provider authentication are
+explicit derived-state/transport exceptions, not claims of text screening or
+universal secret absence. See `docs/MEMORY-EVAL.md`, “Mandatory snapshot admission”.
+
+After constructing the materialized admission gate, trusted preparation always
+runs `reindex-bank`, the separate Bank `validate.py`, Brain validation and SQLite
+`index`, retaining bounded receipts before any native dispatch. A blank or newer
+Markdown INDEX cannot hide imported chunks. Invalid knowledge blocks the attempt;
+preparation never changes chunk contents or silently removes invalid records.
+Custom controllers reusing `install_runtime()` must call `prepare_memory(trusted)`
+at that same post-admission point with their private, bounded receipt runner.
+
+The exact JSON configuration and staged source/served commands are documented
+in [MEMORY-EVAL.md](../docs/MEMORY-EVAL.md#native-producer-and-fresh-consumer).
+Configuration and output must be separate from each other, the tooling clone
+and the original project. The output parent must already exist. Prompts,
+identities, receipts, source paths, native streams and pending state stay under
+the private run directory; stdout contains only fixed status/count fields.
+
+An immutable plan binds source bytes/modes, canonical runtime and budgets.
+Both planned slots persist before preparation; each slot is attempted once.
+Failed capture, progress-only saves, pending foreign observations and missing
+delivery remain distinct from successful capture/consultation. Corrected reruns
+require another output directory; automatic retry and failed-attempt deletion
+are unsupported. Read-only original sources and copied executable permissions
+are checked separately.
+
+Offline tests run actual canonical hooks, native-result storage, promotion and
+fresh-task retrieval through a public fake CLI. They contact no provider and
+do not establish real model behavior or causal task benefit:
+
+```bash
+python3 -B -m unittest tests.test_memory_native_ab tests.test_check
+```
+
+### `memory_throttle_oracle_v2.py`
+
+Opt-in, task-specific external artifact oracle for a **newly sealed**
+EntryFetchThrottle regression-harness task. This portable successor preserves
+the previous 56 finite controls and adds two bare-filename `include_path`
+collisions: a selected good source must pass with a broken shadow, and a selected
+broken source must fail with a good shadow. Resolve the requested source to an
+absolute path before requiring it. Both sources are readonly public code, not
+private labels. Finite mutations do not establish exhaustive correctness.
+
+The trusted patch case invokes:
+
+```bash
+python3 /tooling/scripts/memory_throttle_oracle_v2.py \
+  --source /private/public/EntryFetchThrottle.php \
+  --public-test /private/public/EntryFetchThrottleTest.php \
+  --php /usr/bin/php8.3
+```
+
+Use the candidate root as cwd. It must contain the unchanged public files at
+`packages/website-public-api/app/src/Service/EntryFetchThrottle.php` and
+`packages/website-public-api/app/tests/Unit/Service/EntryFetchThrottleTest.php`,
+and the produced `verification/throttle_regression.php`. Seal the script,
+the two public files and the files `/usr/bin/php` and `/usr/bin/bwrap` resolve to
+as **individual** verifier read roots, and name that PHP with `--php`: Debian and
+Ubuntu link `/usr/bin/php` through `/etc/alternatives`, a link the verifier does
+not seal and its namespace cannot follow. Never mount a directory holding
+private reference fixtures.
+The generic patch verifier binds that implementation and rubric into its digest.
+The stdout receipt keeps the existing `task-outcome-verifier-v1` interface;
+infrastructure failures remain unknown rather than false candidate labels.
+Each untrusted execution retains nested PID/network isolation, a trusted PHP
+startup handshake, bounded time/output and no access to the oracle or reference.
+Linux, PHP and Bubblewrap are required; no model calls or installation are used
+by its synthetic regression tests.
+
+This is a future contract revision, not a regrade of a frozen study. Select and
+seal it explicitly for new tasks; never replace an existing study's oracle or
+replay its B artifacts. Existing study data, outcomes and installed defaults
+remain unchanged.
 
 ### `memory_outcome_ab.py`
 
@@ -736,6 +854,16 @@ the Stop hook's save step exactly as written. The JSON it saves holds
 backticks, `$`, brackets, an apostrophe, escapes and Cyrillic. Nothing leaves
 the machine and no tokens are spent.
 
+Every run also checks that the policy reached the model: every line of the
+project's `AGENTS.md` (the clone's, appended to the system prompt, with
+`--attached`) in what Claude Code sent, HTML comments aside, which it drops.
+The report names each `AGENTS.md` the first question carried and the label it
+came under (`policy_files`). The bench's project keeps a `CLAUDE.md` of its
+own, as client projects do; Claude Code then reads `AGENTS.md` only through
+the edition's `.claude/CLAUDE.md` import. Without that import the run fails:
+the four client projects' Claude Code sessions never had the policy until
+it arrived.
+
 With `--target DIR` it runs in a copy of an installed project instead of a
 fresh install. The copy leaves out dependency trees as the rollout
 rehearsal's does, and `--sync` first brings it up to this clone. The saved
@@ -860,6 +988,14 @@ the same work directory, `--target` and `--sync`. Codex runs a project's hooks
 only once their hashes are approved, and turns a Stop hook's block into a
 `<hook_prompt>` item of the same turn. The save after every answer depends on
 both, and on Codex's sandbox letting the save write the project.
+
+Every run checks the policy reached the model as the Claude Code bench does:
+every line of the project's `AGENTS.md` (the clone's, in the developer
+instructions, with `--attached`) in what Codex sent, none of it in a
+truncated hook output. Codex reads at most `project_doc_max_bytes` of the
+project's `AGENTS.md` files, 32 KiB by default, and the bench's Codex home
+leaves it there: a project whose own notes push the policy block past it
+fails, and the report's `policy_bytes` says by how much.
 
 The stand-in serves the Responses API. It follows the save step as written,
 reading XML entities as a model does. It answers through `exec_command`, or
@@ -1374,6 +1510,30 @@ source-only and not installed.
   Maintainers should prefer fixing repository-owned links over adding
   exceptions.
 - **CI relationship:** read by the `links` job through `check_links.py`.
+
+## memory_response_contract.py
+
+Pure stdlib support for new private task-outcome controllers: render and check
+the same public response constraints, select the last marked answer, and bind
+an independent review to exact message/run identities. Expected factual values
+stay in the separate private oracle. The helper performs no file or model work
+and is opt-in; old task sets do not invoke it automatically. See the
+[public contract and caller boundaries](../docs/MEMORY-RESPONSE-CONTRACT.md).
+
+Version 1 remains shape-only with identical rendering and bindings. Future
+callers can explicitly choose v2 to publish a complete bounded path/raw-SHA/size
+citation corpus and check literal quotes against supplied immutable UTF-8 bytes.
+The pure helper performs no source reads; context drift raises `ValueError`,
+separate from reader range/quote errors. The completion stand can now explicitly
+adopt v2 per task through `memory_response_intake.py`: sealed common source copy,
+full stdin prompt, read-only evidence mount, bounded chronological answer capture
+and same-context isolated literal checking before its existing task oracle.
+Installed runtime defaults remain unchanged. No old study is regraded.
+
+```bash
+python3 -B -m unittest tests.test_memory_response_contract
+python3 -B -m unittest tests.test_memory_response_intake
+```
 
 ## Maintainer Workflow
 

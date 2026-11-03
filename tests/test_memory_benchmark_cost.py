@@ -375,5 +375,126 @@ class LedgerBoundaries(unittest.TestCase):
                 self.assertIsNone(snapshot['product']['tokens'])
 
 
+class IncrementalAcquisitionComparison(unittest.TestCase):
+    def ledger(self, *, horizon=2, ordinary=10000, reader=30, acquisition=None,
+               billed=True, timing=True, failure=False):
+        ledger = subject.Ledger(horizon)
+        phases = [('build', None, ordinary)] if acquisition is None else [('build', None, acquisition)]
+        if acquisition is None:
+            phases += [(phase, ordinal, reader if phase == 'reader' else 2)
+                       for ordinal in range(horizon) for phase in ('query', 'reader', 'judge')]
+        for phase, ordinal, tokens in phases:
+            ticket = ledger.begin_call(phase, ordinal, str((phase, ordinal)), 'first')
+            ledger.finish_call(ticket, outcome='failed' if failure else 'succeeded',
+                usage=usage(tokens, 0, tokens//2, 0), usd_micros=tokens if billed else None,
+                billing='provider_reported' if billed else 'unknown',
+                component_ns=tokens if timing else None)
+            close(ledger, phase, ordinal, billed=billed)
+        if acquisition is None:
+            for ordinal in range(horizon): ledger.grade(ordinal, True)
+        return ledger.finalize()
+
+    def acquisition(self, amount, **options):
+        return {'scope': 'memory-only', 'common_task_excluded': True,
+                'ledger': self.ledger(acquisition=amount, **options)}
+
+    def compare(self, **changes):
+        arguments = dict(baseline=self.ledger(reader=30), treatment=self.ledger(reader=10),
+            acquisition_baseline=self.acquisition(0), acquisition_treatment=self.acquisition(50))
+        arguments.update(changes)
+        return subject.compare_incremental(**arguments)
+
+    def test_manual_oracle_excludes_ordinary_a_and_amortizes_declared_horizon(self):
+        result = self.compare()
+        tokens = result['metrics']['tokens']
+        self.assertEqual({'baseline': 64, 'treatment': 74, 'incremental_acquisition': 50,
+                          'incremental_future': -40, 'incremental_total': 10,
+                          'amortized_incremental': 5.0, 'savings': -10}, tokens)
+        self.assertEqual(2, result['horizon'])
+        self.assertEqual('supplied-observations', result['evidence'])
+        self.assertEqual(5, result['arms']['baseline']['product_attempts'])
+
+    def test_only_acquisition_build_requires_coverage(self):
+        acquisition = self.acquisition(0)
+        self.assertFalse(acquisition['ledger']['product']['complete']['coverage'])
+        self.assertEqual(50, self.compare(acquisition_baseline=acquisition)['metrics']['tokens']['incremental_acquisition'])
+
+    def test_unknown_acquisition_is_not_zero_and_dimensions_are_independent(self):
+        missing = {'scope':'memory-only', 'common_task_excluded':True,
+                   'ledger':subject.Ledger(2).finalize()}
+        result = self.compare(acquisition_baseline=missing)
+        self.assertIsNone(result['metrics']['tokens']['incremental_total'])
+        result = self.compare(acquisition_treatment=self.acquisition(50, billed=False))
+        self.assertEqual(10, result['metrics']['tokens']['incremental_total'])
+        self.assertIsNone(result['metrics']['usd_micros']['incremental_total'])
+        self.assertEqual(10, result['metrics']['component_ns']['incremental_total'])
+        result = self.compare(acquisition_treatment=self.acquisition(50, timing=False))
+        self.assertEqual(10,result['metrics']['tokens']['incremental_total'])
+        self.assertEqual(10,result['metrics']['usd_micros']['incremental_total'])
+        self.assertIsNone(result['metrics']['component_ns']['incremental_total'])
+
+    def test_failed_acquisition_cost_is_retained_without_claiming_provider_truth(self):
+        result = self.compare(acquisition_treatment=self.acquisition(50, failure=True))
+        self.assertEqual(50, result['metrics']['tokens']['incremental_acquisition'])
+        self.assertEqual(1, result['arms']['treatment']['acquisition_outcomes']['failed'])
+        self.assertNotIn('provider_attempt_coverage', result)
+
+    def test_distinct_failed_retry_is_charged_and_duplicate_observation_is_not(self):
+        ledger=subject.Ledger(2)
+        for attempt,outcome,tokens in [('failed','failed',20),('retry','succeeded',30)]:
+            ticket=ledger.begin_call('build',None,'acquire',attempt)
+            ledger.finish_call(ticket,outcome=outcome,usage=usage(tokens,0,0,0))
+            ledger.finish_call(ticket,outcome=outcome,usage=usage(tokens,0,0,0))
+        close(ledger,'build',None,billed=False)
+        result=self.compare(acquisition_treatment={'scope':'memory-only','common_task_excluded':True,
+            'ledger':ledger.finalize()})
+        self.assertEqual(50,result['metrics']['tokens']['incremental_acquisition'])
+        self.assertEqual(2,result['arms']['treatment']['acquisition_attempts'])
+        self.assertEqual(1,result['arms']['treatment']['acquisition_outcomes']['failed'])
+        self.assertIsNone(result['metrics']['usd_micros']['incremental_total'])
+
+    def test_incomplete_grading_never_gives_cost_per_correct(self):
+        treatment=self.ledger(reader=10)
+        treatment['grading'].update(observed=1,known_correct=1,complete=False,correct=None)
+        result=self.compare(treatment=treatment)
+        self.assertEqual(10,result['metrics']['tokens']['incremental_total'])
+        self.assertIsNone(result['arms']['treatment']['metrics']['tokens']['per_correct'])
+
+    def test_contradictory_imported_grading_cannot_establish_per_correct(self):
+        for grading in (
+            {'observed': 0, 'known_correct': 0, 'correct': 2, 'complete': True, 'conflicting': 1},
+            {'observed': True, 'known_correct': 1, 'correct': None, 'complete': False, 'conflicting': 0},
+            {'observed': 2, 'known_correct': 2, 'correct': True, 'complete': True, 'conflicting': 0},
+            {'observed': 2, 'known_correct': 2, 'correct': 1, 'complete': True, 'conflicting': 0},
+            {'observed': 1, 'known_correct': 2, 'correct': None, 'complete': False, 'conflicting': 0},
+            {'observed': 2, 'known_correct': 2, 'correct': 2, 'complete': True, 'conflicting': 1},
+            {'observed': 1, 'known_correct': 1, 'correct': 1, 'complete': False, 'conflicting': 0},
+        ):
+            with self.subTest(grading=grading):
+                ledger = self.ledger()
+                ledger['grading'] = grading
+                with self.assertRaises(subject.LedgerError):
+                    self.compare(treatment=ledger)
+
+    def test_absent_or_valid_incomplete_grading_keeps_per_correct_unknown(self):
+        ledger = self.ledger()
+        ledger.pop('grading')
+        self.assertIsNone(self.compare(treatment=ledger)['arms']['treatment']['metrics']['tokens']['per_correct'])
+        ledger['grading'] = {'observed': 1, 'known_correct': 1, 'correct': None,
+                             'complete': False, 'conflicting': 1}
+        self.assertIsNone(self.compare(treatment=ledger)['arms']['treatment']['metrics']['tokens']['per_correct'])
+
+    def test_horizon_profile_scope_and_malformed_metrics_are_refused(self):
+        for value in (self.acquisition(50, horizon=1),
+                      {**self.acquisition(50), 'common_task_excluded':False}):
+            with self.subTest(value=str(value)[:50]), self.assertRaises(subject.LedgerError):
+                self.compare(acquisition_treatment=value)
+        for key,value in [('profile','different'), ('usage_profile','different')]:
+            ledger=self.ledger();ledger[key]=value
+            with self.assertRaises(subject.LedgerError):self.compare(treatment=ledger)
+        ledger=self.ledger();ledger['phases']['reader']['tokens']=True
+        with self.assertRaises(subject.LedgerError):self.compare(treatment=ledger)
+
+
 if __name__ == '__main__':
     unittest.main()

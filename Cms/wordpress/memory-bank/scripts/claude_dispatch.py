@@ -25,7 +25,8 @@ policy-N: part N of the project's AGENTS.md. Claude Code reaches it from
 it asks about in a terminal and leaves out under -p. It keeps a hook's output
 in the conversation only up to INLINE characters and puts a longer one in a
 file, of which the model sees the first 2,000 - so the policy comes in parts,
-one settings entry each, cut between sections.
+one settings entry each, cut between sections, and a policy longer than the
+entries carry ends the last with the line the rest begins at.
 
 A session in a worktree of the project's repository, which has none of an
 installation Git does not track, is served the same way for the worktree
@@ -54,17 +55,21 @@ WINDOWS = os.name == "nt"
 # One copy serves every project of the person: a session in the root of a
 # project with an older release must not put an older one back. Raise it,
 # with the comment in claude_dispatch.sh, whenever either file changes.
-DISPATCH_VERSION = 4
+DISPATCH_VERSION = 5
 INTERPRETERS = (["python3"], ["python"], ["py", "-3"])
 CLI = "memory-bank/scripts/context.py"
 # How .claude/CLAUDE.md, or the project's own CLAUDE.md, pulls AGENTS.md in.
 POLICY_IMPORT = re.compile(r"(?:^|\s)@(?:\./|\.\./)?AGENTS\.md(?:\s|$)", re.M)
-# Settings entries that carry AGENTS.md; a policy longer than they hold ends
-# in the last one, which Claude Code then keeps in a file.
-POLICY_PARTS = 4
+# Settings entries that carry AGENTS.md, about 9,800 characters each. Four
+# held 39,000: a client project's 43 KB policy, whose own part came first,
+# put every rule of the accelerator's into the last entry, which Claude Code
+# kept in a file. A policy longer than six hold ends the last with where the
+# rest begins (CONTINUED).
+POLICY_PARTS = 6
 # Claude Code 2.1: the longest hook output kept in the conversation, counted
 # as JavaScript counts a string's length.
 INLINE = 10_000
+CONTINUED = "\n\nThe policy goes on past what reaches this session: read {} from line {} to its end.\n"
 
 
 def plain(command: str) -> bool:
@@ -278,7 +283,9 @@ def policy(root: str, start: str, part: int, project: str = "") -> str:
     """Part `part` of the project's AGENTS.md, with a line saying what it is;
     nothing past its end, nor where the project's CLAUDE.md does not import
     it, nor when Claude Code imports it itself - which in a worktree without
-    the installation it cannot, unless the worktree has its own AGENTS.md."""
+    the installation it cannot, unless the worktree has its own AGENTS.md.
+    The last part of a policy longer than the parts carry ends with the line
+    the rest begins at: whole, it would go into a file."""
     path = Path(root) / "AGENTS.md"
     if not 1 <= part <= POLICY_PARTS or not path.is_file() or not imports_policy(root):
         return ""
@@ -289,11 +296,16 @@ def policy(root: str, start: str, part: int, project: str = "") -> str:
     except (OSError, UnicodeError):
         return ""
     header = "Contents of {} (the project's policy), part {} of {}:\n\n"
-    parts = pieces(text, INLINE - width(header.format(path, 99, 99)) - 64)
+    budget = INLINE - width(header.format(path, 99, 99)) - 64
+    parts = pieces(text, budget)
     count = min(len(parts), POLICY_PARTS)
     if part > count:
         return ""
-    body = "".join(parts[part - 1:]) if part == POLICY_PARTS else parts[part - 1]
+    body = parts[part - 1]
+    if part == POLICY_PARTS and len(parts) > POLICY_PARTS:
+        done = sum(len(piece) for piece in parts[:part - 1])
+        body = pieces(text[done:], budget - width(CONTINUED.format(path, 9_999_999)))[0]
+        body += CONTINUED.format(path, text.count("\n", 0, done + len(body)) + 1)
     return header.format(path, part, count) + body
 
 

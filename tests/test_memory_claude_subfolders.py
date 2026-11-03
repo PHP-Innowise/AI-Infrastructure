@@ -206,16 +206,40 @@ class PolicyParts(Fixture):
             bodies.append(output[len(header):])
         self.assertEqual("".join(bodies), text)
 
-    def test_a_policy_longer_than_the_entries_ends_whole_in_the_last(self):
-        root = self.project(policy=self.policy_text(40))
+    def test_a_policy_as_long_as_a_client_projects_comes_whole(self):
+        # 43 KB, the project's own part first: four entries put every rule of
+        # the accelerator's into the last, 17,360 characters Claude Code kept
+        # in a file.
+        root = self.project(policy=self.policy_text(10))
         text = (root / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertGreater(dispatch.width(text), 42_000)
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.config)}):
             outputs = [dispatch.policy(str(root), str(root / "src"), part)
                        for part in range(1, dispatch.POLICY_PARTS + 1)]
-        last = f"part {dispatch.POLICY_PARTS} of {dispatch.POLICY_PARTS}:\n\n"
-        self.assertIn(last, outputs[-1])
-        self.assertTrue(text.endswith(outputs[-1].split(last, 1)[1]))
-        self.assertEqual("".join(output.split(":\n\n", 1)[1] for output in outputs), text)
+        given = [output for output in outputs if output]
+        for output in given:
+            self.assertLessEqual(dispatch.width(output.strip()), dispatch.INLINE)
+            self.assertNotIn("The policy goes on", output)
+        self.assertEqual("".join(output.split(":\n\n", 1)[1] for output in given), text)
+
+    def test_a_policy_longer_than_the_entries_says_where_the_rest_begins(self):
+        root = self.project(policy=self.policy_text(40))
+        path = root / "AGENTS.md"
+        text = path.read_text(encoding="utf-8")
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.config)}):
+            outputs = [dispatch.policy(str(root), str(root / "src"), part)
+                       for part in range(1, dispatch.POLICY_PARTS + 2)]
+        self.assertEqual(outputs[-1], "")
+        outputs = outputs[:-1]
+        for output in outputs:
+            self.assertLessEqual(dispatch.width(output.strip()), dispatch.INLINE)
+        bodies = [output.split(":\n\n", 1)[1] for output in outputs]
+        last, _, note = bodies[-1].rpartition("\n\nThe policy goes on past what reaches this session: read ")
+        named, _, line = note.rstrip("\n").removesuffix(" to its end.").rpartition(" from line ")
+        self.assertEqual(named, str(path))
+        rest = "".join(text.splitlines(keepends=True)[int(line) - 1:])
+        self.assertTrue(rest)
+        self.assertEqual("".join(bodies[:-1]) + last + rest, text)
 
     def approve(self, folder):
         (self.config / ".claude.json").write_text(json.dumps({"projects": {key_of(folder): {
@@ -258,7 +282,8 @@ class DispatcherVersion(Fixture):
     # Raise DISPATCH_VERSION with any change to claude_dispatch.sh or .py,
     # then record the scripts' new fingerprint here.
     FINGERPRINTS = {3: "01f6a42d684516ea4f8aa8025f2186e2f1ea29cf4f7e6b5893b1b8c30a3c024b",
-                    4: "ffa0d136f1843abd212fe5c8161213a09a84007e05153495289707ffbad0420a"}
+                    4: "ffa0d136f1843abd212fe5c8161213a09a84007e05153495289707ffbad0420a",
+                    5: "e50a7291ea8131f8709901b548eb73ad74faa1f13330a7917b0d06d535a9ac73"}
 
     def test_both_scripts_carry_the_version_and_a_change_raises_it(self):
         shell = (SCRIPTS / "claude_dispatch.sh").read_text(encoding="utf-8")

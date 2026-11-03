@@ -27,6 +27,7 @@ or an ID arbitration.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Optional
@@ -40,12 +41,23 @@ def _version(fact: dict[str, Any]) -> Optional[int]:
     return None
 
 
-def _timestamp(fact: dict[str, Any]) -> str:
+def _timestamp(fact: dict[str, Any]) -> datetime:
     value = fact.get("updated_at", fact.get("at", ""))
-    return value if isinstance(value, str) else ""
+    if value in (None, ""):
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if not isinstance(value,str):raise ValueError('timestamp must be an ISO date or aware instant')
+    try:result=datetime.fromisoformat(value[:-1]+'+00:00' if value.endswith('Z') else value)
+    except ValueError as error:raise ValueError('invalid ISO timestamp') from error
+    if result.tzinfo is None:
+        # Historical fixtures permit an ISO calendar date, interpreted as
+        # UTC midnight. A local time without an offset is ambiguous.
+        if len(value)!=10:raise ValueError('timestamp needs an explicit UTC offset')
+        result=result.replace(tzinfo=timezone.utc)
+    try:return result.astimezone(timezone.utc)
+    except (ValueError,OverflowError) as error:raise ValueError('timestamp cannot be represented in UTC') from error
 
 
-def _rank(fact: dict[str, Any]) -> tuple[bool, int, str]:
+def _rank(fact: dict[str, Any]) -> tuple[bool, int, datetime]:
     version = _version(fact)
     return (version is not None, version if version is not None else -1, _timestamp(fact))
 

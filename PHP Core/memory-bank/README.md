@@ -49,6 +49,22 @@ Do not store task plans, speculative ideas, chat transcripts, generic PHP advice
 4. Verify claims against the current repository before using them.
 5. Report stale or conflicting memory in the Context Summary.
 
+## Rechecking Existing Knowledge
+
+After checking a promoted claim against current code, read its cited Brain
+record and retain its UUID and numeric revision. Read the complete file image
+with `python3 memory-bank/scripts/context.py source-fingerprints --source PATH --json`
+(or MCP `memory_source_fingerprints`). These hashes do not establish truth.
+
+In the ordinary result/native save, preserve the learning's type, title and
+complete source set; add `record_id`, `expected_revision` and the checked
+`source_fingerprints`, with top-level `verified: true`. This confirms or corrects
+the existing record instead of creating a duplicate. Changed checked evidence
+gets a successor chunk with the predecessor body and history preserved; an
+already identical checked image is a record no-op. Agents cannot re-attest
+person-verified or unknown-attestation claims. Report held references and
+promotion failures; do not clear stale warnings merely by reading or indexing.
+
 ## Creating Or Updating A Chunk
 
 1. Confirm the information is durable, reusable, non-sensitive, and not already authoritative elsewhere.

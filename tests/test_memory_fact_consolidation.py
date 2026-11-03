@@ -56,6 +56,20 @@ class FixtureTest(unittest.TestCase):
 
 
 class ResolveTest(unittest.TestCase):
+    def test_timezone_offsets_compare_instants_and_equal_instants_remain_tied(self):
+        first={'id':'a','fact':'f','serial':1,'updated_at':'2026-10-31T10:00:00+02:00'}
+        second={'id':'b','fact':'f','serial':1,'updated_at':'2026-10-31T09:00:00Z'}
+        self.assertEqual('b',FACTS.resolve([first,second])['groups'][0]['winner'])
+        first['updated_at']='2026-10-31T10:00:00+01:00'
+        group=FACTS.resolve([first,second])['groups'][0]
+        self.assertTrue(group['ambiguous']);self.assertIsNone(group['winner'])
+
+    def test_invalid_or_ambiguous_local_timestamps_are_not_ranked(self):
+        for stamp in ('not-a-time','2026-10-31T10:00:00',3,
+                      '0001-01-01T00:00:00+01:00','9999-12-31T23:59:59-01:00'):
+            with self.subTest(stamp=stamp),self.assertRaises(ValueError):
+                FACTS.resolve([{'id':'a','fact':'f','updated_at':stamp}])
+
     def test_version_beats_timestamp_and_timestamp_breaks_equal_versions(self) -> None:
         result = FACTS.resolve([
             {"id": "old", "fact": "f", "serial": 1, "updated_at": "2026-01-02"},

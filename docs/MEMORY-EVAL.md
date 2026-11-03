@@ -1,5 +1,78 @@
 # Memory Evaluation Stand
 
+## Declared response contracts for future studies
+
+The maintainer-only [response contract helper](MEMORY-RESPONSE-CONTRACT.md)
+renders and checks the same declared answer/citation limits, keeps the last
+explicitly marked attempt, and binds independent review to the exact message,
+slot, source image, verifier and protocol. A positive review never rescues a
+known machine failure. The caller retains immutable current-run custody and
+checks source truth in its private oracle.
+
+New private controllers may opt into this pure helper. The task-complete stand
+also supports explicit per-task `response_contract` v2, with a sealed common
+citation snapshot, complete stdin prompt and isolated same-byte evidence check.
+Tasks without that field retain legacy behavior. Preflight references against
+both shape and literal source bytes. Equivalent identifier forms or exact
+required forms belong in the public task; custom grader disclosure remains
+author-supplied. Existing frozen studies retain their original grades.
+
+## Experimental whole-task arms
+
+The opt-in `task-complete` endpoint also accepts `selective`, `consolidate`
+and `consolidate-verify`, each paired with one baseline in its own sealed run.
+These arms are refused by legacy first-touch runs. No installed profile,
+ranking, admission rule or write-path default is changed.
+
+`selective` starts with recall and wraps exactly one existing prompt hook.
+Bounded versioned RU/EN cues select the existing full profile only for that
+request. Version 2 distinguishes historical-state inquiries (including past
+limits without decision words), historical decisions, current-state questions,
+procedural requests and continuations. Mixed past/current inquiries can request
+history; ordinary requests stay on recall. Version 1 rules remain supported.
+These are purpose cues, not semantic understanding or an environment filter.
+The wrapper sanitizes a copy for routing but
+forwards the exact original payload, cwd, task, host, session and transcript to
+the original hook. It never bypasses the gate, broadens own-save membership,
+calls MCP, appends a second capsule or retries a failed hook. Routing failure
+falls back to recall before invoking the hook once.
+
+```bash
+python3 scripts/memory_outcome_ab.py seal --set /private/tasks.json --verifiers /private/verifiers.json --design /private/design.json --out /private/selective-protocol.json --cache /separate/corpus-cache --model MODEL --arms recall,selective
+python3 scripts/memory_outcome_ab.py run --endpoint task-complete --set /private/tasks.json --verifiers /private/verifiers.json --protocol /private/selective-protocol.json --out /private/selective-result.json --cache /separate/corpus-cache --model MODEL --arms recall,selective
+```
+
+The wrapper and public rules are copied into the run's corpus; a hook command
+never refers to a tooling path the agent's allowlist cannot read. Metadata-only
+router observations are transient under `memory-bank/local/experiments`, then
+validated/exported into the private result after the agent exits. Digests bind
+router, sanitizer and rules. Missing, unsafe or mismatched receipts give unknown
+treatment attribution, not an excluded successful pair. Receipts from a writable
+corpus are observations, **not authenticated proof of producer honesty**.
+No raw query, session ID or transcript path is included. Optional controller-only
+Boolean `needs_history` labels give TP/FP/FN/TN routing diagnostics; absent labels
+remain unknown and never reach the router. Explicit retrieve and all policy/tool
+availability stay equal in all arms. The router does not provide a new environment
+admission filter: scoped ambiguity must not be silently converted into a fact.
+
+The consolidation arms reproduce the existing pipeline on separate copies at
+`seal`, validate them, and bind each actual public treatment image and Git store
+before model execution. Derived indexes are rebuilt for the treatment and the
+same screened recent-file state is restored from baseline; no private locks or
+unrelated local caches are copied. Every repeat starts from that frozen image; new summary
+UUIDs are not regenerated per repeat. Baseline and treatment differ in the two
+declared consolidation flags and their resulting memory, with promotion settings
+otherwise preserved. The mechanical-only arm is not automatic verification.
+Independent resolution of each flag needs its own held-out result. See
+[the lifecycle pilot contracts](MEMORY-WRITE-PATH.md).
+
+Completion reports validate the embedded protocol seal and exact planned
+membership. A result violating the sealed no-retry policy cannot improve the
+quality verdict; observed attempt costs remain visible. Known agent calls/time
+and input/output/cached subsets are reported separately; none establishes full
+provider-attempt economics. Real held-out measurements of these new arms have
+not been established by public fixture tests.
+
 `scripts/memory_eval.py` measures what the prompt-time memory hook delivers,
 on each project **as it was when the prompt was written**. It is a
 repository-level maintainer tool: it is never installed into a project, it
@@ -81,8 +154,9 @@ the changed file, though it never delivers a saved result; `recall`
 the next day. That did not end the rule: every heuristic after it waits for
 its own run, as the `ticket` arm does. The stand counts the calls
 before the first touch of the file the task changed. It stops a run at that
-touch, so it does not see whether the task got done: that needs full-length
-runs and a way to check the result, and neither exists yet. The measures
+touch, so it does not see whether the task got done. The opt-in `task-complete`
+endpoint below adds full-length runs and independent checking; its public
+fixture tests do not establish an efficacy result on real held-out tasks. The measures
 before it score relevance labels, and real use has not shown that relevant
 delivery changes what an agent does. In September one of 287 delivered
 documents was opened.
@@ -107,6 +181,41 @@ drawn once at least 30 exist, with the stand's verdict rule. The note is kept
 outside the clone (it names the projects); its SHA-256 is
 `ff43fdbad191b748feacfce2a2a087d3bfdabb71108804ed250d2fdca9cd1a6f`. Until
 it reads `ticket-helps`, `ticket_files` stays off.
+
+### The every-turn save: a field check
+
+The save request after every answer is a write-path cost that was never
+weighed against a benefit: on 43 saves on copies of two client projects it
+took a median 17.1 s after an answer of 70.5 s, and in real sessions the
+knowledge it writes was not seen opened (`realized`, above). The four client
+projects run it since 2026-10-30 - but from 17:01 that day a Harness sync
+put them on `main`'s runtime, which refuses their `recall` profile, so until
+they are synced again their prompts carry no capsule and none of their
+turns counts toward the 50 below. What to read from their sessions, when,
+and what follows was written down before any of them ran it: the field
+counts of `funnel` and `realized --traces` from 2026-10-31, on the first
+Monday with 50 capsule turns for each of Claude Code and Codex (at the latest
+2027-02-01); if no knowledge item was opened on either host while the save
+costs a fifth of the answer's time or more on one, an outcome A/B of the
+every-turn save on continuation tasks comes next, before the default moves.
+The note is kept outside the clone (it names the projects); its SHA-256 is
+`83cf101c527e9341aa42c525d6cc6a0262f794ca1102cea39237cd40524edcee`.
+
+`scripts/memory_eval.py field-check --project <each> --since 2026-10-31`
+computes what the rule reads, per host, from the same transcripts `realized`
+reads: the capsule turns; K, the knowledge items (kinds `brain` and `chunk`)
+a later tool call opened, from capsules and explicit retrieves together; T,
+the task records opened, pointers and returned items together; S, the median
+save seconds over the median answer's; and which branch of the rule each
+host meets, or that a host is still below 50 capsule turns. Beside them, not
+part of the rule, it gives the Claude Code hook runs recorded and how many
+were not found: a hook that is not found decides the rule silently - and,
+per host, the prompt-hook turns whose refresh assembled no capsule, which
+are not capsule turns, so a host short of 50 may be short for them. Counts
+only. On
+the four projects' sessions from 2026-09-01 - before any save step ran there -
+it reads K = 0 on both hosts, T = 1 for Claude Code and 9 for Codex: the
+working-state path first.
 
 ## What a run does, per prompt
 
@@ -372,9 +481,60 @@ any retrieve naming them. In next's Codex sessions since 2026-09-01 (992
 read, 36 of them retrieved, 75 calls) the answers named 25 task records, 9
 of them opened afterwards, 4 findings and chunks, none opened, and
 `CHANGELOG.md` in 14 sessions, opened in 11. That runtime printed no `task
-record:` pointer; the records came as history items. In the same sessions'
-440 capsule turns the capsules delivered 54 items, 44 of them `CHANGELOG.md`
-(25 opened) and none of the rest opened.
+record:` pointer; the records came as history items. It also refused a task
+not recorded yet: 14 of the 23 calls that ran retrieve alone were answered
+"Working task not found", and 39 calls ran `start` first; the runtime answers
+such a retrieve since 2026-10-06. Codex heads a command's output with its own
+lines ("Script completed", the wall time, "Output:"), which `realized` reads
+past.
+
+`realized` also counts every hook run a Claude Code transcript records, by
+event: succeeded, failed - and of those, how many failed because the command
+was not found (exit 127) - and blocked. Claude Code records a tool hook's
+success only when the hook printed, so a quiet `PreToolUse` reads 0 there. In
+September 2026 two client projects' hooks were wired as relative
+`.claude/hooks/...` commands: below the project root none was found, 3,309
+times, and the Bash validator did not run there for a month. The wiring has
+named `"${CLAUDE_PROJECT_DIR}"` since; this count is how such a break shows.
+
+`realized --traces` sets the runtime's own record beside the host's. The
+runtime keeps a trace of every capsule it rendered (the last 200 by default,
+in `memory-bank/local/retrieval-traces`) with the digest of the text it
+printed and the items it showed; the manifest of the same ID names what asked
+for it. Each hook turn's capsule and each explicit retrieve's answer is
+matched to the trace whose digest it reproduces, each trace once. The report
+gives the renders in the window, the hook renders a transcript shows were
+handed over and those none shows - a refresh stopped at its budget after it
+printed, a host that dropped the capsule, a session whose transcript is not
+on this machine, and every Cursor session - the retrieve answers that match
+a render, and per host the hook capsules matched to a render, the items those
+renders showed and how many the turn touched. Counts only. The traces exist
+only where a runtime of 2026-10-13 or later rendered; a capsule from a recall
+profile turn without saves of its own renders without a search and leaves no
+trace. In the same sessions'
+440 prompt-hook turns, 140 carried a capsule. The other 300 printed
+"Capsule unavailable": "Working task not found" from the runtime of then
+(the prompt refresh has served a task not yet recorded since 2026-10-06), or
+an automatic-continuation conflict whose code no longer exists anywhere in
+this repository. The 140 delivered 54 items, 44 of them `CHANGELOG.md` (25
+opened), and none of the rest was opened. Until 2026-10-31 `realized` counted
+a turn whose refresh assembled no capsule as a turn with one, since the
+refresh's own layer lines come first; it now counts them apart. Over the four
+client projects from 2026-09-01 they are 448 of 931 prompt-hook turns - 300
+of next's 440 (Codex), 73 of scb's 147, 63 of bauherrenmappe's 216 and 12 of
+aea-partner's 128 - every one in September, for those two reasons.
+
+Read the Claude Code side of those months with one fact beside it: no Claude
+Code session in the four client projects had the memory policy. Each project
+keeps a `CLAUDE.md` of its own, and Claude Code reads `AGENTS.md` by itself
+only where there is none. The edition's `.claude/CLAUDE.md` imports it since
+2026-10-06; it reached three of the clients on 2026-10-08 and `next` on
+2026-10-18, after the last Claude Code session in each (2026-09-18 to
+2026-10-06), and none has run there since. Their transcripts show the
+instructions Claude Code loaded: the project's own `CLAUDE.md` in 191 of 386,
+`AGENTS.md` in none. Claude Code's "no retrieve,
+1 of 289 delivered documents opened" measures sessions that were never told
+to retrieve; Codex reads `AGENTS.md` itself, and did.
 Codex keeps a finished rollout compressed, as `rollout-*.jsonl.zst` (3,040 of
 3,099 on the maintainer machine in October 2026); `realized` reads those too,
 through Python 3.14's `compression.zstd` or else the `zstd` command. Without
@@ -409,15 +569,44 @@ in total, it counts:
   the `capsule` shape a runtime of 2026-10-30 or later records - the profile,
   the working state, how many recent files, ticket files and documents it
   carried, its token estimate - how many had each, by profile, and the median
-  tokens. An older
-  line has no shape and counts as `unknown`. A refresh line names no host and
-  also comes from an explicit request (the MCP retrieve, the CLI);
+  tokens. The estimate counts documents only, so a capsule of working state
+  and recent files reads 0; the bytes the capsule printed, recorded since a
+  later runtime of the same day, give the median printed size. An older
+  line has no shape and counts as `unknown`. A refresh line also comes from
+  an explicit request (the MCP retrieve, the CLI); a runtime of 2026-10-30 or
+  later names the host that asked (`cli` for an explicit request), and the
+  funnel counts capsules by host, an older line as `unknown`. A line that
+  asked for a capsule and got none - a profile the runtime refused, a task ID
+  it cannot read - says so (`"capsule": null`, since 2026-10-31) and counts
+  as "capsules asked for, none built", not as a capsule; on older runtimes it
+  wrote no shape and read as a capsule of `unknown` profile, which is how the
+  four clients' capsule-less turns after 2026-10-30 17:01 would have looked;
 - **the saves**: from `native-results.ndjson`, as `realized` reads it - armed,
   requested at Stop, made (saved or held), refused, failed or omitted,
   learnings written and chunks promoted, with every code and its count;
+  newer save rows also distinguish unique submitted/existing/held learnings;
+  absent or inconsistent selection counters remain unknown, never inferred
+  from zero writes. Exact replays do not double-count the selection;
 - **what the project keeps**: task records, findings and decisions, and bank
   chunks, counted as files. The `--since` window applies to the journals, not
   to these.
+
+`install-status` answers the question before those counts: can memory run
+in the project at all? Per `--project`, from the project's own files: the
+commit its accelerator was last synced from and whether this clone has it
+(this clone's, behind it, or not in it - newer, or another line of work);
+the configured capsule profile and the profiles the project's runtime
+knows; the last prompt hook run, whether the last capsule asked for was
+built, and the last save step; and which instructions Claude Code loads.
+Each problem is one way memory went silent in the client projects: a
+profile the runtime refuses on every prompt (2026-10-30, after a sync from
+an older clone), a last capsule not built, a project's own `CLAUDE.md`
+without the edition's import (September), an `AGENTS.md` Codex cuts before
+the policy, and Claude Code hook commands that name `.claude/` relative to
+the folder a session starts in. It exits 1 when any project has a problem,
+prints no record text, and `--json` gives the same as JSON. On the four
+clients on the night of 2026-10-31 it named the refused `recall` profile in
+each and the cut policy in one.
 
 It prints counts and fixed codes only; `--json` gives the same numbers as
 JSON. A project where the hook ran but no capsule carried a recent file, or
@@ -568,7 +757,8 @@ report them too.
   nothing useful, at least one judged noise), `unjudged-only`, `silent`
   (nothing delivered, or the sanitizer left nothing to search).
 - **latency** - wall time of the refresh process on a warm index, p50 and p95.
-- **realized** - per host: prompt-hook turns, turns with a capsule and with
+- **realized** - per host: prompt-hook turns, those whose refresh assembled
+  no capsule ("Capsule unavailable"), turns with a capsule and with
   documents, delivered items the agent touched with a tool and mentioned in
   its text, by kind (skill, brain, task-record, chunk, task, spec-doc,
   changelog); the capsules' task record pointers and how many the agent
@@ -576,7 +766,10 @@ report them too.
   by the agent in those turns; and, as a baseline, documents of those kinds
   the agent opened that the capsule did not deliver. Then the explicit
   retrieves of whole sessions, what they returned and what was opened
-  afterwards. From the native result journal, per host: the
+  afterwards; the Claude Code hook runs by event, failed and not found among
+  them; and with `--traces` the renders the runtime made that a transcript
+  shows were handed over, and those none shows. From the native result
+  journal, per host: the
   automatic save funnel from prompt hook run to promoted chunk, and the codes
   of every skip, refusal and failure. From the transcripts, per host: how many
   save requests the Stop hook made and, as medians, the seconds and output
@@ -790,13 +983,16 @@ None says whether delivery changes what an agent does.
 - **Comparing arms:** `report --compare BASELINE,TREATMENT` compares any two
   arms of a result. The rule below then reads `<treatment>-helps` /
   `<treatment>-hurts`. Each run also records the token estimate of the
-  documents the hook's manifest delivered.
+  documents the hook's manifest delivered, and the bytes the hook's capsules
+  printed (`capsule_bytes`, from the health journal, None before the runtime
+  recorded them).
 - **Cost:** `report` prints, per arm and outside the verdict, the mean
   seconds of a run, on how many runs Codex reported its usage, the mean
-  input, cached and output tokens over those, and the documents' token
-  estimate. Codex reports usage only when a turn completes, so a run stopped
-  at the first gold touch has none; the estimate counts documents only, so a
-  recall or ticket capsule without one reads 0 whatever the hook printed.
+  input, cached and output tokens over those, the documents' token
+  estimate and the printed bytes. Codex reports usage only when a turn
+  completes, so a run stopped at the first gold touch has none; the estimate
+  counts documents only, so a recall or ticket capsule without one reads 0
+  tokens, and its printed bytes say what it cost.
 - **Repeats:** `--repeat` runs each arm several times; the order alternates by
   task and repeat.
 
@@ -1139,3 +1335,383 @@ complete refresh latency (including cold model startup); a model smoke test is
 not evidence of retrieval improvement. Keep models, queries, client corpora and
 result JSON outside Git. CI exercises stdlib fixtures and fake workers, without
 ML downloads or dependencies.
+
+
+## Optional complete-task endpoint
+
+### Explicit v2 response intake
+
+A public task may declare `response_contract` v2; its private verifier then
+provides `response: {reference, answer_field}`. Answer cases grade exactly one
+nonnullable string field through the existing equals oracle. Patch cases use
+`answer_field: null` and retain the external patch oracle. See the
+[complete input, custody and failure contract](MEMORY-RESPONSE-CONTRACT.md#explicit-task-complete-integration).
+Both arms receive the same read-only citation corpus. It is extra common public
+context: `off` disables hooks, not physical memory. Treatment-only historical
+knowledge must not leak through this image in an absence-control experiment.
+Passing this integration proves evaluation plumbing, not memory benefit.
+
+### Private delivery observations
+
+Complete-task results additionally retain `delivery_proof`, a bounded
+maintainer-only projection of new retrieval manifests in the governed
+`project-brain/control/` or ignored `memory-bank/local/` directories. It names only
+safe paths present in the maintainer-owned pre-run snapshot, document hashes,
+frame/task UUIDs and origins (`automatic` versus `explicit`). It omits queries,
+excerpts, record bodies and arbitrary metadata. New agent-created paths outside
+that vocabulary remain unreported. Legacy first-touch output is unchanged.
+
+The projection distinguishes selected documents from optional local render
+traces. `trace-reported` means a matching local sidecar, not host ingestion.
+`producer_authenticated: false`, `host_receipt: unknown` and
+`model_use: unproven` are intentional. A matching document image can provide
+its declared record ID and stored citation hashes; a changed image cannot
+lend today's metadata to yesterday's delivery. Missing or partial digest coverage
+for declared sources remains unknown. Current citation checks are
+explicitly **post-run**, preserve historical expected hashes and establish
+byte identity only. They do not reverify a claim or authenticate a reviewer.
+
+Limits are 32 frames, 32 documents in total, 1 MiB per file, 8 MiB of reads and
+64 KiB of exported JSON. Expired deadlines/budgets mark collection incomplete.
+Missing traces, unsafe/hardlinked/special files, malformed JSON and unknown
+metadata never become positive evidence. Byte/work bounds do not promise
+preemption of a slow regular filesystem read. Optional collection failure
+does not change native completion, independent grading or treatment validity.
+
+The legacy `run` default is still `--endpoint first-touch`; its gold/recall
+metrics, verdict and hook-only treatment remain unchanged. The opt-in
+`task-complete` controller runs until the native turn AND CLI finish, or its
+sealed cap/deadline. `completed` describes execution, never correctness.
+For multiple native turns, only the last active turn can establish completion;
+an unfinished continuation cannot reuse an earlier answer. Tool IDs are scoped
+to each turn while calls, the cap and deadline remain cumulative. Duplicate
+terminal events and items after a terminal event invalidate completion.
+
+Prepare private inputs together in a private directory **outside this clone**,
+and keep the separate corpus cache outside that directory. Add `task_mode`
+(`answer` or `patch`) and an opaque `verifier_id` to each existing task-set item.
+A verifier manifest has `{"cases":{"id":CASE}}`. An answer case is exactly
+`{"mode":"answer","equals":"the complete expected answer"}`: whitespace at
+its edges is ignored; mentioning the right file is not sufficient.
+
+A patch case has exactly `mode: patch`, `argv`, positive finite `timeout` and
+`read_roots`. Its executed oracle must be a sealed external executable or
+`[absolute_python, absolute_oracle_script, ...]`, under dedicated read-only
+`read_roots`, outside the candidate. Bare pytest/unittest discovery in the
+candidate and Python `-c`/`-m` wrappers are not independent oracles. On exit 0,
+the trusted driver must print exactly one JSON object:
+
+```json
+{"schema":"task-outcome-verifier-v1","completed":true,"correct":true}
+```
+
+The driver is trusted code: **it must isolate candidate execution from its own
+process and labels**, then independently check behavior. Importing arbitrary
+candidate code into the oracle's interpreter and trusting exit 0 is unsafe.
+The explicit receipt detects early exit without a verdict; it is not a general
+proof that an arbitrary driver cannot be subverted. Missing receipts, errors,
+invalid output, changing oracle/label bytes and timeout yield `unavailable`
+with `correct: null`. Patches are checked on a separate disposable copy after
+the agent stops, before its corpus is removed. Gold-bearing feedback is not
+sent back to the agent or used to select a better retry.
+Oracle seals include every file and directory under each declared read root,
+including `.git`, `__pycache__`, empty directories and ordinary permission bits.
+Candidate snapshot exclusions are not label exclusions. Bounded, nonblocking
+regular-file reads reject special answer/label files; duplicate receipt keys
+are invalid rather than selecting the last value.
+Special file permission bits are refused; only ordinary file modes are supported.
+
+The design JSON must contain exactly `primary: correctness`, numeric
+`quality_margin` in [0,1), positive integer `minimum_tasks`, nonempty
+`power_rationale`, `selection`, `exclusion`, `secondary_benefit`,
+`stopping_rule: fixed-horizon` and `unknown_policy: insufficient`.
+Power/sample size, margin, tuning exclusions and the variant are chosen before
+the real holdout, not inherited from the old navigation threshold. Example
+commands (these are not run by CI and call a model only at `run`):
+
+```bash
+python3 scripts/memory_outcome_ab.py seal --set /private/tasks.json --verifiers /private/verifiers.json --design /private/design.json --out /private/protocol.json --cache /separate/corpus-cache --model MODEL --arms off,recall
+python3 scripts/memory_outcome_ab.py run --endpoint task-complete --set /private/tasks.json --verifiers /private/verifiers.json --protocol /private/protocol.json --out /private/result.json --cache /separate/corpus-cache --model MODEL --arms off,recall
+python3 scripts/memory_outcome_ab.py report /private/result.json --metric task-complete --json
+```
+
+`seal` reconstructs the prompt-time public snapshots and saves immutable base
+images, config hashes per arm, runtime/CLI/input/oracle bindings, budgets and
+an explicit no-retry policy before any model process. Repeat and budget options
+must match between seal and run. Raw events, selective IDs and kept agent
+artifacts are refused by this private endpoint. Raw final answers exist only
+in a temporary private artifact outside the mounted agent corpus. Aggregates
+contain counts/digests rather than prompts, expected answers or transcripts.
+A seal is a content binding, not a signature authenticating its author's claims.
+
+Linux bubblewrap with usable user namespaces is mandatory. A probe executes in
+the actual mount allowlist and proves it cannot read the private manifest;
+unavailable isolation never falls back to ordinary host execution. Only the
+public OS/toolchain, the native CLI package, a fresh home with its read-only
+`auth.json`, and that run's writable corpus are visible. The outer namespace
+allows the native provider transport; the native workspace-write sandbox keeps
+its tool networking policy. No account config/trust file is written. This is
+not evidence of native Windows support or provider execution in CI.
+
+For this first private endpoint, Git is rebuilt from the screened public
+snapshot, with no borrowed object store or historical credential blobs. The
+sealed `git_history: public-snapshot-only` is an intentional limitation:
+history/ticket-dependent tasks are not faithful history replays, and the ticket
+arm is refused here. Other legacy endpoints retain their historical behavior.
+Candidate snapshots reject symlinks and special files and are bounded to
+100,000 files / 512 MiB; answer artifacts to 1 MiB. Unsupported snapshots yield
+unavailable evidence instead of dereferencing external paths or exhausting RAM.
+Post-exit health/manifests use nonblocking, no-follow regular-file reads, a
+1 MiB per-artifact limit and at most 1,000 manifest directory entries. Unsafe
+or oversized telemetry makes treatment attribution unknown; FIFO/link artifacts
+cannot block report collection. Remaining collection time is checked between
+manifests; this is not a universal hard filesystem-scheduling guarantee.
+
+Every task × arm × repeat slot is checkpointed before model work. Missing,
+duplicated or changed membership is refused in reports. Interrupted/unattempted
+slots and unknown grades cannot shrink the denominator into a perfect success
+rate. Timeout/cap/agent failure means not completed within its budget; uncertain
+infrastructure/verifier evidence stays unknown. The paired analysis groups
+repeats within task; it never treats them as independent tasks or selects the
+best retry. Incomplete plans/grades/treatments yield `insufficient`.
+
+Costs are observed host-reported input/output (cached input is already included)
+and elapsed time, not complete physical provider-attempt billing. All attempts
+in an imported result retain their observed cost. Missing usage remains unknown,
+not zero; a known subtotal is separate from covered whole-plan host usage.
+Completed-turn usage is accumulated across continuations. `known_usage`,
+`usage_events` and per-field turn coverage retain partial observations; `usage`
+is unavailable when a required turn observation or final completion is missing.
+Optional cached/reasoning fields with partial coverage remain known subtotals.
+Provider totals, USD, savings and cost-per-correct stay unavailable. The existing
+`harness/src/harness/memory_benchmark_cost.py` supplied-observation ledger is not
+replaced or silently called complete: a CLI PID is not a physical provider
+attempt, and a local deterministic verifier is not a complete zero-attempt
+model judge.
+
+Native `error` reconnect notifications are provisional: the original deadline
+and cap continue to apply until `turn.failed`, CLI exit or completion. An
+uncompleted native/CLI failure has an unavailable grade, rather than being
+mistaken for an incorrect answer about the project. Explicit timeout/cap
+exhaustion remains a failed task within its sealed budget. On systems whose
+OpenSSL bundle lives at `/etc/ssl/cert.pem`, that exact public trust file is
+mounted read-only alongside the certificate directory; TLS verification is
+never disabled.
+
+### Source and served tasks
+
+Legacy authored recall sets still save onto their own branch task. New cases
+may name `source_task_id` and `served_task_id`; the served ID is the corpus
+branch, and the controller records both real UUIDs and refuses a claimed
+cross-task pair resolving to one UUID. Newly injected `saves` are always
+`save_provenance: authored`, with native result receipt digests; calling such an
+injection observed/generated is refused.
+
+An existing save may instead carry `save_provenance: observed|generated`,
+`source_task_id`, `served_task_id`, earlier `saved_at`, and
+`save_receipt: {path, sha256}` binding a captured native result receipt. The
+source task and indexed own knowledge must already exist in the prompt-time
+snapshot, and the receipt must match that actual task UUID. No missing learning
+is recreated. The supplied provenance label is retained with
+`authorship_verified: false`: a receipt proves a save, not model/human identity,
+truth or absence of fabricated source evidence. Preserve source-session proof
+privately when making a real observed/generated claim. Changing the captured
+receipt after seal refuses execution.
+
+Public roundtrip tests exercise save on A, a different UUID B, full retrieve
+availability and absence from B's own recall. Their fixtures are not real
+client sessions or a causal long-term benefit measurement. Choose real later
+states with intervening work and without recent-file answer hints when sealing
+such a holdout; moving a clock alone does not establish long-term recall.
+
+## Native producer and fresh consumer
+
+Trusted preparation rebuilds `memory-bank/INDEX.md` unconditionally after the
+materialized admission gate is constructed, runs the separate Bank validator
+(`memory-bank/scripts/validate.py`), validates Brain, then refreshes SQLite.
+`context.py validate` alone validates Brain and cannot establish Bank validity.
+Any failure stops before native dispatch and retains the failed attempt and
+preparation receipts. Reindexing changes only the derived catalog; it does not
+re-attest, repair, promote or discard imported knowledge. A timestamp shortcut
+is insufficient when a fresh blank INDEX is newer than the imported chunks.
+Custom controllers must invoke `memory_native_ab.prepare_memory(trusted)` in
+the same post-admission, private-environment, bounded-receipt phase, before
+baseline capture and sealing. Running it in `install_runtime()` would create
+local locks/indexes before the fresh-image admission check.
+
+`scripts/memory_native_ab.py` makes the native A→B development procedure
+reproducible. It is a private maintainer tool, separate from the default
+first-touch stand and from a confirmatory task-outcome comparison.
+
+Create a UTF-8 private configuration with exactly these fields:
+
+```json
+{
+  "schema": "memory-native-ab-v1",
+  "project_snapshot": "/private/project-snapshot",
+  "source": {
+    "task_alias": "proof/source-alpha",
+    "prompt": "Inspect the current retry contract. Retain one new source-backed finding if warranted."
+  },
+  "served": {
+    "task_alias": "proof/served-omega",
+    "prompt": "Find the prior retry finding using explicit retrieve, recheck its sources and cite its MEM identifier."
+  },
+  "model": "gpt-6.1-sol",
+  "tool_cap": 40,
+  "deadline_seconds": 420
+}
+```
+
+Aliases must differ and be lowercase safe task names. Caps are integers
+1–100; stage deadlines are integer seconds 1–900. Unknown keys, malformed or
+linked inputs, detected secrets and overlapping paths are refused. No
+caller-supplied executable, hook, verifier, arbitrary environment or native
+configuration is admitted. The source path is a screened physical project
+snapshot; links, special files and hardlinks in admitted data are refused.
+
+```bash
+python3 -B scripts/memory_native_ab.py plan --config /private/native-ab.json --out /private/native-run
+python3 -B scripts/memory_native_ab.py run --run /private/native-run --stage source
+python3 -B scripts/memory_native_ab.py inspect --run /private/native-run
+python3 -B scripts/memory_native_ab.py run --run /private/native-run --stage served
+```
+
+Omit `--stage` to execute both stages. Planning binds the screened source
+bytes **and executable modes**, prompts, budgets and canonical runtime images.
+It creates owner-only `control/plan.json` and `control/state.json` with two
+planned slots before execution. Source/runtime drift refuses execution.
+Inspection reads existing artifacts without initializing a database or
+launching subprocesses. A crash may leave a running/uncertain slot or lock;
+inspection does not silently repair it, retry it or remove the prior evidence.
+
+Each stage receives a new physical `work/source` or `work/served` tree,
+independent Git metadata, native home and persistent private temporary root.
+Client execution configuration and local caches/history/queues/handoffs are
+excluded. Canonical executable runtime directories are replaced completely,
+including unknown project modules that could shadow trusted imports.
+Preparatory Git runs ignore inherited global/system configuration.
+The copy is committed as a clean screened baseline before native hooks run,
+so overlay files are not mistaken for task changes.
+
+Full canonical lifecycle hooks are configured per invocation. Existing source
+entries and runtime files are pinned read-only; memory/Brain/handoff mounts
+pin their ancestors while permitting owned data updates. The corpus root
+permits native sandbox denial stubs; unexpected public file additions block
+the handoff. Native auth is a separate read-only mount and
+is never copied. Read-isolation probes must deny the private plan, original
+project and sibling source corpus. There is no host fallback.
+
+A valid source capture needs an observed successful canonical native-result
+command, matching task/session/request/token, normalized payload digest,
+receipt and complete proof. Decisions and findings retain their distinct
+accepted/resolved states; learning-only saves and progress-only saves are
+distinguished. Only a newly created record and its newly promoted, fully
+source-matching chunk count toward A's new durable knowledge. A promotion
+sweep can also promote older records; its total is not A's learning count.
+
+#### Mandatory snapshot admission
+
+Planning screens the held selected image before creating the output. Each
+stage screens its own held image again before copying, Git staging or context
+indexing; the source copy must match the sealed source digest. B independently
+screens new A knowledge even when its handoff hash matches. This gate has no
+configuration/environment bypass and never edits or redacts an input.
+
+The bounded policy rejects known credential assignments and containers,
+including quoted/escaped JSON keys, YAML key/type/value carriers, literal
+registry credentials, opaque `EV[...]`, private-key material and URL userinfo.
+Default-looking and numeric passwords are credentials too. Exact
+`[REDACTED_PRIVATE_VALUE]` / `[REDACTED]` scalars and narrowly defined whole
+environment references are supported. In YAML-like colon assignments,
+references must be quoted; ambiguous suffixes, folded values, comments and
+unsupported credential expressions require a separately reviewed projection.
+For non-JSON secret-container declarations, all `value` fields in the file
+must be screened. Invalid UTF-8, NUL/C0 controls and unsupported binaries fail
+closed. This is known-pattern admission, not proof that arbitrary encoded
+secrets or personal information cannot exist.
+
+After the canonical overlay, a fresh materialized gate checks every file,
+required runtime/hook presence and held application bytes/modes. Canonical
+trust requires exact path, bytes and ordinary mode, never a directory prefix.
+Intentional installer merges are checked explicitly. Trusted preparation
+creates fresh Git and index state from admitted inputs in a private HOME/TMP;
+their opaque binaries are separately declared derived state. Preexisting Git
+history/databases cannot acquire that trust. Their identities are fixed before
+mount setup, while all other generated text remains screened.
+
+After the trusted namespace probe creates its mountpoint directories, the
+gate screens the complete actual tree, binds file/directory identities and
+modes (including the private root), and verifies it immediately before model
+dispatch. Unknown paths, missing files, chmod or byte changes block launch.
+The external read-only provider-auth mount is an explicit transport exception;
+only its empty mode-0600 mountpoint is present in the physical corpus. The gate
+does not claim that the native process has no access to provider credentials.
+
+Private `source-admission.json` / `served-admission.json` and matching verified
+receipts contain policy IDs, aggregate counts and digests, without matched
+values, snippets or unsafe filenames. Gate/controller bytes participate in the
+runtime seal. A refusal retains the attempted slot and blocks downstream work;
+it does not count as a correct answer or a correctly empty native save.
+
+This protocol explicitly defers manual `record-result`/`memory_write` capture
+until the native Stop continuation. A record written earlier in the same
+session may be valid project knowledge, but does not satisfy this experiment's
+native-capture criterion. `no-learning` classifies the native payload rather
+than claiming the entire session produced no knowledge. Capture is elicited
+under these instructions; arbitrary spontaneous extraction is not measured.
+
+The supported observed-save encoding is a direct canonical Python invocation,
+optionally inside the emitted exact-corpus `(cd ... && python3 ...)` wrapper,
+with literal JSON in a single-quoted heredoc. A plain `cat` quoted-heredoc
+pipeline into that exact wrapper is also accepted; extra commands, cat
+options, output redirections and unquoted delimiters are not. The runner
+requests that format in a generic instruction; it supplies no learning contents. Unsupported
+command encodings remain unproven. Shell/interpreter paths are pinned to
+trusted forms, and extracted command text is never executed by the verifier.
+Receipts and sidecars remain unsigned local evidence: producer authentication,
+semantic truth and human review are not established by matching hashes.
+
+Before the handoff, A must have no unresolved native requests, spooled/queued
+updates or pending turn observations. Its own completed observations may be
+settled through canonical `turn --flush` under **A's** identity only, after
+validated capture and healthy hooks; foreign task rows block this step.
+The runner verifies chunk bytes did not change and rechecks that A is clear.
+B never drains A's buffers. B's pending state remains in its private corpus;
+neither database deletion nor cleanup is described as lossless.
+
+B must resolve to a different task UUID and native session. Success requires
+an A chunk in an explicit-retrieve manifest, matching post-run document and
+complete citation hashes, and a render hash matching actual successful native
+tool stdout. The final answer must attribute that MEM record. The collector
+accepts the complete exact UTF-8 frame at the start of a successful canonical
+retrieve's output, even when a later command appends text; `native_stdout_match`
+distinguishes `whole` and `prefix`. Leading text, partial/changed frames and
+unrelated commands remain unobserved. This does not authenticate the producer.
+The collector
+still reports local trace versus host/model receipt separately; observed
+consultation and attribution do not establish causal necessity or correctness.
+
+Native transport has bounded stdout/stderr, line size, answer size, turn count,
+tool count and time; continuations share the original stage budget. Process
+groups are cleaned even after the leader exits. Synchronous filesystem reads
+have byte/work limits and deadline checks, not hard-preemptible wall time.
+Raw streams and native process results are private, including results retained
+when later collection fails. All completed-turn usage observations and known
+subtotals are retained; missing/interrupted coverage and provider billing remain
+unknown. Failed A leaves B planned but blocked. A slot is never retried under
+the same plan; corrected runs need a new output and preserve prior failures.
+
+The public summary always says `cohort_role: development-smoke`,
+`natural_delayed_efficacy: false`, and leaves causal benefit/provider savings
+null. Pausing between stages does not turn a predetermined B question into a
+natural delayed task. The public offline adapter fixture exercises real hooks
+and storage without contacting a provider; its tests are not native model runs.
+
+For a later confirmatory comparison, collect genuinely new source sessions and
+natural later questions with intervening work, exclusion/family receipts and an
+independent private oracle. Exclude all development-exposed families and their
+RU/EN paraphrases. Existing outcome tooling supports two arms at a time: seal
+`recall↔selective` as primary and `recall↔full` as diagnostic comparisons.
+Cover absent knowledge, conflict, fact update and environment changes before
+reading outcomes. No eligible delayed dataset is implied by this runner.

@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import hashlib
 import os
 import shutil
 import subprocess
@@ -109,6 +110,20 @@ class CounterTest(unittest.TestCase):
 
 
 class HookArgumentsTest(unittest.TestCase):
+    def test_selective_wraps_one_handler_inside_corpus_and_preserves_limits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            corpus = Path(directory); (corpus / '.codex').mkdir()
+            (corpus / '.codex/hooks.json').write_text(json.dumps({'hooks': {'UserPromptSubmit': [
+                {'matcher': 'keep', 'hooks': [{'type': 'command', 'command': 'bash working-memory-read.sh',
+                    'additionalContextLimit': 314, 'timeout': 7}]}]}}))
+            args = ab.hook_arguments(corpus, selective=True)
+            rendered = next(value for value in args if value.startswith('hooks.UserPromptSubmit='))
+            self.assertRegex(rendered, r'additionalContextLimit\s*=\s*314')
+            self.assertRegex(rendered, r'timeout\s*=\s*7')
+            self.assertEqual(1, rendered.count('--enabled'))
+            self.assertTrue((corpus / 'memory-bank/local/experiments/selective.py').is_file())
+            self.assertNotIn(str(ROOT / 'scripts/memory_selective_retrieve_pilot.py'), rendered)
+
     def test_only_the_memory_prompt_hook_is_passed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             corpus = Path(directory)
@@ -219,8 +234,9 @@ class ReportTest(unittest.TestCase):
         }} for n in range(4)}
         summary = ab.summarize({"meta": {"cap": 40}, "items": items})
         self.assertEqual({"runs": 4, "seconds_mean": 20.0, "runs_with_usage": 1, "capsule_tokens_mean": 400.0,
-                          "input_tokens_mean": 40000.0, "cached_input_tokens_mean": 30000.0,
-                          "output_tokens_mean": 900.0}, summary["cost"]["capsule"])
+                          "capsule_bytes_mean": None, "input_tokens_mean": 40000.0,
+                          "cached_input_tokens_mean": 30000.0, "output_tokens_mean": 900.0},
+                         summary["cost"]["capsule"])
         self.assertEqual((0, 30.0), (summary["cost"]["off"]["runs_with_usage"], summary["cost"]["off"]["seconds_mean"]))
         self.assertEqual("insufficient", summary["verdict"])
         with tempfile.TemporaryDirectory() as directory:
@@ -801,6 +817,41 @@ class PlantSavesTest(unittest.TestCase):
         self.assertEqual(0, refreshed["exit"], refreshed["stderr"])
         self.assertIn("Invoice rounding happens per line", refreshed["stdout"].decode("utf-8"))
 
+    def test_cross_task_save_has_different_real_uuids(self):
+        self.task.update(source_task_id='public-source-A',served_task_id='public-served-B',save_provenance='authored')
+        self.assertEqual('public-served-B',ab.corpus_branch(self.task))
+        subprocess.run(['git','checkout','-q','-b',ab.corpus_branch(self.task)],cwd=self.corpus,env=self.env,check=True)
+        planted=ab.plant_saves(self.task,self.corpus,self.env,60,Path(self.directory.name)/'saves')
+        self.assertNotEqual(planted['source_task_uuid'],planted['served_task_uuid'])
+        self.assertEqual('authored',planted['save_provenance'])
+        self.assertTrue(planted['receipts'])
+        query=['--query','invoice rounding per line','--task-id',ab.corpus_branch(self.task),'--ephemeral']
+        own=ab.stand.run_runtime(self.corpus,['refresh',*query,'--capsule-profile','recall'],self.env,60)
+        self.assertNotIn('Invoice rounding happens per line',own['stdout'].decode())
+        full=ab.stand.run_runtime(self.corpus,['retrieve','invoice rounding per line','--task-id',ab.corpus_branch(self.task)],self.env,60)
+        self.assertIn('Invoice rounding happens per line',full['stdout'].decode())
+
+    def test_captured_receipt_is_observed_without_injecting_a_learning(self):
+        original=ab.plant_saves(self.task,self.corpus,self.env,60,Path(self.directory.name)/'saves')
+        import memory_results
+        receipt=memory_results._receipt(self.corpus,original['source_task_uuid'],'save-1')
+        captured=Path(self.directory.name)/'captured.json'; captured.write_bytes(receipt.read_bytes())
+        task={**self.task,'saves':[],'source_task_id':ab.corpus_branch(self.task),
+            'served_task_id':'public-observed-served','save_provenance':'observed',
+            'saved_at':self.task['ts'],'ts':'2026-09-02T09:05:00Z',
+            'save_receipt':{'path':str(captured),'sha256':__import__('hashlib').sha256(captured.read_bytes()).hexdigest()}}
+        subprocess.run(['git','checkout','-q','-b',ab.corpus_branch(task)],cwd=self.corpus,env=self.env,check=True)
+        before=set(ab.saved_documents(self.corpus))
+        admitted=ab.plant_saves(task,self.corpus,self.env,60,Path(self.directory.name)/'never-written')
+        self.assertEqual('observed',admitted['save_provenance'])
+        self.assertNotEqual(admitted['source_task_uuid'],admitted['served_task_uuid'])
+        self.assertFalse(admitted['authorship_verified'])
+        self.assertEqual({'project-brain/dynamic/tasks/'+admitted['served_task_uuid']+'.md'},set(ab.saved_documents(self.corpus))-before)
+        self.assertTrue(before.issubset(ab.saved_documents(self.corpus)))
+        captured.write_text('{}')
+        with self.assertRaises(ab.OutcomeError):
+            ab.plant_saves(task,self.corpus,self.env,60,Path(self.directory.name)/'never-written')
+
     def test_a_set_without_saves_plants_nothing(self) -> None:
         self.assertEqual({}, ab.plant_saves({"id": "T1", "ts": self.task["ts"]}, self.corpus, self.env, 60,
                                             Path(self.directory.name) / "saves"))
@@ -824,7 +875,7 @@ class RunArmTest(unittest.TestCase):
             manifests = Path({str(manifests)!r})
             if "--dangerously-bypass-hook-trust" in sys.argv:
                 with open(manifests.parent / "refresh-health.ndjson", "a") as health:
-                    health.write(json.dumps({{"source": "refresh"}}) + "\\n")
+                    health.write(json.dumps({{"source": "refresh", "capsule": {{"bytes": 640}}}}) + "\\n")
                 if "--navigation" not in sys.argv:
                     (manifests / "hook.json").write_text(json.dumps(
                         {{"entry_point": "refresh", "token_estimates": {{"total": 812}},
@@ -856,6 +907,7 @@ class RunArmTest(unittest.TestCase):
         self.assertTrue(outcome["capsule_delivered"])
         self.assertTrue(outcome["hook_ran"])
         self.assertEqual(812, outcome["capsule_tokens"])
+        self.assertEqual(640, outcome["capsule_bytes"])
         self.assertEqual({"refresh": 1, "retrieve": 1}, outcome["manifests"])
 
     def test_a_navigation_run_has_a_hook_line_and_no_delivery(self) -> None:
@@ -864,12 +916,15 @@ class RunArmTest(unittest.TestCase):
         self.assertTrue(outcome["hook_ran"])
         self.assertFalse(outcome["capsule_delivered"])
         self.assertEqual(0, outcome["capsule_tokens"])
+        # A capsule without documents estimates 0 tokens and still prints.
+        self.assertEqual(640, outcome["capsule_bytes"])
 
     def test_an_agent_retrieve_is_not_a_delivered_capsule(self) -> None:
         command = [sys.executable, str(self.fake), "prompt"]
         outcome = ab.run_arm(command, self.corpus, ["src/Gold.php"], cap=40, timeout=20)
         self.assertFalse(outcome["capsule_delivered"])
         self.assertFalse(outcome["hook_ran"])
+        self.assertIsNone(outcome["capsule_bytes"])
 
     def test_an_answer_naming_the_needed_file_is_counted_and_the_save_seen(self) -> None:
         command = [sys.executable, str(self.fake), "--dangerously-bypass-hook-trust", "--answer", "prompt"]
@@ -906,6 +961,534 @@ class RunRefusesTest(unittest.TestCase):
                             "--codex", str(fake), "--cache", str(base / "cache")])
             self.assertEqual(2, code)
             self.assertFalse((base / "result.json").exists())
+
+
+class CompletionCLIIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name); self.private=self.root/'private'; self.private.mkdir()
+        self.cache=self.root/'cache'; self.protocol=self.private/'protocol.json'
+        self.set_path=self.private/'tasks.json'; self.verifiers=self.private/'verifiers.json'
+        self.design=self.private/'design.json'; self.result=self.private/'result.json'
+        self.task={'id':'public-task','ts':'2026-09-01T09:00:00Z','project':'public',
+            'prompt':'Solve the public fixture','gold':['Gold.php'],'task_mode':'answer','verifier_id':'public-answer'}
+        self.set_path.write_text(json.dumps({'tasks':[self.task]}))
+        self.verifiers.write_text(json.dumps({'cases':{'public-answer':{'mode':'answer','equals':'42'}}}))
+        self.design.write_text(json.dumps({'primary':'correctness','quality_margin':0,'minimum_tasks':2,
+            'power_rationale':'Public mechanical fixture only; not an efficacy claim','selection':'public fixture',
+            'exclusion':'none','secondary_benefit':'elapsed','stopping_rule':'fixed-horizon','unknown_policy':'insufficient'}))
+        self.options=['--set',str(self.set_path),'--verifiers',str(self.verifiers),'--cache',str(self.cache),
+            '--arms','off,recall','--model','public-fake','--codex',sys.executable,'--timeout','5']
+
+    def build(self,task,base,*args):
+        base.mkdir(parents=True)
+        cfg=base/'project-brain/config'; cfg.mkdir(parents=True)
+        (cfg/'runtime.json').write_text(json.dumps({'capsule_profile':'recall'}))
+        (base/'Gold.php').write_text('public source')
+        (base/'agent.py').write_text("""import json,sys
+from pathlib import Path
+if sys.argv[1]=='recall':
+ p=Path('memory-bank/local'); p.mkdir(parents=True,exist_ok=True)
+ (p/'refresh-health.ndjson').write_text(json.dumps({'source':'refresh','capsule':{'bytes':12}})+'\\n')
+print(json.dumps({'type':'item.started','item':{'id':'one','type':'command_execution','command':'cat Gold.php'}}),flush=True)
+Path('patch.txt').write_text('changed')
+print(json.dumps({'type':'item.completed','item':{'id':'answer','type':'agent_message','text':'42'}}),flush=True)
+print(json.dumps({'type':'turn.completed','usage':{'input_tokens':11,'output_tokens':3}}),flush=True)
+""")
+        return {'commit':'public-snapshot','edition':'PHP Core','project':self.root}
+
+    def seal(self):
+        with mock.patch.object(ab,'build_corpus',side_effect=self.build), mock.patch.object(ab,'seed_recent_files',return_value=0), mock.patch.object(ab,'plant_saves',return_value={}):
+            self.assertEqual(0,ab.main(['seal',*self.options,'--design',str(self.design),'--out',str(self.protocol)]))
+
+    def test_seal_is_cli_wired_and_tamper_refuses_before_agent(self):
+        self.seal()
+        body=json.loads(self.protocol.read_text())
+        self.assertEqual('public-snapshot-only',body['settings']['git_history'])
+        self.assertFalse((Path(body['bases'][self.task['id']]['path'])/'.git/objects/info/alternates').exists())
+        self.set_path.write_text(json.dumps({'tasks':[{**self.task,'prompt':'tampered'}]}))
+        with mock.patch.object(ab,'run_arm') as run:
+            self.assertEqual(2,ab.main(['run',*self.options,'--endpoint','task-complete','--protocol',str(self.protocol),'--out',str(self.result)]))
+            self.assertFalse(run.called)
+        self.assertFalse(self.result.exists())
+
+    def test_oracle_read_root_outside_private_tree_is_refused(self):
+        oracle = self.root / 'external-oracle'; oracle.mkdir()
+        self.verifiers.write_text(json.dumps({'cases': {'public-answer': {
+            'mode': 'answer', 'equals': '42', 'read_roots': [str(oracle)]}}}))
+        with mock.patch.object(ab, 'build_corpus', side_effect=self.build), \
+                mock.patch.object(ab, 'seed_recent_files', return_value=0), \
+                mock.patch.object(ab, 'plant_saves', return_value={}):
+            self.assertEqual(2, ab.main(['seal', *self.options, '--design', str(self.design), '--out', str(self.protocol)]))
+        self.assertFalse(self.protocol.exists())
+
+    def test_consolidation_treatment_is_prepared_and_bound_before_runs(self):
+        options = list(self.options); options[options.index('off,recall')] = 'recall,consolidate-verify'
+        def build(*args):
+            result = self.build(*args)
+            base = args[1]; (base / 'memory-bank/chunks').mkdir(parents=True)
+            (base / 'memory-bank/README.md').write_text('# Memory Bank\n')
+            from memory_pilot_support import canonical_module
+            brain = canonical_module('brain_runtime')
+            brain.rebuild_indexes(base); brain.reindex_bank(base)
+            shutil.copytree(ROOT / 'PHP Core/memory-bank/scripts', base / 'memory-bank/scripts',
+                            ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+            return result
+        def seed(task, corpus, *args):
+            connection = ab.runtime().connect(corpus / 'memory-bank/local/context.db')
+            try: return ab.runtime().record_recent_files(connection, ['Gold.php'])
+            finally: connection.close()
+        with mock.patch.object(ab, 'build_corpus', side_effect=build), \
+                mock.patch.object(ab, 'seed_recent_files', side_effect=seed), \
+                mock.patch.object(ab, 'plant_saves', return_value={}):
+            self.assertEqual(0, ab.main(['seal', *options, '--design', str(self.design), '--out', str(self.protocol)]))
+        body = json.loads(self.protocol.read_text())
+        variant = body['bases'][self.task['id']]['variants']['consolidate-verify']
+        self.assertEqual(64, len(variant['sha256']))
+        self.assertEqual('not-measured', variant['replay']['task_outcome'])
+        self.assertTrue((Path(variant['path']) / '.git').is_dir())
+        cfg = json.loads((Path(variant['path']) / 'project-brain/config/runtime.json').read_text())
+        self.assertTrue(cfg['automatic_consolidation_verification'])
+        for image in (body['bases'][self.task['id']], variant):
+            connection = ab.runtime().connect_read_only(Path(image['path']) / 'memory-bank/local/context.db')
+            try: self.assertEqual(['Gold.php'], ab.runtime().load_recent_files(connection))
+            finally: connection.close()
+
+    def test_real_namespace_controller_verifies_before_cleanup(self):
+        import memory_outcome_isolation as isolation
+        corpus=self.root/'probe'; corpus.mkdir()
+        try: view=isolation.prepare_agent_view(corpus,self.private,credentials=False)
+        except isolation.IsolationError as error: self.skipTest(str(error))
+        if not isolation.probe_agent_view(view,self.verifiers): self.skipTest('Linux namespace unavailable')
+        self.seal()
+        def command(codex,corpus,arm,prompt,model): return [sys.executable,str(corpus/'agent.py'),arm]
+        with mock.patch.object(ab,'codex_command',side_effect=command), mock.patch.dict(os.environ,{'CODEX_HOME':str(self.root/'no-credentials')}):
+            self.assertEqual(0,ab.main(['run',*self.options,'--endpoint','task-complete','--protocol',str(self.protocol),'--out',str(self.result)]))
+        result=json.loads(self.result.read_text())
+        self.assertEqual(2,len(result['slots']))
+        for slot in result['slots']:
+            self.assertEqual('finished',slot['status'])
+            self.assertTrue(slot['attempts'][0]['completed'],slot)
+            self.assertIs(True,slot['attempts'][0]['verification']['correct'])
+        summary=ab.summarize_complete(result)
+        self.assertEqual(1,summary['arms']['recall']['correct'])
+        self.assertIsNone(summary['arms']['recall']['total_provider_tokens'])
+        self.assertEqual('insufficient',summary['verdict'])
+        self.assertFalse(list(self.cache.glob('completion-*')))
+        self.assertEqual(0,ab.main(['report',str(self.result),'--metric','task-complete','--json']))
+
+    def test_native_failure_is_unknown_while_budget_failure_is_incorrect(self):
+        self.seal()
+        for reason, correct in [('error', None), ('finished', None), ('timeout', False), ('cap', False)]:
+            with self.subTest(reason=reason):
+                result_path = self.private / (reason + '-result.json')
+                outcome = {'completed': False, 'stopped': reason, 'hook_ran': True,
+                           'capsule_delivered': False, 'telemetry_complete': True}
+                with mock.patch.object(ab, 'codex_command', return_value=[sys.executable, '-c', 'pass']), \
+                        mock.patch('memory_outcome_isolation.probe_agent_view', return_value=True), \
+                        mock.patch.object(ab, 'run_arm', return_value=outcome):
+                    self.assertEqual(0, ab.main(['run', *self.options, '--endpoint', 'task-complete',
+                        '--protocol', str(self.protocol), '--out', str(result_path)]))
+                result = json.loads(result_path.read_text())
+                for slot in result['slots']:
+                    self.assertIs(correct, slot['attempts'][0]['verification']['correct'])
+
+    def test_real_unfinished_continuation_never_reaches_positive_verifier(self):
+        import memory_outcome_isolation as isolation
+        probe = self.root / 'probe'; probe.mkdir()
+        try: view = isolation.prepare_agent_view(probe, self.private, credentials=False)
+        except isolation.IsolationError as error: self.skipTest(str(error))
+        if not isolation.probe_agent_view(view, self.verifiers): self.skipTest('Linux namespace unavailable')
+        original_build = self.build
+        def build(*args):
+            built = original_build(*args)
+            agent = args[1] / 'agent.py'
+            agent.write_text(agent.read_text() + "\nprint(json.dumps({'type':'turn.started'}),flush=True)\n")
+            return built
+        with mock.patch.object(self, 'build', side_effect=build):
+            self.seal()
+        def command(codex, corpus, arm, prompt, model):
+            return [sys.executable, str(corpus / 'agent.py'), arm]
+        with mock.patch.object(ab, 'codex_command', side_effect=command), \
+                mock.patch.dict(os.environ, {'CODEX_HOME': str(self.root / 'no-credentials')}), \
+                mock.patch('memory_outcome_verify.verify_task') as verify:
+            self.assertEqual(0, ab.main(['run', *self.options, '--endpoint', 'task-complete',
+                                        '--protocol', str(self.protocol), '--out', str(self.result)]))
+        verify.assert_not_called()
+        result = json.loads(self.result.read_text())
+        for slot in result['slots']:
+            attempt = slot['attempts'][0]
+            self.assertFalse(attempt['completed'])
+            self.assertIsNone(attempt['verification']['correct'])
+            self.assertIsNone(attempt['usage'])
+            self.assertEqual({'input_tokens': 11, 'output_tokens': 3}, attempt['known_usage'])
+        report = ab.summarize_complete(result)['arms']['recall']
+        self.assertEqual((0, 1, 14), (report['correct'], report['unknown'], report['known_host_reported_tokens']))
+        self.assertIsNone(report['host_reported_tokens'])
+
+
+class WholeCompletionReportTests(unittest.TestCase):
+    def slot(self, task, arm, correct=None, completed=True, usage=None):
+        return {'task_id':task,'arm':arm,'repeat':0,'status':'finished','attempts':[
+            {'completed':completed,'treatment_valid':True,'verification':{'correct':correct},'usage':usage,'seconds':2}]}
+
+    def result(self, slots):
+        protocol = {'schema': 'task-outcome-protocol-v1',
+            'bases': {slot['task_id']: {} for slot in slots},
+            'settings': {'arms': ['off', 'recall'], 'repeat': 1, 'retry_policy': 'none', 'endpoint': 'task-complete'},
+            'design': {'primary': 'correctness', 'minimum_tasks': 1, 'quality_margin': 0,
+                'power_rationale': 'public fixture', 'selection': 'fixture', 'exclusion': 'none',
+                'secondary_benefit': 'elapsed', 'stopping_rule': 'fixed-horizon', 'unknown_policy': 'insufficient'}}
+        import hashlib
+        protocol['seal_sha256'] = hashlib.sha256(json.dumps(protocol, sort_keys=True, separators=(',', ':'),
+            ensure_ascii=False, allow_nan=False).encode('utf-8')).hexdigest()
+        return {'schema':'task-outcome-complete-v1','meta':{'finished':True,'interrupted':False},
+                'protocol': protocol, 'slots': slots}
+
+    def test_embedded_seal_cannot_lose_task_and_its_slots(self):
+        result = self.result([self.slot('a','off',True), self.slot('a','recall',True),
+                              self.slot('b','off',True), self.slot('b','recall',True)])
+        del result['protocol']['bases']['b']; result['slots'] = result['slots'][:2]
+        with self.assertRaises(ab.OutcomeError): ab.summarize_complete(result)
+
+    def test_unsealed_retry_never_improves_quality_verdict(self):
+        slots = [self.slot(task, arm, arm == 'recall') for task in ('a', 'b') for arm in ('off', 'recall')]
+        result = self.result(slots)
+        result['slots'][1]['attempts'].insert(0, {'completed': False, 'verification': {'correct': False},
+                                               'usage': {'input_tokens': 2, 'output_tokens': 1}})
+        self.assertEqual('insufficient', ab.summarize_complete(result)['verdict'])
+
+    def test_unknown_is_not_dropped_from_denominator(self):
+        result=self.result([self.slot('a','off',True),self.slot('a','recall',True),
+            self.slot('b','off',True),self.slot('b','recall',None)])
+        summary=ab.summarize_complete(result)
+        self.assertEqual(2,summary['arms']['recall']['planned'])
+        self.assertEqual(1,summary['arms']['recall']['unknown'])
+        self.assertIsNone(summary['arms']['recall']['success_rate'])
+        self.assertEqual('insufficient',summary['verdict'])
+
+    def test_known_agent_time_calls_and_cached_usage_are_separate_from_provider_cost(self):
+        off = self.slot('a', 'off', True, usage={'input_tokens': 10, 'output_tokens': 2, 'cached_input_tokens': 4})
+        recall = self.slot('a', 'recall', True, usage={'input_tokens': 8, 'output_tokens': 1, 'cached_input_tokens': 3})
+        off['attempts'][0]['calls'] = 5; recall['attempts'][0]['calls'] = 2
+        report = ab.summarize_complete(self.result([off, recall]))['arms']['recall']
+        self.assertEqual(2, report['observed_agent_calls'])
+        self.assertEqual(2, report['observed_agent_seconds'])
+        self.assertEqual(3, report['known_cached_input_tokens'])
+        self.assertEqual(9, report['host_reported_tokens'])
+        self.assertIsNone(report['total_provider_tokens'])
+
+    def test_partial_turn_usage_is_retained_without_double_count_or_complete_total(self):
+        first = self.slot('a', 'off', True, usage={'input_tokens': 10, 'output_tokens': 2,
+                                                  'cached_input_tokens': 4})
+        first['attempts'][0].update(known_usage={'input_tokens': 10, 'output_tokens': 2,
+                                                'cached_input_tokens': 4}, usage_complete=True,
+                                   usage_coverage={'completed_turns': 1, 'field_turns': {
+                                       'input_tokens': 1, 'output_tokens': 1, 'cached_input_tokens': 1}})
+        partial = self.slot('b', 'off', None, completed=False)
+        partial['attempts'][0].update(known_usage={'input_tokens': 5, 'output_tokens': 0,
+                                                  'cached_input_tokens': 2}, usage_complete=False,
+                                     usage_coverage={'completed_turns': 1, 'field_turns': {
+                                         'input_tokens': 1, 'output_tokens': 0, 'cached_input_tokens': 1}})
+        slots = [first, partial, self.slot('a', 'recall', True), self.slot('b', 'recall', True)]
+        report = ab.summarize_complete(self.result(slots))['arms']['off']
+        self.assertEqual(17, report['known_host_reported_tokens'])
+        self.assertEqual((15, 2, 6), (report['known_input_tokens'], report['known_output_tokens'],
+                                     report['known_cached_input_tokens']))
+        self.assertEqual((1, 2, 2, 1), (report['attempts_with_usage'], report['attempts_with_known_usage'],
+                                        report['attempts_with_known_input_usage'], report['attempts_with_known_output_usage']))
+        self.assertIsNone(report['host_reported_tokens'])
+
+    def test_complete_multiturn_usage_is_counted_once(self):
+        off = self.slot('a', 'off', True, usage={'input_tokens': 30, 'output_tokens': 5})
+        off['attempts'][0].update(known_usage={'input_tokens': 30, 'output_tokens': 5},
+                                 usage_complete=True, usage_coverage={'completed_turns': 2,
+                                     'field_turns': {'input_tokens': 2, 'output_tokens': 2}})
+        report = ab.summarize_complete(self.result([off, self.slot('a', 'recall', True)]))['arms']['off']
+        self.assertEqual(35, report['known_host_reported_tokens'])
+        self.assertEqual(35, report['host_reported_tokens'])
+
+    def test_interruption_keeps_all_slots_and_attempt_costs(self):
+        slots=[self.slot(str(i),'off',False,usage={'input_tokens':11,'output_tokens':3}) for i in range(3)]
+        slots += [{'task_id':str(i),'arm':'off','repeat':0,'status':'pending','attempts':[]} for i in range(3,8)]
+        slots[0]['attempts'].insert(0,{'completed':False,'usage':{'input_tokens':5,'output_tokens':2},'seconds':1})
+        slots += [{'task_id':str(i),'arm':'recall','repeat':0,'status':'pending','attempts':[]} for i in range(8)]
+        result=self.result(slots); result['meta']['interrupted']=True
+        summary=ab.summarize_complete(result)['arms']['off']
+        self.assertEqual((8,3,5,4),(summary['planned'],summary['attempted'],summary['unattempted'],summary['attempts']))
+        self.assertEqual(49,summary['known_host_reported_tokens'])
+        self.assertIsNone(summary['host_reported_tokens'])
+        self.assertIsNone(summary['total_provider_tokens'])
+
+    def test_missing_or_duplicate_slots_are_refused(self):
+        result=self.result([self.slot('a','off',True),self.slot('a','recall',True),self.slot('b','off',True),self.slot('b','recall',True)])
+        result['slots']=result['slots'][:2]
+        with self.assertRaises(ab.OutcomeError): ab.summarize_complete(result)
+        result['slots'].append(result['slots'][0])
+        with self.assertRaises(ab.OutcomeError): ab.summarize_complete(result)
+
+    def test_gold_touch_and_completed_are_not_correctness(self):
+        summary=ab.summarize_complete(self.result([self.slot('a','off',True),self.slot('a','recall',False)]))
+        self.assertEqual(0,summary['arms']['recall']['correct'])
+        self.assertNotEqual('treatment-helps',summary['verdict'])
+        self.assertIsNone(summary['arms']['recall']['host_reported_tokens'])
+
+
+class CompletedTaskTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.corpus = Path(self.temp.name)
+        self.agent = self.corpus / 'agent.py'
+
+    def run_events(self, events, cap=20, endpoint='task-complete'):
+        self.agent.write_text('import json\nfor event in ' + repr(events)
+                              + ': print(json.dumps(event), flush=True)\n', encoding='utf-8')
+        return ab.run_arm([sys.executable, str(self.agent)], self.corpus, [], cap, 5,
+                          endpoint=endpoint, answer_artifact=self.corpus / 'answer.txt')
+
+    @staticmethod
+    def event_turn(answer, usage, tool=False):
+        events = [{'type': 'turn.started'}]
+        if tool:
+            events += [{'type': kind, 'item': {'id': 'item_0', 'type': 'command_execution',
+                                              'command': 'true'}}
+                       for kind in ('item.started', 'item.completed')]
+        return events + [
+            {'type': 'item.completed', 'item': {'id': 'answer', 'type': 'agent_message', 'text': answer}},
+            {'type': 'turn.completed', 'usage': usage}]
+
+    def test_unfinished_later_turn_cannot_reuse_completion_or_answer(self):
+        result = self.run_events(self.event_turn('42', {'input_tokens': 10, 'output_tokens': 2})
+                                 + [{'type': 'turn.started'}])
+        self.assertFalse(result['completed'])
+        self.assertEqual('', (self.corpus / 'answer.txt').read_text())
+        self.assertIsNone(result['usage'])
+        self.assertFalse(result['usage_complete'])
+        self.assertEqual({'input_tokens': 10, 'output_tokens': 2}, result['known_usage'])
+
+    def test_completed_turns_sum_usage_and_reused_tool_ids(self):
+        first = {'input_tokens': 10, 'output_tokens': 2, 'cached_input_tokens': 4,
+                 'reasoning_output_tokens': 1}
+        second = {'input_tokens': 20, 'output_tokens': 3, 'cached_input_tokens': 6,
+                  'reasoning_output_tokens': 2}
+        result = self.run_events(self.event_turn('first', first, tool=True)
+                                 + self.event_turn('second', second, tool=True))
+        self.assertTrue(result['completed'])
+        self.assertEqual(2, result['calls'])
+        self.assertEqual({'input_tokens': 30, 'output_tokens': 5, 'cached_input_tokens': 10,
+                          'reasoning_output_tokens': 3}, result['usage'])
+        self.assertEqual([first, second], result['usage_events'])
+        self.assertTrue(result['usage_complete'])
+        self.assertEqual('second', (self.corpus / 'answer.txt').read_text())
+
+    def test_reused_tool_id_in_next_turn_still_reaches_cap(self):
+        events = self.event_turn('first', {'input_tokens': 10, 'output_tokens': 2}, tool=True)
+        events += self.event_turn('second', {'input_tokens': 20, 'output_tokens': 3}, tool=True)
+        result = self.run_events(events, cap=2)
+        self.assertEqual(('cap', 2, False), (result['stopped'], result['calls'], result['completed']))
+        self.assertIsNone(result['usage'])
+        self.assertEqual({'input_tokens': 10, 'output_tokens': 2}, result['known_usage'])
+
+    def test_timeout_after_completed_turn_retains_known_usage(self):
+        events = self.event_turn('first', {'input_tokens': 10, 'output_tokens': 2})
+        events += [{'type': 'turn.started'}]
+        self.agent.write_text('import json,time\nfor event in ' + repr(events)
+                              + ': print(json.dumps(event), flush=True)\ntime.sleep(10)\n')
+        result = ab.run_arm([sys.executable, str(self.agent)], self.corpus, [], 20, .2,
+                            endpoint='task-complete', answer_artifact=self.corpus / 'answer.txt')
+        self.assertEqual(('timeout', False), (result['stopped'], result['completed']))
+        self.assertIsNone(result['usage'])
+        self.assertFalse(result['usage_complete'])
+        self.assertEqual({'input_tokens': 10, 'output_tokens': 2}, result['known_usage'])
+
+    def test_duplicate_terminal_or_late_item_cannot_complete(self):
+        terminal = {'type': 'turn.completed', 'usage': {'input_tokens': 10, 'output_tokens': 2}}
+        for late in (terminal,
+                     {'type': 'item.started', 'item': {'id': 'late', 'type': 'command_execution'}},
+                     {'type': 'item.completed', 'item': {'id': 'late', 'type': 'agent_message', 'text': 'late'}},
+                     {'type': 'item.completed', 'item': []}):
+            with self.subTest(late=late):
+                result = self.run_events([terminal, late])
+                self.assertFalse(result['completed'])
+                self.assertEqual('error', result['stopped'])
+                self.assertIsNone(result['usage'])
+                self.assertEqual({'input_tokens': 10, 'output_tokens': 2}, result['known_usage'])
+
+    def test_incomplete_or_invalid_usage_keeps_known_subtotals(self):
+        cases = [
+            (None, 10, 2), ({}, 10, 2),
+            ({'input_tokens': True, 'output_tokens': 3}, 10, 5),
+            ({'input_tokens': -1, 'output_tokens': 3}, 10, 5),
+            ({'input_tokens': 20, 'output_tokens': False}, 30, 2),
+            ({'input_tokens': 20, 'output_tokens': 3, 'cached_input_tokens': -1}, 30, 5),
+            ({'input_tokens': 20, 'output_tokens': 3, 'cached_input_tokens': True}, 30, 5),
+            ({'input_tokens': 20, 'output_tokens': 3, 'cached_input_tokens': 21}, 30, 5),
+            ({'input_tokens': 20, 'output_tokens': 3, 'reasoning_output_tokens': 4}, 30, 5),
+        ]
+        for usage, known_input, known_output in cases:
+            with self.subTest(usage=usage):
+                result = self.run_events(self.event_turn('first', {'input_tokens': 10, 'output_tokens': 2})
+                                         + self.event_turn('second', usage))
+                self.assertTrue(result['completed'])
+                self.assertIsNone(result['usage'])
+                self.assertFalse(result['usage_complete'])
+                self.assertEqual(known_input, result['known_usage']['input_tokens'])
+                self.assertEqual(known_output, result['known_usage']['output_tokens'])
+                self.assertEqual(2, result['usage_coverage']['completed_turns'])
+                self.assertNotIn('cached_input_tokens', result['known_usage'])
+
+    def test_optional_usage_missing_in_one_turn_is_partial_not_zero(self):
+        first = {'input_tokens': 10, 'output_tokens': 2, 'cached_input_tokens': 4}
+        second = {'input_tokens': 20, 'output_tokens': 3}
+        result = self.run_events(self.event_turn('first', first) + self.event_turn('second', second))
+        self.assertTrue(result['usage_complete'])
+        self.assertEqual({'input_tokens': 30, 'output_tokens': 5}, result['usage'])
+        self.assertEqual(4, result['known_usage']['cached_input_tokens'])
+        self.assertEqual(1, result['usage_coverage']['field_turns']['cached_input_tokens'])
+
+    def test_first_touch_retains_legacy_usage_and_item_identity(self):
+        events = self.event_turn('first', {'input_tokens': 10, 'output_tokens': 2}, tool=True)
+        events += self.event_turn('second', {'input_tokens': 20, 'output_tokens': 3}, tool=True)
+        result = self.run_events(events, endpoint='first-touch')
+        self.assertEqual(1, result['calls'])
+        self.assertEqual({'input_tokens': 20, 'output_tokens': 3}, result['usage'])
+        self.assertFalse({'completed', 'known_usage', 'usage_events', 'usage_complete', 'usage_coverage'} & result.keys())
+
+    def run_agent(self, ending='complete', cap=8, timeout=5):
+        code = '''import json,sys,time,os
+from pathlib import Path
+def emit(x): print(json.dumps(x),flush=True)
+emit({'type':'item.started','item':{'id':'one','type':'command_execution','command':'cat Gold.php'}})
+mode=sys.argv[1]
+if mode=='reconnect': emit({'type':'error','message':'Reconnecting... 2/5 (temporary transport failure)'})
+if mode=='quiet': time.sleep(20)
+Path('patched.txt').write_text('fixed')
+emit({'type':'item.completed','item':{'id':'answer','type':'agent_message','text':'The result is 42.'}})
+if mode=='failed': emit({'type':'turn.failed'})
+elif mode!='unfinished': emit({'type':'turn.completed','usage':{'input_tokens':11,'output_tokens':3,'cached_input_tokens':5}})
+if mode=='closed': os.close(1); time.sleep(.15); os._exit(0)
+sys.exit(9 if mode=='bad-exit' else 0)
+'''
+        self.agent.write_text(code, encoding='utf-8')
+        return ab.run_arm([sys.executable, str(self.agent), ending], self.corpus,
+                          ['Gold.php'], cap, timeout, endpoint='task-complete',
+                          answer_artifact=self.corpus / 'answer.txt')
+
+    def test_task_complete_runs_past_gold(self):
+        result = self.run_agent()
+        self.assertTrue(result['completed'])
+        self.assertEqual(1, result['calls_to_gold'])
+        self.assertEqual('fixed', (self.corpus / 'patched.txt').read_text())
+        self.assertEqual(11, result['usage']['input_tokens'])
+        self.assertEqual('The result is 42.', (self.corpus / 'answer.txt').read_text())
+        self.assertNotIn('message', result)
+
+    def test_reconnect_event_can_recover_within_the_original_deadline(self):
+        result = self.run_agent('reconnect')
+        self.assertTrue(result['completed'], result)
+        self.assertEqual('finished', result['stopped'])
+        self.assertEqual(11, result['usage']['input_tokens'])
+
+    def test_task_complete_exports_new_document_identity_without_gold(self):
+        content = 'public selected document\n'
+        (self.corpus / 'Doc.md').write_text(content)
+        image = hashlib.sha256(content.encode()).hexdigest()
+        manifest = {'schema_version': 4, 'id': '11111111-1111-4111-8111-111111111111',
+            'task_id': None, 'task_revision': None, 'entry_point': 'refresh',
+            'selected': [{'path': 'Doc.md', 'source_hash': image}]}
+        self.agent.write_text('import json\nfrom pathlib import Path\n'
+            'p=Path("memory-bank/local/retrieval-manifests");p.mkdir(parents=True)\n'
+            f'(p/"11111111-1111-4111-8111-111111111111.json").write_text({json.dumps(json.dumps(manifest))})\n'
+            'print(json.dumps({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}))\n')
+        result = ab.run_arm([sys.executable, str(self.agent)], self.corpus, [], 8, 5, endpoint='task-complete')
+        self.assertTrue(result['completed'])
+        doc = result['delivery_proof']['frames'][0]['selected'][0]
+        self.assertEqual('Doc.md', doc['path'])
+        self.assertEqual(image, doc['document_sha256'])
+        self.assertEqual('unknown', result['delivery_proof']['host_receipt'])
+
+    def test_default_governed_retrieve_is_counted_and_identified(self):
+        content = 'public explicit result\n'
+        (self.corpus / 'Doc.md').write_text(content)
+        manifest = {'schema_version': 4, 'id': '11111111-1111-4111-8111-111111111111',
+            'task_id': None, 'task_revision': None, 'entry_point': 'retrieve',
+            'selected': [{'path': 'Doc.md', 'source_hash': hashlib.sha256(content.encode()).hexdigest()}]}
+        self.agent.write_text('import json\nfrom pathlib import Path\n'
+            'p=Path("project-brain/control/retrieval-manifests");p.mkdir(parents=True)\n'
+            f'(p/"11111111-1111-4111-8111-111111111111.json").write_text({json.dumps(json.dumps(manifest))})\n'
+            'print(json.dumps({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}))\n')
+        result = ab.run_arm([sys.executable, str(self.agent)], self.corpus, [], 8, 5, endpoint='task-complete')
+        self.assertTrue(result['completed'])
+        self.assertEqual(1, result['manifests'].get('retrieve'))
+        self.assertFalse(result['capsule_delivered'])
+        frame = result['delivery_proof']['frames'][0]
+        self.assertEqual('explicit', frame['origin'])
+        self.assertEqual('Doc.md', frame['selected'][0]['path'])
+
+    def test_optional_proof_failure_does_not_change_native_completion(self):
+        with mock.patch('memory_delivery_proof.collect_delivery_proof', side_effect=RuntimeError('diagnostic only')):
+            result = self.run_agent()
+        self.assertTrue(result['completed'])
+        self.assertEqual('unknown', result['delivery_proof']['status'])
+
+    def test_private_entry_point_cannot_escape_through_aggregate_keys(self):
+        marker = 'PRIVATE-ENTRY-POINT-MARKER'
+        self.agent.write_text('import json\nfrom pathlib import Path\n'
+            'p=Path("memory-bank/local/retrieval-manifests");p.mkdir(parents=True)\n'
+            f'(p/"frame.json").write_text(json.dumps({{"entry_point":{{"secret":{marker!r}}}}}))\n'
+            'print(json.dumps({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}))\n')
+        result = ab.run_arm([sys.executable, str(self.agent)], self.corpus, [], 8, 5, endpoint='task-complete')
+        self.assertTrue(result['completed'])
+        self.assertNotIn(marker, json.dumps(result))
+
+    def test_stdout_eof_allows_normal_process_cleanup(self):
+        self.assertTrue(self.run_agent('closed')['completed'])
+
+    def test_task_complete_keeps_cap_at_gold(self):
+        result = self.run_agent(cap=1)
+        self.assertEqual('cap', result['stopped'])
+        self.assertFalse(result['completed'])
+
+    def test_task_complete_timeout_after_gold(self):
+        result = self.run_agent('quiet', timeout=.2)
+        self.assertEqual('timeout', result['stopped'])
+        self.assertFalse(result['completed'])
+
+    def test_failed_or_unfinished_process_is_not_complete(self):
+        for ending in ('failed', 'unfinished', 'bad-exit'):
+            with self.subTest(ending=ending):
+                self.assertFalse(self.run_agent(ending)['completed'])
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'POSIX special-file fixture')
+    def test_agent_telemetry_cannot_block_or_escape_post_exit_collection(self):
+        for mode in ('health-fifo', 'manifest-fifo', 'manifest-link', 'oversized'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); corpus = root / 'corpus'; corpus.mkdir()
+                agent = root / 'agent.py'
+                agent.write_text('''import json,os,sys
+from pathlib import Path
+p=Path('memory-bank/local'); p.mkdir(parents=True)
+mode=sys.argv[1]
+if mode=='health-fifo': os.mkfifo(p/'refresh-health.ndjson')
+else:
+ d=p/'retrieval-manifests';d.mkdir()
+ if mode=='manifest-fifo': os.mkfifo(d/'one.json')
+ elif mode=='manifest-link':
+  outside=Path(sys.argv[2])/'outside';os.mkfifo(outside);(d/'one.json').symlink_to(outside)
+ else:(d/'one.json').write_text(' '*(1048576+1))
+print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_tokens':1}}),flush=True)
+''')
+                code = ('import sys,json;from pathlib import Path;sys.path.insert(0,sys.argv[1]);'
+                        'import memory_outcome_ab as ab;'
+                        'print(json.dumps(ab.run_arm([sys.executable,sys.argv[3],sys.argv[4],sys.argv[5]],'
+                        'Path(sys.argv[2]),[],20,.5,endpoint="task-complete")))')
+                result = subprocess.run([sys.executable, '-B', '-c', code, str(ROOT / 'scripts'),
+                    str(corpus), str(agent), mode, str(root)], capture_output=True, timeout=3)
+                self.assertEqual(0, result.returncode, result.stderr)
+                observed = json.loads(result.stdout)
+                self.assertTrue(observed['completed'])
+                self.assertFalse(observed['telemetry_complete'])
 
 
 class OutputsStayOutsideTheCloneTest(unittest.TestCase):

@@ -1,8 +1,9 @@
 # Shared memory in Claude Code, Codex and Cursor
 
 Harness and direct clients use the consuming project's existing `project-brain/`
-and `memory-bank/`. Install the accelerator in the actual worktree. SQLite and
-local receipts are disposable; shared records/chunks remain authoritative.
+and `memory-bank/`. Install the accelerator in the actual worktree. SQLite's
+search index is rebuildable, while unfinished turn observations must be retained;
+shared records/chunks remain authoritative and receipt loss does not authorize a new save.
 Memory MCP needs only Python 3.9+ and SQLite FTS5, with no external service or key.
 
 ## Harness automatic sessions
@@ -56,16 +57,19 @@ python3 memory-bank/scripts/mcp_config.py --root . --tool claude --tool codex --
 
 Native clients still control workspace trust and MCP tool approval. Accept project
 MCP in Claude's `/mcp`, trust the Codex project, and enable the Cursor project MCP.
-Allow the four memory tools through the client's supported approval settings when
+Allow the five memory tools through the client's supported approval settings when
 automatic calls are desired. Configuration alone is not a grant of trust, and
 registration does not force the agent to use every retrieved claim.
 See [Claude MCP](https://code.claude.com/docs/en/mcp),
 [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), and
 [Cursor MCP](https://cursor.com/docs/mcp).
 
-## Four tools
+## Five tools
 
 - `memory_status`: check installed memory health.
+- `memory_source_fingerprints`: read the complete checked canonical file image
+  for 1–10 `sources`, without creating a task or attesting truth. Text hashes
+  normalize CRLF to LF. Use these pins only after checking the actual claim.
 - `memory_retrieve`: pass the current `task_id` and a concise module/class/ticket
   `query` before complex work, after compaction/scope changes and before uncovered
   decisions. Optional `paths` link canonical sources. Verify cited claims. The
@@ -78,6 +82,11 @@ See [Claude MCP](https://code.claude.com/docs/en/mcp),
   sanitized `progress`, up to three `next_steps`, and up to three reusable
   findings/decisions. Each learning needs `type`, `title`, `consequence` and
   1–10 canonical project `sources`. Set `verified: true` after checking claims.
+  To explicitly confirm/correct an existing claim, retain its exact type, title
+  and source set and supply all of `record_id` (Brain UUID), `expected_revision`
+  and the complete checked `source_fingerprints`. A protected/mismatched target
+  is held, never recreated. An identical checked image is a record no-op;
+  changed checked evidence versions the existing claim and its promoted chunk.
   Records explicitly say **agent-attested, not human-reviewed**: the verification's
   ledger entry carries `[attestation:agent]`, a chunk promoted from it is tagged
   `agent-attested`, and the capsule marks such knowledge where it delivers it.
@@ -132,7 +141,7 @@ or writes outside a read-only scope.
 
 ## Verify
 
-Confirm all four tools appear in each configured client. Retrieve for a fresh task,
+Confirm all five tools appear in each configured client. Retrieve for a fresh task,
 checkpoint with a goal, record a source-backed result, then replay the same ID/content
 and confirm no duplicates. Inspect Harness **Knowledge → Memory use**, run
 `context.py validate --json` and `memory-bank/scripts/validate.py`. Distinguish real

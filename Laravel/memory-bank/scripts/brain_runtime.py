@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import contextlib
+import base64
+import copy
 import errno
 import hashlib
 import json
@@ -17,7 +19,7 @@ import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator, Optional
 
 import workspace_roots
@@ -168,12 +170,18 @@ class BrainError(Exception):
     """A safe, user-facing Project Brain error."""
 
 
+class _PromotionOutcomeError(BrainError):
+    """A known review-outcome mismatch, safe to classify without metadata."""
+
+
 def linked_reparse(image: os.stat_result) -> bool:
     """Whether a Windows reparse point redirects its path - a symlink or a
     junction - or cannot be told apart from one. Other reparse points (a
     OneDrive placeholder, a deduplicated file) are the file itself with its
     storage elsewhere; refusing them switched the Brain off on such volumes."""
-    if not getattr(image, 'st_file_attributes', 0) & 0x400:
+    # A stat built from fields - the portable NT backend's, which refuses
+    # every reparse point before it builds one - has the attribute as None.
+    if not (getattr(image, 'st_file_attributes', None) or 0) & 0x400:
         return False
     tag = getattr(image, 'st_reparse_tag', 0)
     return not tag or tag in workspace_roots.LINK_REPARSE_TAGS
@@ -550,6 +558,9 @@ def load_config(repository: Path) -> dict[str, Any]:
         raise BrainError(f"Invalid Project Brain configuration: {path}") from error
     if not isinstance(value, dict):
         raise BrainError("Project Brain configuration must be a JSON object")
+    for key,default in defaults.items():
+        if type(default) is bool and key in value and type(value[key]) is not bool:
+            raise BrainError(f'Project Brain configuration {key} must be boolean')
     return {**defaults, **value}
 
 
@@ -581,7 +592,8 @@ def configured_capsule_profile(repository: Path, requested: Optional[str] = None
     read this. A caller of `refresh` that is itself an explicit request - the
     MCP `memory_retrieve` tool, the evaluation stand - passes
     `--capsule-profile full`. A bad value is rejected here, like a bad
-    retrieval gate.
+    retrieval gate; the automatic entry points read the configured one
+    through automatic_capsule_profile, which builds the full capsule instead.
     """
     profile = (
         requested
@@ -592,6 +604,25 @@ def configured_capsule_profile(repository: Path, requested: Optional[str] = None
     if profile not in CAPSULE_PROFILES:
         raise BrainError("Capsule profile must be full, navigation or recall")
     return profile
+
+
+def automatic_capsule_profile(repository: Path, requested: Optional[str] = None) -> tuple[str, Optional[str]]:
+    """The automatic capsule's profile, and why it is not the one configured.
+
+    A configured profile this runtime does not know - one a newer runtime
+    wrote, or a typo - left every prompt without a capsule: on 2026-10-30 a
+    sync from an older clone put four projects whose runtime.json says
+    `recall` back on a runtime that knew only full and navigation, and each
+    prompt got an error in place of its working state. The automatic entry
+    points build the full capsule then and say why in its warnings; a
+    profile the caller names is still refused (configured_capsule_profile).
+    """
+    configured = os.environ.get("CONTEXT_CAPSULE_PROFILE") or load_config(repository).get("capsule_profile")
+    if requested or not configured or configured in CAPSULE_PROFILES:
+        return configured_capsule_profile(repository, requested), None
+    where = "CONTEXT_CAPSULE_PROFILE" if os.environ.get("CONTEXT_CAPSULE_PROFILE") else "capsule_profile"
+    return "full", (f"{where} {str(configured)[:40]!r} is unknown to this runtime "
+                    f"({', '.join(CAPSULE_PROFILES)}): full capsule delivered")
 
 
 def configured_ticket_files(repository: Path) -> bool:
@@ -651,6 +682,7 @@ def mutation_lock(repository: Path) -> Iterator[None]:
             _file_lock(handle)
             depths[key] = 1
             try:
+                _recover_bank_retirement(repository)
                 yield
             finally:
                 depths.pop(key, None)
@@ -661,6 +693,10 @@ def atomic_write_bytes(path: Path, content: bytes) -> None:
     """Replace `path` whole: a reader sees the old content or the new, never
     a part. The temporary file beside it is owner-only, as mkstemp makes it,
     and the rename keeps that mode."""
+    operation = getattr(_PUBLICATION_IO, 'operation', None)
+    if operation is not None and path == operation[0]:
+        operation[1].write(operation[2], content, operation[3])
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     temporary = Path(temporary_name)
@@ -695,26 +731,35 @@ def snapshot_files(paths: Iterator[Path] | list[Path] | tuple[Path, ...]) -> Fil
     }
 
 
+def _restore_file(path: Path, content: Optional[bytes]) -> None:
+    if content is None:
+        if path.exists():
+            path.unlink()
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.restore.", dir=str(path.parent)
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(str(temporary), str(path))
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+
 def restore_files(snapshot: FileSnapshot) -> None:
-    for path, content in snapshot.items():
-        if content is None:
-            if path.exists():
-                path.unlink()
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{path.name}.restore.", dir=str(path.parent)
-            )
-            temporary = Path(temporary_name)
-            try:
-                with os.fdopen(descriptor, "wb") as handle:
-                    handle.write(content)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(str(temporary), str(path))
-            finally:
-                if temporary.exists():
-                    temporary.unlink()
+    # One failed destination must not prevent restoring the other originals.
+    # In particular, restore a predecessor even if INDEX remains unwritable.
+    failures=[]
+    for path,content in snapshot.items():
+        try:_restore_file(path,content)
+        except Exception as error:failures.append(error)
+    if failures:raise failures[0]
 
 
 def index_paths(repository: Path) -> tuple[Path, Path]:
@@ -965,6 +1010,21 @@ class _CitationDigestCache:
         else:
             self.bypasses += 1
         return digest
+
+
+def canonical_source_image(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """A complete checked file image: anchors may repeat the same file."""
+    if not isinstance(rows,list):
+        raise BrainError('Invalid checked source image: expected a list')
+    image={}
+    for row in rows:
+        if (not isinstance(row,dict) or set(row)!={'path','sha256'}
+                or not isinstance(row['path'],str) or not isinstance(row['sha256'],str)
+                or not re.fullmatch(r'[0-9a-f]{64}',row['sha256'])
+                or (row['path'] in image and image[row['path']]!=row['sha256'])):
+            raise BrainError('Invalid or changed checked source image')
+        image[row['path']]=row['sha256']
+    return [{'path':path,'sha256':image[path]} for path in sorted(image)]
 
 
 def fingerprint(repository: Path, source: str, *,
@@ -2109,6 +2169,14 @@ def record_attestation(record: dict[str, Any]) -> str:
         return "agent" if "agent-attested" in reason else ""
     return ""
 
+
+def _verification_image(record: dict[str, Any]) -> str:
+    """Identity of explicit checks, independent of clocks and other edits."""
+    checks=[row for row in record.get('transitions',[])
+            if row.get('from')=='observed' and row.get('to')=='verified']
+    return hashlib.sha256(json.dumps(checks,ensure_ascii=False,sort_keys=True,
+                                    separators=(',',':')).encode('utf-8')).hexdigest()
+
 def update_record(
     repository: Path,
     identifier: str,
@@ -2127,6 +2195,7 @@ def update_record(
     reason: str = "Task updated",
     attestation: Optional[str] = None,
     reverify: bool = False,
+    checked_source_fingerprints: Optional[list[dict[str, str]]] = None,
     allow_phase_regression: bool = False,
     replace_next_steps: bool = False,
 ) -> dict[str, Any]:
@@ -2196,8 +2265,22 @@ def update_record(
             raise BrainError("attestation must be one of: " + ", ".join(ATTESTATIONS))
         # Knowledge that was checked: what promotion carries into the bank.
         checked = record["type"] in PROMOTABLE_STATES and record["authority"] == "verified"
-        revised = (progress is not None and progress != record["progress"]) or bool(
-            set(sources) - set(record["sources"]))
+        if reverify and record['authority']=='verified' and attestation == "agent" and record_attestation(record) != "agent":
+            raise BrainError("A person or unknown actor verified this record's claim; only a person revises it (attestation person)")
+        pinned_sources = None
+        if checked_source_fingerprints is not None:
+            if (not (reverify or authority=='verified') or attestation not in ATTESTATIONS
+                    or not isinstance(checked_source_fingerprints,list)):
+                raise BrainError("Checked source image requires explicit re-verification")
+            checked_paths=list(dict.fromkeys([*record['sources'],*sources]))
+            current_sources=canonical_source_image(source_fingerprints(repository,checked_paths))
+            if checked_source_fingerprints != current_sources:
+                raise BrainError("Checked source image changed before re-verification")
+            # Store what was actually checked. A later editor's race then
+            # makes this image stale instead of attesting the unseen bytes.
+            pinned_sources=[dict(row) for row in checked_source_fingerprints]
+        cited_now = [source for source in dict.fromkeys(sources) if source not in record["sources"]]
+        revised = (progress is not None and progress != record["progress"]) or bool(cited_now)
         if checked and revised and attestation != "person" and record_attestation(record) == "person":
             # The next agent must not be free to overwrite a person's check;
             # record-result holds the same revision.
@@ -2237,9 +2320,17 @@ def update_record(
                 record["status"], set()
             )
             if transition_to not in allowed:
+                # Agents pass an evidence level for a status: 15 of the 383
+                # context.py calls Codex made in one client project in
+                # September 2026 were `--transition verified` or `observed`.
+                hint = ""
+                if transition_to in AUTHORITIES:
+                    hint = f"; {transition_to} is an evidence level, not a {record['type']} status: " + (
+                        "set it with brain-update --authority verified" if transition_to == "verified"
+                        else "a record starts observed, and only brain-update --authority verified changes it")
                 raise BrainError(
                     f"Illegal {record['type']} transition: "
-                    f"{record['status']} -> {transition_to}"
+                    f"{record['status']} -> {transition_to}{hint}"
                 )
             timestamp = utc_now()
             record["transitions"].append(
@@ -2289,17 +2380,19 @@ def update_record(
             # checked: promotion copies them into the chunk, and retrieval
             # marks the item when a file now differs. A write that checks
             # nothing - progress, next steps, a lifecycle move - keeps them and
-            # fingerprints only a source cited for the first time. Re-taking
-            # them all let any edit clear "cited file changed" from a claim
-            # nobody checked again.
+            # fingerprints only a source this write cites for the first time.
+            # Re-taking them all let any edit clear "cited file changed" from
+            # a claim nobody checked again; an old citation that was never
+            # digested stays so, and keeps the record from promotion.
             known = {item["path"] for item in record["source_fingerprints"]}
             record["source_fingerprints"] = sorted(
                 [*record["source_fingerprints"], *source_fingerprints(repository, [
-                    source for source in record["sources"] if source.split("#", 1)[0] not in known])],
+                    source for source in cited_now if source.split("#", 1)[0] not in known])],
                 key=lambda item: item["path"],
             )
         else:
-            record["source_fingerprints"] = source_fingerprints(repository, record["sources"])
+            record["source_fingerprints"] = (pinned_sources if pinned_sources is not None
+                                               else source_fingerprints(repository, record["sources"]))
         record["revision"] += 1
         record["updated_at"] = utc_now()
         _write_record(repository, record, path)
@@ -3203,6 +3296,17 @@ def _event_verification(record: dict[str, Any]) -> str:
     return " ".join(match.group(1).split()) if match else ""
 
 
+def _event_source_image(repository: Path, records: list[dict[str, Any]]) -> Optional[list[dict[str, str]]]:
+    """Original event evidence, never a mechanical rebind to today's files."""
+    try:
+        if not records or any(not _event_verification(record) or not record.get('sources')
+                              or not sources_are_fresh(repository,record) for record in records):
+            return None
+        return canonical_source_image([pin for record in records for pin in record['source_fingerprints']])
+    except (BrainError,OSError,ValueError,TypeError):
+        return None
+
+
 def _event_outcome(record: dict[str, Any]) -> str:
     """The outcome an event recorded, without its verification."""
     goal = str(record.get("goal") or "")
@@ -3324,6 +3428,7 @@ def _consolidated_finding(
             if isinstance(path, str) and path and path not in files:
                 files.append(path)
     verified = sum(1 for record in records if _event_verification(record))
+    checked_sources = _event_source_image(repository,records)
     return {
         "external_id": f"{CONSOLIDATED_PREFIX}{ticket}",
         "title": title,
@@ -3338,7 +3443,8 @@ def _consolidated_finding(
         # Every event recorded its own verification. Counting distinct
         # sentences instead left a finding unverified when two events both
         # said "unit tests passed".
-        "all_verified": verified == len(ordered),
+        "all_verified": checked_sources is not None,
+        "checked_sources": checked_sources,
     }
 
 
@@ -3373,7 +3479,20 @@ def _promoted_chunk(
     if proposal is None or proposal["source_records"][0].get("revision") != record["revision"]:
         return None
     memory_id = proposal.get("destination_memory_id")
-    return memory_id if _chunk_status(repository, memory_id) == "active" else None
+    try:
+        from validate import memory_temporal_reason,indexed_secret_policy_reason
+        _,metadata,body=_find_chunk(repository/'memory-bank',memory_id)
+        image=_render_chunk(metadata,body)
+        config=load_config(repository)
+        if (metadata.get('id')!=memory_id or metadata.get('status')!='active' or memory_temporal_reason(metadata)
+                or metadata.get('privacy','team') not in config['allowed_privacy']
+                or metadata.get('authority','observed') not in config['allowed_authority']
+                or indexed_secret_policy_reason(image) or instruction_like(metadata.get('title'),image)
+                or citation_problem(repository,{'sources':metadata.get('sources'),
+                                               'source_fingerprints':metadata.get('source_digests')})):
+            return None
+        return memory_id
+    except (BrainError,OSError,ValueError,TypeError):return None
 
 
 def consolidate(
@@ -3605,6 +3724,7 @@ def _create_consolidated(
                     actor=owner,
                     authority="verified",
                     attestation="agent",
+                    checked_source_fingerprints=planned['checked_sources'],
                     reason="Every consolidated event recorded verification",
                 )
         except Exception as error:
@@ -3643,9 +3763,9 @@ def _extend_consolidated(
             reason=f"the finding belongs to {summary.get('owner')}; the events stay recorded",
         )
         return
-    if verified and not (
-        verify_consolidated and all(_event_verification(record) for record in records)
-    ):
+    checked_sources=_event_source_image(repository,records)
+    if verified and not (verify_consolidated and checked_sources is not None
+                         and sources_are_fresh(repository,summary)):
         entry.update(
             state="skipped",
             reason="the verified finding takes only verified events; they stay recorded",
@@ -3672,6 +3792,19 @@ def _extend_consolidated(
             for line in carried
         )
     )
+    if harden:
+        try:
+            carried_records=[find_record(repository,identifier,record_type='event',include_archive=True)[1]
+                             for identifier in _covered_events(summary)]
+            checked_sources=_event_source_image(repository,[*carried_records,*records])
+        except (BrainError,OSError,ValueError,TypeError):checked_sources=None
+        harden=checked_sources is not None
+    elif verified:
+        try:checked_sources=canonical_source_image([*summary['source_fingerprints'],*checked_sources])
+        except (BrainError,TypeError):checked_sources=None
+        if checked_sources is None:
+            entry.update(state='skipped',reason='consolidated verification images disagree; events stay recorded')
+            return
     entry.update(state="planned-update", adds=len(records))
     if not apply:
         return
@@ -3694,6 +3827,7 @@ def _extend_consolidated(
                 authority="verified" if harden else None,
                 attestation="agent" if harden or verified else None,
                 reverify=verified,
+                checked_source_fingerprints=checked_sources if verified or harden else None,
                 reason=f"Added {len(records)} completed event(s) of {ticket}",
             )
         except Exception as error:
@@ -3722,6 +3856,12 @@ def _retire_consolidated_events(
         )
         count = 0
         try:
+            latest=promotion_ledger(repository)[1]
+            for volume,memory_id,_ in retiring:
+                _,current,_=find_record(repository,volume['id'],include_archive=True)
+                if (current['revision']!=volume['revision']
+                        or _promoted_chunk(repository,current,latest)!=memory_id):
+                    raise BrainError('Consolidated successor became unavailable; events stay recorded')
             for volume, memory_id, members in retiring:
                 for _, record, _ in members:
                     update_record(
@@ -3944,7 +4084,7 @@ def validate_promotion_record(
     repository: Path, promotion: dict[str, Any], *, expected_id: Optional[str] = None
 ) -> None:
     validate_schema_file(repository, "promotion.schema.json", promotion)
-    if set(promotion) != PROMOTION_KEYS:
+    if set(promotion)-{'source_verifications', 'publication'} != PROMOTION_KEYS:
         raise BrainError("promotion does not match strict schema")
     if not is_uuid4(promotion["id"]) or (
         expected_id is not None and promotion["id"] != expected_id
@@ -3970,9 +4110,9 @@ def validate_promotion_record(
         else "approved"
     )
     if promotion["status"] == "proposed" and promotion["outcome"] is not None:
-        raise BrainError("proposed promotion outcome must be null")
+        raise _PromotionOutcomeError("proposed promotion outcome must be null")
     if promotion["status"] == "rejected" and promotion["outcome"] != "rejected":
-        raise BrainError("rejected promotion outcome must be rejected")
+        raise _PromotionOutcomeError("rejected promotion outcome must be rejected")
     if (
         promotion["status"] in {"reviewed", "applied"}
         and promotion["outcome"] != expected_outcome
@@ -3983,7 +4123,7 @@ def validate_promotion_record(
             and promotion["outcome"] == "promoted"
         )
     ):
-        raise BrainError(
+        raise _PromotionOutcomeError(
             f"{promotion['review_mode']} promotion outcome must be {expected_outcome}"
         )
     for source in promotion["source_records"]:
@@ -3998,6 +4138,19 @@ def validate_promotion_record(
             or source["revision"] < 1
         ):
             raise BrainError("invalid promotion source binding")
+    if 'source_verifications' in promotion:
+        checks=promotion['source_verifications'];seen=set()
+        if not isinstance(checks,list):raise BrainError('invalid promotion verification images')
+        for row in checks:
+            if (not isinstance(row,dict) or set(row)!={'id','sha256'}
+                    or not isinstance(row['id'],str) or row['id'] in seen
+                    or not isinstance(row['sha256'],str) or not re.fullmatch(r'[0-9a-f]{64}',row['sha256'])):
+                raise BrainError('invalid promotion verification image')
+            seen.add(row['id'])
+        if seen!={row['id'] for row in promotion['source_records']}:
+            raise BrainError('incomplete promotion verification images')
+    if 'publication' in promotion:
+        _publication_parts(promotion)
 
 
 def create_promotion(
@@ -4014,6 +4167,7 @@ def create_promotion(
     if not source_ids:
         raise BrainError("Promotion requires at least one source record")
     sources = []
+    verifications = []
     for identifier in source_ids:
         path, record, _ = find_record(repository, identifier, include_archive=True)
         sources.append(
@@ -4024,12 +4178,14 @@ def create_promotion(
                 "revision": record["revision"],
             }
         )
+        verifications.append({'id':record['id'],'sha256':_verification_image(record)})
     timestamp = utc_now()
     proposal = {
         "schema_version": 1, "id": new_uuid(), "status": "proposed", "revision": 1,
         "proposer": proposer, "reviewer": None, "review_mode": review_mode,
         "reviewed_at": None, "created_at": timestamp,
         "updated_at": timestamp, "source_records": sources, "title": title, "content": content,
+        "source_verifications": verifications,
         "destination_memory_id": None, "destination_revision": None, "conflicts": [],
         "outcome": None,
     }
@@ -4096,14 +4252,33 @@ def auto_review_promotion(repository: Path, promotion_id: str) -> dict[str, Any]
         return proposal
 
 
-def iter_promotions(repository: Path) -> Iterator[tuple[str, dict[str, Any]]]:
+def iter_promotions(repository: Path, *, strict: bool = False) -> Iterator[tuple[str, dict[str, Any]]]:
     directory = brain_root(repository) / "control" / "promotions"
     if not directory.is_dir():
         return
     for path in sorted(directory.glob("*.json")):
         try:
-            yield path.stem, json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            raw = _publication_read(repository, path.relative_to(repository).as_posix(),
+                                    limit=2 * PUBLICATION_LIMIT)
+            value = json.loads(raw) if raw is not None else None
+            if not isinstance(value, dict):
+                raise BrainError('Promotion metadata must be an object')
+            if strict:
+                # Identify ownership before writer admission. A parsed but
+                # invalid publication remains a named pending proposal, whose
+                # own apply reports refusal without affecting other records.
+                validate_promotion_record(repository, {key: item for key, item in value.items()
+                    if key != 'publication'}, expected_id=path.stem)
+                if 'publication' in value and value.get('status') != 'reviewed':
+                    raise BrainError('Promotion publication requires a reviewed proposal')
+            yield path.stem, value
+        except (BrainError, OSError, ValueError, UnicodeError, RecursionError) as error:
+            if strict:
+                if isinstance(error, _PromotionOutcomeError):
+                    raise BrainError('Promotion review outcome is invalid') from error
+                raise BrainError('Promotion metadata is unavailable or invalid') from error
+            # Existing read-only status/inspection degrades past unavailable
+            # rows; writers must instead prove custody under the shared lock.
             continue
 
 
@@ -4190,6 +4365,9 @@ def obsolete_promotion(
     would refuse it on every retry for good.
     """
     source = proposal["source_records"][0]
+    held, _ = promotion_ledger(repository)
+    if source['id'] in held:
+        return 'its record is held by a human review or synthesis'
     winner = applied.get(source["id"])
     if (
         winner is not None
@@ -4221,21 +4399,25 @@ def withdraw_promotion(repository: Path, promotion_id: str, reason: str) -> dict
     "not promoted" - and `conflicts` keeps why, for the audit trail.
     """
     path = brain_root(repository) / "control" / "promotions" / f"{promotion_id}.json"
-    with mutation_lock(repository):
+    with mutation_lock(repository), _publication_scope(repository):
         try:
-            proposal = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            proposal = json.loads(_publication_read(repository, path.relative_to(repository).as_posix(),
+                                                     limit=2 * PUBLICATION_LIMIT))
+        except (OSError, ValueError, TypeError) as error:
             raise BrainError(f"Promotion not found or invalid: {promotion_id}") from error
         validate_promotion_record(repository, proposal, expected_id=promotion_id)
         if proposal.get("review_mode") != "automatic" or proposal.get("status") not in {"proposed", "reviewed"}:
             raise BrainError("Only an unapplied automatic promotion is withdrawn")
+        if 'publication' in proposal:
+            proposal = _rollback_publication(repository, proposal, path)
+        previous = copy.deepcopy(proposal)
         proposal["status"] = "rejected"
         proposal["outcome"] = "rejected"
         proposal["updated_at"] = utc_now()
         proposal["revision"] += 1
         proposal["conflicts"] = list(dict.fromkeys([*proposal["conflicts"], f"withdrawn: {reason}"]))
         validate_promotion_record(repository, proposal, expected_id=promotion_id)
-        atomic_json(path, proposal)
+        _publication_json(repository, path, proposal, expected=previous)
         return proposal
 
 
@@ -4356,6 +4538,39 @@ def provenance_problems(record: dict[str, Any], content: Optional[str] = None) -
     return problems
 
 
+def _rechecked_sources_changed(repository: Path, record: dict[str, Any], previous: dict[str, Any]) -> bool:
+    """New checked canonical evidence, never a live file edit or Brain churn."""
+    verifications=[row for row in record.get("transitions",[])
+                   if row.get("from")=="observed" and row.get("to")=="verified"]
+    if (not verifications or record_attestation(record) not in ATTESTATIONS
+            or not sources_are_fresh(repository,record)):
+        return False
+    try:
+        _,metadata,_=_find_chunk(repository/"memory-bank",previous["destination_memory_id"])
+    except (BrainError,OSError,ValueError,TypeError,AttributeError) as error:
+        raise BrainError('Previous promoted source image is unavailable; review its replacement explicitly') from error
+    try:
+        checked={row["path"]:row["sha256"] for row in canonical_source_image(record.get("source_fingerprints",[]))}
+        record_paths={row["path"] for row in previous["source_records"]}
+        old={row["path"]:row["sha256"] for row in canonical_source_image(metadata.get("source_digests",[])) if row["path"] not in record_paths}
+    except (BrainError,KeyError,TypeError) as error:
+        raise BrainError('Previous promoted source image is invalid; review its replacement explicitly') from error
+    paths={source.split("#",1)[0] for source in record["sources"]}
+    if not checked or set(checked)!=paths or paths!=set(old):return False
+    if checked!=old:return True
+    previous_checks={row['id']:row['sha256'] for row in previous.get('source_verifications',[])}
+    if record['id'] not in previous_checks:
+        # A legacy promotion's wall clock cannot prove a later check on
+        # another machine. Equal evidence needs an explicit reviewed repair.
+        return False
+    checked_again=_verification_image(record)!=previous_checks[record['id']]
+    if not checked_again:return False
+    old_record_image={row['path']:row['sha256'] for row in canonical_source_image(metadata.get('source_digests',[]))
+                      if row['path'] in record_paths}
+    current_record_image={row['path']:row['sha256'] for row in source_fingerprints(repository,sorted(record_paths))}
+    return bool(set(old_record_image)==record_paths and old_record_image!=current_record_image)
+
+
 def promotable_records(
     repository: Path,
     config: dict[str, Any],
@@ -4400,11 +4615,18 @@ def promotable_records(
             # the old conclusion, marked only "source changed", while the
             # corrected one never arrived.
             previous = applied.get(record["id"])
+            checked_again = False
+            if previous is not None and content == previous.get('content'):
+                try:
+                    checked_again = _rechecked_sources_changed(repository,record,previous)
+                except BrainError as error:
+                    blocked.append({'record_id':record['id'],'reason':str(error)})
+                    continue
             if (
                 record["id"] in held
                 or previous is None
                 or content is None
-                or content == previous.get("content")
+                or (content == previous.get("content") and not checked_again)
                 or record["revision"] <= previous["source_records"][0]["revision"]
             ):
                 continue
@@ -4630,6 +4852,9 @@ def auto_promote(
     # proposal stayed `reviewed`, refused on every retry, or wrote a second
     # chunk of the same record on a later day.
     with mutation_lock(repository):
+        # Do not infer that an unreadable promotion has no pending ownership.
+        # All sanctioned promotion writers use this same lock.
+        list(iter_promotions(repository, strict=True))
         retry_file = None
         previous_retry = _promotion_retry_state(repository, owner) or {}
         retry_value = {"profile": "automatic-promotion-retry-v1",
@@ -5021,6 +5246,137 @@ def _find_chunk(bank: Path, memory_id: str) -> tuple[Path, dict[str, Any], str]:
     raise BrainError(f"Memory Bank chunk not found: {memory_id}")
 
 
+BANK_RETIRE_CHECKPOINT = 'project-brain/control/bank-retirement.json'
+BANK_RETIRE_PROFILE = 'bank-retirement-v1'
+_BANK_RETIRE_REGENERATE = object()
+
+
+def _bank_retirement_parts(plan):
+    """A pending retirement may only undo its own exact metadata edits."""
+    try:
+        if (not isinstance(plan, dict) or set(plan) != {
+                'profile', 'memory_id', 'valid_to', 'superseded_by', 'chunks', 'sha256'}
+                or plan['profile'] != BANK_RETIRE_PROFILE
+                or plan['sha256'] != _publication_digest({key: value for key, value in plan.items() if key != 'sha256'})
+                or not isinstance(plan['memory_id'], str)
+                or (plan['superseded_by'] is not None and not isinstance(plan['superseded_by'], str))
+                or plan['superseded_by'] == plan['memory_id']
+                or not isinstance(plan['chunks'], list)
+                or len(plan['chunks']) != (2 if plan['superseded_by'] is not None else 1)
+                or date.fromisoformat(plan['valid_to']).isoformat() != plan['valid_to']):
+            raise ValueError('invalid retirement checkpoint')
+        parts = []
+        for ordinal, row in enumerate(plan['chunks']):
+            if not isinstance(row, dict) or set(row) != {'path', 'before', 'after'}:
+                raise ValueError('invalid retirement image')
+            relative = row['path']
+            named = PurePosixPath(relative)
+            match = BANK_FILENAME_PATTERN.fullmatch(named.name)
+            expected_id = plan['memory_id'] if ordinal == 0 else plan['superseded_by']
+            if (not isinstance(relative, str) or named.parent.as_posix() != 'memory-bank/chunks'
+                    or named.as_posix() != relative or '\\' in relative
+                    or match is None or match.group(1) != expected_id):
+                raise ValueError('invalid retirement path')
+            before, after = _publication_decode(row['before']), _publication_decode(row['after'])
+            metadata, body = _publication_metadata(before)
+            if metadata.get('id') != expected_id:
+                raise ValueError('retirement identity differs')
+            wanted = dict(metadata)
+            if ordinal == 0:
+                wanted.update(status='superseded' if plan['superseded_by'] else 'archived',
+                              superseded_by=plan['superseded_by'], valid_to=plan['valid_to'])
+            else:
+                previous = metadata.get('supersedes')
+                if not isinstance(previous, list) or any(not isinstance(value, str) for value in previous):
+                    raise ValueError('invalid retirement lineage')
+                wanted['supersedes'] = [*previous]
+                if plan['memory_id'] not in wanted['supersedes']:
+                    wanted['supersedes'].append(plan['memory_id'])
+            if after != _render_chunk(wanted, body).encode('utf-8'):
+                raise ValueError('retirement changes unrelated knowledge')
+            parts.append((relative, before, after))
+        return parts
+    except (KeyError, TypeError, ValueError, OverflowError, RecursionError, BrainError) as error:
+        raise BrainError('Memory Bank retirement checkpoint is unavailable or invalid') from error
+
+
+def _bank_retirement_rollback(repository, raw, parts, *, index_before=_BANK_RETIRE_REGENERATE):
+    """Restore owned chunks first; discard recovery custody only after INDEX."""
+    with _publication_scope(repository) as files:
+        if _publication_read(repository, BANK_RETIRE_CHECKPOINT, limit=2 * PUBLICATION_LIMIT) != raw:
+            raise BrainError('Memory Bank retirement checkpoint changed before recovery')
+        states = []
+        for relative, before, after in parts:
+            current = _publication_read(repository, relative)
+            if current not in (before, after):
+                raise BrainError('Memory Bank retirement image changed; preserve the edit and review recovery')
+            states.append((relative, before, current))
+        # Reactivate the predecessor before removing a tentative inverse link.
+        for relative, before, current in states:
+            if current != before:
+                _publication_write(repository, relative, before.decode('utf-8'), current)
+        for relative, before, _ in parts:
+            if _publication_read(repository, relative) != before:
+                raise BrainError('Memory Bank retirement image changed during recovery')
+        current_index = _publication_read(repository, 'memory-bank/INDEX.md', limit=PUBLICATION_LIMIT)
+        if index_before is _BANK_RETIRE_REGENERATE:
+            replacement = render_bank_index(repository / 'memory-bank')[0].encode('utf-8')
+        else:
+            replacement = index_before
+        if current_index != replacement:
+            if replacement is None:
+                files.unlink('memory-bank/INDEX.md', current_index)
+            else:
+                _publication_write(repository, 'memory-bank/INDEX.md', replacement.decode('utf-8'), current_index)
+        for relative, before, _ in parts:
+            if _publication_read(repository, relative) != before:
+                raise BrainError('Memory Bank retirement image changed during recovery')
+        files.unlink(BANK_RETIRE_CHECKPOINT, raw)
+
+
+def _recover_bank_retirement(repository):
+    """An uncleared checkpoint is an uncommitted retirement, never a new fact."""
+    try:
+        os.lstat(repository / BANK_RETIRE_CHECKPOINT)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise BrainError('Memory Bank retirement checkpoint is unavailable or invalid') from error
+    with _publication_scope(repository):
+        raw = _publication_read(repository, BANK_RETIRE_CHECKPOINT, limit=2 * PUBLICATION_LIMIT)
+        try:
+            plan = json.loads(raw) if raw is not None else None
+        except (ValueError, TypeError, RecursionError) as error:
+            raise BrainError('Memory Bank retirement checkpoint is unavailable or invalid') from error
+        _bank_retirement_rollback(repository, raw, _bank_retirement_parts(plan))
+
+
+def _bank_retirement_image(repository, memory_id):
+    if (not isinstance(memory_id, str) or len(memory_id) > 128
+            or BANK_FILENAME_PATTERN.fullmatch(memory_id + '-x.md') is None):
+        raise BrainError('Memory Bank retirement identity is invalid')
+    with _publication_scope(repository) as files:
+        try:
+            files.parent('memory-bank/chunks/MEM')
+        except FileNotFoundError as error:
+            raise BrainError(f'Memory Bank chunk not found: {memory_id}') from error
+        matches = [entry for entry in (repository / 'memory-bank/chunks').glob(memory_id + '-*.md')
+                   if BANK_FILENAME_PATTERN.fullmatch(entry.name) is not None]
+        files.check()
+        if not matches:
+            raise BrainError(f'Memory Bank chunk not found: {memory_id}')
+        if len(matches) != 1:
+            raise BrainError(f'Memory Bank chunk identifier is ambiguous: {memory_id}')
+        target = matches[0]
+        raw = _publication_read(repository, target.relative_to(repository).as_posix())
+        if raw is None:
+            raise BrainError('Memory Bank retirement target is unavailable')
+        metadata, body = _publication_metadata(raw)
+        if metadata.get('id') != memory_id:
+            raise BrainError('Memory Bank retirement identity differs from its filename')
+        return target, metadata, body, raw
+
+
 def retire_chunk(
     repository: Path,
     memory_id: str,
@@ -5029,92 +5385,80 @@ def retire_chunk(
     superseded_by: Optional[str] = None,
     reason: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Close a chunk's period, and its replacement link, in one transaction.
+    """Close validity with recoverable custody of both sides of the link.
 
-    Retire was designed but only ever documented: the sole code that writes
-    `valid_to` is promotion, and it always writes null, so the operation was
-    an editing convention - hand-edit both sides of a supersession, then
-    regenerate the index, then validate. Between the first edit and the last
-    the bank is invalid, and the word `valid_to` appears in no skill, so an
-    agent following policy honestly sets a status and never writes a date.
-
-    `valid_to` says when the knowledge stopped being true; `superseded_by`
-    says what replaced it. With a successor the chunk becomes `superseded` and
-    the successor's `supersedes` list gains it in the same write; without one
-    it becomes `archived`, which is the honest status for knowledge that
-    simply ceased. The body is never touched.
-
-    Every write is taken under the mutation lock against a snapshot, so an
-    interruption between the two sides of a link leaves the bank exactly as it
-    was rather than half-retired.
+    Failures before commit restore the prior images immediately. If the process
+    dies before clearing its checkpoint, the next cooperative mutation rolls
+    it back under the shared lock and regenerates the derived INDEX. A foreign
+    chunk edit stops recovery instead of being overwritten. Readers can see
+    an unfinished state until that recovery boundary; this is not a single
+    atomic snapshot for unlocked readers.
     """
     try:
         closing = date.fromisoformat(valid_to)
     except (TypeError, ValueError) as error:
-        raise BrainError("valid_to must be an ISO date (YYYY-MM-DD)") from error
+        raise BrainError('valid_to must be an ISO date (YYYY-MM-DD)') from error
     if superseded_by is not None and superseded_by == memory_id:
-        raise BrainError("A chunk cannot supersede itself")
-    bank = repository / "memory-bank"
-    index_path = bank / "INDEX.md"
-    with mutation_lock(repository):
-        path, metadata, body = _find_chunk(bank, memory_id)
-        successor_path: Optional[Path] = None
-        successor: Optional[dict[str, Any]] = None
-        successor_body = ""
+        raise BrainError('A chunk cannot supersede itself')
+    bank = repository / 'memory-bank'
+    with mutation_lock(repository), _publication_scope(repository) as files:
+        target, metadata, body, before = _bank_retirement_image(repository, memory_id)
+        metadata.update(status='superseded' if superseded_by else 'archived',
+                        superseded_by=superseded_by, valid_to=closing.isoformat())
+        chunks = [{'path': target.relative_to(repository).as_posix(),
+                   'before': _publication_blob(before),
+                   'after': _publication_blob(_render_chunk(metadata, body).encode('utf-8'))}]
+        attested = [target]
         if superseded_by is not None:
-            # Resolved before any write: letting the whole-bank validation
-            # discover a missing successor would roll back with a message
-            # about a broken link rather than about the argument that caused
-            # it.
-            successor_path, successor, successor_body = _find_chunk(
-                bank, superseded_by
-            )
-        before = validate_bank(bank)
-        snapshot = snapshot_files(
-            [p for p in (path, successor_path, index_path) if p is not None]
-        )
+            successor_file, successor, successor_body, previous = _bank_retirement_image(repository, superseded_by)
+            successor['supersedes'] = list(successor.get('supersedes') or [])
+            if memory_id not in successor['supersedes']:
+                successor['supersedes'].append(memory_id)
+            chunks.append({'path': successor_file.relative_to(repository).as_posix(),
+                'before': _publication_blob(previous),
+                'after': _publication_blob(_render_chunk(successor, successor_body).encode('utf-8'))})
+            attested.append(successor_file)
+        before_errors = validate_bank(bank)
+        plan = {'profile': BANK_RETIRE_PROFILE, 'memory_id': memory_id,
+                'valid_to': closing.isoformat(), 'superseded_by': superseded_by, 'chunks': chunks}
+        _publication_seal(plan)
+        parts = _bank_retirement_parts(plan)
+        checkpoint = json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2) + '\n'
+        if len(checkpoint.encode('utf-8')) > 2 * PUBLICATION_LIMIT:
+            raise BrainError('Memory Bank retirement checkpoint exceeds its byte limit')
+        index_before = _publication_read(repository, 'memory-bank/INDEX.md', limit=PUBLICATION_LIMIT)
+        # This no-clobber write is durable before the first authority effect.
+        _publication_write(repository, BANK_RETIRE_CHECKPOINT, checkpoint, None)
+        raw = checkpoint.encode('utf-8')
         try:
-            metadata["status"] = "superseded" if superseded_by else "archived"
-            # Only a superseded chunk may carry a replacement link, and every
-            # superseded chunk must.
-            metadata["superseded_by"] = superseded_by
-            metadata["valid_to"] = closing.isoformat()
-            atomic_write(path, _render_chunk(metadata, body))
-            if successor_path is not None and successor is not None:
-                supersedes = list(successor.get("supersedes") or [])
-                if memory_id not in supersedes:
-                    supersedes.append(memory_id)
-                successor["supersedes"] = supersedes
-                atomic_write(
-                    successor_path, _render_chunk(successor, successor_body)
-                )
-            index_text, chunk_count = render_bank_index(bank)
-            atomic_write(index_path, index_text)
-            errors = bank_write_errors(
-                repository,
-                before,
-                tuple(p for p in (path, successor_path) if p is not None),
-            )
+            for relative, previous, replacement in parts:
+                if previous != replacement:
+                    _publication_write(repository, relative, replacement.decode('utf-8'), previous)
+            rendered, chunk_count = render_bank_index(bank)
+            _publication_write(repository, 'memory-bank/INDEX.md', rendered, index_before)
+            errors = bank_write_errors(repository, before_errors, tuple(attested))
             if errors:
-                raise BrainError(
-                    "Memory Bank retire failed validation: " + "; ".join(errors)
-                )
-        except Exception:
-            restore_files(snapshot)
+                raise BrainError('Memory Bank retire failed validation: ' + '; '.join(errors))
+            for relative, _, replacement in parts:
+                if _publication_read(repository, relative) != replacement:
+                    raise BrainError('Memory Bank retirement image changed before commit')
+            # Clearing custody is the commit point. A prior death rolls back.
+            files.unlink(BANK_RETIRE_CHECKPOINT, raw)
+        except Exception as failure:
+            # unlink may have committed before its directory sync/check
+            # failed. Do not invent rollback custody after it is gone.
+            try:
+                remaining = _publication_read(repository, BANK_RETIRE_CHECKPOINT, limit=2 * PUBLICATION_LIMIT)
+            except (OSError, BrainError):
+                raise failure
+            if remaining is None:
+                raise
+            _bank_retirement_rollback(repository, raw, parts, index_before=index_before)
             raise
-    return {
-        "id": memory_id,
-        "status": metadata["status"],
-        "valid_to": metadata["valid_to"],
-        "superseded_by": superseded_by,
-        # Recorded for the operator's transcript only: the chunk schema is a
-        # closed key set, so a reason written into the frontmatter would fail
-        # validation and roll the whole retire back.
-        "reason": reason,
-        "chunk": path.relative_to(repository).as_posix(),
-        "index": index_path.relative_to(repository).as_posix(),
-        "chunks": chunk_count,
-    }
+    return {'id': memory_id, 'status': metadata['status'], 'valid_to': metadata['valid_to'],
+            'superseded_by': superseded_by, 'reason': reason,
+            'chunk': target.relative_to(repository).as_posix(), 'index': 'memory-bank/INDEX.md',
+            'chunks': chunk_count}
 
 
 def audit_bank(repository: Path, *, provenance: bool = False) -> dict[str, Any]:
@@ -5326,14 +5670,608 @@ def reindex_bank(repository: Path) -> dict[str, Any]:
     }
 
 
+PUBLICATION_PROFILE = 'promotion-publication-v1'
+PUBLICATION_IMAGE_LIMIT = 1024 * 1024
+PUBLICATION_LIMIT = 4 * 1024 * 1024
+_PUBLICATION_IO = threading.local()
+
+
+class _PublicationFiles:
+    """Hold directory custody through reads and mutations, on POSIX and NT.
+
+    The NT backend is the installed rooted implementation used by Cursor
+    custody. Import it lazily: context_retrieval also imports this module.
+    No publication mutation falls back to a pathname-based operation.
+    """
+
+    def __init__(self, repository: Path):
+        self.repository = repository
+        self.files = os
+        self.directories = {}
+        self.parents = []
+        self.descriptors = []
+        try:
+            if os.name == 'nt':
+                # Embedders may remove the scripts directory from sys.path
+                # after importing Brain. Resolve this installed sibling in
+                # a bounded import scope, restoring the caller's path.
+                import _imp
+                import importlib
+                _imp.acquire_lock()
+                sibling = str(Path(__file__).parent)
+                try:
+                    sys.path.insert(0, sibling)
+                    try:
+                        backend = importlib.import_module('context_retrieval')
+                    finally:
+                        sys.path.remove(sibling)
+                finally:
+                    _imp.release_lock()
+                self.files = backend._cursor_nt_backend()
+                descriptor = self.files.open_root(repository)
+                self.descriptors.append(descriptor)
+            elif os.name == 'posix':
+                absolute = repository.absolute()
+                descriptor = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                self.descriptors.append(descriptor)
+                for component in absolute.parts[1:]:
+                    parent = descriptor
+                    descriptor = self._directory(parent, component)
+            else:
+                raise BrainError('Rooted promotion publication is unsupported on this platform')
+            self.directories[()] = descriptor
+            self.root_identity = self._directory_identity(self.files.fstat(descriptor))
+            self.check()
+        except BaseException:
+            self.close()
+            raise
+
+    @staticmethod
+    def _directory_identity(image):
+        # Directory link counts change when an unrelated child directory is
+        # created (notably under the shared temporary root). Namespace
+        # custody is its stable inode/device/type/mode, not that child count.
+        return image.st_dev, image.st_ino, image.st_mode
+
+    @staticmethod
+    def _file_identity(image):
+        return (image.st_dev, image.st_ino, image.st_mode, image.st_nlink, image.st_size,
+                image.st_mtime_ns, workspace_roots.change_time_ns(image))
+
+    def _directory(self, parent, name):
+        descriptor = self.files.open(name, os.O_RDONLY | self.files.O_DIRECTORY | self.files.O_NOFOLLOW,
+                                     dir_fd=parent)
+        self.descriptors.append(descriptor)
+        observed = self.files.fstat(descriptor)
+        named = self.files.stat(name, dir_fd=parent, follow_symlinks=False)
+        if (not stat.S_ISDIR(observed.st_mode) or linked_reparse(observed)
+                or self._directory_identity(named) != self._directory_identity(observed)):
+            raise BrainError('Promotion publication directory custody changed')
+        self.parents.append((parent, name, descriptor, self._directory_identity(observed)))
+        return descriptor
+
+    def check(self):
+        for parent, name, descriptor, identity in self.parents:
+            named = self.files.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (self._directory_identity(named) != identity
+                    or self._directory_identity(self.files.fstat(descriptor)) != identity):
+                raise BrainError('Promotion publication directory custody changed')
+        if os.name == 'nt':
+            descriptor = self.files.open_root(self.repository)
+            try:
+                if self._directory_identity(self.files.fstat(descriptor)) != self.root_identity:
+                    raise BrainError('Promotion publication root custody changed')
+            finally:
+                os.close(descriptor)
+
+    def parent(self, relative, *, create=False):
+        named = PurePosixPath(relative)
+        if (not isinstance(relative, str) or named.is_absolute() or not named.parts
+                or '..' in named.parts or named.as_posix() != relative or '\\' in relative):
+            raise BrainError('Invalid promotion publication path')
+        parts = named.parts[:-1]
+        for length in range(1, len(parts) + 1):
+            key = parts[:length]
+            if key not in self.directories:
+                parent = self.directories[key[:-1]]
+                try:
+                    descriptor = self._directory(parent, key[-1])
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    self.check()
+                    try:
+                        self.files.mkdir(key[-1], 0o700, dir_fd=parent)
+                    except FileExistsError:
+                        pass
+                    descriptor = self._directory(parent, key[-1])
+                self.directories[key] = descriptor
+        self.check()
+        return self.directories[parts], named.name
+
+    def read(self, relative, limit):
+        try:
+            parent, name = self.parent(relative)
+        except FileNotFoundError:
+            # A fresh install ships no chunks directory. Its first target
+            # is absent; disappearance of a parent already pinned in this
+            # operation still fails check(), rather than authorizing reuse.
+            self.check()
+            return None
+        try:
+            image = self.files.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            self.check()
+            return None
+        if (not stat.S_ISREG(image.st_mode) or linked_reparse(image)
+                or image.st_nlink != 1 or image.st_size > limit):
+            raise BrainError('Promotion publication file is not an ordinary bounded image')
+        identity = self._file_identity(image)
+        flags = os.O_RDONLY | self.files.O_NOFOLLOW | self.files.O_NONBLOCK | getattr(os, 'O_BINARY', 0)
+        descriptor = self.files.open(name, flags, dir_fd=parent)
+        with os.fdopen(descriptor, 'rb') as stream:
+            if self._file_identity(self.files.fstat(stream.fileno())) != identity:
+                raise BrainError('Promotion publication image changed during read')
+            self.check()
+            raw = stream.read(limit + 1)
+            if (self._file_identity(self.files.fstat(stream.fileno())) != identity
+                    or self._file_identity(self.files.stat(name, dir_fd=parent, follow_symlinks=False)) != identity):
+                raise BrainError('Promotion publication image changed during read')
+            self.check()
+        if len(raw) > limit:
+            raise BrainError('Promotion publication file exceeds its byte limit')
+        return raw
+
+    def write(self, relative, content, expected):
+        limit = 2 * PUBLICATION_LIMIT
+        if len(content) > limit or self.read(relative, limit) != expected:
+            raise BrainError('Promotion publication effect changed before write')
+        parent, name = self.parent(relative, create=True)
+        temporary = '.' + name + '.' + uuid.uuid4().hex + '.tmp'
+        descriptor = self.files.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | self.files.O_NOFOLLOW,
+                                     0o600, dir_fd=parent)
+        temporary_identity = None
+        try:
+            with os.fdopen(descriptor, 'wb') as stream:
+                temporary_identity = self._file_identity(self.files.fstat(stream.fileno()))[:4]
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            self.check()
+            if self.read(relative, limit) != expected:
+                raise BrainError('Promotion publication effect changed before write')
+            if expected is None:
+                self.publish_absent(parent, temporary, name)
+            else:
+                self.files.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+            if os.name == 'posix':
+                os.fsync(parent)
+            self.check()
+            if self.read(relative, limit) != content:
+                raise BrainError('Promotion publication effect differs after write')
+        finally:
+            try:
+                image = self.files.stat(temporary, dir_fd=parent, follow_symlinks=False)
+                if temporary_identity is not None and self._file_identity(image)[:4] == temporary_identity:
+                    self.files.unlink(temporary, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+
+    def publish_absent(self, parent, temporary, name):
+        if os.name == 'nt':
+            self.files.publish_absent(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+            return
+        # The installed Cursor helper permits a hard-link fallback. Durable
+        # publication cannot: death between link and unlink loses single-link
+        # custody. Use its atomic Linux primitive, refusing unsupported hosts
+        # and filesystems before any destination effect.
+        if sys.platform.startswith('linux'):
+            import ctypes
+            library = ctypes.CDLL(None, use_errno=True)
+            rename = getattr(library, 'renameat2', None)
+            if rename is not None:
+                rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+                rename.restype = ctypes.c_int
+                if rename(parent, os.fsencode(temporary), parent, os.fsencode(name), 1) == 0:
+                    return
+                failure = ctypes.get_errno()
+                if failure not in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+                    raise OSError(failure, os.strerror(failure))
+        elif sys.platform == 'darwin':
+            import ctypes
+            library = ctypes.CDLL(None, use_errno=True)
+            rename = getattr(library, 'renameatx_np', None)
+            if rename is not None:
+                rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+                rename.restype = ctypes.c_int
+                # Apple's RENAME_EXCL differs from Linux RENAME_NOREPLACE.
+                if rename(parent, os.fsencode(temporary), parent, os.fsencode(name), 0x00000004) == 0:
+                    return
+                failure = ctypes.get_errno()
+                if failure not in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+                    raise OSError(failure, os.strerror(failure))
+        raise BrainError('Atomic no-clobber promotion publication is unavailable on this filesystem')
+
+    def unlink(self, relative, expected):
+        parent, name = self.parent(relative)
+        if self.read(relative, 2 * PUBLICATION_LIMIT) != expected:
+            raise BrainError('Promotion publication effect changed before removal')
+        self.check()
+        self.files.unlink(name, dir_fd=parent)
+        if os.name == 'posix':
+            os.fsync(parent)
+        self.check()
+
+    def close(self):
+        for descriptor in reversed(self.descriptors):
+            os.close(descriptor)
+        self.descriptors.clear()
+
+
+@contextlib.contextmanager
+def _publication_scope(repository):
+    current = getattr(_PUBLICATION_IO, 'files', None)
+    if current is not None:
+        if current.repository != repository:
+            raise BrainError('Promotion publication repository custody changed')
+        yield current
+        return
+    try:
+        files = _PublicationFiles(repository)
+    except OSError as error:
+        raise BrainError('Promotion publication root is unavailable or changed') from error
+    _PUBLICATION_IO.files = files
+    try:
+        yield files
+    finally:
+        del _PUBLICATION_IO.files
+        files.close()
+
+
+@contextlib.contextmanager
+def _publication_operation(repository, relative, expected):
+    with _publication_scope(repository) as files:
+        previous = getattr(_PUBLICATION_IO, 'operation', None)
+        _PUBLICATION_IO.operation = (repository / relative, files, relative, expected)
+        try:
+            yield
+        finally:
+            _PUBLICATION_IO.operation = previous
+
+
+def _publication_write(repository, relative, content, expected):
+    with _publication_operation(repository, relative, expected):
+        atomic_write(repository / relative, content)
+
+
+def _publication_json(repository, path, value, *, expected=None):
+    relative = path.relative_to(repository).as_posix()
+    raw = _publication_read(repository, relative, limit=2 * PUBLICATION_LIMIT)
+    if expected is not None and (raw is None or json.loads(raw) != expected):
+        raise BrainError('Promotion publication checkpoint changed before write')
+    with _publication_operation(repository, relative, raw):
+        atomic_json(path, value)
+
+
+class _PublicationSourceEdited(BrainError):
+    """An unversioned external edit cannot authorize clearing custody."""
+
+
+def _publication_digest(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                    allow_nan=False, separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def _publication_seal(plan: dict[str, Any]) -> None:
+    plan['sha256'] = _publication_digest({key: value for key, value in plan.items() if key != 'sha256'})
+
+
+def _publication_blob(raw: bytes) -> dict[str, str]:
+    if len(raw) > PUBLICATION_IMAGE_LIMIT:
+        raise BrainError('Promotion publication image exceeds its byte limit')
+    return {'sha256': hashlib.sha256(raw).hexdigest(), 'data': base64.b64encode(raw).decode('ascii')}
+
+
+def _publication_decode(value: object) -> bytes:
+    if (not isinstance(value, dict) or set(value) != {'sha256', 'data'}
+            or not isinstance(value['sha256'], str) or not re.fullmatch('[0-9a-f]{64}', value['sha256'])
+            or not isinstance(value['data'], str) or len(value['data']) > (PUBLICATION_IMAGE_LIMIT + 2) // 3 * 4):
+        raise BrainError('Invalid promotion publication image')
+    try:
+        raw = base64.b64decode(value['data'].encode('ascii'), validate=True)
+        raw.decode('utf-8')
+    except (ValueError, UnicodeError) as error:
+        raise BrainError('Invalid promotion publication encoding') from error
+    if len(raw) > PUBLICATION_IMAGE_LIMIT or hashlib.sha256(raw).hexdigest() != value['sha256']:
+        raise BrainError('Promotion publication image checksum differs')
+    return raw
+
+
+def _publication_metadata(raw: bytes) -> tuple[dict[str, Any], str]:
+    match = re.fullmatch(r'---\r?\n(.*?)\r?\n---(?:\r?\n|$)(.*)', raw.decode('utf-8'), re.S)
+    try:
+        metadata = json.loads(match[1]) if match else None
+    except (ValueError, RecursionError) as error:
+        raise BrainError('Invalid promotion publication frontmatter') from error
+    if not isinstance(metadata, dict):
+        raise BrainError('Invalid promotion publication frontmatter')
+    return metadata, match[2]
+
+
+def _publication_parts(proposal: dict[str, Any]) -> dict[str, Any]:
+    """Validate bounded internal custody before any path can be written."""
+    plan = proposal['publication']
+    try:
+        if (not isinstance(plan, dict) or set(plan) != {
+                'profile', 'phase', 'original_updated_at', 'proposal_sha256', 'destination', 'predecessor', 'sources', 'sha256'}
+                or plan['profile'] != PUBLICATION_PROFILE or plan['phase'] not in ('publish', 'rollback')
+                or proposal['status'] != 'reviewed'
+                or len(json.dumps(plan, ensure_ascii=False, allow_nan=False).encode('utf-8')) > PUBLICATION_LIMIT
+                or plan['proposal_sha256'] != _publication_digest({k: v for k, v in proposal.items() if k != 'publication'})
+                or plan['sha256'] != _publication_digest({k: v for k, v in plan.items() if k != 'sha256'})):
+            raise BrainError('Invalid promotion publication binding')
+        destination = plan['destination']
+        if not isinstance(destination, dict) or set(destination) != {'path', 'after'}:
+            raise BrainError('Invalid promotion publication destination')
+        raw = _publication_decode(destination['after'])
+        metadata, body = _publication_metadata(raw)
+        slug = re.sub(r'[^a-z0-9]+', '-', proposal['title'].lower()).strip('-') or 'promoted'
+        memory_id = metadata.get('id')
+        heading = '# ' + proposal['title']
+        content = proposal['content'].strip()
+        expected_body = content if content.startswith(heading) else heading + '\n\n' + content
+        if (not isinstance(memory_id, str) or not re.fullmatch(r'MEM-[0-9]{8}-[0-9a-f]{8}', memory_id)
+                or destination['path'] != f'memory-bank/chunks/{memory_id}-{slug}.md'
+                or metadata.get('title') != proposal['title'] or metadata.get('status') != 'active'
+                or body.strip() != expected_body.strip()):
+            raise BrainError('Promotion publication destination differs from proposal')
+        if set(metadata) != {'id', 'title', 'type', 'status', 'scope', 'tags', 'created',
+                'last_verified', 'review_after', 'sources', 'supersedes', 'superseded_by',
+                'valid_from', 'valid_to', 'source_digests'}:
+            raise BrainError('Invalid promotion publication metadata fields')
+        predecessor = plan['predecessor']
+        source = proposal['source_records'][0]
+        suffix = source['id'].replace('-', '')[:8]
+        if predecessor is not None:
+            if proposal['review_mode'] != 'automatic' or len(proposal['source_records']) != 1:
+                raise BrainError('Invalid promotion publication supersession')
+            suffix = hashlib.sha256(f"{source['id']}#{source['revision']}".encode('utf-8')).hexdigest()[:8]
+        created = date.fromisoformat(metadata['created'])
+        frozen = datetime.fromisoformat(proposal['updated_at'].replace('Z', '+00:00'))
+        original_updated = datetime.fromisoformat(plan['original_updated_at'].replace('Z', '+00:00'))
+        if frozen.tzinfo is None or original_updated.tzinfo is None:
+            raise BrainError('Promotion publication timestamp requires an explicit offset')
+        if (created != frozen.astimezone(timezone.utc).date()
+                or memory_id != f"MEM-{created.strftime('%Y%m%d')}-{suffix}"
+                or metadata['last_verified'] != metadata['created'] or metadata['valid_from'] != metadata['created']
+                or metadata['review_after'] != (created + timedelta(days=365)).isoformat()
+                or metadata['superseded_by'] is not None or metadata['valid_to'] is not None):
+            raise BrainError('Promotion publication frozen identity or dates differ')
+        decoded_predecessor = None
+        if predecessor is not None:
+            if not isinstance(predecessor, dict) or set(predecessor) != {'path', 'before', 'after'}:
+                raise BrainError('Invalid promotion publication predecessor')
+            relative = predecessor['path']
+            if (not isinstance(relative, str) or PurePosixPath(relative).parent.as_posix() != 'memory-bank/chunks'
+                    or BANK_FILENAME_PATTERN.fullmatch(PurePosixPath(relative).name) is None
+                    or relative == destination['path']):
+                raise BrainError('Invalid promotion publication predecessor path')
+            before_raw, after_raw = _publication_decode(predecessor['before']), _publication_decode(predecessor['after'])
+            before, before_body = _publication_metadata(before_raw)
+            after, after_body = _publication_metadata(after_raw)
+            expected = {**before, 'status': 'superseded', 'superseded_by': memory_id,
+                        'valid_to': metadata.get('valid_from')}
+            if (before.get('status') != 'active' or after != expected or before_body.strip() != after_body.strip()
+                    or metadata.get('supersedes') != [before.get('id')]
+                    or not PurePosixPath(relative).name.startswith(str(before.get('id')) + '-')):
+                raise BrainError('Promotion publication predecessor differs')
+            decoded_predecessor = (relative, before_raw, after_raw)
+        elif metadata.get('supersedes') != []:
+            raise BrainError('Promotion publication predecessor is missing')
+        rows = plan['sources']
+        expected_sources = {(row['id'], row['path']) for row in proposal['source_records']}
+        if not isinstance(rows, list) or not 1 <= len(rows) <= 100 or len(rows) != len(expected_sources):
+            raise BrainError('Invalid promotion publication sources')
+        seen = set()
+        for row in rows:
+            if (not isinstance(row, dict) or set(row) != {'id', 'path', 'sha256'}
+                    or (row['id'], row['path']) not in expected_sources or row['id'] in seen
+                    or not isinstance(row['sha256'], str) or not re.fullmatch('[0-9a-f]{64}', row['sha256'])):
+                raise BrainError('Invalid promotion publication source image')
+            seen.add(row['id'])
+        return {'destination': (destination['path'], raw), 'predecessor': decoded_predecessor,
+                'sources': rows, 'metadata': metadata}
+    except (KeyError, TypeError, ValueError, UnicodeError, RecursionError, OverflowError) as error:
+        raise BrainError('Invalid promotion publication plan') from error
+
+
+def _publication_read(repository: Path, relative: str, *, limit: int = PUBLICATION_IMAGE_LIMIT) -> Optional[bytes]:
+    try:
+        with _publication_scope(repository) as files:
+            return files.read(relative, limit)
+    except OSError as error:
+        raise BrainError('Promotion publication image is unavailable or changed') from error
+
+
+def _publication_stored(repository: Path, proposal: dict[str, Any], proposal_path: Path) -> None:
+    raw = _publication_read(repository, proposal_path.relative_to(repository).as_posix(), limit=2 * PUBLICATION_LIMIT)
+    try:
+        stored = json.loads(raw) if raw is not None else None
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise BrainError('Promotion publication checkpoint is unavailable') from error
+    if stored != proposal:
+        raise BrainError('Promotion publication checkpoint changed; no writes started')
+
+
+def _publication_states(repository: Path, parts: dict[str, Any]) -> tuple[Optional[bytes], Optional[bytes]]:
+    relative, after = parts['destination']
+    current = _publication_read(repository, relative)
+    if current not in (None, after):
+        raise BrainError('Promotion publication destination was edited; no writes started')
+    predecessor = None
+    if parts['predecessor'] is not None:
+        name, before, after = parts['predecessor']
+        predecessor = _publication_read(repository, name)
+        if predecessor not in (before, after):
+            raise BrainError('Promotion publication predecessor was edited; no writes started')
+    _publication_read(repository, 'memory-bank/INDEX.md', limit=PUBLICATION_LIMIT)
+    return current, predecessor
+
+
+def _rollback_publication(repository: Path, proposal: dict[str, Any], proposal_path: Path) -> dict[str, Any]:
+    parts = _publication_parts(proposal)
+    _publication_stored(repository, proposal, proposal_path)
+    current, predecessor = _publication_states(repository, parts)
+    if proposal['publication']['phase'] != 'rollback':
+        previous = proposal
+        proposal = copy.deepcopy(proposal)
+        proposal['publication']['phase'] = 'rollback'
+        _publication_seal(proposal['publication'])
+        _publication_json(repository, proposal_path, proposal, expected=previous)
+    # Restore the predecessor first: never remove its accessible replacement
+    # if that restoration fails. Keep the durable plan through every failure.
+    if parts['predecessor'] is not None:
+        relative, before, after = parts['predecessor']
+        if predecessor != before:
+            _publication_write(repository, relative, before.decode('utf-8'), after)
+    if current is not None:
+        _publication_states(repository, parts)
+        with _publication_scope(repository) as files:
+            files.unlink(parts['destination'][0], parts['destination'][1])
+    index = repository / 'memory-bank/INDEX.md'
+    rendered = render_bank_index(repository / 'memory-bank')[0]
+    index_before = _publication_read(repository, 'memory-bank/INDEX.md', limit=PUBLICATION_LIMIT)
+    if index_before != rendered.encode('utf-8'):
+        _publication_write(repository, 'memory-bank/INDEX.md', rendered, index_before)
+    current, predecessor = _publication_states(repository, parts)
+    if current is not None or (parts['predecessor'] is not None and predecessor != parts['predecessor'][1]):
+        raise BrainError('Promotion publication rollback is incomplete')
+    original = {key: value for key, value in proposal.items() if key != 'publication'}
+    original['updated_at'] = proposal['publication']['original_updated_at']
+    _publication_stored(repository, proposal, proposal_path)
+    _publication_json(repository, proposal_path, original, expected=proposal)  # Clear custody last.
+    return original
+
+
+def _resume_publication(repository: Path, proposal: dict[str, Any], proposal_path: Path) -> dict[str, Any]:
+    parts = _publication_parts(proposal)
+    _publication_stored(repository, proposal, proposal_path)
+    current, predecessor = _publication_states(repository, parts)
+    inherited = set()
+    verified = {}
+    record_digests = {}
+    attested_by_agent = False
+    try:
+        config = load_config(repository)
+        images = {row['id']: row for row in parts['sources']}
+        for source in proposal['source_records']:
+            image = images[source['id']]
+            found, record, _ = find_record(repository, source['id'], include_archive=True)
+            source_raw = _publication_read(repository, source['path'], limit=4 * PUBLICATION_IMAGE_LIMIT)
+            if (record['revision'] != source['revision'] or record['type'] != source['type']
+                    or found.relative_to(repository).as_posix() != source['path']):
+                raise BrainError('Promotion publication source record changed')
+            if source_raw is None or hashlib.sha256(source_raw).hexdigest() != image['sha256']:
+                raise _PublicationSourceEdited('Promotion publication source image was edited; no writes started')
+            error = promotion_eligibility_error(repository, record, config,
+                                                allow_changed_sources=proposal['review_mode'] == 'automatic')
+            if error is not None or (proposal['review_mode'] == 'automatic' and provenance_problems(record, proposal['content'])):
+                raise BrainError('Promotion publication source is no longer eligible')
+            record_digests[source['path']] = hashlib.sha256(_line_ending_neutral(source_raw)).hexdigest()
+            inherited.add(source['path'])
+            inherited.update(cited for cited in record['sources'] if workspace_roots.resolve(repository, cited).is_file())
+            verified.update({row['path']: row['sha256'] for row in canonical_source_image(record['source_fingerprints'])})
+            attested_by_agent = attested_by_agent or record_attestation(record) == 'agent'
+    except _PublicationSourceEdited:
+        raise
+    except (BrainError, OSError):
+        _rollback_publication(repository, proposal, proposal_path)
+        raise
+    # A self-checksum is consistency, not authentication: even a rehashed
+    # packet may never replace the checked source image with current bytes.
+    metadata = parts['metadata']
+    tags = ['project-brain', 'promoted'] + (['auto-promoted'] if proposal['review_mode'] == 'automatic' else [])
+    if attested_by_agent:
+        tags.append('agent-attested')
+    expected_digests = {**record_digests, **verified}
+    paths = {cited.split('#', 1)[0] for cited in inherited}
+    actual_digests = {row['path']: row['sha256'] for row in canonical_source_image(metadata.get('source_digests'))}
+    if (metadata.get('sources') != sorted(inherited) or not paths.issubset(expected_digests)
+            or actual_digests != {name: expected_digests[name] for name in paths}
+            or metadata.get('tags') != tags or metadata.get('scope') != ['application']
+            or metadata.get('type') != PROMOTION_TYPE_BY_RECORD.get(proposal['source_records'][0]['type'], 'decision')):
+        raise BrainError('Promotion publication provenance differs; no writes started')
+    if proposal['publication']['phase'] == 'rollback':
+        # Cleanup may lead to a fresh attempt, so it must not discard the
+        # only saved source custody before checking same-revision edits.
+        _rollback_publication(repository, proposal, proposal_path)
+        return apply_promotion(repository, proposal['id'])
+    try:
+        held, applied_sources = promotion_ledger(repository)
+        for source in proposal['source_records']:
+            if proposal['review_mode'] == 'automatic' and source['id'] in held:
+                raise BrainError('Promotion publication source is held by a human review or synthesis')
+            winner = applied_sources.get(source['id'])
+            if (proposal['review_mode'] == 'automatic' and winner is not None and winner['id'] != proposal['id']
+                    and winner['source_records'][0]['revision'] >= source['revision']):
+                raise BrainError('Promotion publication source was already promoted by another proposal')
+        if proposal['review_mode'] == 'automatic':
+            own_ids = {metadata['id']}
+            if parts['predecessor'] is not None:
+                own_ids.add(_publication_metadata(parts['predecessor'][1])[0]['id'])
+            duplicate = near_duplicate_chunk(f"{proposal['title']}\n{proposal['content']}",
+                [row for row in active_chunk_texts(repository) if row[0] not in own_ids], bank_duplicate_ratio(config))
+            if duplicate is not None:
+                raise BrainError('Promotion publication is a near-duplicate of ' + duplicate)
+    except BrainError:
+        _rollback_publication(repository, proposal, proposal_path)
+        raise
+    bank = repository / 'memory-bank'
+    before_errors = validate_bank(bank)
+    applied = None
+    try:
+        if current is None:
+            _publication_write(repository, parts['destination'][0], parts['destination'][1].decode('utf-8'), None)
+        _, predecessor = _publication_states(repository, parts)
+        if parts['predecessor'] is not None and predecessor == parts['predecessor'][1]:
+            _publication_write(repository, parts['predecessor'][0], parts['predecessor'][2].decode('utf-8'),
+                               parts['predecessor'][1])
+        rendered = render_bank_index(bank)[0]
+        index_before = _publication_read(repository, 'memory-bank/INDEX.md', limit=PUBLICATION_LIMIT)
+        if index_before != rendered.encode('utf-8'):
+            _publication_write(repository, 'memory-bank/INDEX.md', rendered, index_before)
+        attested = (repository / parts['destination'][0],)
+        errors = bank_write_errors(repository, before_errors, attested)
+        if errors:
+            raise BrainError('Promoted Memory Bank publication failed validation: ' + '; '.join(errors))
+        applied = {key: value for key, value in proposal.items() if key != 'publication'}
+        applied.update(status='applied', destination_memory_id=parts['metadata']['id'],
+                       destination_revision=1, updated_at=utc_now(), revision=proposal['revision'] + 1)
+        validate_promotion_record(repository, applied)
+        _publication_states(repository, parts)
+        _publication_stored(repository, proposal, proposal_path)
+        _publication_json(repository, proposal_path, applied, expected=proposal)
+        return applied
+    except Exception:
+        # An atomic ledger write may have committed before a helper failed.
+        # Never undo a completed publication in that case.
+        raw = _publication_read(repository, proposal_path.relative_to(repository).as_posix(), limit=2 * PUBLICATION_LIMIT)
+        stored = json.loads(raw) if raw is not None else None
+        if stored != applied:
+            _rollback_publication(repository, proposal, proposal_path)
+        raise
+
+
 def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
     promotion_path = brain_root(repository) / "control" / "promotions" / f"{promotion_id}.json"
     bank = repository / "memory-bank"
     index_path = bank / "INDEX.md"
-    with mutation_lock(repository):
+    with mutation_lock(repository), _publication_scope(repository):
+        list(iter_promotions(repository, strict=True))
         try:
-            proposal = json.loads(promotion_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            proposal = json.loads(_publication_read(repository, promotion_path.relative_to(repository).as_posix(),
+                                                     limit=2 * PUBLICATION_LIMIT))
+        except (OSError, ValueError, TypeError) as error:
             raise BrainError(f"Promotion not found or invalid: {promotion_id}") from error
         validate_promotion_record(
             repository, proposal, expected_id=promotion_id
@@ -5343,6 +6281,8 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
             not proposal.get("reviewer") and not automatic
         ):
             raise BrainError("Promotion requires an approved human review before apply")
+        if 'publication' in proposal:
+            return _resume_publication(repository, proposal, promotion_path)
         config = load_config(repository)
         # What the promoted records themselves cited, carried through to the
         # chunk. Without this the citation chain breaks at promotion: the
@@ -5390,7 +6330,8 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                 # promotion that has nothing to do with that file.
                 if workspace_roots.resolve(repository, cited).is_file():
                     inherited.append(cited)
-        today = datetime.now(timezone.utc).date()
+        publication_at = utc_now()
+        today = datetime.fromisoformat(publication_at).astimezone(timezone.utc).date()
         # Conflict-free identifier: the promotion date plus eight hex
         # characters of the source record's UUID. Two machines or branches
         # promoting concurrently cannot collide the way the retired shared
@@ -5420,6 +6361,11 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                         f"The chunk this promotion revises is {predecessor[1].get('status')}: "
                         f"{previous.get('destination_memory_id')}"
                     )
+                heading=f"# {previous['title']}"
+                content=previous['content'].strip()
+                expected_body=content if content.startswith(heading) else f"{heading}\n\n{content}"
+                if predecessor[1].get('title')!=previous['title'] or predecessor[2].strip()!=expected_body.strip():
+                    raise BrainError("Previously promoted chunk was edited; review its replacement explicitly")
                 suffix = hashlib.sha256(f"{source_uuid}#{revision}".encode("utf-8")).hexdigest()[:8]
         memory_id = f"MEM-{today.strftime('%Y%m%d')}-{suffix}"
         slug = re.sub(r"[^a-z0-9]+", "-", proposal["title"].lower()).strip("-") or "promoted"
@@ -5502,36 +6448,33 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
             metadata,
             content if content.startswith(heading) else f"{heading}\n\n{content}",
         )
-        before = validate_bank(bank)
-        snapshot = snapshot_files(
-            [destination, index_path, promotion_path] + ([predecessor[0]] if predecessor else [])
-        )
-        try:
-            atomic_write(destination, chunk)
-            if predecessor is not None:
-                # Closed the way `retire_chunk` closes one: superseded, linked
-                # to its successor, valid until today. The body is untouched.
-                predecessor[1]["status"] = "superseded"
-                predecessor[1]["superseded_by"] = memory_id
-                predecessor[1]["valid_to"] = today.isoformat()
-                atomic_write(predecessor[0], _render_chunk(predecessor[1], predecessor[2]))
-            # The index is derived state: regenerate it from chunk
-            # frontmatter instead of appending a row, so the same rendering
-            # path serves promotions, manual capture, and post-merge repair.
-            atomic_write(index_path, render_bank_index(bank)[0])
-            validation_errors = bank_write_errors(repository, before, (destination,))
-            if validation_errors:
-                raise BrainError(
-                    "Promoted Memory Bank chunk failed validation: "
-                    + "; ".join(validation_errors)
-                )
-            proposal["status"] = "applied"
-            proposal["destination_memory_id"] = memory_id
-            proposal["destination_revision"] = 1
-            proposal["updated_at"] = utc_now()
-            proposal["revision"] += 1
-            atomic_json(promotion_path, proposal)
-        except Exception:
-            restore_files(snapshot)
-            raise
-        return proposal
+        original_proposal = copy.deepcopy(proposal)
+        proposal['updated_at'] = publication_at
+        plan = {'profile': PUBLICATION_PROFILE, 'phase': 'publish',
+                'original_updated_at': original_proposal['updated_at'],
+                'proposal_sha256': _publication_digest(proposal),
+                'destination': {'path': destination.relative_to(repository).as_posix(),
+                                'after': _publication_blob(chunk.encode('utf-8'))},
+                'predecessor': None, 'sources': []}
+        for source in proposal['source_records']:
+            raw = _publication_read(repository, source['path'], limit=4 * PUBLICATION_IMAGE_LIMIT)
+            if raw is None:
+                raise BrainError('Promotion publication source is missing')
+            plan['sources'].append({'id': source['id'], 'path': source['path'],
+                                    'sha256': hashlib.sha256(raw).hexdigest()})
+        if predecessor is not None:
+            relative = predecessor[0].relative_to(repository).as_posix()
+            raw = _publication_read(repository, relative)
+            if raw is None:
+                raise BrainError('Promotion publication predecessor is missing')
+            after = {**predecessor[1], 'status': 'superseded', 'superseded_by': memory_id,
+                     'valid_to': today.isoformat()}
+            plan['predecessor'] = {'path': relative, 'before': _publication_blob(raw),
+                                  'after': _publication_blob(_render_chunk(after, predecessor[2]).encode('utf-8'))}
+        _publication_seal(plan)
+        proposal['publication'] = plan
+        validate_promotion_record(repository, proposal)
+        # Intent precedes every Bank effect. Process death leaves the exact
+        # authority needed to finish; legacy unproven files still fail above.
+        _publication_json(repository, promotion_path, proposal, expected=original_proposal)
+        return _resume_publication(repository, proposal, promotion_path)

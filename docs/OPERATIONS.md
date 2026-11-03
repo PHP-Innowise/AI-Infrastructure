@@ -802,6 +802,7 @@ python3 memory-bank/scripts/context.py [--owner OWNER] brain-create TYPE \
   [--conflict UUID]... \
   [--privacy public|team|restricted|private] \
   [--authority inferred|observed|verified] \
+  [--attestation agent|person] \
   [--confidence 0..1] \
   [--json]
 ```
@@ -809,7 +810,10 @@ python3 memory-bank/scripts/context.py [--owner OWNER] brain-create TYPE \
 `TYPE` is `finding`, `bug`, `incident`, `decision`, or `event`. Tasks use
 `start`. Defaults are `privacy=team`, `authority=observed`, and
 `confidence=1.0`. Creation writes a UUID-named Brain record and rebuilds
-deterministic indexes. Non-task records do not receive handoffs.
+deterministic indexes. Non-task records do not receive handoffs. A record
+created `--authority verified` says who checked it: `agent` unless
+`--attestation person` (the Harness passes `person` for a person's pages);
+the attestation goes into its ledger as an `observed` -> `verified` entry.
 
 Initial statuses are `open` for findings and incidents, `reported` for bugs,
 `proposed` for decisions, and `recorded` for events. The schema and runtime
@@ -829,15 +833,27 @@ python3 memory-bank/scripts/context.py [--owner OWNER] brain-update \
   [--source PATH]... \
   [--conflict UUID]... \
   [--transition STATE] \
+  [--authority verified | --reverify] \
+  [--attestation agent|person] \
   [--reason TEXT] \
   [--json]
 ```
 
 Performs a required compare-and-swap revision update, verifies that the actor
 is in `authorized_owners`, validates type-specific lifecycle transitions,
-refreshes source fingerprints, appends transition history when transitioning,
-and rebuilds indexes. At least one field or transition is required. The default
-reason is `Record updated`.
+appends transition history when transitioning, and rebuilds indexes. At least
+one field or transition is required. The default reason is `Record updated`.
+
+`--authority verified` raises an observed record's evidence level, the one
+authority edge there is; `--reverify` says a verified record's claim was
+checked again. Either records who checked: `agent` unless `--attestation
+person`. Source fingerprints follow the sources on every write of an
+unverified record; a verified finding, bug, incident or decision keeps the
+versions that were checked through any write that checks nothing, and only
+`--authority verified` or `--reverify` takes them anew (a source the write
+cites for the first time is fingerprinted then). A person's verified claim is
+revised only with `--attestation person`. An evidence level passed as
+`--transition` is refused with how to set it.
 
 `--revision auto` resolves the current revision inside the runtime mutation
 lock, so an automated writer still performs a real compare-and-swap rather than
@@ -878,6 +894,8 @@ Side effects: creates or migrates the local database schema if necessary.
 ```bash
 python3 memory-bank/scripts/context.py validate [--json]
 ```
+
+`brain-validate` is accepted for the same command.
 
 Validates active and archived Brain records and control data, including strict
 schema keys, UUID/path consistency, legal status history, source freshness,
@@ -946,17 +964,28 @@ local existing sources and is created `resolved` with authority `observed`.
 
 With `automatic_consolidation_verification`, the finding becomes `verified`
 (attested by the agent) when **every** event recorded a `Verification:` line
-and at least one local source was fingerprinted; two events that both say
+and its original complete local source image still matches the current files;
+two events that both say
 "unit tests passed" count twice. Without it, or without that evidence,
 mechanical consolidation is not a verification and the finding stays
 `observed`, which promotion never takes.
+
+The stored event image is checked again before upgrading authority. A source
+edit cannot acquire a new verification merely because folding the text read it
+again. Extending an observed summary rechecks the original carried events;
+extending a verified summary requires its earlier evidence to remain current.
+Automatic lifecycle settings accept JSON booleans, so the string "false" cannot
+silently enable maintenance.
 
 `--apply` writes the finding. Events that reach the ticket later are added to
 an active `observed` finding; a `verified` one takes only events that recorded
 their own verification, as a revised claim; once the finding is archived, a
 new one takes them. Retrieval serves no resolved finding, so the events stay
 `recorded` - on a fresh clone they are where their outcomes are found - until
-the finding's current revision is an active Memory Bank chunk. Then the next
+the finding's current revision is an active and currently retrievable Memory
+Bank chunk. An overdue, missing, private or otherwise unavailable successor
+leaves the events recorded. Availability is rechecked under the mutation lock
+before retirement. Then the next
 run marks them `superseded`, with the operator as the actor, and `compact`
 moves them. Another owner's events are left to that owner; a ticket that
 already has a resolved finding of its own is reported as `existing` and its
@@ -1028,7 +1057,13 @@ followed by `reindex-bank`. The legacy `.memory-counter` file is neither read
 nor written (it may remain on disk; the validator ignores it), and legacy
 `MEM-0001`-style chunks keep their IDs.
 
-All promotion writes are snapshotted and restored on failure. The generated
+Promotion persists a bounded exact-image publication checkpoint before its
+multi-file effects. Ordinary failures roll back owned writes; process death
+leaves custody for exact replay, and incomplete rollback retains the checkpoint.
+Foreign edits stop recovery. All supported writers use the shared mutation lock;
+manual editors must pause during publication. See
+[interrupted publication](MEMORY-WRITE-PATH.md#interrupted-promotion-publication)
+for host support and the final existing-file check/operation limitation. The generated
 chunk currently uses the runtime's fixed promoted-memory defaults; use the
 normal Memory Bank capture workflow when a proposal requires more nuanced
 categorization or an update/supersession decision.
@@ -1204,11 +1239,11 @@ python3 memory-bank/scripts/context.py bank-retire \
   [--superseded-by MEM-20260815-e5f6a7b8] [--reason "..."] [--json]
 ```
 
-Closes a durable chunk's validity period as one transaction. `--valid-to` is
+Closes a durable chunk's validity period as one recoverable operation. `--valid-to` is
 the date the knowledge stopped being true and is what removes the chunk from
 retrieval; `--superseded-by` names what replaced it. With a successor the
 chunk becomes `superseded` and the successor's `supersedes` list gains it in
-the same write; without one it becomes `archived`, the honest status for
+the same operation; without one it becomes `archived`, the honest status for
 knowledge that ceased with nothing taking its place.
 
 Use this rather than editing frontmatter. Retiring by hand means editing both
@@ -1216,8 +1251,23 @@ sides of a replacement link and then regenerating the index, and between any
 two of those edits the bank is invalid. Every write here happens under the
 mutation lock against a snapshot, `memory-bank/INDEX.md` is regenerated, and
 the bank is validated for anything the retirement broke, with the retired
-chunk and its successor held to the whole contract; any failure restores every
-touched file, so an interruption leaves the bank exactly as it was.
+chunk and its successor held to the whole contract. Failures before commit
+restore the prior images immediately when recovery can write them safely.
+
+Before either chunk changes, retirement stores bounded before/after images in
+`project-brain/control/bank-retirement.json`. Removing that checkpoint commits
+the operation. If the process dies first, the next cooperative mutation
+(for example `reindex-bank`) restores the exact prior chunk bytes, regenerates
+the derived index, and removes the checkpoint last. Retry the original
+`bank-retire` if the retirement is still wanted. This recovery does not attest
+the claim or refresh its evidence. The journal belongs with the authoritative
+state; it is not a disposable SQLite cache. Do not delete it to force progress.
+
+An edited chunk, corrupt checkpoint, linked path, or oversized image stops
+recovery before overwriting unknown content. Preserve those files and inspect
+the discrepancy. A pending operation can be visible to unlocked readers until
+the next mutation recovers it; this is not an atomic snapshot for readers.
+An error after checkpoint removal leaves the committed retirement in place.
 
 What does not change: the chunk body, its other frontmatter fields, the file
 on disk, and its `INDEX.md` row, which survives with the new status — a chunk

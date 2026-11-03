@@ -44,10 +44,12 @@ class RetainedCitationTests(unittest.TestCase):
         # write CRLF on Windows.
         self.chunk.write_bytes(('---\n'+json.dumps(self.metadata,ensure_ascii=False,indent=2,sort_keys=True)+'\n---\n\n'+PUBLIC['body']).encode('utf-8'))
         self.call('index','--json')
-        names=('context','context_retrieval','brain_runtime','automatic_query','validate','memory_results','workspace_roots','context_handoff')
         # Modules imported from this temporary copy leave sys.modules when the
         # test ends: a later module in the same process (the Windows job runs
-        # them together) must not import a runtime whose files are gone.
+        # them together) must not import a runtime whose files are gone. Every
+        # module of the copy's scripts folder, not a list: native_results,
+        # left out of one, served the next suite from a deleted copy.
+        names={path.stem for path in self.cli.parent.glob('*.py')}
         previous={name:sys.modules.pop(name) for name in names if name in sys.modules}
         def restore():
             for name in names:sys.modules.pop(name,None)

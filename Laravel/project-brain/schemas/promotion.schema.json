@@ -34,11 +34,49 @@
         }
       }
     },
+    "source_verifications": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "sha256"],
+        "properties": {
+          "id": {"type": "string", "format": "uuid"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "publication": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "phase", "original_updated_at", "proposal_sha256", "destination", "predecessor", "sources", "sha256"],
+      "properties": {
+        "profile": {"const": "promotion-publication-v1"},
+        "phase": {"enum": ["publish", "rollback"]},
+        "original_updated_at": {"type": "string", "format": "date-time"},
+        "proposal_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "destination": {
+          "type": "object", "additionalProperties": false, "required": ["path", "after"],
+          "properties": {"path": {"type": "string"}, "after": {"$ref": "#/$defs/publication_image"}}
+        },
+        "predecessor": {
+          "type": ["object", "null"], "additionalProperties": false, "required": ["path", "before", "after"],
+          "properties": {"path": {"type": "string"}, "before": {"$ref": "#/$defs/publication_image"}, "after": {"$ref": "#/$defs/publication_image"}}
+        },
+        "sources": {"type": "array", "minItems": 1, "maxItems": 100, "items": {
+          "type": "object", "additionalProperties": false, "required": ["id", "path", "sha256"],
+          "properties": {"id": {"type": "string", "format": "uuid"}, "path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+        }}
+      }
+    },
     "title": {"type": "string", "minLength": 1},
     "content": {"type": "string", "minLength": 1},
     "destination_memory_id": {"type": ["string", "null"]},
     "destination_revision": {"type": ["integer", "null"], "minimum": 1},
     "conflicts": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
     "outcome": {"type": ["string", "null"]}
+  },
+  "$defs": {
+    "publication_image": {"type": "object", "additionalProperties": false, "required": ["data", "sha256"],
+      "properties": {"data": {"type": "string", "maxLength": 1398104}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
   }
 }

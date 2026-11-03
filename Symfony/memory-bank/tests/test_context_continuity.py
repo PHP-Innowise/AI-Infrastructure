@@ -286,6 +286,27 @@ class ContextContinuityTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertFalse(runtime._codex_injected(text))
 
+    def test_codex_context_the_turn_reader_skips_stays_out_of_snapshots(self) -> None:
+        """The turn reader (context.py) and the snapshot reader decide the
+        same Codex envelopes for the same reason - context Codex added, not
+        the person's words - and differ only where they answer different
+        questions, named here."""
+        import context
+        for tag in ("recommended_plugins", "user_instructions", "external_codex_apps_writing_block_edits",
+                    "subagent_notification"):
+            with self.subTest(tag=tag):
+                self.assertTrue(runtime._codex_injected(f"<{tag}>Codex added this.</{tag}>"))
+        # The person's answer to the agent's question continues a turn, so the
+        # turn reader does not start one there; it is still what they wrote.
+        self.assertFalse(runtime._codex_injected(
+            "<send_user_message_question_reply>Use half-up.</send_user_message_question_reply>"))
+        turn_only = set(context._CODEX_CONTEXT_ENVELOPES) - runtime.CODEX_INJECTED_ENVELOPES
+        snapshot_only = runtime.CODEX_INJECTED_ENVELOPES - set(context._CODEX_CONTEXT_ENVELOPES)
+        self.assertEqual({"send_user_message_question_reply"}, turn_only)
+        # A notification starts a turn - the agent works on it as on a
+        # prompt - but it is not what the person wrote.
+        self.assertEqual({"task-notification", "system-reminder"}, snapshot_only)
+
     def test_excerpt_cuts_do_not_manufacture_secret_tokens(self) -> None:
         content = 'User:\n' + 'Visible progress on invoices. ' * 200
         content += 'We closed the task-list-for-the-billing-module-refactor today.' + 'x' * 772

@@ -1093,6 +1093,86 @@ def source_commit(root: Path) -> str | None:
     return result.stdout.strip() or None if result.returncode == 0 else None
 
 
+# Codex reads at most this many bytes of a project's AGENTS.md files
+# (`project_doc_max_bytes`) unless its configuration says otherwise.
+CODEX_DOC_LIMIT = 32 * 1024
+
+
+def codex_policy_cut(target: Path) -> str | None:
+    """Why Codex would not read the project's whole AGENTS.md, or None.
+
+    The installer appends the policy to a project's own AGENTS.md, so the
+    policy is what Codex's byte limit cuts. The editions' .codex/config.toml
+    raises the limit, but a project's own configuration is kept, by install
+    and sync alike: one project's 27 KB of team notes and a config.toml of its
+    own left the policy past byte 32,768 - Verification, Security, Memory
+    Bank And Project Brain - out of every Codex session that did not raise
+    the limit itself. Codex 0.163 reads `project_doc_max_bytes` from a
+    trusted project's `.codex/config.toml`, a top-level key; a person's own
+    configuration is not looked at, since a teammate's differs.
+    """
+    try:
+        policy = read_confined(target, "AGENTS.md")
+        config = read_confined(target, CODEX_CONFIG)
+    except (UnsafePathError, OSError):
+        return None
+    if policy is None:
+        return None
+    top = re.split(rb"(?m)^\s*\[", config or b"", maxsplit=1)[0]
+    found = re.search(rb"(?m)^\s*project_doc_max_bytes\s*=\s*(\d+)\s*(?:#.*)?$", top)
+    limit = int(found.group(1)) if found else CODEX_DOC_LIMIT
+    if len(policy) <= limit:
+        return None
+    return (
+        f"AGENTS.md is {len(policy)} bytes and Codex reads {limit} of it (project_doc_max_bytes) unless a "
+        f"person's own Codex configuration raises the limit: past byte {limit} the policy never reaches such a "
+        "session. Put project_doc_max_bytes = "
+        f"{max(65536, 1 << (len(policy) - 1).bit_length())} at the top of {CODEX_CONFIG}, or shorten the "
+        "project's own part of AGENTS.md"
+    )
+
+
+def installation_ahead(root: Path, recorded: object) -> str | None:
+    """Why a sync from this clone would take the project back, or None.
+
+    A sync writes this clone's files over the project's, so from a clone that
+    lacks the commit the project was last synced from it replaces newer work
+    with older: the Harness, keeping its projects current from a clone on
+    main, put four projects synced from a memory branch back onto main that
+    way, runtime and all, with nobody asked. Nothing stops the sync when the
+    record names no commit, this clone is no Git checkout, or the project's
+    commit is this clone's or one of its ancestors. A commit the clone does
+    not have at all stops it too - the project came from work this clone has
+    not seen - except in a shallow clone, which lacks its own history.
+    """
+    if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", recorded):
+        return None
+    head = source_commit(root)
+    if head is None or head == recorded:
+        return None
+    try:
+        ancestry = subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", recorded, "HEAD"],
+            capture_output=True, text=True,
+        )
+        if ancestry.returncode == 0:
+            return None
+        if ancestry.returncode != 1:
+            shallow = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
+                capture_output=True, text=True,
+            )
+            if shallow.returncode == 0 and shallow.stdout.strip() == "true":
+                return None
+    except OSError:
+        return None
+    return (
+        f"the project was last synced from {recorded[:12]}, which this clone ({head[:12]}) does not "
+        "contain: a sync from here would take it back. Sync from a clone that has that commit, or pass "
+        "--allow-downgrade to go back on purpose"
+    )
+
+
 # A sync reaches every path it reads or writes from the target one folder at
 # a time, so a symbolic link is seen as itself and never followed. Git checks
 # links out, and one standing in for `.cursor`, `memory-bank` or
@@ -1980,6 +2060,7 @@ def sync_installation(
     stamp: str | None = None,
     rewire_codex: bool = False,
     update_tracked: bool = False,
+    allow_downgrade: bool = False,
 ) -> dict:
     """Bring an installed project's accelerator files up to this clone.
 
@@ -2005,6 +2086,11 @@ def sync_installation(
     project that commits its accelerator takes a release. Nothing that runs
     unattended passes it.
 
+    Never back: a project last synced from a commit this clone does not
+    contain - a newer one, or another line of work - is left as it is, with
+    the reason as the error (installation_ahead). `allow_downgrade` is a
+    person going back on purpose; nothing that runs unattended passes it.
+
     A release is never applied in part over what its files run (see
     HOOK_WIRING): while a runtime file stays at the project's version, the
     release's other files are held back too, and a tool's new hooks wait for
@@ -2015,6 +2101,7 @@ def sync_installation(
     report: dict = {
         "target": str(target), "edition": None, "release": None, "changed": [],
         "kept": [], "backups": [], "dry_run": dry_run, "error": None, "partial": None,
+        "codex_policy_cut": None,
     }
     # A runtime reached only through a link is not this project's: the
     # Harness, which reads it without following links, does not count it as
@@ -2053,6 +2140,12 @@ def sync_installation(
         record_problem, manifest = str(error), None
     except (OSError, ValueError):
         manifest = None
+    ahead = None if allow_downgrade else installation_ahead(
+        root, manifest.get("source_commit") if isinstance(manifest, dict) else None
+    )
+    if ahead is not None:
+        report["error"] = ahead
+        return report
     known = manifest.get("files") if isinstance(manifest, dict) else None
     known = known if isinstance(known, dict) else {}
     history = released_blob_ids(root, edition)
@@ -2326,6 +2419,7 @@ def sync_installation(
             )
         except UnsafePathError as error:
             keep(SYNC_MANIFEST, f"the sync's record is not written ({error})")
+    report["codex_policy_cut"] = codex_policy_cut(target) if "codex" in present else None
     return report
 
 
@@ -2438,6 +2532,12 @@ def parse_args() -> argparse.Namespace:
         help="with --sync, also write files the project's Git tracks, by the same "
         "rules (an edited file stays); review the diff and commit it",
     )
+    parser.add_argument(
+        "--allow-downgrade",
+        action="store_true",
+        help="with --sync, sync a project last synced from a commit this clone does not "
+        "contain (newer, or another line of work), taking it back to this clone",
+    )
     parser.add_argument("--target", type=Path)
     parser.add_argument("--tool", action="append", choices=TOOLS)
     parser.add_argument("--dry-run", action="store_true")
@@ -2457,6 +2557,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--rewire-codex requires --sync")
     if args.update_tracked and not args.sync:
         parser.error("--update-tracked requires --sync")
+    if args.allow_downgrade and not args.sync:
+        parser.error("--allow-downgrade requires --sync")
     return args
 
 
@@ -2483,6 +2585,7 @@ def main() -> int:
                 dry_run=args.dry_run,
                 rewire_codex=args.rewire_codex,
                 update_tracked=args.update_tracked,
+                allow_downgrade=args.allow_downgrade,
             )
             print(json.dumps(report, indent=1, ensure_ascii=False))
             return 1 if report["error"] else 0
@@ -2501,6 +2604,9 @@ def main() -> int:
             claude_below_root(target)
         if code == 0 and not args.dry_run and "codex" in tools:
             codex_worktrees(target)
+            cut = codex_policy_cut(target)
+            if cut:
+                print(f"CODEX\tAGENTS.md\t{cut}", file=sys.stderr)
         return code
     except (InventoryError, OSError, subprocess.CalledProcessError) as error:
         print(f"install-accelerator: {error}", file=sys.stderr)

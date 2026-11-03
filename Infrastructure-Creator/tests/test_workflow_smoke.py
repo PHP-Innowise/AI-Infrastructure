@@ -104,6 +104,7 @@ class WorkflowSmokeTests(unittest.TestCase):
             "workspace_roots.py",
             "automatic_query.py",
             "memory_results.py",
+            "native_results.py",
         ):
             shutil.copy2(RUNTIME_ASSETS / name, scripts / name)
 

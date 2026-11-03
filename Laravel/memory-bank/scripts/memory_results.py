@@ -33,6 +33,7 @@ from brain_runtime import (
     BrainError,
     BrainRecordNotFound,
     atomic_json,
+    canonical_source_image,
     auto_promote,
     brain_root,
     create_record,
@@ -55,6 +56,7 @@ LEARNING_LIMIT = 3
 NEXT_STEP_LIMIT = 3
 SOURCE_LIMIT = 10
 ATTESTATIONS = ("agent", "person")
+CAPTURE_DECISIONS = ("selected", "no_reusable_knowledge", "insufficiently_checked")
 PREPARE_PROFILE = "harness-memory-request-v1"
 ATTEMPT_PROFILE = "memory-result-attempt-v1"
 FRONTIER_PROFILE = "memory-result-frontier-v2"
@@ -198,6 +200,14 @@ def check_result_id(value: object) -> str:
     return result_id
 
 
+def checked_fingerprints(root: Path, sources: object) -> list[dict[str, str]]:
+    """Read policy-checked citation hashes; reading does not attest a claim."""
+    paths=_strings(sources,"sources",SOURCE_LIMIT,1024)
+    if not paths:
+        raise ResultRefused("no_sources","Cite sources to fingerprint")
+    return canonical_source_image(source_fingerprints(root,[check_source(root,path) for path in paths]))
+
+
 def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str, Any]:
     """The result as it will be written, checked before anything is.
 
@@ -206,7 +216,7 @@ def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str
     """
     if not isinstance(data, dict):
         raise ResultRefused("schema", "A result is an object")
-    unknown = set(data) - {"progress", "next_steps", "learnings", "verified"}
+    unknown = set(data) - {"progress", "next_steps", "learnings", "verified", "capture_decision"}
     if unknown:
         raise ResultRefused("schema", "Unknown result fields: " + ", ".join(sorted(unknown)))
     if "progress" in data and data["progress"] is not None and not isinstance(data["progress"], str):
@@ -223,13 +233,14 @@ def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str
     identities = {}
     for learning in learnings:
         fields = {"type", "title", "consequence", "sources"}
+        optional = {"expected_revision", "record_id", "source_fingerprints"}
         if (not isinstance(learning, dict) or not fields <= set(learning)
-                or set(learning) - fields - {"expected_revision"}):
+                or set(learning) - fields - optional):
             # Name what to correct; `verified` inside a learning is the usual one.
             detail = ""
             if isinstance(learning, dict):
                 missing = sorted(fields - set(learning))
-                extra = sorted(str(key)[:40] for key in set(learning) - fields - {"expected_revision"})
+                extra = sorted(str(key)[:40] for key in set(learning) - fields - optional)
                 if missing:
                     detail += "; missing: " + ", ".join(missing)
                 if extra:
@@ -255,22 +266,52 @@ def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str
         })
         if "expected_revision" in learning:
             checked[-1]["expected_revision"] = learning["expected_revision"]
+        if "record_id" in learning or "source_fingerprints" in learning:
+            identifier = learning.get("record_id")
+            if (not isinstance(identifier, str) or not UUID4_PATTERN.fullmatch(identifier)
+                    or "expected_revision" not in learning):
+                raise ResultRefused("reference", "Existing knowledge needs its exact record_id and expected_revision")
+            pins = learning.get("source_fingerprints")
+            if not isinstance(pins, list) or not 1 <= len(pins) <= SOURCE_LIMIT:
+                raise ResultRefused("reference", "Existing knowledge needs the checked source_fingerprints image")
+            image = {}
+            for pin in pins:
+                if (not isinstance(pin, dict) or set(pin) != {"path", "sha256"}
+                        or not isinstance(pin["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}",pin["sha256"])):
+                    raise ResultRefused("reference", "Invalid checked source_fingerprints image")
+                path = check_source(root,pin["path"],require_file=False)
+                if "#" in path or (path in image and image[path]!=pin['sha256']):
+                    raise ResultRefused("reference", "Checked source paths must be consistent files without anchors")
+                image[path]=pin["sha256"]
+            if set(image) != {source.split("#",1)[0] for source in sources}:
+                raise ResultRefused("reference", "Check the complete source_fingerprints image")
+            checked[-1].update(record_id=identifier,source_fingerprints=[
+                {"path":path,"sha256":image[path]} for path in sorted(image)])
         # This static conflict must precede native task provisioning and
         # digest binding, so a refused format can be corrected in place.
         # Match learning_id's semantic key; its hashed collision guard also
         # remains in record_result before any authoritative result effect.
         item = checked[-1]
-        identity = (item["type"], " ".join(item["title"].casefold().split()),
-                    tuple(sorted(item["sources"])))
+        identity = (("record",item["record_id"]) if "record_id" in item else
+                    (item["type"], " ".join(item["title"].casefold().split()),tuple(sorted(item["sources"]))))
         if identity in identities and identities[identity] != item:
             raise ResultRefused("conflicting_learnings", "Conflicting learning identities in one result: two "
                                 f"{item['type']}s titled {item['title'][:80]!r} cite the same sources; merge them")
         identities[identity] = item
     if checked and data.get("verified") is not True:
         raise ResultRefused("unverified", "Attest that each learning was checked against its sources with verified=true")
+    if "capture_decision" in data:
+        decision = data["capture_decision"]
+        if not isinstance(decision, str) or decision not in CAPTURE_DECISIONS:
+            raise ResultRefused("capture_decision", "Use selected, no_reusable_knowledge or insufficiently_checked")
+        if (decision == "selected") != bool(checked):
+            raise ResultRefused("capture_decision", "selected needs a checked learning; other capture decisions need empty learnings")
     if progress is None and steps is None and not checked:
         raise ResultRefused("nothing", "Nothing to record: give a progress summary, next steps or a checked learning")
-    return {"progress": progress, "next_steps": steps, "learnings": checked}
+    # Absence retains the legacy request image and digest exactly. A supplied
+    # decision is a caller's selection reason, never proof a record persisted.
+    return {"progress": progress, "next_steps": steps, "learnings": checked,
+            **({"capture_decision": data["capture_decision"]} if "capture_decision" in data else {})}
 
 
 def request_digest(task_id: str, result: dict[str, Any]) -> str:
@@ -322,6 +363,8 @@ def prepare_result(root: Path, task_id: str, result_id: str, revision: int,
         if task["revision"] != revision:
             raise BrainError("memory-result-v1:prepared_stale_no_write")
         wire = {"learnings": result["learnings"], "verified": True}
+        if "capture_decision" in result:
+            wire["capture_decision"] = result["capture_decision"]
         for field in ("progress", "next_steps"):
             if result[field] is not None:
                 wire[field] = result[field]
@@ -337,6 +380,9 @@ def learning_id(task_id: str, learning: dict[str, Any]) -> str:
     The same learning restated by a retry, or by a later result of the same
     task, names the same record.
     """
+    if "record_id" in learning:
+        key = json.dumps([task_id,"record",learning["record_id"]],ensure_ascii=False)
+        return "learning-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
     key = json.dumps(
         [task_id, learning["type"], " ".join(learning["title"].casefold().split()),
          sorted(learning["sources"])],
@@ -497,7 +543,7 @@ def _owned_learning_image(root: Path, identifier: str, record: dict[str, Any], o
                 and proof["record_id"] == record["id"] and proof["owner"] == owner
                 and type(proof["revision"]) is int and proof["revision"] == record["revision"]
                 and isinstance(proof["sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", proof["sha256"])
-                and proof["sha256"] == _learning_image(root, identifier))
+                and proof["sha256"] == _learning_image(root, record["id"]))
     except (OSError, BrainError):
         return False
 
@@ -506,7 +552,7 @@ def _remember_learning_image(root: Path, identifier: str, record: dict[str, Any]
     path = _learning_image_path(root, identifier)
     try:
         _attempt_directory(path)
-        image = _learning_image(root, identifier)
+        image = _learning_image(root, record["id"])
         if image is not None:
             atomic_json(path, {"profile": "native-learning-image-v1", "record_id": record["id"],
                               "revision": record["revision"], "sha256": image, "owner": owner})
@@ -925,7 +971,7 @@ def record_result(
         # A restarted save whose task already holds its progress may have
         # written it itself before stopping: the revision it started from
         # still names this save.
-        restarted_holds = (restarted and _holds(task, result)
+        restarted_holds = (restarted and task_fields and _holds(task, result)
                            and revision == attempt.get('original_revision'))
         if prior is None and completed_task_stage is None and task["revision"] != revision and not restarted_holds:
             if prepared is not None:
@@ -938,6 +984,7 @@ def record_result(
         plan = []
         identities = {}
         held = {}
+        resolved_targets = {}
         implicit_cas = set()
         owned_created = set()
         if prior is None:
@@ -953,13 +1000,20 @@ def record_result(
                 for source in learning["sources"]:
                     check_source(root, source)
                 fingerprints = source_fingerprints(root, learning["sources"])
-                current, archived = _existing(root, identifier)
+                if "record_id" in learning:
+                    fingerprints=canonical_source_image(fingerprints)
+                target = learning.get("record_id",identifier)
+                current, archived = _existing(root, target)
+                if current is not None:
+                    earlier=resolved_targets.setdefault(current['id'],identifier)
+                    if earlier != identifier:
+                        raise ResultRefused("conflicting_learnings", "One record was targeted by different learning identities; merge them")
                 stage = attempt.get('stages', {}).get(identifier) if resuming else None
                 if stage is not None:
                     if (current is None or archived or current['type'] != learning['type']
                             or stage['record_id'] != current['id']
                             or stage['revision'] != current['revision']
-                            or stage['sha256'] != _learning_image(root, identifier)):
+                            or stage['sha256'] != _learning_image(root, target)):
                         raise BrainError("memory-result-v1:attempt_incomplete")
                     if stage['done']:
                         if (current['status'] != CLOSED_STATE[learning['type']]
@@ -981,6 +1035,8 @@ def record_result(
                 same = current is not None and _consequence(current) == " ".join(learning["consequence"].split())
                 if current is not None and current['privacy'] not in allowed_learning_privacy:
                     held[identifier] = 'not-authorized'
+                elif "record_id" in learning and current is None:
+                    held[identifier] = "record-not-found"
                 elif archived:
                     held[identifier] = "archived"
                 elif current is not None and current['type'] != learning['type']:
@@ -991,8 +1047,14 @@ def record_result(
                     held[identifier] = "revision-conflict"
                 elif current is not None and owner not in current["authorized_owners"]:
                     held[identifier] = "not-authorized"
+                elif "record_id" in learning and (
+                        current["title"] != learning["title"] or sorted(current["sources"]) != sorted(learning["sources"])):
+                    held[identifier] = "reference-mismatch"
+                elif "record_id" in learning and (current["status"] != CLOSED_STATE[learning["type"]]
+                                                   or current["authority"] != "verified"):
+                    held[identifier] = "not-verified-terminal"
                 elif (current is not None and attestation == "agent" and current["authority"] == "verified"
-                      and (unfinished or not same) and record_attestation(current) != "agent"):
+                      and ("record_id" in learning or unfinished or not same) and record_attestation(current) != "agent"):
                     held[identifier] = "person-or-unknown-attestation"
                 elif current is not None and expected is None and (unfinished or not same) and identifier not in owned_created:
                     closed = not unfinished and current["status"] == CLOSED_STATE[learning["type"]]
@@ -1015,6 +1077,10 @@ def record_result(
                         owned_created.add(identifier)
                     else:
                         held[identifier] = "original-image-unproven"
+                if ("record_id" in learning and identifier not in held
+                        and not (stage is not None and stage['done'])
+                        and fingerprints != learning['source_fingerprints']):
+                    raise ResultRefused("source_changed", "Checked source image changed; inspect the current sources again")
                 plan.append({"learning_id": identifier, "record_id": current["id"] if current else None,
                              "revision": current["revision"] if current else None,
                              "archived": archived, "fingerprints": fingerprints})
@@ -1038,7 +1104,7 @@ def record_result(
             if identifier in emitted:
                 continue
             emitted.add(identifier)
-            current, archived = _existing(root, identifier)
+            current, archived = _existing(root, learning.get("record_id",identifier))
             def summary(state):
                 return _summary(current, state, learning=learning, identifier=identifier,
                                 allowed_privacy=allowed_learning_privacy)
@@ -1115,6 +1181,12 @@ def record_result(
                     attestation=attestation,
                 )
                 state = "created" if state == "created" else "completed"
+            elif ("record_id" in learning and same
+                  and canonical_source_image(current["source_fingerprints"]) != learning["source_fingerprints"]):
+                current = update_record(root,current["id"],expected_revision=current["revision"],
+                    progress=None,next_steps=[],files=[],sources=[],actor=owner,reason=reason,
+                    reverify=True,attestation=attestation,checked_source_fingerprints=learning["source_fingerprints"])
+                state = "updated"
             elif not same:
                 # The same learning with a revised consequence: the record
                 # takes the new one when an agent revises what an agent
@@ -1134,10 +1206,15 @@ def record_result(
                         root, current["id"], expected_revision=current["revision"],
                         progress=learning["consequence"], next_steps=[], files=[], sources=[],
                         actor=owner, reason=reason, reverify=True, attestation=attestation,
+                        **({"checked_source_fingerprints":learning["source_fingerprints"]} if "record_id" in learning else {}),
                     )
                     state = "updated"
             if state in ("created", "completed", "updated"):
-                _remember_learning_image(root, identifier, current, owner)
+                # Explicit references always require their original numeric
+                # CAS. Do not create an unused ownership image per task for
+                # the same record or grant implicit legacy corrections.
+                if "record_id" not in learning:
+                    _remember_learning_image(root, identifier, current, owner)
                 _checkpoint_attempt(root, attempt_path, attempt, identifier, current, state, True)
             wrote = wrote or state not in ("existing", "differs")
             records.append(summary(state))
@@ -1170,6 +1247,7 @@ def record_result(
         "records": records,
         "promotion": promotion,
         "attestation": attestation,
+        **({"capture_decision": result["capture_decision"]} if "capture_decision" in result else {}),
         # A receipt proves the result was recorded before; without one,
         # nothing was written because every part of it was already there -
         # not because a part of it was refused.

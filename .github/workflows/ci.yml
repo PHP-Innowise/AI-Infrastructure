@@ -240,8 +240,9 @@ jobs:
     # The memory runtime's own regression steps, split from installation:
     # together they ran about 1000 s of that job's 20 minutes, and each
     # half now runs beside the other. The runtime is declared for Python 3.9
-    # and later, so it runs on that floor too.
-    timeout-minutes: 15
+    # and later, so it runs on that floor too. Its 3.x leg took 14 of 15
+    # minutes on 2026-10-31, before the A-to-B runner's two steps joined it.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -251,11 +252,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - name: Native memory fixture namespace prerequisite
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Memory evaluation stand
         # The stand runs on client prompts and stays out of CI; its as-of
         # reconstruction, edition overlay, scoring, report and transcript
         # parsing run here on a synthetic project, with one real refresh.
-        run: python3 -m unittest tests.test_memory_eval tests.test_memory_graph_pilot tests.test_memory_miss_audit tests.test_memory_onnx tests.test_memory_onnx_pilot tests.test_memory_outcome_ab tests.test_memory_rerank_pilot tests.test_memory_sqlite_vec_pilot tests.test_memory_fact_consolidation tests.test_memory_history_series
+        run: python3 -m unittest tests.test_memory_eval tests.test_memory_graph_pilot tests.test_memory_miss_audit tests.test_memory_onnx tests.test_memory_onnx_pilot tests.test_memory_outcome_ab tests.test_memory_outcome_verify tests.test_memory_response_contract tests.test_memory_response_intake tests.test_memory_outcome_isolation tests.test_memory_delivery_proof tests.test_memory_rerank_pilot tests.test_memory_sqlite_vec_pilot tests.test_memory_fact_consolidation tests.test_memory_history_series tests.test_memory_current_facts tests.test_memory_consolidation_pilot tests.test_memory_freshness_plan tests.test_memory_selective_retrieve_pilot
+      - name: Native A-to-B memory maintainer runner (offline)
+        run: python3 -m unittest tests.test_memory_native_ab tests.test_memory_native_admission tests.test_memory_throttle_oracle
       - name: Memory snapshot and failed-refresh boundaries
         run: python3 -m unittest tests.test_memory_runtime_reliability
       - name: Native memory source diagnostics and complete-governance boundaries
@@ -323,7 +332,7 @@ jobs:
       - name: A working task swept away by git stash or clean is recorded again
         run: python3 -m unittest tests.test_memory_orphaned_task
       - name: Exact memory result replay after archival and source deletion
-        run: python3 -m unittest tests.test_memory_result_replay tests.test_memory_result_fencing tests.test_memory_result_evidence
+        run: python3 -m unittest tests.test_memory_result_replay tests.test_memory_result_fencing tests.test_memory_result_evidence tests.test_memory_result_revalidation
       - name: Private Harness memory request binding
         run: python3 -m unittest tests.test_harness_memory_binding
       - name: Reviewed memory saves and Cursor upgrade regressions
@@ -475,6 +484,7 @@ jobs:
           tests.test_cursor_root_rename
           tests.test_memory_result_fencing
           tests.test_memory_result_evidence
+          tests.test_memory_result_revalidation
           tests.test_memory_brain_scale
           tests.test_memory_review_regressions
           tests.test_memory_review_privacy

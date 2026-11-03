@@ -33,6 +33,9 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 import brain_runtime
+from native_results import (observe_maintenance, review_notice, memory_review_plan, memory_review_apply,
+                            semantic_review_export, semantic_review_apply, semantic_controller_input,
+                            read_input as read_review_input)
 from brain_runtime import (
     BrainError,
     BrainRecordNotFound,
@@ -57,6 +60,7 @@ from brain_runtime import (
     consolidate,
     CAPSULE_PROFILES,
     configured_capsule_profile,
+    automatic_capsule_profile,
     configured_mode,
     configured_retrieval_gate,
     configured_ticket_files,
@@ -97,6 +101,7 @@ from brain_runtime import (
     validate_repository,
 )
 from context_retrieval import (
+    _cursor_backend, _cursor_safe_directory, _cursor_directory, _cursor_image, _cursor_publish,
     AUTOMATIC_LINK_SELECTIONS,
     TASK_TWINS_KEY,
     _CurrentSourcePolicy,
@@ -111,6 +116,8 @@ from context_retrieval import (
     CAPSULE_PROMPT_TERM_LIMIT,
     DocumentRow,
     _content_hash,
+    _read_final_working_record,
+    _working_record_image,
     episode_item,
     EVIDENCE_STOPWORDS,
     RetrievalError,
@@ -313,6 +320,9 @@ CHECKPOINT_LOG_LIMIT = 500
 TURN_HEADS_KEY = "turn-heads"
 TURN_HEADS_RETENTION = 200
 LAST_TURN_REPORT_FILENAME = "last-turn-report.json"
+LAST_TURN_REPORT_READ_BYTES = 65536
+LAST_TURN_REPORT_STORAGE_BYTES = 1024 * 1024
+LAST_TURN_SUMMARY_INPUT_CHARACTER_LIMIT = 4096
 # The report describes one Stop-hook turn, so it is only meaningful for the
 # session that produced it. A day bounds any plausible gap between two working
 # sessions; anything older describes work the operator no longer remembers.
@@ -3065,7 +3075,12 @@ def governed_binding(connection: sqlite3.Connection, task_id: str) -> sqlite3.Ro
         (task_id, task_id),
     ).fetchone()
     if row is None:
-        raise ContextError(f"Working task not found: {task_id}")
+        # The most frequent refusal agents met (35 of 383 calls in one
+        # client's September): say how a task comes to be bound here.
+        raise ContextError(
+            f"Working task not found: {task_id}; start records it (so does the first checkpoint), "
+            f"and rebind --task-id {task_id} binds one recorded on another machine"
+        )
     return row
 
 
@@ -3241,17 +3256,21 @@ def append_refresh_health(repository: Path, record: dict[str, object]) -> None:
         return
 
 
-def capsule_shape(repository: Path, capsule: object, requested_profile: Optional[str]) -> dict[str, object]:
+def capsule_shape(
+    repository: Path, capsule: object, requested_profile: Optional[str], text: Optional[str] = None,
+) -> dict[str, object]:
     """What a delivered capsule carried, as counts a usage funnel can add up.
 
     The profile that built it, whether it held the task's working state, how
-    many recent files, ticket files and documents it named, and its token
-    estimate. Never a
+    many recent files, ticket files and documents it named, its token
+    estimate, and the bytes of ``text``, the capsule as printed. The estimate
+    counts documents only, so a capsule of working state and recent files
+    read 0 tokens whatever it printed. Never a
     path, a title or a text: like the rest of the health record, it must not
     become a second channel for what the manifest keeps under privacy rules.
     """
     try:
-        profile: Optional[str] = configured_capsule_profile(repository, requested_profile)
+        profile: Optional[str] = automatic_capsule_profile(repository, requested_profile)[0]
     except (BrainError, OSError, ValueError):
         profile = None
     capsule = capsule if isinstance(capsule, dict) else {}
@@ -3270,44 +3289,87 @@ def capsule_shape(repository: Path, capsule: object, requested_profile: Optional
         "ticket_files": len(ticket.get("paths") or []) if isinstance(ticket, dict) else 0,
         "documents": count("selected"),
         "tokens": tokens if type(tokens) is int and tokens >= 0 else None,
+        "bytes": len((text + "\n").encode("utf-8")) if isinstance(text, str) else None,
     }
 
 
-def write_last_turn_report(repository: Path, report: dict[str, object]) -> None:
-    """Persist the turn outcome where the next request's capsule can read it.
-
-    The Stop hook discards this command's stdout, so a blocked promotion or a
-    failed compaction printed there is never seen by anyone. The machine
-    summary lands in ignored local state instead, and the next refresh folds
-    it into the Task Capsule. A write failure degrades silently: continuity
-    telemetry must never turn a checkpoint that already landed into a failed
-    turn, and a repository whose ``local`` directory cannot be created simply
-    goes without the report.
-    """
+@contextlib.contextmanager
+def _last_turn_report_directory(repository: Path, *, create: bool = False):
+    """Keep advisory I/O inside this state root using existing native handles."""
+    descriptors, parents = [], []
     try:
-        atomic_json(last_turn_report_path(repository), report)
-    except OSError:
-        pass
+        files = _cursor_backend()
+        if files is None or (files is os and (
+                not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_DIRECTORY')
+                or os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd)):
+            raise OSError('Secure advisory report I/O is unavailable')
+        root_identity = _cursor_safe_directory(repository, files=files)
+        root_fd = (os.open(repository, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                   if files is os else files.open_root(repository))
+        descriptors.append(root_fd)
+        root_mode = files.fstat(root_fd).st_mode
+        parent = root_fd
+        for component in ('memory-bank', 'local'):
+            child = _cursor_directory(parent, component, create=create, files=files)
+            descriptors.append(child)
+            parents.append((parent, component, child))
+            parent = child
+
+        def check():
+            root = files.fstat(root_fd)
+            if ([root.st_dev, root.st_ino] != root_identity or root.st_mode != root_mode
+                    or _cursor_safe_directory(repository, files=files) != root_identity):
+                raise OSError('Advisory report root changed')
+            for parent_fd, component, child_fd in parents:
+                named = files.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+                held = files.fstat(child_fd)
+                if (not stat_module.S_ISDIR(named.st_mode) or brain_runtime.linked_reparse(named)
+                        or (named.st_dev, named.st_ino, named.st_mode) !=
+                           (held.st_dev, held.st_ino, held.st_mode)):
+                    raise OSError('Advisory report directory changed')
+
+        check()
+        yield files, parent, check
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass  # Advisory cleanup must not hide cancellation or fail a saved turn.
+
+
+def write_last_turn_report(repository: Path, report: dict[str, object]) -> None:
+    """Best-effort advisory publication; unsafe paths never redirect writes."""
+    try:
+        payload = (json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + '\n').encode('utf-8')
+        if len(payload) > LAST_TURN_REPORT_STORAGE_BYTES:
+            return
+        with _last_turn_report_directory(repository, create=True) as (files, parent, check):
+            previous = _cursor_image(parent, LAST_TURN_REPORT_FILENAME,
+                                     LAST_TURN_REPORT_STORAGE_BYTES, files=files)
+            check()
+            _cursor_publish(parent, LAST_TURN_REPORT_FILENAME, payload, previous,
+                            LAST_TURN_REPORT_STORAGE_BYTES, files=files, sync_file=True)
+            check()
+    except (OSError, BrainError, ValueError, TypeError, RecursionError, ImportError, AttributeError, NotImplementedError):
+        return
 
 
 def load_last_turn_report(repository: Path) -> Optional[dict[str, object]]:
-    """Return the previous turn's report, or None when it cannot be trusted.
-
-    The file is advisory local state: missing, malformed, or stale content
-    must never break a refresh. Staleness is judged by the timestamp inside
-    the report rather than filesystem metadata, so a copied or restored file
-    does not resurrect an old turn as if it had just happened. A timestamp
-    from the future is equally untrustworthy and is treated as absent.
-    """
+    """Read one bounded ordinary local report; unsafe advisory input is absent."""
     try:
-        value = json.loads(
-            last_turn_report_path(repository).read_text(encoding="utf-8")
-        )
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        with _last_turn_report_directory(repository) as (files, parent, check):
+            image = _cursor_image(parent, LAST_TURN_REPORT_FILENAME,
+                                  LAST_TURN_REPORT_READ_BYTES, files=files)
+            check()
+        if image is None:
+            return None
+        value = json.loads(image[0].decode('utf-8'))
+    except (OSError, BrainError, ValueError, TypeError, RecursionError, ImportError, AttributeError, NotImplementedError):
         return None
     if not isinstance(value, dict):
         return None
-    timestamp = value.get("timestamp")
+    timestamp = value.get('timestamp')
     if not isinstance(timestamp, str):
         return None
     try:
@@ -3327,9 +3389,8 @@ def summarize_last_turn(report: dict[str, object], *, routine: bool = True) -> O
 
     Only non-zero and problem items appear: a turn that merely buffered a
     delta produces no section at all, so the capsule does not narrate routine
-    bookkeeping. Problems lead the line — a blocked promotion is the fact this
-    section exists to surface — so the tail truncation can only ever cut
-    routine counters, never a blocked-promotion reason. The report is local
+    bookkeeping. Problems lead the line before routine counters, and privacy
+    is checked before the final character limit. The report is local
     state a human may have edited, so every field is read defensively.
     """
 
@@ -3374,7 +3435,8 @@ def summarize_last_turn(report: dict[str, object], *, routine: bool = True) -> O
         ("promotion failed", "promotion_failed"),
     ):
         reasons = dict.fromkeys(
-            str(item["reason"]) for item in entries(key) if item.get("reason")
+            item["reason"] for item in entries(key)
+            if isinstance(item.get("reason"), str) and item["reason"]
         )
         parts.extend(f"{label}: {reason}" for reason in reasons)
     parts.extend(f"compaction failed: {error}" for error in strings("compaction_errors"))
@@ -3419,6 +3481,17 @@ def summarize_last_turn(report: dict[str, object], *, routine: bool = True) -> O
     if not parts:
         return None
     summary = "; ".join(parts)
+    # Privacy patterns can backtrack on long ordinary punctuation sequences.
+    # Keep the whole local report, but deliver no excerpt from oversized text.
+    if len(summary) > LAST_TURN_SUMMARY_INPUT_CHARACTER_LIMIT:
+        return "prior-turn diagnostics too large; inspect local memory status"
+    # Local diagnostics can contain excluded file names and raw errors. Apply
+    # the existing delivery privacy policy before clipping: a truncated token
+    # must not lose the syntax that made it recognizable as sensitive.
+    try:
+        brain_runtime.guard_shared_text("Last turn report", [summary])
+    except BrainError:
+        return "prior-turn diagnostics withheld: sensitive content; inspect local memory status"
     if len(summary) > LAST_TURN_SECTION_CHARACTER_LIMIT:
         summary = summary[: LAST_TURN_SECTION_CHARACTER_LIMIT - 1] + "…"
     return summary
@@ -3429,7 +3502,11 @@ def last_turn_section(repository: Path, *, routine: bool = True) -> Optional[str
     report = load_last_turn_report(repository)
     if report is None:
         return None
-    return summarize_last_turn(report, routine=routine)
+    try:
+        return summarize_last_turn(report, routine=routine)
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        # This optional local hint must not prevent a fresh capsule.
+        return None
 
 
 # Entry points that build the capsule a hook delivers on its own; the
@@ -3517,11 +3594,11 @@ def assemble_capsule(
     # The automatic capsule may be configured to carry navigation only, or
     # navigation and the task's own saves; an explicit retrieval always
     # searches everything.
-    profile = (
-        configured_capsule_profile(repository, capsule_profile)
-        if entry_point in AUTOMATIC_ENTRY_POINTS
-        else "full"
-    )
+    profile = "full"
+    if entry_point in AUTOMATIC_ENTRY_POINTS:
+        profile, unknown_profile = automatic_capsule_profile(repository, capsule_profile)
+        if unknown_profile:
+            warnings.append(unknown_profile)
     if mode == "lightweight":
         # Local-only work has no governed task whose saves recall could keep,
         # so a recall capsule here is a navigation one.
@@ -3603,8 +3680,17 @@ def assemble_capsule(
     # "not recorded yet" would promise one that never comes.
     closed = (closed_task_record(connection, repository, task_id)
               if served is None and not unreadable else None)
+    query_withdrawn = False
+    if served is None and (query_source == 'task' or (
+            query_source == 'continuation' and (not unbound or unreadable))):
+        # A task-derived query can predate this assembly. Losing its record
+        # must not keep the old goal/progress as an otherwise warming query.
+        # A checked public Cursor topic for a genuinely unprovisioned task
+        # is also called continuation and remains independent of that task.
+        query, query_source, query_withdrawn = task_id, 'task-id', True
     query_fallback = None
-    if bound_record is not None and _task_fallback_prompt(query):
+    if (bound_record is not None and _task_fallback_prompt(query)
+            and record_is_eligible(repository, bound_record, load_config(repository))[0]):
         # The prompt is an acknowledgement or a short continuation, not a
         # subject. The task it continues carries the retrieval terms; without
         # them a "fix it" turn asked memory about the word "fix".
@@ -3622,7 +3708,7 @@ def assemble_capsule(
                 query_source = "continuation"
         except (ContextError, RetrievalError, KeyError, TypeError, ValueError):
             query_fallback = None
-    request_query = build_capsule_query(query, None)
+    request_query = task_id if query_withdrawn else build_capsule_query(query, None)
     # The recall profile searches only what the served task's own saves
     # recorded; with none indexed it is a navigation capsule.
     own_saves: Optional[list[str]] = None
@@ -3634,22 +3720,32 @@ def assemble_capsule(
         # delivery, even if old document bytes still match their hashes.
         # A navigation-only profile takes the same path by choice: working
         # state and recent files, no documents and no delivery record.
-        task = task_record = None
+        task = task_record = initial_working_image = None
         if served is not None:
-            task_record, task, _ = find_task(repository, served)
+            task_record, task, task_body = find_task(repository, served)
             validate_record(task)
+            eligible, _ = record_is_eligible(repository,task,load_config(repository))
+            if not eligible:
+                task = task_record = None
+                warnings = [*warnings,'Working task eligibility unavailable.']
+            else:
+                initial_working_image = _working_record_image(task,task_body)
         working, omitted = project_working_task(governed_task_view(task) if task else None,
                                                 delivery_profile=delivery_profile)
         if working is not None:
             working.update(phase=task.get("phase"), created_at=task["created_at"],
                            updated_at=task["updated_at"])
+        elif served is not None and query_source in ('task', 'continuation'):
+            # Navigation performs no retrieval custody pass to withdraw the
+            # unavailable task's derived words after packing.
+            request_query, query, query_source = task_id, task_id, 'task-id'
         result: dict[str, object] = {
             "mode": mode, "query": request_query, "query_source": query_source,
             "task_id": task["external_id"] if task else task_id,
             "task_uuid": task["id"] if task else None,
             "task_revision": task["revision"] if task else None,
             "task_record": task_record.relative_to(repository).as_posix() if task_record else None,
-            "working": working, "omitted": omitted, "last_turn": last_turn,
+            "working": working, "omitted": omitted, "last_turn": last_turn if task or served is None else None,
             "procedural": [], "semantic": [], "episodic": [],
             "categories": {}, "selected": [], "no_match": [], "repeated": 0,
             "manifest": None, "warnings": [*warnings, *binding_notices],
@@ -3670,6 +3766,25 @@ def assemble_capsule(
         result = enforce_governed_capsule_contract(result)
         if delivery_admission is not None:
             delivery_admission()
+        if task is not None:
+            try:
+                current_text=_read_final_working_record(task_record)
+                current_task,current_body=brain_runtime.parse_markdown_record(task_record,text=current_text)
+                validate_record(current_task)
+                eligible,_=record_is_eligible(repository,current_task,load_config(repository))
+                current=(eligible and current_task['id']==task['id']
+                         and _working_record_image(current_task,current_body)==initial_working_image)
+            except (BrainError,OSError,UnicodeError,ValueError,TypeError):
+                current=False
+            if not current:
+                # Packing and admission callbacks may race task/config edits.
+                # Never deliver the earlier working image or its metadata.
+                result.update(task_id=task_id,working=None,task_uuid=None,task_revision=None,task_record=None,last_turn=None)
+                if result.get('query_source') in ('task', 'continuation'):
+                    result.update(query=task_id, query_source='task-id')
+                result['warnings']=[*result.get('warnings',[]),'Working task changed or became unavailable during refresh.']
+                result.pop('capsule_text',None)
+                result=enforce_governed_capsule_contract(result)
         return result
     seeds: Optional[dict[str, list[str]]] = None
     if automatic_links and own_saves is None:
@@ -3736,6 +3851,7 @@ def assemble_capsule(
         source_provenance_sink=source_provenance_sink,
         admit_delivery=delivery_admission,
         scope=own_saves,
+        requested_task_id=task_id,
     )
 
 
@@ -4492,8 +4608,8 @@ def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
         # Admitted on one rare term rather than on covering the query: still
         # worth naming, not worth being read as an answer.
         marks.append("weak match")
-    if item.get("match") == "conflict":
-        marks.append("conflicts with another item here")
+    if item.get("conflict_recorded") or item.get("conflicts") or item.get("match") == "conflict":
+        marks.append("recorded conflict; verify sources")
     if item.get("attestation") == "agent":
         marks.append("agent-attested, not reviewed by a person")
     if item.get("selection") in AUTOMATIC_LINK_SELECTIONS and item.get("via"):
@@ -5749,8 +5865,16 @@ def create_governed_task(
             # archives it - automatic compaction waits for five finished
             # records - and a new task for the same branch was refused. That
             # finished record, and no other, is archived now.
-            if "already exists" not in str(error) or not _finished_records_only(repository, task_id):
+            if "already exists" not in str(error):
                 raise
+            if not _finished_records_only(repository, task_id):
+                # The task under way: agents ran start at the top of every
+                # session (15 times in one client's September), and the
+                # refusal said nothing of what to run instead.
+                raise BrainError(
+                    f"{error}; it is the task under way: context.py get --task-id {task_id} reads it, "
+                    f"and update --task-id {task_id} --revision auto records progress"
+                ) from error
             compact(repository, only_external_id=task_id)
             task = create_task(repository, task_id, goal, files, sources, owner=owner)
         try:
@@ -8899,7 +9023,8 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "JSON object with progress, next_steps, learnings (type, title, "
-            "consequence, sources) and verified; '-' reads standard input"
+            "consequence, sources; existing knowledge also needs record_id, expected_revision, "
+            "source_fingerprints) and verified; '-' reads standard input"
         ),
     )
     record.add_argument(
@@ -9007,6 +9132,24 @@ def build_parser() -> argparse.ArgumentParser:
     get_brain.add_argument("--record-id", required=True)
     get_brain.add_argument("--json", action="store_true")
 
+    fingerprints = commands.add_parser("source-fingerprints",help="read citation digests; this does not attest a claim")
+    fingerprints.add_argument("--source",action="append",required=True)
+    fingerprints.add_argument("--json",action="store_true")
+
+    review = commands.add_parser("memory-review",help="explicit experimental pre-answer claim review")
+    review.add_argument("--task-id",required=True)
+    review.add_argument("--input",choices=("-",),help="submit complete review decisions on stdin")
+    review.add_argument("--json",action="store_true")
+
+    controller = commands.add_parser("memory-review-controller",help="trusted external host semantic review; requires isolated primary")
+    controller.add_argument("--task-id",required=True)
+    controller.add_argument("--proposal-id",required=True)
+    controller.add_argument("--proposal-sha",required=True)
+    controller.add_argument("--action",choices=("export","apply"),required=True)
+    controller.add_argument("--packet",help="absolute host-owned packet outside project/tooling/state")
+    controller.add_argument("--authorization",help="absolute host-owned captured reviewer authorization")
+    controller.add_argument("--json",action="store_true")
+
     retrieval_report_command = commands.add_parser(
         "retrieval-report",
         help="aggregate what the retrieval manifests recorded, across turns",
@@ -9048,7 +9191,12 @@ def build_parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="show local context index counts")
     status.add_argument("--json", action="store_true")
 
-    validate = commands.add_parser("validate", help="validate active and archived Brain records")
+    # Agents reach for brain-validate beside brain-create, brain-update and
+    # brain-get: 9 of the 383 context.py calls Codex made in one client
+    # project in September 2026. _command reads it as validate.
+    validate = commands.add_parser(
+        "validate", aliases=["brain-validate"], help="validate active and archived Brain records"
+    )
     validate.add_argument("--json", action="store_true")
 
     parity = commands.add_parser(
@@ -9284,6 +9432,8 @@ def main() -> int:
 def _command() -> int:
     utf8_output()
     arguments = build_parser().parse_args()
+    if arguments.command == "brain-validate":
+        arguments.command = "validate"
     if arguments.project is not None:
         workspace_roots.serve_from(str(arguments.project))
     _branch_task_identity(arguments)
@@ -9347,6 +9497,35 @@ def _command() -> int:
             if not named.is_absolute() or not (layout.shared or os.path.realpath(named)
                                                == os.path.realpath(layout.project)):
                 raise ContextError("--project names neither this project nor a worktree this installation serves")
+        if arguments.command == "source-fingerprints":
+            from memory_results import checked_fingerprints
+            print(json.dumps({"source_fingerprints":checked_fingerprints(repository,arguments.source)},ensure_ascii=False))
+            return 0
+        if arguments.command == "memory-review":
+            if configured_mode(repository,arguments.mode) != 'governed':
+                raise ContextError('memory-review requires governed mode')
+            review_owner = arguments.owner or os.environ.get('PROJECT_BRAIN_OWNER','local')
+            result = (memory_review_apply(repository,arguments.task_id,read_review_input(sys.stdin),owner=review_owner)
+                      if arguments.input else memory_review_plan(repository,arguments.task_id,owner=review_owner))
+            print(json.dumps(result,ensure_ascii=False))
+            return 0
+        if arguments.command == "memory-review-controller":
+            if configured_mode(repository,arguments.mode) != 'governed':
+                raise ContextError('memory-review-controller requires governed mode')
+            review_owner = arguments.owner or os.environ.get('PROJECT_BRAIN_OWNER','local')
+            if arguments.action == 'export':
+                if arguments.packet or arguments.authorization:
+                    raise ContextError('export prints a packet; input files are apply-only')
+                result = semantic_review_export(repository,arguments.task_id,arguments.proposal_id,
+                                                arguments.proposal_sha,owner=review_owner)
+            else:
+                if not arguments.packet or not arguments.authorization:
+                    raise ContextError('apply requires external packet and authorization files')
+                result = semantic_review_apply(repository,arguments.task_id,arguments.proposal_id,
+                    arguments.proposal_sha,semantic_controller_input(repository,arguments.packet),
+                    semantic_controller_input(repository,arguments.authorization),owner=review_owner)
+            print(json.dumps(result,ensure_ascii=False))
+            return 0
         expected_branch = getattr(arguments, "expected_branch", None)
         delivery_admission = None
         if expected_branch is not None:
@@ -9684,9 +9863,12 @@ def _command() -> int:
                     result = {"episode_id": episode_id}
                 else:
                     if arguments.revision in (None, AUTO_REVISION):
+                        # Ending a task pins the revision a person or agent
+                        # read; agents passed `auto` (5 times in one client's
+                        # September), so say where the number is.
                         raise ContextError(
                             "Governed completion requires the current numeric "
-                            "--revision"
+                            f"--revision; context.py get --task-id {arguments.task_id} shows it"
                         )
                     result = complete_governed_task(
                         connection,
@@ -10354,13 +10536,20 @@ def _command() -> int:
                     # as the prompt hook does, instead of failing outright.
                     allow_unprovisioned=True,
                 )
+                review_stage = None
+                if mode == 'governed':
+                    observe_maintenance(repository, result, arguments.task_id, owner=owner)
+                    review_stage = review_notice(repository, arguments.task_id, owner=owner)
+                if review_stage and not arguments.provenance_response: result['memory_review'] = review_stage
                 if arguments.json:
                     transport = ({'response_profile': SOURCE_PROVENANCE_PROFILE,
                                   'capsule': result, 'source_provenance': source_provenance or None}
                                  if arguments.provenance_response else result)
+                    if review_stage and arguments.provenance_response: transport['memory_review'] = review_stage
                     print(serialize_capsule(transport))
                 else:
                     print_capsule(result, capsule_excerpts(connection, result), repository=repository)
+                    if review_stage: print(review_stage)
                 return 0
 
             if arguments.command == "hook-context":
@@ -10395,6 +10584,7 @@ def _command() -> int:
                     # overwrite the rule with an empty one on every skipped
                     # turn, which is the opposite of what a skip means.
                     return 4
+                excerpts = None if arguments.json else capsule_excerpts(connection, result)
                 # Cursor's read path never enters the refresh branch, so
                 # without this the health series would systematically
                 # under-report the one client whose capsule is a turn stale.
@@ -10405,7 +10595,11 @@ def _command() -> int:
                         "mode": mode,
                         "omitted": result.get("omitted"),
                         "source": "hook-context",
-                        "capsule": capsule_shape(repository, result, None),
+                        "host": arguments.host,
+                        "capsule": capsule_shape(
+                            repository, result, None,
+                            None if excerpts is None else "\n".join(
+                                render_capsule_lines(result, excerpts, delivery_profile=delivery_profile))),
                     },
                 )
                 if delivery_admission is not None:
@@ -10413,7 +10607,7 @@ def _command() -> int:
                 if arguments.json:
                     print(serialize_capsule(result))
                 else:
-                    print_capsule(result, capsule_excerpts(connection, result), repository=repository, delivery_profile=delivery_profile)
+                    print_capsule(result, excerpts, repository=repository, delivery_profile=delivery_profile)
                 return 0
 
             if arguments.command == "refresh":
@@ -10580,6 +10774,11 @@ def _command() -> int:
                 excerpts = (
                     capsule_excerpts(connection, capsule) if capsule is not None else {}
                 )
+                review_stage = None
+                if mode == 'governed' and capsule is not None and not withheld:
+                    observe_maintenance(repository, capsule, arguments.task_id, owner=owner)
+                    review_stage = review_notice(repository, arguments.task_id, owner=owner)
+                    if review_stage: result['memory_review'] = review_stage
                 if capsule is not None:
                     # What a host puts in front of the model: Harness inserts
                     # this text instead of the JSON, which repeated every item
@@ -10588,6 +10787,7 @@ def _command() -> int:
                     result["capsule_text"] = "\n".join(
                         render_capsule_lines(capsule, excerpts, trace=render_trace, delivery_profile=delivery_profile)
                     )
+                    if review_stage: result['capsule_text'] += '\n' + review_stage
                     record_render_trace(repository, capsule, render_trace)
                 elif delivery_profile == 'cursor-rule':
                     result['capsule_text'] = ('working: unavailable\nwarning: memory refresh incomplete; '
@@ -10609,9 +10809,18 @@ def _command() -> int:
                     "layers_updated": all(layers[layer] == "updated" for layer in DOCUMENT_LAYERS),
                     "warnings": len(warnings),
                     "source": "refresh",
+                    # The client that asked: a funnel can then count each
+                    # host's capsules, which the line never said.
+                    "host": arguments.host,
                 }
                 if capsule is not None:
-                    health_record["capsule"] = capsule_shape(repository, capsule, arguments.capsule_profile)
+                    health_record["capsule"] = capsule_shape(
+                        repository, capsule, arguments.capsule_profile, result.get("capsule_text"))
+                elif arguments.query is not None:
+                    # Asked for and none assembled - a refused prompt, a task
+                    # the runtime cannot read: the turn went without a
+                    # capsule, which a funnel must not count as one built.
+                    health_record["capsule"] = None
                 if source_notices:
                     health_record['source_notices'] = source_notices
                 def capture_diagnosis(render: Optional[dict[str, object]]) -> None:
@@ -10721,6 +10930,7 @@ def _command() -> int:
                         if capsule is not None:
                             print_capsule(capsule, excerpts, repository=repository, delivery_profile=delivery_profile,
                                           _diagnosis_sink=capture_diagnosis)
+                            if review_stage: print(review_stage)
                     finally:
                         append_refresh_health(repository, health_record)
                 return 0 if all(

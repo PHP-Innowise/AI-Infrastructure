@@ -1198,6 +1198,8 @@ class ExperimentalTestIsolationTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         sources = list((root / 'tests').glob('test_longmemeval*.py'))
         sources += list((root / 'tests').glob('test_hindsight*.py'))
+        sources += list((root / 'tests').glob('test_memory_outcome*.py'))
+        sources += list((root / 'tests').glob('test_memory_native_ab*.py'))
         sources += list((root / 'harness/tests').glob('test_longmemeval*.py'))
         self.assertGreaterEqual(len(sources), 3)
         for source in sources:

@@ -72,14 +72,14 @@ python3 memory-bank/scripts/mcp_config.py --root . --tool claude --tool codex --
 
 Native clients still control workspace trust and MCP tool approval. Accept project
 MCP in Claude's `/mcp`, trust the Codex project, and enable the Cursor project MCP.
-Allow the four memory tools through the client's supported approval settings when
+Allow the five memory tools through the client's supported approval settings when
 automatic calls are desired. Configuration alone is not a grant of trust, and
 registration does not force the agent to use every retrieved claim.
 See [Claude MCP](https://code.claude.com/docs/en/mcp),
 [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), and
 [Cursor MCP](https://cursor.com/docs/mcp).
 
-## Four tools
+## Five tools
 
 Cursor's installed hooks use a persistent-rule delivery profile. Short replies
 such as `yes do it`, `да`, and `fix it` may use the last safe substantive query
@@ -97,6 +97,9 @@ their existing history and repeat behavior. This is local delivery behavior;
 it does not establish model quality or provider-token savings.
 
 - `memory_status`: check installed memory health.
+- `memory_source_fingerprints`: read CRLF-neutral hashes for 1–10 canonical
+  `sources` without provisioning a task or attesting truth. Use the complete
+  image only after checking the claim against those files.
 - `memory_retrieve`: pass the current `task_id` and a concise module/class/ticket
   `query` before complex work, after compaction/scope changes and before uncovered
   decisions. Optional `paths` link canonical sources. Verify cited claims. The
@@ -109,6 +112,11 @@ it does not establish model quality or provider-token savings.
   sanitized `progress`, up to three `next_steps`, and up to three reusable
   findings/decisions. Each learning needs `type`, `title`, `consequence` and
   1–10 canonical project `sources`. Set `verified: true` after checking claims.
+  An explicit existing-claim review preserves its type/title/source set and
+  adds `record_id` (Brain UUID), original numeric `expected_revision`, and
+  the complete checked `source_fingerprints`. Missing/protected references
+  are held rather than recreated; changed checked evidence can supersede
+  the old promoted chunk while preserving its body and history.
   Records explicitly say **agent-attested, not human-reviewed**: the verification's
   ledger entry carries `[attestation:agent]`, a chunk promoted from it is tagged
   `agent-attested`, and the capsule marks such knowledge where it delivers it.
@@ -217,7 +225,7 @@ or writes outside a read-only scope.
 
 ## Verify
 
-Confirm all four tools appear in each configured client. Retrieve for a fresh task,
+Confirm all five tools appear in each configured client. Retrieve for a fresh task,
 checkpoint with a goal, record a source-backed result, then replay the same ID/content
 and confirm no duplicates. Inspect Harness **Knowledge → Memory use**, run
 `context.py validate --json` and `memory-bank/scripts/validate.py`. Distinguish real
@@ -285,9 +293,34 @@ How the continuation ends depends on who reads the session. A headless run (`cod
 
 Every other session repeats, Cursor's included. `repeat` always repeats and `brief` never does; `CONTEXT_NATIVE_RESULT_ANSWER` sets it for one session. An unknown value repeats, and the journal's `requested` line carries `native-result:invalid-answer-setting`: the save itself is asked for either way.
 
-The step carries its rules - the JSON fields, the schema example, what belongs in learnings - in full only while the conversation lacks them. Every answer used to carry about 2,600 characters, and Claude Code's terminal showed them whole each time. The Stop reads the transcript's last 2 MiB: when a full step is there after the last compaction record, the step carries its commands, its ending and a pointer back to those rules, about 900 characters less. After a compaction, or without a readable transcript, the full step comes back. Cursor gets the full step every time: how its transcript records a summarized conversation could not be checked. `"native_result_instruction": "full"` in `runtime.json` (or `CONTEXT_NATIVE_RESULT_INSTRUCTION=full`) sends it every time; an unknown value does too.
+The step carries its rules - the JSON fields, the schema example, what belongs in learnings - in full only while the conversation lacks them. Every answer used to carry about 2,600 characters, and Claude Code's terminal showed them whole each time. The Stop reads the transcript's last 2 MiB: when a full step is there after the last compaction record, the step carries its commands, its ending and a pointer back to those rules, about 900 characters less. After a compaction, or without a readable transcript, the full step comes back. The latest full step must also match the current ordinary/proposal-only capture policy; changing that policy sends a fresh full step rather than inheriting a prior restriction. Cursor gets the full step every time: how its transcript records a summarized conversation could not be checked. `"native_result_instruction": "full"` in `runtime.json` (or `CONTEXT_NATIVE_RESULT_INSTRUCTION=full`) sends it every time; an unknown value does too.
 
 The save takes two more model calls, and Claude Code counts them against `--max-turns` (`maxTurns` in the Agent SDK). A headless run whose answer comes in its last two allowed calls ends with `error_max_turns` and no `result`; the Stop hook is told neither the limit nor the count. Give such a run two more turns, or set `CONTEXT_NATIVE_RESULT_REQUEST=off` for it (`docs/TROUBLESHOOTING.md`).
+
+### Optional capture-decision diagnostics
+
+Current `record-result`, prepared requests and MCP `memory_record_result` accept an
+optional `capture_decision`: `selected` requires at least one normalized checked
+learning; `no_reusable_knowledge` and `insufficiently_checked` require none.
+The field alone cannot create a task or bypass the existing nothing-to-record
+check. Without it, request normalization, digests and prepared wire images retain
+their legacy format; diagnostic interpretation is unknown. Supplied decisions
+are bound to the request digest and retained through Harness/MCP/native saves.
+
+This records the caller's selection reason. `selected` does not prove persistence:
+records may still be held. Inspect submitted, written, existing, held and promoted
+counts separately. Native evaluation counts decisions only for completed,
+non-repeat saved/held observations; missing, invalid or inconsistent metadata
+counts as `capture_unknown`. Refusals and errors stay separate. Journals include
+only the fixed enum, never a free-text reason or learning body.
+
+Harness preserves a valid original draft's identity if subsequent source
+filtering removes every selected learning; the final progress-only request omits
+the decision rather than inventing a reason. Existing omission diagnostics and
+bounds remain. A legacy command-chain runtime cannot bind this new field and
+reports that limitation with any partial saved work. Use matching updated core
+and Harness versions. Default native prompts and automatic draft instructions
+are unchanged; no extra extractor or forced finding was added.
 
 ### Decisions and known limits of the native save
 
@@ -306,7 +339,7 @@ The save takes two more model calls, and Claude Code counts them against `--max-
 
 Claude Code reads a project's `.claude/settings.json` - its hooks, its permission rules and `env` - only from the folder a session starts in. It finds skills, commands, agents and `CLAUDE.md` above that folder, and it reads the root's `settings.local.json` too, but resolves that file's paths from the session's folder. Without the dispatcher below, a session started in `src/` of an installed project ran no capsule, no save and no guard hook; in `bypassPermissions` it read and edited `.env` and ran `rm -rf` and `sudo`, all of which the root denies; it was asked about reads, edits and commands the project allows; and `.claude/CLAUDE.md`'s `@../AGENTS.md` became an import from outside the working directory, which Claude Code asks about once per repository in a terminal (No is the default) and leaves out under `-p`.
 
-**The dispatcher.** `memory-bank/scripts/claude_subfolders.py` keeps one in the person's Claude Code configuration folder (`~/.claude`, or `$CLAUDE_CONFIG_DIR`): `ai-accelerator/ai-accelerator-dispatch.sh` and `.py`, the roots it serves in `ai-accelerator/projects`, and in `settings.json` one entry per project hook (with its matcher and timeout), a `permissions` entry for every tool call, an `environment` entry and four `policy-N` entries at a session's start.
+**The dispatcher.** `memory-bank/scripts/claude_subfolders.py` keeps one in the person's Claude Code configuration folder (`~/.claude`, or `$CLAUDE_CONFIG_DIR`): `ai-accelerator/ai-accelerator-dispatch.sh` and `.py`, the roots it serves in `ai-accelerator/projects`, and in `settings.json` one entry per project hook (with its matcher and timeout), a `permissions` entry for every tool call, an `environment` entry and six `policy-N` entries at a session's start.
 
 - **Who sets it up:** `local-context.sh`, in the background, in a session in the root; and the installer run by a person in a terminal (stdin and stderr a terminal - never a test, a bench, the Harness or a call into the module).
 - **What it writes:** only for the Claude Code that started the hook (the session's transcript must be in that folder); nothing when all is in place; nothing into a `settings.json` that is not a JSON object, and one linked from elsewhere is written where it lives; every write under a lock; nothing once the person has put a file named `off` into `ai-accelerator/`, which also stops the dispatcher. One dispatcher serves every project: `DISPATCH_VERSION` keeps a newer copy in place when a project with an older release starts.
@@ -318,7 +351,7 @@ Claude Code reads a project's `.claude/settings.json` - its hooks, its permissio
 - **The project's permission rules** (`permissions`): a deny or an ask wherever the root makes one; an allow only for a file inside the root or a single plain command, never against a deny or ask of the person's own or the managed settings. Read and Edit paths match as Claude Code 2.1.278 matches them in the root: gitignore patterns from the root, where a trailing `/` or `/**` names a folder at any depth (`./secrets/**` denies `src/secrets/key.txt` too) and a pattern with another `/` is anchored. Command rules reach through what Claude Code's own reach through - `env`, `timeout`, `nice`, `stdbuf`, `sudo`, `ionice` and other wrappers with their options, leading assignments, shell keywords (`if ...; then`, `do`, `{`, `!`), a bare `xargs` - but not through `command -v`, an `xargs` with flags, `busybox`, `coproc` or a wrapper named by its path; a rule may name the wrapper or what it runs.
 - **The project's `env`** (`environment`), except the `CLAUDE_` and `ANTHROPIC_` variables, which set Claude Code itself, written into the file Claude Code names in `CLAUDE_ENV_FILE` for the session's commands. What `CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS` does is done there by the `Agent(...)` denies and `subagent-gate.sh`.
 - **The memory CLI's path:** the policy and the skills name the CLI from the root, `python3 memory-bank/scripts/context.py`, and the session's commands run in its own folder, so the banner names it by its path in the root - bare, or in single quotes, the form the allow for the memory CLI takes. `local-context.sh` reads the session's folder from its input's `cwd`: the dispatcher runs it in the root, Codex in the session's folder, and both say where the session is.
-- **`AGENTS.md`** (`policy-N`), where the project's `CLAUDE.md` imports it. Claude Code 2.1 keeps a hook's output in the conversation only up to 10,000 characters and writes a longer one to a file, of which the model sees the first 2,000, so the policy comes cut between sections, the last entry taking whatever does not fit. Nothing comes when Claude Code imports the file itself: the dialog's Yes, which it files under the repository's root (a linked worktree's under its main checkout's, with forward slashes on Windows) in its `.claude.json`.
+- **`AGENTS.md`** (`policy-N`), where the project's `CLAUDE.md` imports it. Claude Code 2.1 keeps a hook's output in the conversation only up to 10,000 characters and writes a longer one to a file, of which the model sees the first 2,000, so the policy comes cut between sections, about 9,800 characters an entry. A policy longer than the six carry, some 59,000 characters, ends the last with the line of `AGENTS.md` the rest begins at. With four entries the last took the rest whole and went into a file: bauherrenmappe's policy, 42,932 characters with the project's own part first, reached a session in `src/` without a rule of the accelerator's. Nothing comes when Claude Code imports the file itself: the dialog's Yes, which it files under the repository's root (a linked worktree's under its main checkout's, with forward slashes on Windows) in its `.claude.json`.
 
 **How it was checked.** Offline, the real Claude Code 2.1.278 (and 2.1.258, 2.1.259, and 2.1.299, the desktop app's) started in `src/` got the capsule, every line of `AGENTS.md` in the conversation and saved, in the four editions and in the default, `acceptEdits`, `dontAsk`, `bypassPermissions` and `auto` modes; after `--resume` and `/clear` too, the policy there once; in its terminal with No and with Yes to the import dialog, and with a question typed during the save. Nineteen fixed tool calls (`scripts/claude_code_bench.py --permissions`) got the same decision in `src/` as in the root, and randomized runs of rules and commands in both - 480 pairs after the last change - differed only where Claude Code itself decides: its reading of the root's `settings.local.json` from the session's folder (stricter, never looser) and its own checks of commands against the folder a session starts in. In an unrelated project the dispatcher printed nothing and failed no hook. The Windows CI job runs the dispatcher, its helper, the setup and the installer's module path under Git Bash and Python 3.13; Claude Code itself was not run on Windows. `scripts/claude_code_bench.py --subfolder src` and `--permissions` repeat the host runs. `scripts/claude_code_bench.py --subfolder src --cli` has the stand-in first run the CLI as the banner names it: on 2.1.278, and on 2.1.299 in the desktop app's mode, it ran without a permission prompt and answered for the root's branch.
 

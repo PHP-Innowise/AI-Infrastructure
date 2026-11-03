@@ -196,6 +196,20 @@ class NativeRoundtripTests(unittest.TestCase):
         image['memory-bank/INDEX.md'] = (index.read_bytes(),stat.S_IMODE(index.stat().st_mode))
         return image
 
+    def test_saved_source_A_is_not_served_task_B_own_memory(self):
+        self.prepare('cli')
+        saved=self.cli('record-result','--task-id',self.case['task'],'--result-id','aster-cross-source',
+            '--revision','1','--input','-','--json',data=json.dumps(self.payload).encode('utf-8'))
+        self.saved(saved)
+        other=self.cli('start','--task-id','aster-served-other','--goal','A separate later task','--json')
+        self.assertNotEqual(self.task_uuid,other['task_uuid'])
+        own=self.cli('refresh','--task-id','aster-served-other','--query',self.case['title'],
+            '--capsule-profile','recall','--gate','off','--ephemeral','--json')
+        self.assertNotIn(self.chunk_rel,[item['path'] for item in own['capsule']['selected']])
+        full=self.cli('retrieve',self.case['title'],'--task-id','aster-served-other','--json')
+        self.assertIn(self.chunk_rel,[item['path'] for item in full['selected']])
+        self.assertEqual(self.source_image,(self.source.read_bytes(),self.source.stat().st_mtime_ns))
+
     def test_cli_save_promotes_then_mcp_recall_tracks_source_presence(self):
         self.prepare('cli')
         saved = self.cli('record-result','--task-id',self.case['task'],'--result-id','aster-cli-save-01',
