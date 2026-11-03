@@ -225,7 +225,16 @@ impl Store {
         let conn = Connection::open(path)?;
         conn.busy_timeout(options.startup_wait)?;
         conn.execute_batch("BEGIN IMMEDIATE")?;
-        let initialized = initialize(&conn, options.require_write);
+        // Inspecting and migrating the whole schema is most of an open; a
+        // store this source already brought current only proves it is writable.
+        let initialized = if schema_current(&conn) {
+            writable(&conn, options.require_write)
+        } else {
+            initialize(&conn, options.require_write).map(|()| {
+                // A store that cannot keep the mark is initialized again next time.
+                let _ = mark_schema(&conn);
+            })
+        };
         if let Err(error) = initialized {
             let _ = conn.execute_batch("ROLLBACK");
             return Err(error);
@@ -764,10 +773,37 @@ fn initialize(conn: &Connection, require_write: bool) -> Result<()> {
         conn.execute_batch("ALTER TABLE document_source_state ADD COLUMN eligible_until TEXT")?;
     }
     conn.execute_batch("CREATE INDEX IF NOT EXISTS document_metadata_conflicts ON document_metadata(conflicts) WHERE conflicts != '[]'")?;
+    writable(conn, require_write)
+}
+fn writable(conn: &Connection, require_write: bool) -> Result<()> {
     if require_write {
         conn.execute("UPDATE index_state SET value=value WHERE 0", [])?;
     }
     Ok(())
+}
+/// Index state naming the source whose `initialize` last ran on a store and
+/// the schema cookie it left: any later schema change moves the cookie.
+const SCHEMA_MARK: &str = "store-schema";
+fn schema_mark(conn: &Connection) -> Result<String> {
+    static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let cookie = conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?;
+    let source = SOURCE.get_or_init(|| crate::query::sha256(include_str!("storage.rs").as_bytes()));
+    Ok(format!("{source}:{cookie}"))
+}
+fn schema_current(conn: &Connection) -> bool {
+    let Ok(expected) = schema_mark(conn) else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT value FROM index_state WHERE key=?1",
+        [SCHEMA_MARK],
+        |row| row.get::<_, String>(0),
+    )
+    .is_ok_and(|kept| kept == expected)
+}
+fn mark_schema(conn: &Connection) -> Result<()> {
+    let mark = schema_mark(conn)?;
+    store_state(conn, &BTreeMap::from([(SCHEMA_MARK.to_string(), mark)]))
 }
 fn create_episodes(conn: &Connection) -> Result<()> {
     conn.execute_batch("CREATE VIRTUAL TABLE episodes USING fts5(summary,outcome,files,verification,sources,created_at UNINDEXED,tokenize='porter unicode61')")?;
@@ -935,4 +971,72 @@ pub fn derive_goal(id: &str) -> String {
         .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
         .unwrap_or_else(|| id.into());
     format!("{label} (auto-provisioned from {id})")
+}
+
+#[cfg(test)]
+mod schema_mark_tests {
+    use super::*;
+    struct Directory(PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn database() -> (Directory, PathBuf) {
+        let root = std::env::temp_dir().join(format!("infra-schema-mark-{}", uuid4()));
+        std::fs::create_dir_all(&root).unwrap();
+        (Directory(root.clone()), root.join("context.db"))
+    }
+    fn kept(store: &Store) -> Option<String> {
+        store.state().unwrap().get(SCHEMA_MARK).cloned()
+    }
+    #[test]
+    fn a_marked_store_reopens_without_migrating_until_its_schema_changes() {
+        let (_temp, path) = database();
+        let store = Store::open(&path, OpenOptions::refresh(None)).unwrap();
+        let mark = kept(&store).expect("a fresh store is marked");
+        assert!(schema_current(&store.conn));
+        drop(store);
+        let store = Store::open(&path, OpenOptions::refresh(None)).unwrap();
+        assert_eq!(kept(&store), Some(mark.clone()));
+        // A schema change made by anything else moves the cookie, so the next
+        // open migrates again and restores what was removed.
+        store
+            .conn
+            .execute_batch("DROP INDEX document_links_ref")
+            .unwrap();
+        assert!(!schema_current(&store.conn));
+        drop(store);
+        let store = Store::open(&path, OpenOptions::refresh(None)).unwrap();
+        let restored: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='document_links_ref'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restored, 1);
+        assert!(schema_current(&store.conn));
+        assert_ne!(kept(&store), Some(mark));
+    }
+    #[test]
+    fn a_mark_left_by_another_source_migrates_again() {
+        let (_temp, path) = database();
+        let mut store = Store::open(&path, OpenOptions::default()).unwrap();
+        let cookie: i64 = store
+            .conn
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .unwrap();
+        store
+            .put_state(&BTreeMap::from([(
+                SCHEMA_MARK.to_string(),
+                format!("another source:{cookie}"),
+            )]))
+            .unwrap();
+        assert!(!schema_current(&store.conn));
+        drop(store);
+        let store = Store::open(&path, OpenOptions::default()).unwrap();
+        assert!(schema_current(&store.conn));
+    }
 }
