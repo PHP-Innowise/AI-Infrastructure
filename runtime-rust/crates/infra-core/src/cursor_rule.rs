@@ -140,8 +140,7 @@ fn set_reason(result: &mut Value, reason: &str) {
     result["reason"] = reason.into();
 }
 fn valid_task(task: &str) -> bool {
-    regex::Regex::new(r"^[\p{L}\p{N}][\p{L}\p{N}_\u{0300}-\u{036f}./#+-]{0,199}$")
-        .is_ok_and(|expression| expression.is_match(task))
+    crate::results::task_grammar(task, 200)
 }
 fn hex_digest(value: &str) -> bool {
     value.len() == 64

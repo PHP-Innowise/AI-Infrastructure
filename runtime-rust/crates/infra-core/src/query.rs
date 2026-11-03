@@ -27,20 +27,12 @@ pub fn estimated_tokens(value: &str) -> usize {
 pub fn folded(value: &str) -> String {
     crate::unicode_fold::fold(value)
 }
-fn expression(pattern: &str) -> Result<regex::Regex> {
-    regex::Regex::new(pattern).map_err(|_| RuntimeError::invalid("Invalid query expression"))
-}
-pub fn query_tokens(query: &str) -> Result<Vec<String>> {
-    let words = expression(r"[\p{L}\p{N}_]+")?;
-    let mut tokens = Vec::new();
-    let mut seen = BTreeSet::new();
-    for word in words.find_iter(query) {
-        let word = word.as_str();
-        if seen.insert(folded(word)) {
-            tokens.push(word.into());
-        }
-        let folded_word = folded(word);
-        for (pattern, alias) in [
+/// Russian forms and the English vocabulary word they also search for.
+fn aliases() -> &'static [(regex::Regex, &'static str)] {
+    static ALIASES: std::sync::OnceLock<Vec<(regex::Regex, &'static str)>> =
+        std::sync::OnceLock::new();
+    ALIASES.get_or_init(|| {
+        [
             (r"предотвращ\w*", "prevent"),
             (r"подделк\w*", "spoof"),
             (r"вложенн\w*", "nested"),
@@ -63,14 +55,38 @@ pub fn query_tokens(query: &str) -> Result<Vec<String>> {
             (r"пол(?:е|я|ей|ю|ям|ем|ями|ях)", "field"),
             (r"им(?:я|ени|енем|ена|ён|ен|енам|енами|енах)", "name"),
             (r"срок\w*", "ttl"),
-        ] {
-            if alias == "validity" && folded_word == "действительно" {
+        ]
+        .into_iter()
+        .map(|(pattern, alias)| {
+            let pattern = regex::Regex::new(&format!("^(?:{pattern})$"))
+                .expect("constant query alias grammar");
+            (pattern, alias)
+        })
+        .collect()
+    })
+}
+pub fn query_tokens(query: &str) -> Result<Vec<String>> {
+    static WORDS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let words = WORDS
+        .get_or_init(|| regex::Regex::new(r"[\p{L}\p{N}_]+").expect("constant query word grammar"));
+    let mut tokens = Vec::new();
+    let mut seen = BTreeSet::new();
+    for word in words.find_iter(query) {
+        let word = word.as_str();
+        if seen.insert(folded(word)) {
+            tokens.push(word.into());
+        }
+        let folded_word = folded(word);
+        // Every alias form begins with a lowercase Cyrillic letter.
+        if !folded_word.starts_with(|c: char| ('а'..='я').contains(&c) || c == 'ё') {
+            continue;
+        }
+        for (pattern, alias) in aliases() {
+            if *alias == "validity" && folded_word == "действительно" {
                 continue;
             }
-            if expression(&format!("^(?:{pattern})$"))?.is_match(&folded_word)
-                && seen.insert(alias.into())
-            {
-                tokens.push(alias.into());
+            if pattern.is_match(&folded_word) && seen.insert((*alias).into()) {
+                tokens.push((*alias).into());
             }
         }
     }
@@ -723,14 +739,12 @@ pub fn rank_candidates_observed(
     Ok((output, diagnostics))
 }
 pub fn word_tokens(text: &str) -> Vec<String> {
-    regex::Regex::new(r"[\p{L}\p{N}_]+")
-        .map(|pattern| {
-            pattern
-                .find_iter(text)
-                .map(|found| folded(found.as_str()))
-                .collect()
-        })
-        .unwrap_or_default()
+    static WORDS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    WORDS
+        .get_or_init(|| regex::Regex::new(r"[\p{L}\p{N}_]+").expect("constant word grammar"))
+        .find_iter(text)
+        .map(|found| folded(found.as_str()))
+        .collect()
 }
 pub fn contains_decimal_digit(text: &str) -> bool {
     static DECIMAL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();

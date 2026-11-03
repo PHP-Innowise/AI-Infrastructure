@@ -40,7 +40,11 @@ pub struct RefreshRequest {
 pub struct MemoryService {
     pub context: RuntimeContext,
     pub database: Option<PathBuf>,
-    queue_engine: Option<queue::NativeQueueWorker>,
+    /// The executable that runs queued commands. Admission reads its whole
+    /// image twice and starts it once, so it happens only when a turn finds
+    /// queued commands, not for every memory command.
+    queue_engine: Option<PathBuf>,
+    admitted: std::sync::OnceLock<queue::NativeQueueWorker>,
     eval_no_child: bool,
 }
 impl MemoryService {
@@ -49,12 +53,23 @@ impl MemoryService {
             context,
             database,
             queue_engine: None,
+            admitted: std::sync::OnceLock::new(),
             eval_no_child: false,
         }
     }
     pub fn with_queue_engine(mut self, engine: PathBuf) -> Result<Self> {
-        self.queue_engine = Some(queue::NativeQueueWorker::admit(engine, &self.context)?);
+        self.queue_engine = Some(engine);
         Ok(self)
+    }
+    fn queue_worker(&self) -> Result<Option<&queue::NativeQueueWorker>> {
+        let Some(engine) = &self.queue_engine else {
+            return Ok(None);
+        };
+        if let Some(worker) = self.admitted.get() {
+            return Ok(Some(worker));
+        }
+        let worker = queue::NativeQueueWorker::admit(engine.clone(), &self.context)?;
+        Ok(Some(self.admitted.get_or_init(|| worker)))
     }
     pub fn with_eval_no_child(mut self) -> Self {
         self.eval_no_child = true;
@@ -528,8 +543,24 @@ impl MemoryService {
             }
             return self.turn_direct(request);
         }
+        // Commands already queued admit the worker before the turn, so an
+        // unavailable worker still refuses before any work. Ones queued by
+        // another process during the turn are drained when the worker admits,
+        // and otherwise stay queued as without a worker.
+        let worker = if queue::has_waiting(&self.context).unwrap_or(true) {
+            self.queue_worker()?
+        } else {
+            None
+        };
         let mut result = self.turn_direct(request)?;
-        let queued = queue::drain_configured(&self.context, self.queue_engine.as_ref())?;
+        let worker = match worker {
+            Some(worker) => Some(worker),
+            None if queue::has_waiting(&self.context).unwrap_or(true) => {
+                self.queue_worker().ok().flatten()
+            }
+            None => None,
+        };
+        let queued = queue::drain_configured(&self.context, worker)?;
         if !queued.is_empty() {
             result["queued_commands"] = object!(queued);
         }

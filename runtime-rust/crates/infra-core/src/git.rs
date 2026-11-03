@@ -92,11 +92,17 @@ pub fn run(
             Ok(())
         })
     });
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    let deadline = started + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            // Most Git queries answer within a few milliseconds: noticing the
+            // exit late should cost at most a twentieth of the wait.
+            Ok(None) if Instant::now() < deadline => thread::sleep(
+                (started.elapsed() / 20)
+                    .clamp(Duration::from_micros(100), Duration::from_millis(5)),
+            ),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -246,9 +252,21 @@ pub fn branch_snapshot(project: &Path) -> Option<BranchSnapshot> {
     let project = fs::canonicalize(project).ok()?;
     let checkout = checkout(&project).ok()??;
     let marker = checkout.join(".git");
+    let admin = admin(&checkout)?;
+    let head = image(&admin.join("HEAD"), true).ok()??;
+    Some(BranchSnapshot {
+        admin: admin.clone(),
+        marker: image(&marker, true).ok()?,
+        head,
+        reftable: image(&admin.join("reftable/tables.list"), true).ok()?,
+    })
+}
+/// The administrative directory a checkout's `.git` marker names.
+fn admin(checkout: &Path) -> Option<PathBuf> {
+    let marker = checkout.join(".git");
     let metadata = fs::metadata(&marker).ok()?;
-    let admin = if metadata.is_dir() {
-        fs::canonicalize(&marker).ok()?
+    if metadata.is_dir() {
+        fs::canonicalize(&marker).ok()
     } else if metadata.is_file() {
         let text = fs::read_to_string(&marker).ok()?;
         let pointer = text.strip_prefix("gitdir: ")?.trim();
@@ -258,17 +276,24 @@ pub fn branch_snapshot(project: &Path) -> Option<BranchSnapshot> {
         } else {
             checkout.join(path)
         })
-        .ok()?
+        .ok()
     } else {
-        return None;
+        None
+    }
+}
+/// The identity of the frame `project` would have, read before Git is asked.
+fn provisional_identity(project: &Path) -> Option<FrameIdentity> {
+    let project = fs::canonicalize(project).ok()?;
+    let top = checkout(&project).ok()??;
+    let admin = admin(&top)?;
+    let frame = GitFrame {
+        project: project.clone(),
+        top,
+        prefix: String::new(),
+        prefix_bytes: Vec::new(),
+        admin,
     };
-    let head = image(&admin.join("HEAD"), true).ok()??;
-    Some(BranchSnapshot {
-        admin: admin.clone(),
-        marker: image(&marker, true).ok()?,
-        head,
-        reftable: image(&admin.join("reftable/tables.list"), true).ok()?,
-    })
+    frame_identity(&project, &frame).ok()
 }
 
 fn checkout(project: &Path) -> Result<Option<PathBuf>> {
@@ -357,8 +382,39 @@ impl GitFrame {
         }))
     }
     pub fn discover(project: &Path) -> Result<Option<Self>> {
-        Self::discover_uncached(project, Instant::now() + Duration::from_secs(5))
-            .map_err(source_git)
+        Self::discover_held(project, Instant::now() + Duration::from_secs(5)).map_err(source_git)
+    }
+    /// Within a command scope, a frame whose checkout ancestry and
+    /// administrative files are unchanged is not asked of Git again. A frame is
+    /// held only when nothing changed while Git was looking.
+    fn discover_held(project: &Path, deadline: Instant) -> Result<Option<Self>> {
+        if SCOPE.with(|scope| scope.borrow().is_none()) {
+            return Self::discover_uncached(project, deadline);
+        }
+        let key = frame_key(project);
+        let held = SCOPE.with(|scope| {
+            scope
+                .borrow()
+                .as_ref()
+                .and_then(|scope| scope.frames.get(&key).cloned())
+        });
+        if let Some((frame, identity)) = held
+            && frame_identity(project, &frame).ok().as_ref() == Some(&identity)
+        {
+            return Ok(Some(frame));
+        }
+        let before = provisional_identity(project);
+        let frame = Self::discover_uncached(project, deadline)?;
+        if let (Some(frame), Some(before)) = (&frame, before)
+            && frame_identity(project, frame).ok().as_ref() == Some(&before)
+        {
+            SCOPE.with(|scope| {
+                if let Some(scope) = scope.borrow_mut().as_mut() {
+                    scope.frames.insert(key, (frame.clone(), before));
+                }
+            });
+        }
+        Ok(frame)
     }
     pub fn branch(&self) -> Result<Option<String>> {
         self.branch_inner().map_err(source_git)

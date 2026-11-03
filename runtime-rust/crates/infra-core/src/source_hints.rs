@@ -46,8 +46,9 @@ pub fn normalize(value: &Value) -> (Vec<Reference>, &'static str) {
             .as_array()
             .filter(|entries| entries.len() <= LIMIT)
             .ok_or_else(|| RuntimeError::invalid("Hint references invalid"))?;
-        let controls = regex::Regex::new(r"\p{C}")
-            .map_err(|_| RuntimeError::invalid("Hint path grammar unavailable"))?;
+        static CONTROLS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let controls = CONTROLS
+            .get_or_init(|| regex::Regex::new(r"\p{C}").expect("constant hint path grammar"));
         let mut clean = vec![];
         for entry in entries {
             if !exact(entry, &["path", "source_sha256"]) {

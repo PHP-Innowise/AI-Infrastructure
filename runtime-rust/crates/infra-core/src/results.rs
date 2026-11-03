@@ -68,11 +68,22 @@ pub fn strings(value: &Value, label: &str, count: usize, limit: usize) -> Result
             .collect::<Result<Vec<_>>>()?,
     ))
 }
+/// Whether `value` is `^[\p{L}\p{N}][\p{L}\p{N}_\u{0300}-\u{036f}./#+-]{0,limit-1}$`:
+/// the bounded repetition is a length check, since unrolling it makes the
+/// expression costly to build.
+pub fn task_grammar(value: &str, limit: usize) -> bool {
+    static GRAMMAR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    GRAMMAR
+        .get_or_init(|| {
+            regex::Regex::new(r"^[\p{L}\p{N}][\p{L}\p{N}_\u{0300}-\u{036f}./#+-]*$")
+                .expect("constant task grammar")
+        })
+        .is_match(value)
+        && value.chars().count() <= limit
+}
 pub fn task_id(value: &str) -> Result<String> {
     let id = text(&object!(value), "task ID", 200)?;
-    let expression = regex::Regex::new(r"^[\p{L}\p{N}][\p{L}\p{N}_\u{0300}-\u{036f}./#+-]{0,199}$")
-        .map_err(|_| RuntimeError::invalid("Invalid task expression"))?;
-    if !expression.is_match(&id) || id.split('/').any(|part| part == "..") {
+    if !task_grammar(&id, 200) || id.split('/').any(|part| part == "..") {
         return Err(refused("task_id", "Invalid task ID"));
     }
     Ok(id)

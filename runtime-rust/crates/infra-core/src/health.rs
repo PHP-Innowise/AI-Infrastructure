@@ -620,19 +620,20 @@ fn special_identity(context: &RuntimeContext) -> (Option<String>, Option<String>
     (None, None, None)
 }
 pub fn branch_task_id(branch: &str) -> String {
-    let grammar = regex::Regex::new(r"^[\p{L}\p{N}][\p{L}\p{N}_\u{0300}-\u{036f}./#+-]{0,127}$");
-    if grammar.is_ok_and(|pattern| pattern.is_match(branch)) {
+    if crate::results::task_grammar(branch, 128) {
         return branch.into();
     }
-    let allowed = regex::Regex::new(r"[\p{L}\p{N}_\u{0300}-\u{036f}./#+-]").ok();
-    let word = regex::Regex::new(r"^[\p{L}\p{N}]$").ok();
+    static ALLOWED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static WORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let allowed = ALLOWED.get_or_init(|| {
+        regex::Regex::new(r"[\p{L}\p{N}_\u{0300}-\u{036f}./#+-]").expect("constant branch grammar")
+    });
+    let word =
+        WORD.get_or_init(|| regex::Regex::new(r"^[\p{L}\p{N}]$").expect("constant word grammar"));
     let mut stem = String::new();
     let mut refused = false;
     for character in branch.chars() {
-        if allowed
-            .as_ref()
-            .is_some_and(|pattern| pattern.is_match(&character.to_string()))
-        {
+        if allowed.is_match(&character.to_string()) {
             stem.push(character);
             refused = false;
         } else if !refused {
@@ -642,11 +643,7 @@ pub fn branch_task_id(branch: &str) -> String {
     }
     let mut chars = stem
         .chars()
-        .skip_while(|character| {
-            !word
-                .as_ref()
-                .is_some_and(|pattern| pattern.is_match(&character.to_string()))
-        })
+        .skip_while(|character| !word.is_match(&character.to_string()))
         .take(119)
         .collect::<String>();
     while chars.ends_with('-') {

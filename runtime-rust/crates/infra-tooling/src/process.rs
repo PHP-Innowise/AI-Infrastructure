@@ -271,6 +271,8 @@ fn read_pipe(
     let mut bytes = Vec::new();
     let mut chunk = [0u8; 8192];
     let mut stopping = None;
+    // Output usually ends just before the exit: look again soon after data.
+    let mut pause = Duration::from_micros(100);
     loop {
         if stop.load(Ordering::Acquire) {
             let since = stopping.get_or_insert_with(Instant::now);
@@ -282,6 +284,7 @@ fn read_pipe(
             Ok(0) => return Ok(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return Ok(bytes),
             Ok(count) => {
+                pause = Duration::from_micros(100);
                 let remaining = (limit + 1).saturating_sub(bytes.len());
                 bytes.extend_from_slice(&chunk[..count.min(remaining)]);
                 if bytes.len() > limit {
@@ -294,7 +297,8 @@ fn read_pipe(
                 if stop.load(Ordering::Acquire) {
                     return Ok(bytes);
                 }
-                thread::sleep(Duration::from_millis(2));
+                thread::sleep(pause);
+                pause = (pause * 3 / 2).min(Duration::from_millis(2));
             }
             Err(error) => return Err(error),
         }
@@ -393,6 +397,7 @@ pub fn run_with_env(
         None
     };
     let cancellation = CANCEL.with(|slot| slot.borrow().clone());
+    let started = Instant::now();
     let completed = loop {
         if cancellation
             .as_ref()
@@ -414,7 +419,12 @@ pub fn run_with_env(
         }
         match child.try_wait() {
             Ok(Some(code)) => break Ok(code),
-            Ok(None) => thread::sleep(Duration::from_millis(5)),
+            // Short commands are common: noticing the exit late should cost
+            // at most a twentieth of the wait.
+            Ok(None) => thread::sleep(
+                (started.elapsed() / 20)
+                    .clamp(Duration::from_micros(100), Duration::from_millis(5)),
+            ),
             Err(error) => break Err(error),
         }
     };

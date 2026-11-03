@@ -11,9 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const STOP: &str = "AES AGPL ANSI ASCII BCP BSD CET CP CRC CSS CVE CVSS CWE DES DIN DNS DSA ECDSA ECMA EN EPL ES FIPS GDPR GMT GPL GPT HMAC HTML HTTP HTTPS IEC IEEE IP IPV ISO JSON KOI LATIN LGPL MD MPEG MPL NIST OAUTH OWASP PCI PER PHP PSR RFC RSA SHA SOC SSL TCP TLS UCS UDP UTC UTF UUID WCAG WIN XML YAML";
 fn word(character: char) -> bool {
+    static WORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let mut encoded = [0; 4];
-    regex::Regex::new(r"^[\p{L}\p{N}_]$")
-        .is_ok_and(|pattern| pattern.is_match(character.encode_utf8(&mut encoded)))
+    WORD.get_or_init(|| regex::Regex::new(r"^[\p{L}\p{N}_]$").expect("constant word grammar"))
+        .is_match(character.encode_utf8(&mut encoded))
 }
 pub fn ticket_ids(text: &str, known: &BTreeSet<String>) -> Vec<String> {
     let Ok(pattern) = regex::Regex::new(r"([A-Z]{2,10})-([0-9]{1,6})") else {

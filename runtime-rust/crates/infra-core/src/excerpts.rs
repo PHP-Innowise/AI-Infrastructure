@@ -225,13 +225,17 @@ pub fn score(units: &[String], weights: &BTreeMap<String, f64>) -> (i64, usize) 
     score_terms(&stems, weights)
 }
 pub fn slug(heading: &str) -> String {
+    static PLAIN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static GAPS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let folded = query::folded(heading);
-    let plain = regex::Regex::new(r"[^\p{L}\p{N}_\s-]")
-        .map(|pattern| pattern.replace_all(&folded, "").into_owned())
-        .unwrap_or(folded);
-    let collapsed = regex::Regex::new(r"[\s_]+")
-        .map(|pattern| pattern.replace_all(&plain, "-").into_owned())
-        .unwrap_or(plain);
+    let plain = PLAIN
+        .get_or_init(|| regex::Regex::new(r"[^\p{L}\p{N}_\s-]").expect("constant slug grammar"))
+        .replace_all(&folded, "")
+        .into_owned();
+    let collapsed = GAPS
+        .get_or_init(|| regex::Regex::new(r"[\s_]+").expect("constant slug grammar"))
+        .replace_all(&plain, "-")
+        .into_owned();
     query::chars(collapsed.trim_matches('-'), 60)
 }
 fn payload(heading: &str, lines: &[String], title: &str) -> Section {
@@ -480,7 +484,9 @@ fn answering_stretch(text: &str, tokens: &[String]) -> String {
         .flat_map(|form| form.split_whitespace().map(String::from))
         .chain(tokens.iter().map(|token| query::folded(token)))
         .collect::<BTreeSet<_>>();
-    let words = regex::Regex::new(r"[\p{L}\p{N}_]+").ok();
+    static WORDS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let words =
+        WORDS.get_or_init(|| regex::Regex::new(r"[\p{L}\p{N}_]+").expect("constant word grammar"));
     let mut sections = Vec::<(usize, usize)>::new();
     let mut offset = 0;
     let mut start = 0;
@@ -496,24 +502,19 @@ fn answering_stretch(text: &str, tokens: &[String]) -> String {
     for (start, end) in sections {
         let body = characters[start..end].iter().collect::<String>();
         let found = words
-            .as_ref()
-            .map(|words| {
-                words
-                    .find_iter(&body)
-                    .filter(|word| {
-                        stems
-                            .iter()
-                            .any(|stem| query::folded(word.as_str()).starts_with(stem))
-                    })
-                    .map(|word| {
-                        (
-                            body[..word.start()].chars().count() + start,
-                            query::folded(word.as_str()),
-                        )
-                    })
-                    .collect::<Vec<_>>()
+            .find_iter(&body)
+            .filter(|word| {
+                stems
+                    .iter()
+                    .any(|stem| query::folded(word.as_str()).starts_with(stem))
             })
-            .unwrap_or_default();
+            .map(|word| {
+                (
+                    body[..word.start()].chars().count() + start,
+                    query::folded(word.as_str()),
+                )
+            })
+            .collect::<Vec<_>>();
         if found.is_empty() {
             continue;
         }
