@@ -91,6 +91,28 @@ edition's own files remain in that edition's changelog.
   without `dirname`. Hook output is unchanged, except that a text the old
   policy refused because a rule hit the backtracking limit is now answered
   when that rule's literals are absent from it.
+- Hooks are faster again and the Rust test suite takes under 3 minutes
+  instead of about 21 (hook medians on settled copies of one installed
+  project, before → after): prompt memory 34 → 25 ms, stop memory 34 → 25 ms,
+  session start 50 → 27 ms, context continuity 11.5 → 9 ms; the shell guard
+  stays at 7 ms. Every prompt read the 252 skill copies of three mirrors and
+  serialized their bytes as JSON to fingerprint them (9.5 ms); the parity is
+  now kept beside an image of the copies' identities, sizes and change times
+  and reused while that image holds. Copies changed within the last 3 seconds
+  are always read, and the fingerprint is computed as before, so no index is
+  rebuilt. Each store open inspected and migrated the whole schema under the
+  write lock (about 1 ms per engine process); a store that this source
+  brought current, with no schema change since, skips that. Session start ran
+  the PHP version probe (17 ms), the cache key's Git queries, the status and
+  the branch query one after another; they now run together and their lines
+  keep their places. A turn resolves the default branch from the ref listing
+  it already made instead of up to four more Git processes, continuity no
+  longer asks Git whether the project's own directory is another worktree, a
+  child's exit is noticed when its output ends instead of at the next poll,
+  and children are spawned without forking the engine. Test builds optimize
+  dependencies (workspace code stays unoptimized): `native_generator` went
+  from 546 to 24 s and `native_install` from 342 to 18 s, which keeps the
+  30-minute CI job within its limit.
 - The Harness page shows its own updates again. Since the move to Rust the
   Update button never appeared: the Wasm interface waited for an `available`
   flag that `GET /api/app/update` does not send (it reports `state`), filled

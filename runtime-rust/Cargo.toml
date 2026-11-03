@@ -20,6 +20,12 @@ strip = "debuginfo"
 [profile.test]
 debug = 0
 
+# Dependencies do the hashing, matching, JSON and SQLite work of every engine
+# process a test starts. Unoptimized, they made the suite take about 21 minutes
+# instead of under 3. Workspace code stays unoptimized, so rebuilds stay quick.
+[profile.dev.package."*"]
+opt-level = 3
+
 [package]
 name = "memory-kernel-probe"
 version = "0.1.0"
