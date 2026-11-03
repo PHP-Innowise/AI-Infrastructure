@@ -91,6 +91,20 @@ edition's own files remain in that edition's changelog.
   without `dirname`. Hook output is unchanged, except that a text the old
   policy refused because a rule hit the backtracking limit is now answered
   when that rule's literals are absent from it.
+- The Harness page shows its own updates again. Since the move to Rust the
+  Update button never appeared: the Wasm interface waited for an `available`
+  flag that `GET /api/app/update` does not send (it reports `state`), filled
+  the banner from keys the status lacks, asked for the first time ten minutes
+  after the page opened and ignored a refused update, so the outcome of an
+  update was visible only in a terminal. The button now shows while the
+  branch the clone follows has new commits, listed on hover, from the first
+  paint, which uses the status in `/api/bootstrap`; the page also checks when
+  it regains focus. The banner says why the clone has diverged, why an update
+  failed or what a restart still needs, with the commands it names set as
+  code, and a refused Update shows the server's message. A held restart
+  (`restart-required`) keeps the button, so Update can be pressed again after
+  the rebuild. After an update the page reloads once `/api/health` answers
+  from the restarted server, and says so if none answers within two minutes.
 
 - Move executable project logic into the Rust workspace and one native
   `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation

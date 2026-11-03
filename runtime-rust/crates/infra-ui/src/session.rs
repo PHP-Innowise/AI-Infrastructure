@@ -72,11 +72,6 @@ pub fn initialize() {
         let _ = media.add_event_listener_with_callback("change", c.as_ref().unchecked_ref());
         c.forget();
     }
-    dom::later("app-update", 600000, || {
-        spawn_local(async {
-            update_status(true).await;
-        })
-    });
 }
 fn apply_theme(preference: &str) {
     let dark = dom::window()
@@ -110,12 +105,17 @@ pub async fn bootstrap() {
                 && boot["projects"].is_array()
                 && boot["providers"].is_array() =>
         {
+            m::set("app-update", boot["update"].clone());
             m::write(|s| {
                 s.sessions = m::array(&boot["sessions"]);
                 s.boot = boot;
                 s.auth_failed = false;
             });
             dom::hidden("connection-banner", true);
+            render_update();
+            spawn_local(async {
+                update_status(true).await;
+            });
             populate();
             history();
             restore_preferences();
@@ -1575,20 +1575,202 @@ pub async fn sign_in(refresh: bool) {
     }
     m::set("sign-in-pending", json!(false));
 }
-async fn update_status(check: bool) {
-    if let Ok(v) = api::get(&format!(
-        "/api/app/update{}",
-        if check { "?check=1" } else { "" }
-    ))
-    .await
+// Updates of this clone, offered as desktop applications offer theirs: an Update button in the
+// header while the branch the clone follows has moved on. A click fast-forwards the clone and
+// restarts the server, and the page reloads itself on the new version. "app-update" holds the
+// server's status (updates.rs), "app-update-page" what this page did: pending, restarting,
+// failed, its note and the server instance that answered before the update.
+pub async fn update_status(check: bool) {
+    let page = m::data("app-update-page");
+    if !(m::yes(&page["pending"])
+        || m::yes(&page["restarting"])
+        || m::read(|s| s.boot.is_null() || s.auth_failed))
     {
-        dom::hidden("app-update", !m::yes(&v["available"]));
-        dom::text("app-update-note", &m::summary(&v));
-        m::set("app-update", v);
+        if let Ok(v) = api::get(&format!(
+            "/api/app/update{}",
+            if check { "?check=1" } else { "" }
+        ))
+        .await
+        {
+            m::set("app-update", v);
+            render_update();
+        }
+        if check {
+            // A check fetches in the background: its answer is read once it has had time to arrive.
+            dom::later("app-update-read", 8000, || {
+                spawn_local(async {
+                    update_status(false).await;
+                })
+            });
+        }
     }
     dom::later("app-update", 600000, || {
         spawn_local(async {
             update_status(true).await;
+        })
+    });
+}
+#[derive(Debug, PartialEq)]
+struct UpdateView {
+    button: bool,
+    busy: bool,
+    label: &'static str,
+    title: String,
+    note: String,
+    error: bool,
+}
+fn update_view(status: &V, page: &V) -> UpdateView {
+    let state = status["state"].as_str().unwrap_or("");
+    let (pending, restarting) = (m::yes(&page["pending"]), m::yes(&page["restarting"]));
+    let mut title = vec![];
+    if state == "available" {
+        let commits = m::array(&status["commits"]);
+        let shown = commits.len().min(10);
+        title.push(m::text(status, "detail"));
+        title.extend(
+            commits[..shown]
+                .iter()
+                .map(|commit| format!("• {}", m::text(commit, "subject"))),
+        );
+        let more = status["behind"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_sub(shown as u64);
+        if more > 0 {
+            title.push(format!("… and {more} more"));
+        }
+    }
+    let note = m::text(page, "note");
+    let (note, error) = if !note.is_empty() {
+        (note, m::yes(&page["failed"]))
+    } else if ["diverged", "failed", "restart-required"].contains(&state) {
+        (m::text(status, "detail"), state != "diverged")
+    } else {
+        (String::new(), false)
+    };
+    UpdateView {
+        // A restart the server refused is pressed again once the clone is rebuilt.
+        button: pending || restarting || ["available", "restart-required"].contains(&state),
+        busy: pending || restarting,
+        label: if restarting {
+            "Restarting…"
+        } else if pending {
+            "Updating…"
+        } else {
+            "Update"
+        },
+        title: title
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        note,
+        error,
+    }
+}
+/// The pieces of a server note, `true` for a command it quotes in backticks.
+fn code_spans(note: &str) -> Vec<(bool, &str)> {
+    let pieces = note.split('`').collect::<Vec<_>>();
+    if pieces.len() % 2 == 0 {
+        return vec![(false, note)];
+    }
+    pieces
+        .into_iter()
+        .enumerate()
+        .filter(|(_, piece)| !piece.is_empty())
+        .map(|(index, piece)| (index % 2 == 1, piece))
+        .collect()
+}
+fn render_update() {
+    let view = update_view(&m::data("app-update"), &m::data("app-update-page"));
+    dom::hidden("app-update", !view.button);
+    dom::disabled("app-update", view.busy);
+    dom::text("app-update", view.label);
+    dom::attr("app-update", "title", &view.title);
+    // Rewritten only when it changes, so the status region is not announced again.
+    if let Some(note) = dom::get("app-update-note") {
+        if note.get_attribute("data-note").as_deref() != Some(view.note.as_str()) {
+            note.set_text_content(None);
+            for (code, piece) in code_spans(&view.note) {
+                if code {
+                    dom::add(&note, &dom::el("code", "", piece));
+                } else {
+                    let _ = note.append_with_str_1(piece);
+                }
+            }
+            let _ = note.set_attribute("data-note", &view.note);
+        }
+    }
+    dom::hidden("app-update-banner", view.note.is_empty());
+    dom::class("app-update-banner", "error", view.error);
+}
+async fn apply_update() {
+    let page = m::data("app-update-page");
+    if m::yes(&page["pending"]) || m::yes(&page["restarting"]) {
+        return;
+    }
+    m::set("app-update-page", json!({"pending":true}));
+    render_update();
+    // The restarted server answers health with another instance.
+    let result = match api::get("/api/health").await {
+        Ok(health) => api::post("/api/app/update", json!({}))
+            .await
+            .map(|v| (health["instance"].clone(), v)),
+        Err(error) => Err(error),
+    };
+    let mut status = m::data("app-update");
+    let page = match result {
+        Ok((_, v)) if m::yes(&v["current"]) => {
+            status["state"] = "current".into();
+            json!({"note":v["detail"]})
+        }
+        Ok((instance, v)) => {
+            status["state"] = "updated".into();
+            let to = m::text(&v, "to");
+            let updated = if to.is_empty() {
+                "Updated.".to_owned()
+            } else {
+                format!("Updated to {to}.")
+            };
+            if m::yes(&v["restarting"]) {
+                json!({"restarting":true,"instance":instance,"note":format!("{updated} The Harness is restarting; this page reloads by itself.")})
+            } else {
+                json!({"note":format!("{updated} Restart the Harness to use it.")})
+            }
+        }
+        Err(error) => json!({"failed":true,"note":error.message}),
+    };
+    let (restarting, failed) = (m::yes(&page["restarting"]), m::yes(&page["failed"]));
+    m::set("app-update", status);
+    m::set("app-update-page", page);
+    render_update();
+    if restarting {
+        wait_for_restart(js_sys::Date::now() + 120000.);
+    } else if failed {
+        // The failure may have changed the server's state, such as a restart it now requires.
+        update_status(false).await;
+    }
+}
+fn wait_for_restart(deadline: f64) {
+    dom::later("app-restart", 1000, move || {
+        spawn_local(async move {
+            if let Ok(health) = api::get("/api/health").await {
+                if health["instance"].is_string()
+                    && health["instance"] != m::data("app-update-page")["instance"]
+                {
+                    let _ = dom::window().location().reload();
+                    return;
+                }
+            }
+            if js_sys::Date::now() < deadline {
+                wait_for_restart(deadline);
+            } else {
+                m::set(
+                    "app-update-page",
+                    json!({"failed":true,"note":"The Harness did not come back after the update. Start it again from the application icon."}),
+                );
+                render_update();
+            }
         })
     });
 }
@@ -2574,21 +2756,7 @@ pub async fn event(
                 _ => {}
             }
         }
-        "app-update" => {
-            if let Ok(v) = api::post("/api/app/update", json!({})).await {
-                m::set("update-instance", v["instance"].clone());
-                dom::later("app-restart", 1000, || {
-                    spawn_local(async {
-                        if let Ok(v) = api::get("/api/health").await {
-                            let old = m::data("update-instance");
-                            if v["instance"] != old {
-                                let _ = dom::window().location().reload();
-                            }
-                        }
-                    })
-                });
-            }
-        }
+        "app-update" => apply_update().await,
         _ if action.starts_with("option-") => {
             let panel = action.trim_start_matches("option-");
             let open = m::data("option-open") != panel;
@@ -2939,5 +3107,139 @@ mod draft_project_tests {
         assert_eq!(persisted["drafts"]["a"], extracted_a);
         assert_eq!(persisted["drafts"]["b"], draft_b);
         m::take("composer-project");
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+    fn status(state: &str, detail: &str) -> V {
+        json!({"state":state,"detail":detail,"behind":0,"ahead":0,"commits":[],"upstream":"origin/main","version":"6e5a8cc"})
+    }
+    #[test]
+    fn an_available_update_shows_the_button_and_its_commits_on_hover() {
+        let mut available = status("available", "12 new changes on origin/main.");
+        available["behind"] = json!(12);
+        available["commits"] = (1..=12)
+            .map(|n| json!({"hash":format!("abc{n}"),"subject":format!("change {n}")}))
+            .collect();
+        let view = update_view(&available, &V::Null);
+        assert!(view.button && !view.busy);
+        assert_eq!(view.label, "Update");
+        let lines = view.title.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 12);
+        assert_eq!(lines[0], "12 new changes on origin/main.");
+        assert_eq!(lines[1], "• change 1");
+        assert_eq!(lines[10], "• change 10");
+        assert_eq!(lines[11], "… and 2 more");
+        assert!(view.note.is_empty());
+        let mut one = status("available", "1 new changes on origin/main.");
+        one["behind"] = json!(1);
+        one["commits"] = json!([{"hash":"abc1","subject":"docs: one"}]);
+        assert_eq!(
+            update_view(&one, &V::Null).title,
+            "1 new changes on origin/main.\n• docs: one"
+        );
+    }
+    #[test]
+    fn nothing_is_offered_without_an_update_whatever_else_the_status_says() {
+        for state in [
+            "unknown",
+            "current",
+            "unavailable",
+            "updating",
+            "updated",
+            "",
+        ] {
+            let mut value = status(state, "This clone is not on a branch.");
+            // The server never sends this key; the button follows the state alone.
+            value["available"] = json!(true);
+            let view = update_view(&value, &V::Null);
+            assert!(!view.button, "{state}");
+            assert!(view.note.is_empty() && view.title.is_empty(), "{state}");
+        }
+        assert!(!update_view(&V::Null, &V::Null).button);
+    }
+    #[test]
+    fn a_diverged_failed_or_held_update_says_why_in_the_banner() {
+        let diverged = update_view(
+            &status(
+                "diverged",
+                "2 new changes on origin/main; this clone has 1 commits of its own. Update it with Git.",
+            ),
+            &V::Null,
+        );
+        assert!(!diverged.button && !diverged.error);
+        assert!(diverged.note.ends_with("Update it with Git."));
+        let failed = update_view(
+            &status(
+                "failed",
+                "The update could not be applied: Git exited with status 128.",
+            ),
+            &V::Null,
+        );
+        assert!(!failed.button && failed.error);
+        assert_eq!(
+            failed.note,
+            "The update could not be applied: Git exited with status 128."
+        );
+        let held = update_view(
+            &status("restart-required", "The clone is now at 43a21a0, but its browser interface was built from other sources. In the clone, run `./infra-engine repo build-ui`, then press Update again."),
+            &V::Null,
+        );
+        assert!(held.button && !held.busy && held.error);
+        assert_eq!(held.label, "Update");
+        assert!(held.note.contains("press Update again"));
+    }
+    #[test]
+    fn what_this_page_did_takes_over_the_button_and_the_banner() {
+        let available = status("available", "1 new changes on origin/main.");
+        let pending = update_view(&available, &json!({"pending":true}));
+        assert!(pending.button && pending.busy);
+        assert_eq!(pending.label, "Updating…");
+        let restarting = update_view(
+            &status("updated", ""),
+            &json!({"restarting":true,"note":"Updated to 43a21a0. The Harness is restarting; this page reloads by itself."}),
+        );
+        assert!(restarting.button && restarting.busy && !restarting.error);
+        assert_eq!(restarting.label, "Restarting…");
+        assert!(restarting.note.starts_with("Updated to 43a21a0."));
+        // A refused update keeps its message, also over the detail the server recorded.
+        let refused = update_view(
+            &status("restart-required", "recorded detail"),
+            &json!({"failed":true,"note":"An update is waiting for the Harness to restart."}),
+        );
+        assert!(refused.button && !refused.busy && refused.error);
+        assert_eq!(
+            refused.note,
+            "An update is waiting for the Harness to restart."
+        );
+        let current = update_view(
+            &status("current", ""),
+            &json!({"note":"This clone is already up to date."}),
+        );
+        assert!(!current.button && !current.error);
+        assert_eq!(current.note, "This clone is already up to date.");
+    }
+    #[test]
+    fn commands_quoted_in_a_note_become_code() {
+        assert_eq!(
+            code_spans(
+                "In the clone, run `cargo build --release`, then `./infra-engine repo build-ui`."
+            ),
+            vec![
+                (false, "In the clone, run "),
+                (true, "cargo build --release"),
+                (false, ", then "),
+                (true, "./infra-engine repo build-ui"),
+                (false, "."),
+            ]
+        );
+        assert_eq!(code_spans("`a`"), vec![(true, "a")]);
+        assert_eq!(
+            code_spans("an unpaired ` stays"),
+            vec![(false, "an unpaired ` stays")]
+        );
+        assert!(code_spans("").is_empty());
     }
 }

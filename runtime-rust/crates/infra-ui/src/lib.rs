@@ -161,6 +161,10 @@ pub fn start() -> Result<(), JsValue> {
     let focus = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
         spawn_local(async {
             session::sign_in(true).await;
+        });
+        // The server fetches again only once its last check is ten minutes old.
+        spawn_local(async {
+            session::update_status(true).await;
         })
     });
     dom::window().add_event_listener_with_callback("focus", focus.as_ref().unchecked_ref())?;
