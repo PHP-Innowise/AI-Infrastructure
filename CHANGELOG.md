@@ -24,6 +24,13 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- The generated workflows start on GitHub again. Each job named
+  `${{ runner.temp }}` in its job-level `env`, where GitHub provides no
+  `runner` context, so every workflow file was rejected before a job existed:
+  the native checks had never run in CI. A step now sets `CARGO_TARGET_DIR`
+  from `RUNNER_TEMP` (forward slashes, for Git Bash on Windows), and an
+  emitter test admits only the contexts job-level `env` provides.
+
 - Move executable project logic into the Rust workspace and one native
   `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation
   and repository tooling, Infrastructure-Creator, Harness and declarative

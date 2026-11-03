@@ -710,11 +710,14 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
                 ));
             }
         };
+        // Job-level env admits only github, needs, strategy, matrix, vars,
+        // secrets and inputs; any runner reference there makes GitHub reject
+        // the whole file before a job exists. The target directory is set by
+        // a step below instead.
         output.push_str(&format!(
-            "    runs-on: {runner}\n    timeout-minutes: {}\n    env:\n      CARGO_TARGET_DIR: ",
+            "    runs-on: {runner}\n    timeout-minutes: {}\n    env:\n      NATIVE_CHECK_GROUP: ",
             group.timeout_minutes
         ));
-        output.push_str("'${{ runner.temp }}/infra-native-target'\n      NATIVE_CHECK_GROUP: ");
         output.push_str(&yaml_string(&group.name)?);
         output.push_str("\n    defaults:\n      run:\n        shell: bash\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n      - uses: dtolnay/rust-toolchain@stable\n        with:\n          components: rustfmt, clippy\n");
         validate_rust_configuration(group)?;
@@ -734,6 +737,9 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
         if group.gates.iter().any(|gate|matches!(gate,Gate::Tool{operation,request,..}if operation=="php-snippets"&&request["require_php"]==true)){
    output.push_str("      - uses: shivammathur/setup-php@v2\n        with:\n          php-version: '8.3'\n          coverage: none\n          tools: none\n");
   }
+        // RUNNER_TEMP is a backslash path on Windows; Cargo and Git Bash both
+        // accept the forward-slash spelling.
+        output.push_str("      - name: Select the native target directory\n        run: echo \"CARGO_TARGET_DIR=${RUNNER_TEMP//\\\\//}/infra-native-target\" >> \"$GITHUB_ENV\"\n");
         output.push_str("      - name: Build the native engine\n        run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine\n      - name: Run the catalog group\n        run: |\n          suffix=''\n          if [ \"$RUNNER_OS\" = 'Windows' ]; then suffix='.exe'; fi\n          \"$CARGO_TARGET_DIR/debug/infra-engine$suffix\" check --group \"$NATIVE_CHECK_GROUP\" --strict --base origin/main");
         if oracle {
             output.push_str(" --include-oracles");
@@ -889,6 +895,79 @@ mod compiler_workflow_tests {
             bad["rust_targets"] = targets;
             assert!(workflow(&catalog(json!([bad])), "rust.yml").is_err());
         }
+    }
+
+    /// Context names used by `${{ }}` expressions in each job-level env block.
+    fn job_env_contexts(rendered: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut inside = false;
+        for line in rendered.lines() {
+            if line == "    env:" {
+                inside = true;
+                continue;
+            }
+            if !line.starts_with("      ") {
+                inside = false;
+            }
+            if !inside {
+                continue;
+            }
+            for expression in line.split("${{").skip(1) {
+                found.push(
+                    expression
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect(),
+                );
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn job_level_env_uses_only_contexts_github_provides_there() {
+        // GitHub rejects the whole workflow file otherwise, and no job starts.
+        let allowed = [
+            "github", "needs", "strategy", "matrix", "vars", "secrets", "inputs",
+        ];
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let source = load_catalog(&root, false).unwrap();
+        let files = source
+            .groups
+            .iter()
+            .map(|group| group.workflow.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(!files.is_empty());
+        for name in files {
+            let rendered = workflow(&source, &name).unwrap();
+            for context in job_env_contexts(&rendered) {
+                assert!(allowed.contains(&context.as_str()), "{name}: {context}");
+            }
+            let mut jobs: Vec<String> = Vec::new();
+            for line in rendered.split("\njobs:\n").nth(1).unwrap().lines() {
+                if line.starts_with("  ") && !line.starts_with("   ") {
+                    jobs.push(String::new());
+                }
+                if let Some(job) = jobs.last_mut() {
+                    job.push_str(line);
+                    job.push('\n');
+                }
+            }
+            assert!(!jobs.is_empty(), "{name}");
+            for job in jobs {
+                let target = job
+                    .find("name: Select the native target directory")
+                    .unwrap_or_else(|| panic!("{name}: no target directory step"));
+                let build = job.find("name: Build the native engine").unwrap();
+                assert!(target < build, "{name}");
+                assert!(job.contains("\"$CARGO_TARGET_DIR/debug/infra-engine$suffix\""));
+            }
+        }
+        assert_eq!(
+            job_env_contexts("    env:\n      A: ${{ runner.temp }}/x\n    steps:\n"),
+            ["runner"]
+        );
     }
 
     #[test]

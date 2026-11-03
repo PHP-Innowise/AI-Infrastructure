@@ -18,7 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      CARGO_TARGET_DIR: '${{ runner.temp }}/infra-native-target'
       NATIVE_CHECK_GROUP: "changelog"
     defaults:
       run:
@@ -30,6 +29,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Select the native target directory
+        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -41,7 +42,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      CARGO_TARGET_DIR: '${{ runner.temp }}/infra-native-target'
       NATIVE_CHECK_GROUP: "installation"
     defaults:
       run:
@@ -53,6 +53,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Select the native target directory
+        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -64,7 +66,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      CARGO_TARGET_DIR: '${{ runner.temp }}/infra-native-target'
       NATIVE_CHECK_GROUP: "links"
     defaults:
       run:
@@ -76,6 +77,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Select the native target directory
+        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -87,7 +90,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      CARGO_TARGET_DIR: '${{ runner.temp }}/infra-native-target'
       NATIVE_CHECK_GROUP: "lint"
     defaults:
       run:
@@ -104,6 +106,8 @@ jobs:
           php-version: '8.3'
           coverage: none
           tools: none
+      - name: Select the native target directory
+        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -115,7 +119,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      CARGO_TARGET_DIR: '${{ runner.temp }}/infra-native-target'
       NATIVE_CHECK_GROUP: "mirrors"
     defaults:
       run:
@@ -127,6 +130,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Select the native target directory
+        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -138,7 +143,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      CARGO_TARGET_DIR: '${{ runner.temp }}/infra-native-target'
       NATIVE_CHECK_GROUP: "parity"
     defaults:
       run:
@@ -150,6 +154,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Select the native target directory
+        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
