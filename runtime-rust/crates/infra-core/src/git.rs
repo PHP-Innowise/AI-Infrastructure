@@ -76,12 +76,17 @@ pub fn run(
         .stdout
         .take()
         .ok_or_else(|| RuntimeError::unavailable("Git stdout unavailable"))?;
+    let waiter = thread::current();
     let reader = thread::spawn(move || {
         let mut output = Vec::new();
-        stdout
+        let read = stdout
             .take(output_limit as u64 + 1)
             .read_to_end(&mut output)
-            .map(|_| output)
+            .map(|_| output);
+        // The output ends with Git's exit, which the wait below would
+        // otherwise only notice on its next look.
+        waiter.unpark();
+        read
     });
     let writer = input.map(|input| {
         let stdin = child.stdin.take();
@@ -99,7 +104,7 @@ pub fn run(
             Ok(Some(status)) => break status,
             // Most Git queries answer within a few milliseconds: noticing the
             // exit late should cost at most a twentieth of the wait.
-            Ok(None) if Instant::now() < deadline => thread::sleep(
+            Ok(None) if Instant::now() < deadline => thread::park_timeout(
                 (started.elapsed() / 20)
                     .clamp(Duration::from_micros(100), Duration::from_millis(5)),
             ),

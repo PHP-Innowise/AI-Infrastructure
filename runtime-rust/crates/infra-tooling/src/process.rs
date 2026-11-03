@@ -45,6 +45,9 @@ pub(crate) struct OwnedChild {
     child: std::process::Child,
     #[cfg(unix)]
     group: i32,
+    /// The stdout and stderr descriptors behind the boxed pipes, or -1.
+    #[cfg(unix)]
+    fds: [i32; 2],
     #[cfg(windows)]
     child: infra_host::process::GuardedChild,
     finished: bool,
@@ -83,15 +86,9 @@ pub(crate) fn spawn_child(
             } else {
                 Stdio::null()
             });
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setpgid(0, 0) < 0 {
-                    Err(std::io::Error::last_os_error())
-                } else {
-                    Ok(())
-                }
-            });
-        }
+        // Unlike a pre-exec hook, a process group lets the standard library
+        // spawn without forking this process.
+        command.process_group(0);
         for (key, value) in environment {
             match value {
                 Some(value) => {
@@ -118,6 +115,7 @@ pub(crate) fn spawn_child(
             stdin: None,
             stdout: None,
             stderr: None,
+            fds: [-1, -1],
             finished: false,
         };
         if let Some(pipe) = owned.child.stdin.take() {
@@ -126,10 +124,12 @@ pub(crate) fn spawn_child(
         }
         if let Some(pipe) = owned.child.stdout.take() {
             nonblocking(&pipe)?;
+            owned.fds[0] = std::os::fd::AsRawFd::as_raw_fd(&pipe);
             owned.stdout = Some(Box::new(pipe));
         }
         if let Some(pipe) = owned.child.stderr.take() {
             nonblocking(&pipe)?;
+            owned.fds[1] = std::os::fd::AsRawFd::as_raw_fd(&pipe);
             owned.stderr = Some(Box::new(pipe));
         }
         Ok(owned)
@@ -262,8 +262,41 @@ impl Drop for OwnedChild {
         let _ = self.terminate();
     }
 }
+/// Read a pipe to its end, then wake `waiter`: the end of a child's output
+/// usually arrives with its exit, which the waiter would otherwise only notice
+/// on its next look.
 fn read_pipe(
+    pipe: Box<dyn Read + Send>,
+    fd: i32,
+    waiter: thread::Thread,
+    limit: usize,
+    stop: Arc<AtomicBool>,
+    overflow: Arc<AtomicBool>,
+) -> std::io::Result<Vec<u8>> {
+    let result = read_pipe_until_end(pipe, fd, limit, stop, overflow);
+    waiter.unpark();
+    result
+}
+/// Wait until `fd` is readable, at its end or `pause` has passed.
+fn pipe_wait(fd: i32, pause: Duration) {
+    #[cfg(unix)]
+    if fd >= 0 {
+        let mut entry = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let milliseconds = pause.as_millis().clamp(1, 1000) as libc::c_int;
+        // Interrupted or failed waits only end this pause early.
+        unsafe { libc::poll(&mut entry, 1, milliseconds) };
+        return;
+    }
+    let _ = fd;
+    thread::sleep(pause);
+}
+fn read_pipe_until_end(
     mut pipe: Box<dyn Read + Send>,
+    fd: i32,
     limit: usize,
     stop: Arc<AtomicBool>,
     overflow: Arc<AtomicBool>,
@@ -297,7 +330,7 @@ fn read_pipe(
                 if stop.load(Ordering::Acquire) {
                     return Ok(bytes);
                 }
-                thread::sleep(pause);
+                pipe_wait(fd, pause);
                 pause = (pause * 3 / 2).min(Duration::from_millis(2));
             }
             Err(error) => return Err(error),
@@ -376,15 +409,21 @@ pub fn run_with_env(
         .ok_or_else(|| RuntimeError::unavailable("Native stderr unavailable"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let overflow = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    let [out_fd, err_fd] = child.fds;
+    #[cfg(not(unix))]
+    let [out_fd, err_fd] = [-1, -1];
+    let waiter = thread::current();
     let out = {
         let stop = stop.clone();
         let overflow = overflow.clone();
-        thread::spawn(move || read_pipe(stdout, limit, stop, overflow))
+        let waiter = waiter.clone();
+        thread::spawn(move || read_pipe(stdout, out_fd, waiter, limit, stop, overflow))
     };
     let err = {
         let stop = stop.clone();
         let overflow = overflow.clone();
-        thread::spawn(move || read_pipe(stderr, limit, stop, overflow))
+        thread::spawn(move || read_pipe(stderr, err_fd, waiter, limit, stop, overflow))
     };
     let writer = if let Some(bytes) = input {
         let pipe = child
@@ -420,8 +459,9 @@ pub fn run_with_env(
         match child.try_wait() {
             Ok(Some(code)) => break Ok(code),
             // Short commands are common: noticing the exit late should cost
-            // at most a twentieth of the wait.
-            Ok(None) => thread::sleep(
+            // at most a twentieth of the wait. The readers wake this thread
+            // when the output ends, which is usually the exit.
+            Ok(None) => thread::park_timeout(
                 (started.elapsed() / 20)
                     .clamp(Duration::from_micros(100), Duration::from_millis(5)),
             ),
