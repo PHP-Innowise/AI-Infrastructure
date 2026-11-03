@@ -18,6 +18,7 @@
       "memory-bank/INDEX.md",
       "memory-bank/MCP.md",
       "memory-bank/README.md",
+      "memory-bank/bin/.gitignore",
       "memory-bank/config/mirror-rules.json",
       "memory-bank/templates/chunk.md",
       "project-brain/.gitignore",

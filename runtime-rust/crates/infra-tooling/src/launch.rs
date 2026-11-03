@@ -14,6 +14,10 @@ use std::path::Path;
 /// First line of every portable MCP launcher script; it marks ownership.
 pub const MARKER: &str = "# infra-engine portable launcher v1";
 const ENGINE: &str = "memory-bank/bin/infra-engine";
+/// `memory-bank/bin/.gitignore`, beside the engine, so that no project root
+/// `.gitignore` has to name it: installations ship it from the editions and the
+/// generator seeds it.
+pub const ENGINE_IGNORE: &str = "# Each checkout installs its own native engine; it is never committed.\n/infra-engine\n/infra-engine.exe\n";
 
 /// Whether this platform's installations use the portable form.
 pub fn enabled() -> bool {

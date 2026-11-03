@@ -62,6 +62,15 @@ edition's own files remain in that edition's changelog.
   otherwise `cwd` or Cursor's `workspace_roots`): a second clone or a copy on
   the same machine read and recorded the original checkout's memory. They now
   say so instead and record nothing; the shell guard still applies.
+- An upgraded or generated project no longer offers the engine for commit.
+  `install --sync` keeps a project-owned root `.gitignore` without a managed
+  block as it is, so after upgrading a Python-era installation the 47 MB
+  `memory-bank/bin/infra-engine` was untracked but not ignored and
+  `git add -A` staged it; a generated project's composed root `.gitignore`
+  never named it either. Every edition now ships `memory-bank/bin/.gitignore`
+  (core manifest and inventories), the generator seeds the same rules beside
+  the engine, and the root agent instructions drop the stale source-first
+  migration gate that deferred builds and tests.
 - Hooks answer several times faster than after the move to Rust and no slower
   than the Python runtime did (medians on fresh copies of one installed
   project, before → after, Python in brackets): prompt memory 305 → 34 ms

@@ -474,3 +474,15 @@ fn committed_launchers_are_the_generated_ones_and_find_their_root() {
         );
     }
 }
+
+#[test]
+fn every_edition_ships_the_ignore_rules_beside_its_engine() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    for edition in ["Laravel", "Symfony", "PHP Core", "Cms/wordpress"] {
+        assert_eq!(
+            fs::read_to_string(source.join(edition).join("memory-bank/bin/.gitignore")).unwrap(),
+            infra_tooling::launch::ENGINE_IGNORE,
+            "{edition}"
+        );
+    }
+}

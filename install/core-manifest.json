@@ -17,6 +17,7 @@
     "project-brain/tests/*.py",
     "project-brain/tests/fixtures/memory-probes.json",
     ".claude/hooks/*.sh",
+    "memory-bank/bin/.gitignore",
     "memory-bank/bin/infra-engine",
     "memory-bank/bin/infra-engine.exe",
     "memory-bank/runtime-capabilities.json",

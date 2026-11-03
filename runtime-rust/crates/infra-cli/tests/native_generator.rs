@@ -181,6 +181,11 @@ fn generate_edit_classify_keep_revalidate_lifecycle() {
     assert_eq!(emitted["staging_only"], true);
     assert_eq!(emitted["canonical_edition"], ".agents");
     assert_eq!(fs::read(staging.join(&installed)).unwrap(), engine);
+    // A generated project's root .gitignore need not name the engine.
+    assert_eq!(
+        fs::read_to_string(staging.join("memory-bank/bin/.gitignore")).unwrap(),
+        infra_tooling::launch::ENGINE_IGNORE
+    );
     assert_eq!(
         json_file(&staging, "project-brain/config/runtime.json"),
         json!({"framework":"symfony","canonical_edition":".agents"})

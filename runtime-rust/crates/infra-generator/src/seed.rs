@@ -174,6 +174,14 @@ pub fn assets(
             mode: executable,
         },
     );
+    output.insert(
+        "memory-bank/bin/.gitignore".into(),
+        Image {
+            source: "native engine ignore rules".into(),
+            bytes: infra_tooling::launch::ENGINE_IGNORE.as_bytes().to_vec(),
+            mode: 0o644,
+        },
+    );
     for (from, to) in [
         ("runtime-contract.json", "memory-bank/runtime-contract.json"),
         ("MCP.md", "memory-bank/MCP.md"),

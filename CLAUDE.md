@@ -43,13 +43,7 @@ source custody and repository operations. PHP is needed only for PHP snippet
 validation; provider CLIs and optional ONNX/vector libraries are selected
 explicitly for the operations that use them.
 
-**Source-first migration gate:** complete the production Rust implementation
-before dependency fetches, builds, formatting, tests, checks, or provider calls.
-Keep those phases marked deferred until the implementation gate is closed.
-The commands below describe the later validation and maintenance phase; their
-presence is not evidence that they have run.
-
-### Native validation after the implementation gate
+### Native validation
 
 ```bash
 cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine

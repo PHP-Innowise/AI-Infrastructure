@@ -1167,6 +1167,7 @@ impl LegacySyncUpgrade {
         let mut wanted = [
             ".claude/settings.json",
             "memory-bank/INDEX.md",
+            "memory-bank/bin/.gitignore",
             "project-brain/config/runtime.json",
             "tasks/.task-counter",
         ]
@@ -1488,6 +1489,10 @@ fn schema_one_sync_preserves_client_guard_and_entire_old_runtime_until_review() 
 fn pristine_schema_one_sync_installs_native_engine_rewires_hooks_and_preserves_authority() {
     let _serial = exclusive();
     let fixture = LegacySyncUpgrade::new(false);
+    // The project's own root ignore file has no managed block and never named
+    // the engine; the sync keeps it.
+    let root_ignore = b"vendor/\n.env\n";
+    write(&fixture.target.join(".gitignore"), root_ignore);
     let before = images(&fixture.target);
     let home = images(&fixture.boxed.home);
     let codex_home = images(&fixture.boxed.codex_home);
@@ -1581,6 +1586,38 @@ fn pristine_schema_one_sync_installs_native_engine_rewires_hooks_and_preserves_a
     ] {
         assert_eq!(record["files"][name].as_str().unwrap().len(), 64, "{name}");
     }
+    // The engine never enters the project's history: its ignore rules are
+    // installed beside it.
+    assert_eq!(
+        fs::read(fixture.target.join(".gitignore")).unwrap(),
+        root_ignore
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.target.join("memory-bank/bin/.gitignore")).unwrap(),
+        infra_tooling::launch::ENGINE_IGNORE
+    );
+    let git = |args: &[&str]| {
+        infra_core::git::run(
+            &fixture.target,
+            &infra_core::git::strings(args),
+            None,
+            Duration::from_secs(15),
+            1024 * 1024,
+        )
+        .unwrap()
+    };
+    assert_eq!(git(&["init", "--quiet", "--template="]).code, 0);
+    assert_eq!(
+        git(&["check-ignore", "--quiet", "--", ENGINE_PATH]).code,
+        0,
+        "the installed engine is not ignored"
+    );
+    let untracked = git(&["status", "--porcelain", "--untracked-files=all"]).stdout;
+    let untracked = String::from_utf8_lossy(&untracked);
+    assert!(
+        untracked.contains("memory-bank/bin/.gitignore") && !untracked.contains("infra-engine"),
+        "{untracked}"
+    );
     fixture.assert_authority_unchanged();
     assert!(images(&fixture.boxed.home) == home);
     assert!(images(&fixture.boxed.codex_home) == codex_home);
@@ -1590,8 +1627,9 @@ fn pristine_schema_one_sync_installs_native_engine_rewires_hooks_and_preserves_a
 fn native_sync_holds_legacy_style_config_for_custom_guard_without_python_retirement() {
     let _serial = exclusive();
     let fixture = LegacySyncUpgrade::new(true);
-    // This is the zero-retirement boundary: all native wrappers and the engine
-    // already exist. Only the recorded old-style host configuration would change.
+    // This is the zero-retirement boundary: all native wrappers, the engine and
+    // its ignore rules already exist. Only the recorded old-style host
+    // configuration would change.
     let installed = fixture.target.join(ENGINE_PATH);
     fs::create_dir_all(installed.parent().unwrap()).unwrap();
     fs::copy(engine(), &installed).unwrap();
@@ -1606,6 +1644,10 @@ fn native_sync_holds_legacy_style_config_for_custom_guard_without_python_retirem
         ENGINE_PATH.into(),
         json!(infra_core::query::sha256(&fs::read(&installed).unwrap())),
     );
+    let ignore = "memory-bank/bin/.gitignore";
+    let bytes = fs::read(fixture.source.join("PHP Core").join(ignore)).unwrap();
+    write(&fixture.target.join(ignore), &bytes);
+    known.insert(ignore.into(), json!(infra_core::query::sha256(&bytes)));
     for role in LEGACY_SYNC_HOOKS {
         if *role == "bash-validator" {
             continue;
