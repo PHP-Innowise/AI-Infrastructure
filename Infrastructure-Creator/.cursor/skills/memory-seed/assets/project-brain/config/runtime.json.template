@@ -8,7 +8,7 @@
     "team"
   ],
   "automatic_compaction": true,
-  "automatic_completion": true,
+  "automatic_completion": false,
   "automatic_consolidation": false,
   "automatic_consolidation_verification": false,
   "automatic_promotion": true,

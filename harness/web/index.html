@@ -6,14 +6,6 @@
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="A local workspace for AI Infrastructure sessions, project context, and accelerators.">
   <title>AI Infrastructure Harness</title>
-  <script>
-    // Runs before first paint so a dark page never flashes white; the sidebar switch keeps it current.
-    (() => {
-      let saved = null;
-      try { saved = localStorage.getItem('harness.theme.v1'); } catch (_) { /* Storage may be disabled. */ }
-      document.documentElement.dataset.theme = saved === 'light' || saved === 'dark' ? saved : window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    })();
-  </script>
   <link rel="icon" type="image/svg+xml" href="/icons/ai-accelerator.svg">
   <link rel="stylesheet" href="/app.css">
 </head>
@@ -381,19 +373,6 @@
     <div class="folder-picker-actions"><button class="button" type="button" id="merge-picker-cancel">Cancel</button><button class="button primary" type="button" id="merge-picker-continue" disabled>Continue with selected chats</button></div>
   </dialog>
   <div class="run-file-card" id="run-file-card" role="dialog" aria-label="File details" hidden></div>
-  <script src="/app-core.js"></script>
-  <script src="/run-model.js"></script>
-  <script src="/run-view.js"></script>
-  <script src="/composer-commands.js"></script>
-  <script src="/app-knowledge.js"></script>
-  <script src="/memory-use.js"></script>
-  <script src="/context-usage.js"></script>
-  <script src="/app-setup.js"></script>
-  <script src="/app-skills.js"></script>
-  <script src="/app-creator.js"></script>
-  <script src="/agent-activity.js"></script>
-  <script src="/system.js"></script>
-  <script src="/system-editor.js"></script>
-  <script src="/system-discovery.js"></script>
+  <script type="module" src="/boot.js"></script>
 </body>
 </html>

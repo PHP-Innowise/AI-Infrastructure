@@ -15,7 +15,7 @@ arguments and never completes work.
 
 1. Resolve the repository root with `git rev-parse --show-toplevel`; stop safely
    if it fails.
-2. Take the mode `python3 memory-bank/scripts/context.py status --json`
+2. Take the mode `memory-bank/bin/infra-engine memory status --json`
    reports (`mode`): it reads the installation's
    `project-brain/config/runtime.json`, which a worktree the installation
    serves, or a project an accelerator is lent to, does not hold. If its mode is
@@ -30,16 +30,16 @@ arguments and never completes work.
 1. The task ID is the one the hooks name: `CONTEXT_TASK_ID`, otherwise
    `git symbolic-ref --quiet --short HEAD`. On a detached HEAD it is the
    `automatic_memory.task_identity.task_id` that
-   `python3 memory-bank/scripts/context.py status --json` reports - the
+   `memory-bank/bin/infra-engine memory status --json` reports - the
    branch a rebase in progress rewrites, or `codex-thread/<thread>` in a
    worktree Codex made for a thread. When that is null, stop with its
    `remediation` rather than inventing an ID.
-2. Run `python3 memory-bank/scripts/context.py turn --task-id <task> --flush --json`.
+2. Run `memory-bank/bin/infra-engine memory turn --task-id <task> --flush --json`.
    It flushes the turns the Stop hook buffered into the governed task and
    creates the task when this is its first checkpoint.
 3. Write one concise sanitized line of what the checkpoint cannot see - the
    goal, a decision, the next step - with
-   `python3 memory-bank/scripts/context.py update --task-id <task> --revision auto --progress "<summary>"`
+   `memory-bank/bin/infra-engine memory update --task-id <task> --revision auto --progress "<summary>"`
    and, when there is one, `--next-step "<step>"`. Never store raw diffs,
    file bodies, prompts, responses, logs, or secrets; the runtime refuses
    likely secrets and personal data.
@@ -66,7 +66,7 @@ arguments and never completes work.
    Read safe untracked files only after filtering.
 5. Create a concise sanitized progress summary. Never store raw diffs, file
    bodies, prompts, responses, logs, or secrets.
-6. Run `python3 memory-bank/scripts/context.py --mode lightweight get --task-id
+6. Run `memory-bank/bin/infra-engine memory --mode lightweight get --task-id
    <task> --json`. If absent, run `start` with goal `Checkpoint work on
    <task>` and one `--file` argv value per exact changed path. Then run
    `update` with the summary and the same exact paths, preserving leading and

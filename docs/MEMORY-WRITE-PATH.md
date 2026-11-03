@@ -10,7 +10,7 @@ source citation set, and provide **all three** fields:
 - `record_id`: the existing Brain finding/decision UUID, not its MEM identifier;
 - `expected_revision`: the numeric revision actually inspected;
 - `source_fingerprints`: the complete checked file image returned by
-  `context.py source-fingerprints --source PATH --json` or the read-only
+  `memory-bank/bin/infra-engine memory source-fingerprints --source PATH --json` or the read-only
   `memory_source_fingerprints` MCP tool. Text hashes normalize CRLF to LF;
   reading hashes alone does not verify a claim.
 
@@ -107,7 +107,7 @@ the derived index is regenerated from the restored bank. This mechanism neither
 re-attests knowledge nor provides an atomic view to unlocked readers. See
 [the operational procedure](OPERATIONS.md#bank-retire).
 
-These maintainer-only tools use standard-library Python and never install a
+These maintainer-only tools use native Rust services and never install a
 provider or change a client's configuration. They are local implementation and
 measurement infrastructure, not evidence of improved task outcomes. Both
 automatic consolidation defaults remain off. Live held-out acceptance follows
@@ -116,14 +116,14 @@ automatic consolidation defaults remain off. Live held-out acceptance follows
 ### Consolidation on a copy
 
 ```bash
-python3 scripts/memory_consolidation_pilot.py --root /private/project-snapshot --variant consolidate-verify --out /private/consolidation.json --export /private/new-treatment
+infra-engine eval memory-consolidation-pilot --root /private/project-snapshot --variant consolidate-verify --out /private/consolidation.json --export /private/new-treatment
 ```
 
 Variants are `baseline`, `consolidate` (verification off), and
 `consolidate-verify`. The tool makes a physical bounded copy, excludes Git
 administration, credentials, attachment launchers and local caches, and never
 executes runtime code from the input. Public canonical skill/policy citations
-remain as data. A fresh isolated Python worker invokes the trusted canonical
+remain as data. A fresh isolated native worker invokes the trusted canonical
 `auto_consolidate → auto_promote → auto_compact` for three boundaries. It checks
 its roots before mutation and verifies the input digest afterwards.
 
@@ -141,7 +141,7 @@ or 64 MiB total are refused rather than silently truncated.
 ### Current-fact projection
 
 ```bash
-python3 scripts/memory_current_facts.py --root /private/project-snapshot --selectors /private/selectors.json --as-of 2026-10-31T00:00:00Z --json
+infra-engine eval memory-current-facts --root /private/project-snapshot --selectors /private/selectors.json --as-of 2026-10-31T00:00:00Z --json
 ```
 
 The default source format remains **public JSON**, not free-text extraction. A
@@ -255,7 +255,7 @@ application work and tests, the agent opens a review plan **before its final
 answer**:
 
 ```bash
-python3 memory-bank/scripts/context.py memory-review --task-id ID --json
+memory-bank/bin/infra-engine memory memory-review --task-id ID --json
 ```
 
 This stage currently requires an existing authorized active task and up to three
@@ -331,9 +331,9 @@ After the primary exits and completes its native progress-only save, the host
 exports a packet and later supplies its captured review:
 
 ```bash
-python3 memory-bank/scripts/context.py memory-review-controller --task-id ID \
+memory-bank/bin/infra-engine memory memory-review-controller --task-id ID \
   --proposal-id PROPOSAL --proposal-sha SHA --action export --json
-python3 memory-bank/scripts/context.py memory-review-controller --task-id ID \
+memory-bank/bin/infra-engine memory memory-review-controller --task-id ID \
   --proposal-id PROPOSAL --proposal-sha SHA --action apply \
   --packet /private/controller/packet.json \
   --authorization /private/controller/authorization.json --json
@@ -391,7 +391,7 @@ benefit. Full-source/model checks used isolated copies; defaults stayed off.
 ### Read-only freshness packet
 
 ```bash
-python3 scripts/memory_freshness_plan.py --root /private/project-snapshot --limit 50 --json
+infra-engine eval memory-freshness-plan --root /private/project-snapshot --limit 50 --json
 ```
 
 This runs the real provenance audit on a physical copy and groups its findings
@@ -420,8 +420,8 @@ real client tasks.
 Explicit evidence capture can include a fresh chunk before its sources change:
 
 ```bash
-python3 scripts/memory_freshness_plan.py --root /private/project-snapshot --evidence --chunk memory-bank/chunks/MEM-YYYYMMDD-xxxxxxxx-claim.md --out /private/evidence.json
-python3 scripts/memory_freshness_plan.py --root /private/project-snapshot --packet /private/evidence.json --decisions /private/decisions.json --export /private/new-reviewed-copy --out /private/review-report.json
+infra-engine eval memory-freshness-plan --root /private/project-snapshot --evidence --chunk memory-bank/chunks/MEM-YYYYMMDD-xxxxxxxx-claim.md --out /private/evidence.json
+infra-engine eval memory-freshness-plan --root /private/project-snapshot --packet /private/evidence.json --decisions /private/decisions.json --export /private/new-reviewed-copy --out /private/review-report.json
 ```
 
 Without `--chunk`, evidence capture uses the freshness queue. Packets bind the
@@ -524,8 +524,8 @@ Three write-path gaps follow:
 ## 1. Consolidate a ticket's completed events
 
 ```bash
-python3 memory-bank/scripts/context.py consolidate --ticket CMS-741          # dry-run
-python3 memory-bank/scripts/context.py consolidate --ticket CMS-741 --apply
+memory-bank/bin/infra-engine memory consolidate --ticket CMS-741          # dry-run
+memory-bank/bin/infra-engine memory consolidate --ticket CMS-741 --apply
 ```
 
 The turn boundary runs the same pass when a project sets
@@ -614,8 +614,8 @@ record. The gate is about what the machine does without a reviewer.
 Two operator commands expose the state:
 
 ```bash
-python3 memory-bank/scripts/context.py bank-audit --provenance --json
-python3 memory-bank/scripts/context.py bank-quarantine --id MEM-... --reason "suspected poisoning"
+memory-bank/bin/infra-engine memory bank-audit --provenance --json
+memory-bank/bin/infra-engine memory bank-quarantine --id MEM-... --reason "suspected poisoning"
 ```
 
 An `auto-promoted` chunk that reads like an instruction is withheld from
@@ -665,7 +665,7 @@ local, dependency-free and extendable in one table.
 ## 4. Deterministic fact consolidation
 
 ```bash
-python3 scripts/memory_fact_consolidation.py --input facts.json --json
+infra-engine eval memory-fact-consolidation --input facts.json --json
 ```
 
 The tool groups candidate facts by `fact`, takes the maximum explicit
@@ -730,7 +730,7 @@ passages, but the current stand does not justify it.
 
 ## 5. Optional local vector pool
 
-`scripts/memory_sqlite_vec_pilot.py` probes local `sqlite-vec`/`sqlite-lembed`
+`infra-engine pilot sqlite-vec probe` probes local `sqlite-vec`/`sqlite-lembed`
 assets and fuses a dense path list with the lexical one through RRF. It is
 maintainer-only and fails closed; the runtime never imports it. See
 [the pilot doc](MEMORY-SQLITE-VEC-PILOT.md).

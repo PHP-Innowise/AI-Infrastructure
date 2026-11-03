@@ -23,7 +23,7 @@ particular chats into a new task:
 1. List available captured chats; use the exact returned `host:session` values:
 
    ```bash
-   python3 memory-bank/scripts/context_continuity.py --host codex --event list
+   memory-bank/bin/infra-engine continuity --host codex --event list
    ```
 
    Set `--host` to the destination client: `codex`, `claude`, or `cursor`.
@@ -33,7 +33,7 @@ particular chats into a new task:
 2. Freeze all selected sources in one local archive for the next new task:
 
    ```bash
-   python3 memory-bank/scripts/context_continuity.py --host codex --event merge --source-session codex:CHAT_A --source-session claude:CHAT_B
+   memory-bank/bin/infra-engine continuity --host codex --event merge --source-session codex:CHAT_A --source-session claude:CHAT_B
    ```
 
    Check success before proceeding. A missing/invalid source or an already
@@ -60,7 +60,7 @@ particular chats into a new task:
 2. Run the read-only facade without transcript content by default:
 
    ```bash
-   python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --json
+   memory-bank/bin/infra-engine memory context-load --input HANDOFF.md --json
    ```
 
    Add `--include-transcript` only when the user explicitly asks to load the

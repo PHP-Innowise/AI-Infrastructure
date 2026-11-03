@@ -1,0 +1,6093 @@
+{
+  "memory-eval/run": {
+    "--set": {
+      "flags": [
+        "--set"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4793
+      }
+    },
+    "--judgments": {
+      "flags": [
+        "--judgments"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4794
+      }
+    },
+    "--passages": {
+      "flags": [
+        "--passages"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4795
+      }
+    },
+    "--projects-root": {
+      "flags": [
+        "--projects-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4796
+      }
+    },
+    "--edition": {
+      "flags": [
+        "--edition"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "auto",
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4797
+      }
+    },
+    "--out": {
+      "flags": [
+        "--out"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4802
+      }
+    },
+    "--host": {
+      "flags": [
+        "--host"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "claude",
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4803
+      },
+      "choices": [
+        "claude",
+        "codex",
+        "cursor"
+      ]
+    },
+    "--limit": {
+      "flags": [
+        "--limit"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4804
+      }
+    },
+    "--ids": {
+      "flags": [
+        "--ids"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4805
+      }
+    },
+    "--as-of": {
+      "flags": [
+        "--as-of"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "prompt",
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4806
+      },
+      "choices": [
+        "prompt",
+        "now"
+      ],
+      "dest": "as_of"
+    },
+    "--clock": {
+      "flags": [
+        "--clock"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "as-of",
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4813
+      },
+      "choices": [
+        "as-of",
+        "real"
+      ]
+    },
+    "--updated-after": {
+      "flags": [
+        "--updated-after"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "drop",
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4819
+      },
+      "choices": [
+        "drop",
+        "keep"
+      ]
+    },
+    "--cache": {
+      "flags": [
+        "--cache"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4828
+      }
+    },
+    "--timeout": {
+      "flags": [
+        "--timeout"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": 30,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4829
+      }
+    },
+    "--keep": {
+      "flags": [
+        "--keep"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4830
+      }
+    },
+    "--diagnose-misses": {
+      "flags": [
+        "--diagnose-misses"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4831
+      }
+    },
+    "--audit-git": {
+      "flags": [
+        "--audit-git"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4835
+      }
+    },
+    "--onnx-excerpts": {
+      "flags": [
+        "--onnx-excerpts"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4842
+      }
+    },
+    "--onnx-timeout": {
+      "flags": [
+        "--onnx-timeout"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": 5,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4845
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-eval/run"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--runtime-binary": {
+      "flags": [
+        "--runtime-binary"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--onnx-worker": {
+      "flags": [
+        "--onnx-worker"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--onnx-ort-library": {
+      "flags": [
+        "--onnx-ort-library"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "memory-eval/report": {
+    "$result": {
+      "flags": [
+        "result"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4849
+      },
+      "positional": true
+    },
+    "--compare": {
+      "flags": [
+        "--compare"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4850
+      }
+    },
+    "--show-unjudged": {
+      "flags": [
+        "--show-unjudged"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4851
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-eval/report"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-eval/realized": {
+    "--project": {
+      "flags": [
+        "--project"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4857
+      }
+    },
+    "--claude-root": {
+      "flags": [
+        "--claude-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "~/.claude/projects",
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4858
+      }
+    },
+    "--codex-root": {
+      "flags": [
+        "--codex-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "~/.codex/sessions",
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4859
+      }
+    },
+    "--state": {
+      "flags": [
+        "--state"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4860
+      }
+    },
+    "--since": {
+      "flags": [
+        "--since"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4862
+      }
+    },
+    "--json": {
+      "flags": [
+        "--json"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4863
+      }
+    },
+    "--paths": {
+      "flags": [
+        "--paths"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4864
+      }
+    },
+    "--traces": {
+      "flags": [
+        "--traces"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4865
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-eval/realized"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-eval/field-check": {
+    "--project": {
+      "flags": [
+        "--project"
+      ],
+      "actions": [
+        "append"
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4871
+      }
+    },
+    "--claude-root": {
+      "flags": [
+        "--claude-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "~/.claude/projects",
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4872
+      }
+    },
+    "--codex-root": {
+      "flags": [
+        "--codex-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "~/.codex/sessions",
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4873
+      }
+    },
+    "--since": {
+      "flags": [
+        "--since"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4874
+      }
+    },
+    "--min-turns": {
+      "flags": [
+        "--min-turns"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": false,
+      "default": 50,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4875
+      }
+    },
+    "--json": {
+      "flags": [
+        "--json"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4877
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-eval/field-check"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-eval/funnel": {
+    "--project": {
+      "flags": [
+        "--project"
+      ],
+      "actions": [
+        "append"
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4882
+      }
+    },
+    "--since": {
+      "flags": [
+        "--since"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4884
+      }
+    },
+    "--json": {
+      "flags": [
+        "--json"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4885
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-eval/funnel"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-eval/install-status": {
+    "--project": {
+      "flags": [
+        "--project"
+      ],
+      "actions": [
+        "append"
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4890
+      }
+    },
+    "--json": {
+      "flags": [
+        "--json"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_eval.py",
+        "line": 4891
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-eval/install-status"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-outcome-ab/sample": {
+    "--projects": {
+      "flags": [
+        "--projects"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2443
+      }
+    },
+    "--projects-root": {
+      "flags": [
+        "--projects-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": "Desktop"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2444
+      }
+    },
+    "--transcripts": {
+      "flags": [
+        "--transcripts"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": ".claude/projects"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2445
+      }
+    },
+    "--hosts": {
+      "flags": [
+        "--hosts"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "claude",
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2446
+      }
+    },
+    "--codex-root": {
+      "flags": [
+        "--codex-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": ".codex/sessions"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2448
+      }
+    },
+    "--before": {
+      "flags": [
+        "--before"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2449
+      }
+    },
+    "--after": {
+      "flags": [
+        "--after"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2450
+      }
+    },
+    "--exclude-set": {
+      "flags": [
+        "--exclude-set"
+      ],
+      "actions": [
+        "append"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2451
+      }
+    },
+    "--require-ticket-commits": {
+      "flags": [
+        "--require-ticket-commits"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2452
+      }
+    },
+    "--n": {
+      "flags": [
+        "--n"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2455
+      }
+    },
+    "--seed": {
+      "flags": [
+        "--seed"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2456
+      }
+    },
+    "--out": {
+      "flags": [
+        "--out"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2457
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-outcome-ab/sample"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-outcome-ab/recall-sources": {
+    "--projects": {
+      "flags": [
+        "--projects"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2460
+      }
+    },
+    "--projects-root": {
+      "flags": [
+        "--projects-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": "Desktop"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2461
+      }
+    },
+    "--transcripts": {
+      "flags": [
+        "--transcripts"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": ".claude/projects"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2462
+      }
+    },
+    "--hosts": {
+      "flags": [
+        "--hosts"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "claude",
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2463
+      }
+    },
+    "--codex-root": {
+      "flags": [
+        "--codex-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": ".codex/sessions"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2465
+      }
+    },
+    "--before": {
+      "flags": [
+        "--before"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2466
+      }
+    },
+    "--after": {
+      "flags": [
+        "--after"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2467
+      }
+    },
+    "--exclude-set": {
+      "flags": [
+        "--exclude-set"
+      ],
+      "actions": [
+        "append"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2468
+      }
+    },
+    "--out": {
+      "flags": [
+        "--out"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2469
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-outcome-ab/recall-sources"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-outcome-ab/recall-set": {
+    "--sources": {
+      "flags": [
+        "--sources"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2471
+      }
+    },
+    "--projects-root": {
+      "flags": [
+        "--projects-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": "Desktop"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2472
+      }
+    },
+    "--scenarios": {
+      "flags": [
+        "--scenarios"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2473
+      }
+    },
+    "--regime": {
+      "flags": [
+        "--regime"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "next",
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2475
+      },
+      "choices": [
+        "next",
+        "later"
+      ]
+    },
+    "--exclude-id": {
+      "flags": [
+        "--exclude-id"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2478
+      }
+    },
+    "--n": {
+      "flags": [
+        "--n"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2479
+      }
+    },
+    "--seed": {
+      "flags": [
+        "--seed"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2480
+      }
+    },
+    "--out": {
+      "flags": [
+        "--out"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2481
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-outcome-ab/recall-set"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-outcome-ab/run": {
+    "--endpoint": {
+      "flags": [
+        "--endpoint"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "first-touch",
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2483
+      },
+      "choices": [
+        "first-touch",
+        "task-complete"
+      ]
+    },
+    "--protocol": {
+      "flags": [
+        "--protocol"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2484
+      }
+    },
+    "--verifiers": {
+      "flags": [
+        "--verifiers"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2485
+      }
+    },
+    "--set": {
+      "flags": [
+        "--set"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2486
+      }
+    },
+    "--out": {
+      "flags": [
+        "--out"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2487
+      }
+    },
+    "--projects-root": {
+      "flags": [
+        "--projects-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": "Desktop"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2488
+      }
+    },
+    "--transcripts": {
+      "flags": [
+        "--transcripts"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": ".claude/projects"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2489
+      }
+    },
+    "--codex-root": {
+      "flags": [
+        "--codex-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": ".codex/sessions"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2490
+      }
+    },
+    "--cache": {
+      "flags": [
+        "--cache"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2492
+      }
+    },
+    "--arms": {
+      "flags": [
+        "--arms"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "off,capsule",
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2493
+      }
+    },
+    "--ids": {
+      "flags": [
+        "--ids"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2494
+      }
+    },
+    "--cap": {
+      "flags": [
+        "--cap"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": false,
+      "default": 40,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2495
+      }
+    },
+    "--repeat": {
+      "flags": [
+        "--repeat"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": false,
+      "default": 1,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2496
+      }
+    },
+    "--timeout": {
+      "flags": [
+        "--timeout"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": 900,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2497
+      }
+    },
+    "--model": {
+      "flags": [
+        "--model"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2498
+      }
+    },
+    "--codex": {
+      "flags": [
+        "--codex"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "codex",
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2499
+      }
+    },
+    "--keep": {
+      "flags": [
+        "--keep"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2500
+      }
+    },
+    "--events": {
+      "flags": [
+        "--events"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2501
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-outcome-ab/run"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--runtime-binary": {
+      "flags": [
+        "--runtime-binary"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "memory-outcome-ab/report": {
+    "$result": {
+      "flags": [
+        "result"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2504
+      },
+      "positional": true
+    },
+    "--json": {
+      "flags": [
+        "--json"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2505
+      }
+    },
+    "--compare": {
+      "flags": [
+        "--compare"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "off,capsule",
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2506
+      }
+    },
+    "--metric": {
+      "flags": [
+        "--metric"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2508
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-outcome-ab/report"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-outcome-ab/seal": {
+    "--projects-root": {
+      "flags": [
+        "--projects-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": "Desktop"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2512
+      }
+    },
+    "--transcripts": {
+      "flags": [
+        "--transcripts"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": ".claude/projects"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2513
+      }
+    },
+    "--codex-root": {
+      "flags": [
+        "--codex-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": ".codex/sessions"
+      },
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2514
+      }
+    },
+    "--arms": {
+      "flags": [
+        "--arms"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "off,capsule",
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2515
+      }
+    },
+    "--repeat": {
+      "flags": [
+        "--repeat"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": false,
+      "default": 1,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2516
+      }
+    },
+    "--cap": {
+      "flags": [
+        "--cap"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": false,
+      "default": 40,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2517
+      }
+    },
+    "--timeout": {
+      "flags": [
+        "--timeout"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": 900,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2518
+      }
+    },
+    "--model": {
+      "flags": [
+        "--model"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2519
+      }
+    },
+    "--codex": {
+      "flags": [
+        "--codex"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "codex",
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2520
+      }
+    },
+    "--set": {
+      "flags": [
+        "--set"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2511
+      }
+    },
+    "--verifiers": {
+      "flags": [
+        "--verifiers"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2511
+      }
+    },
+    "--design": {
+      "flags": [
+        "--design"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2511
+      }
+    },
+    "--out": {
+      "flags": [
+        "--out"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2511
+      }
+    },
+    "--cache": {
+      "flags": [
+        "--cache"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_outcome_ab.py",
+        "line": 2511
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-outcome-ab/seal"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--runtime-binary": {
+      "flags": [
+        "--runtime-binary"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "memory-native-ab/plan": {
+    "--config": {
+      "flags": [
+        "--config"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_native_ab.py",
+        "line": 490
+      }
+    },
+    "--out": {
+      "flags": [
+        "--out"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_native_ab.py",
+        "line": 491
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-native-ab/plan"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--runtime-binary": {
+      "flags": [
+        "--runtime-binary"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "memory-native-ab/run": {
+    "--run": {
+      "flags": [
+        "--run"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_native_ab.py",
+        "line": 494
+      }
+    },
+    "--stage": {
+      "flags": [
+        "--stage"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "both",
+      "source": {
+        "path": "scripts/memory_native_ab.py",
+        "line": 496
+      },
+      "choices": [
+        "both",
+        "source",
+        "served"
+      ]
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-native-ab/run"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--runtime-binary": {
+      "flags": [
+        "--runtime-binary"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "memory-native-ab/inspect": {
+    "--run": {
+      "flags": [
+        "--run"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_native_ab.py",
+        "line": 494
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-native-ab/inspect"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--runtime-binary": {
+      "flags": [
+        "--runtime-binary"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "codex-bench": {
+    "--codex": {
+      "flags": [
+        "--codex"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "codex",
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 808
+      }
+    },
+    "--edition": {
+      "flags": [
+        "--edition"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "PHP Core",
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 809
+      },
+      "choices": [
+        "Laravel",
+        "PHP Core",
+        "Symfony",
+        "WordPress"
+      ]
+    },
+    "--timeout": {
+      "flags": [
+        "--timeout"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": 240,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 810
+      }
+    },
+    "--sandbox": {
+      "flags": [
+        "--sandbox"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "workspace-write",
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 811
+      },
+      "choices": [
+        "workspace-write",
+        "read-only"
+      ]
+    },
+    "--keep": {
+      "flags": [
+        "--keep"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 813
+      }
+    },
+    "--target": {
+      "flags": [
+        "--target"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 814
+      }
+    },
+    "--sync": {
+      "flags": [
+        "--sync"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 815
+      }
+    },
+    "--exclude": {
+      "flags": [
+        "--exclude"
+      ],
+      "actions": [
+        "append"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": [],
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 816
+      }
+    },
+    "--attached": {
+      "flags": [
+        "--attached"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 817
+      },
+      "nargs": "?",
+      "const": ""
+    },
+    "--queued": {
+      "flags": [
+        "--queued"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 819
+      }
+    },
+    "--subfolder": {
+      "flags": [
+        "--subfolder"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 822
+      }
+    },
+    "--worktree": {
+      "flags": [
+        "--worktree"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 824
+      },
+      "choices": [
+        "beside",
+        "codex",
+        "inside"
+      ],
+      "nargs": "?",
+      "const": "inside"
+    },
+    "--app-server": {
+      "flags": [
+        "--app-server"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 827
+      }
+    },
+    "--cli": {
+      "flags": [
+        "--cli"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 829
+      },
+      "choices": [
+        "checkpoint"
+      ]
+    },
+    "--inside": {
+      "flags": [
+        "--inside"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 832
+      }
+    },
+    "--work": {
+      "flags": [
+        "--work"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 833
+      }
+    },
+    "--source": {
+      "flags": [
+        "--source"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 834
+      }
+    },
+    "--packages": {
+      "flags": [
+        "--packages"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/codex_bench.py",
+        "line": 835
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "codex-bench"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--runtime-binary": {
+      "flags": [
+        "--runtime-binary"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "claude-code-bench": {
+    "--claude": {
+      "flags": [
+        "--claude"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": {
+        "provider": "which",
+        "program": "claude",
+        "fallback": "claude"
+      },
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 976
+      }
+    },
+    "--edition": {
+      "flags": [
+        "--edition"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "PHP Core",
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 977
+      },
+      "choices": [
+        "Laravel",
+        "PHP Core",
+        "Symfony",
+        "WordPress"
+      ]
+    },
+    "--shell": {
+      "flags": [
+        "--shell"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": {
+        "provider": "which",
+        "program": "bash",
+        "fallback": "/bin/bash"
+      },
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 978
+      }
+    },
+    "--timeout": {
+      "flags": [
+        "--timeout"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": 180,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 980
+      }
+    },
+    "--mode": {
+      "flags": [
+        "--mode"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "default",
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 981
+      },
+      "choices": [
+        "default",
+        "acceptEdits",
+        "auto",
+        "dontAsk",
+        "bypassPermissions",
+        "plan"
+      ]
+    },
+    "--subfolder": {
+      "flags": [
+        "--subfolder"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 982
+      }
+    },
+    "--sandbox": {
+      "flags": [
+        "--sandbox"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 984
+      }
+    },
+    "--desktop": {
+      "flags": [
+        "--desktop"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 986
+      }
+    },
+    "--worktree": {
+      "flags": [
+        "--worktree"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 989
+      }
+    },
+    "--enter-worktree": {
+      "flags": [
+        "--enter-worktree"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 992
+      }
+    },
+    "--cli": {
+      "flags": [
+        "--cli"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 994
+      },
+      "choices": [
+        "retrieve",
+        "checkpoint"
+      ],
+      "nargs": "?",
+      "const": "retrieve"
+    },
+    "--permissions": {
+      "flags": [
+        "--permissions"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 998
+      }
+    },
+    "--queued": {
+      "flags": [
+        "--queued"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 1000
+      }
+    },
+    "--attached": {
+      "flags": [
+        "--attached"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 1003
+      },
+      "nargs": "?",
+      "const": ""
+    },
+    "--target": {
+      "flags": [
+        "--target"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 1005
+      }
+    },
+    "--sync": {
+      "flags": [
+        "--sync"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 1006
+      }
+    },
+    "--exclude": {
+      "flags": [
+        "--exclude"
+      ],
+      "actions": [
+        "append"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": [],
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 1007
+      }
+    },
+    "--source": {
+      "flags": [
+        "--source"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 1008
+      }
+    },
+    "--keep": {
+      "flags": [
+        "--keep"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 1009
+      }
+    },
+    "--inside": {
+      "flags": [
+        "--inside"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 1010
+      }
+    },
+    "--work": {
+      "flags": [
+        "--work"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/claude_code_bench.py",
+        "line": 1011
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "claude-code-bench"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--runtime-binary": {
+      "flags": [
+        "--runtime-binary"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "memory-graph-pilot": {
+    "--out-dir": {
+      "flags": [
+        "--out-dir"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_graph_pilot.py",
+        "line": 170
+      }
+    },
+    "--baseline-ref": {
+      "flags": [
+        "--baseline-ref"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "HEAD",
+      "source": {
+        "path": "scripts/memory_graph_pilot.py",
+        "line": 172
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-graph-pilot"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--runtime-binary": {
+      "flags": [
+        "--runtime-binary"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--baseline-runtime": {
+      "flags": [
+        "--baseline-runtime"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--build-baseline": {
+      "flags": [
+        "--build-baseline"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-selective-retrieve-pilot": {
+    "--hook": {
+      "flags": [
+        "--hook"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_selective_retrieve_pilot.py",
+        "line": 163
+      }
+    },
+    "--enabled": {
+      "flags": [
+        "--enabled"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_selective_retrieve_pilot.py",
+        "line": 164
+      }
+    },
+    "--rules": {
+      "flags": [
+        "--rules"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_selective_retrieve_pilot.py",
+        "line": 165
+      }
+    },
+    "--audit": {
+      "flags": [
+        "--audit"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_selective_retrieve_pilot.py",
+        "line": 166
+      }
+    },
+    "--runtime-dir": {
+      "flags": [
+        "--runtime-dir"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_selective_retrieve_pilot.py",
+        "line": 167
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-selective-retrieve-pilot"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-throttle-oracle-v2": {
+    "--source": {
+      "flags": [
+        "--source"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_throttle_oracle_v2.py",
+        "line": 362
+      }
+    },
+    "--public-test": {
+      "flags": [
+        "--public-test"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_throttle_oracle_v2.py",
+        "line": 363
+      }
+    },
+    "--php": {
+      "flags": [
+        "--php"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "/usr/bin/php",
+      "source": {
+        "path": "scripts/memory_throttle_oracle_v2.py",
+        "line": 366
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-throttle-oracle-v2"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-onnx-pilot": {
+    "--context": {
+      "flags": [
+        "--context"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_onnx_pilot.py",
+        "line": 44
+      }
+    },
+    "--assets": {
+      "flags": [
+        "--assets"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_onnx_pilot.py",
+        "line": 45
+      }
+    },
+    "--worker-timeout": {
+      "flags": [
+        "--worker-timeout"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": 5,
+      "source": {
+        "path": "scripts/memory_onnx_pilot.py",
+        "line": 47
+      }
+    },
+    "--invocation-timeout": {
+      "flags": [
+        "--invocation-timeout"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": 30,
+      "source": {
+        "path": "scripts/memory_onnx_pilot.py",
+        "line": 48
+      }
+    },
+    "--invocation-deadline": {
+      "flags": [
+        "--invocation-deadline"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_onnx_pilot.py",
+        "line": 49
+      }
+    },
+    "--stats": {
+      "flags": [
+        "--stats"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_onnx_pilot.py",
+        "line": 50
+      }
+    },
+    "$arguments": {
+      "flags": [
+        "arguments"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_onnx_pilot.py",
+        "line": 51
+      },
+      "nargs": "REMAINDER",
+      "positional": true
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-onnx-pilot"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--root": {
+      "flags": [
+        "--root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--worker": {
+      "flags": [
+        "--worker"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--ort-library": {
+      "flags": [
+        "--ort-library"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "native_extension": true
+    },
+    "--eval-clock": {
+      "flags": [
+        "--eval-clock"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "memory-current-facts": {
+    "--root": {
+      "flags": [
+        "--root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_current_facts.py",
+        "line": 360
+      }
+    },
+    "--selectors": {
+      "flags": [
+        "--selectors"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_current_facts.py",
+        "line": 361
+      }
+    },
+    "--as-of": {
+      "flags": [
+        "--as-of"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_current_facts.py",
+        "line": 362
+      }
+    },
+    "--json": {
+      "flags": [
+        "--json"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_current_facts.py",
+        "line": 363
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-current-facts"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-fact-consolidation": {
+    "--input": {
+      "flags": [
+        "--input"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_fact_consolidation.py",
+        "line": 104
+      }
+    },
+    "--json": {
+      "flags": [
+        "--json"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_fact_consolidation.py",
+        "line": 105
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-fact-consolidation"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-freshness-plan": {
+    "--root": {
+      "flags": [
+        "--root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_freshness_plan.py",
+        "line": 552
+      }
+    },
+    "--limit": {
+      "flags": [
+        "--limit"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": false,
+      "default": 50,
+      "source": {
+        "path": "scripts/memory_freshness_plan.py",
+        "line": 553
+      }
+    },
+    "--json": {
+      "flags": [
+        "--json"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_freshness_plan.py",
+        "line": 554
+      }
+    },
+    "--evidence": {
+      "flags": [
+        "--evidence"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_freshness_plan.py",
+        "line": 555
+      }
+    },
+    "--chunk": {
+      "flags": [
+        "--chunk"
+      ],
+      "actions": [
+        "append"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_freshness_plan.py",
+        "line": 556
+      }
+    },
+    "--packet": {
+      "flags": [
+        "--packet"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_freshness_plan.py",
+        "line": 557
+      }
+    },
+    "--decisions": {
+      "flags": [
+        "--decisions"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_freshness_plan.py",
+        "line": 558
+      }
+    },
+    "--export": {
+      "flags": [
+        "--export"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_freshness_plan.py",
+        "line": 559
+      }
+    },
+    "--out": {
+      "flags": [
+        "--out"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_freshness_plan.py",
+        "line": 560
+      }
+    },
+    "--owner": {
+      "flags": [
+        "--owner"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "local",
+      "source": {
+        "path": "scripts/memory_freshness_plan.py",
+        "line": 561
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-freshness-plan"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-rollout-rehearsal": {
+    "--target": {
+      "flags": [
+        "--target"
+      ],
+      "actions": [
+        "append"
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_rollout_rehearsal.py",
+        "line": 489
+      }
+    },
+    "--hosts": {
+      "flags": [
+        "--hosts"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "claude,codex",
+      "source": {
+        "path": "scripts/memory_rollout_rehearsal.py",
+        "line": 491
+      }
+    },
+    "--profiles": {
+      "flags": [
+        "--profiles"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "config,recall",
+      "source": {
+        "path": "scripts/memory_rollout_rehearsal.py",
+        "line": 492
+      }
+    },
+    "--work": {
+      "flags": [
+        "--work"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_rollout_rehearsal.py",
+        "line": 493
+      }
+    },
+    "--exclude": {
+      "flags": [
+        "--exclude"
+      ],
+      "actions": [
+        "append"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": [],
+      "source": {
+        "path": "scripts/memory_rollout_rehearsal.py",
+        "line": 494
+      }
+    },
+    "--timeout": {
+      "flags": [
+        "--timeout"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": 60,
+      "source": {
+        "path": "scripts/memory_rollout_rehearsal.py",
+        "line": 496
+      }
+    },
+    "--worktree": {
+      "flags": [
+        "--worktree"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_rollout_rehearsal.py",
+        "line": 497
+      }
+    },
+    "--keep": {
+      "flags": [
+        "--keep"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_rollout_rehearsal.py",
+        "line": 500
+      }
+    },
+    "--json": {
+      "flags": [
+        "--json"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_rollout_rehearsal.py",
+        "line": 501
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-rollout-rehearsal"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--runtime-binary": {
+      "flags": [
+        "--runtime-binary"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "memory-lifecycle-fuzz": {
+    "--seed": {
+      "flags": [
+        "--seed"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": false,
+      "default": 1,
+      "source": {
+        "path": "scripts/memory_lifecycle_fuzz.py",
+        "line": 992
+      }
+    },
+    "--edition": {
+      "flags": [
+        "--edition"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "PHP Core",
+      "source": {
+        "path": "scripts/memory_lifecycle_fuzz.py",
+        "line": 993
+      },
+      "choices": [
+        "PHP Core",
+        "Laravel",
+        "Symfony",
+        "WordPress"
+      ]
+    },
+    "--attached": {
+      "flags": [
+        "--attached"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_lifecycle_fuzz.py",
+        "line": 994
+      }
+    },
+    "--steps": {
+      "flags": [
+        "--steps"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": false,
+      "default": 60,
+      "source": {
+        "path": "scripts/memory_lifecycle_fuzz.py",
+        "line": 996
+      }
+    },
+    "--contention": {
+      "flags": [
+        "--contention"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": 0,
+      "source": {
+        "path": "scripts/memory_lifecycle_fuzz.py",
+        "line": 997
+      }
+    },
+    "--interrupt": {
+      "flags": [
+        "--interrupt"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "float"
+      ],
+      "required": false,
+      "default": 0,
+      "source": {
+        "path": "scripts/memory_lifecycle_fuzz.py",
+        "line": 1000
+      }
+    },
+    "--work": {
+      "flags": [
+        "--work"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_lifecycle_fuzz.py",
+        "line": 1003
+      }
+    },
+    "--verbose": {
+      "flags": [
+        "--verbose"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_lifecycle_fuzz.py",
+        "line": 1004
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-lifecycle-fuzz"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--runtime-binary": {
+      "flags": [
+        "--runtime-binary"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "memory-miss-audit": {
+    "--corpus": {
+      "flags": [
+        "--corpus"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_miss_audit.py",
+        "line": 448
+      }
+    },
+    "--manifest": {
+      "flags": [
+        "--manifest"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_miss_audit.py",
+        "line": 449
+      }
+    },
+    "--paths-json": {
+      "flags": [
+        "--paths-json"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_miss_audit.py",
+        "line": 450
+      }
+    },
+    "--query-withheld": {
+      "flags": [
+        "--query-withheld"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_miss_audit.py",
+        "line": 451
+      }
+    },
+    "--audit-git": {
+      "flags": [
+        "--audit-git"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_miss_audit.py",
+        "line": 452
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-miss-audit"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--eval-clock": {
+      "flags": [
+        "--eval-clock"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "memory-consolidation-pilot": {
+    "--root": {
+      "flags": [
+        "--root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_consolidation_pilot.py",
+        "line": 105
+      }
+    },
+    "--variant": {
+      "flags": [
+        "--variant"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_consolidation_pilot.py",
+        "line": 106
+      },
+      "choices": [
+        "baseline",
+        "consolidate",
+        "consolidate-verify"
+      ]
+    },
+    "--owner": {
+      "flags": [
+        "--owner"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": "local",
+      "source": {
+        "path": "scripts/memory_consolidation_pilot.py",
+        "line": 107
+      }
+    },
+    "--export": {
+      "flags": [
+        "--export"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_consolidation_pilot.py",
+        "line": 108
+      }
+    },
+    "--out": {
+      "flags": [
+        "--out"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_consolidation_pilot.py",
+        "line": 109
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-consolidation-pilot"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  },
+  "memory-rerank-pilot": {
+    "--runtime": {
+      "flags": [
+        "--runtime"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "controller",
+        "reason": "Native in-process retrieval replaces the retired default script directory."
+      },
+      "source": {
+        "path": "scripts/memory_rerank_pilot.py",
+        "line": 192
+      }
+    },
+    "--database": {
+      "flags": [
+        "--database"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_rerank_pilot.py",
+        "line": 197
+      }
+    },
+    "--queries": {
+      "flags": [
+        "--queries"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": true,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_rerank_pilot.py",
+        "line": 198
+      }
+    },
+    "--judgments": {
+      "flags": [
+        "--judgments"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/memory_rerank_pilot.py",
+        "line": 199
+      }
+    },
+    "--limit": {
+      "flags": [
+        "--limit"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": false,
+      "default": 3,
+      "source": {
+        "path": "scripts/memory_rerank_pilot.py",
+        "line": 200
+      }
+    },
+    "--json": {
+      "flags": [
+        "--json"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/memory_rerank_pilot.py",
+        "line": 201
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "memory-rerank-pilot"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "--eval-clock": {
+      "flags": [
+        "--eval-clock"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    }
+  },
+  "cost-attribution": {
+    "--root": {
+      "flags": [
+        "--root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": {
+        "provider": "home",
+        "relative": ".claude/projects"
+      },
+      "source": {
+        "path": "scripts/cost_attribution.py",
+        "line": 142
+      }
+    },
+    "--project": {
+      "flags": [
+        "--project"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/cost_attribution.py",
+        "line": 148
+      }
+    },
+    "--by": {
+      "flags": [
+        "--by"
+      ],
+      "actions": [
+        "append"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": null,
+      "source": {
+        "path": "scripts/cost_attribution.py",
+        "line": 149
+      },
+      "choices": [
+        "agent",
+        "mcp",
+        "plugin",
+        "skill",
+        "tool"
+      ]
+    },
+    "--top": {
+      "flags": [
+        "--top"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "int"
+      ],
+      "required": false,
+      "default": 15,
+      "source": {
+        "path": "scripts/cost_attribution.py",
+        "line": 155
+      }
+    },
+    "--json": {
+      "flags": [
+        "--json"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "source": {
+        "path": "scripts/cost_attribution.py",
+        "line": 156
+      }
+    },
+    "$contract": {
+      "profile": "eval-cli-v2",
+      "source_commit": "6628d976d3fa1ca2d03ebb7d8714503a7b87b824",
+      "operation": "cost-attribution"
+    },
+    "--source-root": {
+      "flags": [
+        "--source-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--tooling-root": {
+      "flags": [
+        "--tooling-root"
+      ],
+      "actions": [
+        null
+      ],
+      "types": [
+        "path"
+      ],
+      "required": false,
+      "default": null,
+      "native_extension": true
+    },
+    "--help": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    },
+    "-h": {
+      "flags": [
+        "--help"
+      ],
+      "actions": [
+        "store_true"
+      ],
+      "types": [
+        null
+      ],
+      "required": false,
+      "default": false,
+      "native_extension": true
+    }
+  }
+}

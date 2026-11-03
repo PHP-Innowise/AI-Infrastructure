@@ -6,8 +6,10 @@ Reproduce only the Run IDs assigned to you and return independently reviewable,
 sanitized evidence. Do not modify accelerator source code or change QA
 dispositions while testing.
 
-Record the repository commit SHA, operating system, PHP/Python versions,
-AI-client version, exact commands, exit codes, and unavailable dependencies.
+Record the repository commit SHA, operating system, native engine version and
+artifact identity, PHP version where relevant, AI-client version, exact
+commands, exit codes, and unavailable dependencies. Keep the original runtime
+requirements of historical definitions in their evidence records.
 
 ## Pending Cases
 
@@ -52,10 +54,16 @@ checksum-verified package described in
 
 ## Codex Cases
 
-```bash
-scripts/qa/.venv/bin/python scripts/qa/run_tc_ai.py --list
+Use the native engine from the repository root. Listing accepts the historical
+catalog; execution requires a reviewed schema `2.0.0` native command catalog.
+Follow the explicit migration procedure in [README.md](README.md) first.
+The runner refuses the legacy Python catalog and never treats that refusal as
+passing evidence.
 
-scripts/qa/.venv/bin/python scripts/qa/run_tc_ai.py \
+```bash
+infra-engine qa run --list
+
+infra-engine qa run \
   --run-id RUN-20260803-XXX \
   --output-root docs/qa/evidence-<developer>
 ```

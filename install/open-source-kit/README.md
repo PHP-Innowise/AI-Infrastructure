@@ -15,15 +15,15 @@ Run from this repository. Python 3.9+ is sufficient for the catalog and web
 preview. Skill management additionally needs Node.js **22.20.0+** and `npx`.
 
 ```bash
-./kit3 serve
+infra-engine kit serve
 # Open http://127.0.0.1:8765
 
-./kit3 find review --agent codex
-./kit3 show caveman
-./kit3 add caveman --agent codex --list
-./kit3 add caveman --agent codex --target /path/to/project --dry-run
-./kit3 add caveman --agent codex --target /path/to/project
-./kit3 list --target /path/to/project
+infra-engine kit find review --agent codex
+infra-engine kit show caveman
+infra-engine kit add caveman --agent codex --list
+infra-engine kit add caveman --agent codex --target /path/to/project --dry-run
+infra-engine kit add caveman --agent codex --target /path/to/project
+infra-engine kit list --target /path/to/project
 ```
 
 The browser provides search, category/client/review filters, resource detail
@@ -35,7 +35,7 @@ repository. For static hosting, build and publish the resulting directory using
 your existing hosting workflow:
 
 ```bash
-./kit3 build --output output/kit3-site
+infra-engine kit build --output output/kit3-site
 ```
 
 There is no server API, database, remote font or frontend dependency. The web
@@ -69,16 +69,16 @@ an error directing you to `show`; its prose guide is never executed.
 
 ```bash
 # Discover components before choosing which ones to install.
-./kit3 add vercel-labs/agent-skills --list
-./kit3 add owner/repo --skill skill-name --agent codex --copy --target /path/to/project
+infra-engine kit add vercel-labs/agent-skills --list
+infra-engine kit add owner/repo --skill skill-name --agent codex --copy --target /path/to/project
 
 # Repeat --agent / --skill for an explicit selection.
-./kit3 add owner/repo --skill first --skill second --agent codex --agent cursor
+infra-engine kit add owner/repo --skill first --skill second --agent codex --agent cursor
 
-./kit3 list --json --target /path/to/project
-./kit3 update skill-name --target /path/to/project --dry-run
-./kit3 update skill-name --target /path/to/project
-./kit3 remove skill-name --agent codex --target /path/to/project
+infra-engine kit list --json --target /path/to/project
+infra-engine kit update skill-name --target /path/to/project --dry-run
+infra-engine kit update skill-name --target /path/to/project
+infra-engine kit remove skill-name --agent codex --target /path/to/project
 ```
 
 Commands that use the native manager print the exact argv and target on stderr;
@@ -104,10 +104,10 @@ lock state. Changes to installed content need a new review.
 The original selector remains compatible:
 
 ```bash
-python3 scripts/install_open_source_kit.py --list
-python3 scripts/install_open_source_kit.py --select caveman --target /path/to/project --dry-run
-./kit3 record caveman --target /path/to/project --pin caveman=EXACT_REVIEWED_REF
-./kit3 list --recorded --json --target /path/to/project
+infra-engine kit --list
+infra-engine kit --select caveman --target /path/to/project --dry-run
+infra-engine kit record caveman --target /path/to/project --pin caveman=EXACT_REVIEWED_REF
+infra-engine kit list --recorded --json --target /path/to/project
 ```
 
 `record` selects catalog entries; it installs nothing. `.kit3-manifest.json`
@@ -163,15 +163,19 @@ implemented guarantees of Kit 3.
 ## Verification
 
 ```bash
-python3 scripts/validate_registry.py --check
-python3 -m unittest tests.test_registry tests.test_open_source_kit tests.test_kit_fetcher tests.test_kit3 tests.test_kit3_catalog
+infra-engine repo registry --check
+infra-engine check --group rust --strict --base origin/main
 bash -n kit3
 shellcheck -S error kit3
-./kit3 build --output output/kit3-site
+infra-engine kit build --output output/kit3-site
 ```
 
-Tests use temporary directories and process mocks for the native boundary; the
-normal suite does not download or install third-party packages. A separate
-manual smoke test can use an owned local Git repository to check add, list,
+The registry command checks admission data; the site builder verifies and binds
+the supplied Rust/Wasm assets. The Rust check group runs the current workspace
+tests, formatting and Clippy. Record each actual result separately; these
+commands do not establish live third-party installation, provider behavior or
+residue-free removal. Retained Python Kit tests are historical references, not
+a current runtime oracle. A separate manual smoke test can use an owned local
+Git repository to check add, list,
 content update and removal through the pinned manager without installing an
 upstream skill into a working project.

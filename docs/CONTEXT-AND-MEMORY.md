@@ -151,8 +151,8 @@ specification replacement, or durable knowledge base.
 
 ### Local Context Engine
 
-The Local Context Engine is the Python/SQLite retrieval runtime exposed through
-`memory-bank/scripts/context.py`. Its default database is the ignored
+The Local Context Engine is the Rust/SQLite retrieval runtime exposed through
+`memory-bank/bin/infra-engine`. Its default database is the ignored
 `memory-bank/local/context.db`.
 
 It provides:
@@ -209,7 +209,7 @@ disabled. An external provider entry exists only as a disabled contract.
 Retrieval is not only on request: each edition's prompt hook injects a bounded
 Task Capsule into every request (Cursor reads it from the rendered
 `.cursor/rules/working-memory.mdc`), and the local memory MCP server
-(`memory-bank/scripts/mcp_server.py`, see `memory-bank/MCP.md`) offers the
+(`memory-bank/bin/infra-engine`, see `memory-bank/MCP.md`) offers the
 same runtime to the client as tools.
 
 ### Memory Bank
@@ -692,7 +692,7 @@ Maintainers can compare a committed runtime with the automatic working tree
 on identical synthetic prompt-time snapshots:
 
 ```bash
-python3 scripts/memory_graph_pilot.py --out-dir /tmp/source-link-comparison
+infra-engine eval memory-graph-pilot --out-dir /tmp/source-link-comparison
 ```
 
 The directory must be new and outside the clone. Baseline defaults to `HEAD`;
@@ -778,9 +778,9 @@ document should not outlive a change to it silently.
 
 #### Reaching it: `links` and `retrieve --path`
 
-    python3 memory-bank/scripts/context.py links --path specs/rounding.md
-    python3 memory-bank/scripts/context.py links --path specs --prefix
-    python3 memory-bank/scripts/context.py retrieve "..." --task-id T --path specs/rounding.md
+    memory-bank/bin/infra-engine memory links --path specs/rounding.md
+    memory-bank/bin/infra-engine memory links --path specs --prefix
+    memory-bank/bin/infra-engine memory retrieve "..." --task-id T --path specs/rounding.md
 
 `links` reports the citations; `retrieve --path` delivers them in the same
 capsule, budget and manifest as everything else. Both apply the full runtime
@@ -1011,7 +1011,7 @@ older clone put four projects that say `recall` on a runtime without it.
 
 The profile applies to the automatic entry points (`refresh`, which the Codex
 and Cursor hooks run, and Claude's `hook-context`). An explicit
-`context.py retrieve` always searches. Any other value leaves the turn without
+`memory-bank/bin/infra-engine memory retrieve` always searches. Any other value leaves the turn without
 a capsule and says why, as a broken index does.
 
 `navigation` is an opt-in profile. On 30 client tasks it reached the file a
@@ -1023,7 +1023,7 @@ through the document layers:
 - source hints are not delivered;
 - the Cursor rule carries no documents.
 
-An agent can still pull all of these with `context.py retrieve` or the MCP
+An agent can still pull all of these with `memory-bank/bin/infra-engine memory retrieve` or the MCP
 `memory_retrieve` tool. `recall` keeps the first of them - a session's saved
 result in the next session's capsule - and drops the other two.
 
@@ -1082,7 +1082,7 @@ useful one.
 Measurements like these are only honest on each project as it was when the
 prompt was written: an index of the project's current state lets knowledge
 written after the prompt, often about its own work, answer it. The
-[Memory Evaluation Stand](MEMORY-EVAL.md) (`scripts/memory_eval.py`) rebuilds
+[Memory Evaluation Stand](MEMORY-EVAL.md) (`infra-engine eval memory-eval`) rebuilds
 that state, overlays the runtime under test and scores the capsule against
 judged prompts.
 
@@ -1363,7 +1363,7 @@ successor took over, which the bank requires a link for, and `archived` when
 the knowledge simply ceased and nothing replaced it. The boolean model could
 not express that second case at all.
 
-Closing a period is an operation, not an editing convention: `context.py
+Closing a period is an operation, not an editing convention: `memory-bank/bin/infra-engine memory
 bank-retire --id MEM-... --valid-to YYYY-MM-DD [--superseded-by MEM-...]`
 writes the chunk, the other side of any replacement link, and the regenerated
 index under one lock and validates the bank. A bounded checkpoint records both
@@ -1613,7 +1613,7 @@ event's outcome; the events stay recorded until a chunk carries that finding
 propose -> apply
 ```
 
-`context.py promote-auto` runs the same pass on demand. The boundary waits for
+`memory-bank/bin/infra-engine memory promote-auto` runs the same pass on demand. The boundary waits for
 `--flush-after` turns, and knowledge recorded deliberately — what a Harness run
 drafted, saved when the run completes or after a person confirmed each
 learning — has no reason to wait for a counter. A learning the Harness saved
@@ -1691,7 +1691,7 @@ the write changed — the new chunk in full, and the bank for anything newly
 broken — and updates the proposal. These writes are snapshotted and rolled back
 together on failure. No shared counter is involved: the legacy
 `.memory-counter` file is neither read nor written, so concurrent promotions
-on different machines or branches cannot collide, and `context.py
+on different machines or branches cannot collide, and `memory-bank/bin/infra-engine memory
 reindex-bank` rebuilds the index after any merge.
 
 Promotion is appropriate for a reusable consequence, not:
@@ -2149,16 +2149,12 @@ context.
 
 ### CLI stream encoding and newlines
 
-At startup the memory CLI configures exact standard Python `TextIOWrapper`
-stdout/stderr instances for UTF-8, replacement encoding errors and untranslated
-LF. This applies to subsequent writes; it preserves explicit CR content and
-does not transcode bytes buffered before startup. Buffers and stream ownership
-are unchanged. Custom streams, including subclasses, retain the existing
-encoding/errors-only call, once per stream; their newline behavior is not
-certified. Unsupported configuration is best effort and cancellation propagates.
-Fresh controls use real supplied CRLF/CR/LF wrappers and an actual CLI error
-path. Native Windows, separate MCP/continuity entry points and live clients
-require their own evidence.
+The native CLI returns explicit stdout/stderr byte buffers. Text renderers emit
+UTF-8 and LF line endings; the launcher writes those bytes directly rather than
+configuring interpreter stream wrappers. Explicit CR bytes in supplied content
+remain content. Provider process streams use their own bounded byte transport.
+Native Windows console rendering, separate MCP/continuity transports and live
+clients require their own execution evidence.
 
 ### Generated read-hook identity
 
@@ -2209,10 +2205,10 @@ inside the project counts as present.
 Runtime metadata channels are batched before file hydration; optional unsafe or
 unindexed source hints abstain before policy admission. Raw search filters its
 bounded ranking pool (at most ten times the requested limit) before returning the
-limit; it does not promise arbitrary refill beyond that pool. Internal Python
-`search_documents` callers must supply `repository` for source-policy admission;
-all CLI/capsule runtime callers do so. A bare connection remains the legacy raw
-index helper and is not a runtime authority check.
+limit; it does not promise arbitrary refill beyond that pool. Native
+`infra_core::query::search` requires a `RuntimeContext` for source-policy
+admission. A bare SQLite connection remains an index access mechanism rather
+than a runtime authority check.
 
 Final admission prunes all delivered views of a document whose own path became
 ignored and recomputes signatures, usage and receipts, including episode-only
@@ -2266,7 +2262,7 @@ Current Memory Bank expiry is reapplied at delivery. Cached raw search checks th
 Cached delivery also reapplies the current secret-recognition grammar to full unhighlighted indexed title, summary and content, plus the returned path/title/snippet. A changed or refused masking result withholds the row; already-safe masked documents and template expressions retain their bytes. Raw search gets its checked image and snippet from the same SQL statement and preserves its five public fields. Governed retrieval retains the first admitted image through packing and rechecks it under the current grammar. Optional source hints enforce their cached-content byte bound before image hydration. Structured Brain/Memory Bank source records remain subject to strict whole-record checks, never masking metadata into authority. These checks do not establish an atomic prequote-to-prime database/filesystem epoch. Local manifest exclusion diagnostics may retain rejected identifiers; this is not a promise that every local artifact is free of such identifiers.
 
 
-Claude Code and Codex automatic prompt reads call `context.py refresh` directly, bounded by the hook's own `timeout` and its single `CONTEXT_HOOK_BUDGET` (default 5 seconds). Whatever budget the person sets is honoured, and the prompt reaches the CLI whole, whatever its length. A refresh stopped at the budget (status 124) delivers nothing - a cut capsule reads like a whole one - and the turn is told memory was not consulted. A refresh that fails names its cause with the CLI's own last stderr line; one that exits 1 after printing its layer report delivers that report. Cursor keeps its persistent-rule path. The hooks start the CLI through `memory-bank/scripts/context_cli.py`, which runs `context.py` as the same script from its cached bytecode: started directly, the 8,000-line module is compiled again on every prompt (about 30 ms); a runtime without the launcher falls back to `context.py`. The launcher writes that cache even when the caller asks Python for none - Claude Desktop starts Claude Code with `PYTHONDONTWRITEBYTECODE=1`, the hooks inherit it, and the Harness sets it - for the runtime's own directory only: `memory-bank/scripts/__pycache__/` is ignored wherever the runtime is installed, and nothing else the runtime imports is cached. A cold index too large for the budget still restarts on every prompt; this path does not implement resumable indexing, and in an installed project the budget message says to build the index once outside the hook (`python3 memory-bank/scripts/context.py index`).
+Claude Code and Codex automatic prompt reads call `memory-bank/bin/infra-engine memory refresh` directly, bounded by the hook's own `timeout` and its single `CONTEXT_HOOK_BUDGET` (default 5 seconds). Whatever budget the person sets is honoured, and the prompt reaches the CLI whole, whatever its length. A refresh stopped at the budget (status 124) delivers nothing - a cut capsule reads like a whole one - and the turn is told memory was not consulted. A refresh that fails names its cause with the CLI's own last stderr line; one that exits 1 after printing its layer report delivers that report. Cursor keeps its persistent-rule path. Hooks invoke the selected native engine directly with explicit runtime roots. The compiled runtime has no interpreter launcher, bytecode compilation or Python cache. A cold index too large for the budget still restarts on every prompt; this path does not implement resumable indexing, and in an installed project the budget message says to build the index once outside the hook (`memory-bank/bin/infra-engine memory index`).
 
 Candidate construction now holds the unhighlighted indexed image in the same SQL statement as its highlighted/plain quote. Missing rows and changed path/layer/kind/title identities remain unavailable rather than adopting a later cache image. Conflict/automatic-link rows capture the image with their body; path, hint and source-graph snippets reuse the already-admitted body, including the hint UTF-8 byte cap. This closes the quote-to-first-prime substitution gap.
 

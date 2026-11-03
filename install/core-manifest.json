@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "canonical": "PHP Core",
+  "editions": {
+    "Laravel": "Laravel",
+    "Symfony": "Symfony",
+    "PHP Core": "PHP Core",
+    "WordPress": "Cms/wordpress"
+  },
+  "includes": [
+    "memory-bank/config/*.json",
+    "memory-bank/MCP.md",
+    "memory-bank/templates/*",
+    "memory-bank/tests/*.py",
+    "project-brain/schemas/**/*",
+    "project-brain/PROTOCOL.md",
+    "project-brain/tests/*.py",
+    "project-brain/tests/fixtures/memory-probes.json",
+    ".claude/hooks/*.sh",
+    "memory-bank/bin/infra-engine",
+    "memory-bank/bin/infra-engine.exe",
+    "memory-bank/runtime-capabilities.json",
+    ".cursor/cli.json",
+    "project-brain/README.md"
+  ],
+  "allowed_drift": {
+    ".claude/hooks/bash-validator.sh": "framework-specific command policy",
+    ".claude/hooks/local-context.sh": "framework-specific session detection"
+  },
+  "retired": [
+    "memory-bank/scripts/*.py",
+    "project-brain/scripts/*.py",
+    "memory-bank/scripts/*.sh"
+  ]
+}

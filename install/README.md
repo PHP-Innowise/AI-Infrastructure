@@ -1,6 +1,6 @@
 # Accelerator Installer
 
-`scripts/install_accelerator.py` installs a ready-made Laravel, Symfony, PHP
+`infra-engine install` installs a ready-made Laravel, Symfony, PHP
 Core, or WordPress accelerator into an existing project from a versioned production
 inventory. It copies the selected production payload into the target root and
 refuses unsupported collisions before writing anything.
@@ -18,9 +18,9 @@ either of those, see the [Open-Source Kit](open-source-kit/README.md).
 ## Prerequisites
 
 - Clone or check out the accelerator repository separately from the target.
-- Use Python 3.9 or newer. The hooks find it as `python3`; on native Windows
-  (Git Bash) also as `python` or `py -3`, the names the python.org installer
-  provides.
+- Use the verified native `infra-engine` release for this platform
+  (`infra-engine.exe` on Windows). Installation binds each hook and MCP
+  handler to the final native executable and project root.
 - Put the target project in a clean, recoverable Git state.
 - Back up existing AI configuration, policies, Memory Bank, and Project Brain
   data.
@@ -45,7 +45,7 @@ and lock file.
 ## 2. Verify the Distribution Inventories
 
 ```bash
-python3 scripts/install_accelerator.py --verify-inventories
+infra-engine install --verify-inventories
 ```
 
 The command must report `VERIFIED` for Laravel, Symfony, PHP Core, and WordPress. An
@@ -61,7 +61,7 @@ changes. Do not infer the installed file set by counting every tracked file in
 an edition directory.
 
 The production payload keeps the files required to operate and adapt the
-accelerator: policies, native tool integrations, runtime scripts, workflow
+accelerator: policies, native tool integrations, the native runtime, workflow
 documentation, templates, Memory Bank, Project Brain, living-spec and
 lowercase `tasks/` scaffolds. Source-only research, test suites and worked
 examples remain in this repository but are not copied into a consuming project.
@@ -97,7 +97,7 @@ hand-maintained total.
 ```bash
 TARGET="/path/to/existing-project"
 
-python3 scripts/install_accelerator.py \
+infra-engine install \
   --edition "PHP Core" \
   --target "$TARGET" \
   --tool cursor \
@@ -115,8 +115,8 @@ Repeat `--tool` to select multiple integrations. Omit it to install all three.
 
 The selected clients automatically receive project Memory MCP registration:
 `.mcp.json` for Claude, `.cursor/mcp.json` for Cursor, and a managed table in
-`.codex/config.toml` for Codex. The installer detects Python with SQLite FTS5
-and uses portable launchers across worktrees and nested directories. It merges
+`.codex/config.toml` for Codex. The installer binds the final native executable
+and root explicitly for each host. It merges
 only the memory entry, preserves other servers/settings, and refuses a foreign
 same-name entry even under `--overwrite`. Native workspace trust/tool approval
 remains under client control. See [memory integration](../docs/MEMORY-INTEGRATION.md).
@@ -170,7 +170,7 @@ After obtaining a collision-free dry run, repeat the same command without
 
 ```bash
 set -o pipefail
-python3 scripts/install_accelerator.py \
+infra-engine install \
   --edition "PHP Core" \
   --target "$TARGET" \
   --tool cursor \
@@ -220,11 +220,11 @@ setup to the project's first Codex session in its root
 From the target project root:
 
 ```bash
-python3 memory-bank/scripts/validate.py
-python3 project-brain/scripts/validate.py --root .
-python3 memory-bank/scripts/context.py status --json
-python3 memory-bank/scripts/context.py validate --json
-python3 memory-bank/scripts/context.py index
+memory-bank/bin/infra-engine bank validate
+memory-bank/bin/infra-engine bank validate --root .
+memory-bank/bin/infra-engine memory status --json
+memory-bank/bin/infra-engine memory validate --json
+memory-bank/bin/infra-engine memory index
 git status --short
 ```
 
@@ -241,7 +241,7 @@ conventions, or specialized CI/CD. Infrastructure-Creator remains outside the
 target project and generates a bespoke accelerator from evidence found in that
 project.
 
-Do not run `scripts/install_accelerator.py` for this path. Infrastructure-Creator
+Do not run `infra-engine install` for this path. Infrastructure-Creator
 is operated by an AI assistant through its own workflows; `infra-scan`,
 `infra-generate`, `infra-build`, and `infra-update` are not terminal
 executables.
@@ -497,18 +497,37 @@ pre-existing project files or active records.
 After intentionally changing distribution files:
 
 ```bash
-python3 scripts/install_accelerator.py --write-inventories
-python3 scripts/install_accelerator.py --verify-inventories
-python3 -m unittest tests.test_installation
+infra-engine install --write-inventories
+infra-engine install --verify-inventories
+cargo test --manifest-path runtime-rust/Cargo.toml --locked -p infra-cli --test native_install
+infra-engine check --group installation --strict --base origin/main
 ```
 
 Review generated inventory changes before committing them.
 
-Inventories are generated from `git ls-files --cached`, so stage new
-distribution files before regenerating: an unstaged file is not part of the
-payload. The same rule keeps untracked working-tree content - a client
-application under `Task/`, caches, `.env` files - out of the shipped
-inventories and out of verification.
+Schema-v3 inventories resolve a closed payload from Git's tracked-file index
+(`git ls-files --cached`) plus exact static additions declared in
+`install/native-payload.json`. New ordinary tracked distribution files must
+belong to that index when inventories are generated. The native allowlist is an
+explicit exception for declared static resources; its sorted paths and optional
+files are captured under file custody. It does not discover arbitrary untracked
+directories, client applications, caches, credentials or `.env` files. The
+selected native engine is a separately identified artifact. Installation admits
+it by its capabilities and content hash rather than by a directory scan.
+
+Regenerate affected canonical resources and mirrors before inventory generation.
+Review inventory membership, exclusions, source overrides and the native-engine
+descriptor as deliberate payload changes.
+
+Inventory verification establishes that the versioned payload declaration agrees
+with current admitted sources. The `native_install` integration target separately
+runs the actual Cargo engine against real edition sources and isolated temporary
+projects and client-home directories: it exercises real edition planning, dry-run/apply, copied-engine
+capabilities, collisions, source/target races, rollback and materialized MCP
+configuration. Run the named tests and record their actual results; an inventory
+match alone does not establish those behaviors, live AI-client operation or
+native Windows execution. Retained Python installation tests describe the former
+implementation and are not registered as a working native oracle.
 
 ## Further Documentation
 

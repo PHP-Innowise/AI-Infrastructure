@@ -53,7 +53,7 @@ Do not store task plans, speculative ideas, chat transcripts, generic PHP advice
 
 After checking a promoted claim against current code, read its cited Brain
 record and retain its UUID and numeric revision. Read the complete file image
-with `python3 memory-bank/scripts/context.py source-fingerprints --source PATH --json`
+with `memory-bank/bin/infra-engine memory source-fingerprints --source PATH --json`
 (or MCP `memory_source_fingerprints`). These hashes do not establish truth.
 
 In the ordinary result/native save, preserve the learning's type, title and
@@ -72,7 +72,7 @@ promotion failures; do not clear stale warnings merely by reading or indexing.
 3. Update the existing chunk when the concept already exists.
 4. For a new concept, mint a conflict-free ID `MEM-YYYYMMDD-xxxxxxxx` (today's UTC date plus eight lowercase hex characters, e.g. from `uuid.uuid4().hex[:8]`) and create `chunks/MEM-YYYYMMDD-xxxxxxxx-short-slug.md` from the template. Legacy `MEM-NNNN` chunks keep their IDs; the retired `.memory-counter` is never read or incremented.
 5. Cite repository paths, specifications, decisions, or external authoritative sources that verify the claim.
-6. Regenerate the index with `python3 memory-bank/scripts/context.py reindex-bank`; `INDEX.md` is a derived view over chunk frontmatter, so never hand-edit its rows.
+6. Regenerate the index with `memory-bank/bin/infra-engine memory reindex-bank`; `INDEX.md` is a derived view over chunk frontmatter, so never hand-edit its rows.
 7. Validate metadata, links, duplicate IDs, status transitions, and secret safety.
 
 Chunk metadata uses a JSON object between Markdown frontmatter delimiters. JSON is valid YAML, so standard YAML-aware editors can read it while `scripts/validate.py` can validate it without a third-party dependency.
@@ -80,7 +80,7 @@ Chunk metadata uses a JSON object between Markdown frontmatter delimiters. JSON 
 Run:
 
 ```bash
-python3 memory-bank/scripts/validate.py
+memory-bank/bin/infra-engine bank validate
 ```
 
 ## Project Brain Boundary And Local Context Engine
@@ -163,26 +163,26 @@ For the manual flow, run these lifecycle commands from the edition root or
 consuming-project root:
 
 ```bash
-python3 memory-bank/scripts/context.py index
-python3 memory-bank/scripts/context.py start \
+memory-bank/bin/infra-engine memory index
+memory-bank/bin/infra-engine memory start \
   --task-id BAUMAS-133 \
   --goal "Invalidate other password-change sessions"
-python3 memory-bank/scripts/context.py update \
+memory-bank/bin/infra-engine memory update \
   --task-id BAUMAS-133 \
   --progress "Two-session regression passes" \
   --next-step "Verify the old remember-me cookie"
-python3 memory-bank/scripts/context.py retrieve \
+memory-bank/bin/infra-engine memory retrieve \
   "password session invalidation" \
   --task-id BAUMAS-133
-python3 memory-bank/scripts/context.py complete \
+memory-bank/bin/infra-engine memory complete \
   --task-id BAUMAS-133 \
   --outcome "Other sessions and stale remember-me cookies are invalidated" \
   --verification "ChangePasswordTest passed"
-python3 memory-bank/scripts/context.py brain-create finding \
+memory-bank/bin/infra-engine memory brain-create finding \
   --external-id FINDING-1 \
   --title "Observed reusable constraint" \
   --source specs/constraint.md
-python3 memory-bank/scripts/context.py brain-update \
+memory-bank/bin/infra-engine memory brain-update \
   --record-id UUID \
   --revision 1 \
   --transition investigating

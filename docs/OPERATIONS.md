@@ -9,10 +9,10 @@ Run commands from the selected accelerator or consuming-project root, where
 `memory-bank/` and `project-brain/` are siblings:
 
 ```bash
-python3 memory-bank/scripts/context.py --help
+memory-bank/bin/infra-engine memory --help
 ```
 
-Requirements are Python 3.9 or later and SQLite with FTS5. No network service,
+Requirements are the platform's native engine, its versioned resources and SQLite FTS5. No network service,
 MCP server, embeddings provider, or daemon is required.
 
 ## Installation Inventory Operations
@@ -21,8 +21,8 @@ Ready-made edition installation is governed by exact, versioned inventories,
 not by directory-wide exclusions. From the accelerator repository root:
 
 ```bash
-python3 scripts/install_accelerator.py --verify-inventories
-python3 scripts/install_accelerator.py \
+infra-engine install --verify-inventories
+infra-engine install \
   --edition Laravel \
   --target "/path/with spaces/project" \
   --tool claude \
@@ -102,7 +102,7 @@ treating them as settled.
   context on every remaining turn.
 
 Two related facts worth knowing before optimizing anything here. A file under
-`.claude/`, `.cursor/` or `.codex/` that `scripts/build_mirrors.py --check`
+`.claude/`, `.cursor/` or `.codex/` that `infra-engine repo mirrors --check`
 regenerates is not canon: edit the canonical source, or the change is silently
 discarded on the next `--write`. Each edition's `.gitattributes` lists exactly
 those generated files so they collapse to a stub in review diffs; the
@@ -138,24 +138,24 @@ Example:
 ```bash
 export PROJECT_BRAIN_OWNER=alice
 
-python3 memory-bank/scripts/context.py status --json
-python3 memory-bank/scripts/context.py validate
-python3 memory-bank/scripts/context.py parity
+memory-bank/bin/infra-engine memory status --json
+memory-bank/bin/infra-engine memory validate
+memory-bank/bin/infra-engine memory parity
 
-python3 memory-bank/scripts/context.py start \
+memory-bank/bin/infra-engine memory start \
   --task-id TASK-123 \
   --goal "Add two-factor authentication" \
   --source specs/two-factor-auth.md \
   --json
 
-python3 memory-bank/scripts/context.py index --json
+memory-bank/bin/infra-engine memory index --json
 
-python3 memory-bank/scripts/context.py retrieve \
+memory-bank/bin/infra-engine memory retrieve \
   "two-factor authentication requirements and security rules" \
   --task-id TASK-123 \
   --json
 
-python3 memory-bank/scripts/context.py update \
+memory-bank/bin/infra-engine memory update \
   --task-id TASK-123 \
   --revision 1 \
   --progress "TOTP enrollment and verification implemented" \
@@ -164,7 +164,7 @@ python3 memory-bank/scripts/context.py update \
   --source specs/two-factor-auth.md \
   --json
 
-python3 memory-bank/scripts/context.py complete \
+memory-bank/bin/infra-engine memory complete \
   --task-id TASK-123 \
   --revision 2 \
   --outcome "Two-factor authentication implemented" \
@@ -181,10 +181,10 @@ Use these checks before shared work, after runtime maintenance, and before a
 handoff or promotion:
 
 ```bash
-python3 memory-bank/scripts/context.py status --json
-python3 memory-bank/scripts/context.py validate --json
-python3 memory-bank/scripts/context.py parity --json
-python3 memory-bank/scripts/validate.py
+memory-bank/bin/infra-engine memory status --json
+memory-bank/bin/infra-engine memory validate --json
+memory-bank/bin/infra-engine memory parity --json
+memory-bank/bin/infra-engine bank validate
 ```
 
 Interpretation:
@@ -198,7 +198,7 @@ Interpretation:
   deterministic indexes. It exits `1` when errors exist.
 - `parity` compares mirrored skill implementations with the
   `canonical_edition` configured in `runtime.json`. It fails on drift.
-- `memory-bank/scripts/validate.py` validates durable Memory Bank structure and
+- `memory-bank/bin/infra-engine bank validate` validates durable Memory Bank structure and
   metadata independently of Project Brain validation. It reports two severity
   levels. **Errors** exit `1`: a chunk that is wrong, or an index row pointing
   at a chunk that is not on disk. **Warnings** print to stderr and exit `0`: a
@@ -227,8 +227,10 @@ Global arguments must appear **before** the subcommand:
 --owner OWNER
 ```
 
-- `--root` selects the repository root. Its default is derived from the
-  location of `context.py`, two directories above the script.
+- `--root` selects the state/repository root and precedes the memory operation.
+  The native launcher normally binds this explicitly; installed runs discover
+  the tooling installation from the executable, with attached state supplied
+  by the launcher's explicit environment.
 - `--db` overrides the default
   `memory-bank/local/context.db`. This changes local index, binding, task, and
   episode storage only; it does not relocate Project Brain.
@@ -251,7 +253,7 @@ and `--source-id` options append one value per occurrence (`update` and
 `--next-step` values the whole list):
 
 ```bash
-python3 memory-bank/scripts/context.py --owner alice brain-create finding \
+memory-bank/bin/infra-engine memory --owner alice brain-create finding \
   --external-id FINDING-42 \
   --title "Two related constraints differ" \
   --source specs/first.md \
@@ -284,7 +286,7 @@ Record relationships use Project Brain UUIDs, not external aliases.
 ### `refresh`
 
 ```bash
-python3 memory-bank/scripts/context.py refresh \
+memory-bank/bin/infra-engine memory refresh \
   [--query TEXT --task-id ID] \
   [--limit N] \
   [--ephemeral] \
@@ -320,7 +322,7 @@ accompanies a capsule.
 ### `index`
 
 ```bash
-python3 memory-bank/scripts/context.py index [--incremental] [--json]
+memory-bank/bin/infra-engine memory index [--incremental] [--json]
 ```
 
 Rebuilds the disposable FTS5 document index from eligible policy, skills,
@@ -362,7 +364,7 @@ before replacing the previous index.
 ### `search`
 
 ```bash
-python3 memory-bank/scripts/context.py search QUERY \
+memory-bank/bin/infra-engine memory search QUERY \
   [--limit N] \
   [--layer procedural|semantic|episodic] \
   [--json]
@@ -381,7 +383,7 @@ Side effects: SQLite initialization only.
 ### `links`
 
 ```bash
-python3 memory-bank/scripts/context.py links --path SOURCE \
+memory-bank/bin/infra-engine memory links --path SOURCE \
   [--prefix] \
   [--json]
 ```
@@ -405,14 +407,14 @@ Side effects: SQLite initialization only.
 ### `retrieve` and compatibility `context`
 
 ```bash
-python3 memory-bank/scripts/context.py retrieve QUERY \
+memory-bank/bin/infra-engine memory retrieve QUERY \
   --task-id ID \
   [--limit N] \
   [--path SOURCE ...] \
   [--ephemeral] \
   [--json]
 
-python3 memory-bank/scripts/context.py context QUERY \
+memory-bank/bin/infra-engine memory context QUERY \
   --task-id ID \
   [--limit N] \
   [--path SOURCE ...] \
@@ -532,7 +534,7 @@ governed manifest and do not apply the governed filter pipeline.
 ### `start`
 
 ```bash
-python3 memory-bank/scripts/context.py [--owner OWNER] start \
+memory-bank/bin/infra-engine memory [--owner OWNER] start \
   --task-id ID \
   --goal GOAL \
   [--file PATH]... \
@@ -553,7 +555,7 @@ the Brain files and local binding state.
 ### `update`
 
 ```bash
-python3 memory-bank/scripts/context.py [--owner OWNER] update \
+memory-bank/bin/infra-engine memory [--owner OWNER] update \
   --task-id ID \
   --revision N \
   [--progress TEXT] \
@@ -589,7 +591,7 @@ the record moved between reading it and deciding to write.
 ### `turn`
 
 ```bash
-python3 memory-bank/scripts/context.py [--owner OWNER] turn \
+memory-bank/bin/infra-engine memory [--owner OWNER] turn \
   --task-id ID \
   [--flush] \
   [--flush-after N] \
@@ -654,7 +656,7 @@ buffer, plus one task update per flush.
 ### `rebind`
 
 ```bash
-python3 memory-bank/scripts/context.py rebind \
+memory-bank/bin/infra-engine memory rebind \
   --task-id ID \
   [--record UUID] \
   [--json]
@@ -684,7 +686,7 @@ compatibility pointer. Nothing under `project-brain/` changes.
 ### `get`
 
 ```bash
-python3 memory-bank/scripts/context.py get --task-id ID [--json]
+memory-bank/bin/infra-engine memory get --task-id ID [--json]
 ```
 
 Returns the authoritative Brain task through its local binding in governed
@@ -696,7 +698,7 @@ Side effects: SQLite initialization only.
 ### `clear`
 
 ```bash
-python3 memory-bank/scripts/context.py [--owner OWNER] clear \
+memory-bank/bin/infra-engine memory [--owner OWNER] clear \
   --task-id ID \
   [--json]
 ```
@@ -716,7 +718,7 @@ an episode.
 ### `complete`
 
 ```bash
-python3 memory-bank/scripts/context.py [--owner OWNER] complete \
+memory-bank/bin/infra-engine memory [--owner OWNER] complete \
   --task-id ID \
   --revision N \
   --outcome TEXT \
@@ -744,15 +746,15 @@ working row.
 ### `msg-send`, `msg-read`, `msg-dispatch`, and `capsule`
 
 ```bash
-python3 memory-bank/scripts/context.py msg-send --task-id ID \
+memory-bank/bin/infra-engine memory msg-send --task-id ID \
   --from AGENT --to AGENT|main|'*' --type finding|question|handoff \
   (--body TEXT | --body-file PATH) [--ref PATH]... [--json]
-python3 memory-bank/scripts/context.py msg-read --task-id ID \
+memory-bank/bin/infra-engine memory msg-read --task-id ID \
   [--for ACTOR] [--since SEQ] [--type TYPE] [--json]
-python3 memory-bank/scripts/context.py msg-dispatch --task-id ID \
+memory-bank/bin/infra-engine memory msg-dispatch --task-id ID \
   --agent AGENT --event spawn|complete [--note TEXT] \
   [--capsule-file PATH] [--json]
-python3 memory-bank/scripts/context.py capsule --validate --file PATH|- [--json]
+memory-bank/bin/infra-engine memory capsule --validate --file PATH|- [--json]
 ```
 
 The agent message channel behind orchestrated flows (governed mode only):
@@ -776,7 +778,7 @@ progress line with the recording agent's slug.
 ### `record`
 
 ```bash
-python3 memory-bank/scripts/context.py record \
+memory-bank/bin/infra-engine memory record \
   --summary TEXT \
   --outcome TEXT \
   [--file PATH]... \
@@ -793,7 +795,7 @@ or promotion, and local episodes are never promoted automatically.
 ### `brain-create`
 
 ```bash
-python3 memory-bank/scripts/context.py [--owner OWNER] brain-create TYPE \
+memory-bank/bin/infra-engine memory [--owner OWNER] brain-create TYPE \
   --external-id ID \
   --title TITLE \
   [--goal TEXT] \
@@ -823,7 +825,7 @@ can exist as governed records but are excluded from indexing/retrieval.
 ### `brain-update`
 
 ```bash
-python3 memory-bank/scripts/context.py [--owner OWNER] brain-update \
+memory-bank/bin/infra-engine memory [--owner OWNER] brain-update \
   --record-id UUID_OR_EXTERNAL_ID \
   --revision N \
   [--progress TEXT] \
@@ -866,7 +868,7 @@ it against the record type and current status.
 ### `brain-get`
 
 ```bash
-python3 memory-bank/scripts/context.py brain-get \
+memory-bank/bin/infra-engine memory brain-get \
   --record-id UUID_OR_EXTERNAL_ID \
   [--json]
 ```
@@ -879,7 +881,7 @@ Side effects: SQLite initialization only.
 ### `status`
 
 ```bash
-python3 memory-bank/scripts/context.py status [--json]
+memory-bank/bin/infra-engine memory status [--json]
 ```
 
 Reports local database counts and selected mode/authority. In governed mode,
@@ -892,7 +894,7 @@ Side effects: creates or migrates the local database schema if necessary.
 ### `validate`
 
 ```bash
-python3 memory-bank/scripts/context.py validate [--json]
+memory-bank/bin/infra-engine memory validate [--json]
 ```
 
 `brain-validate` is accepted for the same command.
@@ -908,7 +910,7 @@ Side effects are limited to SQLite initialization.
 ### `parity`
 
 ```bash
-python3 memory-bank/scripts/context.py parity [--json]
+memory-bank/bin/infra-engine memory parity [--json]
 ```
 
 Fails when mirrored skill implementations drift from the configured
@@ -920,7 +922,7 @@ Side effects are limited to SQLite initialization.
 ### `compact`
 
 ```bash
-python3 memory-bank/scripts/context.py compact [--json]
+memory-bank/bin/infra-engine memory compact [--json]
 ```
 
 Validates first, then atomically moves terminal or superseded dynamic records
@@ -949,7 +951,7 @@ Incident `resolved` and decision `accepted` are intentionally not terminal.
 ### `consolidate`
 
 ```bash
-python3 memory-bank/scripts/context.py consolidate [--ticket CMS-741] [--apply] [--json]
+memory-bank/bin/infra-engine memory consolidate [--ticket CMS-741] [--apply] [--json]
 ```
 
 Read-only by default. Groups the operator's own **recorded events whose title
@@ -1004,7 +1006,7 @@ turns it on deliberately; the command is the explicit replay or backfill.
 ### `promote-propose`
 
 ```bash
-python3 memory-bank/scripts/context.py [--owner PROPOSER] promote-propose \
+memory-bank/bin/infra-engine memory [--owner PROPOSER] promote-propose \
   --source-id UUID \
   [--source-id UUID]... \
   --title TITLE \
@@ -1023,7 +1025,7 @@ write durable memory.
 ### `promote-review`
 
 ```bash
-python3 memory-bank/scripts/context.py promote-review \
+memory-bank/bin/infra-engine memory promote-review \
   --promotion-id UUID \
   --reviewer HUMAN_ID \
   [--reject] \
@@ -1040,7 +1042,7 @@ Side effects: updates the Git-tracked promotion record and revision.
 ### `promote-apply`
 
 ```bash
-python3 memory-bank/scripts/context.py promote-apply \
+memory-bank/bin/infra-engine memory promote-apply \
   --promotion-id UUID \
   [--json]
 ```
@@ -1071,7 +1073,7 @@ categorization or an update/supersession decision.
 ### `promote-auto`
 
 ```bash
-python3 memory-bank/scripts/context.py [--owner OWNER] promote-auto [--json]
+memory-bank/bin/infra-engine memory [--owner OWNER] promote-auto [--json]
 ```
 
 Runs automatic promotion now, under exactly the rules a turn boundary applies:
@@ -1092,7 +1094,7 @@ tokens). The record stays eligible for the reviewed `promote-propose` /
 ### `retrieval-report`
 
 ```bash
-python3 memory-bank/scripts/context.py retrieval-report \
+memory-bank/bin/infra-engine memory retrieval-report \
   [--since N] [--scope local|governed|all] [--json]
 ```
 
@@ -1125,7 +1127,7 @@ The report never contains the query text, in either output mode.
 ### `health`
 
 ```bash
-python3 memory-bank/scripts/context.py health [--window N] [--json]
+memory-bank/bin/infra-engine memory health [--window N] [--json]
 ```
 
 Aggregates `memory-bank/local/refresh-health.ndjson`, one record per turn,
@@ -1142,12 +1144,12 @@ things.
 A record is appended by `refresh`, by `hook-context` (Cursor's read path never
 enters the refresh branch, so without it that client would be invisible), and
 by the prompt hook itself — the hook writes its own line carrying only an exit
-status, because on a timeout the Python process is killed before it can write
+status, because on a timeout the native process is killed before it can write
 anything, and that is the one case most worth measuring. Records carry no
 query text and no selected paths. A `refresh` or `hook-context` record also
 carries the capsule's shape as counts - `{"profile", "working",
 "recent_files", "ticket_files", "documents", "tokens"}` - which
-`scripts/memory_eval.py funnel` adds up across projects.
+`infra-engine eval memory-eval funnel` adds up across projects.
 
 ### `status` consolidation counters
 
@@ -1171,7 +1173,7 @@ on a very large Brain expect `status` to take proportionally longer.
 ### `bank-audit`
 
 ```bash
-python3 memory-bank/scripts/context.py bank-audit [--provenance] [--json]
+memory-bank/bin/infra-engine memory bank-audit [--provenance] [--json]
 ```
 
 Read-only. Reports, for active chunks only: `source_changed` (a cited local
@@ -1190,7 +1192,7 @@ the live ones.
 ### `bank-reverify`
 
 ```bash
-python3 memory-bank/scripts/context.py bank-reverify --id MEM-... \
+memory-bank/bin/infra-engine memory bank-reverify --id MEM-... \
   [--review-after YYYY-MM-DD] [--json]
 ```
 
@@ -1219,7 +1221,7 @@ so the only honest thing it can say about a remote citation is nothing.
 ### `bank-quarantine`
 
 ```bash
-python3 memory-bank/scripts/context.py bank-quarantine --id MEM-... \
+memory-bank/bin/infra-engine memory bank-quarantine --id MEM-... \
   [--reason "..."] [--json]
 ```
 
@@ -1233,7 +1235,7 @@ written into frontmatter.
 ### `bank-retire`
 
 ```bash
-python3 memory-bank/scripts/context.py bank-retire \
+memory-bank/bin/infra-engine memory bank-retire \
   --id MEM-20260101-a1b2c3d4 \
   --valid-to 2026-08-22 \
   [--superseded-by MEM-20260815-e5f6a7b8] [--reason "..."] [--json]
@@ -1286,7 +1288,7 @@ failure.
 ### `reindex-bank`
 
 ```bash
-python3 memory-bank/scripts/context.py reindex-bank [--json]
+memory-bank/bin/infra-engine memory reindex-bank [--json]
 ```
 
 Regenerates `memory-bank/INDEX.md` deterministically from chunk frontmatter:
@@ -1301,7 +1303,7 @@ automatically.
 ### `export`
 
 ```bash
-python3 memory-bank/scripts/context.py export \
+memory-bank/bin/infra-engine memory export \
   --destination ../context-bundle \
   [--include-archive] \
   [--include-superseded] \
@@ -1489,11 +1491,11 @@ Bank chunks remain in Git.
 Recommended routine:
 
 ```bash
-python3 memory-bank/scripts/context.py validate
-python3 memory-bank/scripts/context.py parity
-python3 memory-bank/scripts/validate.py
-python3 memory-bank/scripts/context.py index --json
-python3 memory-bank/scripts/context.py status --json
+memory-bank/bin/infra-engine memory validate
+memory-bank/bin/infra-engine memory parity
+memory-bank/bin/infra-engine bank validate
+memory-bank/bin/infra-engine memory index --json
+memory-bank/bin/infra-engine memory status --json
 ```
 
 Periodically:

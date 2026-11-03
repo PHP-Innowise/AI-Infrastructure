@@ -1,6 +1,6 @@
 # Supplied provider usage for the isolated memory benchmark
 
-`harness.longmemeval_provider_usage` projects a bounded supplied nonstreaming
+`infra_pilots::longmemeval::usage` projects a bounded supplied nonstreaming
 ChatCompletion JSON response into the memory cost ledger's five-counter
 profile. It captures those counters before a trusted answer decoder runs, so
 decoder failure or cancellation does not erase already supplied usage. It

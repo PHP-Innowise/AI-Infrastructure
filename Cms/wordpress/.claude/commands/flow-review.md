@@ -34,14 +34,14 @@ You - the MAIN conversation - are the orchestrator and the synthesizer.
    - **Decisions and assumptions so far** - the review scope and anything
      the user said about intent.
    Before each spawn, save the capsule to a scratch file and record it -
-   `python3 memory-bank/scripts/context.py msg-dispatch --task-id <ID> --agent <name> --event spawn --capsule-file <file>`
+   `memory-bank/bin/infra-engine memory msg-dispatch --task-id <ID> --agent <name> --event spawn --capsule-file <file>`
    (it refuses an under-specified capsule); completions are recorded in the
    channel by the SubagentStop hook automatically.
 3. When all three return, synthesize in the main conversation: deduplicate
    overlapping findings, rank by severity, drop claims without evidence,
    and present one report grouped by file.
 4. Record the outcome:
-   `python3 memory-bank/scripts/context.py update --task-id <ID> --progress "flow-review: <N> findings, <top severity>"`.
+   `memory-bank/bin/infra-engine memory update --task-id <ID> --progress "flow-review: <N> findings, <top severity>"`.
 5. Suggest next steps: `/coder` to fix confirmed findings, `/debugger` for
    unclear failures, `/verify` for the full Definition of Done.
 

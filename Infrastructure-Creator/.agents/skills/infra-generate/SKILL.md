@@ -9,6 +9,8 @@ related: [policy-forge, skill-forge, agent-forge, command-forge, hook-forge, mem
 
 # Infra Generate
 
+Native helper commands use the generator's explicit bundled executable. Set `GENERATOR_NATIVE` to the absolute path `<generator>/memory-bank/bin/infra-engine` (`infra-engine.exe` on Windows) before the commands below; this is the selected release artifact, with no interpreter, download or build fallback.
+
 ## Overview
 
 `infra-generate` is the second orchestrator (see `AGENTS.md`'s
@@ -30,10 +32,10 @@ target manifest member.
 1. **Locate the profile.** Require the target project path (must match a profile from `infra-scan`); if more than one `TASK-{N}/` exists for that target, use the most recent unless the user specifies one.
 2. **Validate evidence and the generation plan.** Require the scan's coverage
    gate to have passed -
-   `python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir <task> --plan <task>/skill-generation-plan.json`
+   `"$GENERATOR_NATIVE" creator validate-scan-coverage --target <target> --task-dir <task> --plan <task>/skill-generation-plan.json`
    and the adversarial review (selected skills and risk-flagged rejections
    alike) to have passed -
-   `python3 bootstrap-verifier/scripts/validate_plan_review.py --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json --registry .agents/skills/skill-forge/references/candidate-registry.json` -
+   `"$GENERATOR_NATIVE" creator validate-plan-review --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json --registry .agents/skills/skill-forge/references/candidate-registry.json` -
    before reading the plan at all: a plan is only as complete as the discovery
    under it, and a subsystem nobody dispositioned produces an accelerator that
    looks finished and does not know the subsystem exists. Then require the
@@ -50,7 +52,7 @@ target manifest member.
    must be covered by `routing_cases[]`. If anything drifted, stop for re-scan
    rather than accepting generic fallback content.
 3. **Damage the plan on purpose before publishing it.**
-   `python3 bootstrap-verifier/scripts/validate_plan_mutations.py --plan <task>/skill-generation-plan.json --target <target> --registry <generator>/skill-forge/references/candidate-registry.json`
+   `"$GENERATOR_NATIVE" creator validate-plan-mutations --plan <task>/skill-generation-plan.json --target <target> --registry <generator>/skill-forge/references/candidate-registry.json`
    A plan that passes every gate proves the rules are satisfiable; it says
    nothing about whether they would have noticed had the plan been worse, and a
    gate can decay in ways nothing reports - a rule made conditional on a field
@@ -109,7 +111,7 @@ target manifest member.
    For each selected command-carrying edition run:
 
    ```bash
-   python3 .agents/skills/bootstrap-verifier/scripts/validate_flow_contracts.py \
+   "$GENERATOR_NATIVE" creator validate-flow-contracts \
      --plan "tasks/TASK-003/skill-generation-plan.json" \
      --skill-flow "tasks/TASK-003/infra-generate-staging/.cursor/skills/SKILL FLOW.md" \
      --commands-dir "tasks/TASK-003/infra-generate-staging/.cursor/commands"
@@ -126,7 +128,7 @@ target manifest member.
    and the mechanical validators re-run after any repair. Require
 
    ```bash
-   python3 .agents/skills/bootstrap-verifier/scripts/validate_content_review.py \
+   "$GENERATOR_NATIVE" creator validate-content-review \
      --publication-plan "tasks/TASK-003/infra-generate-publication-plan.txt" \
      --review "tasks/TASK-003/infra-validate-review.json"
    ```
@@ -150,7 +152,7 @@ target manifest member.
    requirements. `resolved_sha256` must equal the manifest file hash.
 
    ```bash
-   python3 .agents/skills/bootstrap-verifier/scripts/merge_gitignore.py \
+   "$GENERATOR_NATIVE" creator merge-gitignore \
      --existing "<target>/.gitignore" \
      --requirements "tasks/TASK-003/gitignore-requirements/memory-seed.json" \
      --requirements "tasks/TASK-003/gitignore-requirements/hook-forge.json" \
@@ -194,7 +196,7 @@ The generator's version has a single source of truth: the `VERSION` file at this
 Before authoring any skill, run the plan-only gate:
 
 ```bash
-python3 .agents/skills/bootstrap-verifier/scripts/validate_skill_quality.py \
+"$GENERATOR_NATIVE" creator validate-skill-quality \
   --plan "tasks/TASK-003/skill-generation-plan.json" \
   --target "<path-to-real-target>" \
   --registry ".agents/skills/skill-forge/references/candidate-registry.json" \
@@ -222,7 +224,7 @@ Exact recipe - run from this generator's root after Step A, substituting the
 resulting manifest is copied to the target only after staged verification:
 
 ```bash
-python3 .agents/skills/bootstrap-verifier/scripts/infra_ownership.py manifest \
+"$GENERATOR_NATIVE" creator infra-ownership manifest \
   --target "tasks/TASK-003/infra-generate-staging" \
   --write-plan "tasks/TASK-003/infra-generate-write-plan.txt" \
   --version "$(cat VERSION)" \
@@ -232,7 +234,7 @@ python3 .agents/skills/bootstrap-verifier/scripts/infra_ownership.py manifest \
   --mode "full"
 ```
 
-The helper hashes only explicit write-plan members and refuses missing files, absolute/traversal paths, caches, the manifest itself, and runtime state. It never walks the target's managed roots. Consequently, team files absent from the plan remain untracked and invisible to `infra-update` in both full and merge modes. `validate_generated.py` validates every tracked file's existence/hash and scans every tracked text file for placeholders, while ignoring unmanifested team files.
+The helper hashes only explicit write-plan members and refuses missing files, absolute/traversal paths, caches, the manifest itself, and runtime state. It never walks the target's managed roots. Consequently, team files absent from the plan remain untracked and invisible to `infra-update` in both full and merge modes. `"$GENERATOR_NATIVE" creator validate-generated` validates every tracked file's existence/hash and scans every tracked text file for placeholders, while ignoring unmanifested team files.
 
 ## Transactional Publication Recipe
 
@@ -240,13 +242,13 @@ Use the bundled helper; do not implement ad-hoc recursive copies:
 Omit `--watch-plan` when there are no watch-only members.
 
 ```bash
-python3 .agents/skills/bootstrap-verifier/scripts/publish_staging.py snapshot \
+"$GENERATOR_NATIVE" creator publish-staging snapshot \
   --target "<path-to-target>" \
   --publication-plan "tasks/TASK-003/infra-generate-publication-plan.txt" \
   --watch-plan "tasks/TASK-003/infra-generate-watch-plan.txt" \
   --output "tasks/TASK-003/prepublication-baseline.json"
 
-python3 .agents/skills/bootstrap-verifier/scripts/publish_staging.py publish \
+"$GENERATOR_NATIVE" creator publish-staging publish \
   --target "<path-to-target>" \
   --staging "tasks/TASK-003/infra-generate-staging" \
   --publication-plan "tasks/TASK-003/infra-generate-publication-plan.txt" \
@@ -269,7 +271,7 @@ Keep the journal until post-publication `bootstrap-verifier` succeeds. On any
 failure:
 
 ```bash
-python3 .agents/skills/bootstrap-verifier/scripts/publish_staging.py rollback \
+"$GENERATOR_NATIVE" creator publish-staging rollback \
   --target "<path-to-target>" \
   --journal "tasks/TASK-003/publication-rollback"
 ```
@@ -320,7 +322,7 @@ The target now has its own working `AGENTS.md` + [selected edition folder(s)] + 
 - MUST maintain a separate explicit publication plan for initial team-owned
   runtime seeds that intentionally stay outside manifest ownership; publication
   still never walks staging or target roots.
-- MUST report the generated inventory as two counts - evidence-derived project skills and `runtime-fixed` runtime guides - and MUST NOT present their sum as skills derived from the target. `validate_skill_quality.py` prints the same split on its `skill inventory:` line and in the `skill_classes` member of its `--json` result.
+- MUST report the generated inventory as two counts - evidence-derived project skills and `runtime-fixed` runtime guides - and MUST NOT present their sum as skills derived from the target. `"$GENERATOR_NATIVE" creator validate-skill-quality` prints the same split on its `skill inventory:` line and in the `skill_classes` member of its `--json` result.
 - MUST NOT report success while `bootstrap-verifier` has unresolved failures.
 - MUST roll back publication when any write or post-publication verification
   fails; a partially published accelerator is never an acceptable result.
@@ -330,9 +332,13 @@ The target now has its own working `AGENTS.md` + [selected edition folder(s)] + 
   block publication when any adjacency is dropped or when `SKILL FLOW.md` and
   executable flow commands do not compile to the same canonical graph.
 - MUST run `infra-validate` against the complete staged bundle and require
-  `validate_content_review.py` to exit 0 before manifest stamping or
+  `"$GENERATOR_NATIVE" creator validate-content-review` to exit 0 before manifest stamping or
   publication; repairs go through the owning forges, never in-place edits.
 
 ## Final Output
 
 Return what was generated, where, for which edition(s), the verification results, remaining risks, and the concrete first command the target team should run inside their project.
+
+## Native policy and final-target gate
+
+The approved Project Profile must already contain its complete `infra-hook-policy-selection-v1` JSON block before human review. Preserve the digest recorded with that actual review; a matching self-hash is not approval. Use `creator materialize-hook-policy` to emit the owned policy and schema into staging, and include both exact hashes in the explicit write/publication plans. Pass `--approved-profile REPORT --approved-profile-sha256 RECORDED_HASH --delivery-root FINAL_TARGET` to the native generated gate. Staging paths are for inspection; native hook/MCP commands bind the final target. A legacy report missing the selection block requires refreshed review, never a broad fallback policy.

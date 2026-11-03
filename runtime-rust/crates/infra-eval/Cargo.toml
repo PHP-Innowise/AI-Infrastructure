@@ -1,0 +1,30 @@
+[package]
+name = "infra-eval"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[[bin]]
+name = "infra-eval-process-fixture"
+path = "tests/support/process_fixture.rs"
+test = false
+bench = false
+
+[dependencies]
+infra-core = { path = "../infra-core" }
+infra-host = { path = "../infra-host" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+sha2 = "=0.11.0"
+chrono = { version = "=0.4.45", features = ["serde"] }
+libc = "=0.2.191"
+regex = "1"
+uuid = { version = "=1.22.0", features = ["v4"] }
+zstd = "0.13"
+base64 = "0.22"
+infra-tooling = { path = "../infra-tooling" }
+shell-words = "1"
+rusqlite = { version = "=0.37.0", features = ["bundled", "modern_sqlite", "functions"] }
+infra-pilots = { path = "../infra-pilots" }
+

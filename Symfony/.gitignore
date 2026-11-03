@@ -12,6 +12,10 @@ __pycache__/
 # Uncommitted personal agent memory
 memory-bank/local/
 
+# Platform-specific engines are supplied by native installation artifacts.
+memory-bank/bin/infra-engine
+memory-bank/bin/infra-engine.exe
+
 # Local chat snapshots kept for an explicit chat merge; never commit or index them
 .context-handoff/
 

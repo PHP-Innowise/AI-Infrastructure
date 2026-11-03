@@ -104,8 +104,8 @@ restores both stores. Compaction uses the same snapshot-and-move-journal rule.
 The public command is:
 
 ```text
-python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID [--path SOURCE ...]
-python3 memory-bank/scripts/context.py links --path SOURCE [--prefix]
+memory-bank/bin/infra-engine memory retrieve QUERY --task-id ID [--path SOURCE ...]
+memory-bank/bin/infra-engine memory links --path SOURCE [--prefix]
 ```
 
 `context` is an alias. Retrieval uses SQLite FTS5/BM25 and bounded snippets.
@@ -137,8 +137,8 @@ No network service or embedding store is part of this runtime. Retrieval also
 runs without a command: the prompt hook injects the capsule above into every
 request (Cursor reads it from the `working-memory.mdc` rule the hook renders),
 unless the host delivered it and set `CONTEXT_CAPSULE_DELIVERED=1`. The local
-memory MCP server, `memory-bank/scripts/mcp_server.py`, is a stdio subprocess
-of the client whose four tools call `memory-bank/scripts/context.py` in
+memory MCP server, `memory-bank/bin/infra-engine`, is a stdio subprocess
+of the client whose four tools call `memory-bank/bin/infra-engine` in
 governed mode; see `memory-bank/MCP.md`.
 
 ## Messages

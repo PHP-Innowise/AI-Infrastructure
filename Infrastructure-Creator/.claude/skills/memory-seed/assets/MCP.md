@@ -4,7 +4,7 @@ Harness and direct clients use the consuming project's existing `project-brain/`
 and `memory-bank/`. Install the accelerator in the actual worktree. SQLite's
 search index is rebuildable, while unfinished turn observations must be retained;
 shared records/chunks remain authoritative and receipt loss does not authorize a new save.
-Memory MCP needs only Python 3.9+ and SQLite FTS5, with no external service or key.
+Memory MCP uses the installed native engine with bundled SQLite FTS5, with no external service or key.
 
 ## Harness automatic sessions
 
@@ -26,24 +26,24 @@ use**; neither proves reading. Telemetry stores counts, not source bodies/path l
 
 The accelerator installer and generator register Memory MCP for each selected
 client. No separate `claude mcp add` command or manual config entry is needed.
-The installer checks Python 3.9+ and SQLite FTS5 on the client PATH, including
-`python` / `py -3` on native Windows, and preserves other servers/settings.
+The installer selects the verified native engine for the platform and preserves
+other servers and settings. SQLite FTS5 is part of the native runtime.
 
-- Claude Code: `.mcp.json` uses a Python launcher anchored by the server-process
-  `CLAUDE_PROJECT_DIR`, with a nearest-project-marker fallback.
-- Codex: `.codex/config.toml` carries one managed `mcp_servers.harness_memory`
-  table. The Python launcher finds the nearest declaring config from the
-  session directory, including nested directories and worktrees.
-- Cursor: `.cursor/mcp.json` uses `${workspaceFolder}`.
+- Claude Code: `.mcp.json` contains one managed memory server.
+- Codex: `.codex/config.toml` contains one managed `mcp_servers.harness_memory`
+  table, parsed and merged natively.
+- Cursor: `.cursor/mcp.json` contains one managed memory server.
 
-Launchers stop at their first project marker. Missing runtime there fails rather
-than using an ancestor project's memory. Paths are portable across clones and
-worktrees; registration never writes global client configuration.
+Each entry invokes the final absolute `memory-bank/bin/infra-engine` path
+(`infra-engine.exe` on Windows) with `mcp --root FINAL_PROJECT --host HOST`.
+Generation can stage elsewhere while binding the eventual delivery root.
+Source templates are materialized before use. Moving an installation requires
+native re-registration for its new root; there is no ancestor-project fallback
+or interpreter bootstrap. Registration writes only project configuration.
 
-A foreign server using the memory name, malformed configuration, symlinks and
-edited managed Codex blocks block registration rather than overwriting them.
-On Python 3.9/3.10, Codex merges validate a conservative TOML subset and refuse
-unsupported syntax. Run registration with Python 3.11+ for the full TOML parser.
+A foreign server using the managed memory name, malformed configuration,
+symlinks and edited managed Codex blocks block registration rather than
+overwriting them.
 Dry runs and collision preflight write no project files. Harness setup previews
 these merges while omitting other servers' configuration values.
 
@@ -51,8 +51,8 @@ For an already installed project after updating the runtime, the same helper can
 repair registration in one command (select only clients used by that project):
 
 ```bash
-python3 memory-bank/scripts/mcp_config.py --root . --tool claude --tool codex --tool cursor --dry-run
-python3 memory-bank/scripts/mcp_config.py --root . --tool claude --tool codex --tool cursor
+infra-engine repo mcp-config --root . --tool claude --tool codex --tool cursor --dry-run
+infra-engine repo mcp-config --root . --tool claude --tool codex --tool cursor
 ```
 
 Native clients still control workspace trust and MCP tool approval. Accept project
@@ -129,7 +129,7 @@ positive learning `expected_revision`; never invent one. A protected, archived,
 wrong-kind or conflicting learning is retained individually with revision/reason;
 independent progress, next steps and valid facts still save. Stale numeric task
 CAS, privacy, source and request-identity violations remain hard refusals.
-Without MCP: `python3 memory-bank/scripts/context.py record-result --task-id ID
+Without MCP: `memory-bank/bin/infra-engine memory record-result --task-id ID
 --result-id RID --revision auto --input result.json`. Harness captures
 the native task identity and original safe request automatically; generic stale
 errors never authorize rebasing an uncertain retry. Completion remains explicit.
@@ -144,5 +144,50 @@ or writes outside a read-only scope.
 Confirm all five tools appear in each configured client. Retrieve for a fresh task,
 checkpoint with a goal, record a source-backed result, then replay the same ID/content
 and confirm no duplicates. Inspect Harness **Knowledge → Memory use**, run
-`context.py validate --json` and `memory-bank/scripts/validate.py`. Distinguish real
+`memory-bank/bin/infra-engine memory validate --json` and `memory-bank/bin/infra-engine bank validate`. Distinguish real
 client connections from isolated protocol tests.
+
+
+## Unicode case-folding data notice
+
+The native runtime includes default full case-folding mappings pinned to Unicode 16.0.0, derived from the Unicode Character Database CaseFolding.txt (https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt; SHA-256 6f1f9c588eb4a5c718d9e8f93b782685e5c7fec872cf05e8e6878053599e09bb). This preserves the canonical Python 3.14 semantic-key contract without depending on a compiler's Unicode version. The Unicode-data license is reproduced in full below and accompanies the native artifact's distributed memory-bank documentation.
+
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.

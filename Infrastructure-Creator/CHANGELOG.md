@@ -4,6 +4,16 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Native runtime and deterministic generator helpers — 2026-11-02
+
+- Seed the platform's native `infra-engine` with its versioned runtime contract,
+  policy schema and resources; bind hooks and MCP to the final delivery root.
+  Route deterministic generation, validation, ownership and publication through
+  native `creator` commands. Update model-facing procedures to use those APIs
+  instead of copying or invoking retired Python helpers. Preserve the approved
+  profile, staging, publication and approval boundaries. Validation and live
+  client evidence remain separate; see the root [changelog](../CHANGELOG.md).
+
 ### The seeded runtime promotes on Windows again — 2026-11-02
 
 - As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`

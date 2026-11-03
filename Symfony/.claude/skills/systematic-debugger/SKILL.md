@@ -200,7 +200,7 @@ described in prose is not. This skill is declared write-capable, so record it
 directly:
 
 ```bash
-python3 memory-bank/scripts/context.py brain-create finding \
+memory-bank/bin/infra-engine memory brain-create finding \
   --external-id <TASK>-F<N> --title "<one line>" --source <path>
 ```
 
@@ -209,9 +209,9 @@ verified, close the record so the consolidation pipeline can promote it; the
 two edges are separate calls:
 
 ```bash
-python3 memory-bank/scripts/context.py brain-update --record-id <id> \
+memory-bank/bin/infra-engine memory brain-update --record-id <id> \
   --revision auto --authority verified --reason "Verified: <check>"
-python3 memory-bank/scripts/context.py brain-update --record-id <id> \
+memory-bank/bin/infra-engine memory brain-update --record-id <id> \
   --revision auto --progress "<one-line consequence>" \
   --transition resolved --reason "Resolved"
 ```

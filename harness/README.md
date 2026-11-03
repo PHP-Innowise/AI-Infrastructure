@@ -1,8 +1,16 @@
 # AI-Infrastructure Harness
 
+> Rust migration, 2026-11-03: Python test and demo invocations below are
+> retained pre-Rust behavior specifications and historical evidence. They are
+> not verification commands for the migrated checkout. Run the registered native
+> suites from the repository root with
+> `cargo test --manifest-path runtime-rust/Cargo.toml --workspace --all-targets --locked --offline`.
+> Current coverage is defined by those Rust assertions; historical passes are
+> not transferred to the port.
+
 A local browser workspace over **Claude Code, Codex and Cursor Agent**.
-Kit 1, Kit 2 and Kit 3 are sections within the workspace. The optional
-LangGraph batch runner remains available separately below.
+Kit 1, Kit 2 and Kit 3 are sections within the workspace.
+The native Rust batch runner is described below.
 
 In **Sessions**, use **Attach files**, select files and write your message. You
 can remove files before sending. Each message accepts up to five files, 4 MiB
@@ -305,14 +313,9 @@ session/workspace; it does not transfer conversations between providers.
 
 ### Starting the server
 
-Supports Linux, macOS and native Windows 10/11 through Git Bash, with Python 3.10+ and at least one authenticated native
-agent CLI. The web server uses only Python's standard library; no venv,
-Node frontend build or API-key form is required.
-Fleet review additionally uses the optional LangGraph runtime described below.
+Supports Linux, macOS and native Windows 10/11 through the platform's native engine and at least one authenticated provider CLI. The server and Fleet runtime are Rust; browser business logic is Rust/Wasm. Install a verified engine and its generated UI assets. A Python virtualenv is not part of the runtime.
 
-On Windows, install Python, Git for Windows and the native agent CLI, then run
-these commands in Git Bash. The launcher tries a working Python 3 interpreter
-named `python3`, then `python`; a Microsoft Store alias is skipped. State defaults
+On Windows, install Git for Windows and the provider CLI, then run the native `infra-engine.exe` from PowerShell or a terminal. State defaults
 to `%LOCALAPPDATA%/ai-infrastructure-harness` (Linux/macOS retain XDG state).
 Projects and state must use local drive paths; junctions, symlinks and UNC/network
 roots are refused at protected filesystem boundaries. npm-installed Codex and
@@ -338,20 +341,21 @@ limited to 50,000 files, 256 MiB total and 4 MiB per file.
 Native providers run under the sandbox account. File-based credentials remain
 in their existing account directory; Windows user-keyring credentials may need
 provider-specific setup and are not copied or exported by Harness.
-The `windows-harness` CI job covers portable/native runtime unit tests and a
-System Orchestration run with an npm-installed Codex fixture. The
-manual `Windows Creator sandbox` workflow requires a self-hosted Windows runner
-with elevated Codex already configured; it runs actual write-denial and owner
-death tests without model credentials. Native sandbox checks cannot run on a
-Linux workstation.
+The declared `native-windows` job in `.github/workflows/native-windows.yml`
+runs the Rust workspace contracts on a hosted Windows runner. The manual
+`Native Windows Creator sandbox` workflow in `.github/workflows/windows-creator.yml`
+requires a self-hosted Windows runner with elevated Codex already configured;
+it selects the native Creator sandbox boundary tests without model credentials.
+These workflow definitions do not establish that remote CI or native sandbox
+checks ran locally; Linux cross-compilation is separate evidence.
 
 From the repository root:
 
 ```bash
-./harness-server start --project /absolute/path/to/project
+infra-engine serve start --project /absolute/path/to/project
 # Started: http://127.0.0.1:8766
-./harness-server status
-./harness-server stop
+infra-engine serve status
+infra-engine serve stop
 ```
 
 `start` detaches the server from the terminal. `serve` keeps it in the
@@ -364,7 +368,7 @@ restarts alongside the command-line projects. Stop and start again to change
 server options such as its port or provider executable:
 
 ```bash
-./harness-server start --port 8766 --timeout 900 \
+infra-engine serve start --port 8766 --timeout 900 \
   --project /path/to/project-a --project /path/to/project-b \
   --cursor-bin /absolute/path/to/cursor-agent
 ```
@@ -404,7 +408,7 @@ To start the accelerator like any installed application, run once from the
 clone (in Git Bash on Windows):
 
 ```bash
-./accelerator-app install
+infra-engine app install
 ```
 
 **AI Accelerator**, with the hare icon, then appears among the installed
@@ -468,10 +472,9 @@ To keep checks off, set `HARNESS_UPDATE_CHECK=0` in the server's environment.
 
 A desktop launch lacks the `PATH` additions of a shell profile, such as
 `~/.local/bin`, nvm or Homebrew. That is where the Claude, Codex and Cursor
-CLIs, and often Python itself, usually live. Three things make up for it:
+CLIs usually live. Three things make up for it:
 
-- The application entry names the Python that ran `install`
-  (`ACCELERATOR_APP_PYTHON`). The launcher falls back to `python3` and `python`.
+- The application entry records the exact native executable used by `app install`; desktop launches invoke that executable directly.
 - Before it starts the server, `open` reads the `PATH` the login shell sets up
   today, as VS Code does for a desktop launch. It runs `$SHELL -ilc` with a
   10-second limit and reads the value between marks, so a greeting or prompt
@@ -491,10 +494,10 @@ When the server cannot start, the reason appears as a desktop notification (a
 message box on Windows) and in `launcher.log` beside `app.json`.
 
 ```bash
-./accelerator-app status     # is the application installed, is the server running
-./accelerator-app update     # what the Update button does
-./accelerator-app stop       # stop the server
-./accelerator-app uninstall  # remove the application; projects, sessions and memory stay
+infra-engine app status     # is the application installed, is the server running
+infra-engine app update     # what the Update button does
+infra-engine app stop       # stop the server
+infra-engine app uninstall  # remove the application; projects, sessions and memory stay
 ```
 
 `harness/web/icons/ai-accelerator.svg` is the icon's source. The PNG sizes next
@@ -581,7 +584,7 @@ last entry, **＋ Choose a project folder…**, adds a folder the way the Sessio
   an edition's files in the project's Git (sessions already use it attached). Its **Startup context
   per edition** table lists the exact bytes each edition puts in front of the
   model before any work: AGENTS.md and the skill, command and agent listings.
-  The table sets them against the ceilings `scripts/context_budget.py --check`
+  The table sets them against the ceilings `infra-engine repo budget --check`
   holds them to, and measures them with the same script, so the page and the CI
   gate cannot disagree.
 - **Open Source Kit:** the Kit 3 catalog, filters, dossiers and copyable
@@ -939,15 +942,15 @@ Keep that directory private: prompts and agent answers are retained there.
 The server binds only to `127.0.0.1`. Browser mutations require a
 per-process token and matching Origin/Host; static routes do not expose
 repository files. This is a personal local tool, not a remotely hosted or
-multi-user service. Fleet review runs the existing LangGraph graph in a separate
-local Python process, with the same queue and workspace checks as native sessions.
+multi-user service. Fleet review runs the native Rust workflow with the same queue and workspace boundaries as ordinary sessions.
 
 The browser keeps the page's styles and scripts between visits:
 
-- **Styles and scripts.** The server reads them once at start, and the page names
-  each by its content hash (`app-core.js?v=…`). That address is cached as
-  immutable, so an updated Harness changes the address and an old page never meets
-  a new script.
+- **Styles, loader and native UI.** The server captures one startup snapshot of
+  `app.css`, `boot.js`, the generated `infra_ui.js` bindings and `infra_ui_bg.wasm`.
+  It verifies the bindings and Wasm against `abi-manifest.json`, then puts content
+  hashes in their URLs (`/assets/infra_ui.js?v=…`). Matching versioned URLs are
+  cached as immutable; unversioned or mismatched URLs are revalidated.
 - **The page itself.** It is revalidated by its hash on every load.
 - **API answers and downloads.** They stay `no-store`.
 
@@ -968,29 +971,23 @@ Keep the browser workspace quiet as it grows:
 
 #### Page files
 
-The page has no build step. `harness/web/index.html` holds the markup and the
-theme script that runs before the first paint, `app.css` holds the styles, and
-classic scripts share their top-level names in load order: `app-core.js`
-(shell, theme, routing, sessions), `run-model.js` and `run-view.js` (the run view's
-event model and its strip, tabs and receipt), `composer-commands.js` (the composer's slash
-commands), `app-knowledge.js`, `app-setup.js`,
-`app-skills.js`, `app-creator.js`, then System Orchestration's
-`agent-activity.js` (the agents panel), `system.js`, `system-editor.js` and
-`system-discovery.js`. The server reads the page and the files
-named in `ASSETS` (`harness/src/harness/web.py`) at start and serves nothing
-else from the folder: add a new file to that list, and restart the server to
-see an edit. `tests/test_harness_web.py` checks that the page and the list
-name the same files and keeps the stylesheet on its color, type and spacing
-tokens.
+The browser UI is written in `runtime-rust/crates/infra-ui/src/` and compiled
+to WebAssembly. `harness/web/index.html` holds the markup and pre-paint theme
+script, `app.css` holds the styles, and `boot.js` only loads the generated
+bindings and Wasm. From the repository root, `./infra-engine repo build-ui`
+uses the locked Rust target and matching `wasm-bindgen` version to publish
+`runtime-rust/target/wasm-ui/{infra_ui.js,infra_ui_bg.wasm,abi-manifest.json}`.
+The manifest is published last; do not edit generated bindings directly.
 
-**Motion and numbers.** Durations and easings come from the motion tokens in
-`app.css` (`--motion-*`, `--ease-*`); the same test rejects a literal duration or
-`cubic-bezier()` in a rule, and reduced motion stops every animation, pseudo-elements
-included. Scripted scrolls ask for `scrollMotion()`. Numbers use `fmt` in
-`app-core.js`: exact values as grouped digits, estimates with ≈ and two significant
-digits, bounds with ≤, ≥ or +, and — for unknown, which is never 0. A list that
-refreshes on a poll renders through `keyedRender`, so open details keep their
-state.
+`runtime-rust/crates/infra-harness/src/http.rs` admits the fixed static files
+and verifies the native pair's hashes at startup. A missing or mismatched pair
+refuses startup. Rebuild after changing Rust UI code and restart the server to
+load the new snapshot; stylesheet and markup changes also require a restart.
+
+**Motion and numbers.** Keep motion tokens in `app.css` and respect reduced
+motion. Numeric rendering and keyed DOM updates live in the Rust UI modules;
+keep exact values, estimates, bounds and unknown values distinct when editing
+them, and rebuild the native UI afterwards.
 
 ### Slash commands
 
@@ -1117,16 +1114,15 @@ with an installed accelerator keeps using its own files. See
 Either way the server keeps the project at this clone's version by itself: once
 per version of the clone - at start, on registration and before a session's
 memory - it brings an installed copy's untouched files and memory runtime up to
-the clone (`scripts/install_accelerator.py --sync`), never back: a project last
+the clone (`infra-engine install --sync --target <project>`), never back: a project last
 synced from a commit this clone lacks, such as a sync from a newer branch, is
 left as it is, and the **Project** chip's panel says why, as it does for a
-release held back in part. With Codex available, it also
-approves the accelerator's own Codex hooks in your Codex config, the record
-Codex's `/hooks` review writes; a team's own or edited hook is left for that
-review. The conversation says what changed, and what was held back: the sync
+release held back in part. Sync never grants Codex hook trust. Use the explicit
+**Trust accelerator hooks in Codex** action or Codex's own `/hooks` review; a
+team's own or edited hook remains for that review. The conversation says what changed, and what was held back: the sync
 writes no file the project's Git tracks, and none of a release whose runtime
 or hook wiring stays behind, so a project that commits its accelerator takes a
-release with `scripts/install_accelerator.py --sync --update-tracked` and a
+release with `infra-engine install --sync --update-tracked --target <project>` and a
 commit (see [scripts/README.md](../scripts/README.md)). The memory server's own entry in
 `.mcp.json`, `.cursor/mcp.json` and the managed block of `.codex/config.toml`
 follows the clone beside the project's own servers. Nothing is read or written
@@ -1134,10 +1130,9 @@ through a symbolic link inside the project, backups and the sync's record
 included, even one another process swaps in while the sync runs: each folder
 on a path is opened by descriptor without following links, and a folder
 swapped during a write leaves the file alone. Such a path is reported instead.
-Native Windows has no descriptor-relative file calls in Python, so there the
-same walk goes by NT handles; where neither is available the sync writes
-nothing and reports each file. Set `HARNESS_CODEX_HOOK_TRUST=0` in the
-server's environment to leave the approval to `/hooks`.
+On native Windows the same custody checks use NT handles. Where the required
+rooted operations are unavailable the sync writes nothing and reports the
+refusal. Hook approval remains an explicit action, independently of sync.
 
 The folder browser navigates local folders, or takes an absolute path
 directly. The folder picker provides Home, Parent folder,
@@ -1177,7 +1172,7 @@ project. No model is called by registration, preview or installation.
 Choose a registered project and its bank before using either view. Source editions
 in this repository have separate banks; an installed accelerator uses the consuming
 project's root. Browse operations only read bounded canonical files. The UI remains
-a viewer when `memory-bank/scripts/context.py` is missing.
+a viewer when `memory-bank/bin/infra-engine` is missing.
 
 Explicit operation buttons invoke that selected runtime with fixed arguments:
 
@@ -1408,10 +1403,13 @@ either fold happens are not counted.
 The view remembers your last visit in this browser. Coming back shows what changed
 since then, such as new chunks, re-attestations, chunks that crossed their review
 date and new retrievals, and replays only those changes. Reduced motion shows the
-final state with a `+N` mark instead. To try it on a realistic project, build the
-demo; its history goes through the copied runtime's own API:
+final state with a `+N` mark instead. The former Python memory-demo invocation
+below is historical evidence; the migrated runtime has no replacement
+demo-launch command.
 
-```bash
+Historical pre-Rust invocation (reference only):
+
+```text
 python3 tests/harness_memory_demo.py /tmp/shop-api
 ```
 
@@ -1421,7 +1419,7 @@ Every new session uses project memory, and there is no switch to turn it off;
 the **Memory** chip shows **Automatic**. Nothing waits for a person. The first message names a new Brain task
 (`harness/<first words>-<6 hex>`, its goal the message's first line). Every message,
 the first and each follow-up, is the retrieval query for its own turn: the server
-runs the project's `context.py refresh` with the provider as host, so instruction
+runs the project's `memory-bank/bin/infra-engine memory refresh` with the provider as host, so instruction
 files the provider loads by itself (`CLAUDE.md`, `AGENTS.md`) stay out of the
 capsule, and puts the capsule into the launch. What it carries is the project's
 `capsule_profile`: the editions ship `recall` - the working state, recent files
@@ -1476,7 +1474,7 @@ preserving human attestation and delayed-replay protections. A runtime older
 than `record-result` uses a command chain that can create additional records on
 repetition or correction; it cannot guarantee cross-run idempotency or supersede
 the earlier claim. Then the project's
-automatic promotion runs once (`context.py promote-auto`), under the runtime's own
+automatic promotion runs once (`memory-bank/bin/infra-engine memory promote-auto`), under the runtime's own
 rules and its `automatic_promotion` setting; promoted chunks are tagged
 `auto-promoted`. A second line in the conversation says what was saved, promoted
 or held back. A run that fails or is cancelled saves nothing. If a completed normal automatic run omits its draft or returns invalid JSON, one bounded read-only follow-up resumes the same native session to format it. The follow-up shares the launch budget, disables helpers/memory hooks, and never repeats the task; a failed attempt is reported without discarding completed work. The memory line names the delivered items, how many the run's own tools were seen to open (a lower bound when shell commands also ran, unknown when they were its only way to read) and, with the optional used_memory field, how many the agent reports using. See [shared memory integration](../docs/MEMORY-INTEGRATION.md) for direct-client MCP setup.
@@ -1514,30 +1512,14 @@ The conversation has no record or promotion tools. To complete a task with its
 outcome and verification, or to create and verify a finding or decision by hand,
 use **Knowledge › Project Brain**. Process success never completes a task
 automatically. A Memory Bank proposal by hand goes through the project's runtime:
-`context.py promote-propose`, `promote-review` and `promote-apply`. Manual proposals
+`memory-bank/bin/infra-engine memory promote-propose`, `promote-review` and `promote-apply`. Manual proposals
 require an independent reviewer and keep the runtime's source revision checks.
 Prompts, transcripts and free assistant output never reach durable memory; only the
 fields of a memory draft do.
 
 ### Fleet review setup and use
 
-Install its declared dependencies once from the repository root (Python 3.10+):
-
-```bash
-python3 -m venv harness/.venv
-harness/.venv/bin/python -m pip install -e harness
-```
-
-For native Windows/Git Bash:
-
-```bash
-python -m venv harness/.venv
-harness/.venv/Scripts/python.exe -m pip install -e harness
-```
-
-Restart the browser server after installation. A different prepared Python can
-be selected with `HARNESS_FLEET_PYTHON=/absolute/path/to/python`. Ordinary sessions
-remain available when this optional runtime is missing.
+Use the same native `infra-engine` and generated UI assets as the browser server. Fleet's durable workflow, provider workers and checkpoints are implemented in Rust; no separate Python environment or `HARNESS_FLEET_PYTHON` selection is used.
 
 1. Choose **Workflow → Fleet review**, a project/worktree and a provider.
 2. Select reviewers and enter the review scope in the task field. For real
@@ -1558,7 +1540,7 @@ its checkpoint; successful reviewer nodes are retained. Provider failures stop
 the graph and are not reported as code findings. Session settings stay fixed;
 start another review to change its scope, reviewers, provider, or workspace.
 
-Real runs use the selected workspace's `memory-bank/scripts/context.py`, when
+Real runs use the selected workspace's `memory-bank/bin/infra-engine`, when
 installed, for task creation, capsule validation, dispatch events and progress.
 This writes Project Brain audit records; it does not create a second project
 knowledge store. Without that runtime the review runs without the project audit
@@ -1574,97 +1556,46 @@ an over-allocation result fails the reviewer instead of claiming the limit held.
 
 Verification from the repository root:
 
-```bash
+Historical pre-Rust invocation (reference only):
+
+```text
 python3 -m unittest tests.test_harness_providers tests.test_harness_commands tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_memory_draft tests.test_memory_mcp tests.test_mcp_registration tests.test_harness_context_usage tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
 harness/.venv/bin/python -m unittest discover -s harness/tests -p 'test_*.py'
 ```
 
-The Fleet integration tests use the optional runtime and synthetic/fake providers;
-they skip when that runtime is absent. CI has a separate job that installs it.
+The historical Python Fleet integration tests used an optional runtime and
+synthetic providers, and skipped when that runtime was absent; their CI then had
+a separate runtime-install job. Current native coverage comes from the Rust
+assertions described above. Live clients and providers require separate evidence.
 
 The browser workflow was informed by the official
 [DeepSeek Harness web mode](https://www.deepseek.com/harness/en/).
 This implementation uses locally installed native CLIs rather than
 vendoring DeepSeek's runtime or plugins.
 
-## Optional LangGraph batch runner
+## Native batch runner
 
-External LangGraph batch harness for the AI-Infrastructure accelerators:
-unattended multi-stage pipelines (nightly fleet review, mass migrations,
-scheduled research) over headless coding-agent hosts.
-
-The batch runner is **Stage D** of the agent-orchestration design
-([`../docs/AGENT-ORCHESTRATION-DESIGN.md`](../docs/AGENT-ORCHESTRATION-DESIGN.md))
-and a deliberate **companion, not a component**: it lives at the monorepo
-root, OUTSIDE the editions — the installer never ships it, the inventories
-never list it, no edition requires or depends on it, and the accelerator's
-own runtime stays stdlib-only. This directory (with its own venv) is where
-the LangGraph dependency is allowed to live.
-
-## What it does
-
-```
-harness run --project /path/to/project --scope "HEAD~5..HEAD"
-# ... runs lenses in parallel, then:
-# PAUSED at the approval gate: {"findings": 7, "high": 2, "cost_usd": 1.84}
-harness resume --project /path/to/project --thread fleet-review-... --approve
-```
-
-The `fleet-review` graph: scope → parallel review lenses (`Send` fan-out)
-→ collect → **human approval gate** (`interrupt`, waits indefinitely across
-processes) → report + record. Durable execution via the SQLite checkpointer:
-a crashed or paused run resumes from its checkpoint with `--thread`.
-
-## Architecture rules (from the design doc)
-
-- **The blackboard is the project's own project-brain.** Nodes write and
-  read through the target project's `context.py`: task lifecycle, capsule
-  validation (`capsule --validate` refuses under-specified delegations),
-  the message channel (`msg-dispatch` spawn/complete with SHA-256 capsule
-  digests). LangGraph's checkpointer holds only graph position — interactive
-  sessions and unattended runs share one audit trail.
-- **Workers are headless host sessions.** The default `claude-cli` worker
-  runs `claude -p --output-format json` in the project directory — the
-  officially documented subprocess pattern — deliberately **without**
-  `--bare`, so the project's `.claude/` world applies inside every worker:
-  permissions deny rules, the subagent gate (roster-only spawning, write
-  serialization), skills, and the SubagentStop observer. The worker prompt
-  delegates to the project's own roster agent. `codex-cli` (`codex exec
-  --json`, read-only sandbox) is available; the batch runner has no Cursor adapter on
-  purpose — its headless mode has documented hangs.
-- **Cost is a first-class signal.** Known worker costs accumulate in graph state;
-  unknown cost stays unknown. `--budget-usd` is optional (default `none`), supported
-  by Claude and dry-run. A finite budget is split across reviewers rather than
-  copied to every parallel branch. Claude receives a native per-call budget limit;
-  Codex rejects finite USD limits. The legacy CLI limit applies to a graph attempt;
-  the browser additionally reserves allocations durably across failed retries.
-- **`dry-run` worker** rehearses any pipeline offline (deterministic canned
-  findings, no host, no tokens) — used by the test suite and recommended
-  before every new pipeline.
-
-## Install
+The native Harness supports long, resumable Fleet reviews and sequential
+multi-stage work with explicit human approval. It lives in the repository's Rust
+workspace and is not copied into an installed edition.
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest            # offline graph and worker tests
+infra-engine harness run --project /path/to/project --scope "HEAD~5..HEAD"
+infra-engine harness resume --project /path/to/project --thread fleet-review-ID --approve
 ```
 
-Requires Python ≥ 3.10. The target project needs the accelerator installed
-(for the blackboard); without `memory-bank/scripts/context.py` the harness
-still runs, minus the audit trail.
+Review lenses run through the selected native provider CLI. SQLite retains graph
+position, completed reviewer nodes and the approval boundary. Project Brain
+remains the project's authoritative blackboard; private checkpoint state is not
+a second durable project memory store.
 
-## Auth for unattended runs
+Choose `--worker dry-run` for synthetic offline orchestration. It calls no provider
+and establishes no task benefit. Real workers require the selected CLI's own
+authentication. Finite USD caps are accepted only where the provider can enforce
+them; unavailable usage remains unknown.
 
-Subscription OAuth does not survive CI: use `ANTHROPIC_API_KEY`, or mint a
-long-lived token with `claude setup-token`. Note Anthropic's policy: products
-must not offer claude.ai login or rate limits — internal pipelines on your
-own subscription are fine. Parallel workers share the subscription's rate
-bucket; throttle accordingly (`--worker-timeout`, fewer lenses).
-
-## When to use the batch runner
-
-Interactive accelerator orchestration belongs in the accelerator's own `/flow-*` commands (Stage
-A–C) — the main conversation is the orchestrator there, with checkpoints the
-user answers in place. Short single-host scripts are simpler with the Claude
-Agent SDK alone. This harness earns its dependencies only for long,
-resumable, multi-stage unattended runs with human gates.
+The native engine and assets are selected explicitly. Runtime setup does not
+create a Python virtualenv or install LangGraph. The source-first implementation
+phase is complete; [the migration report](../docs/RUST-MIGRATION.md) records
+subsequent native builds, tests and checks with their evidence limits. Provider
+runs require separate authentication and are not implied by those local checks.

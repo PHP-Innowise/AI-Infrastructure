@@ -45,7 +45,7 @@ The artifacts are the point; if nobody will read them, they are overhead.
 | 1 Specify | `specs/<feature>-spec.md` | requirements-analyst |
 | 2 Design | `specs/<feature>-architecture.md` | architect |
 | 3 Tasks | `tasks/<TASK-ID>/writing-plans-plan.md` | writing-plans |
-| 4 Execute | checkboxes in that plan, plus one `context.py update` per task | coder, test-generator |
+| 4 Execute | checkboxes in that plan, plus one `memory-bank/bin/infra-engine memory update` per task | coder, test-generator |
 
 `specs/MANIFEST.md` is the index. Every spec file appears in its table with a
 purpose, its dependencies and the date it was last touched. **A spec that is
@@ -167,7 +167,7 @@ artifacts, in this order, and continue at the first gap:
 5. All boxes checked -> verification.
 
 Cross-check against the governed task before trusting the files:
-`python3 memory-bank/scripts/context.py retrieve --task-id <ID>`. If the task
+`memory-bank/bin/infra-engine memory retrieve --task-id <ID>`. If the task
 record and the artifacts disagree, say so and ask - a silent reconciliation
 loses whichever one was right.
 

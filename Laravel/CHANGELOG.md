@@ -11,6 +11,13 @@ it at the top of every session.
 
 ## Unreleased
 
+- Route this edition's policy, memory/checkpoint skills, host hooks, MCP and
+  skill-creator helpers through the native Rust `infra-engine` runtime
+  (`infra-engine.exe` on Windows). Replace retired Python entry points in tool
+  configuration and operating instructions while preserving governed authority,
+  native-save and approval boundaries. Validation and native-client evidence
+  remain separate. See the root [changelog](../CHANGELOG.md).
+
 - The `checkpoint` skill records into the task the hooks name. It took the branch alone and stopped
   on a detached HEAD, where the hooks name the branch a rebase in progress rewrites, or
   `codex-thread/<thread>` in a worktree Codex made; there it now takes the task

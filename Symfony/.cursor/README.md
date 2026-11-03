@@ -39,6 +39,6 @@ Type `/` in Cursor chat to see the commands (e.g. `/coder`, `/architect`, `/secu
 
 `/project-brain` manages governed shared tasks, handoffs, unified retrieval, records, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is explicit and local-only. `/memory-bank` is limited to durable retrieval/capture/audit/supersession and applying governed automatic or independently reviewed promotions.
 
-The one public task-aware retrieval command is `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`. Canonical project sources outrank all retrieved context. Session hooks report metadata only and never index or inject records automatically. Keep Cursor's optional Claude-file loading disabled so native commands, agents, skills, and hooks are not duplicated.
+The one public task-aware retrieval command is `memory-bank/bin/infra-engine memory retrieve QUERY --task-id ID` (`memory-bank/bin/infra-engine.exe` on Windows). Canonical project sources outrank all retrieved context. Session hooks report metadata only and never index or inject records automatically. Keep Cursor's optional Claude-file loading disabled so native commands, agents, skills, and hooks are not duplicated.
 
 The baseline supports Symfony 7.4 LTS on PHP 8.2+ and Symfony 8.1 on PHP 8.4+. Always follow the consuming project's declared versions and installed components.

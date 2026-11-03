@@ -16,14 +16,14 @@ and stops. It never completes, promotes, or invents task state.
 
 1. Resolve the repository root with `git rev-parse --show-toplevel`; stop without
    touching context state if it fails.
-2. Take the mode `python3 memory-bank/scripts/context.py status --json`
+2. Take the mode `memory-bank/bin/infra-engine memory status --json`
    reports (`mode`) - `governed`, or `lightweight` where that is explicitly
    configured. It reads the installation's `project-brain/config/runtime.json`,
    which a worktree the installation serves, or a project an accelerator is
    lent to, does not hold.
 3. In governed mode:
    - treat Project Brain as the only authority for active tasks and handoffs;
-   - run `python3 memory-bank/scripts/context.py validate`;
+   - run `memory-bank/bin/infra-engine memory validate`;
    - set `working: governed` and do not derive a branch task, checkpoint
      progress, or write SQLite working state.
 4. In explicitly configured lightweight mode, read
@@ -33,7 +33,7 @@ and stops. It never completes, promotes, or invents task state.
    does not invoke or chain another skill. Set `working: updated`, `skipped`, or
    `failed`, retain safe warnings, and continue.
 5. Regardless of the Working result, run
-   `python3 memory-bank/scripts/context.py refresh --json` from the repository
+   `memory-bank/bin/infra-engine memory refresh --json` from the repository
    root. It refreshes only the disposable SQLite document index, and reports
    `procedural`, `semantic`, and `episodic` separately. This is the command the
    request hook runs, so this skill and the hook cannot drift apart.
@@ -42,7 +42,7 @@ and stops. It never completes, promotes, or invents task state.
    and do not infer one from a successful run; a failed layer is named in the
    output. Do not roll back a successful lightweight checkpoint because a layer
    failed.
-7. Run `python3 memory-bank/scripts/context.py status --json` and report the
+7. Run `memory-bank/bin/infra-engine memory status --json` and report the
    configured mode, index health/counts, Project Brain validation result, safe
    warnings, and:
    `working: governed | updated | skipped | failed`,

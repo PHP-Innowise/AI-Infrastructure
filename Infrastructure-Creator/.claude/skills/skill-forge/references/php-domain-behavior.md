@@ -71,7 +71,7 @@ Required modes:
 - **retrieve**: search `memory-bank/INDEX.md`, then read only relevant active chunks and revalidate canonical sources before relying on them;
 - **capture**: create one cohesive durable concept from confirmed evidence; never copy a full spec/schema/test inventory;
 - **update/supersede**: never rewrite history silently; update verification metadata or supersede a stale chunk with links;
-- **audit**: run `memory-bank/scripts/validate.py`, check source existence/current truth, and report stale/conflicting chunks;
+- **audit**: run `memory-bank/bin/infra-engine bank validate`, check source existence/current truth, and report stale/conflicting chunks;
 - **initialize**: only when the bank is absent; generation normally delegates this to `memory-seed`.
 
 Authority and safety:
@@ -85,7 +85,7 @@ Authority and safety:
 
 ### Enforceable `memory-bank` Contract
 
-- **Selection/evidence:** unconditional only because `memory-seed` installs `memory-bank/INDEX.md`, chunk schema/template, and `memory-bank/scripts/validate.py`; cite these generated-runtime contracts, not the task plan, in the skill.
+- **Selection/evidence:** unconditional only because `memory-seed` installs `memory-bank/INDEX.md`, chunk schema/template, and `memory-bank/bin/infra-engine bank validate`; cite these generated-runtime contracts, not the task plan, in the skill.
 - **Owned/excluded:** owns durable reusable confirmed knowledge, retrieval, capture, supersession, and audit; excludes active tasks/handoffs, raw working context, canonical policy, and self-approval of promotions.
 - **Procedure:** select exactly one mode; retrieve index-first and revalidate sources; capture one cohesive concept; supersede append-only with reciprocal links; audit structure and source freshness; initialize only when runtime is absent and authorized.
 - **Decision points:** stale source -> supersede or report; conflicting sources -> preserve contradiction; governed promotion -> apply only after independent approval; sensitive/raw content -> reject.

@@ -42,8 +42,7 @@ Use the project's existing setup instructions first. At minimum, confirm:
 ```bash
 php -v
 composer --version
-python3 --version
-python3 -c "import sqlite3; db=sqlite3.connect(':memory:'); db.execute('CREATE VIRTUAL TABLE fts_check USING fts5(content)'); print('SQLite FTS5 available')"
+infra-engine capabilities --json
 ```
 
 The ready-made PHP editions expect PHP 8.2+ and Composer 2+. Run the
@@ -51,9 +50,8 @@ project's normal dependency installation and verification tooling; do not
 silently install PHPUnit/Pest, formatters, static analyzers, framework CLIs,
 bundles, or npm packages.
 
-The local context engine requires Python 3.9+ and the standard-library
-`sqlite3` module built with SQLite FTS5 support. The definitive functional
-check is the post-install `context.py index` command: it reports
+The local context engine is the native Rust engine with its SQLite FTS5 runtime. The definitive functional
+check is the post-install `memory-bank/bin/infra-engine memory index` command: it reports
 `SQLite FTS5 support is required` if FTS5 is unavailable.
 
 ## 3. Back Up and Inventory
@@ -105,7 +103,7 @@ are supported:
 
 ```bash
 TARGET="/path/to/existing-project"
-python3 scripts/install_accelerator.py \
+infra-engine install \
   --edition "PHP Core" \
   --target "$TARGET" \
   --tool cursor \
@@ -131,7 +129,7 @@ Once the dry run has no unsupported collisions, run the same command without
 
 ```bash
 set -o pipefail
-python3 scripts/install_accelerator.py \
+infra-engine install \
   --edition "PHP Core" \
   --target "$TARGET" \
   --tool cursor \
@@ -230,7 +228,7 @@ Copy it elsewhere regularly, for example:
 tar -czf ~/brain-$(date +%F).tgz --exclude memory-bank/local project-brain memory-bank
 ```
 
-`context.py export` is not a backup: it leaves out restricted and private
+`memory-bank/bin/infra-engine memory export` is not a backup: it leaves out restricted and private
 records, and nothing imports it.
 
 ## 8. Validate After Installation
@@ -238,12 +236,12 @@ records, and nothing imports it.
 From the target root:
 
 ```bash
-python3 memory-bank/scripts/validate.py
-python3 project-brain/scripts/validate.py --root .
-python3 memory-bank/scripts/context.py status --json
-python3 memory-bank/scripts/context.py validate --json
-python3 memory-bank/scripts/context.py index
-python3 memory-bank/scripts/context.py parity
+memory-bank/bin/infra-engine bank validate
+memory-bank/bin/infra-engine bank validate --root .
+memory-bank/bin/infra-engine memory status --json
+memory-bank/bin/infra-engine memory validate --json
+memory-bank/bin/infra-engine memory index
+memory-bank/bin/infra-engine memory parity
 git status --short
 ```
 
@@ -308,8 +306,8 @@ Treat an edition update as a new adoption:
    while retaining each tool's required frontmatter and event schema.
 6. Re-run structural, context, tool activation, and project verification.
 
-For a project installed with `scripts/install_accelerator.py` whose Git tracks
-the accelerator, `install_accelerator.py --sync --update-tracked --target DIR`
+For a project installed with `infra-engine install` whose Git tracks
+the accelerator, `infra-engine install --sync --update-tracked --target DIR`
 (after the same command with `--dry-run`) does the mechanical part of steps 3
 and 4: it writes only files that still hold a released version, the runtime
 and the managed policy blocks, and lists every edited file it leaves for you
@@ -319,14 +317,14 @@ under `kept`. Review that report and `git diff`, then commit. A reinstall with
 [`scripts/README.md`](../scripts/README.md).
 
 Before syncing a project people already work in, rehearse it:
-`python3 scripts/memory_rollout_rehearsal.py --target DIR` copies the project
+`infra-engine eval memory-rollout-rehearsal --target DIR` copies the project
 (without dependency and worktree trees), syncs the copy, and runs one turn of
 the installed memory hooks as Claude Code and Codex would - the capsule, the
 Stop hook's save request, the save itself and the next session's recall -
 without starting a model or writing to the project. `--sync` never changes
 `project-brain/config/runtime.json`, so the rehearsal's `config` profile is
 the capsule the project will run. After the sync,
-`python3 scripts/memory_eval.py install-status --project DIR` says whether
+`infra-engine eval memory-eval install-status --project DIR` says whether
 memory can run there at all - the commit the project was synced from against
 this clone, the capsule profile against its runtime, the last capsule and
 save, the Claude Code import of `AGENTS.md`, a policy Codex cuts - and exits 1
@@ -337,8 +335,8 @@ hosts themselves do with them. On Linux, two more commands run the installed
 Claude Code and Codex in such a synced copy, offline and without a model:
 
 ```bash
-python3 scripts/claude_code_bench.py --target DIR --sync
-python3 scripts/codex_bench.py --target DIR --sync
+infra-engine bench claude-code --target DIR --sync
+infra-engine bench codex --target DIR --sync
 ```
 
 Each reports whether the save after an answer ran, how many messages carried
@@ -353,8 +351,8 @@ project's trust dialog was never accepted there. In such a project
 the save, so open the project once in interactive Claude Code first.
 
 For a project the Harness attaches without copying, run
-`python3 scripts/claude_code_bench.py --attached` and
-`python3 scripts/codex_bench.py --attached`: they launch Claude Code and Codex
+`infra-engine bench claude-code --attached` and
+`infra-engine bench codex --attached`: they launch Claude Code and Codex
 the same way, with the edition lent from the clone and nothing installed.
 
 For heavily adapted or drifting installations, regenerate from current

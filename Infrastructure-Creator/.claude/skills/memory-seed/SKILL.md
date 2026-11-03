@@ -1,6 +1,6 @@
 ---
 name: memory-seed
-description: Bootstrap the target PHP project's full memory layer - the durable memory-bank/ (with the dependency-free context-brain runtime under memory-bank/scripts/) and the governed project-brain/ control plane - and seed the bank with initial active memory chunks drawn strictly from confirmed Project Profile findings, each cited to the real file that proves it. Use once profile-synthesizer has produced a profile. Triggers on "seed memory bank", "bootstrap memory-bank", "bootstrap project brain", "initialize memory for the target".
+description: Bootstrap the target PHP project's full memory layer - the durable memory-bank/ (with its bundled native Rust engine under memory-bank/bin/) and the governed project-brain/ control plane - and seed the bank with initial active memory chunks drawn strictly from confirmed Project Profile findings, each cited to the real file that proves it. Use once profile-synthesizer has produced a profile. Triggers on "seed memory bank", "bootstrap memory-bank", "bootstrap project brain", "initialize memory for the target".
 phase: generation
 flow-next: skill-flow-composer
 flow-alternatives: [policy-forge, skill-forge, hook-forge]
@@ -9,70 +9,74 @@ related: [infra-generate, policy-forge, skill-forge, agent-forge, command-forge,
 
 # Memory Seed
 
+Native helper commands use the generator's explicit bundled executable. Set `GENERATOR_NATIVE` to the absolute path `<generator>/memory-bank/bin/infra-engine` (`infra-engine.exe` on Windows). Use the selected release artifact; it is never located on PATH, downloaded or compiled during generation.
+
 ## Overview
 
-`memory-seed` bootstraps the target project's complete memory layer and seeds it
-with confirmed profile evidence. During generation it writes both shared roots
-under the required task staging root, while resolving citations against the
-real target. They are published once at the target root only after the complete
-bundle passes.
+`memory-seed` writes the shared native memory layer into the required task staging root and seeds it from the approved Project Profile. Citations are checked against the real target. Publication happens once after the complete staged accelerator passes its gates.
 
-- **`memory-bank/`** - the durable, indexed shared-memory layer, plus the **context-brain runtime** under `memory-bank/scripts/`: `context.py` (the CLI facade), `context_cli.py` (the entry the memory hooks run: `context.py` from its cached bytecode, which it writes into `memory-bank/scripts/__pycache__/` even under `PYTHONDONTWRITEBYTECODE` - hence the `__pycache__/` root-ignore requirement below), `context_handoff.py` (portable `context-save`/`context-load` handoffs), `context_continuity.py` (chat snapshots and merges), `brain_runtime.py` (governed Project Brain runtime), `context_retrieval.py` (local SQLite/BM25 retrieval), `validate.py` (the bank validator), `workspace_roots.py` (tooling/project/state roots and the Git source-policy probe; one directory in an installed project), `claude_subfolders.py` with `claude_dispatch.py` and `claude_dispatch.sh` (the hooks and `AGENTS.md` for a Claude Code session started below the root or in a worktree; hook-forge's `local-context.sh` runs it), and `codex_worktrees.py` with `codex_dispatch.py` and `codex_dispatch.sh` (the same for a Codex session in a worktree; the Codex `local-context.sh` runs it). The runtime is dependency-free (standard library only) and stack-agnostic.
-- **`project-brain/`** - the governed control plane for active work: dynamic records (tasks, findings, bugs, incidents, decisions, events), handoffs, the append-only agent message channel that orchestrated flows write to, retrieval manifests, promotion proposals, schemas, and `PROTOCOL.md`. The runtime under `memory-bank/scripts/` operates it.
+- `memory-bank/` holds durable chunks, their index and templates, the trusted native runtime contract and mirror rules, and the selected Rust executable at `memory-bank/bin/infra-engine[.exe]`. The native engine implements retrieval, checkpoints, governed results, handoffs, chat continuity, MCP and validation with bundled SQLite/FTS5.
+- `project-brain/` holds governed tasks, findings, bugs, incidents, decisions, events, handoffs, messages, retrieval manifests, promotions, schemas and protocol. It is operated by the same engine.
+- `memory-bank/local/context.db` is an ignored disposable index. Current project sources and shared Brain/Bank records remain authoritative.
 
-`skill-forge` separately generates the operational skills that drive this layer in every selected edition (`memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save`, `context-load` - see `skill-forge/references/php-process-skills.md`). `hook-forge` generates the working-memory hooks (`working-memory-read.sh` / `working-memory-write.sh`) that run `refresh` / `turn` automatically through `memory-bank/scripts/context_cli.py` (falling back to `memory-bank/scripts/context.py`), and `context-continuity.sh`, which keeps each chat's visible text through `memory-bank/scripts/context_continuity.py` for `context-load merge`. `assets/runtime-contract.json` is the canonical machine-readable source for the six guides' paths, the chat-snapshot boundaries, SQLite checkpoint/turn tables, creatable artifacts, command forms, and ownership split. The paths this skill creates are the contract those hooks and skills depend on - never rename them.
+`skill-forge` separately creates the six runtime-fixed guides: `memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save` and `context-load`. `hook-forge` emits the native host launch fields and compatibility shims for the supported Rust hook roles. None of those shims parses JSON, discovers task identity, retrieves memory or implements publication.
 
-The profile's section 12 ("Memory Bank Preview") already lists exactly what this skill is expected to seed. It plans one chunk per cohesive durable concept, composed only from confirmed evidence, rather than one tiny chunk per factual line. This skill's job is to **fulfill that preview**, not re-derive it: same count, same concepts, same sources. If the target changed, flag drift rather than silently seeding stale content.
+The bundled `assets/runtime-contract.json` is the source for paths, operations, SQLite checkpoint tables, ownership and chat-snapshot boundaries. Its native contract must match the trusted contract compiled into the selected engine. The artifact metadata at `assets/native-artifacts.json` pins the exact engine bytes, platform target and required capabilities. Preserve both contracts.
 
-Unlike every other artifact this forge produces, everything under this skill's bundled `assets/` is copied **verbatim** - the runtime scripts, the chunk template, and the `project-brain/` skeleton are dependency-free and stack-agnostic, so there is nothing target-specific to adapt (the single exception is `runtime.json.template`, which takes two substitutions - see below). Only `memory-bank/README.md`, `memory-bank/INDEX.md`, and chunk content are written fresh to describe the target's own memory contract and its own real findings.
+Profile section 12 is the approved seed plan: one cohesive durable concept per row, the same count, concepts and sources. Revalidate it against confirmed evidence; report drift instead of silently replacing the plan.
 
-## Generated File Naming Convention (MANDATORY)
+## Generated paths
 
-Into the required generation root, create:
+Create one shared memory layer at the generation root:
 
-**`memory-bank/` (durable memory + runtime):**
-- `memory-bank/README.md`, `memory-bank/INDEX.md`, `memory-bank/.memory-counter` (written fresh)
-- `memory-bank/runtime-contract.json` (copied verbatim from `assets/runtime-contract.json`)
-- `memory-bank/templates/chunk.md` (copied verbatim from `assets/templates/chunk.md`)
-- `memory-bank/scripts/context.py`, `memory-bank/scripts/context_cli.py`, `memory-bank/scripts/context_handoff.py`, `memory-bank/scripts/context_continuity.py`, `memory-bank/scripts/brain_runtime.py`, `memory-bank/scripts/context_retrieval.py`, `memory-bank/scripts/validate.py`, `memory-bank/scripts/automatic_query.py`, `memory-bank/scripts/memory_results.py`, `memory-bank/scripts/telemetry.py`, `memory-bank/scripts/workspace_roots.py`, `memory-bank/scripts/mcp_server.py`, `memory-bank/scripts/mcp_config.py` (copied verbatim from `assets/scripts/`)
-- `memory-bank/local/.gitkeep` (gitignored machine-local state: the disposable SQLite index `context.db`, turn buffers, ephemeral manifests)
-- `memory-bank/chunks/MEM-{NNNN}-{short-slug}.md` per seeded chunk (starting at `MEM-0001`)
+- `memory-bank/README.md`, `INDEX.md` and `.memory-counter` are authored for the target.
+- `memory-bank/bin/infra-engine` or `infra-engine.exe` is the selected native artifact, copied by the scoped native seed operation.
+- `memory-bank/runtime-contract.json`, `memory-bank/MCP.md`, `memory-bank/config/mirror-rules.json` and `memory-bank/templates/chunk.md` are the bundled static resources.
+- `memory-bank/local/` is empty ignored machine state. Seed durable chunks under `memory-bank/chunks/` with IDs allocated from the preview plan.
+- `project-brain/` receives its protocol, README, ignore rules, schemas, templates, provider/telemetry/runtime config, empty active/archive indexes and empty record/control directories from the trusted assets.
+- No executable Python file, interpreter launcher or runtime fallback is part of the payload.
 
-**`project-brain/` (governed control plane, copied verbatim from `assets/project-brain/`):**
-- `PROTOCOL.md`, `README.md`, `.gitignore`
-- `schemas/` (all six `*.schema.json` files, including `message.schema.json` for the agent channel), `templates/` (all nine record/control templates), `scripts/validate.py`
-- `config/providers.json`, `config/telemetry.json`, and `config/runtime.json` (from `runtime.json.template`, after the one substitution below)
-- `indexes/active.json`, `indexes/archive.json` (both `[]`)
-- empty, `.gitkeep`-held directories: `archive/`, `local/`, `control/handoffs/`, `control/messages/`, `control/promotions/`, `control/retrieval-manifests/`, `dynamic/bugs/`, `dynamic/decisions/`, `dynamic/events/`, `dynamic/findings/`, `dynamic/incidents/`, `dynamic/tasks/`
+Keep runtime state out of manifest ownership: chunks/index/counter, local state, Brain indexes and record/control directories belong to the target team after seeding. Static resources and the native artifact may be owned by the explicit write plan.
 
-**Target `.gitignore` requirements:** do not read or modify the root file.
-Write `tasks/TASK-{N}/gitignore-requirements/memory-seed.json` containing the
-exact sorted requirements `[".context-handoff/", "__pycache__/", "memory-bank/local/"]`.
-`infra-generate`/`infra-update` are the sole root-file composers.
+## Runtime configuration
 
-Append a log to `tasks/TASK-{N}/memory-seed-log.md`.
+Materialize `assets/project-brain/config/runtime.json.template` with exactly the supported profile substitutions:
 
-## Placeholder Substitution (`runtime.json.template`)
+1. The confirmed framework slug from section 2; use `generic` when no framework is confirmed. Never invent a supported framework to make the output look specific.
+2. The actual canonical skills root from selected clients: `.agents` for Codex, otherwise `.claude`, otherwise `.cursor`. It must exist in the generated tree.
 
-`assets/project-brain/config/runtime.json.template` becomes `project-brain/config/runtime.json` with exactly two substitutions:
-
-1. **`{{TARGET_FRAMEWORK}}`** -> the target's framework slug - lowercase, kebab-case, from the profile's confirmed section 2 framework (`laravel`, `symfony`, `php-core`, `laminas`, ...). When section 2 has no confirmed framework, or the target is plain PHP with no framework, use `generic`. This is safe by design: the runtime treats `framework` as an opaque configuration value. The only framework-sensitive behavior is `MIRROR_RULES.skip_by_framework` inside `context_retrieval.py`, a lookup keyed by this slug - a slug with no entry (any non-`symfony` value today) simply contributes no framework-specific mirror exemptions, and `brain_runtime.py` itself defaults to `generic` when the key is absent. So an unrecognized slug degrades to "no framework exceptions", never to an error. Do NOT invent a known-framework slug (`laravel`/`symfony`) that the profile does not confirm just to look specific.
-2. **`{{CANONICAL_EDITION}}`** -> the skills root `context.py parity` treats as the source of truth, derived from the profile's selected editions (section 1): `.agents` when Codex is selected, else `.claude` when Claude is selected, else `.cursor`. The value MUST name an edition root that will actually exist in the target: `skill_mirror_drift` in `context_retrieval.py` classifies every mirror file as drift when the canonical edition's skills tree is missing, so a claude-only target seeded with a hardcoded `.agents` fails `context.py parity` with a false total-drift report even though status/validate/refresh/turn are clean.
-
-All other `runtime.json` values are shipped defaults (`mode: governed`, `automatic_promotion/completion/compaction: true`, `provider: sqlite-fts5`, telemetry off). Leave them as-is; the target team tunes them post-handoff.
+Keep the other shipped runtime defaults. Approved declarative hook policy is emitted separately by `hook-forge` through its native evidence-bound service; it does not become shell code.
 
 ## Process
 
-1. **Read profile section 12 first** - it is the authoritative seed plan, already reviewed by the user. Cross-check it against confirmed facts in sections 2-8, including canonical source authority, durable invariants, lifecycles, permissions, audit obligations, integration contracts, and sanitized incident-prevention rules.
-2. **Bootstrap `memory-bank/`:** write `README.md` (fresh prose naming the target and its memory contract: authority hierarchy, layout, what belongs here, retrieval, creating/updating a chunk, lifecycle, security, and the runtime CLI - `python3 memory-bank/scripts/context.py --help`), copy `assets/runtime-contract.json` to `memory-bank/runtime-contract.json`, copy `assets/MCP.md` to `memory-bank/MCP.md`, copy `templates/chunk.md`, every `assets/scripts/*.py` (the runtime imports each of them; a missing one stops every memory command) and `assets/scripts/*.sh` verbatim, and create empty gitignored `local/`. Treat the contract's `required_skeleton` paths as required generation outputs and its `creatable` paths as runtime-created; do not require creatable files to pre-exist.
-   Register project Memory MCP in staging by running the copied `mcp_config.py --root GENERATION_ROOT` with one `--tool` per selected client. Include its `.mcp.json` (Claude), `.cursor/mcp.json` (Cursor), and `.codex/config.toml` (Codex) outputs in the explicit write plan/manifest. The helper detects Python and generates portable worktree-aware launchers, preserving other servers/settings and refusing a foreign same-name server. Existing Codex hooks/features stay; hook-forge must retain this managed MCP block when it supplies them. Registration does not grant client trust or bypass tool approval.
-3. **Bootstrap `project-brain/`:** copy the whole `assets/project-brain/` skeleton verbatim (including `.gitkeep` placeholders and both empty `[]` indexes), then materialize `config/runtime.json` from the template with the two substitutions above (framework slug + canonical edition).
+1. Read profile section 12 and cross-check its concepts against confirmed sections 2–8: canonical authority, invariants, lifecycle, permissions, audit obligations, integration contracts and sanitized incident-prevention rules.
+2. Seed only the trusted memory/Brain assets into staging using the native scoped operation:
+
+   ```sh
+   "$GENERATOR_NATIVE" creator seed-assets \
+     --assets "<generator>/.agents/skills/memory-seed/assets" \
+     --staging "<generation-root>" \
+     --framework "<confirmed-slug-or-generic>" \
+     --editions "<selected-clients>"
+   ```
+
+   The operation selects the explicit current-platform artifact from the bundled metadata, verifies its digest/capabilities, copies only the runtime/static skeleton, and applies the two config substitutions. It must not overlay a ready edition's policy, skills, commands or agents. The separate `seed-runtime` ready-edition overlay is not this forge's operation.
+3. Write the target-specific Bank README/index/counter and register project Memory MCP for only the selected hosts:
+
+   ```sh
+   "$GENERATOR_NATIVE" repo mcp-config \
+     --root "<generation-root>" --delivery-root "<real-target>" \
+     --tool "<selected-client>"
+   ```
+
+   Repeat `--tool` for each selected client. The helper writes only staged configurations but binds their executable and runtime root to the final target. Preserve external servers and existing Codex configuration; registration grants no trust. Include these host MCP files in the explicit write plan.
+
 4. **Seed one chunk per row in section 12's preview table**, starting at `MEM-0001`, in the same order. Fill frontmatter exactly per `templates/chunk.md` (JSON frontmatter; `valid_from`/`valid_to` are optional temporal-validity keys - seed chunks normally set `valid_from` to the seed date and leave `valid_to` null). Each chunk represents one cohesive concept and links all canonical sources that prove it. It may group tightly related facts (for example, a lifecycle's statuses, confirmed transitions, guards, permission, and audit consequence) but MUST NOT copy full specs, schemas, permission matrices, test inventories, incident narratives, or logs. If revalidation surfaces a new confirmed concept or invalidates a previewed one, report drift rather than silently reconciling it.
 
    **The body serializes the rule itself - a chunk whose body could be
    regenerated from its own title has preserved nothing.** A measured
    publication seeded fifteen chunks that all carried the same sentence with
-   the title and paths substituted; `validate_memory_content.py` now refuses
+   the title and paths substituted; `creator validate-memory-content` now refuses
    that, and this is what each section must actually hold, drawn from the
    run's own evidence (the domain findings, `project-claims.json`, and the
    plan contracts that cite these sources):
@@ -96,56 +100,37 @@ All other `runtime.json` values are shipped defaults (`mode: governed`, `automat
    - Bodies are written one concept at a time from that concept's own
      evidence; no two chunks may share sentence scaffolding once their
      nouns are erased.
-5. **Write `INDEX.md`** with the exact 8-column table: `ID | Title | Type | Scope | Tags | Status | Last Verified | File`.
-6. **Set `.memory-counter`** to one past the highest allocated ID.
-7. **Declare root-ignore requirements** in the task-scoped JSON file above;
-   never append to `.gitignore` directly.
-8. **Run the validators and smoke checks** from the staged generation root; fix any structural error before declaring success:
-   - `python3 memory-bank/scripts/validate.py memory-bank --source-root <target>` (bank structure). The chunks cite the target's files, which are not in the staging root; without `--source-root` every seeded chunk reports `source path does not exist`. Once published beside the project the flag is unnecessary, and `bootstrap-verifier` passes it for you from `--evidence-target`.
-   - `python3 <generator>/.agents/skills/bootstrap-verifier/scripts/validate_memory_content.py --bank <staging>/memory-bank --target <real-target>` (chunk substance: a stated rule per chunk, no shared body skeleton, no known boilerplate, every source explained with a valid range, contradictions recording both claims as `needs-review`). The structural validator proves shape; this one proves the body says something. Exit 1 blocks the seed.
-   - `python3 memory-bank/scripts/context.py validate` (Project Brain records - passes on the empty skeleton)
-   - `python3 memory-bank/scripts/context.py status` (runtime imports and index health; exit 0 proves the four scripts and the skeleton are wired correctly)
-   - compare `memory-bank/runtime-contract.json` byte-for-byte with the bundled asset and verify its required skeleton paths exist while its creatable paths are accepted as intentionally absent
+5. Write `INDEX.md` with exactly `ID | Title | Type | Scope | Tags | Status | Last Verified | File`.
+6. Set `.memory-counter` to one past the highest allocated seed ID.
+7. Write the task-scoped root-ignore requirements contract. Keep `.context-handoff/` and `memory-bank/local/` ignored; preserve the approved shared-file composition contract. Never read, append or replace the target root ignore file directly.
+8. From the staged generation root, run native structure, substance and health checks:
 
-## Output Template
+   ```sh
+   "<generation-root>/memory-bank/bin/infra-engine" bank validate \
+     --root "<generation-root>" --source-root "<real-target>"
+   "$GENERATOR_NATIVE" creator validate-memory-content \
+     --bank "<generation-root>/memory-bank" --target "<real-target>"
+   "<generation-root>/memory-bank/bin/infra-engine" memory \
+     --root "<generation-root>" validate
+   "<generation-root>/memory-bank/bin/infra-engine" memory \
+     --root "<generation-root>" status
+   ```
 
-```markdown
-# Memory Seed Complete: [target_name]
+   Use `infra-engine.exe` on Windows. Verify the copied runtime contract matches the bundled trusted contract and its required skeleton exists. Creatable paths are allowed to remain absent. An error blocks completion.
 
-**Seeded chunks:** [count] (profile's section 12 previewed: [count])
-- [MEM-0001: title (source)]
-- ...
+## Output
 
-**Runtime:** memory-bank/scripts/ (context.py, context_cli.py, context_handoff.py, context_continuity.py, brain_runtime.py, context_retrieval.py, validate.py, automatic_query.py, memory_results.py, telemetry.py, workspace_roots.py, mcp_server.py, mcp_config.py - verbatim)
-**Project Brain:** project-brain/ skeleton (framework slug: [slug], canonical edition: [.agents/.claude/.cursor])
-**Counter:** [value]
-**validate.py:** [pass/fail] | **context.py validate:** [pass/fail] | **context.py status:** [pass/fail]
-**Drift from preview:** none | [what changed and why]
-
-## Next
-skill-flow-composer, once all forges have finished.
-```
+Return the seeded chunk IDs, concrete concept titles and canonical sources; agreement or drift against section 12; framework and canonical edition; counter; native artifact identity; structure/substance/health results; log path; and `skill-flow-composer` as the next step after all forges finish.
 
 ## Guardrails
 
-- MUST copy every file under `assets/` byte-for-byte - the runtime contract, runtime scripts, chunk template, and the `project-brain/` skeleton included; do not "improve", trim, or re-generate them. The only sanctioned edits are the `{{TARGET_FRAMEWORK}}` and `{{CANONICAL_EDITION}}` substitutions in `runtime.json.template` (which is copied under the name `config/runtime.json`).
-- MUST declare root `.gitignore` requirements through the task-scoped JSON
-  contract only; MUST NOT read, create, or append the target root file.
-- MUST leave no `{{TARGET_FRAMEWORK}}` or `{{CANONICAL_EDITION}}` placeholder in the written `project-brain/config/runtime.json`; MUST use `generic` rather than an unconfirmed framework slug; and MUST set `canonical_edition` to an edition root that is actually generated (`.agents` for Codex, else `.claude`, else `.cursor`) - a canonical edition absent from the tree makes `context.py parity` report false total drift.
-- MUST seed only cohesive concepts composed from `confirmed` facts, each with canonical source paths; never seed an `inferred`/`unknown` item as fact.
-- MUST seed the same set of chunks section 12 previewed - same count, same concepts, same sources - unless the target genuinely changed, in which case report drift explicitly.
-- MUST NOT duplicate a canonical spec/schema/test inventory/permission matrix or include raw incident logs, customer data, payloads, or sensitive operational detail.
-- MUST preserve authority: current policy, canonical specs, code, migrations, constraints, and tests outrank memory; `project-brain/` outranks retrieval caches; `PROTOCOL.md` governs every Brain mutation.
-- MUST NOT include any secret or credential value in any chunk.
-- MUST serialize the actual rule in every chunk body - condition, required behavior, forbidden behavior, consequence, with concrete symbols and cited ranges - and MUST NOT reuse one body template across chunks or restate the title as content; `validate_memory_content.py` exit 1 blocks the seed.
-- MUST record a contradiction as both competing claims with their sources, the current safe operating rule, and a resolution owner/condition, under status `needs-review` - never as settled `active` knowledge.
-- MUST explain in Verification, per cited source, what its exact range proves and what change triggers re-review; a bare list of paths explains nothing.
-- MUST run all three checks in step 7 and fix every reported error before reporting success.
-- MUST create ONE shared `memory-bank/` and ONE shared `project-brain/` at the target root, not per edition, and MUST NOT rename any runtime path (`hook-forge`'s memory hooks call `memory-bank/scripts/context_cli.py`, falling back to `memory-bank/scripts/context.py`, at exactly those paths).
-- MUST make the six runtime-fixed memory-continuity guides compile from `assets/runtime-contract.json`; generic prose, guessed flags, and paths not listed as required or creatable cannot override it. Chat snapshots and the merges `context-load merge` freezes under `.context-handoff/merges/` are local ignored state only: they hold documented visible hook text, never private stores or hidden reasoning, and never reach Project Brain, Memory Bank, or SQLite.
-
-## Final Output
-
-Return the seeded chunk list (ID, cohesive concept title, canonical sources), how it compares to section 12's preview, the framework slug and canonical edition written to `runtime.json`, the final counter value, the three validator/smoke results, the log path, and the next step (`skill-flow-composer`).
-
-Native Stop capture requires `native_results.py`: one structured agent-attested save through the existing result guards, with no raw-chat adoption or task completion.
+- Preserve the exact trusted static resources and native artifact. Only supported runtime-template substitutions and approved declarative hook policy are target-specific.
+- Create one shared Bank and Brain at the target root, not one per client.
+- Seed only confirmed cohesive concepts and preserve the reviewed preview. Do not promote inferred or unknown claims to facts.
+- Serialize the actual rule: condition, required and forbidden behavior, consequence, concrete symbols and cited ranges. Do not reuse a boilerplate body after merely changing names.
+- A contradiction records both cited claims, the current safe rule and the resolution owner/condition under `needs-review`.
+- Explain what each cited source proves and which change triggers review. Avoid copied specs, schemas, permission matrices, raw logs, incident transcripts and secrets.
+- Preserve authority: policy and canonical sources outrank Brain; Brain outranks Bank; the local index is disposable.
+- Compile the six runtime-fixed guides from the trusted native runtime contract. Do not invent operations or paths.
+- Chat snapshots and prepared merges remain ignored local visible-text convenience state. They never admit private account stores, hidden reasoning or system/tool envelopes into Brain, Bank or SQLite.
+- Native result capture uses the existing structured result guards. It never treats arbitrary chat text as an attested save or completes a task automatically.

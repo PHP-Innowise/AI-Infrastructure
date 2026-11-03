@@ -63,7 +63,7 @@ Claude Code, Codex или Cursor получает политику, навыки
 хуки редакции, а память проекта (Project Brain, Memory Bank, индекс) хранится
 в состоянии Harness, а не в проекте. `git pull` в клоне обновляет все
 подключённые проекты сразу. Из терминала то же самое делает
-`python3 <клон>/scripts/accelerator_attach.py run claude|codex|cursor`,
+`infra-engine attach run claude|codex|cursor`,
 запущенный в папке проекта. Подробности и ограничения:
 [docs/ATTACHED-MODE.md](docs/ATTACHED-MODE.md).
 
@@ -204,7 +204,7 @@ AGENTS.md выбранной редакции — исполняемая пол�
   `MEM-YYYYMMDD-xxxxxxxx` (дата плюс восемь hex-символов от UUID
   записи-источника), поэтому promotion на двух машинах или в двух ветках не
   конкурирует за общий счётчик; `INDEX.md` не дописывается вручную, а
-  детерминированно пересобирается командой `context.py reindex-bank`. Старые
+  детерминированно пересобирается командой `memory-bank/bin/infra-engine memory reindex-bank`. Старые
   фрагменты `MEM-NNNN` остаются валидными.
 
 По умолчанию используется governed mode. Общим состоянием активной работы
@@ -254,7 +254,7 @@ Working Memory, производная от имени ветки, сущест�
 Публичная команда получения контекста в governed mode:
 
 ~~~bash
-python3 memory-bank/scripts/context.py retrieve \
+memory-bank/bin/infra-engine memory retrieve \
   "password session invalidation" \
   --task-id BAUMAS-133
 ~~~
@@ -271,13 +271,13 @@ python3 memory-bank/scripts/context.py retrieve \
   валидаций кешируются по состоянию репозитория, поэтому повторный старт не
   платит за них заново;
 - хук отправки запроса (`UserPromptSubmit` в Claude Code и Codex) вызывает
-  `context.py refresh --sanitize`: он инкрементально обновляет три слоя индекса
+  `memory-bank/bin/infra-engine memory refresh --sanitize`: он инкрементально обновляет три слоя индекса
   и подставляет Task Capsule в запрос - рабочее состояние задачи, её недавние
   файлы и то, что сохранила сама задача, если `capsule_profile` в
   `runtime.json` не просит полного поиска (`docs/CONTEXT-AND-MEMORY.md`).
   В Cursor тот же хук работает на `beforeSubmitPrompt` и вместо этого
   записывает капсулу в правило `working-memory.mdc`;
-- хук конца хода (`Stop`) вызывает `context.py turn`: изменённые пути
+- хук конца хода (`Stop`) вызывает `memory-bank/bin/infra-engine memory turn`: изменённые пути
   буферизуются в игнорируемом локальном состоянии и раз в пять ходов
   сбрасываются в авторитетную задачу. На этой же границе выполняется
   обслуживание — promotion всего, что ещё подходит, компакция и сообщение о
@@ -355,24 +355,24 @@ manifest; хуки запроса передают `--sanitize`, который 
 Запускайте команды из корня редакции или потребляющего проекта:
 
 ~~~bash
-python3 memory-bank/scripts/context.py start \
+memory-bank/bin/infra-engine memory start \
   --task-id BAUMAS-133 \
   --goal "Проверить инвалидирование других сессий после смены пароля"
-python3 memory-bank/scripts/context.py index
-python3 memory-bank/scripts/context.py retrieve \
+memory-bank/bin/infra-engine memory index
+memory-bank/bin/infra-engine memory retrieve \
   "password sessions" \
   --task-id BAUMAS-133
-python3 memory-bank/scripts/context.py update \
+memory-bank/bin/infra-engine memory update \
   --task-id BAUMAS-133 \
   --revision 1 \
   --progress "Регрессионный тест с двумя сессиями проходит" \
   --next-step "Проверить старый remember-me cookie"
-python3 memory-bank/scripts/context.py complete \
+memory-bank/bin/infra-engine memory complete \
   --task-id BAUMAS-133 \
   --revision 2 \
   --outcome "Другие сессии и устаревшие remember-me cookies инвалидируются" \
   --verification "ChangePasswordTest passed"
-python3 memory-bank/scripts/context.py compact
+memory-bank/bin/infra-engine memory compact
 ~~~
 
 Сопутствующие команды обслуживания:
@@ -380,15 +380,15 @@ python3 memory-bank/scripts/context.py compact
 ~~~bash
 # восстановить машинно-локальную привязку задачи на другой машине или в свежем
 # клоне (запись в Git есть, локальной привязки нет)
-python3 memory-bank/scripts/context.py rebind --task-id BAUMAS-133
+memory-bank/bin/infra-engine memory rebind --task-id BAUMAS-133
 
 # детерминированно пересобрать memory-bank/INDEX.md из фронтматтера фрагментов
-python3 memory-bank/scripts/context.py reindex-bank
+memory-bank/bin/infra-engine memory reindex-bank
 
 # сверить зеркала навыков, хуков, команд и агентов внутри редакции,
 # а --cross-edition — байт-идентичность общего ядра между редакциями
-python3 memory-bank/scripts/context.py parity
-python3 memory-bank/scripts/context.py parity --cross-edition
+memory-bank/bin/infra-engine memory parity
+memory-bank/bin/infra-engine memory parity --cross-edition
 ~~~
 
 Автоматический ребиндинг встроен в сброс хода: если запись задачи существует в
@@ -399,7 +399,7 @@ Git, но локальной привязки нет, она восстанав�
 репозиторий, соберите бандл:
 
 ~~~bash
-python3 memory-bank/scripts/context.py export --destination ../context-bundle
+memory-bank/bin/infra-engine memory export --destination ../context-bundle
 ~~~
 
 Экспорт только читает. В бандл попадают записи Project Brain с допустимым
@@ -441,19 +441,18 @@ accepted decision переносится без запроса, как толь�
 `start → update → retrieve → complete` и локальные episodes; они неавторитетны
 и теряются при удалении его SQLite-базы.
 
-Реализация локальна, написана на Python без внешних зависимостей и использует
-SQLite FTS5. В ней нет embeddings, vector search, LangGraph или центрального
+Реализация локальная: нативный Rust runtime с SQLite FTS5. В ней нет embeddings, vector search, LangGraph или центрального
 сервиса памяти. Claude Code и Codex получают свежую ограниченную Task Capsule
 через хуки запроса; Cursor — капсулу предыдущего хода через автоматически
 отрисованное локальное правило. Кроме того, каждая редакция поставляет
-локальный MCP-сервер памяти `memory-bank/scripts/mcp_server.py`, который клиент
+локальный MCP-сервер памяти `memory-bank/bin/infra-engine`, который клиент
 запускает через стандартные ввод и вывод. Установщик регистрирует его для
 каждого выбранного клиента: как `harness-memory` в `.mcp.json` и
 `.cursor/mcp.json` и как `harness_memory` в `.codex/config.toml`; доверие и
 одобрение инструментов клиент по-прежнему запрашивает сам. Его четыре
 инструмента — `memory_status`, `memory_retrieve`, `memory_checkpoint` и
 `memory_record_result` — работают с теми же Project Brain и Memory Bank, что и
-CLI, а без него тот же путь записи даёт `context.py record-result`.
+CLI, а без него тот же путь записи даёт `memory-bank/bin/infra-engine memory record-result`.
 Подробности — в `memory-bank/MCP.md` редакции.
 
 Pressure test Task Capsule на трёх сценариях сократил объём передаваемого текста
@@ -546,7 +545,7 @@ MCP-серверы — необязательные внешние интегр�
 
 ## Дополнительные инструменты разработчика: сбор контекста
 
-`scripts/collect_context.py` упаковывает выбранный срез **этого репозитория**
+`infra-engine collect` упаковывает выбранный срез **этого репозитория**
 в один бандл, который можно отдать внешней модели: ревью в окне чата, второе
 мнение по ядру памяти, объяснение диффа модели, которая не видит рабочую
 копию. Это обёртка над необязательным CLI
@@ -626,7 +625,7 @@ Run infra-scan against the existing target project at
 Генератор исследует фактические composer.json, фреймворк, зависимости,
 интеграции, архитектуру и CI/CD, а не копирует шаблон Laravel, Symfony или PHP
 Core. Сгенерированный акселератор получает тот же слой памяти, что и готовые
-редакции: рантайм context-brain в `memory-bank/scripts/`, каркас
+редакции: рантайм context-brain в `memory-bank/bin/`, версионированные ресурсы runtime, каркас
 `project-brain/` и хуки автоматической памяти, включая доставку капсулы для
 Cursor.
 
@@ -648,11 +647,12 @@ Cursor.
   к границам соответствующего фреймворка, а не копируйте без проверки.
 - Не правьте зеркала руками. Канон навыков — `.agents/skills`, канон хуков,
   команд, агентов и документов политики — `.claude`; после правки канона
-  запустите `python3 scripts/build_mirrors.py --write`, и зеркала `.claude`,
-  `.cursor` и `.codex` будут перегенерированы по таблице правил `MIRROR_RULES`
-  из `memory-bank/scripts/context_retrieval.py` (для генератора —
-  `Infrastructure-Creator/mirror_rules.py`). Законное отличие зеркала
-  описывается правилом или исключением в этой таблице, а не молчаливым
+  запустите `infra-engine repo mirrors --write`, и зеркала `.claude`,
+  `.cursor` и `.codex` будут перегенерированы по версионируемому манифесту
+  `memory-bank/config/mirror-rules.json` (ресурс генератора —
+  `runtime-rust/crates/infra-generator/resources/mirror-rules.json`).
+  Законное отличие зеркала описывается правилом или исключением
+  в этом манифесте, а не молчаливым
   расхождением файлов.
 - Зафиксируйте изменение в CHANGELOG.md соответствующей редакции и выполните
   её проверку из DOD.md. Изменения общего ядра (memory/context-ядро,
@@ -661,25 +661,25 @@ Cursor.
 
 ### Проверки перед сдачей
 
-`scripts/check.py` выполняет те же шаги, что и CI (`.github/workflows/`), по
+`infra-engine check` выполняет те же шаги, что и CI (`.github/workflows/`), по
 одной группе на задание; что проверяет каждое задание, описано в
 [docs/CI.md](docs/CI.md):
 
 ~~~bash
-python3 scripts/check.py                               # все задания CI; код 1 при любом сбое
-python3 scripts/check.py --list                        # все команды и что здесь будет пропущено
-python3 scripts/check.py --group lint --group mirrors  # только эти задания
+infra-engine check                               # все задания CI; код 1 при любом сбое
+infra-engine check --list                        # все команды и что здесь будет пропущено
+infra-engine check --group lint --group mirrors  # только эти задания
 ~~~
 
 Бюджет контекста (`AGENTS.md`, описания навыков, команды, агенты и тела
-навыков каждой редакции) измеряется `scripts/context_budget.py`; потолки лежат
+навыков каждой редакции) измеряется `infra-engine repo budget`; потолки лежат
 в `scripts/token_budget.json`. Этот файл декларирует запас примерно в пять
 процентов, но потолки поднимали по-разному: одни пересчитывали как измеренное
 значение плюс пять процентов, другие поднимали ровно на рост одного изменения.
 Поэтому запас сейчас от нескольких байт до чуть меньше пяти процентов потолка,
 и там, где он в несколько байт, одно добавленное в `AGENTS.md` предложение
 может уронить задание lint в CI. Сократите текст или поднимите потолок в том
-же изменении; `python3 scripts/context_budget.py --headroom` показывает остаток
+же изменении; `infra-engine repo budget --headroom` показывает остаток
 по каждой категории.
 
 Для деталей конкретного стека используйте README выбранной редакции. Для её

@@ -1,6 +1,6 @@
 ---
 name: memory-seed
-description: "Use this agent to bootstrap the target's full memory layer at the target root - one shared memory-bank/ with the dependency-free context-brain runtime (context.py, brain_runtime.py, context_retrieval.py, validate.py) and one governed project-brain/ skeleton - and seed cohesive durable concepts composed strictly from confirmed Project Profile evidence, linked to canonical source files. It copies every bundled asset verbatim (sole substitution: the framework slug in project-brain/config/runtime.json), then validates and smoke-runs context.py before success. Runs exactly one skill and stops."
+description: "Use this agent to bootstrap the target's full memory layer at the target root - one shared memory-bank/ with the selected native memory-bank/bin/infra-engine artifact and trusted runtime resources and one governed project-brain/ skeleton - and seed cohesive durable concepts composed strictly from confirmed Project Profile evidence, linked to canonical source files. It copies trusted static assets, materializes the framework and canonical edition in project-brain/config/runtime.json, and runs native bank validation plus memory validate/status before success. Runs exactly one skill and stops."
 model: sonnet
 invokes: memory-seed
 phase: generation
@@ -13,7 +13,7 @@ Bootstrap the target project's shared memory-bank/ (durable memory + context-bra
 
 ## Instructions
 1. Use the Skill tool to invoke the `memory-seed` skill, passing the approved profile and target-project-path.
-2. Execute the skill completely following its instructions (read section 12, bootstrap both roots, copy assets verbatim, substitute the framework slug in runtime.json, seed one chunk per reviewed cohesive confirmed concept, write the index/counter, run the validators and context.py smoke checks, and report drift).
+2. Execute the skill completely following its instructions (read section 12, bootstrap both roots, copy trusted static assets and the selected native artifact, materialize the framework and canonical edition in runtime.json, seed one chunk per reviewed cohesive confirmed concept, write the index/counter, run native bank validate, creator validate-memory-content and memory validate/status checks, and report drift).
 3. STOP once the memory bank is seeded and validated - do not proceed to any other forge.
 4. Provide structured output (below).
 
@@ -21,7 +21,7 @@ Bootstrap the target project's shared memory-bank/ (durable memory + context-bra
 When done, provide:
 
 ### Context Summary
-[2-3 sentences: the seeded chunk list (ID, title, source), the final counter value, and the validate.py result]
+[2-3 sentences: the seeded chunk list (ID, title, source), the final counter value, and the native structure, substance and health results]
 
 ### Next Steps
 **Next by flow:** run skill-flow-composer once all forges have finished.

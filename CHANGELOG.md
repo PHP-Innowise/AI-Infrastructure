@@ -4,18 +4,14 @@
 
 Shared-core history for the PHP AI Accelerators monorepo. The shared
 core is what the `Laravel/`, `Symfony/` and `PHP Core/` editions have
-in common: the Python memory/context core (`memory-bank/scripts/`,
-`memory-bank/tests/`, `memory-bank/templates/`), Project Brain
-(`project-brain/` protocol, config, schemas, scripts, tests), the tool
-hooks (`.claude/hooks/` and their generated `.cursor`/`.codex`
-mirrors), the mirror machinery (`MIRROR_RULES` in
-`memory-bank/scripts/context_retrieval.py`, executed by
-`scripts/build_mirrors.py`), and the repository-level tooling in
-`scripts/`.
+in common: the native memory/context core (`runtime-rust/crates/infra-core/`),
+Project Brain protocol/config/schemas and historical behavior fixtures, native
+host hooks and their generated exec adapters, declarative mirror rules and
+the repository tooling in `runtime-rust/crates/infra-tooling/`.
 
 A change to a shared-core file must land together with an entry here;
 CI enforces this on pull requests via
-`scripts/check_core_changelog.sh`. Framework-specific history stays in
+`./infra-engine repo changelog`. Framework-specific history stays in
 each edition's own changelog (`Laravel/CHANGELOG.md`,
 `Symfony/CHANGELOG.md`, `PHP Core/CHANGELOG.md`;
 `Infrastructure-Creator/CHANGELOG.md` covers the generator). Each PHP
@@ -27,6 +23,18 @@ changelogs when this file was introduced; entries that describe one
 edition's own files remain in that edition's changelog.
 
 ## Unreleased
+
+- Move executable project logic into the Rust workspace and one native
+  `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation
+  and repository tooling, Infrastructure-Creator, Harness and declarative
+  orchestration, evaluation/pilots, QA workbooks and skill tools. Compile
+  browser behavior to WebAssembly, with generated JavaScript bindings and an
+  exec-only compatibility launcher. Retire production Python and shell
+  implementations, materialize native hook/MCP commands against the final
+  target, and derive distribution inventories and checks from native
+  contracts. Preserve stored authority, frozen study attribution, explicit
+  source/process custody and reviewed publication boundaries. The early
+  primitive ABI remains a compatibility fixture; it is not the runtime.
 
 - Rebuild and validate imported Memory Bank catalogs before native A/B dispatch,
   then refresh SQLite under the existing admission and timeout boundaries.

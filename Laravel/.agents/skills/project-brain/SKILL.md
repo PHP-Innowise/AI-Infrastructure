@@ -8,7 +8,7 @@ flow-alternatives: [memory-bank, documentation-generator, reflect]
 
 # Laravel Project Brain
 
-Operate the shared, repository-backed control plane in `project-brain/` through the dependency-free facade at `memory-bank/scripts/context.py`. Governed mode is the default. Use `--mode lightweight` only when shared task state, formal handoffs, and governed records are explicitly unnecessary.
+Operate the shared, repository-backed control plane in `project-brain/` through the dependency-free facade at `memory-bank/bin/infra-engine`. Governed mode is the default. Use `--mode lightweight` only when shared task state, formal handoffs, and governed records are explicitly unnecessary.
 
 ## Authority And Boundaries
 
@@ -29,18 +29,18 @@ Operate the shared, repository-backed control plane in `project-brain/` through 
 - **Promote durable knowledge:** use the configured automatic or independently reviewed promotion mode without falsifying review provenance.
 - **Lightweight:** explicitly use local-only task/episode behavior with its durability and collaboration limits.
 
-Execute only the selected operation, then stop. Inspect `python3 memory-bank/scripts/context.py --help` and the relevant `project-brain/templates/` file before mutation; do not invent unsupported flags or hand-edit revision/lifecycle fields when a command exists.
+Execute only the selected operation, then stop. Inspect `memory-bank/bin/infra-engine memory --help` and the relevant `project-brain/templates/` file before mutation; do not invent unsupported flags or hand-edit revision/lifecycle fields when a command exists.
 
 ## Governed Task Lifecycle
 
 Tasks are the sixth governed record type alongside findings, bugs, incidents, decisions, and events.
 
-1. Use a stable caller-supplied task ID and an explicit owner. Start with `python3 memory-bank/scripts/context.py --owner OWNER start --task-id ID --goal GOAL`.
+1. Use a stable caller-supplied task ID and an explicit owner. Start with `memory-bank/bin/infra-engine memory --owner OWNER start --task-id ID --goal GOAL`.
 2. Confirm the task UUID/revision and initial handoff. SQLite may retain a local binding but must not become a second authority for progress.
 3. Before material decisions, retrieve context with exactly:
 
    ```bash
-   python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID
+   memory-bank/bin/infra-engine memory retrieve QUERY --task-id ID
    ```
 
 4. Open cited canonical sources and verify material claims. Preserve surfaced conflicts and stale-source warnings; do not collapse disagreement into a false consensus.
@@ -69,7 +69,7 @@ Use global `--mode lightweight` only by explicit choice and place it before the 
 
 ## Unified Retrieval
 
-- The public agent interface is only `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`; `context` may exist solely as a compatibility alias.
+- The public agent interface is only `memory-bank/bin/infra-engine memory retrieve QUERY --task-id ID`; `context` may exist solely as a compatibility alias.
 - Retrieval applies privacy, owner, authority, lifecycle, supersession, and source-freshness filters before selection.
 - Treat SQLite/BM25 output and the context packet as discovery aids. Verify cited sources before implementation or decisions.
 - Keep bounded snippets and category budgets. Delivered capsules allow at most 3 semantic and 3 episodic items (the changelog and up to two recorded events), no procedural item (hosts list skills), and 8,000 serialized characters; the rendered text a host reads stays under 3,600. Do not bypass the internal conflict ceiling or omit an escalation reason.
@@ -95,7 +95,7 @@ Use global `--mode lightweight` only by explicit choice and place it before the 
 
 ## Validation
 
-- Run `python3 memory-bank/scripts/context.py validate`, `python3 memory-bank/scripts/context.py parity`, and `python3 memory-bank/scripts/validate.py`.
+- Run `memory-bank/bin/infra-engine memory validate`, `memory-bank/bin/infra-engine memory parity`, and `memory-bank/bin/infra-engine bank validate`.
 - Confirm task/handoff and record links resolve, source fingerprints are current, revisions are monotonic, transitions are legal, indexes are deterministic, and archive records pass the same checks as active records.
 - Confirm governed retrieval produced a manifest and no unauthorized/private/stale content leaked.
 - Run the active edition's DOD and report unavailable tooling as `N/A - tooling not configured`.

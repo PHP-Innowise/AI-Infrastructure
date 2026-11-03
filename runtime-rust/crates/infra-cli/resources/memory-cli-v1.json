@@ -1,0 +1,2059 @@
+{
+  "global": {
+    "name": "global",
+    "options": [
+      {
+        "flags": [
+          "--root"
+        ],
+        "default": null
+      },
+      {
+        "flags": [
+          "--db"
+        ]
+      },
+      {
+        "flags": [
+          "--project"
+        ]
+      },
+      {
+        "flags": [
+          "--mode"
+        ],
+        "choices": [
+          "governed",
+          "lightweight"
+        ]
+      },
+      {
+        "flags": [
+          "--owner"
+        ],
+        "default": null
+      }
+    ]
+  },
+  "cursor-rule": {
+    "name": "cursor-rule",
+    "options": [
+      {
+        "flags": [
+          "--action"
+        ],
+        "choices": [
+          "write",
+          "keep",
+          "retire",
+          "prompt-held",
+          "migrate"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--approved-current-sha256"
+        ]
+      },
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "default": ""
+      },
+      {
+        "flags": [
+          "--phase"
+        ],
+        "choices": [
+          "prompt",
+          "turn",
+          "session"
+        ],
+        "default": "prompt"
+      },
+      {
+        "flags": [
+          "--report-json"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--diagnostic"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "cursor-rule-retire": {
+    "name": "cursor-rule-retire",
+    "options": [
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--diagnostic"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "context-save": {
+    "name": "context-save",
+    "options": [
+      {
+        "flags": [
+          "--input"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--output"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--detail"
+        ],
+        "choices": [
+          "summary",
+          "topic",
+          "full"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--topic"
+        ]
+      },
+      {
+        "flags": [
+          "--task-id"
+        ]
+      },
+      {
+        "flags": [
+          "--source-client"
+        ],
+        "choices": [
+          "codex",
+          "claude",
+          "cursor",
+          "other"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--transcript"
+        ]
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "context-load": {
+    "name": "context-load",
+    "options": [
+      {
+        "flags": [
+          "--input"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--include-transcript"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "index": {
+    "name": "index",
+    "options": [
+      {
+        "flags": [
+          "--incremental"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "search": {
+    "name": "search",
+    "options": [
+      {
+        "flags": [
+          "query"
+        ]
+      },
+      {
+        "flags": [
+          "--limit"
+        ],
+        "default": 8
+      },
+      {
+        "flags": [
+          "--layer"
+        ],
+        "choices": [
+          "procedural",
+          "semantic",
+          "episodic"
+        ]
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "context": {
+    "name": "context",
+    "options": [
+      {
+        "flags": [
+          "query"
+        ]
+      },
+      {
+        "flags": [
+          "--task-id"
+        ]
+      },
+      {
+        "flags": [
+          "--limit"
+        ],
+        "default": 3
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--provenance-response"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--source-hints-json"
+        ]
+      },
+      {
+        "flags": [
+          "--trace-path"
+        ],
+        "action": "append",
+        "default": [],
+        "dest": "trace_paths"
+      },
+      {
+        "flags": [
+          "--path"
+        ],
+        "action": "append",
+        "default": [],
+        "dest": "paths"
+      },
+      {
+        "flags": [
+          "--ephemeral"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--host"
+        ],
+        "choices": [
+          "cli",
+          "claude",
+          "codex",
+          "cursor",
+          "harness"
+        ],
+        "default": "cli"
+      },
+      {
+        "flags": [
+          "--gate"
+        ],
+        "choices": [
+          "off",
+          "shadow",
+          "enforce"
+        ],
+        "default": null
+      }
+    ]
+  },
+  "retrieve": {
+    "name": "retrieve",
+    "options": [
+      {
+        "flags": [
+          "query"
+        ]
+      },
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--limit"
+        ],
+        "default": 3
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--provenance-response"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--source-hints-json"
+        ]
+      },
+      {
+        "flags": [
+          "--trace-path"
+        ],
+        "action": "append",
+        "default": [],
+        "dest": "trace_paths"
+      },
+      {
+        "flags": [
+          "--path"
+        ],
+        "action": "append",
+        "default": [],
+        "dest": "paths"
+      },
+      {
+        "flags": [
+          "--ephemeral"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--host"
+        ],
+        "choices": [
+          "cli",
+          "claude",
+          "codex",
+          "cursor",
+          "harness"
+        ],
+        "default": "cli"
+      },
+      {
+        "flags": [
+          "--gate"
+        ],
+        "choices": [
+          "off",
+          "shadow",
+          "enforce"
+        ],
+        "default": null
+      }
+    ]
+  },
+  "hook-context": {
+    "name": "hook-context",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--delivery-profile"
+        ],
+        "choices": [
+          "ordinary",
+          "cursor-rule"
+        ],
+        "default": "ordinary"
+      },
+      {
+        "flags": [
+          "--expected-branch"
+        ],
+        "default": null
+      },
+      {
+        "flags": [
+          "--host"
+        ],
+        "choices": [
+          "cli",
+          "claude",
+          "codex",
+          "cursor",
+          "harness"
+        ],
+        "default": "cli"
+      },
+      {
+        "flags": [
+          "--gate"
+        ],
+        "choices": [
+          "off",
+          "shadow",
+          "enforce"
+        ],
+        "default": null
+      }
+    ]
+  },
+  "refresh": {
+    "name": "refresh",
+    "options": [
+      {
+        "flags": [
+          "--query"
+        ]
+      },
+      {
+        "flags": [
+          "--task-id"
+        ]
+      },
+      {
+        "flags": [
+          "--session-id"
+        ]
+      },
+      {
+        "flags": [
+          "--transcript"
+        ]
+      },
+      {
+        "flags": [
+          "--sanitize"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--source-hints-json"
+        ]
+      },
+      {
+        "flags": [
+          "--limit"
+        ],
+        "default": 3
+      },
+      {
+        "flags": [
+          "--path"
+        ],
+        "action": "append",
+        "default": [],
+        "dest": "paths"
+      },
+      {
+        "flags": [
+          "--trace-path"
+        ],
+        "action": "append",
+        "default": [],
+        "dest": "trace_paths"
+      },
+      {
+        "flags": [
+          "--ephemeral"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--capsule-profile"
+        ],
+        "choices": [
+          "full",
+          "navigation",
+          "recall"
+        ],
+        "default": null
+      },
+      {
+        "flags": [
+          "--expected-branch"
+        ],
+        "default": null
+      },
+      {
+        "flags": [
+          "--host"
+        ],
+        "choices": [
+          "cli",
+          "claude",
+          "codex",
+          "cursor",
+          "harness"
+        ],
+        "default": "cli"
+      },
+      {
+        "flags": [
+          "--gate"
+        ],
+        "choices": [
+          "off",
+          "shadow",
+          "enforce"
+        ],
+        "default": null
+      },
+      {
+        "flags": [
+          "--validate"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--provenance-response"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--read-only"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--read-only-reason"
+        ],
+        "choices": [
+          "budget"
+        ]
+      },
+      {
+        "flags": [
+          "--delivery-profile"
+        ],
+        "choices": [
+          "ordinary",
+          "cursor-rule"
+        ],
+        "default": "ordinary"
+      }
+    ]
+  },
+  "turn": {
+    "name": "turn",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--flush"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--transcript"
+        ]
+      },
+      {
+        "flags": [
+          "--flush-after"
+        ],
+        "default": 5
+      },
+      {
+        "flags": [
+          "--max-files"
+        ],
+        "default": 20
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "rebind": {
+    "name": "rebind",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--record"
+        ]
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "record": {
+    "name": "record",
+    "options": [
+      {
+        "flags": [
+          "--summary"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--outcome"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--file"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--verification"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--source"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "start": {
+    "name": "start",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--goal"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--file"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--source"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "update": {
+    "name": "update",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--progress"
+        ]
+      },
+      {
+        "flags": [
+          "--next-step"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--replace-next-steps"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--file"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--source"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--phase"
+        ],
+        "choices": [
+          "understanding",
+          "planning",
+          "implementation",
+          "verification",
+          "finalization",
+          "implementing",
+          "execution",
+          "review",
+          "quality"
+        ]
+      },
+      {
+        "flags": [
+          "--revision"
+        ]
+      },
+      {
+        "flags": [
+          "--actor"
+        ]
+      },
+      {
+        "flags": [
+          "--allow-phase-regression"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "get": {
+    "name": "get",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "clear": {
+    "name": "clear",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "complete": {
+    "name": "complete",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--outcome"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--summary"
+        ]
+      },
+      {
+        "flags": [
+          "--file"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--verification"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--source"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--revision"
+        ]
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "msg-send": {
+    "name": "msg-send",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--from"
+        ],
+        "dest": "from_actor",
+        "required": true
+      },
+      {
+        "flags": [
+          "--to"
+        ],
+        "dest": "to_actor",
+        "required": true
+      },
+      {
+        "flags": [
+          "--type"
+        ],
+        "choices": [
+          "finding",
+          "question",
+          "handoff"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--body"
+        ]
+      },
+      {
+        "flags": [
+          "--body-file"
+        ]
+      },
+      {
+        "flags": [
+          "--ref"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "msg-read": {
+    "name": "msg-read",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--for"
+        ],
+        "dest": "for_actor"
+      },
+      {
+        "flags": [
+          "--since"
+        ],
+        "default": 0
+      },
+      {
+        "flags": [
+          "--type"
+        ],
+        "choices": [
+          "finding",
+          "question",
+          "handoff",
+          "dispatch",
+          "completion"
+        ]
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "msg-dispatch": {
+    "name": "msg-dispatch",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--agent"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--event"
+        ],
+        "choices": [
+          "spawn",
+          "complete"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--note"
+        ]
+      },
+      {
+        "flags": [
+          "--capsule-file"
+        ]
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "capsule": {
+    "name": "capsule",
+    "options": [
+      {
+        "flags": [
+          "--validate"
+        ],
+        "action": "store_true",
+        "required": true
+      },
+      {
+        "flags": [
+          "--file"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "brain-create": {
+    "name": "brain-create",
+    "options": [
+      {
+        "flags": [
+          "type"
+        ],
+        "choices": [
+          "finding",
+          "bug",
+          "incident",
+          "decision",
+          "event"
+        ]
+      },
+      {
+        "flags": [
+          "--external-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--title"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--goal"
+        ]
+      },
+      {
+        "flags": [
+          "--file"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--source"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--conflict"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--privacy"
+        ],
+        "choices": [
+          "public",
+          "team",
+          "restricted",
+          "private"
+        ],
+        "default": "team"
+      },
+      {
+        "flags": [
+          "--authority"
+        ],
+        "choices": [
+          "inferred",
+          "observed",
+          "verified"
+        ],
+        "default": "observed"
+      },
+      {
+        "flags": [
+          "--attestation"
+        ],
+        "choices": [
+          "agent",
+          "person"
+        ]
+      },
+      {
+        "flags": [
+          "--confidence"
+        ],
+        "default": 1
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "record-result": {
+    "name": "record-result",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--result-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--revision"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--input"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--attestation"
+        ],
+        "choices": [
+          "agent",
+          "person"
+        ],
+        "default": "agent"
+      },
+      {
+        "flags": [
+          "--reason"
+        ]
+      },
+      {
+        "flags": [
+          "--prepared-scope"
+        ]
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "native-prompt": {
+    "name": "native-prompt",
+    "options": [
+      {
+        "flags": [
+          "--host"
+        ],
+        "choices": [
+          "claude",
+          "codex",
+          "cursor"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "native-stop": {
+    "name": "native-stop",
+    "options": [
+      {
+        "flags": [
+          "--host"
+        ],
+        "choices": [
+          "claude",
+          "codex",
+          "cursor"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "native-result": {
+    "name": "native-result",
+    "options": [
+      {
+        "flags": [
+          "--request"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--token"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--input"
+        ]
+      },
+      {
+        "flags": [
+          "--skip"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "prepare-result": {
+    "name": "prepare-result",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--result-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--revision"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--input"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--attestation"
+        ],
+        "choices": [
+          "agent",
+          "person"
+        ],
+        "default": "agent"
+      },
+      {
+        "flags": [
+          "--reason"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "replay-result": {
+    "name": "replay-result",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--result-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--revision"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--input"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--attestation"
+        ],
+        "choices": [
+          "agent",
+          "person"
+        ],
+        "default": "agent"
+      },
+      {
+        "flags": [
+          "--reason"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "brain-update": {
+    "name": "brain-update",
+    "options": [
+      {
+        "flags": [
+          "--record-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--revision"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--progress"
+        ]
+      },
+      {
+        "flags": [
+          "--next-step"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--replace-next-steps"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--file"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--source"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--conflict"
+        ],
+        "action": "append",
+        "default": []
+      },
+      {
+        "flags": [
+          "--phase"
+        ],
+        "choices": [
+          "understanding",
+          "planning",
+          "implementation",
+          "verification",
+          "finalization",
+          "implementing",
+          "execution",
+          "review",
+          "quality"
+        ]
+      },
+      {
+        "flags": [
+          "--transition"
+        ]
+      },
+      {
+        "flags": [
+          "--authority"
+        ],
+        "choices": [
+          "inferred",
+          "observed",
+          "verified"
+        ]
+      },
+      {
+        "flags": [
+          "--reverify"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--attestation"
+        ],
+        "choices": [
+          "agent",
+          "person"
+        ]
+      },
+      {
+        "flags": [
+          "--reason"
+        ],
+        "default": "Record updated"
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "brain-get": {
+    "name": "brain-get",
+    "options": [
+      {
+        "flags": [
+          "--record-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "source-fingerprints": {
+    "name": "source-fingerprints",
+    "options": [
+      {
+        "flags": [
+          "--source"
+        ],
+        "action": "append",
+        "required": true
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "memory-review": {
+    "name": "memory-review",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--input"
+        ],
+        "choices": [
+          "-"
+        ]
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "memory-review-controller": {
+    "name": "memory-review-controller",
+    "options": [
+      {
+        "flags": [
+          "--task-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--proposal-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--proposal-sha"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--action"
+        ],
+        "choices": [
+          "export",
+          "apply"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--packet"
+        ]
+      },
+      {
+        "flags": [
+          "--authorization"
+        ]
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "retrieval-report": {
+    "name": "retrieval-report",
+    "options": [
+      {
+        "flags": [
+          "--since"
+        ],
+        "default": null
+      },
+      {
+        "flags": [
+          "--scope"
+        ],
+        "choices": [
+          "local",
+          "governed",
+          "all"
+        ],
+        "default": "all"
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "health": {
+    "name": "health",
+    "options": [
+      {
+        "flags": [
+          "--window"
+        ],
+        "default": null
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "links": {
+    "name": "links",
+    "options": [
+      {
+        "flags": [
+          "--path"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--prefix"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "status": {
+    "name": "status",
+    "options": [
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "validate": {
+    "name": "validate",
+    "options": [
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "brain-validate": {
+    "name": "validate",
+    "options": [
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "parity": {
+    "name": "parity",
+    "options": [
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--skills-only"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--cross-edition"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "compact": {
+    "name": "compact",
+    "options": [
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "consolidate": {
+    "name": "consolidate",
+    "options": [
+      {
+        "flags": [
+          "--apply"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--ticket"
+        ],
+        "default": null
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "bank-audit": {
+    "name": "bank-audit",
+    "options": [
+      {
+        "flags": [
+          "--provenance"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "bank-reverify": {
+    "name": "bank-reverify",
+    "options": [
+      {
+        "flags": [
+          "--id"
+        ],
+        "required": true,
+        "dest": "memory_id"
+      },
+      {
+        "flags": [
+          "--review-after"
+        ],
+        "default": null
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "bank-retire": {
+    "name": "bank-retire",
+    "options": [
+      {
+        "flags": [
+          "--id"
+        ],
+        "required": true,
+        "dest": "memory_id"
+      },
+      {
+        "flags": [
+          "--valid-to"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--superseded-by"
+        ],
+        "default": null
+      },
+      {
+        "flags": [
+          "--reason"
+        ],
+        "default": null
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "bank-quarantine": {
+    "name": "bank-quarantine",
+    "options": [
+      {
+        "flags": [
+          "--id"
+        ],
+        "required": true,
+        "dest": "memory_id"
+      },
+      {
+        "flags": [
+          "--reason"
+        ],
+        "default": null
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "reindex-bank": {
+    "name": "reindex-bank",
+    "options": [
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "promote-propose": {
+    "name": "promote-propose",
+    "options": [
+      {
+        "flags": [
+          "--source-id"
+        ],
+        "action": "append",
+        "required": true
+      },
+      {
+        "flags": [
+          "--title"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--content"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "promote-review": {
+    "name": "promote-review",
+    "options": [
+      {
+        "flags": [
+          "--promotion-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--reviewer"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--reject"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "promote-apply": {
+    "name": "promote-apply",
+    "options": [
+      {
+        "flags": [
+          "--promotion-id"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "promote-auto": {
+    "name": "promote-auto",
+    "options": [
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "export": {
+    "name": "export",
+    "options": [
+      {
+        "flags": [
+          "--destination"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--include-archive"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--include-superseded"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--force"
+        ],
+        "action": "store_true"
+      },
+      {
+        "flags": [
+          "--json"
+        ],
+        "action": "store_true"
+      }
+    ]
+  }
+}

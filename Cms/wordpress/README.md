@@ -205,7 +205,7 @@ Use the repository-root inventory-driven installer. Start with `--dry-run` and
 resolve every remaining collision manually:
 
 ```bash
-python3 scripts/install_accelerator.py \
+infra-engine install \
   --edition WordPress \
   --target "/absolute/path/to/wordpress-project" \
   --tool codex \

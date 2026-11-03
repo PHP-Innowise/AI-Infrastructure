@@ -30,7 +30,7 @@ Neither is installed or downloaded by this repository.
 Assets are provided by a maintainer, from local paths:
 
 ```bash
-python3 scripts/memory_sqlite_vec_pilot.py probe \
+infra-engine pilot sqlite-vec probe \
   --vec-extension ~/models/sqlite-vec/vec0.so \
   --lembed-extension ~/models/sqlite-lembed/lembed0.so \
   --model ~/models/minilm.gguf --json
@@ -49,7 +49,7 @@ with the model revision and hash.
 `k=60`), which needs no score scale shared between the lexical and dense pools:
 
 ```bash
-python3 scripts/memory_sqlite_vec_pilot.py fuse \
+infra-engine pilot sqlite-vec fuse \
   --lexical lexical.json --dense dense.json --json
 ```
 

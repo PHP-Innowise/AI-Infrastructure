@@ -14562,6 +14562,89 @@ class LinkedMemoryExcerptTest(unittest.TestCase):
         self.assertTrue(revision)
 
 
+class FingerprintBackendTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        (self.root / 'source.txt').write_bytes(b'allow\r\n')
+
+    def backend(self, digest, library='1', adapter='2'):
+        return brain.using_fingerprint_backend(digest, library_sha256=library * 64,
+                                               adapter_sha256=adapter * 64)
+
+    def test_explicit_scope_uses_captured_bytes_and_restores_default(self):
+        seen = []
+        def digest(data):
+            seen.append(data)
+            return hashlib.sha256(brain._line_ending_neutral(data)).hexdigest()
+        baseline = brain.fingerprint(self.root, 'source.txt')
+        self.assertIsNone(brain.fingerprint_backend_identity())
+        with self.backend(digest):
+            self.assertEqual(brain.fingerprint(self.root, 'source.txt'), baseline)
+            self.assertEqual(seen, [b'allow\r\n'])
+            identity = brain.fingerprint_backend_identity()
+            self.assertEqual(identity, {'profile': 'rust-fingerprint-v1', 'abi': 1,
+                                       'library_sha256': '1' * 64, 'adapter_sha256': '2' * 64})
+            identity['abi'] = 99
+            self.assertEqual(brain.fingerprint_backend_identity()['abi'], 1)
+        self.assertIsNone(brain.fingerprint_backend_identity())
+        self.assertEqual(brain.fingerprint(self.root, 'source.txt'), baseline)
+
+    def test_native_failure_never_falls_back_or_echoes_input(self):
+        def failed(_data):
+            raise ValueError('private captured bytes')
+        for digest in (failed, lambda data: 'INVALID', lambda data: b'0' * 64):
+            with self.subTest(digest=digest), self.backend(digest):
+                with self.assertRaises(brain.BrainError) as caught:
+                    brain.fingerprint(self.root, 'source.txt')
+                self.assertNotIn('private', str(caught.exception))
+        self.assertIsNone(brain.fingerprint_backend_identity())
+
+    def test_cache_is_invalidated_when_backend_scope_changes(self):
+        cache = brain._CitationDigestCache()
+        expected = brain.fingerprint(self.root, 'source.txt', _normalization_cache=cache)
+        with self.backend(lambda data: '0' * 64):
+            self.assertEqual(brain.fingerprint(self.root, 'source.txt', _normalization_cache=cache)['sha256'], '0' * 64)
+            self.assertEqual(brain.fingerprint(self.root, 'source.txt', _normalization_cache=cache)['sha256'], '0' * 64)
+            self.assertEqual(cache.hits, 1)
+        self.assertEqual(brain.fingerprint(self.root, 'source.txt', _normalization_cache=cache), expected)
+        self.assertEqual(cache.misses, 3)
+
+    def test_nested_scope_and_new_thread_do_not_leak_backend(self):
+        with self.backend(lambda data: '0' * 64):
+            with self.backend(lambda data: '3' * 64, library='3'):
+                self.assertEqual(brain.fingerprint_backend_identity()['library_sha256'], '3' * 64)
+            self.assertEqual(brain.fingerprint_backend_identity()['library_sha256'], '1' * 64)
+            observed = []
+            thread = threading.Thread(target=lambda: observed.append(brain.fingerprint_backend_identity()))
+            thread.start()
+            thread.join()
+            self.assertEqual(observed, [None])
+
+    def test_prepared_scope_binds_library_and_adapter_identity(self):
+        def scope():
+            return memory_results.prepared_scope(self.root, 'local', 'checked', 'agent')
+        baseline = scope()
+        with self.backend(lambda data: '0' * 64):
+            native = scope()
+        with self.backend(lambda data: '0' * 64, library='3'):
+            other_library = scope()
+        with self.backend(lambda data: '0' * 64, adapter='4'):
+            other_adapter = scope()
+        self.assertEqual(len({baseline, native, other_library, other_adapter}), 4)
+        self.assertEqual(scope(), baseline)
+
+    def test_invalid_backend_identity_refuses_before_scope(self):
+        for digest, library, adapter in ((None, '1' * 64, '2' * 64),
+                                         (lambda data: '0' * 64, 'bad', '2' * 64),
+                                         (lambda data: '0' * 64, '1' * 64, None)):
+            with self.subTest(library=library, adapter=adapter), self.assertRaises(brain.BrainError):
+                with brain.using_fingerprint_backend(digest, library_sha256=library, adapter_sha256=adapter):
+                    self.fail('invalid backend was admitted')
+        self.assertIsNone(brain.fingerprint_backend_identity())
+
+
 class CitationDigestCacheTest(unittest.TestCase):
     def setUp(self):
         self.directory=tempfile.TemporaryDirectory();self.addCleanup(self.directory.cleanup)

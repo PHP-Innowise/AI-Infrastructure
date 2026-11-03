@@ -1,0 +1,43 @@
+[workspace]
+# The patched source vendor is deliberately tested and linted with this workspace.
+members = [".", "crates/*", "vendor/ooxml-numfmt"]
+default-members = ["crates/infra-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+# Integration cases install and fingerprint the actual engine. Keep test
+# artifacts small; symbol-heavy copies otherwise dominate those contracts.
+[profile.test]
+debug = 0
+
+[package]
+name = "memory-kernel-probe"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+description = "Native memory primitive compatibility contracts"
+
+[lib]
+name = "memory_kernel_probe"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "memory-kernel-probe"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+sha2 = "=0.11.0"

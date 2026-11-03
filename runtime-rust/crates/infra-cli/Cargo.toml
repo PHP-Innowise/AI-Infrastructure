@@ -1,0 +1,33 @@
+[package]
+name = "infra-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+default-run = "infra-engine"
+
+[[bin]]
+name = "infra-engine"
+path = "src/main.rs"
+
+[[bin]]
+name = "infra-cli-eval-process-fixture"
+path = "tests/support/eval_process_fixture.rs"
+test = false
+bench = false
+
+[dependencies]
+infra-core = { path = "../infra-core" }
+infra-adapters = { path = "../infra-adapters" }
+infra-tooling = { path = "../infra-tooling" }
+infra-generator = { path = "../infra-generator" }
+infra-system = { path = "../infra-system" }
+infra-eval = { path = "../infra-eval" }
+infra-skill-tools = { path = "../infra-skill-tools" }
+infra-qa = { path = "../infra-qa" }
+infra-pilots = { path = "../infra-pilots" }
+infra-harness = { path = "../infra-harness" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["preserve_order","arbitrary_precision","raw_value"] }
+chrono = "=0.4.45"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread","macros","net","process","signal","io-util","sync","time"] }

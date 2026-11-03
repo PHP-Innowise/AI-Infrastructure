@@ -1,5 +1,13 @@
 # Troubleshooting
 
+> Rust migration, 2026-11-03: Python test and demo invocations below are
+> retained pre-Rust behavior specifications and historical evidence. They are
+> not verification commands for the migrated checkout. Run the registered native
+> suites from the repository root with
+> `cargo test --manifest-path runtime-rust/Cargo.toml --workspace --all-targets --locked --offline`.
+> Current coverage is defined by those Rust assertions; historical passes are
+> not transferred to the port.
+
 This guide starts from observable symptoms and uses non-destructive diagnosis
 first. Run commands from the selected accelerator root (`Laravel/`,
 `Symfony/`, or `PHP Core/`) unless a command explicitly names another path.
@@ -33,7 +41,7 @@ Confirm the tool's native discovery path:
 Check the skill directory and validate it:
 
 ```bash
-python3 .agents/skills/skill-creator/scripts/quick_validate.py \
+infra-engine skill-tools quick-validate \
   .agents/skills/<skill-name>
 ```
 
@@ -140,32 +148,9 @@ quiet hook is not proof of safety.
 
 Do not add fake Codex command or one-skill agent trees.
 
-## Python or SQLite FTS5 Is Unavailable
+## Native Engine or SQLite FTS5 Is Unavailable
 
-### Symptom
-
-`context.py` reports a Python version/import error, `no such module: fts5`,
-or cannot create an FTS virtual table.
-
-### Diagnose
-
-The Local Context Engine requires Python 3.9+ and SQLite with FTS5:
-
-```bash
-python3 --version
-python3 -c 'import sqlite3; print(sqlite3.sqlite_version)'
-python3 -c 'import sqlite3; c=sqlite3.connect(":memory:"); c.execute("CREATE VIRTUAL TABLE t USING fts5(body)"); print("FTS5 OK")'
-```
-
-Also confirm the script is the selected accelerator's
-`memory-bank/scripts/context.py`, not a similarly named global utility.
-
-### Recover
-
-Use the project's documented Python runtime that includes FTS5. Do not install
-or replace system Python without approval. If tooling is unavailable, report
-`N/A - tooling not configured`; Project Brain Markdown/JSON remains the shared
-authority, but local indexing/retrieval cannot be claimed as validated.
+Use the platform's installed `memory-bank/bin/infra-engine` (`.exe` on Windows). Verify the native release and its resources were installed together, then run `memory-bank/bin/infra-engine capabilities --json` and `memory-bank/bin/infra-engine memory index` during the validation phase. A runtime error remains an unavailable result; reinstall through the native installer rather than introducing an interpreter fallback.
 
 ## SQLite Database Is Stale or Corrupt
 
@@ -178,14 +163,15 @@ search results are clearly stale, or `status` cannot open
 ### Diagnose
 
 ```bash
-python3 memory-bank/scripts/context.py status --json
-python3 memory-bank/scripts/context.py index --json
+memory-bank/bin/infra-engine memory status --json
+memory-bank/bin/infra-engine memory index --json
 ```
 
-If SQLite can open the database, an integrity check is read-only:
+If the optional SQLite CLI is available and SQLite can open the database,
+run a read-only integrity check:
 
 ```bash
-python3 -c 'import sqlite3; c=sqlite3.connect("memory-bank/local/context.db"); print(c.execute("PRAGMA integrity_check").fetchone()[0])'
+sqlite3 -readonly memory-bank/local/context.db 'PRAGMA integrity_check;'
 ```
 
 Distinguish data classes before replacement:
@@ -227,8 +213,8 @@ original aside instead of deleting it, then reindex:
 ```bash
 mv memory-bank/local/context.db \
   memory-bank/local/context.db.quarantine-YYYYMMDD-HHMMSS
-python3 memory-bank/scripts/context.py index --json
-python3 memory-bank/scripts/context.py status --json
+memory-bank/bin/infra-engine memory index --json
+memory-bank/bin/infra-engine memory status --json
 ```
 
 Replace the timestamp placeholders manually before running. Do not perform
@@ -247,9 +233,14 @@ recovery is verified.
 Run the checks separately so the failing contract is clear:
 
 ```bash
-python3 memory-bank/scripts/context.py validate
-python3 memory-bank/scripts/context.py parity
-python3 memory-bank/scripts/validate.py
+memory-bank/bin/infra-engine memory validate
+memory-bank/bin/infra-engine memory parity
+memory-bank/bin/infra-engine bank validate
+```
+
+Historical pre-Rust invocations (reference only):
+
+```text
 python3 -m unittest discover project-brain/tests
 python3 -m unittest discover memory-bank/tests
 ```
@@ -292,8 +283,8 @@ compare-and-swap safety failure, not corruption.
 1. Reload the task or record:
 
    ```bash
-   python3 memory-bank/scripts/context.py get --task-id TASK-ID --json
-   python3 memory-bank/scripts/context.py brain-get --record-id UUID --json
+   memory-bank/bin/infra-engine memory get --task-id TASK-ID --json
+   memory-bank/bin/infra-engine memory brain-get --record-id UUID --json
    ```
 
 2. Review the current revision, progress, transitions, handoff, and conflicts.
@@ -315,7 +306,7 @@ The CLI actor comes from global `--owner`, then `PROJECT_BRAIN_OWNER`, then
 `local`. The global option must precede the subcommand:
 
 ```bash
-python3 memory-bank/scripts/context.py \
+memory-bank/bin/infra-engine memory \
   --owner alice \
   brain-get --record-id UUID --json
 ```
@@ -385,9 +376,9 @@ Mode changes do not migrate state:
 ### Diagnose
 
 ```bash
-python3 memory-bank/scripts/context.py status --json
+memory-bank/bin/infra-engine memory status --json
 PROJECT_BRAIN_MODE=lightweight \
-  python3 memory-bank/scripts/context.py status --json
+  memory-bank/bin/infra-engine memory status --json
 ```
 
 Check `project-brain/config/runtime.json`, `PROJECT_BRAIN_MODE`, and any global
@@ -407,7 +398,7 @@ See [`CONTEXT-MODES.md`](CONTEXT-MODES.md) for the full contract.
 ### Symptom
 
 The capsule warns "Task record <UUID> also claims <branch>; this turn uses
-<UUID>.", or `context.py rebind --task-id <branch>` reports that the
+<UUID>.", or `memory-bank/bin/infra-engine memory rebind --task-id <branch>` reports that the
 identifier is ambiguous.
 
 ### Cause
@@ -429,7 +420,7 @@ Keep one task per branch. Carry what matters from the other record's
 progress and next steps into the kept one, then cancel the other:
 
 ```bash
-python3 memory-bank/scripts/context.py brain-update --record-id <other UUID> \
+memory-bank/bin/infra-engine memory brain-update --record-id <other UUID> \
   --revision auto --transition cancelled --reason "Duplicate of <kept UUID>"
 ```
 
@@ -450,9 +441,9 @@ or carries a warning about the branch's task.
 
 | First line or warning | Meaning | What to do |
 |---|---|---|
-| `working: not recorded yet (the task starts at the 5-turn checkpoint)` | The branch has no task yet; a later checkpoint records one. | Nothing, or `context.py start` to record it now. |
+| `working: not recorded yet (the task starts at the 5-turn checkpoint)` | The branch has no task yet; a later checkpoint records one. | Nothing, or `memory-bank/bin/infra-engine memory start` to record it now. |
 | `working: not recorded yet (task codex-thread/<UUID>; the task starts at ...)` | A worktree Codex made, on a detached HEAD: the thread that owns it names the task, which has no record yet. | Nothing; use that ID with the CLI. |
-| `working: closed (this branch's task is finished; ...)` | The branch's task was completed or cancelled, and turns after it are not recorded. | `python3 memory-bank/scripts/context.py start --task-id <branch> --goal "..."`; the finished record moves to the archive. |
+| `working: closed (this branch's task is finished; ...)` | The branch's task was completed or cancelled, and turns after it are not recorded. | `memory-bank/bin/infra-engine memory start --task-id <branch> --goal "..."`; the finished record moves to the archive. |
 | `working: unavailable (the task's record cannot be read)` | The record is invalid - a merge conflict, a hand edit; a warning names the file. | Repair or restore that file; checkpoints wait for it. |
 | `working: unavailable (the task's record changed while this turn read it; read <path>)` | Another session's checkpoint rewrote the record in the last moments of this read. | Read the named record; the next prompt carries it again. |
 | warning `This branch was renamed from <old>; its task continues here.` | The branch was renamed with `git branch -m`, and its earlier name's task is used. | Nothing; `start --task-id <new name>` records a task of its own instead. |
@@ -474,14 +465,14 @@ context, and nothing says so outside the conversation.
 ### Diagnose
 
 From a clone of this repository,
-`python3 scripts/memory_eval.py install-status --project DIR` names what it
+`infra-engine eval memory-eval install-status --project DIR` names what it
 can see: the commit the project was last synced from against the clone, the
 capsule profile against the profiles the project's runtime knows, and whether
 the last capsule asked for was built. Otherwise the warning's text says it:
 
 | After "Capsule unavailable:" | Cause | What to do |
 |---|---|---|
-| `Capsule profile must be full or navigation` (or another list) | `project-brain/config/runtime.json` names a profile the project's runtime does not know: the runtime is older than the setting. On 2026-10-30 a Harness sync from a clone on `main` took four projects synced from a newer branch back to `main`'s runtime this way. | Sync the project from a clone that has the commit it was synced from (`install_accelerator.py --sync --target DIR`), or set a profile the runtime knows. A runtime of 2026-10-31 or later builds the full capsule and says why instead. |
+| `Capsule profile must be full or navigation` (or another list) | `project-brain/config/runtime.json` names a profile the project's runtime does not know: the runtime is older than the setting. On 2026-10-30 a Harness sync from a clone on `main` took four projects synced from a newer branch back to `main`'s runtime this way. | Sync the project from a clone that has the commit it was synced from (`infra-engine install --sync --target DIR`), or set a profile the runtime knows. A runtime of 2026-10-31 or later builds the full capsule and says why instead. |
 | `Task ID must use letters, digits, ...` | A task ID given by hand or in `CONTEXT_TASK_ID` with a character the grammar refuses (a branch name is mapped to a valid ID). | Unset `CONTEXT_TASK_ID`, or use the ID the capsule names for the branch. |
 | `Working task not found` | A runtime from before 2026-10-06, which refused a branch whose task was not recorded yet. | Sync the project. |
 
@@ -510,11 +501,11 @@ is kept by every sync. One client's 27 KB of notes put the policy past byte
 
 ### Diagnose
 
-`install_accelerator.py --sync` reports it as `codex_policy_cut`, an install
-with Codex prints it on stderr, and `memory_eval.py install-status` names it.
-`scripts/codex_bench.py --target DIR --sync` shows whether the whole policy
+`infra-engine install --sync` reports it as `codex_policy_cut`, an install
+with Codex prints it on stderr, and `infra-engine eval memory-eval install-status` names it.
+`infra-engine bench codex --target DIR --sync` shows whether the whole policy
 reached the model (`policy`, `policy_bytes`). For Claude Code started below
-the project root, `scripts/claude_code_bench.py --target DIR --sync
+the project root, `infra-engine bench claude-code --target DIR --sync
 --subfolder src` does the same: until 2026-10-31 its dispatcher carried
 39,000 characters of the policy there and filed the rest away.
 
@@ -530,7 +521,7 @@ only your machine. Or shorten the project's own part of `AGENTS.md`.
 ### Symptom
 
 After each answer the agent runs one more shell command. The command pipes a
-JSON object into `context.py ... native-result`, and in some sessions the
+JSON object into the selected native `memory ... native-result` command, and in some sessions the
 agent then repeats its answer. Each turn takes noticeably longer and costs
 more.
 
@@ -551,11 +542,11 @@ input tokens: about half of the answer's own. Only the first step of a
 conversation, and the first after a compaction, carries the full rules; later
 ones point back to them and are about 900 characters shorter.
 
-An agent that also runs `context.py record-result` or `memory_record_result`
+An agent that also runs `memory-bank/bin/infra-engine memory record-result` or `memory_record_result`
 during the answer saves it twice. The `AGENTS.md` of releases before 24
 October 2026 asked for that explicit save after every answer; the current
 policy asks for it only where the Stop hook requests no save.
-`install_accelerator.py --sync` rewrites the policy's managed block, with
+`infra-engine install --sync` rewrites the policy's managed block, with
 `--update-tracked` where the project's Git tracks `AGENTS.md`.
 
 ### Recover
@@ -566,7 +557,7 @@ for one session.
 
 - `--sync` never rewrites `runtime.json`, so the setting stays.
 - Results then reach memory only when an agent or a person records them:
-  `context.py record-result`, the MCP `memory_record_result` tool, or the
+  `memory-bank/bin/infra-engine memory record-result`, the MCP `memory_record_result` tool, or the
   Harness.
 - The native journal (`memory-bank/local/native-results.ndjson`) shows each
   skipped prompt and Stop as `skipped` with the code `switched-off`.
@@ -582,7 +573,7 @@ of the answer. `repeat` restores the repeat everywhere.
 ### Symptom
 
 After each answer Claude Code asks to approve a command like
-`cd <project> && echo -E '{...}' | python3 memory-bank/scripts/context.py ... native-result ...`.
+`cd <project> && echo -E '{...}' | memory-bank/bin/infra-engine memory ... native-result ...`.
 Under `claude -p` the command is refused instead and the result is not
 saved: `memory-bank/local/native-results.ndjson` records `stop` `failed` with
 the code `host-refused` (`unsaved` on runtimes before 24 October 2026).
@@ -591,8 +582,8 @@ the code `host-refused` (`unsaved` on runtimes before 24 October 2026).
 
 Claude Code runs that command without asking only when
 `.claude/settings.json` allows the memory CLI
-(`Bash(python3 memory-bank/scripts/context.py:*)`, with `python` and `py -3`
-for Windows) and the project is trusted. Claude Code ignores a project's allow
+(`Bash(memory-bank/bin/infra-engine memory:*)`, using the platform's
+`infra-engine.exe` spelling on Windows) and the project is trusted. Claude Code ignores a project's allow
 rules until its trust dialog has been accepted once. A team-edited
 `settings.json` may have lost the rules.
 
@@ -605,7 +596,7 @@ notification after every answer.
 ### Recover
 
 - Accept the trust dialog once in an interactive session.
-  `python3 scripts/claude_code_bench.py --target DIR` says whether your Claude
+  `infra-engine bench claude-code --target DIR` says whether your Claude
   Code has accepted it for that project.
 - Put the three allow rules back into `.claude/settings.json`. The edition's
   own file lists them. The dialog's "Yes, and don't ask again for: echo *"
@@ -650,7 +641,7 @@ Seen offline on Claude Code 2.1.278, with the answer on the second model call:
   needs.
 - Or switch the request off for that run with
   `CONTEXT_NATIVE_RESULT_REQUEST=off` in its environment. Its results then
-  reach memory only through `context.py record-result`, the MCP
+  reach memory only through `memory-bank/bin/infra-engine memory record-result`, the MCP
   `memory_record_result` tool or the Harness.
 
 ## Promotion Review or Apply Fails
@@ -678,8 +669,8 @@ Confirm:
 Run:
 
 ```bash
-python3 memory-bank/scripts/context.py validate
-python3 memory-bank/scripts/validate.py
+memory-bank/bin/infra-engine memory validate
+memory-bank/bin/infra-engine bank validate
 ```
 
 ### Recover
@@ -711,15 +702,15 @@ Project Brain indexes are deterministic navigation summaries; records remain
 authority. SQLite's document index is separate.
 
 ```bash
-python3 memory-bank/scripts/context.py validate
-python3 memory-bank/scripts/context.py index --json
+memory-bank/bin/infra-engine memory validate
+memory-bank/bin/infra-engine memory index --json
 ```
 
 For terminal/superseded Project Brain records, validate before compacting:
 
 ```bash
-python3 memory-bank/scripts/context.py compact
-python3 memory-bank/scripts/context.py validate
+memory-bank/bin/infra-engine memory compact
+memory-bank/bin/infra-engine memory validate
 ```
 
 ### Recover
@@ -736,7 +727,7 @@ python3 memory-bank/scripts/context.py validate
   or one side's list, in `project-brain/indexes/*.json`. Those files are
   derived from the records: resolve the Git conflict either way, and the next
   Brain write (a checkpoint, `update`, `record-result`) rebuilds them;
-  `context.py compact` rebuilds them too, even with nothing to archive.
+  `memory-bank/bin/infra-engine memory compact` rebuilds them too, even with nothing to archive.
   Compaction no longer refuses because of a stale or conflicted index, only
   because of an invalid record.
 - If compaction fails, retain all files and indexes. The runtime is designed to
@@ -770,97 +761,7 @@ blocked, or a hook times out.
    `echo '$TOOL_INPUT' | <script>` wrapper passes the literal variable name
    instead of the payload, and the hook then exits 0 on every call.
 8. Check return-code semantics in the edition hook README.
-9. Memory hooks that stay silent - no capsule on any prompt, no checkpoint in
-   `memory-bank/local/last-turn-report.json` - while `context.py status`
-   works: check that Python 3.9+ runs in the shell the host starts hooks with
-   (Git Bash on native Windows). The hooks take `python3`; on native Windows,
-   where the python.org installer provides `python` and `py` but no
-   `python3` and the `python3` found may be the Microsoft Store stub, they try
-   `python`, `py -3` and `python3`, in that order, and take the first that is
-   Python 3.9+. With none of them the hooks exit quietly, and the session
-   banner says `Context governance: unavailable - no Python 3.9+ found`. The
-   name found is remembered in `ai-accelerator-python-<uid>` in the temporary
-   directory and used while the shell finds it at the same path; delete that
-   file to make the hooks look again.
-   Outside Windows a `python3` on `PATH` is taken without a check, so one that
-   is not Python makes every prompt report `Memory refresh unavailable`.
-   Where Python has another name, the session banner says which, and the
-   agent runs the memory CLI with it: Claude Code allows the CLI under
-   `python3`, `python` and `py -3`, the Cursor CLI under `python3` and
-   `python`.
-10. Automatic native saves that never land - no `learning-*` record after a
-    session: read `memory-bank/local/native-results.ndjson`, one line per
-    prompt, Stop and save with a fixed code. `stop-hook` `exited` with
-    `status` 124 is a save request killed at its budget; `stop-hook`
-    `skipped` `capsule-delivered` a Harness turn; `stop` `failed` `unsaved`
-    a request nobody answered, `host-refused` one Claude Code refused (the
-    session is then not asked again for a day); `save` `refused` carries the
-    refusal's code
-    (`memory-result-v1:learning_fields` is usually `verified` put inside a
-    learning). From the repository, `python3 scripts/memory_eval.py realized
-    --project DIR` counts the lines per host.
-11. Hooks that run in one Claude Code session and not in another - no
-    capsule, no save, no `bash-validator.sh` - or files the project denies
-    read in one, while no hook reports an error: check the folder the session
-    started in. Claude Code reads `.claude/settings.json`, with the hooks,
-    the permission rules and `env`, only from the folder it starts in. For a
-    folder below the root a dispatcher in your own Claude Code configuration
-    gives the session all of them; the installer run in a terminal and a
-    session in the root set it up: `~/.claude/ai-accelerator/projects` (or
-    the same under `$CLAUDE_CONFIG_DIR`) lists the project root and
-    `~/.claude/settings.json` holds `ai-accelerator-dispatch.sh` entries,
-    `permissions` among them. If they are missing, start one session in the
-    root. Nothing is set up while `~/.claude/ai-accelerator/off` exists
-    (on Windows the dispatcher runs under Git Bash, as Claude Code's hooks
-    do), and a folder of another Git checkout inside the project - a
-    worktree, a vendored repository - is that checkout's. To remove the
-    dispatcher, create that `off` file and delete the entries from
-    `settings.json`. What the dispatcher does and how it was checked:
-    [Claude Code started below the project root](MEMORY-INTEGRATION.md#claude-code-started-below-the-project-root).
-    A Git worktree of the project has only what Git tracks: when the
-    installation is not committed, the dispatcher serves a session started
-    in the worktree too - the root's memory, the worktree's own task and an
-    index of its own under the root's `memory-bank/local/worktrees/` - but
-    not a session that entered the worktree after starting in the root
-    ([Claude Code started in a worktree](MEMORY-INTEGRATION.md#claude-code-started-in-a-worktree)).
-    Codex started in a subdirectory finds and runs the project's hooks; its
-    sandbox writes only below that folder, so the save waits in a temporary
-    folder (`ai-accelerator-native-spool-<uid>`) and the next hook saves it
-    (journal `saved` with code `spooled`: the sandbox cannot write the
-    journal either). Codex started in a Git worktree of the project without
-    the installation runs the root's hooks only through a dispatcher in your
-    own Codex folder, whose entries Codex runs once you have trusted them:
-    `~/.codex/ai-accelerator/projects` (or the same under `$CODEX_HOME`)
-    lists the project root and `~/.codex/hooks.json` holds
-    `ai-accelerator-dispatch.sh` entries. If they are missing, start one Codex
-    session in the root; if Codex skips them - `codex exec` does so without a
-    word - trust them in its terminal's `/hooks` or the app's Settings >
-    Hooks. Nothing is set up for hooks kept in `~/.codex/config.toml` or
-    while `~/.codex/ai-accelerator/off` exists; to remove the dispatcher,
-    create that file and delete the entries from `hooks.json`
-    ([Codex started in a worktree](MEMORY-INTEGRATION.md#codex-started-in-a-worktree)).
-    A worktree Codex made itself - `codex --worktree`, the Codex app's - is on
-    a detached HEAD: its task is `codex-thread/<thread>`, the thread that
-    `codex-thread.json` in `git rev-parse --git-dir` names as owner, until a
-    branch is made there, and `context.py status` says so. Any other detached
-    HEAD names no task: check out a branch, or set `CONTEXT_TASK_ID`
-    ([A worktree Codex made](MEMORY-INTEGRATION.md#a-worktree-codex-made)).
-
-### Recover
-
-Make the smallest pattern or payload fix, then test:
-
-- a known safe operation;
-- a known blocked destructive operation;
-- missing/unexpected payload keys;
-- a script failure and timeout;
-- duplicate loading;
-- secret-safe error output.
-
-Mirror shared script behavior across editions while preserving native event
-wiring. Do not make hooks fail closed globally without evaluating the risk of
-blocking all work, and do not make them fail open silently for high-risk
-operations without documenting the limitation.
+9. If native memory status works while hooks stay silent, inspect the materialized host configuration and its final absolute executable/root binding. Source templates copied directly into a live host are incomplete. Reinstall or sync through the native installer, preserve custom settings, and inspect the host's hook result. No Python interpreter lookup or temporary interpreter cache is used.
 
 ## Framework Tools Are Missing
 

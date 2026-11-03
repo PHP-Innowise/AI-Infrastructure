@@ -1,3 +1,4 @@
+<!-- Native Rust/Wasm skill-creator resource; Apache-2.0 attribution retained in ../LICENSE.txt. -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -42,8 +43,8 @@
   <p class="description">Current description: <span id="skill-desc">__SKILL_DESCRIPTION_PLACEHOLDER__</span></p>
 
   <div class="controls">
-    <button class="btn btn-add" onclick="addRow()">+ Add Query</button>
-    <button class="btn btn-export" onclick="exportEvalSet()">Export Eval Set</button>
+    <button class="btn btn-add" data-editor-action="add">+ Add Query</button>
+    <button class="btn btn-export" data-editor-action="export">Export Eval Set</button>
   </div>
 
   <table>
@@ -59,88 +60,7 @@
 
   <p class="summary" id="summary"></p>
 
-  <script>
-    const EVAL_DATA = __EVAL_DATA_PLACEHOLDER__;
-
-    let evalItems = [...EVAL_DATA];
-
-    function render() {
-      const tbody = document.getElementById('eval-body');
-      tbody.innerHTML = '';
-
-      // Sort: should-trigger first, then should-not-trigger
-      const sorted = evalItems
-        .map((item, origIdx) => ({ ...item, origIdx }))
-        .sort((a, b) => (b.should_trigger ? 1 : 0) - (a.should_trigger ? 1 : 0));
-
-      let lastGroup = null;
-      sorted.forEach(item => {
-        const group = item.should_trigger ? 'trigger' : 'no-trigger';
-        if (group !== lastGroup) {
-          const headerRow = document.createElement('tr');
-          headerRow.className = 'section-header';
-          headerRow.innerHTML = `<td colspan="3">${item.should_trigger ? 'Should Trigger' : 'Should NOT Trigger'}</td>`;
-          tbody.appendChild(headerRow);
-          lastGroup = group;
-        }
-
-        const idx = item.origIdx;
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td><textarea class="query-input" onchange="updateQuery(${idx}, this.value)">${escapeHtml(item.query)}</textarea></td>
-          <td>
-            <label class="toggle">
-              <input type="checkbox" ${item.should_trigger ? 'checked' : ''} onchange="updateTrigger(${idx}, this.checked)">
-              <span class="slider"></span>
-            </label>
-            <span style="margin-left:8px;font-size:0.8rem;color:#b0aea5">${item.should_trigger ? 'Yes' : 'No'}</span>
-          </td>
-          <td><button class="btn-delete" onclick="deleteRow(${idx})">Delete</button></td>
-        `;
-        tbody.appendChild(tr);
-      });
-      updateSummary();
-    }
-
-    function escapeHtml(text) {
-      const div = document.createElement('div');
-      div.textContent = text;
-      return div.innerHTML;
-    }
-
-    function updateQuery(idx, value) { evalItems[idx].query = value; updateSummary(); }
-    function updateTrigger(idx, value) { evalItems[idx].should_trigger = value; render(); }
-    function deleteRow(idx) { evalItems.splice(idx, 1); render(); }
-
-    function addRow() {
-      evalItems.push({ query: '', should_trigger: true });
-      render();
-      const inputs = document.querySelectorAll('.query-input');
-      inputs[inputs.length - 1].focus();
-    }
-
-    function updateSummary() {
-      const trigger = evalItems.filter(i => i.should_trigger).length;
-      const noTrigger = evalItems.filter(i => !i.should_trigger).length;
-      document.getElementById('summary').textContent =
-        `${evalItems.length} queries total: ${trigger} should trigger, ${noTrigger} should not trigger`;
-    }
-
-    function exportEvalSet() {
-      const valid = evalItems.filter(i => i.query.trim() !== '');
-      const data = valid.map(i => ({ query: i.query.trim(), should_trigger: i.should_trigger }));
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'eval_set.json';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }
-
-    render();
-  </script>
+  <script id="eval-viewer-data" type="application/json">__EVAL_DATA__</script>
+<script type="module" src="__BOOT_URL__"></script>
 </body>
 </html>

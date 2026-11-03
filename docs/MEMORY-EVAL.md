@@ -38,8 +38,8 @@ calls MCP, appends a second capsule or retries a failed hook. Routing failure
 falls back to recall before invoking the hook once.
 
 ```bash
-python3 scripts/memory_outcome_ab.py seal --set /private/tasks.json --verifiers /private/verifiers.json --design /private/design.json --out /private/selective-protocol.json --cache /separate/corpus-cache --model MODEL --arms recall,selective
-python3 scripts/memory_outcome_ab.py run --endpoint task-complete --set /private/tasks.json --verifiers /private/verifiers.json --protocol /private/selective-protocol.json --out /private/selective-result.json --cache /separate/corpus-cache --model MODEL --arms recall,selective
+infra-engine eval memory-outcome-ab seal --set /private/tasks.json --verifiers /private/verifiers.json --design /private/design.json --out /private/selective-protocol.json --cache /separate/corpus-cache --model MODEL --arms recall,selective
+infra-engine eval memory-outcome-ab run --endpoint task-complete --set /private/tasks.json --verifiers /private/verifiers.json --protocol /private/selective-protocol.json --out /private/selective-result.json --cache /separate/corpus-cache --model MODEL --arms recall,selective
 ```
 
 The wrapper and public rules are copied into the run's corpus; a hook command
@@ -73,7 +73,7 @@ and input/output/cached subsets are reported separately; none establishes full
 provider-attempt economics. Real held-out measurements of these new arms have
 not been established by public fixture tests.
 
-`scripts/memory_eval.py` measures what the prompt-time memory hook delivers,
+`infra-engine eval memory-eval` measures what the prompt-time memory hook delivers,
 on each project **as it was when the prompt was written**. It is a
 repository-level maintainer tool: it is never installed into a project, it
 calls no model by default and no network, and CI runs only its tests
@@ -81,7 +81,7 @@ calls no model by default and no network, and CI runs only its tests
 
 Source-linked expansion runs automatically without a runtime flag. Each
 successful item keeps only safe `source_links` counters from the local manifest
-before its corpus is removed. The repository-only `memory_graph_pilot.py`
+before its corpus is removed. The repository-only `infra-engine eval memory-graph-pilot`
 compares a committed baseline with the working tree using the same scorer and
 inputs; its baseline contains all four installable editions so `--edition auto`
 works for real projects too. Runtime version, materialization and scorer digest
@@ -201,7 +201,7 @@ every-turn save on continuation tasks comes next, before the default moves.
 The note is kept outside the clone (it names the projects); its SHA-256 is
 `83cf101c527e9341aa42c525d6cc6a0262f794ca1102cea39237cd40524edcee`.
 
-`scripts/memory_eval.py field-check --project <each> --since 2026-10-31`
+`infra-engine eval memory-eval field-check --project <each> --since 2026-10-31`
 computes what the rule reads, per host, from the same transcripts `realized`
 reads: the capsule turns; K, the knowledge items (kinds `brain` and `chunk`)
 a later tool call opened, from capsules and explicit retrieves together; T,
@@ -266,12 +266,12 @@ Nothing is written into the project. All work happens in the cache (default
    default) reads, per project, the installer's sync manifest
    (`memory-bank/local/accelerator-install.json`), then the project's
    `.accelerator-policy-lock.json`, then the framework markers attached mode
-   uses (`scripts/accelerator_attach.py`: `composer.json`/`composer.lock`,
+   uses (`infra-tooling::attach`: `composer.json`/`composer.lock`,
    `artisan`, `bin/console`, WordPress markers), else PHP Core; a name or an
    edition directory forces one edition for every prompt. Every path any
    edition's inventory (`install/inventories/*.json`) installs is removed
    from the corpus - an older install may be committed - and the chosen
-   edition is copied in the way `scripts/install_accelerator.py` copies it
+   edition is copied in the way `infra-engine install` copies it
    (source overrides, executable bits). Project-owned state is never
    replaced: `project-brain/dynamic/`, `archive/`, `control/`,
    `memory-bank/chunks/`, `memory-bank/INDEX.md`, `runtime.json` and the other
@@ -293,8 +293,8 @@ Nothing is written into the project. All work happens in the cache (default
    `sitecustomize` shim on `PYTHONPATH`), so review dates, validity windows
    and recency decay are those of the prompt and a result does not drift with
    the calendar. Git and file timestamps stay real.
-6. **The refresh.** `context.py index` warms the index first (a hook's index is
-   warm); then `context.py refresh --host <host> --query <prompt> --task-id
+6. **The refresh.** `memory-bank/bin/infra-engine memory index` warms the index first (a hook's index is
+   warm); then `memory-bank/bin/infra-engine memory refresh --host <host> --query <prompt> --task-id
    eval/<id> --ephemeral --sanitize --json` is timed. The environment is
    minimal: no attached-mode variables, no task override, no caller Git
    configuration, `PYTHONHASHSEED=0`, `TZ=UTC`.
@@ -318,27 +318,27 @@ outside the repository.
 
 ```bash
 # Baseline: the runtime as committed in this clone.
-python3 scripts/memory_eval.py run \
+infra-engine eval memory-eval run \
   --set ~/memory-eval/set.json --judgments ~/memory-eval/judgments.json \
   --passages ~/memory-eval/passages.json --projects-root ~/Desktop \
   --out ~/memory-eval/results/baseline.json
 
 # After a retrieval change in an edition: the same command, another --out.
-python3 scripts/memory_eval.py run ... --out ~/memory-eval/results/change.json
+infra-engine eval memory-eval run ... --out ~/memory-eval/results/change.json
 
 # Side by side, with the per-prompt diff; then what still needs a judgment.
-python3 scripts/memory_eval.py report ~/memory-eval/results/baseline.json \
+infra-engine eval memory-eval report ~/memory-eval/results/baseline.json \
   --compare ~/memory-eval/results/change.json
-python3 scripts/memory_eval.py report ~/memory-eval/results/change.json --show-unjudged
+infra-engine eval memory-eval report ~/memory-eval/results/change.json --show-unjudged
 
 # How much the old measurement leaked, on the same set.
-python3 scripts/memory_eval.py run ... --as-of now --out ~/memory-eval/results/leaky.json
+infra-engine eval memory-eval run ... --as-of now --out ~/memory-eval/results/leaky.json
 
 # Do agents use what the hook delivered? Aggregates only.
-python3 scripts/memory_eval.py realized --project ~/Desktop/next --since 2026-09-01
+infra-engine eval memory-eval realized --project ~/Desktop/next --since 2026-09-01
 
 # How far memory gets in several projects at once, from their journals alone.
-python3 scripts/memory_eval.py funnel --project ~/Desktop/next --project ~/Desktop/scb --since 2026-10-30
+infra-engine eval memory-eval funnel --project ~/Desktop/next --project ~/Desktop/scb --since 2026-10-30
 ```
 
 | `run` option | Meaning |
@@ -357,7 +357,7 @@ python3 scripts/memory_eval.py funnel --project ~/Desktop/next --project ~/Deskt
 | `--cache DIR` | Work and cache directory; refused inside this clone. |
 | `--diagnose-misses` | Add opt-in judged-path stage and answer-presence counters; default JSON stays unchanged. |
 | `--audit-git` | Diagnostic only: seed a temporary Git snapshot in each evaluation corpus so history admission can be audited when the archive has no usable `.git`. |
-| `--onnx-excerpts DIR` / `--onnx-python FILE` | Maintainer-only excerpt pilot with local assets and an explicit isolated worker. Supply both; default is off. |
+| `--onnx-excerpts DIR` / `--onnx-worker FILE` / `--onnx-ort-library FILE` | Maintainer-only excerpt pilot with local assets, the explicit native worker and selected ORT library; default is off. |
 | `--onnx-timeout SECONDS` | Worker budget including startup and cleanup (default and maximum 5); larger requests are capped and the remaining evaluator timeout can tighten it; failure retains lexical excerpts. |
 | `--timeout SECONDS` | Per runtime call (default 30). A refresh past it skips the prompt as `refresh-timeout`. |
 | `--keep` | Keep each prompt's corpus and record its path in the item, for debugging. |
@@ -468,7 +468,7 @@ its own row (`task record pointers`). A task's record is the kind
 `task-record`, apart from the Brain's findings and decisions (`brain`).
 
 `realized` also reads every explicit retrieve in the sessions it reads -
-`context.py retrieve` (or `context`) through a shell, and the Memory MCP's
+`memory-bank/bin/infra-engine memory retrieve` (or `context`) through a shell, and the Memory MCP's
 `memory_retrieve` - in a capsule turn or not, pairs each call with its answer
 by the host's call ID, and reads the answer as it reads a capsule (or the
 capsule's JSON, with `--json`). Per host it counts the sessions that
@@ -537,7 +537,7 @@ instructions Claude Code loaded: the project's own `CLAUDE.md` in 191 of 386,
 to retrieve; Codex reads `AGENTS.md` itself, and did.
 Codex keeps a finished rollout compressed, as `rollout-*.jsonl.zst` (3,040 of
 3,099 on the maintainer machine in October 2026); `realized` reads those too,
-through Python 3.14's `compression.zstd` or else the `zstd` command. Without
+through the native zstd decoder. Without
 either, it says how many compressed rollouts it could not read
 (`compressed_unread`), counted over every project, since which project a log
 nobody could read belongs to is unknown.
@@ -762,7 +762,7 @@ report them too.
   documents, delivered items the agent touched with a tool and mentioned in
   its text, by kind (skill, brain, task-record, chunk, task, spec-doc,
   changelog); the capsules' task record pointers and how many the agent
-  touched; `context.py retrieve` calls and Memory MCP `memory_retrieve` calls
+  touched; `memory-bank/bin/infra-engine memory retrieve` calls and Memory MCP `memory_retrieve` calls
   by the agent in those turns; and, as a baseline, documents of those kinds
   the agent opened that the capsule did not deliver. Then the explicit
   retrieves of whole sessions, what they returned and what was opened
@@ -822,8 +822,10 @@ Grow the judgments with `report --show-unjudged`: it lists every delivered
   suppressed as already handed.
 - Projects used in attached mode keep their memory in the Harness state
   directory, which the stand does not read.
-- The clock pin covers Python's `datetime`; a runtime reading `time.time()`
-  for dates would see the real clock.
+- The controlled native clock supplies an explicit advancing knowledge-calendar
+  offset. Proof ages, process deadlines and cancellation keep the real clock.
+  A child path must preserve that typed calendar or refuse before mutation;
+  ordinary commands never read a calendar override from ambient environment.
 - `<cache>/trees/` and `<cache>/history/` (a full clone per project) persist
   across runs and grow with them; delete the cache to reclaim the space.
 
@@ -843,7 +845,7 @@ cache is deleted.
 
 ## Diagnosing misses
 
-First keep Python and the runtime unchanged and run the same frozen set with
+First keep the native runtime artifact and resources unchanged and run the same frozen set with
 `--diagnose-misses`. The helper receives private input over stdin, reads the
 actual refresh manifest and a read-only index, and runs under the refresh's
 pinned clock. It emits only supplied judged paths, fixed stage labels and
@@ -920,7 +922,7 @@ identify the CPU cost of a selector change.
 
 Every number above scores what a capsule delivers against relevance labels.
 None says whether delivery changes what an agent does.
-`scripts/memory_outcome_ab.py` measures that on tasks that really happened.
+`infra-engine eval memory-outcome-ab` measures that on tasks that really happened.
 
 **What a pair is.**
 - **The task:** the first prompt of a recorded Claude Code session whose turn
@@ -957,7 +959,7 @@ None says whether delivery changes what an agent does.
     and `capsule_profile: full` in the corpus.
 
   The arms therefore differ by the Task Capsule alone. The policy's own
-  `context.py retrieve` stays available in both. Until 2026-10-30 `capsule`
+  `memory-bank/bin/infra-engine memory retrieve` stays available in both. Until 2026-10-30 `capsule`
   left the profile to the corpus's own `runtime.json`; since the editions
   shipped `recall` (2026-10-22) that would have run recall under the old
   name.
@@ -1249,37 +1251,20 @@ option remains first. The ordinary budgets, quotas and renderer remain active;
 a longer structured snippet is still defensively rejected, and if an alternate changes which paths
 the renderer would retain, the complete lexical selection is recomputed once
 without another worker call. A failed score attempt is not retried at rendering.
-The former late-render `ExcerptPilot(context, runtime, scorer)` callable remains
-available as a lexical-only compatibility shim; the CLI uses `StatefulExcerptPilot`.
+The native adapter implements the core's pre-session `ExcerptPreparer` seam. Invalid selections or changed packed membership restore the complete lexical result.
 This is a maintainer experiment and is never included in installer inventories.
 
-Provision the worker in a separate environment outside the checkout, using
-Python 3.12+ for these pinned packages (NumPy 2.5.3 requires it; ONNX Runtime
-1.31 itself needs 3.11+). Python 3.14 works without an interpreter downgrade:
+Provision the selected native engine, local model assets and dynamic ONNX Runtime library explicitly; no Python environment is created.
 
 ```bash
-python3 -m venv ~/memory-eval/onnx-venv
-~/memory-eval/onnx-venv/bin/python -m pip install -r requirements-memory-onnx.txt
-python3 scripts/memory_eval.py run ... --diagnose-misses \
-  --onnx-excerpts ~/memory-eval/models/minilm-l6 \
-  --onnx-python ~/memory-eval/onnx-venv/bin/python \
-  --onnx-timeout 5 --out ~/memory-eval/results/onnx.json
+infra-engine eval memory-eval run --set prompts.json --judgments judgments.json \
+  --out /private/memory-eval/onnx.json --diagnose-misses \
+  --onnx-excerpts /private/memory-eval/models/minilm-l6 \
+  --onnx-worker /opt/infra/bin/infra-engine \
+  --onnx-ort-library /opt/onnxruntime/lib/libonnxruntime.so --onnx-timeout 5
 ```
 
-Neither the evaluator nor the worker downloads models or installs dependencies.
-Keep existing system/Harness interpreters and environments intact. The worker
-alone imports NumPy, ONNX Runtime and tokenizers; CPU inference and tokenizer
-parallelism are limited to one thread. Its budget includes startup, blocked stdin,
-asset verification, import, model loading, inference and bounded cleanup, using
-one absolute deadline without pipe-reader threads. Cleanup terminates the owned
-POSIX process group even if its leader has exited; real Linux workers also guard
-against parent death. Detached descendants outside that group and Windows
-process-tree cleanup are not guaranteed. The evaluator's `--timeout` supplies
-the whole invocation limit, with cooperative termination before forced kill;
-the direct pilot defaults to a 30-second invocation and a 5-second worker.
-Synchronous OS delays are not a universal hard deadline guarantee. Busy, missing assets/dependencies, mismatched hashes,
-malformed/non-finite logits and worker errors return no scores and leave lexical
-excerpts intact. Optional stats-file errors cannot fail a successful refresh.
+The native worker verifies assets and accepts a bounded query/passages packet. Its explicit worker deadline is capped by the remaining invocation budget. Failure preserves the lexical capsule atomically; a score attempt is not retried during rendering. Optional libraries and models are never downloaded by the worker.
 
 The legacy schema-less local asset directory needs `manifest.json` and these five files:
 `model_O3.onnx`, `tokenizer.json`, `config.json`, `tokenizer_config.json`,
@@ -1302,14 +1287,12 @@ The profile pins `jinaai/jina-reranker-v1-tiny-en` at revision
 `pad_token: "<pad>"`, and integer `pad_id: 1`. Its five basenames are
 `model.onnx` and the same four JSON files. Each manifest hash and size must
 match the worker-owned `JINA_FILES` pins in
-[`memory_onnx.py`](../scripts/memory_onnx.py), as well as the actual local bytes.
+[`memory_onnx.py`](https://github.com/PHP-Innowise/AI-Infrastructure/blob/6628d976d3fa1ca2d03ebb7d8714503a7b87b824/scripts/memory_onnx.py), as well as the actual local bytes.
 Inert provenance fields may remain; the worker never fetches their URLs.
 The [publisher model tree](https://huggingface.co/jinaai/jina-reranker-v1-tiny-en/tree/aca45de6945b5dc6399abcd2a9c55ded5dc9111f)
 provides the pinned ONNX and tokenizer assets; publisher Python is not executed.
 
-This separate profile requires the retained Python 3.14 worker and exact
-NumPy 2.5.3, ONNX Runtime 1.31.0 and tokenizers 0.23.3 versions. A version
-mismatch returns the ordinary dependency fallback. Its tokenizer is
+The historical Python profile's exact NumPy/ORT/tokenizers versions belong to its sealed artifact identity. The native worker uses the Rust tokenizers/ORT implementation and an explicit library/asset image; it must not be reported as the same historical worker or used to silently regrade an old study. Its tokenizer is
 `RobertaTokenizer`: the pinned config declares pad ID zero, while the actual
 `<pad>` token maps to ID one. The worker validates both declarations without
 rewriting metadata and pads on the right with ID one. It supplies only
@@ -1326,6 +1309,12 @@ that one budget. Requests above five are accepted but shortened; shorter
 requests remain shorter. The existing OS scheduling and process-tree limits
 still apply. Any failed profile, metadata, shape, dependency or score check
 keeps the complete lexical capsule and session delivery receipts.
+
+If cleanup cannot be confirmed before that deadline, the runner retains one
+pending child and its owned I/O handles, including Job custody on Windows.
+Before spawning another worker, the next valid request must recover that pending
+invocation within the new request's own existing deadline. Pending invocations
+do not accumulate; no recovery thread or extra cleanup grace is introduced.
 
 Freeze model/assets, settings, labels, prompt-time snapshots and the scorer
 before measuring. Use development queries first; only a passing configuration
@@ -1430,9 +1419,9 @@ the real holdout, not inherited from the old navigation threshold. Example
 commands (these are not run by CI and call a model only at `run`):
 
 ```bash
-python3 scripts/memory_outcome_ab.py seal --set /private/tasks.json --verifiers /private/verifiers.json --design /private/design.json --out /private/protocol.json --cache /separate/corpus-cache --model MODEL --arms off,recall
-python3 scripts/memory_outcome_ab.py run --endpoint task-complete --set /private/tasks.json --verifiers /private/verifiers.json --protocol /private/protocol.json --out /private/result.json --cache /separate/corpus-cache --model MODEL --arms off,recall
-python3 scripts/memory_outcome_ab.py report /private/result.json --metric task-complete --json
+infra-engine eval memory-outcome-ab seal --set /private/tasks.json --verifiers /private/verifiers.json --design /private/design.json --out /private/protocol.json --cache /separate/corpus-cache --model MODEL --arms off,recall
+infra-engine eval memory-outcome-ab run --endpoint task-complete --set /private/tasks.json --verifiers /private/verifiers.json --protocol /private/protocol.json --out /private/result.json --cache /separate/corpus-cache --model MODEL --arms off,recall
+infra-engine eval memory-outcome-ab report /private/result.json --metric task-complete --json
 ```
 
 `seal` reconstructs the prompt-time public snapshots and saves immutable base
@@ -1528,8 +1517,8 @@ such a holdout; moving a clock alone does not establish long-term recall.
 
 Trusted preparation rebuilds `memory-bank/INDEX.md` unconditionally after the
 materialized admission gate is constructed, runs the separate Bank validator
-(`memory-bank/scripts/validate.py`), validates Brain, then refreshes SQLite.
-`context.py validate` alone validates Brain and cannot establish Bank validity.
+(`memory-bank/bin/infra-engine bank validate`), validates Brain, then refreshes SQLite.
+`memory-bank/bin/infra-engine memory validate` alone validates Brain and cannot establish Bank validity.
 Any failure stops before native dispatch and retains the failed attempt and
 preparation receipts. Reindexing changes only the derived catalog; it does not
 re-attest, repair, promote or discard imported knowledge. A timestamp shortcut
@@ -1539,7 +1528,7 @@ the same post-admission, private-environment, bounded-receipt phase, before
 baseline capture and sealing. Running it in `install_runtime()` would create
 local locks/indexes before the fresh-image admission check.
 
-`scripts/memory_native_ab.py` makes the native A→B development procedure
+`infra-engine eval memory-native-ab` makes the native A→B development procedure
 reproducible. It is a private maintainer tool, separate from the default
 first-touch stand and from a confirmatory task-outcome comparison.
 
@@ -1571,10 +1560,10 @@ configuration is admitted. The source path is a screened physical project
 snapshot; links, special files and hardlinks in admitted data are refused.
 
 ```bash
-python3 -B scripts/memory_native_ab.py plan --config /private/native-ab.json --out /private/native-run
-python3 -B scripts/memory_native_ab.py run --run /private/native-run --stage source
-python3 -B scripts/memory_native_ab.py inspect --run /private/native-run
-python3 -B scripts/memory_native_ab.py run --run /private/native-run --stage served
+infra-engine eval memory-native-ab plan --config /private/native-ab.json --out /private/native-run
+infra-engine eval memory-native-ab run --run /private/native-run --stage source
+infra-engine eval memory-native-ab inspect --run /private/native-run
+infra-engine eval memory-native-ab run --run /private/native-run --stage served
 ```
 
 Omit `--stage` to execute both stages. Planning binds the screened source
@@ -1661,8 +1650,8 @@ native-capture criterion. `no-learning` classifies the native payload rather
 than claiming the entire session produced no knowledge. Capture is elicited
 under these instructions; arbitrary spontaneous extraction is not measured.
 
-The supported observed-save encoding is a direct canonical Python invocation,
-optionally inside the emitted exact-corpus `(cd ... && python3 ...)` wrapper,
+The supported observed-save encoding is a direct canonical native invocation,
+optionally inside the emitted exact-corpus native engine wrapper,
 with literal JSON in a single-quoted heredoc. A plain `cat` quoted-heredoc
 pipeline into that exact wrapper is also accepted; extra commands, cat
 options, output redirections and unquoted delimiters are not. The runner

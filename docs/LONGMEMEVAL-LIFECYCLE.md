@@ -1,6 +1,6 @@
 # Local LongMemEval lifecycle controller
 
-`harness.longmemeval_lifecycle.Controller` connects an exclusively owned
+`infra_pilots::longmemeval::lifecycle::Controller` connects an exclusively owned
 registered memory instance to fixed question slots, local request construction,
 one-use reader/judge callback tickets and a separate cost ledger. This is an
 experimental local text profile; it does not run the official LongMemEval

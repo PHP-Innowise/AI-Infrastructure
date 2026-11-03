@@ -9,7 +9,7 @@ Companion Codex config lives in `.codex/` (config, hooks, DOD, principles). Poli
 
 Invoke Codex skills by their discovered names, including `documentation-generator`, `project-brain`, and `memory-bank`; do not add fake `.codex` command or agent wrappers.
 
-The `project-brain` skill owns governed shared lifecycle, handoffs, the unified `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID` command, six record types, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is explicitly local-only.
+The `project-brain` skill owns governed shared lifecycle, handoffs, the unified `memory-bank/bin/infra-engine memory retrieve QUERY --task-id ID` command, six record types, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is explicitly local-only.
 
 The `memory-bank` skill owns durable retrieval/capture/audit/supersession and application of governed automatic or independently reviewed promotions. Session hooks report metadata only—mode, index health/staleness, active binding count, and validation status—and never index, retrieve, load, or inject records automatically.
 

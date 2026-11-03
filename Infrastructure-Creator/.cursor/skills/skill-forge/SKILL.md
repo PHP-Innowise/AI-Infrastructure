@@ -9,6 +9,10 @@ related: [infra-generate, policy-forge, agent-forge, command-forge, hook-forge, 
 
 # Skill Forge
 
+Native commands below use `"$GENERATOR_NATIVE"`: set `GENERATOR_NATIVE` to the
+selected generator's absolute `memory-bank/bin/infra-engine` path
+(`infra-engine.exe` on Windows), as required by the owning generator skill.
+
 ## Overview
 
 `skill-forge` authors the evidence-gated inventory in `skill-generation-plan.json`. It works on one skill, or one small sibling group with an explicit shared boundary, at a time. Each pass receives only that contract and its referenced evidence slice, writes to task-scoped staging, and produces a substantive project-specific procedure rather than a renamed template. There are no fixed category counts and no minimum-line padding. Only the six memory-continuity guides are unconditional because `memory-seed` always installs their runtime; they are `runtime-fixed` and are judged by runtime accuracy rather than project specificity (see `references/php-process-skills.md`).
@@ -102,7 +106,7 @@ orchestration step. The log maps every staged skill to exactly one plan entry.
    `fixed_blocks` entry with an explicit ID, version, and exact content; keep it
    confined to guardrails/failure handling.
 8. **Analyze every proposed command without executing it.** Use
-   `bootstrap-verifier/scripts/analyze_commands.py` against the real target.
+   `"$GENERATOR_NATIVE" creator analyze-commands` against the real target.
    First inventory aliases without enforcement, then pass each command proposed
    for a generated verification separately with `--no-scripts --verification
    --command '<command>'`. The analyzer reads `composer.json` and `package.json`,
@@ -149,7 +153,7 @@ agent-forge (wrap these skills), then command-forge; policy-forge/hook-forge/mem
 ## Guardrails
 
 - MUST author only plan entries whose evidence gates passed; the six memory-continuity guides are the only unconditional set.
-- MUST author every `runtime-fixed` skill exclusively from `memory-seed/assets/runtime-contract.json`: each `memory-bank/`/`project-brain/` path and each `python3 memory-bank/scripts/*.py` form it names must appear there, and it MUST NOT name a target path it declares no evidence for. Project specificity is not required of these six guides and MUST NOT be faked by borrowing an unrelated target file as evidence.
+- MUST author every `runtime-fixed` skill exclusively from `memory-seed/assets/runtime-contract.json`: each `memory-bank/`/`project-brain/` path and each native `memory-bank/bin/infra-engine memory ...` form it names (`infra-engine.exe` on Windows) must appear there, and it MUST NOT name a target path it declares no evidence for. Project specificity is not required of these six guides and MUST NOT be faked by borrowing an unrelated target file as evidence.
 - MUST report project skills and runtime guides as two counts, never as one combined total.
 - MUST process one skill or a small explicit sibling group at a time from a minimal contract/evidence slice.
 - MUST stage before publication and MUST NOT cite generator task/staging paths in generated target skills.

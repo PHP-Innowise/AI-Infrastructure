@@ -16,7 +16,7 @@ The Codex edition of the accelerator, laid out the way OpenAI Codex actually dis
 - **No subagents ported.** The `.claude/agents` wrappers just ran one skill; since Codex invokes skills directly, they add nothing here. (Codex does support subagents via `.agents/` + `agents.<name>.config_file` if you later want explicit delegation.)
 - **Skills live in `.agents/skills`**, deliberately, because that is the path Codex loads.
 
-Use the discovered `project-brain` skill for governed shared task lifecycle, handoffs, all six record types, compaction, promotion proposals, and the one public task-aware retrieval command: `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`. Governed mode is the default; `--mode lightweight` is an explicit machine-local fallback.
+Use the discovered `project-brain` skill for governed shared task lifecycle, handoffs, all six record types, compaction, promotion proposals, and the one public task-aware retrieval command: `memory-bank/bin/infra-engine memory retrieve QUERY --task-id ID`. Governed mode is the default; `--mode lightweight` is an explicit machine-local fallback.
 
 Use `memory-bank` only for durable retrieval/capture/audit/supersession and application of a governed automatic or independently reviewed promotion. Canonical policy, specs, code, configuration, migrations, and tests outrank all context. Codex intentionally has no `.codex/commands` or `.codex/agents` wrapper for Project Brain. Session hooks report mode, index health/staleness, active binding count, and validation status only; they never index, retrieve, load, or inject records automatically.
 

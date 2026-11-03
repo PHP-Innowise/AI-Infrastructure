@@ -340,7 +340,7 @@ the backup-first recovery in
 
 The Project Brain runtime itself uses local SQLite FTS5 and has no network
 service or embedding store. Its one MCP server is the local memory server
-`memory-bank/scripts/mcp_server.py` (registered as `harness-memory` in
+`memory-bank/bin/infra-engine mcp` (registered as `harness-memory` in
 `.mcp.json` and `.cursor/mcp.json`, and as `harness_memory` in the Codex
 project config), which the client starts over standard input and output and
 which works on the project's own Project Brain and Memory Bank; see

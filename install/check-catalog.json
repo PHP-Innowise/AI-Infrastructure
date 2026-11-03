@@ -1,0 +1,451 @@
+{
+  "schema_version": 1,
+  "groups": [
+    {
+      "name": "wasm",
+      "workflow": "rust.yml",
+      "job": "rust-wasm",
+      "timeout_minutes": 15,
+      "default": true,
+      "rust_targets": [
+        "wasm32-unknown-unknown"
+      ],
+      "gates": [
+        {
+          "kind": "process",
+          "name": "Compile the Rust browser UI for Wasm",
+          "program": "cargo",
+          "arguments": [
+            "build",
+            "--release",
+            "--package",
+            "infra-ui",
+            "--lib",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--manifest-path",
+            "{root}/runtime-rust/Cargo.toml",
+            "--locked"
+          ],
+          "cwd": ".",
+          "tools": [],
+          "paths": [
+            "runtime-rust/crates/infra-ui/Cargo.toml"
+          ],
+          "timeout_seconds": 600,
+          "oracle": false
+        }
+      ]
+    },
+    {
+      "name": "msrv",
+      "workflow": "rust.yml",
+      "job": "rust-msrv",
+      "timeout_minutes": 20,
+      "default": false,
+      "rust_toolchain": "1.89.0",
+      "gates": [
+        {
+          "kind": "process",
+          "name": "Check every native workspace target with Rust 1.89",
+          "program": "rustup",
+          "arguments": [
+            "run",
+            "{toolchain}",
+            "cargo",
+            "check",
+            "--workspace",
+            "--all-targets",
+            "--manifest-path",
+            "{root}/runtime-rust/Cargo.toml",
+            "--locked"
+          ],
+          "cwd": ".",
+          "tools": [
+            "cargo"
+          ],
+          "paths": [
+            "runtime-rust/Cargo.toml"
+          ],
+          "timeout_seconds": 900,
+          "oracle": false
+        }
+      ]
+    },
+    {
+      "name": "rust",
+      "workflow": "rust.yml",
+      "job": "rust-contract",
+      "timeout_minutes": 30,
+      "default": true,
+      "gates": [
+        {
+          "kind": "process",
+          "name": "Workspace Rust tests",
+          "program": "cargo",
+          "arguments": [
+            "test",
+            "--workspace",
+            "--manifest-path",
+            "{root}/runtime-rust/Cargo.toml",
+            "--locked"
+          ],
+          "cwd": ".",
+          "tools": [],
+          "paths": [
+            "runtime-rust/Cargo.toml"
+          ],
+          "timeout_seconds": 1200,
+          "oracle": false
+        },
+        {
+          "kind": "process",
+          "name": "OOXML formatter production-feature tests",
+          "program": "cargo",
+          "arguments": [
+            "test",
+            "--manifest-path",
+            "{root}/runtime-rust/Cargo.toml",
+            "--package",
+            "ooxml-numfmt",
+            "--no-default-features",
+            "--locked"
+          ],
+          "cwd": ".",
+          "tools": [],
+          "paths": [
+            "runtime-rust/Cargo.toml",
+            "runtime-rust/Cargo.lock",
+            "runtime-rust/vendor/ooxml-numfmt/Cargo.toml"
+          ],
+          "timeout_seconds": 300,
+          "oracle": false
+        },
+        {
+          "kind": "process",
+          "name": "Rust formatting",
+          "program": "cargo",
+          "arguments": [
+            "fmt",
+            "--manifest-path",
+            "{root}/runtime-rust/Cargo.toml",
+            "--all",
+            "--",
+            "--check"
+          ],
+          "cwd": ".",
+          "tools": [
+            "rustfmt"
+          ],
+          "paths": [
+            "runtime-rust/Cargo.toml"
+          ],
+          "timeout_seconds": 300,
+          "oracle": false
+        },
+        {
+          "kind": "process",
+          "name": "Workspace Clippy",
+          "program": "cargo",
+          "arguments": [
+            "clippy",
+            "--workspace",
+            "--manifest-path",
+            "{root}/runtime-rust/Cargo.toml",
+            "--locked",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "cwd": ".",
+          "tools": [],
+          "paths": [
+            "runtime-rust/Cargo.toml"
+          ],
+          "timeout_seconds": 1200,
+          "oracle": false
+        }
+      ]
+    },
+    {
+      "name": "parity",
+      "workflow": "ci.yml",
+      "job": "parity",
+      "timeout_minutes": 10,
+      "default": true,
+      "gates": [
+        {
+          "kind": "tool",
+          "name": "Core parity",
+          "operation": "core-sync",
+          "request": {
+            "write": false,
+            "no_chain": true
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "Generator assets",
+          "operation": "assets",
+          "request": {
+            "write": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "mirrors",
+      "workflow": "ci.yml",
+      "job": "mirrors",
+      "timeout_minutes": 10,
+      "default": true,
+      "gates": [
+        {
+          "kind": "tool",
+          "name": "Laravel mirrors",
+          "operation": "mirrors",
+          "request": {
+            "edition": "Laravel",
+            "write": false
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "Symfony mirrors",
+          "operation": "mirrors",
+          "request": {
+            "edition": "Symfony",
+            "write": false
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "PHP Core mirrors",
+          "operation": "mirrors",
+          "request": {
+            "edition": "PHP Core",
+            "write": false
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "Cms/wordpress mirrors",
+          "operation": "mirrors",
+          "request": {
+            "edition": "Cms/wordpress",
+            "write": false
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "Infrastructure-Creator mirrors",
+          "operation": "mirrors",
+          "request": {
+            "edition": "Infrastructure-Creator",
+            "write": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "installation",
+      "workflow": "ci.yml",
+      "job": "installation",
+      "timeout_minutes": 15,
+      "default": true,
+      "gates": [
+        {
+          "kind": "tool",
+          "name": "Laravel inventory",
+          "operation": "inventory-check",
+          "request": {
+            "edition": "Laravel"
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "Symfony inventory",
+          "operation": "inventory-check",
+          "request": {
+            "edition": "Symfony"
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "PHP Core inventory",
+          "operation": "inventory-check",
+          "request": {
+            "edition": "PHP Core"
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "Cms/wordpress inventory",
+          "operation": "inventory-check",
+          "request": {
+            "edition": "Cms/wordpress"
+          }
+        }
+      ]
+    },
+    {
+      "name": "lint",
+      "workflow": "ci.yml",
+      "job": "lint",
+      "timeout_minutes": 15,
+      "default": true,
+      "gates": [
+        {
+          "kind": "tool",
+          "name": "Tracked JSON syntax",
+          "operation": "json-syntax",
+          "request": {}
+        },
+        {
+          "kind": "tool",
+          "name": "Context budgets",
+          "operation": "budget",
+          "request": {
+            "check": true
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "Stabilization contracts",
+          "operation": "stabilization",
+          "request": {}
+        },
+        {
+          "kind": "tool",
+          "name": "Routes and wiring",
+          "operation": "routes",
+          "request": {}
+        },
+        {
+          "kind": "tool",
+          "name": "Kit admission registry",
+          "operation": "registry",
+          "request": {}
+        },
+        {
+          "kind": "tool",
+          "name": "PHP documentation snippets",
+          "operation": "php-snippets",
+          "request": {
+            "require_php": true
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "Laravel policy identity",
+          "operation": "policy-lock",
+          "request": {
+            "edition": "Laravel",
+            "write": false
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "Symfony policy identity",
+          "operation": "policy-lock",
+          "request": {
+            "edition": "Symfony",
+            "write": false
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "PHP Core policy identity",
+          "operation": "policy-lock",
+          "request": {
+            "edition": "PHP Core",
+            "write": false
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "Cms/wordpress policy identity",
+          "operation": "policy-lock",
+          "request": {
+            "edition": "Cms/wordpress",
+            "write": false
+          }
+        },
+        {
+          "kind": "tool",
+          "name": "Infrastructure-Creator policy identity",
+          "operation": "policy-lock",
+          "request": {
+            "edition": "Infrastructure-Creator",
+            "write": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "links",
+      "workflow": "ci.yml",
+      "job": "links",
+      "timeout_minutes": 5,
+      "default": true,
+      "gates": [
+        {
+          "kind": "tool",
+          "name": "Relative Markdown links",
+          "operation": "links",
+          "request": {
+            "standalone": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "changelog",
+      "workflow": "ci.yml",
+      "job": "changelog",
+      "timeout_minutes": 5,
+      "default": true,
+      "gates": [
+        {
+          "kind": "tool",
+          "name": "Shared and edition changelogs",
+          "operation": "changelog",
+          "request": {
+            "base": "{base}",
+            "strict": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "windows-native",
+      "workflow": "native-windows.yml",
+      "job": "native-windows",
+      "platform": "windows",
+      "timeout_minutes": 40,
+      "default": false,
+      "gates": [
+        {
+          "kind": "process",
+          "name": "Native Windows workspace contracts",
+          "program": "cargo",
+          "arguments": [
+            "test",
+            "--workspace",
+            "--manifest-path",
+            "{root}/runtime-rust/Cargo.toml",
+            "--locked"
+          ],
+          "cwd": ".",
+          "tools": [],
+          "paths": [
+            "runtime-rust/Cargo.toml"
+          ],
+          "timeout_seconds": 2100,
+          "oracle": false
+        }
+      ]
+    }
+  ]
+}

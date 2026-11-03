@@ -63,7 +63,7 @@ and attaches it from the clone: every Claude Code, Codex or Cursor session gets
 the edition's policy, skills, agents, commands and hooks, and the project's
 memory (Project Brain, Memory Bank, index) is kept in the Harness state, not in
 the project. `git pull` in the clone updates every attached project at once.
-From a terminal, `python3 <clone>/scripts/accelerator_attach.py run
+From a terminal, `infra-engine attach run
 claude|codex|cursor` run in the project folder does the same. Details and
 limits: [docs/ATTACHED-MODE.md](docs/ATTACHED-MODE.md).
 
@@ -105,7 +105,7 @@ itself. Claude Code, Cursor, and Codex do not automatically search
 - `Cms/wordpress/` — ready-made WordPress edition.
 - `Infrastructure-Creator/` — project-specific accelerator generator.
 - `install/` — installation documentation and inventories.
-- `scripts/` — installation and maintenance scripts.
+- `runtime-rust/` — native production implementation; `scripts/` — versioned tooling data and historical references.
 - `tests/` — repository-level tests.
 - `docs/` — shared documentation.
 - `harness/` — optional orchestration harness.
@@ -222,7 +222,7 @@ Every edition combines three separate components:
   characters derived from the source record's UUID), so promotions on two
   machines or in two branches never race for a shared counter; `INDEX.md` is
   not appended by hand but regenerated deterministically with
-  `context.py reindex-bank`. Legacy `MEM-NNNN` chunks stay valid.
+  `memory-bank/bin/infra-engine memory reindex-bank`. Legacy `MEM-NNNN` chunks stay valid.
 
 Governed mode is the default. Project Brain owns shared active-work state;
 `memory-bank/local/context.db` is only a disposable index plus local
@@ -270,7 +270,7 @@ for a step-by-step walkthrough.
 The public governed retrieval command is:
 
 ~~~bash
-python3 memory-bank/scripts/context.py retrieve \
+memory-bank/bin/infra-engine memory retrieve \
   "password session invalidation" \
   --task-id BAUMAS-133
 ~~~
@@ -286,14 +286,14 @@ Alongside the explicit command, the hooks run an automatic memory loop:
   rule described in the tool table). Validation results are cached per
   repository state, so a second start does not pay for them again;
 - the prompt hook (`UserPromptSubmit` in Claude Code and Codex) runs
-  `context.py refresh --sanitize`: it incrementally refreshes the three index
+  `memory-bank/bin/infra-engine memory refresh --sanitize`: it incrementally refreshes the three index
   layers and injects the Task Capsule into the prompt - the task's working
   state, its recent files and what the task itself saved, unless
   `capsule_profile` in `runtime.json` asks for the full search
   (`docs/CONTEXT-AND-MEMORY.md`). On Cursor the same hook runs on
   `beforeSubmitPrompt` and writes the capsule into the `working-memory.mdc`
   rule instead;
-- the turn-end hook (`Stop`) runs `context.py turn`: changed paths are buffered
+- the turn-end hook (`Stop`) runs `memory-bank/bin/infra-engine memory turn`: changed paths are buffered
   in ignored local state and flushed into the authoritative task every fifth
   turn. Maintenance — promoting anything still eligible, compaction, and
   reporting a merged branch as a completion candidate (a task is never closed
@@ -370,24 +370,24 @@ implementation-to-independent-verification, and recovery after compaction.
 Run from an edition or consuming-project root:
 
 ~~~bash
-python3 memory-bank/scripts/context.py start \
+memory-bank/bin/infra-engine memory start \
   --task-id BAUMAS-133 \
   --goal "Verify invalidation of other sessions after a password change"
-python3 memory-bank/scripts/context.py index
-python3 memory-bank/scripts/context.py retrieve \
+memory-bank/bin/infra-engine memory index
+memory-bank/bin/infra-engine memory retrieve \
   "password sessions" \
   --task-id BAUMAS-133
-python3 memory-bank/scripts/context.py update \
+memory-bank/bin/infra-engine memory update \
   --task-id BAUMAS-133 \
   --revision 1 \
   --progress "The two-session regression test passes" \
   --next-step "Verify the old remember-me cookie"
-python3 memory-bank/scripts/context.py complete \
+memory-bank/bin/infra-engine memory complete \
   --task-id BAUMAS-133 \
   --revision 2 \
   --outcome "Other sessions and stale remember-me cookies are invalidated" \
   --verification "ChangePasswordTest passed"
-python3 memory-bank/scripts/context.py compact
+memory-bank/bin/infra-engine memory compact
 ~~~
 
 Companion maintenance commands:
@@ -395,15 +395,15 @@ Companion maintenance commands:
 ~~~bash
 # restore the machine-local binding on another machine or in a fresh clone
 # (the task record exists in Git, the local binding does not)
-python3 memory-bank/scripts/context.py rebind --task-id BAUMAS-133
+memory-bank/bin/infra-engine memory rebind --task-id BAUMAS-133
 
 # regenerate memory-bank/INDEX.md deterministically from chunk frontmatter
-python3 memory-bank/scripts/context.py reindex-bank
+memory-bank/bin/infra-engine memory reindex-bank
 
 # check skill, hook, command, and agent mirrors inside the edition; add
 # --cross-edition to check the shared core is byte-identical across editions
-python3 memory-bank/scripts/context.py parity
-python3 memory-bank/scripts/context.py parity --cross-edition
+memory-bank/bin/infra-engine memory parity
+memory-bank/bin/infra-engine memory parity --cross-edition
 ~~~
 
 Automatic rebinding is built into the turn flush: when a task record exists in
@@ -414,7 +414,7 @@ To hand accumulated context to another person or to a team repository, write a
 bundle:
 
 ~~~bash
-python3 memory-bank/scripts/context.py export --destination ../context-bundle
+memory-bank/bin/infra-engine memory export --destination ../context-bundle
 ~~~
 
 Export is read-only. The bundle carries Project Brain records whose privacy is
@@ -453,18 +453,18 @@ approves it before atomic application. Lightweight mode retains the older local
 `start → update → retrieve → complete` lifecycle and local episodes, all of
 which are non-authoritative and lost when its SQLite database is deleted.
 
-The implementation is local, dependency-free Python with SQLite FTS5. It does
+The implementation is a local native Rust runtime with SQLite FTS5. It does
 not provide embeddings, vector search, LangGraph, or a central memory service.
 Claude Code and Codex receive a fresh bounded Task Capsule through prompt
 hooks; Cursor receives the previous turn's capsule through an auto-rendered
 local rule. Each edition also ships a local memory MCP server,
-`memory-bank/scripts/mcp_server.py`, which the client starts over standard
+`memory-bank/bin/infra-engine`, which the client starts over standard
 input and output. The installer registers it for each selected client, as
 `harness-memory` in `.mcp.json` and `.cursor/mcp.json` and as
 `harness_memory` in `.codex/config.toml`; the client still asks for trust and
 tool approval. Its four tools — `memory_status`, `memory_retrieve`,
 `memory_checkpoint` and `memory_record_result` — work on the same Project
-Brain and Memory Bank as the CLI, and `context.py record-result` is the same
+Brain and Memory Bank as the CLI, and `memory-bank/bin/infra-engine memory record-result` is the same
 write path without it. See the edition's `memory-bank/MCP.md`.
 
 A three-scenario Task Capsule pressure test measured 96.4%, 97.2%, and 97.2%
@@ -557,7 +557,7 @@ Context rules:
 
 ## Optional Developer Tooling: Context Collection
 
-`scripts/collect_context.py` packages a chosen slice of **this repository**
+`infra-engine collect` packages a chosen slice of **this repository**
 into a single bundle for pasting into an external model — a review in a chat
 window, a second opinion on the memory core, a diff explained to a model that
 cannot see the checkout. It wraps the optional
@@ -636,7 +636,7 @@ The generator inspects the actual `composer.json`, framework, dependencies,
 integrations, architecture, and CI/CD instead of copying a Laravel, Symfony,
 or PHP Core template. A generated accelerator receives the same memory layer as
 the ready-to-use editions: the context-brain runtime under
-`memory-bank/scripts/`, the `project-brain/` skeleton, and the automatic-memory
+`memory-bank/bin/`, versioned runtime resources, the `project-brain/` skeleton, and the automatic-memory
 hooks, including capsule delivery for Cursor.
 
 Generated output is upgradable in place. Every `infra-generate` run writes
@@ -658,11 +658,12 @@ complete guide.
   relevant framework boundaries instead of copying it blindly.
 - Never edit a mirror by hand. Skills are canonical in `.agents/skills`; hooks,
   commands, agents, and policy documents are canonical in `.claude`. After
-  editing the canon, run `python3 scripts/build_mirrors.py --write` and the
+  editing the canon, run `infra-engine repo mirrors --write` and the
   `.claude`, `.cursor`, and `.codex` mirrors are regenerated from the
-  `MIRROR_RULES` table in `memory-bank/scripts/context_retrieval.py`
-  (`Infrastructure-Creator/mirror_rules.py` for the generator). A legitimate
-  per-mirror difference belongs in that table as a rule or an exception, never
+  versioned `memory-bank/config/mirror-rules.json` manifest
+  (`runtime-rust/crates/infra-generator/resources/mirror-rules.json` is the
+  generator's compiled resource). A legitimate per-mirror difference belongs
+  in that manifest as a rule or an exception, never
   as a silently diverging file.
 - Record the change in the edition's `CHANGELOG.md` and run its `DOD.md`
   verification. Changes to the shared core (the memory/context core,
@@ -671,24 +672,24 @@ complete guide.
 
 ### Checks Before Handing Work Over
 
-`scripts/check.py` runs the same steps as CI (`.github/workflows/`), one group
+`infra-engine check` runs the same steps as CI (`.github/workflows/`), one group
 per job; [docs/CI.md](docs/CI.md) says what each job verifies:
 
 ~~~bash
-python3 scripts/check.py                               # every CI job; exit 1 on any failure
-python3 scripts/check.py --list                        # every command, and what would skip here
-python3 scripts/check.py --group lint --group mirrors  # only these jobs
+infra-engine check                               # every CI job; exit 1 on any failure
+infra-engine check --list                        # every command, and what would skip here
+infra-engine check --group lint --group mirrors  # only these jobs
 ~~~
 
 The context budget (each edition's `AGENTS.md`, skill descriptions, commands,
-agents, and skill bodies) is measured by `scripts/context_budget.py`; the
+agents, and skill bodies) is measured by `infra-engine repo budget`; the
 ceilings live in `scripts/token_budget.json`. That file states a policy of
 about five percent headroom, but ceilings have been raised inconsistently:
 some were refit to the observed value plus five percent, others raised by
 exactly the growth of one change. Headroom therefore runs from a few bytes to
 just under five percent of the ceiling, and where it is a few bytes one added
 sentence in an `AGENTS.md` can fail CI's lint job. Trim the text or raise the
-ceiling in the same change; `python3 scripts/context_budget.py --headroom`
+ceiling in the same change; `infra-engine repo budget --headroom`
 lists what each category has left.
 
 For stack-specific details, open the selected edition's README. For its

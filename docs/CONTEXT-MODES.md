@@ -169,7 +169,7 @@ should consistently follow that mode.
 The global option must appear before the subcommand:
 
 ```bash
-python3 memory-bank/scripts/context.py \
+memory-bank/bin/infra-engine memory \
   --mode lightweight \
   start --task-id LOCAL-001 --goal "Investigate locally"
 ```
@@ -178,7 +178,7 @@ python3 memory-bank/scripts/context.py \
 
 ```bash
 PROJECT_BRAIN_MODE=lightweight \
-python3 memory-bank/scripts/context.py status
+memory-bank/bin/infra-engine memory status
 ```
 
 Mode precedence is:

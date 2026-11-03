@@ -21,7 +21,7 @@ orchestration to a sub-agent, and do not run stages the user has not reached.
 
 **Setup.** Derive the task ID from the current Git branch (or
 `CONTEXT_TASK_ID`). Ensure the governed task exists: run
-`python3 memory-bank/scripts/context.py start --task-id <ID> --goal "<sanitized goal>"`
+`memory-bank/bin/infra-engine memory start --task-id <ID> --goal "<sanitized goal>"`
 if it does not (an existing task is never overwritten).
 
 **Per stage:**
@@ -32,7 +32,7 @@ if it does not (an existing task is never overwritten).
      (work completed, decisions, files, verification evidence, risks,
      next step, blockers).
    - **Tool and source guidance** - the explicit files or directories to
-     read, and the task ID for `context.py retrieve`.
+     read, and the task ID for `memory-bank/bin/infra-engine memory retrieve`.
    - **Task boundaries** - what the agent must NOT do in this stage.
    - **Decisions and assumptions so far** - carried forward from previous
      stages' Context Summaries; never leave this empty after stage one. Carry
@@ -43,16 +43,16 @@ if it does not (an existing task is never overwritten).
    Keep the serialized capsule within the 8,000-character Task Capsule
    bound. Pass file paths, never file contents, raw diffs, or transcripts.
 2. Save the capsule to a scratch file and record the dispatch:
-   `python3 memory-bank/scripts/context.py msg-dispatch --task-id <ID> --agent <name> --event spawn --capsule-file <file>`
+   `memory-bank/bin/infra-engine memory msg-dispatch --task-id <ID> --agent <name> --event spawn --capsule-file <file>`
    - it refuses an under-specified capsule, so fix the capsule before
    spawning. Then spawn each agent with the Task tool: **subagent_type** =
    the agent name from the stage, **prompt** = the capsule. When the stage
    has `parallel: true` (read-only agents only), spawn all of its agents in
    one message; otherwise spawn strictly one agent at a time and wait for it.
 3. When an agent returns, read its Context Summary, then record progress:
-   `python3 memory-bank/scripts/context.py update --task-id <ID> --actor <name> --progress "<stage>: <sanitized one-line result>"`.
+   `memory-bank/bin/infra-engine memory update --task-id <ID> --actor <name> --progress "<stage>: <sanitized one-line result>"`.
    Check the channel for agent messages addressed to you:
-   `python3 memory-bank/scripts/context.py msg-read --task-id <ID> --for main --since <last seen seq>`.
+   `memory-bank/bin/infra-engine memory msg-read --task-id <ID> --for main --since <last seen seq>`.
    The SubagentStop hook normally records the completion there; when it
    reports that the write failed, or the channel shows no completion for an
    agent that returned, record it yourself with

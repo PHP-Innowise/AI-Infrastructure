@@ -1,10 +1,18 @@
 # Supplied memory benchmark cost ledger
 
-`harness/src/harness/memory_benchmark_cost.py` records a fixed benchmark horizon
+> Rust migration, 2026-11-03: Python test and demo invocations below are
+> retained pre-Rust behavior specifications and historical evidence. They are
+> not verification commands for the migrated checkout. Run the registered native
+> suites from the repository root with
+> `cargo test --manifest-path runtime-rust/Cargo.toml --workspace --all-targets --locked --offline`.
+> Current coverage is defined by those Rust assertions; historical passes are
+> not transferred to the port.
+
+`infra_pilots::longmemeval::cost::Ledger` records a fixed benchmark horizon
 across **build**, **query**, **reader** and **judge**. It is optional experimental
 accounting, with no default Harness routing, model calls or service authorization.
 Existing native cost observation and RunCost/budgets remain unchanged. The local
-runtime stays Python 3.14/FTS5; upstream benchmark dependencies remain separate.
+runtime is native Rust/FTS5; upstream benchmark dependencies remain separate.
 
 This ledger consumes supplied observations. It does not discover provider work,
 audit an invoice, judge answers or authorize execution. A completed SDK response
@@ -14,18 +22,35 @@ runtime adapter must observe those costs or declare coverage incomplete.
 
 ## Collection contract
 
-```python
-from harness.memory_benchmark_cost import Ledger
+The caller owns the physical attempt identities and supplies observations:
 
-ledger = Ledger(horizon=2)
-ticket = ledger.begin_call('reader', 0, 'physical-call-id', 'physical-attempt-id')
-ledger.finish_call(ticket, outcome='succeeded', usage={
-    'input_tokens': 100, 'output_tokens': 20, 'total_tokens': 120,
-    'cached_input_tokens': 60, 'reasoning_output_tokens': 5,
-})
-ledger.close_unit('reader', 0, coverage='complete', model_work='reported_calls',
-                  billing_complete=False, local_ns=0, constructed_bytes=2400)
-snapshot = ledger.snapshot()  # all other units are still unknown
+```rust
+use infra_pilots::longmemeval::{
+    cost::{Close, Ledger, Outcome, Report},
+    usage::Usage,
+};
+
+fn supplied_example() -> anyhow::Result<serde_json::Value> {
+    let mut ledger = Ledger::new(2)?;
+    let ticket = ledger.begin_call(
+        "reader", Some(0), "physical-call-id", "physical-attempt-id",
+    )?;
+    ledger.finish_call(&ticket, Report {
+        outcome: Outcome::Succeeded,
+        usage: Usage {
+            input_tokens: Some(100), output_tokens: Some(20),
+            total_tokens: Some(120), cached_input_tokens: Some(60),
+            reasoning_output_tokens: Some(5),
+        },
+        usd_micros: None, billing: "unknown".into(), component_ns: None,
+    })?;
+    ledger.close_unit("reader", Some(0), Close {
+        coverage: "complete".into(), model_work: "reported_calls".into(),
+        billing_complete: false, component_ns: Some(0),
+        constructed_bytes: Some(2400),
+    })?;
+    ledger.snapshot() // all other units remain unknown
+}
 ```
 
 Build has ordinal `None`; the other phases require each ordinal `0..H-1`.
@@ -101,24 +126,26 @@ dictionaries, error prose, model names, URLs or credentials enter exports.
 Fresh public arithmetic inputs and complete independent oracles precede code and
 calls. Run the new local suite with:
 
-```bash
+Historical pre-Rust invocation (reference only):
+
+```text
 python3 -m unittest tests.test_memory_benchmark_cost
 ```
 
 ## Incremental acquisition comparison
 
-`compare_incremental(baseline, treatment, acquisition_baseline=..., acquisition_treatment=...)`
+`infra_pilots::longmemeval::comparison::compare_incremental(&baseline, &treatment, &acquisition_baseline, &acquisition_treatment)`
 compares supplied ledger snapshots over the same fixed horizon and usage profile.
 The two later-work snapshots contribute query + reader; judge is added only to
 the experiment total. Their ordinary source-task build phase is excluded.
 Acquisition is supplied separately for each arm:
 
-```python
-acquisition = {
-    'scope': 'memory-only',
-    'common_task_excluded': True,
-    'ledger': acquisition_ledger.snapshot(),
-}
+```rust
+let acquisition = serde_json::json!({
+    "scope": "memory-only",
+    "common_task_excluded": true,
+    "ledger": acquisition_ledger.snapshot()?,
+});
 ```
 
 Only that ledger's build phase contributes acquisition. It must describe just

@@ -1,7 +1,15 @@
 # LongMemEval-V2 pilot
 
+> Rust migration, 2026-11-03: Python test and demo invocations below are
+> retained pre-Rust behavior specifications and historical evidence. They are
+> not verification commands for the migrated checkout. Run the registered native
+> suites from the repository root with
+> `cargo test --manifest-path runtime-rust/Cargo.toml --workspace --all-targets --locked --offline`.
+> Current coverage is defined by those Rust assertions; historical passes are
+> not transferred to the port.
+
 This is a private experimental text-projection adapter. Project memory remains
-automatic; Python 3.14 and local FTS5 remain the defaults. No service, model or
+automatic; native Rust and local FTS5 remain the defaults. No service, model or
 upstream benchmark is enabled by installing these files.
 
 The pinned upstream Python fixtures carry the accompanying
@@ -19,13 +27,14 @@ dependencies. Keep that environment separate from the installed accelerators.
 ## Implemented profile
 
 `native-fts5/public-states-text-projection-v1` implements a standalone
-`insert(trajectory)` / `query(text, query_image=None)` interface in
-`harness/src/harness/longmemeval_projection.py`. Actual upstream registration,
-imports, runtime configuration and persistence are pending. The caller supplies
-the trusted native context module and a fresh dedicated private project. Copy
-the pinned native scripts, configuration, schemas, templates and indexes without
-changing their defaults. Use a separate process for each corpus because the
-native modules import siblings by bare names.
+`NativeProjectionMemory::insert(&trajectory)` / `query(text, None)` interface
+in `infra_pilots::longmemeval::projection`. The caller supplies a typed
+`NativeRuntime` and a fresh dedicated private project. Deliver the selected
+native engine, configuration, schemas, templates and indexes together.
+`infra_pilots::longmemeval::core_runtime::CoreRuntime` is the native adapter;
+each corpus retains its own explicit runtime context. Upstream registration is
+an explicit Rust registry operation described in [the bridge guide](LONGMEMEVAL-BRIDGE.md);
+official runner integration and persistence remain separate scopes.
 
 Only the named public `states` shape is supported: ID, goal, start URL, optional
 outcome, ordered states, URL, arrival action, thought, text, original step and
@@ -82,7 +91,9 @@ is retained; the neutral-title supplement was fixed after source review and
 before implementation changes or any product calls. Local tests execute current
 native FTS5, packing, rendering and source/privacy guards on copied projects:
 
-```bash
+Historical pre-Rust invocation (reference only):
+
+```text
 python3 -m unittest tests.test_longmemeval_projection
 ```
 

@@ -93,9 +93,9 @@ If enforcement is automatable, also identify which hook to create/update.
 
 Write into the canonical tree — `.agents/skills/{name}/SKILL.md` — never into
 the generated `.claude`/`.cursor` mirrors. Here, regenerate with
-`python3 scripts/build_mirrors.py --write --edition <edition>`; in a consuming
+`infra-engine repo mirrors --write --edition <edition>`; in a consuming
 project, where that tool is not installed, make the identical edit in every
-tool tree present, or `context.py parity` will report a governance-document
+tool tree present, or `memory-bank/bin/infra-engine memory parity` will report a governance-document
 drift you just created.
 
 ### Step 4b: Decide add, overwrite, or retire
@@ -104,8 +104,8 @@ A pillar that can only add runs out of budget: `AGENTS.md` is paid on every
 session and gated in CI. Before writing, look for what this rule replaces.
 
 ```bash
-python3 memory-bank/scripts/context.py index
-python3 memory-bank/scripts/context.py search "<the rule's own words>" --layer procedural
+memory-bank/bin/infra-engine memory index
+memory-bank/bin/infra-engine memory search "<the rule's own words>" --layer procedural
 ```
 
 Index first: a stale index returns nothing and the decision degrades to `add`
@@ -123,7 +123,7 @@ Present the candidates and decide explicitly — never default to `add`:
   `## Retired rules` in `STABILIZATION.md` and delete the line it placed
   wherever it was enforced. That is what returns budget.
 
-Report the remaining budget with `python3 scripts/context_budget.py --headroom`
+Report the remaining budget with `infra-engine repo budget --headroom`
 where that maintainer tool exists; a consuming project quotes its own ceiling
 instead.
 
