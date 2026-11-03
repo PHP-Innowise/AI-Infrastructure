@@ -8,7 +8,9 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 - As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`
   changes in the asset (`linked_reparse` takes a stat without attributes for
-  no reparse point); the policy lock was rewritten.
+  no reparse point), and `native_results.py` (three reads compare change
+  times through `workspace_roots.change_time_ns`); the policy lock was
+  rewritten.
 
 ### The seeded dispatcher brings a long `AGENTS.md` below the root — 2026-10-31
 

@@ -42,6 +42,8 @@ edition's own files remain in that edition's changelog.
   trusted case names with `--php`, and lays out `/bin`, `/lib` and `/lib64`
   as the system does. CI's memory job may take 25 minutes: its 3.x leg took
   14 of 15 before the runner's two steps joined it.
+  Where a sandbox cannot start another, as on Ubuntu 26.04's runners, its
+  verifier test expects the fail-closed `unavailable`.
 
 - Promotion works on Windows again. The publication's directory check asks
   `linked_reparse` about a stat the portable NT backend built from fields,
@@ -52,6 +54,10 @@ edition's own files remain in that edition's changelog.
   file's open and named images by `st_birthtime_ns` on Windows, where Python
   3.12+ gives `st_ctime_ns` the last change from an open file and the
   creation time from a path, so every file read as changed while read.
+  The pre-answer review's plans, a maintenance source and a semantic
+  review's sources compared the same way in the runtime, so every review
+  answered `memory-review:invalid-plan` there; they compare through
+  `workspace_roots.change_time_ns`, as the runtime's other reads do.
 
 - Wire public response-contract v2 into the opt-in task-complete stand: seal an
   approved common citation snapshot and complete stdin prompt, expose citation

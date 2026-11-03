@@ -765,7 +765,7 @@ def _maintenance_image(root, name):
         with os.fdopen(descriptor, 'rb', closefd=False) as handle:
             raw = handle.read(65537)
         after=os.fstat(descriptor);named=path.lstat()
-        identity=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns,value.st_mode,value.st_nlink)
+        identity=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,workspace_roots.change_time_ns(value),value.st_mode,value.st_nlink)
         if identity(image)!=identity(after) or identity(after)!=identity(named):
             raise BrainError('native-result:maintenance-source-changed')
     finally:
@@ -954,7 +954,7 @@ def _review_read(source, *, limit=65536):
         if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>limit: return None
         with os.fdopen(descriptor,'rb',closefd=False) as handle:raw=handle.read(limit+1)
         after=os.fstat(descriptor);named=source.lstat()
-        identity=lambda image:(image.st_dev,image.st_ino,image.st_size,image.st_mtime_ns,image.st_ctime_ns,image.st_mode,image.st_nlink)
+        identity=lambda image:(image.st_dev,image.st_ino,image.st_size,image.st_mtime_ns,workspace_roots.change_time_ns(image),image.st_mode,image.st_nlink)
         if len(raw)>limit or identity(before)!=identity(after) or identity(after)!=identity(named): return None
         def unique(pairs):
             value={}
@@ -1276,7 +1276,7 @@ def _semantic_sources(root,proposal):
                 raise BrainError('semantic-review:source-unavailable')
             with os.fdopen(descriptor,'rb',closefd=False) as handle:raw=handle.read(262145)
             after=os.fstat(descriptor);named=source.lstat()
-            identity=lambda image:(image.st_dev,image.st_ino,image.st_size,image.st_mtime_ns,image.st_ctime_ns,image.st_nlink,image.st_mode)
+            identity=lambda image:(image.st_dev,image.st_ino,image.st_size,image.st_mtime_ns,workspace_roots.change_time_ns(image),image.st_nlink,image.st_mode)
             if len(raw)>262144 or identity(before)!=identity(after) or identity(after)!=identity(named):
                 raise BrainError('semantic-review:source-changed')
         finally:os.close(descriptor)

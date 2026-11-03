@@ -102,7 +102,7 @@ class NativeCaptureFixture(unittest.TestCase):
         return [json.loads(item.read_text().split('---',2)[1]) for item in folder.glob('*.md')]
 
     def authority(self):
-        return {str(item.relative_to(self.root)):item.read_bytes() for prefix in
+        return {item.relative_to(self.root).as_posix():item.read_bytes() for prefix in
                 ('project-brain/dynamic','project-brain/archive','project-brain/control',
                  'project-brain/indexes','memory-bank/chunks')
                 for item in (self.root/prefix).rglob('*') if item.is_file()}

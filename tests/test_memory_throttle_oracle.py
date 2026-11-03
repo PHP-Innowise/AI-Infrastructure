@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,25 @@ import memory_outcome_verify as verify
 
 FIXTURES = Path(__file__).parent / 'fixtures/memory_throttle'
 AVAILABLE = sys.platform == 'linux' and shutil.which('php') and shutil.which('bwrap')
+
+
+def nested_sandboxes():
+    """Whether a Bubblewrap sandbox can start another, as the verifier's does
+    for the oracle. Ubuntu 26.04's runners can start one and not two."""
+    if not AVAILABLE:
+        return False
+    view = ['bwrap', '--die-with-parent', '--unshare-pid', '--unshare-net', '--ro-bind', '/', '/',
+            '--dev', '/dev', '--proc', '/proc', '--']
+    candidate = ['bwrap', '--die-with-parent', '--unshare-pid', '--as-pid-1', '--unshare-net',
+                 '--unshare-ipc', '--unshare-uts', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--']
+    try:
+        return subprocess.run([*view, *candidate, 'true'], stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+NESTED = nested_sandboxes()
 
 
 class OracleContractTests(unittest.TestCase):
@@ -112,9 +132,14 @@ class IsolatedOracleTests(unittest.TestCase):
             with self.subTest(resolved=correct):
                 artifact.write_bytes(script)
                 checked = verify.verify_task(self.candidate, answer, case)
+                self.assertEqual(verify.verifier_digest(case), checked['verifier_digest'])
+                if not NESTED:
+                    # The oracle's sandbox cannot start inside the verifier's:
+                    # unknown, never a candidate label.
+                    self.assertEqual(('unavailable', None), (checked['status'], checked['correct']), checked)
+                    continue
                 self.assertIs(correct, checked['correct'], checked)
                 self.assertEqual('passed' if correct else 'failed', checked['status'])
-                self.assertEqual(verify.verifier_digest(case), checked['verifier_digest'])
 
     def test_missing_php_remains_infrastructure_unknown(self):
         with mock.patch.object(oracle, 'PHP', '/usr/bin/no-such-php-for-oracle-v2'):
