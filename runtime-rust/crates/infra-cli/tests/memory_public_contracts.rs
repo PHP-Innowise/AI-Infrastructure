@@ -1469,6 +1469,28 @@ fn turn_reports_merge_candidate_without_completing_authority_or_losing_pending()
     assert_eq!(completion_episodes(&fixture), episodes);
     assert!(completion_source_image(&fixture) == sources);
     assert!(fixture.chunks().is_empty());
+
+    // The target of origin's HEAD names the default branch before main does.
+    fixture.git(&["update-ref", "refs/remotes/origin/trunk", "main"]);
+    fixture.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/trunk",
+    ]);
+    let report = fixture.success(
+        &[
+            "turn",
+            "--task-id",
+            "TASK-MERGE-OBSERVER",
+            "--flush-after",
+            "1000",
+            "--json",
+        ],
+        None,
+    );
+    let candidates = report["completion_candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 1, "{report}");
+    assert_eq!(candidates[0]["target"], "refs/remotes/origin/trunk");
 }
 
 #[test]

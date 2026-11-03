@@ -393,37 +393,50 @@ pub fn head_advanced(store: &mut Store, context: &RuntimeContext, id: &str) -> b
     operation.unwrap_or(false)
 }
 pub fn default_branch(store: &mut Store, context: &RuntimeContext) -> Option<String> {
-    let mut options: Vec<String> = Vec::new();
-    if let Ok(output) = crate::git::run(
+    let origin_head = crate::git::run(
         &context.roots.project,
         &crate::git::strings(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]),
         None,
         Duration::from_secs(2),
         16384,
-    ) && output.code == 0
-        && let Ok(value) = String::from_utf8(output.stdout)
-    {
-        options.push(value.trim().into());
-    }
-    options.extend(["refs/heads/main".into(), "refs/heads/master".into()]);
-    for candidate in options {
-        if crate::git::run(
+    )
+    .ok()
+    .filter(|output| output.code == 0)
+    .and_then(|output| String::from_utf8(output.stdout).ok())
+    .map(|value| value.trim().to_string());
+    choose_default_branch(store, origin_head, |candidate| {
+        crate::git::run(
             &context.roots.project,
-            &crate::git::strings(&["rev-parse", "--verify", "--quiet", &candidate]),
+            &crate::git::strings(&["rev-parse", "--verify", "--quiet", candidate]),
             None,
             Duration::from_secs(2),
             16384,
         )
         .is_ok_and(|output| output.code == 0)
-        {
-            let _ = store.put_state(&BTreeMap::from([(
-                "default_branch".into(),
-                candidate.clone(),
-            )]));
-            return Some(candidate);
-        }
+    })
+}
+/// The first candidate `exists` admits: the target of origin's HEAD, then
+/// main, then master. The store keeps the choice.
+fn choose_default_branch(
+    store: &mut Store,
+    origin_head: Option<String>,
+    exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let chosen = origin_head
+        .into_iter()
+        .chain(["refs/heads/main".into(), "refs/heads/master".into()])
+        .find(|candidate| exists(candidate))?;
+    // Rewriting an unchanged choice would still cost a synced write each turn.
+    if store
+        .state()
+        .ok()
+        .and_then(|state| state.get("default_branch").cloned())
+        .as_deref()
+        != Some(chosen.as_str())
+    {
+        let _ = store.put_state(&BTreeMap::from([("default_branch".into(), chosen.clone())]));
     }
-    None
+    Some(chosen)
 }
 pub fn branch_subjects(store: &mut Store, context: &RuntimeContext) -> (Vec<String>, usize) {
     let operation = (|| -> Result<(Vec<String>, usize)> {
@@ -709,9 +722,6 @@ pub fn merge_candidates(store: &mut Store, context: &RuntimeContext) -> Result<V
     if tasks.is_empty() {
         return Ok(vec![]);
     }
-    let Some(target) = default_branch(store, context) else {
-        return Ok(vec![]);
-    };
     let query = |arguments: &[&str]| -> Option<Vec<u8>> {
         let output = crate::git::run(
             &context.roots.project,
@@ -727,38 +737,66 @@ pub fn merge_candidates(store: &mut Store, context: &RuntimeContext) -> Result<V
             None
         }
     };
-    let target_object = format!("{target}^{{commit}}");
-    let Some(target_commit) = query(&["rev-parse", "--verify", "--quiet", &target_object])
-        .and_then(|value| String::from_utf8(value).ok())
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(vec![]);
-    };
+    // One listing tells which default branch exists, the commit it names and
+    // where every task's ref points: four fewer Git processes per turn than
+    // asking `default_branch` and `rev-parse` first.
     let Some(listing) = query(&[
         "for-each-ref",
-        "--format=%(objectname) %(*objectname) %(refname)",
+        "--format=%(objectname) %(*objectname) %(objecttype) %(*objecttype) %(symref) %(refname)",
     ]) else {
         return Ok(vec![]);
     };
-    let merged_argument = format!("--merged={target}");
-    let Some(merged) = query(&["for-each-ref", "--format=%(refname)", &merged_argument]) else {
-        return Ok(vec![]);
-    };
-    let mut references = BTreeMap::new();
+    let mut listed = BTreeMap::new();
     // Task identifiers are UTF-8. An unrelated byte-only Unix ref must not
     // invalidate the whole snapshot or collide with a lossy replacement name.
     for line in listing
         .split(|byte| *byte == b'\n')
         .filter_map(|line| std::str::from_utf8(line).ok())
     {
-        let mut parts = line.splitn(3, ' ');
-        if let (Some(pointed), Some(peeled), Some(reference)) =
-            (parts.next(), parts.next(), parts.next())
+        // Ref names hold no spaces, so only the last field may contain one.
+        if let [pointed, peeled, kind, peeled_kind, symref, reference] =
+            line.splitn(6, ' ').collect::<Vec<_>>()[..]
         {
-            references.insert(reference, if peeled.is_empty() { pointed } else { peeled });
+            listed.insert(reference, [pointed, peeled, kind, peeled_kind, symref]);
         }
     }
+    let origin_head = listed
+        .get("refs/remotes/origin/HEAD")
+        .map(|fields| fields[4].to_string())
+        .filter(|target| !target.is_empty());
+    let Some(target) = choose_default_branch(store, origin_head, |candidate| {
+        listed.contains_key(candidate)
+    }) else {
+        return Ok(vec![]);
+    };
+    let target_commit = match listed.get(target.as_str()) {
+        Some([pointed, _, "commit", _, _]) => Some(pointed.to_string()),
+        Some([_, peeled, "tag", "commit", _]) => Some(peeled.to_string()),
+        _ => query(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{target}^{{commit}}"),
+        ])
+        .and_then(|value| String::from_utf8(value).ok())
+        .map(|value| value.trim().to_owned()),
+    };
+    let Some(target_commit) = target_commit.filter(|value| !value.is_empty()) else {
+        return Ok(vec![]);
+    };
+    let merged_argument = format!("--merged={target}");
+    let Some(merged) = query(&["for-each-ref", "--format=%(refname)", &merged_argument]) else {
+        return Ok(vec![]);
+    };
+    let references = listed
+        .iter()
+        .map(|(reference, [pointed, peeled, ..])| {
+            (
+                *reference,
+                if peeled.is_empty() { *pointed } else { *peeled },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let reachable = merged
         .split(|byte| *byte == b'\n')
         .filter_map(|line| std::str::from_utf8(line).ok())

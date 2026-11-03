@@ -105,8 +105,45 @@ fn stale(root: &Path, at: SystemTime) -> bool {
     }
     false
 }
+fn php_version(scope: &Context) -> Option<String> {
+    process::run(
+        Path::new("php"),
+        &["-r".into(), "echo PHP_VERSION;".into()],
+        &scope.roots.project,
+        &[],
+        Duration::from_secs(2),
+        &scope.environment(),
+    )
+    .ok()
+    .filter(|output| output.code == 0)
+    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+}
 pub fn render(scope: &Context) -> Result<Output> {
     let _ = counters::reset(&project_root(&scope.roots.project), &scope.payload);
+    // The PHP probe, the cache key, the status and the branch are separate
+    // processes with no effect on each other: they run together, most of all
+    // to hide PHP's start, and their lines keep their places.
+    std::thread::scope(|threads| {
+        let php = threads.spawn(|| php_version(scope));
+        let key = threads.spawn(|| cache_key(scope));
+        let status = threads.spawn(|| scope.json("status", &[], &[]).ok());
+        let branch = threads.spawn(|| git_output(scope, &["branch", "--show-current"]));
+        render_lines(
+            scope,
+            || php.join().ok().flatten(),
+            || key.join().ok().flatten(),
+            || status.join().ok().flatten(),
+            || branch.join().ok().flatten(),
+        )
+    })
+}
+fn render_lines(
+    scope: &Context,
+    php: impl FnOnce() -> Option<String>,
+    key: impl FnOnce() -> Option<String>,
+    status: impl FnOnce() -> Option<Value>,
+    branch: impl FnOnce() -> Option<Vec<u8>>,
+) -> Result<Output> {
     let mut lines = vec!["Project Context".into(), "===============".into()];
     if let Ok(version) = std::fs::read_to_string(scope.roots.tooling.join("VERSION")) {
         let version = version.split_whitespace().collect::<String>();
@@ -150,16 +187,8 @@ pub fn render(scope: &Context) -> Result<Output> {
     if !managers.is_empty() {
         lines.push(format!("Dependencies: {}", managers.join(" ")));
     }
-    if let Ok(output) = process::run(
-        Path::new("php"),
-        &["-r".into(), "echo PHP_VERSION;".into()],
-        &scope.roots.project,
-        &[],
-        Duration::from_secs(2),
-        &scope.environment(),
-    ) && output.code == 0
-    {
-        lines.push(format!("PHP: {}", String::from_utf8_lossy(&output.stdout)));
+    if let Some(version) = php() {
+        lines.push(format!("PHP: {version}"));
     }
     for (paths, label) in [
         (
@@ -229,11 +258,11 @@ pub fn render(scope: &Context) -> Result<Output> {
             lines.extend(["".into(),format!("NOTE: {framework} detected. This is the native-PHP base folder (PHP Core/)."),"      For framework-specific conventions, switch to the matching sibling folder (Laravel/, Symfony/).".into()]);
         }
     }
-    let key = cache_key(scope);
-    let status = scope.json("status", &[], &[]).ok();
+    let key = key();
+    let status = status();
+    let branch = branch();
     if let Some(status) = status {
-        if let Some(branch) = git_output(scope, &["branch", "--show-current"])
-            .map(|bytes| String::from_utf8_lossy(&bytes).tail().to_string())
+        if let Some(branch) = branch.map(|bytes| String::from_utf8_lossy(&bytes).tail().to_string())
         {
             let uncommitted = status["uncommitted"]
                 .as_u64()

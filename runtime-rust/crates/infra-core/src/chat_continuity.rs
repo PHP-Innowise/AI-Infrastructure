@@ -410,6 +410,10 @@ impl ChatContinuity {
         if !cwd.is_absolute() || !cwd.is_dir() {
             return false;
         }
+        // The project's own directory is the same checkout: no Git question.
+        if std::fs::canonicalize(cwd).ok() == std::fs::canonicalize(&self.roots.project).ok() {
+            return false;
+        }
         let theirs = Self::checkout(cwd);
         let ours = Self::checkout(&self.roots.project);
         theirs
