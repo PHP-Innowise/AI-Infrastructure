@@ -600,7 +600,8 @@ class PreAnswerReviewTests(RevalidationFixture):
         return self.native.memory_review_apply(self.root,values.get('task_id','cedar/b'),data,owner=values.get('owner','local'))
 
     def authority(self):
-        return {str(p.relative_to(self.root)):p.read_bytes() for prefix in
+        # Keyed as the tests spell paths: str() gives backslashes on Windows.
+        return {p.relative_to(self.root).as_posix():p.read_bytes() for prefix in
             ('project-brain/dynamic','project-brain/control','project-brain/indexes','memory-bank/chunks')
             for p in (self.root/prefix).rglob('*') if p.is_file()}
 
