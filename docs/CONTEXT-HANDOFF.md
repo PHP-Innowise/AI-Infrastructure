@@ -98,8 +98,9 @@ the next newly opened task; it must not be reported as an already created task.
 SQLite, retrieval indexes, and publishing. The store writes its own
 `.gitignore` containing `*` when it is created (or on the next capture into a
 store that predates it), so snapshots stay out of Git even in a project whose
-`.gitignore` was never updated - an installer sync wires the hook but keeps the
-project's own `.gitignore`. An existing `.gitignore` there is left alone.
+`.gitignore` lacks the entry - an installer sync wires the hook, but a
+`.gitignore` the project's Git tracks keeps its content until a sync with
+`--update-tracked`. An existing `.gitignore` there is left alone.
 
 Capture keeps eight chats per branch and 64 per checkout, and at most 4 MiB of
 visible text per chat; when it trims older text, the snapshot marks the

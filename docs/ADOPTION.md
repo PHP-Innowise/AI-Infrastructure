@@ -309,9 +309,11 @@ Treat an edition update as a new adoption:
 For a project installed with `infra-engine install` whose Git tracks
 the accelerator, `infra-engine install --sync --update-tracked --target DIR`
 (after the same command with `--dry-run`) does the mechanical part of steps 3
-and 4: it writes only files that still hold a released version, the runtime
-and the managed policy blocks, and lists every edited file it leaves for you
-under `kept`. Review that report and `git diff`, then commit. A reinstall with
+and 4: it writes only files that still hold a released version, the runtime,
+the managed policy blocks and the managed block of `.gitignore` and
+`.gitattributes` (an edited file keeps its lines and receives the release's
+missing entries there), and lists every edited file it leaves for you under
+`kept`. Review that report and `git diff`, then commit. A reinstall with
 `--overwrite` is not an upgrade path: it replaces the project's own
 `AGENTS.md`, `README.md`, `.gitignore` and edited skills. See
 [`scripts/README.md`](../scripts/README.md).

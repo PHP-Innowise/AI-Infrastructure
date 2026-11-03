@@ -105,6 +105,24 @@ edition's own files remain in that edition's changelog.
   (`restart-required`) keeps the button, so Update can be pressed again after
   the rebuild. After an update the page reloads once `/api/health` answers
   from the restarted server, and says so if none answers within two minutes.
+- `install --sync` stops a project from going back only where it can tell.
+  A project last synced from a Git clone was refused by a packaged release
+  ("no Git identity"), by a shallow clone that lacks the recorded commit's
+  history, and whenever its record named no valid commit. As in the Python
+  installer, only a full clone that lacks the recorded commit now stops the
+  sync, and the refusal names both commits and `--allow-downgrade`.
+- `install --sync` brings a release's new ignore and attribute entries to
+  every install. An install's `.gitignore` or `.gitattributes` without the
+  managed block was kept whole, so no newer entry reached a clean or
+  Python-era install (the engine was offered to `git add -A` until
+  `memory-bank/bin/.gitignore` shipped). A copy that still holds a released
+  version now follows the release like any untouched file; one the project
+  edited keeps every line and receives the release's missing entries in the
+  managed block, as `--merge-existing` writes them.
+- `install --sync` no longer adds `ACCELERATOR.md` beside the `README.md` an
+  install wrote where the project had none, nor puts back a removed copy. The
+  edition README follows the release only where an install placed it beside
+  the project's own, and the project's `README.md` is never written.
 
 - Move executable project logic into the Rust workspace and one native
   `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation

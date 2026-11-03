@@ -838,34 +838,53 @@ impl Installer {
         }
         Ok(result)
     }
+    /// Why a sync from this source would take the project back, or `None`.
+    /// A sync writes the source's files over the project's, so a source that
+    /// lacks the commit the project was last synced from replaces newer work
+    /// with older. Nothing stops it when the record names no commit, the
+    /// source is no Git checkout (a packaged release), or the recorded commit
+    /// is the source's own or one of its ancestors. A commit the source does
+    /// not have at all stops it too, except in a shallow clone, which lacks
+    /// its own history.
     fn downgrade_problem(&self, record: &Value) -> Result<Option<String>> {
-        let Some(old) = record["source_commit"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-        else {
+        let Some(old) = record["source_commit"].as_str().filter(|value| {
+            [40, 64].contains(&value.len())
+                && value
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        }) else {
             return Ok(None);
         };
-        if !old.bytes().all(|byte| byte.is_ascii_hexdigit()) || ![40, 64].contains(&old.len()) {
-            return Err(RuntimeError::invalid(
-                "Installed source commit identity is malformed",
-            ));
-        }
-        let current = self.source_commit()?.ok_or_else(|| {
-            RuntimeError::unavailable("Source release has no Git identity for downgrade protection")
-        })?;
+        let Some(current) = self.source_commit()? else {
+            return Ok(None);
+        };
         if old == current {
             return Ok(None);
         }
-        let output = common::git(
+        let ancestry = common::git(
             &self.source,
             &["merge-base", "--is-ancestor", old, &current],
             None,
         )?;
-        Ok(if output.code == 0 {
-            None
-        } else {
-            Some("Installed release is newer than or outside this source history; explicit downgrade authorization is required".into())
-        })
+        if ancestry.code == 0 {
+            return Ok(None);
+        }
+        if ancestry.code != 1 {
+            let shallow = common::git(
+                &self.source,
+                &["rev-parse", "--is-shallow-repository"],
+                None,
+            )?;
+            if shallow.code == 0 && common::text(shallow.stdout)?.trim() == "true" {
+                return Ok(None);
+            }
+        }
+        let short = |commit: &str| commit.get(..12).unwrap_or(commit).to_string();
+        Ok(Some(format!(
+            "The project was last synced from {}, which this source ({}) does not contain: a sync from here would take it back. Sync from a source that has that commit, or pass --allow-downgrade to go back on purpose",
+            short(old),
+            short(&current)
+        )))
     }
     pub fn sync(&self, target: &Path, options: &InstallOptions) -> Result<Value> {
         if options.overwrite && options.merge_existing {
@@ -951,6 +970,13 @@ impl Installer {
             }
             active_paths.insert(name.clone());
             let before = custody.read(&name, FILE_LIMIT)?;
+            // The edition README follows the release only where an install
+            // put it beside the project's own, as ACCELERATOR.md. It is never
+            // added: an absent copy was removed, or the project had no README
+            // and the edition's went in as README.md, which no sync writes.
+            if item.path == "README.md" && before.is_none() {
+                continue;
+            }
             let runtime = is_runtime(&name);
             let wiring = hook_wiring(&name);
             if before.is_some() && SEED.contains(&name.as_str()) {
@@ -1018,14 +1044,21 @@ impl Installer {
                     }
                     action = "updated over local edit".into();
                 }
-            } else if before.is_some() && [".gitignore", ".gitattributes"].contains(&name.as_str())
+            } else if before.is_some()
+                && !pristine
+                && [".gitignore", ".gitattributes"].contains(&name.as_str())
             {
+                // A copy that still holds a released version follows the
+                // release whole, as any untouched file does. One the project
+                // edited keeps every line of its own and receives the release
+                // directives it lacks in the managed block, as an install
+                // with `--merge-existing` writes them: otherwise the engine
+                // and private state a newer release ignores reach `git add`.
                 let previous = std::str::from_utf8(before.as_deref().unwrap_or_default())
                     .map_err(|_| RuntimeError::invalid("Project entries are not UTF-8"))?;
-                if !previous.contains(ENTRIES_BEGIN) {
-                    kept.push(
-                        json!({"path":name,"reason":"project-owned entries without managed block"}),
-                    );
+                let managed = previous.contains(ENTRIES_BEGIN);
+                if !managed && previous.contains(ENTRIES_END) {
+                    kept.push(json!({"path":name,"reason":"managed block is malformed"}));
                     continue;
                 }
                 payload = merge_additive(
@@ -1034,7 +1067,12 @@ impl Installer {
                         .map_err(|_| RuntimeError::invalid("Release entries are not UTF-8"))?,
                 )?
                 .into_bytes();
-                action = "managed entries updated".into();
+                action = if managed {
+                    "managed entries updated"
+                } else {
+                    "managed entries added"
+                }
+                .into();
             } else if before.is_some() && !pristine && !runtime {
                 if is_wiring(&name) {
                     held_wiring.insert(name.clone());
