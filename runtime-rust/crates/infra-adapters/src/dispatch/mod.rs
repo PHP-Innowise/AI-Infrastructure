@@ -184,6 +184,7 @@ fn project_launch(root: &Path, host: &str, hook: &Value) -> Option<ProjectLaunch
     for role in hooks::ROLES {
         if [
             installed.handler(host, role),
+            installed.earlier_handler(host, role),
             infra_tooling::attach::hook_handler(&engine, root, host, role, cfg!(windows)),
         ]
         .into_iter()

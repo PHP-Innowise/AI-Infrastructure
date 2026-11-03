@@ -265,15 +265,16 @@ anchors the script path its own way:
 
 | Host | Command form | Why |
 | --- | --- | --- |
-| Claude Code | `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` | Hooks run in the session's current directory, which follows every `cd`; Claude Code exports the project root as `CLAUDE_PROJECT_DIR` and asks for the placeholder double-quoted in shell form. |
-| Codex | `sh -c '...' sh <script>.sh` - a fixed launcher (spelled out in `.codex/hooks/README.md`) that walks up from the session's directory to the nearest directory holding `.codex/hooks.json` and execs that project's `.codex/hooks/<script>.sh` | Codex runs hooks in the session cwd through `$SHELL -lc` and exports no project-root variable. The walk works from a subdirectory, without Git, and for a project nested in a larger repository, and `sh` keeps it independent of the login shell. It stops at the project that declared the hook, so a missing script exits 127 instead of running a same-named script from an ancestor such as `~/.codex/hooks/`. |
-| Cursor | `.cursor/hooks/<script>.sh` | Cursor runs project hooks from the project root. |
+| Claude Code | `e="$CLAUDE_PROJECT_DIR"/memory-bank/bin/infra-engine; [ -x "$e" ] && exec "$e" hook claude <role> --root "$CLAUDE_PROJECT_DIR"; exec "$CLAUDE_PROJECT_DIR"/.claude/hooks/<role>.sh` | Hooks run in the session's current directory, which follows every `cd`; Claude Code exports the project root as `CLAUDE_PROJECT_DIR` and runs the command in a POSIX shell. The checkout's engine starts directly; the launcher script runs only without it, which uses the main checkout's engine in a linked worktree and refuses guarded commands when no engine is installed. |
+| Codex | `sh -c 'r="$(git rev-parse --show-toplevel 2>/dev/null \|\| pwd)/<prefix>"; e="$r"memory-bank/bin/infra-engine; [ -x "$e" ] && exec "$e" hook codex <role> --root "$r"; exec "$r".codex/hooks/<role>.sh'` | Codex runs hooks in the session cwd through `$SHELL -lc` and exports no project-root variable, so the command finds the project from Git's top level (`<prefix>` is the project's path below it); `sh` keeps it independent of the login shell. The engine and the launcher fall back as on Claude Code. Codex trusts a hook by the hash of its definition, so a changed command must be trusted again in `/hooks`. |
+| Cursor | `.cursor/hooks/<role>.sh` | Cursor runs project hooks from the project root; the command stays a path, since Cursor need not pass it through a shell. |
 
 A bare relative path on Claude Code or Codex exits 127 as soon as the
 session's directory is not the project root, and both hosts treat every exit
 other than 2 as non-blocking, so a safety hook would stop guarding without an
-error. `tests/test_hook_wiring.py` runs every wired command from a nested
-directory to keep it that way.
+error. `runtime-rust/crates/infra-cli/tests/portable_wiring.rs` runs the
+committed commands, Codex's from a nested directory, with and without an
+installed engine.
 
 ## Claude Code Activation
 

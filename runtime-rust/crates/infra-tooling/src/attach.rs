@@ -570,6 +570,14 @@ impl HookLaunch {
             Self::Portable { prefix } => crate::launch::hook_handler(host, role, prefix),
         }
     }
+    /// The launch an earlier installation of this form committed, which is
+    /// still this installation's own.
+    pub fn earlier_handler(&self, host: &str, role: &str) -> Result<Value> {
+        match self {
+            Self::Bound { .. } => self.handler(host, role),
+            Self::Portable { prefix } => crate::launch::launcher_handler(host, role, prefix),
+        }
+    }
 }
 fn rewrite_handler(handler: &mut Value, host: &str, launch: &HookLaunch) -> Result<()> {
     if !handler.is_object()
@@ -1658,7 +1666,12 @@ pub fn classify_native_hook(
     });
     if let HookLaunch::Portable { prefix } = HookLaunch::installed(&home, &engine, cfg!(windows)) {
         for role in &roles {
-            if same_launch(handler, &crate::launch::hook_handler(host, role, &prefix)?) {
+            if same_launch(handler, &crate::launch::hook_handler(host, role, &prefix)?)
+                || same_launch(
+                    handler,
+                    &crate::launch::launcher_handler(host, role, &prefix)?,
+                )
+            {
                 return Ok(Some(NativeHookIdentity {
                     host: host.into(),
                     role: (*role).into(),

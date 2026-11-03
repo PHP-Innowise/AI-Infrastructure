@@ -48,8 +48,7 @@ pub fn worktree_fallback(root: &str, engine: &str, binary: &str) -> String {
     )
 }
 
-/// The committed hook launch for one host and role.
-pub fn hook_handler(host: &str, role: &str, prefix: &str) -> Result<Value> {
+fn valid_role(role: &str) -> Result<()> {
     if role.is_empty()
         || !role
             .bytes()
@@ -57,6 +56,37 @@ pub fn hook_handler(host: &str, role: &str, prefix: &str) -> Result<Value> {
     {
         return Err(RuntimeError::invalid("Invalid native hook role"));
     }
+    Ok(())
+}
+
+/// The committed hook launch for one host and role. Where the checkout has its
+/// engine, the host's own shell starts it, which spares the launcher script's
+/// shell and subshell (about 1.3 ms of every hook); otherwise the role's
+/// launcher runs, which finds the main checkout's engine in a linked worktree
+/// and refuses a guarded command when no engine is installed.
+pub fn hook_handler(host: &str, role: &str, prefix: &str) -> Result<Value> {
+    valid_role(role)?;
+    let command = match (host, role) {
+        // Claude Code runs a hook command in a POSIX shell.
+        ("claude", _) if role != "notification" => format!(
+            "e=\"$CLAUDE_PROJECT_DIR\"/{ENGINE}; [ -x \"$e\" ] && exec \"$e\" hook claude {role} --root \"$CLAUDE_PROJECT_DIR\"; exec \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/{role}.sh"
+        ),
+        // Codex runs hooks in the session directory through the user's login
+        // shell; Codex documents resolving repository scripts from Git's top.
+        ("codex", _) => format!(
+            "sh -c 'r=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/{prefix}\"; e=\"$r\"{ENGINE}; [ -x \"$e\" ] && exec \"$e\" hook codex {role} --root \"$r\"; exec \"$r\".codex/hooks/{role}.sh'"
+        ),
+        // Cursor runs project hooks from the project root, and its command
+        // stays a path: Cursor need not pass it through a shell.
+        _ => return launcher_handler(host, role, prefix),
+    };
+    Ok(json!({ "command": command }))
+}
+
+/// The launch committed before hooks started the engine themselves: Cursor's
+/// still, and an earlier installation's own on Claude Code and Codex.
+pub fn launcher_handler(host: &str, role: &str, prefix: &str) -> Result<Value> {
+    valid_role(role)?;
     let command = match (host, role) {
         // The notification role has no launcher script; a worktree session
         // without an engine only misses the desktop notice.
@@ -64,10 +94,7 @@ pub fn hook_handler(host: &str, role: &str, prefix: &str) -> Result<Value> {
             "\"$CLAUDE_PROJECT_DIR\"/{ENGINE} hook claude notification --root \"$CLAUDE_PROJECT_DIR\""
         ),
         ("claude", _) => format!("\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/{role}.sh"),
-        // Cursor runs project hooks from the project root.
         ("cursor", _) => format!(".cursor/hooks/{role}.sh"),
-        // Codex runs hooks in the session directory through the user's login
-        // shell; Codex documents resolving repository scripts from Git's top.
         ("codex", _) => format!(
             "sh -c 'exec \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/{prefix}.codex/hooks/{role}.sh\"'"
         ),
@@ -138,22 +165,39 @@ mod tests {
                 if host == "codex" { "claude" } else { "codex" }
             ));
             for role in ["bash-validator", "working-memory-read"] {
-                let command = hook_handler(host, role, "apps/shop/").unwrap()["command"]
-                    .as_str()
-                    .unwrap()
-                    .to_string();
-                assert!(
-                    command.ends_with(&format!("{role}.sh"))
-                        || command.ends_with(&format!("{role}.sh\"'"))
-                );
-                assert!(!command.contains("/home/") && !command.contains("/tmp/"));
+                for handler in [hook_handler, launcher_handler] {
+                    let command = handler(host, role, "apps/shop/").unwrap()["command"]
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+                    // The installer recognizes a role by the script its launch ends on.
+                    assert!(
+                        command.ends_with(&format!("hooks/{role}.sh"))
+                            || command.ends_with(&format!("hooks/{role}.sh'"))
+                            || command.ends_with(&format!("hooks/{role}.sh\"'"))
+                    );
+                    assert!(!command.contains("/home/") && !command.contains("/tmp/"));
+                    assert!(!command.contains("${"));
+                }
             }
         }
-        assert!(
-            hook_handler("codex", "bash-validator", "apps/shop/").unwrap()["command"]
+        let command = |host| {
+            hook_handler(host, "bash-validator", "apps/shop/").unwrap()["command"]
                 .as_str()
                 .unwrap()
-                .contains("/apps/shop/.codex/hooks/bash-validator.sh")
+                .to_string()
+        };
+        assert!(command("claude").starts_with(
+            "e=\"$CLAUDE_PROJECT_DIR\"/memory-bank/bin/infra-engine; [ -x \"$e\" ] && exec \"$e\" hook claude bash-validator --root \"$CLAUDE_PROJECT_DIR\"; "
+        ));
+        let codex = command("codex");
+        assert!(codex.contains("|| pwd)/apps/shop/\"; e=\"$r\"memory-bank/bin/infra-engine; "));
+        assert!(codex.contains(" exec \"$e\" hook codex bash-validator --root \"$r\"; "));
+        assert_eq!(codex.matches('\'').count(), 2, "{codex}");
+        assert_eq!(command("cursor"), ".cursor/hooks/bash-validator.sh");
+        assert_eq!(
+            hook_handler("claude", "notification", "").unwrap(),
+            launcher_handler("claude", "notification", "").unwrap()
         );
         assert!(hook_handler("other", "bash-validator", "").is_err());
         assert!(hook_handler("claude", "bash validator", "").is_err());

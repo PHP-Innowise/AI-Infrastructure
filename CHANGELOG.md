@@ -113,6 +113,20 @@ edition's own files remain in that edition's changelog.
   dependencies (workspace code stays unoptimized): `native_generator` went
   from 460–486 to 23–26 s and `native_install` from 264–289 to 17–19 s, which
   keeps the 30-minute CI job within its limit.
+- Hooks start one shell fewer and ask Git less (medians on settled copies of
+  one installed project, before → after): shell guard 7.3 → 4.7 ms, context
+  continuity 9.8 → 7.2 ms, prompt memory 25.6 → 21.1 ms, stop memory
+  27.1 → 21.5 ms, session start 30.0 → 26.2 ms. Claude Code and Codex hook
+  commands now start the checkout's engine themselves and run the role's
+  launcher script only without it (a linked worktree, a fresh clone), which
+  spares the launcher's shell and subshell (about 1.3 ms). The launcher-only
+  commands of earlier installations are still recognized and a sync rewrites
+  them; Codex asks to trust the changed hooks again in `/hooks`. Cursor's
+  commands stay script paths. Every engine process found its checkout with
+  `git rev-parse` (about 1.1 ms); a checkout whose `.git` is a plain directory
+  this user owns, on the project's file system, with no configuration that can
+  move or remove the work tree, is now read without Git, with the same top,
+  prefix and administrative directory.
 - The Harness page shows its own updates again. Since the move to Rust the
   Update button never appeared: the Wasm interface waited for an `available`
   flag that `GET /api/app/update` does not send (it reports `state`), filled

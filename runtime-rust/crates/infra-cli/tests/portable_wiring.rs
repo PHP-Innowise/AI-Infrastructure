@@ -321,6 +321,34 @@ fn a_clone_works_after_installing_only_its_engine() {
         );
     }
 
+    // With its engine in place, a Claude Code or Codex hook starts it without
+    // the launcher script.
+    for host in ["claude", "codex"] {
+        let launcher = clone.join(format!(".{host}/hooks/bash-validator.sh"));
+        let committed = fs::read(&launcher).unwrap();
+        fs::write(&launcher, "#!/bin/sh\nexit 97\n").unwrap();
+        let cwd = if host == "codex" {
+            clone.join("src")
+        } else {
+            clone.clone()
+        };
+        let output = fixture.hook(
+            host,
+            &clone,
+            &cwd,
+            &guard_command(&clone, host),
+            &shell("git push --force origin main"),
+        );
+        fs::write(&launcher, committed).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{host}: {}",
+            text(&output.stderr)
+        );
+        assert!(text(&output.stderr).contains("Command refused"), "{host}");
+    }
+
     // A linked worktree has no engine of its own and uses the main checkout's.
     let linked = fixture.root.join("second machine/linked");
     fixture.git(

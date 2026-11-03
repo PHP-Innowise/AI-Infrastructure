@@ -240,16 +240,20 @@ its skills and hooks.
 Commit the installation like any other project files. The wiring names no
 path of the machine it was installed on:
 
-- Claude Code runs `"$CLAUDE_PROJECT_DIR"/.claude/hooks/<role>.sh`;
+- Claude Code starts `"$CLAUDE_PROJECT_DIR"/memory-bank/bin/infra-engine`
+  directly and runs `"$CLAUDE_PROJECT_DIR"/.claude/hooks/<role>.sh` only when
+  that engine is absent;
 - Cursor runs `.cursor/hooks/<role>.sh` from the project root;
-- Codex resolves `.codex/hooks/<role>.sh` from `git rev-parse --show-toplevel`,
-  so a session started in a subdirectory finds it;
+- Codex resolves the engine and `.codex/hooks/<role>.sh` the same way from
+  `git rev-parse --show-toplevel`, so a session started in a subdirectory
+  finds them;
 - the memory MCP entries start a small launcher that finds the engine the same
   way.
 
 Each launcher runs `memory-bank/bin/infra-engine` of its checkout. A linked
-Git worktree has no engine of its own (the engine is ignored by Git) and uses
-the one installed in its repository's main checkout.
+Git worktree has no engine of its own (the engine is ignored by Git), so its
+hooks fall back to the launcher, which uses the one installed in its
+repository's main checkout.
 
 A fresh clone has no engine until it is installed there. Until then the shell
 guard refuses every command with an install hint, and the memory hooks pass
