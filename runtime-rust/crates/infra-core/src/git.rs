@@ -345,12 +345,82 @@ fn checkout(project: &Path) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
+/// The frame of a checkout whose `.git` is a plain directory, read without
+/// starting Git (about 1 ms of every engine process): Git answers the same top,
+/// prefix and administrative directory there. Every layout Git could see
+/// differently is left to Git: a `.git` file or link, a checkout another user
+/// owns (`safe.directory`), a configuration that can move or remove the work
+/// tree, and a file-system boundary Git would not cross on its way up.
+fn plain_frame(project: &Path, checkout: &Path) -> Option<GitFrame> {
+    let marker = checkout.join(".git");
+    let metadata = fs::symlink_metadata(&marker).ok()?;
+    if !metadata.is_dir() || crate::fs::linked_at(&marker, &metadata).ok()? {
+        return None;
+    }
+    if !owned_on_one_device(project, checkout, &metadata) {
+        return None;
+    }
+    let config = fs::read_to_string(marker.join("config"))
+        .ok()?
+        .to_ascii_lowercase();
+    let bare = config.lines().any(|line| {
+        let line = line.trim();
+        let (key, value) = line.split_once('=').unwrap_or((line, "true"));
+        key.trim() == "bare" && value.trim() != "false"
+    });
+    if bare || config.contains("worktree") || config.contains("include") {
+        return None;
+    }
+    let admin = fs::canonicalize(&marker).ok()?;
+    let relative = project.strip_prefix(checkout).ok()?;
+    let mut prefix_bytes = os_bytes(relative.as_os_str());
+    if !prefix_bytes.is_empty() {
+        prefix_bytes.push(b'/');
+    }
+    Some(GitFrame {
+        project: project.to_owned(),
+        top: checkout.to_owned(),
+        prefix: String::from_utf8_lossy(&prefix_bytes).into_owned(),
+        prefix_bytes,
+        admin,
+    })
+}
+/// Whether this user owns the checkout and its `.git`, and every directory from
+/// `project` up to the checkout lies on the checkout's file system.
+#[cfg(unix)]
+fn owned_on_one_device(project: &Path, checkout: &Path, marker: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let user = unsafe { libc::geteuid() };
+    let Ok(top) = fs::metadata(checkout) else {
+        return false;
+    };
+    top.uid() == user
+        && marker.uid() == user
+        && project
+            .ancestors()
+            .take_while(|directory| *directory != checkout)
+            .all(|directory| fs::metadata(directory).is_ok_and(|meta| meta.dev() == top.dev()))
+}
+/// Ownership has no such cheap reading here, so Git is asked.
+#[cfg(not(unix))]
+fn owned_on_one_device(_: &Path, _: &Path, _: &fs::Metadata) -> bool {
+    false
+}
+
 impl GitFrame {
     fn discover_uncached(project: &Path, deadline: Instant) -> Result<Option<Self>> {
         let project = fs::canonicalize(project)?;
         let Some(checkout) = checkout(&project)? else {
             return Ok(None);
         };
+        if let Some(frame) = plain_frame(&project, &checkout) {
+            return Ok(Some(frame));
+        }
+        Self::asked(&project, &checkout, deadline).map(Some)
+    }
+    /// The frame Git reports for `project`, which must lie in `checkout`.
+    fn asked(project: &Path, checkout: &Path, deadline: Instant) -> Result<Self> {
+        let project = project.to_owned();
         let result = run(
             &project,
             &strings(&[
@@ -389,13 +459,13 @@ impl GitFrame {
         if top != checkout || !admin.is_dir() || lines[1] != expected {
             return Err(RuntimeError::unavailable("Git source context unavailable"));
         }
-        Ok(Some(Self {
+        Ok(Self {
             project,
             top,
             prefix: String::from_utf8_lossy(lines[1]).into_owned(),
             prefix_bytes: lines[1].to_vec(),
             admin,
-        }))
+        })
     }
     pub fn discover(project: &Path) -> Result<Option<Self>> {
         Self::discover_held(project, Instant::now() + Duration::from_secs(5)).map_err(source_git)
@@ -875,5 +945,98 @@ fn path_bytes(bytes: &[u8]) -> Result<PathBuf> {
         Ok(PathBuf::from(std::str::from_utf8(bytes).map_err(|_| {
             RuntimeError::invalid("Git path is not UTF-8")
         })?))
+    }
+}
+
+#[cfg(test)]
+mod plain_frame_tests {
+    use super::*;
+    struct Directory(PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn git(directory: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "user.name=Plain frame",
+                "-c",
+                "user.email=plain@invalid.example",
+            ])
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {arguments:?}");
+    }
+    fn repository() -> (Directory, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("infra-plain-frame-{}", crate::domain::uuid4()));
+        fs::create_dir_all(root.join("shop/src")).unwrap();
+        let root = fs::canonicalize(&root).unwrap();
+        git(&root, &["init", "--quiet"]);
+        (Directory(root.clone()), root)
+    }
+    fn checkout_of(project: &Path) -> (PathBuf, PathBuf) {
+        let project = fs::canonicalize(project).unwrap();
+        let checkout = checkout(&project).unwrap().unwrap();
+        (project, checkout)
+    }
+    fn asked(project: &Path) -> GitFrame {
+        let (project, checkout) = checkout_of(project);
+        GitFrame::asked(&project, &checkout, Instant::now() + Duration::from_secs(5)).unwrap()
+    }
+    fn plain(project: &Path) -> Option<GitFrame> {
+        let (project, checkout) = checkout_of(project);
+        plain_frame(&project, &checkout)
+    }
+    #[test]
+    fn a_plain_checkout_reads_as_git_reports_it() {
+        let (_temp, root) = repository();
+        let named = root.join("shop/магазин с пробелами");
+        fs::create_dir_all(&named).unwrap();
+        for project in [
+            root.clone(),
+            root.join("shop"),
+            root.join("shop/src"),
+            named,
+        ] {
+            assert_eq!(
+                plain(&project),
+                Some(asked(&project)),
+                "{}",
+                project.display()
+            );
+        }
+    }
+    #[test]
+    fn layouts_git_could_read_differently_are_left_to_git() {
+        let (_temp, root) = repository();
+        let config = root.join(".git/config");
+        let original = fs::read_to_string(&config).unwrap();
+        assert!(original.contains("bare = false") && plain(&root).is_some());
+        for extra in [
+            "\tbare = true\n",
+            "\tbare\n",
+            "\tworktree = /elsewhere\n",
+            "[include]\n\tpath = more.config\n",
+        ] {
+            fs::write(&config, format!("{original}[core]\n{extra}")).unwrap();
+            assert_eq!(plain(&root), None, "{extra}");
+        }
+        fs::write(&config, &original).unwrap();
+        git(
+            &root,
+            &["commit", "--quiet", "--allow-empty", "-m", "start"],
+        );
+        let linked = root.join("linked");
+        git(
+            &root,
+            &["worktree", "add", "--quiet", "-b", "linked", "linked"],
+        );
+        assert_eq!(plain(&linked), None);
+        assert_eq!(asked(&linked).top, fs::canonicalize(&linked).unwrap());
     }
 }
