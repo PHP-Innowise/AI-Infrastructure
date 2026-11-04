@@ -65,6 +65,21 @@ edition's own files remain in that edition's changelog.
   whether a request was brief. The native runtime had logged every skip and
   settlement bare, so the funnel report counted no failed or held Stop and
   troubleshooting found no `host-refused`.
+- `infra-engine bench claude|codex` runs for an unprivileged user: its worker
+  compares its network namespace with the launcher's and requires a
+  loopback-only namespace, instead of reading PID 1's, which only a process
+  allowed to trace PID 1 may. The bench, the hook rehearsal and the lifecycle
+  experiment recognise the engine-path save request as well as the `cd` form.
+  The bench also trusts the Codex dispatcher's user hooks in the form the
+  dispatcher now writes, reads an attached session's policy from Claude
+  Code's block-form system prompt, and runs `/checkpoint` with the CLI
+  spelling the skill names; its Claude Code and Codex variants (root,
+  subfolder, worktrees, attached, permission modes, queued prompts, app
+  server, read-only sandbox) pass offline. `eval memory-lifecycle-fuzz` runs
+  the memory CLI as a session does - the installation's engine with its
+  `memory` group, from the session's folder, naming no root - so its
+  checkpoint, recall-from-every-worktree and turn checks run again instead
+  of failing or being skipped.
 - Memory Bank retrieval now reads canonical `source_digests`, so editing a
   cited file marks the saved knowledge as changed and shows the source-check
   warning. Incremental indexing upgrades older cached metadata transactionally,

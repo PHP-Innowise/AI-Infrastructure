@@ -394,10 +394,7 @@ fn unescape(text: &str) -> String {
 }
 fn exact_save(text: &str) -> Option<String> {
     let text = unescape(text);
-    let pattern = regex::Regex::new(
-        r"exact command: (cd [^\n]*?--json(?: && cd [^\n]*)?|\(cd .*?--json\))\n",
-    )
-    .ok()?;
+    let pattern = regex::Regex::new(crate::rehearsal::SAVE_COMMAND).ok()?;
     pattern.captures(&text).map(|m| m[1].to_string())
 }
 fn command_tool(body: &Value, host: &str, command: &str, number: usize, tag: &str) -> Value {
@@ -421,6 +418,24 @@ fn command_tool(body: &Value, host: &str, command: &str, number: usize, tag: &st
         json!({"cmd":command})
     };
     json!({"type":"function_call","id":format!("fc_{tag}_{number}"),"call_id":format!("call_{tag}_{number}"),"name":shell,"arguments":serde_json::to_string(&input).unwrap_or_default()})
+}
+/// A command's output as Codex reports it - "Chunk ID", wall time, "Process
+/// exited with code N", token count, then "Output:" - and whether it exited 0;
+/// any other text as it is.
+fn codex_output(text: &str) -> (String, Option<bool>) {
+    let marker = "Process exited with code ";
+    let (Some(exit), true) = (text.find(marker), text.starts_with("Chunk ID:")) else {
+        return (text.into(), None);
+    };
+    let code = text[exit + marker.len()..]
+        .split(|c: char| !(c.is_ascii_digit() || c == '-'))
+        .next()
+        .unwrap_or("");
+    let Some(start) = text[exit..].find("Output:") else {
+        return (text.into(), None);
+    };
+    let body = text[exit + start + "Output:".len()..].trim_start_matches(['\n', '\r', ' ']);
+    (body.into(), Some(code == "0"))
 }
 fn text_of(v: &Value) -> String {
     match v {
@@ -506,10 +521,11 @@ fn decide(body: &Value, host: &str, s: &mut State, number: usize) -> Result<(Vec
         if ["function_call_output", "custom_tool_call_output"]
             .contains(&m["type"].as_str().unwrap_or(""))
         {
+            let (output, exited) = codex_output(&text_of(&m["output"]));
             results.push((
                 m["call_id"].as_str().unwrap_or("").to_string(),
-                text_of(&m["output"]),
-                m["is_error"] == true,
+                output,
+                m["is_error"] == true || exited == Some(false),
             ));
         }
         for block in m["content"].as_array().into_iter().flatten() {
@@ -589,10 +605,11 @@ fn decide(body: &Value, host: &str, s: &mut State, number: usize) -> Result<(Vec
                         .nth(1)
                         .and_then(|s| s.rsplit_once('_').map(|r| r.0))
                     {
+                        let (output, exited) = codex_output(&text_of(&m["output"]));
                         completed.push(Step {
                             name: step.into(),
-                            output: text_of(&m["output"]),
-                            failed: m["is_error"] == true,
+                            output,
+                            failed: m["is_error"] == true || exited == Some(false),
                         });
                     }
                 }
@@ -921,5 +938,22 @@ fn pause(state: &Arc<Mutex<State>>, delay: Duration) {
         std::thread::sleep(
             Duration::from_millis(10).min(end.saturating_duration_since(Instant::now())),
         );
+    }
+}
+
+#[cfg(test)]
+mod codex_output_tests {
+    use super::codex_output;
+
+    #[test]
+    fn codex_command_reports_yield_their_output_and_exit() {
+        let report = "Chunk ID: 0c2743\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 6\nOutput:\nfeature/SHOP-7-invoices\n";
+        assert_eq!(
+            codex_output(report),
+            ("feature/SHOP-7-invoices\n".to_string(), Some(true))
+        );
+        let failed = "Chunk ID: 1\nWall time: 0.1 seconds\nProcess exited with code 128\nOutput:\nfatal: ref HEAD is not a symbolic ref\n";
+        assert_eq!(codex_output(failed).1, Some(false));
+        assert_eq!(codex_output("plain text"), ("plain text".to_string(), None));
     }
 }

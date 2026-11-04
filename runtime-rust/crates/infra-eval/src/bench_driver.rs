@@ -380,7 +380,7 @@ fn trust_with(
     rpc.send(json!({"id":1,"method":"hooks/list","params":{"cwds":[project]}}))?;
     let listed = rpc.response(1, end)?;
     let mut entries = vec![];
-    fn collect(v: &Value, source: &str, prefix: &str, out: &mut Vec<Value>) {
+    fn collect(v: &Value, source: &str, prefixes: &[String], out: &mut Vec<Value>) {
         if let Some(m) = v.as_object() {
             if let (Some(key), Some(hash)) = (
                 m.get("key").and_then(Value::as_str),
@@ -388,30 +388,46 @@ fn trust_with(
             ) {
                 let own = m.get("source").and_then(Value::as_str) == Some(source);
                 let command = m.get("command").and_then(Value::as_str).unwrap_or("");
-                if own && (source != "user" || command.starts_with(prefix)) {
+                if own
+                    && (source != "user"
+                        || prefixes.iter().any(|prefix| command.starts_with(prefix)))
+                {
                     out.push(
                         json!({"key":key,"currentHash":hash,"trustStatus":m.get("trustStatus")}),
                     );
                 }
             }
             for value in m.values() {
-                collect(value, source, prefix, out);
+                collect(value, source, prefixes, out);
             }
         } else if let Some(a) = v.as_array() {
             for value in a {
-                collect(value, source, prefix, out);
+                collect(value, source, prefixes, out);
             }
         }
     }
-    let prefix = format!(
+    // The dispatcher's user hooks: the launcher it once wrote, and the
+    // engine it now starts directly.
+    let store = home.join("ai-accelerator");
+    let mut prefixes = vec![format!(
         "{} ",
-        shell_words::quote(
-            &home
-                .join("ai-accelerator/ai-accelerator-dispatch.sh")
-                .to_string_lossy()
-        )
-    );
-    collect(&listed, source, &prefix, &mut entries);
+        shell_words::quote(&store.join("ai-accelerator-dispatch.sh").to_string_lossy())
+    )];
+    if let Ok(handler) = infra_tooling::attach::native_handler(
+        &store.join("infra-engine"),
+        &[
+            "dispatch".into(),
+            "codex".into(),
+            "--store".into(),
+            store.to_string_lossy().into_owned(),
+        ],
+        "codex",
+        false,
+    ) && let Some(command) = handler["command"].as_str()
+    {
+        prefixes.push(format!("{command} "));
+    }
+    collect(&listed, source, &prefixes, &mut entries);
     let before = entries
         .iter()
         .filter(|v| v["trustStatus"] == "trusted")
@@ -727,6 +743,16 @@ fn events(rows: &[Value]) -> Vec<String> {
         .collect()
 }
 fn policy_heard(policy: &str, requests: &[Value]) -> bool {
+    // Claude Code sends its system prompt as text blocks; an attached session
+    // carries the policy there (`--append-system-prompt-file`).
+    fn flattened(value: &Value) -> String {
+        match value {
+            Value::String(text) => text.clone(),
+            Value::Array(items) => items.iter().map(flattened).collect::<Vec<_>>().join("\n"),
+            Value::Object(map) => map.get("text").map(flattened).unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
     let comments = regex::Regex::new(r"(?s)<!--.*?-->").ok();
     let cleaned = comments
         .as_ref()
@@ -737,7 +763,7 @@ fn policy_heard(policy: &str, requests: &[Value]) -> bool {
         .map(|r| {
             format!(
                 "{}\n{}",
-                r["system"].as_str().unwrap_or(""),
+                flattened(&r["system"]),
                 r["since"].as_str().unwrap_or("")
             )
         })
@@ -1089,6 +1115,13 @@ pub fn run(source: &Path, runtime: &Path, host: &str, request: &Value) -> Result
     request["host"] = host.into();
     request["original_packages"] = json!(home.join(".codex/packages"));
     request["attached_enabled"] = attached.into();
+    // The worker proves it left this process's network: PID 1's namespace is
+    // readable only to a process allowed to trace it, which an unprivileged
+    // worker in a nested user namespace never is.
+    request["launcher_network"] = std::fs::read_link("/proc/self/ns/net")?
+        .to_string_lossy()
+        .into_owned()
+        .into();
     let config = work.0.join("inside.json");
     artifact::write_json(&config, &request)?;
     let mut args = vec![unshare.to_string_lossy().into_owned()];
@@ -1290,15 +1323,9 @@ impl NativeDriver {
                 shell_words::quote(&self.project.to_string_lossy())
             )
         } else {
-            format!(
-                "{}",
-                shell_words::quote(
-                    &self
-                        .project
-                        .join("memory-bank/bin/infra-engine")
-                        .to_string_lossy()
-                )
-            )
+            // The spelling the policy and skills name, run from the root; a
+            // session elsewhere hears its own in the banner's "Memory CLI".
+            "memory-bank/bin/infra-engine memory".to_string()
         };
         provider.configure(json!({"policy_cli":policy_cli}), None)?;
         let mut base = if host == "claude" && flag(v, "sandbox") {
@@ -1949,8 +1976,13 @@ pub fn worker(args: &[String]) -> Result<Option<i32>> {
     #[cfg(target_os = "linux")]
     {
         let me = std::fs::read_link("/proc/self/ns/net")?;
-        let host = std::fs::read_link("/proc/1/ns/net")?;
-        if me == host {
+        let launcher = v["launcher_network"]
+            .as_str()
+            .map(PathBuf::from)
+            .ok_or_else(|| artifact::invalid("launcher network namespace required"))?;
+        // PID 1's namespace, when this worker may read it at all.
+        let init = std::fs::read_link("/proc/1/ns/net").ok();
+        if me == launcher || init.as_ref() == Some(&me) || !loopback_only()? {
             return Err(artifact::invalid(
                 "offline worker refuses host network namespace",
             ));
@@ -1999,6 +2031,17 @@ pub fn worker(args: &[String]) -> Result<Option<i32>> {
     Ok(Some(0))
 }
 
+/// Whether this process's network namespace holds no interface but loopback,
+/// as a namespace fresh from `unshare -n` does.
+#[cfg(target_os = "linux")]
+fn loopback_only() -> Result<bool> {
+    let table = std::fs::read_to_string("/proc/self/net/dev")?;
+    Ok(table
+        .lines()
+        .skip(2)
+        .filter_map(|line| line.split_once(':'))
+        .all(|(name, _)| name.trim() == "lo"))
+}
 #[cfg(unix)]
 fn namespace_uid() -> u32 {
     unsafe { libc::getuid() }
