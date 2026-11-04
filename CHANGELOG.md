@@ -24,6 +24,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- CI keeps compiled dependencies when a check fails. `actions/cache` saved
+  only after a successful job, so the Windows job, which had not yet passed,
+  started every run from an empty target directory and spent about eight of
+  its seventeen minutes compiling optimized dependencies. Generated jobs now
+  restore and save the cache in separate steps: the save also follows a
+  failed check, a missed key falls back to the job's newest entry for the same
+  compiler, and jobs build without incremental state, which only added writes
+  and cache weight. The key moved to `native-cargo-v2`, so no entry carrying
+  incremental state is restored.
 - Windows child processes accept the environment Windows itself keeps. A
   complete environment from `std::env::vars_os()` carries names such as `=C:`
   (each drive's working directory) and `=ExitCode`, and the native runner

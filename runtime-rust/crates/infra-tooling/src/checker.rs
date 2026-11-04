@@ -793,8 +793,10 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
         ));
         output.push_str(&yaml_string(&group.name)?);
         // Match the test profile's debuginfo without changing local dev builds
-        // or the debug/ engine path used by the catalog bootstrap.
-        output.push_str("\n      CARGO_PROFILE_DEV_DEBUG: \"0\"\n    defaults:\n      run:\n        shell: bash\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n      - uses: dtolnay/rust-toolchain@stable\n        id: native-toolchain\n        with:\n          components: rustfmt, clippy\n");
+        // or the debug/ engine path used by the catalog bootstrap. A job
+        // compiles each changed crate once, so incremental state would only
+        // add writes and cache weight.
+        output.push_str("\n      CARGO_PROFILE_DEV_DEBUG: \"0\"\n      CARGO_INCREMENTAL: \"0\"\n    defaults:\n      run:\n        shell: bash\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n      - uses: dtolnay/rust-toolchain@stable\n        id: native-toolchain\n        with:\n          components: rustfmt, clippy\n");
         validate_rust_configuration(group)?;
         if group.rust_toolchain != "stable" {
             output.push_str("          toolchain: ");
@@ -819,19 +821,25 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
         // installed compiler. Keep jobs separate so a lightweight engine-only
         // job cannot occupy the immutable cache key of the complete test job.
         // Cached artifacts are inputs to Cargo, never authority to skip it.
+        // A missed key starts from the job's newest entry for this compiler,
+        // and Cargo rebuilds only what changed since. v2 entries hold no
+        // incremental state, so no v1 entry is restored into them.
+        let prefix = format!(
+            "native-cargo-v2-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ steps.native-toolchain.outputs.cachekey }}}}-{}-dev0-",
+            group.job
+        );
         output.push_str(concat!(
-            "      - name: Cache native Cargo artifacts\n",
-            "        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\n",
+            "      - name: Restore native Cargo artifacts\n",
+            "        id: native-cache\n",
+            "        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\n",
             "        with:\n",
-            "          path: |\n",
-            "            ${{ env.CARGO_HOME }}/registry/index\n",
-            "            ${{ env.CARGO_HOME }}/registry/cache\n",
-            "            ${{ env.CARGO_HOME }}/git/db\n",
-            "            ${{ env.CARGO_TARGET_DIR }}\n",
-            "          key: native-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-",
         ));
-        output.push_str(&group.job);
-        output.push_str("-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}\n");
+        output.push_str(CARGO_CACHE_PATHS);
+        output.push_str("          key: ");
+        output.push_str(&prefix);
+        output.push_str("${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}\n          restore-keys: ");
+        output.push_str(&prefix);
+        output.push('\n');
         // The group's own Cargo builds rewrite this engine in the target
         // directory, and Windows cannot replace a running executable: the
         // catalog runs from a copy outside it.
@@ -852,9 +860,27 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
             "          if-no-files-found: ignore\n",
             "          retention-days: 14\n",
         ));
+        // A failed check still leaves the dependencies it compiled, and
+        // keeping them spares the next run a cold build. An entry found under
+        // its exact key is immutable and stays as it is.
+        output.push_str(concat!(
+            "      - name: Save native Cargo artifacts\n",
+            "        if: ${{ !cancelled() && steps.native-cache.outputs.cache-hit != 'true' }}\n",
+            "        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\n",
+            "        with:\n",
+        ));
+        output.push_str(CARGO_CACHE_PATHS);
+        output.push_str("          key: ${{ steps.native-cache.outputs.cache-primary-key }}\n");
     }
     Ok(output)
 }
+const CARGO_CACHE_PATHS: &str = concat!(
+    "          path: |\n",
+    "            ${{ env.CARGO_HOME }}/registry/index\n",
+    "            ${{ env.CARGO_HOME }}/registry/cache\n",
+    "            ${{ env.CARGO_HOME }}/git/db\n",
+    "            ${{ env.CARGO_TARGET_DIR }}\n",
+);
 /// Emit only catalog-owned workflow files; unrelated workflows are untouched.
 pub fn write_ci(root: &Path, write: bool) -> Result<Value> {
     let root = infra_core::fs::canonicalize(root)?;
@@ -1072,7 +1098,7 @@ mod compiler_workflow_tests {
                 let target = job
                     .find("name: Select the native target directory")
                     .unwrap_or_else(|| panic!("{name}: no target directory step"));
-                let cache = job.find("name: Cache native Cargo artifacts").unwrap();
+                let cache = job.find("name: Restore native Cargo artifacts").unwrap();
                 let build = job.find("name: Build the native engine").unwrap();
                 let check = job.find("name: Run the catalog group").unwrap();
                 assert!(
@@ -1080,6 +1106,21 @@ mod compiler_workflow_tests {
                     "{name}"
                 );
                 assert!(job.contains("      CARGO_PROFILE_DEV_DEBUG: \"0\"\n"));
+                assert!(job.contains("      CARGO_INCREMENTAL: \"0\"\n"), "{name}");
+                // A missed key falls back to the newest entry of this job and
+                // compiler, never to another job's or a v1 entry.
+                let prefix = job[cache..build]
+                    .split("          restore-keys: ")
+                    .nth(1)
+                    .and_then(|rest| rest.lines().next())
+                    .unwrap_or_else(|| panic!("{name}: a missed key restores nothing"));
+                let job_name = job.lines().next().unwrap().trim().trim_end_matches(':');
+                assert!(prefix.starts_with("native-cargo-v2-"), "{name}");
+                assert!(prefix.ends_with(&format!("-{job_name}-dev0-")), "{name}");
+                assert!(
+                    job[cache..build].contains(&format!("          key: {prefix}${{{{ hashFiles(")),
+                    "{name}"
+                );
                 assert!(job.contains("\"$CARGO_TARGET_DIR/debug/infra-engine$suffix\""));
                 // Cargo in the group replaces the built engine; Windows refuses
                 // that while the engine runs, so only a copy may run the group.
@@ -1109,7 +1150,26 @@ mod compiler_workflow_tests {
                     "{name}"
                 );
                 assert!(!job[build..check].contains("        if:"), "{name}");
-                assert!(!job.contains("cache-hit"), "{name}");
+                // Dependencies compiled before a failure are kept too; only
+                // the save step reads whether the exact key was found.
+                let save = job
+                    .find("      - name: Save native Cargo artifacts\n")
+                    .unwrap_or_else(|| panic!("{name}: compiled dependencies are not kept"));
+                assert!(keep < save, "{name}");
+                assert!(
+                    job[save..].contains(
+                        "        if: ${{ !cancelled() && steps.native-cache.outputs.cache-hit != 'true' }}\n"
+                    ),
+                    "{name}"
+                );
+                assert!(
+                    job[save..].contains(
+                        "          key: ${{ steps.native-cache.outputs.cache-primary-key }}\n"
+                    ),
+                    "{name}"
+                );
+                assert!(!job[..save].contains("cache-hit"), "{name}");
+                assert_eq!(job.matches(CARGO_CACHE_PATHS).count(), 2, "{name}");
             }
         }
         assert_eq!(

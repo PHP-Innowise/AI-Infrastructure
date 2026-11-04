@@ -20,6 +20,7 @@ jobs:
     env:
       NATIVE_CHECK_GROUP: "rust"
       CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
     defaults:
       run:
         shell: bash
@@ -33,15 +34,17 @@ jobs:
           components: rustfmt, clippy
       - name: Select the native target directory
         run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
-      - name: Cache native Cargo artifacts
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Restore native Cargo artifacts
+        id: native-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ${{ env.CARGO_HOME }}/registry/index
             ${{ env.CARGO_HOME }}/registry/cache
             ${{ env.CARGO_HOME }}/git/db
             ${{ env.CARGO_TARGET_DIR }}
-          key: native-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-rust-contract-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
+          key: native-cargo-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-rust-contract-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
+          restore-keys: native-cargo-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-rust-contract-dev0-
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -59,12 +62,23 @@ jobs:
           path: ${{ runner.temp }}/infra-check-logs
           if-no-files-found: ignore
           retention-days: 14
+      - name: Save native Cargo artifacts
+        if: ${{ !cancelled() && steps.native-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            ${{ env.CARGO_TARGET_DIR }}
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
   rust-msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       NATIVE_CHECK_GROUP: "msrv"
       CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
     defaults:
       run:
         shell: bash
@@ -79,15 +93,17 @@ jobs:
           toolchain: "1.89.0"
       - name: Select the native target directory
         run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
-      - name: Cache native Cargo artifacts
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Restore native Cargo artifacts
+        id: native-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ${{ env.CARGO_HOME }}/registry/index
             ${{ env.CARGO_HOME }}/registry/cache
             ${{ env.CARGO_HOME }}/git/db
             ${{ env.CARGO_TARGET_DIR }}
-          key: native-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-rust-msrv-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
+          key: native-cargo-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-rust-msrv-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
+          restore-keys: native-cargo-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-rust-msrv-dev0-
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -105,12 +121,23 @@ jobs:
           path: ${{ runner.temp }}/infra-check-logs
           if-no-files-found: ignore
           retention-days: 14
+      - name: Save native Cargo artifacts
+        if: ${{ !cancelled() && steps.native-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            ${{ env.CARGO_TARGET_DIR }}
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
   rust-wasm:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       NATIVE_CHECK_GROUP: "wasm"
       CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
     defaults:
       run:
         shell: bash
@@ -125,15 +152,17 @@ jobs:
           targets: "wasm32-unknown-unknown"
       - name: Select the native target directory
         run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
-      - name: Cache native Cargo artifacts
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Restore native Cargo artifacts
+        id: native-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ${{ env.CARGO_HOME }}/registry/index
             ${{ env.CARGO_HOME }}/registry/cache
             ${{ env.CARGO_HOME }}/git/db
             ${{ env.CARGO_TARGET_DIR }}
-          key: native-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-rust-wasm-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
+          key: native-cargo-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-rust-wasm-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
+          restore-keys: native-cargo-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-rust-wasm-dev0-
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -151,3 +180,13 @@ jobs:
           path: ${{ runner.temp }}/infra-check-logs
           if-no-files-found: ignore
           retention-days: 14
+      - name: Save native Cargo artifacts
+        if: ${{ !cancelled() && steps.native-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            ${{ env.CARGO_TARGET_DIR }}
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}

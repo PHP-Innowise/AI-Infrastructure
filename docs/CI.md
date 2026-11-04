@@ -56,6 +56,14 @@ under the runner's temporary directory and uploads it as the
 once it ends. The Windows workspace tests run with `--no-fail-fast`, so one run
 reports every failing test target.
 
+Each job restores its Cargo registry and target directory from the cache
+before the build and saves them after the check, also when the check failed,
+unless the run found its exact key. The key names the job, the compiler and a
+hash of the Cargo manifests, lockfile and catalog; when that hash changes, the
+job starts from its newest entry for the same compiler and Cargo rebuilds what
+changed. Jobs build without incremental state (`CARGO_INCREMENTAL=0`), which a
+CI build never reuses and the cache would only carry.
+
 | Group | Actual validation |
 | --- | --- |
 | `rust` | Workspace Rust tests, rustfmt and Clippy. |
