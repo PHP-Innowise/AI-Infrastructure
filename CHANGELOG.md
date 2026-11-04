@@ -183,6 +183,12 @@ edition's own files remain in that edition's changelog.
   reported every recall missing. On a copy of a client project it now
   reports the saved finding recalled in the next session for both hosts
   and both capsule profiles.
+- The Project Brain message journal
+  (`project-brain/control/messages/<task>.jsonl`) is written as before:
+  each line is `json.dumps(sort_keys=True)`, keys sorted and separated by
+  `, ` and `: `. The native runtime wrote compact lines in insertion
+  order, so a migrated task's tracked journal mixed two line formats.
+  Both read the same; only lines written from now on change.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

@@ -825,7 +825,9 @@ impl BrainRepository {
         }
         validate_message(&message)?;
         validate_schema_file(self.roots(), "message.schema.json", &message)?;
-        let mut line = serde_json::to_string(&message)?;
+        // Written as the retired runtime wrote it (`json.dumps(sort_keys=True)`):
+        // the journal is tracked, and a migrated task keeps one line format.
+        let mut line = crate::domain::json::python_default(&message, true, false, false)?;
         for (character, escaped) in [
             ('\u{2028}', "\\u2028"),
             ('\u{2029}', "\\u2029"),

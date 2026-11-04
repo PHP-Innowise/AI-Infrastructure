@@ -1175,7 +1175,10 @@ fn hand_run_commands_report_what_they_did() {
     assert_eq!(view["authority"], "project-brain", "{view}");
     assert!(view.get("phase").is_some_and(Value::is_null), "{view}");
     // A task never checkpointed has no automatic summary yet, as before.
-    assert!(view.get("auto_checkpoint").is_some_and(Value::is_null), "{view}");
+    assert!(
+        view.get("auto_checkpoint").is_some_and(Value::is_null),
+        "{view}"
+    );
     let output = fixture.run(&["rebind", "--task-id", "TASK-REBIND"], None);
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -2623,4 +2626,55 @@ fn completion_candidate_ignores_a_never_diverged_branch_even_after_checkout_to_m
     assert_eq!(completion_task_image(&fixture, id), local);
     assert_eq!(completion_episodes(&fixture), episodes);
     assert!(completion_source_image(&fixture) == sources);
+}
+
+#[test]
+fn the_message_journal_keeps_the_retired_line_format() {
+    let fixture = Fixture::new(false);
+    let task = fixture.start("TASK-MESSAGES");
+    let body = "Grüße\u{2028}aus Köln";
+    let sent = fixture.success(
+        &[
+            "msg-send",
+            "--task-id",
+            "TASK-MESSAGES",
+            "--from",
+            "planner",
+            "--to",
+            "implementer",
+            "--type",
+            "handoff",
+            "--body",
+            body,
+            "--json",
+        ],
+        None,
+    );
+    let journal = fs::read_to_string(fixture.project.join(format!(
+        "project-brain/control/messages/{}.jsonl",
+        task["task_uuid"].as_str().unwrap()
+    )))
+    .unwrap();
+    // `json.dumps(record, ensure_ascii=False, sort_keys=True)`, with the line
+    // separators escaped: a migrated task's journal keeps one format.
+    let expected = format!(
+        "{{\"body\": \"Grüße\\u2028aus Köln\", \"created_at\": \"{}\", \"from_actor\": \"planner\", \"id\": \"{}\", \"refs\": [], \"schema_version\": 1, \"seq\": 1, \"task_id\": \"{}\", \"task_revision\": {}, \"to_actor\": \"implementer\", \"type\": \"handoff\"}}\n",
+        sent["created_at"].as_str().unwrap(),
+        sent["id"].as_str().unwrap(),
+        task["task_uuid"].as_str().unwrap(),
+        sent["task_revision"],
+    );
+    assert_eq!(journal, expected);
+    let read = fixture.success(
+        &[
+            "msg-read",
+            "--task-id",
+            "TASK-MESSAGES",
+            "--for",
+            "implementer",
+            "--json",
+        ],
+        None,
+    );
+    assert_eq!(read[0]["body"], body, "{read}");
 }
