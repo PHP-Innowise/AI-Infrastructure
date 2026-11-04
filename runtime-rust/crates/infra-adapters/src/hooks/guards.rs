@@ -400,21 +400,35 @@ pub fn subagent_gate(scope: &Context) -> Result<Output> {
         return gate(scope, true, "");
     }
     let Some(writes) = roster.get(agent) else {
-        return gate(
-            scope,
-            false,
-            &format!(
+        // Cursor shows its person one line, in Cursor's own terms, as the
+        // retired gate wrote it; Claude Code's model reads the longer text.
+        let message = if scope.host == "cursor" {
+            format!(
+                "Blocked subagent \"{}\": built-in Cursor subagents are disabled in this project. Delegate via the project agents in .cursor/agents/ (invoke with /agent-name) or work in the main conversation.",
+                safe_type(agent)
+            )
+        } else {
+            format!(
                 "BLOCKED: subagent type \"{}\" is not part of this accelerator.\n  Delegate only to the project agents defined in .{}/agents/\n  (see its README for the roster), or do the work in the main\n  conversation instead of spawning a built-in agent.",
                 safe_type(agent),
                 scope.host
-            ),
-        );
+            )
+        };
+        return gate(scope, false, &message);
     };
     if !writes {
         return gate(scope, true, "");
     }
     match counters::take_writer(&project_root(&scope.roots.project), &scope.host, agent) {
         Ok(None) => gate(scope, true, ""),
+        Ok(Some(holder)) if scope.host == "cursor" => gate(
+            scope,
+            false,
+            &format!(
+                "Write-capable agent \"{}\" is already running; write-capable agents run one at a time. Wait for its completion or remove the stale write-agent lock.",
+                safe_type(&holder)
+            ),
+        ),
         Ok(Some(holder)) => gate(
             scope,
             false,

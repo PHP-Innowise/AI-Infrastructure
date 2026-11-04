@@ -63,6 +63,11 @@ edition's own files remain in that edition's changelog.
   diagnosis checks the capsule without the appended review notice, as before.
   A retrieval without a session leaves `repeat_withheld` unobserved, not an
   exact zero: nothing was checked for repeats.
+- Cursor's subagent gate answers in Cursor's own words again: a built-in
+  subagent is refused with "Blocked subagent ...: built-in Cursor subagents
+  are disabled in this project ... (invoke with /agent-name)", and a second
+  write-capable agent with the retired one-line text. The native gate gave
+  Cursor's person Claude Code's three-line text.
 
 - Claude Code saves a turn's result without asking again: the Stop request
   names `cd <installation> && echo -E '<JSON>' | memory-bank/bin/infra-engine
