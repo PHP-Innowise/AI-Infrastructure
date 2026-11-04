@@ -24,6 +24,11 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- The native evaluation runtime tests give Git plain drive paths on Windows.
+  `fs::canonicalize` spells them `\\?\C:\…`, and with such a home and global
+  configuration `git init` stopped with "unknown error occurred while reading
+  the configuration files", the first failure of the newly running Windows
+  tests. The fixture now drops the verbatim prefix from drive paths.
 - The `native-windows` job tests the workspace. Each generated job ran
   `infra-engine check` from the engine it had just built in the Cargo target
   directory; the group's own `cargo test` rebuilds that engine in place, and
