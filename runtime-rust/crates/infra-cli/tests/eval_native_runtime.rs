@@ -250,19 +250,6 @@ fn public_memory_eval_accepts_hardlinked_selected_native_runtime_without_a_provi
     let selected_sha = digest(&selected);
     let original_sha = digest(original_engine);
     assert_eq!(selected_sha, original_sha);
-    // Windows records code-integrity state on a file the first time it runs
-    // as an image, which moves the file's change time. Let that happen before
-    // taking the identity the evaluation itself must leave alone.
-    let (code, _, stderr) = fixture.run(
-        &fixture.root,
-        vec![
-            selected.display().to_string(),
-            "capabilities".into(),
-            "--json".into(),
-        ],
-        60,
-    );
-    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
     let mut selected_parent =
         infra_core::bank::publication::PublicationFiles::new(selected.parent().unwrap()).unwrap();
     let (_, selected_identity) = selected_parent
@@ -474,7 +461,17 @@ fn public_memory_eval_accepts_hardlinked_selected_native_runtime_without_a_provi
         )
         .unwrap()
         .unwrap();
-    assert_eq!(after, selected_identity);
+    // On Windows the copy's change time moved during the evaluation while
+    // its file, links, size, bytes and write time stayed the same. Those
+    // still prove the image was neither replaced nor rewritten; publication
+    // compares a renamed image the same way.
+    let image = |identity: infra_core::bank::publication::FileImageIdentity| {
+        let changed = if cfg!(windows) { 0 } else { identity.6 };
+        (
+            identity.0, identity.1, identity.2, identity.3, identity.4, identity.5, changed,
+        )
+    };
+    assert_eq!(image(after), image(selected_identity));
     assert!(
         fs::read_dir(fixture.root.join("codex-home"))
             .unwrap()

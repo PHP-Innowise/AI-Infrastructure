@@ -1528,8 +1528,10 @@ mod threaded_exit_tests {
         for code in [0, 7] {
             // /D disables AutoRun. Only cmd builtins run: consume one complete
             // request line, emit exact valid scores, then exit with this code.
+            // `exit /b` outside a batch file left cmd's exit code at the 1 that
+            // `set /p` from nul sets; plain `exit` ends cmd with this code.
             let script =
-                format!(r#"set /p request=& <nul set /p ={{"scores":[0.25]}}& exit /b {code}"#);
+                format!(r#"set /p request=& <nul set /p ={{"scores":[0.25]}}& exit {code}"#);
             let child = Command::new(&command)
                 .args(["/D", "/Q", "/C"])
                 .raw_arg(script)

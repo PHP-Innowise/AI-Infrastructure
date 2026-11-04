@@ -32,13 +32,17 @@ edition's own files remain in that edition's changelog.
   Harness setup already applied, now shared by all three. On Windows the
   replaced-state test checks that a held prepared state root cannot be moved
   at all, since Windows refuses that move.
-- The hardlinked evaluation test runs its engine copy once before taking the
-  identity the evaluation must leave alone. Windows records code-integrity
-  state on a file the first time it runs as an image, which moved the copy's
-  change time by about a second and failed the comparison although its bytes
-  and write time were unchanged. The Windows ONNX exit test now reports the
-  worker's observed status with its refusal, since "worker-exit" stands for a
-  failed write, a failed read and a nonzero exit alike.
+- The hardlinked evaluation test compares its engine copy on Windows without
+  the change time. Windows moved that time by one to two seconds during the
+  evaluation while the copy's file, links, size, bytes and write time stayed
+  the same, and running the copy once beforehand did not settle it. The
+  other fields still show the image was neither replaced nor rewritten, the
+  way publication already compares a renamed image.
+- The Windows ONNX exit test ends its `cmd` worker with `exit`. `exit /b`
+  outside a batch file left the exit code at the 1 that `set /p` from `nul`
+  sets, so the natural zero exit the test requires never came. The test also
+  reports the worker's observed status with a refusal, since "worker-exit"
+  stands for a failed write, a failed read and a nonzero exit alike.
 - A process that embeds the runtime names the engine that guards its
   children. On Windows every child starts under a guardian that re-runs the
   current executable as `internal-guard`; in a test binary that executable is
