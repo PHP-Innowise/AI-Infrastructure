@@ -2781,3 +2781,84 @@ fn a_declared_phase_reaches_the_capsule() {
         "{text}"
     );
 }
+
+/// A task's files become file edges as the retired index made them: each is
+/// screened (no directory, build output, lockfile or runtime state) and the
+/// survivors are checked against Git's index at once, a staged file counting.
+/// A directory listed by a task used to link every tracked file under it.
+#[test]
+fn a_tasks_file_edges_are_screened_and_checked_against_the_index() {
+    let fixture = Fixture::new(false);
+    for (path, text) in [
+        ("src/Tracked.php", "<?php\n"),
+        ("src/Staged.php", "<?php\n"),
+        ("src/Untracked.php", "<?php\n"),
+        ("src/Nested/Inner.php", "<?php\n"),
+        ("vendor/acme/Lib.php", "<?php\n"),
+        ("composer.lock", "{}\n"),
+    ] {
+        let file = fixture.project.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, text).unwrap();
+    }
+    fixture.git(&[
+        "add",
+        "--",
+        "src/Tracked.php",
+        "src/Staged.php",
+        "src/Nested/Inner.php",
+        "vendor/acme/Lib.php",
+        "composer.lock",
+        "memory-bank/README.md",
+    ]);
+    let task = fixture.start("TASK-EDGES");
+    let mut arguments = vec!["update", "--task-id", "TASK-EDGES", "--json"];
+    for file in [
+        "src/",
+        "./src/Tracked.php",
+        "src/Staged.php",
+        "src/Untracked.php",
+        "vendor/acme/Lib.php",
+        "composer.lock",
+        "memory-bank/README.md",
+    ] {
+        arguments.extend(["--file", file]);
+    }
+    fixture.success(&arguments, None);
+    fixture.success(&["index", "--json"], None);
+    let record = format!(
+        "project-brain/dynamic/tasks/{}.md",
+        task["task_uuid"].as_str().unwrap()
+    );
+    let linked = || {
+        let store = public_fixture_store(&fixture);
+        let mut statement = store
+            .conn
+            .prepare("SELECT ref_path FROM document_links WHERE path=?1 AND ref_kind='file' ORDER BY ref_path")
+            .unwrap();
+        statement
+            .query_map([&record], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(linked(), ["src/Staged.php", "src/Tracked.php"]);
+    // A file Git starts tracking gains its edge at the next refresh, though
+    // no record changed: the incremental index compares the links too.
+    fixture.git(&["add", "--", "src/Untracked.php"]);
+    fixture.success(
+        &[
+            "refresh",
+            "--json",
+            "--task-id",
+            "TASK-EDGES",
+            "--query",
+            "cobalt retries",
+        ],
+        None,
+    );
+    assert_eq!(
+        linked(),
+        ["src/Staged.php", "src/Tracked.php", "src/Untracked.php"]
+    );
+}

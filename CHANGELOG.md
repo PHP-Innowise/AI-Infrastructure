@@ -218,6 +218,21 @@ edition's own files remain in that edition's changelog.
   `memory retrieve` 61 ms instead of 72; a prompt hook on a client copy,
   whose time goes to its source scan, is unchanged. The capsules are
   unchanged: 153 of 153 on six client copies match the retired runtime.
+- A task's files become file edges as the retired index made them. Each of
+  the task's last 50 files is screened as a file edge is (no directory,
+  build output, vendored code, lockfile, runtime state or secret-shaped
+  path), and Git's index is asked about all tasks' files at once with
+  `cat-file --batch-check`, a staged file counting. The native index ran
+  `git ls-files` once per task on every refresh and screened only
+  sensitive paths, so a directory a task listed linked every tracked file
+  under it: on a copy of one client the tasks had 3,934 file edges where
+  the retired index had 163 (`.agents/`, `.claude/`, `.codex/` and
+  `.cursor/` were listed), and on others lockfiles and Memory Bank files
+  were linked. Five client copies now have the retired edges exactly. The
+  incremental index also compares the Brain's links and derived state, as
+  the retired digest did: a file Git starts tracking gains its edge at the
+  next refresh, where the native index kept the old edges until a record
+  changed.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
