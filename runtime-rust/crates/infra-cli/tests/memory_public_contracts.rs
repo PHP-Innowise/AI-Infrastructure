@@ -1102,6 +1102,51 @@ fn hand_run_commands_report_what_they_did() {
     );
 }
 
+/// No handoff reaches a capsule, as in the retired runtime: another task's
+/// open handoff repeated that task's record, which is admitted on its own.
+#[test]
+fn another_tasks_handoff_is_not_admitted_to_a_capsule() {
+    let fixture = Fixture::new(false);
+    fixture.success(
+        &[
+            "start",
+            "--task-id",
+            "TASK-OTHER",
+            "--goal",
+            "Zirconium ledger reconciliation",
+            "--json",
+        ],
+        None,
+    );
+    fixture.start("TASK-WORK");
+    let handoffs = fixture.project.join("project-brain/control/handoffs");
+    assert!(
+        fs::read_dir(&handoffs).unwrap().count() >= 2,
+        "each task writes its handoff"
+    );
+    let value = fixture.success(
+        &[
+            "refresh",
+            "--json",
+            "--task-id",
+            "TASK-WORK",
+            "--host",
+            "codex",
+            "--gate",
+            "off",
+            "--ephemeral",
+            "--capsule-profile",
+            "full",
+            "--query",
+            "Zirconium ledger reconciliation",
+        ],
+        None,
+    );
+    let text = value["capsule_text"].as_str().unwrap();
+    assert!(text.contains("project-brain/dynamic/tasks/"), "{text}");
+    assert!(!text.contains("project-brain/control/handoffs/"), "{text}");
+}
+
 /// The operator reports list a refresh's phases in the order it runs them,
 /// as the retired reports did, not in the sorted order of a JSON object.
 #[test]

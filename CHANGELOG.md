@@ -68,6 +68,15 @@ edition's own files remain in that edition's changelog.
   are disabled in this project ... (invoke with /agent-name)", and a second
   write-capable agent with the retired one-line text. The native gate gave
   Cursor's person Claude Code's three-line text.
+- No Project Brain handoff reaches a capsule again. The retired runtime
+  admitted none (a handoff has no lifecycle of its own), and every measured
+  capsule was built that way; the native runtime admitted an open handoff,
+  so a query naming another task returned its handoff beside its record,
+  which says the same, at the cost of budget. Found by comparing retrieval
+  on real installations: on a copy of a client project 23 of 24 queries
+  gave identical capsules, the 24th differed by this handoff alone.
+  Admitting open handoffs would be a retrieval change to measure on its own
+  (docs/MEMORY-EVAL.md).
 - `memory health` and `memory retrieval-report` list a refresh's phases in
   the order it runs them (`stat`, `index`, `retrieval`), as the retired
   reports did; the native text followed the sorted keys of the JSON object.

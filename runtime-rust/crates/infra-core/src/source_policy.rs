@@ -518,11 +518,11 @@ pub fn metadata_reason(config: &RuntimeConfig, document: &Document) -> Result<Op
     {
         return Ok(Some("authority".into()));
     }
-    if document.kind == "brain-handoff" && document.lifecycle == "closed" {
-        return Ok(Some("lifecycle".into()));
-    }
+    // A handoff has no lifecycle of its own, so none is admitted, open or
+    // closed, as in the retired runtime whose capsules were measured: an open
+    // handoff repeats its task's record, and admitting it would be a retrieval
+    // change of its own to measure (docs/MEMORY-EVAL.md).
     if let Some(kind) = document.kind.strip_prefix("brain-")
-        && kind != "handoff"
         && (domain::lifecycle_states(kind).is_empty()
             || domain::is_terminal(kind, &document.lifecycle))
     {
