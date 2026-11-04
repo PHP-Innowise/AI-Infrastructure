@@ -40,16 +40,6 @@ fn image_tuple(image: &Identity) -> FileImageIdentity {
 fn same_renamed_image(a: FileImageIdentity, b: FileImageIdentity) -> bool {
     (a.0, a.1, a.2, a.3, a.4, a.5) == (b.0, b.1, b.2, b.3, b.4, b.5)
 }
-fn requested_mode(mode: u32) -> u32 {
-    #[cfg(unix)]
-    {
-        mode
-    }
-    #[cfg(not(unix))]
-    {
-        if mode & 0o200 == 0 { 0o444 } else { 0o644 }
-    }
-}
 fn held_mode(file: &File) -> Result<u32> {
     #[cfg(unix)]
     {
@@ -279,7 +269,7 @@ impl PublicationFiles {
             let prepared_identity = native::identity(&file)?;
             let prepared = image_tuple(&prepared_identity);
             let output_mode = held_mode(&file)?;
-            if prepared_identity.links != 1 || output_mode != requested_mode(mode) {
+            if prepared_identity.links != 1 || output_mode != super::kept_mode(mode) {
                 return Err(RuntimeError::conflict(
                     "Prepared publication ownership or mode changed",
                 ));

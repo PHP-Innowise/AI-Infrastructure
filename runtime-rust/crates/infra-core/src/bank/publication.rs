@@ -641,6 +641,18 @@ impl PublicationFiles {
     }
 }
 
+/// The mode `read_mode` reports for a file published with `mode`. Windows
+/// keeps only read-only, which publication sets from the owner's write bit,
+/// so every mode reads back there as 0o444 or 0o644.
+pub fn kept_mode(mode: u32) -> u32 {
+    if cfg!(unix) {
+        mode
+    } else if mode & 0o200 == 0 {
+        0o444
+    } else {
+        0o644
+    }
+}
 pub fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -1480,5 +1492,30 @@ impl PublicationFiles {
                 identity.changed,
             ),
         )))
+    }
+}
+
+#[cfg(test)]
+mod kept_mode_tests {
+    use super::{PublicationFiles, kept_mode};
+
+    #[test]
+    fn a_published_mode_reads_back_as_kept_mode_says() {
+        let root = std::env::temp_dir().join(format!("infra-kept-mode-{}", crate::domain::uuid4()));
+        std::fs::create_dir(&root).unwrap();
+        let mut files = PublicationFiles::new(&root).unwrap();
+        let mut observed = vec![];
+        for mode in [0o755, 0o644, 0o600, 0o555, 0o444] {
+            let name = format!("file-{mode:o}");
+            files
+                .write_expected_mode(&name, b"bytes", None, mode, 64)
+                .unwrap();
+            observed.push((mode, files.read_mode(&name).unwrap()));
+        }
+        drop(files);
+        let _ = std::fs::remove_dir_all(&root);
+        for (mode, read) in observed {
+            assert_eq!(read, Some(kept_mode(mode)), "{mode:o}");
+        }
     }
 }

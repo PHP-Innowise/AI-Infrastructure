@@ -24,6 +24,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- A Cursor plugin image can be materialized again on Windows. Repeating it
+  compared each file's planned Unix mode with the mode Windows keeps, only
+  read-only, reported as 0o444 or 0o644, and refused an unchanged image with
+  "Private Cursor plugin image was changed". The comparison now uses
+  `infra_core::bank::publication::kept_mode`, the rule publication commits and
+  Harness setup already applied, now shared by all three. On Windows the
+  replaced-state test checks that a held prepared state root cannot be moved
+  at all, since Windows refuses that move.
 - The hardlinked evaluation test runs its engine copy once before taking the
   identity the evaluation must leave alone. Windows records code-integrity
   state on a file the first time it runs as an image, which moved the copy's

@@ -327,7 +327,8 @@ pub(super) fn materialize(
         let previous = output.read(&relative, FILE_LIMIT)?;
         if let Some(previous) = previous {
             if previous.as_slice() != bytes.as_slice()
-                || output.read_mode(&relative)? != Some(*mode)
+                || output.read_mode(&relative)?
+                    != Some(infra_core::bank::publication::kept_mode(*mode))
             {
                 return Err(RuntimeError::conflict(
                     "Private Cursor plugin image was changed",
@@ -674,7 +675,15 @@ mod tests {
         let mut prepared = fixture.prepared_state().unwrap();
         let record = std::fs::read(fixture.state.join("accelerator-attach.json")).unwrap();
         let retired = fixture.root.join("retained prepared state");
-        std::fs::rename(&fixture.state, &retired).unwrap();
+        let moved = std::fs::rename(&fixture.state, &retired);
+        if cfg!(windows) {
+            // The prepared state holds its root open without delete sharing,
+            // so Windows refuses to move it: no replacement can be admitted.
+            let error = moved.expect_err("Windows moved a held prepared state root");
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            return;
+        }
+        moved.unwrap();
         std::fs::create_dir(&fixture.state).unwrap();
         #[cfg(unix)]
         {
