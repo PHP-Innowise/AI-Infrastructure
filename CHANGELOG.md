@@ -76,7 +76,11 @@ edition's own files remain in that edition's changelog.
   on real installations: on a copy of a client project 23 of 24 queries
   gave identical capsules, the 24th differed by this handoff alone.
   Admitting open handoffs would be a retrieval change to measure on its own
-  (docs/MEMORY-EVAL.md).
+  (docs/MEMORY-EVAL.md). `memory search` stays broad, as the retired search
+  was, and lists an open handoff; `memory links` follows the capsule.
+- `memory search --json` names its query again, and an explicit `retrieve`
+  records the index's own `stat` and `index` phases in its manifest, so the
+  retrieval report counts the filesystem walk of every turn, as before.
 - A hook without a prompt (session start and compaction capsules, Cursor's
   rule) asks memory with the task's own words again, as the retired hook
   did: a file adds its stem (`src/Refund.php` asks for "Refund", not for

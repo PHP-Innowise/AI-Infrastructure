@@ -1323,6 +1323,21 @@ fn another_tasks_handoff_is_not_admitted_to_a_capsule() {
     let text = value["capsule_text"].as_str().unwrap();
     assert!(text.contains("project-brain/dynamic/tasks/"), "{text}");
     assert!(!text.contains("project-brain/control/handoffs/"), "{text}");
+    // An explicit search stays broad, as the retired one was: it lists the
+    // open handoff a capsule leaves out.
+    let found = fixture.success(
+        &["search", "Zirconium ledger reconciliation", "--json"],
+        None,
+    );
+    assert_eq!(found["query"], "Zirconium ledger reconciliation", "{found}");
+    assert!(
+        found["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|document| document["kind"] == "brain-handoff"),
+        "{found}"
+    );
 }
 
 /// The operator reports list a refresh's phases in the order it runs them,

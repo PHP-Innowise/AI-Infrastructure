@@ -727,7 +727,7 @@ impl MemoryService {
                 } else {
                     vec![]
                 };
-                Ok(object!({"documents":documents,"episodes":episodes}))
+                Ok(object!({"query":query,"documents":documents,"episodes":episodes}))
             }
             "context" | "retrieve" => {
                 let mut retrieval = request_retrieval(&request)?;

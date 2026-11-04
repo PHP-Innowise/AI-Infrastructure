@@ -546,7 +546,7 @@ pub fn search(
     let mut output = Vec::new();
     for row in rows {
         let (document, snippet) = row?;
-        if crate::retrieval::admit_document(context, &config, &document)?.is_none() {
+        if crate::retrieval::admit_searchable(context, &config, &document)?.is_none() {
             output.push(SearchItem {
                 path: document.path,
                 layer: document.layer,

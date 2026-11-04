@@ -98,8 +98,27 @@ pub fn admit_document(
     config: &RuntimeConfig,
     document: &Document,
 ) -> Result<Option<String>> {
+    admit_for(context, config, document, false)
+}
+/// What `memory search` withholds: what retrieval withholds, except that an
+/// open handoff is listed, as the retired search listed it.
+pub fn admit_searchable(
+    context: &RuntimeContext,
+    config: &RuntimeConfig,
+    document: &Document,
+) -> Result<Option<String>> {
+    admit_for(context, config, document, true)
+}
+fn admit_for(
+    context: &RuntimeContext,
+    config: &RuntimeConfig,
+    document: &Document,
+    open_handoffs: bool,
+) -> Result<Option<String>> {
     let item = Candidate::linked(document.clone(), "");
-    if let Some(reason) = crate::source_policy::unscoped_reason(context, config, &item)? {
+    if let Some(reason) =
+        crate::source_policy::unscoped_reason_for(context, config, &item, open_handoffs)?
+    {
         return Ok(Some(reason));
     }
     let (_, missing) = source_changes(&context.roots, &document.source_fingerprints)?;
@@ -789,9 +808,19 @@ fn retrieve_inner(
     let request = &request;
     let mut phase_seconds = request.phase_seconds.clone();
     if request.refresh_index && !store.read_only {
+        // The index report's own phases, the filesystem walk (`stat`) apart
+        // from indexing, as the retired retrieval recorded them; the
+        // retrieval report counted no `stat` sample for an explicit retrieve.
         let index_started = Instant::now();
-        index::refresh_index(store, context, true)?;
-        phase_seconds.insert("index".into(), index_started.elapsed().as_secs_f64());
+        let report = index::refresh_index(store, context, true)?;
+        for (name, seconds) in &report.phase_seconds {
+            if seconds.is_finite() && *seconds >= 0.0 {
+                phase_seconds.insert(name.clone(), *seconds);
+            }
+        }
+        phase_seconds
+            .entry("index".into())
+            .or_insert_with(|| index_started.elapsed().as_secs_f64());
     }
     let config = RuntimeConfig::load(&context.roots)?;
     let profile = config.capsule_profile(request.capsule_profile.as_deref())?;
