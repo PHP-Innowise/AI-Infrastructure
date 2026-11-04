@@ -1532,9 +1532,10 @@ mod threaded_exit_tests {
             // `set /p` from nul sets; plain `exit` ends cmd with this code.
             let script =
                 format!(r#"set /p request=& <nul set /p ={{"scores":[0.25]}}& exit {code}"#);
+            let errors = root.path().join(format!("stderr-{code}"));
             let child = Command::new(&command)
                 .args(["/D", "/Q", "/C"])
-                .raw_arg(script)
+                .raw_arg(&script)
                 .env_clear()
                 .env("SystemRoot", &system)
                 .env("ComSpec", &command)
@@ -1544,7 +1545,7 @@ mod threaded_exit_tests {
                 .env("TMP", root.path())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(std::fs::File::create(&errors).unwrap())
                 .spawn()
                 .unwrap();
             let mut owned = Some(PendingWorker::new(child));
@@ -1573,8 +1574,42 @@ mod threaded_exit_tests {
             );
             if code == 0 {
                 let raw = output.unwrap_or_else(|error| {
+                    // The same script, a bare exit and a bare exit with the
+                    // inherited environment, each outside the Job and the
+                    // worker threads, show which part decides the code.
+                    let probe = |arguments: &str, cleared: bool| {
+                        let mut probe = Command::new(&command);
+                        probe.args(["/D", "/Q", "/C"]).raw_arg(arguments);
+                        if cleared {
+                            probe
+                                .env_clear()
+                                .env("SystemRoot", &system)
+                                .env("ComSpec", &command)
+                                .env("TEMP", root.path())
+                                .env("TMP", root.path());
+                        }
+                        let mut child = probe
+                            .stdin(Stdio::piped())
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .spawn()
+                            .unwrap();
+                        use std::io::Write;
+                        let _ = child.stdin.take().unwrap().write_all(b"{}\n");
+                        let output = child.wait_with_output().unwrap();
+                        format!(
+                            "{:?} {:?} {:?}",
+                            output.status.code(),
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr)
+                        )
+                    };
                     panic!(
-                        "zero exit with full input and EOF must succeed: {error:?}, status {status:?}"
+                        "zero exit with full input and EOF must succeed: {error:?}, status {status:?}, stderr {:?}; plain script: {}; exit 0: {}; exit 0 inherited: {}",
+                        std::fs::read_to_string(&errors),
+                        probe(&script, true),
+                        probe("exit 0", true),
+                        probe("exit 0", false)
                     )
                 });
                 let value = strict::decode(&raw, super::RESPONSE, 16, 4096).unwrap();
