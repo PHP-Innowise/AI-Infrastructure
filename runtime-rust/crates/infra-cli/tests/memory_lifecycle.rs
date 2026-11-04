@@ -634,6 +634,15 @@ fn claude_code_saves_and_recalls_in_a_worktree_the_main_checkout_serves() {
         )),
         "{banner}"
     );
+    // The worktree shares the installation's memory; it is no attached
+    // project with nothing installed, as the banner once called it.
+    assert!(
+        banner.contains(&format!(
+            "Accelerator: the installation in {}, whose memory this worktree shares",
+            project.path.display()
+        )) && !banner.contains("attached from"),
+        "{banner}"
+    );
     project.turn_in(
         "claude",
         "worktree-one",

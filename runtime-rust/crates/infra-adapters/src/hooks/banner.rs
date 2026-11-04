@@ -200,7 +200,12 @@ fn render_lines(
                 .unwrap_or_default()
         ));
     }
-    if scope.roots.attached() {
+    // A worktree the installation serves shares its state, so it is no
+    // attached project: the retired banner told the two apart by whether the
+    // state lies outside the installation.
+    if scope.roots.shared {
+        lines.push(format!("Accelerator: the installation in {}, whose memory this worktree shares (Git gives the worktree none of it): the memory-bank/ and project-brain/ paths the policy and skills name are there.",scope.roots.tooling.display()));
+    } else if scope.roots.attached() {
         lines.push(format!(
             "Accelerator: attached from {} (nothing is installed in this project).",
             scope.roots.tooling.display()
@@ -209,8 +214,6 @@ fn render_lines(
             "Accelerator state (Project Brain, Memory Bank, index): {}",
             scope.roots.state.display()
         ));
-    } else if scope.roots.shared {
-        lines.push(format!("Accelerator: the installation in {}, whose memory this worktree shares (Git gives the worktree none of it): the memory-bank/ and project-brain/ paths the policy and skills name are there.",scope.roots.tooling.display()));
     }
     if let Some(line) = memory_cli(scope) {
         lines.push(line);

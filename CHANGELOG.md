@@ -110,6 +110,12 @@ edition's own files remain in that edition's changelog.
   instead of writing "query: from branch name only"), with one it gives the
   warming notice alone. An enforced gate's skip exits 4, so the host keeps
   its rule, and the capsule's manifest stays local, as before.
+- The session banner of a linked worktree the installation serves says it
+  shares that installation's memory again, instead of calling it a project
+  attached from elsewhere with nothing installed. The worktree is both
+  "attached" (its state lies outside it) and "shared"; the banner tested
+  the first. Sessions run inside such worktrees for six turns match the
+  retired runtime's hooks at every turn on Claude Code, Codex and Cursor.
 - A governed command that finds no task bound here (`get`, `update`,
   `complete`, `clear`) says again which task and how one comes to be bound:
   "Working task not found: <id>; start records it (so does the first
