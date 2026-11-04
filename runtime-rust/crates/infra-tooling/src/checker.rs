@@ -161,6 +161,53 @@ struct Outcome {
     code: Option<i32>,
     reason: Option<String>,
     log: Option<PathBuf>,
+    /// The last lines of a failed check's streams. A CI job's retained log
+    /// ends with its runner, so the run's own output must show the failure.
+    #[serde(skip)]
+    excerpt: Vec<(&'static str, String)>,
+}
+const EXCERPT_LINES: usize = 150;
+const EXCERPT_BYTES: usize = 48 * 1024;
+/// The end of each nonempty stream, at most `EXCERPT_LINES` lines of its last
+/// `EXCERPT_BYTES` bytes.
+fn excerpt(streams: &[(&'static str, &[u8])]) -> Vec<(&'static str, String)> {
+    streams
+        .iter()
+        .filter(|(_, bytes)| !bytes.is_empty())
+        .map(|(stream, bytes)| {
+            let window = &bytes[bytes.len().saturating_sub(EXCERPT_BYTES)..];
+            let text = window.strip_suffix(b"\n").unwrap_or(window);
+            let start = text
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, byte)| **byte == b'\n')
+                .nth(EXCERPT_LINES - 1)
+                .map_or(0, |(at, _)| at + 1);
+            (
+                *stream,
+                String::from_utf8_lossy(&text[start..]).into_owned(),
+            )
+        })
+        .collect()
+}
+/// What each failed check printed last; empty when nothing failed.
+fn failure_report(results: &[Outcome]) -> String {
+    let mut report = String::new();
+    for result in results.iter().filter(|result| result.status == "fail") {
+        report.push_str(&format!("FAILED {} / {}", result.group, result.name));
+        if let Some(code) = result.code {
+            report.push_str(&format!(" (exit {code})"));
+        }
+        if let Some(reason) = &result.reason {
+            report.push_str(&format!(": {reason}"));
+        }
+        report.push('\n');
+        for (stream, text) in &result.excerpt {
+            report.push_str(&format!("--- end of {stream} ---\n{text}\n"));
+        }
+    }
+    report
 }
 fn interpolate(value: &Value, root: &Path, base: &str) -> Value {
     match value {
@@ -281,6 +328,7 @@ fn gate(context: GateContext<'_>, gate: &Gate) -> Outcome {
         code: Some(0),
         reason: None,
         log: None,
+        excerpt: Vec::new(),
     };
     let executed = (|| -> Result<(Option<i32>, Vec<u8>)> {
         if cancel.load(Ordering::Acquire) || INTERRUPTED.load(Ordering::Acquire) {
@@ -325,7 +373,11 @@ fn gate(context: GateContext<'_>, gate: &Gate) -> Outcome {
                         outcome.code = Some(code);
                     }
                 }
-                Ok((outcome.code, common::json_bytes(&report)?))
+                let bytes = common::json_bytes(&report)?;
+                if outcome.status == "fail" {
+                    outcome.excerpt = excerpt(&[("report", bytes.as_slice())]);
+                }
+                Ok((outcome.code, bytes))
             }
             Gate::Process {
                 program,
@@ -377,11 +429,17 @@ fn gate(context: GateContext<'_>, gate: &Gate) -> Outcome {
                         16 * 1024 * 1024,
                     )
                 })?;
-                let mut bytes = output.stdout;
-                bytes.extend_from_slice(&output.stderr);
                 if output.code != 0 {
                     outcome.status = "fail".into();
+                    // Separately: a test harness prints its failures to stdout,
+                    // while Cargo names the failed target on stderr.
+                    outcome.excerpt = excerpt(&[
+                        ("stdout", output.stdout.as_slice()),
+                        ("stderr", output.stderr.as_slice()),
+                    ]);
                 }
+                let mut bytes = output.stdout;
+                bytes.extend_from_slice(&output.stderr);
                 Ok((Some(output.code), bytes))
             }
         }
@@ -585,7 +643,7 @@ pub fn execute(request: &Value) -> Result<Value> {
         None
     };
     Ok(
-        json!({"_cli":{"code":code,"stdout":serde_json::to_string_pretty(&json!({"passed":passed,"failed":failed,"skipped":skipped,"interrupted":interrupted,"results":results,"logs":retained,"wall_seconds":started.elapsed().as_secs_f64()}))?+"\n","stderr":""},"result":{"exit_code":code,"passed":passed,"failed":failed,"skipped":skipped,"interrupted":interrupted,"results":results,"logs":retained}}),
+        json!({"_cli":{"code":code,"stdout":serde_json::to_string_pretty(&json!({"passed":passed,"failed":failed,"skipped":skipped,"interrupted":interrupted,"results":results,"logs":retained,"wall_seconds":started.elapsed().as_secs_f64()}))?+"\n","stderr":failure_report(&results)},"result":{"exit_code":code,"passed":passed,"failed":failed,"skipped":skipped,"interrupted":interrupted,"results":results,"logs":retained}}),
     )
 }
 
@@ -1161,5 +1219,129 @@ mod tracked_json_syntax_tests {
         assert_eq!(report["files"], 1);
         assert_eq!(report["findings"][0]["path"], name);
         assert_eq!(report["passed"], false);
+    }
+}
+
+#[cfg(test)]
+mod failure_report_tests {
+    use super::*;
+
+    fn outcome(status: &str, excerpt: Vec<(&'static str, String)>) -> Outcome {
+        Outcome {
+            group: "rust".into(),
+            name: "Workspace Rust tests".into(),
+            status: status.into(),
+            seconds: 1.0,
+            code: Some(101),
+            reason: None,
+            log: None,
+            excerpt,
+        }
+    }
+
+    #[test]
+    fn excerpts_keep_the_last_lines_of_each_nonempty_stream() {
+        let long = (1..=EXCERPT_LINES + 5)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>();
+        let kept = excerpt(&[
+            ("stdout", long.as_bytes()),
+            ("stderr", b""),
+            ("report", b"no final newline"),
+        ]);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].0, "stdout");
+        let lines = kept[0].1.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), EXCERPT_LINES);
+        assert_eq!(lines[0], "line 6");
+        assert_eq!(
+            lines[EXCERPT_LINES - 1],
+            format!("line {}", EXCERPT_LINES + 5)
+        );
+        assert_eq!(kept[1], ("report", "no final newline".to_string()));
+    }
+
+    #[test]
+    fn excerpts_keep_the_last_bytes_of_an_overlong_line() {
+        // Two-byte characters put the byte bound inside one of them.
+        let mut bytes = "é".repeat(EXCERPT_BYTES).into_bytes();
+        bytes.extend_from_slice(b"\nend\n");
+        let kept = excerpt(&[("stderr", bytes.as_slice())]);
+        let text = &kept[0].1;
+        assert!(text.starts_with('\u{FFFD}'), "{}", &text[..8]);
+        assert!(text.ends_with("é\nend"));
+        // The cut continuation byte becomes one three-byte replacement.
+        assert_eq!(text.len(), EXCERPT_BYTES + 1);
+    }
+
+    #[test]
+    fn the_report_names_only_failed_checks_with_their_streams() {
+        assert_eq!(failure_report(&[outcome("pass", vec![])]), "");
+        let mut absent = outcome("fail", vec![]);
+        absent.name = "PHP snippets".into();
+        absent.code = Some(1);
+        absent.reason = Some("Required executable is unavailable: php".into());
+        let report = failure_report(&[
+            outcome("pass", vec![]),
+            outcome(
+                "fail",
+                vec![
+                    ("stdout", "test locks ... FAILED".into()),
+                    ("stderr", "error: test failed".into()),
+                ],
+            ),
+            absent,
+            outcome("skipped", vec![]),
+        ]);
+        assert_eq!(
+            report,
+            concat!(
+                "FAILED rust / Workspace Rust tests (exit 101)\n",
+                "--- end of stdout ---\ntest locks ... FAILED\n",
+                "--- end of stderr ---\nerror: test failed\n",
+                "FAILED rust / PHP snippets (exit 1): Required executable is unavailable: php\n",
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_process_check_reports_the_end_of_both_streams() {
+        let temporary = Temporary::new("infra-check-report").unwrap();
+        let group: Group = serde_json::from_value(json!({
+            "name":"probe","workflow":"ci.yml","job":"probe","timeout_minutes":1,
+            "gates":[{"kind":"process","name":"failing probe","program":"sh",
+                "arguments":["-c","echo first; echo last; echo cause >&2; exit 3"]}]
+        }))
+        .unwrap();
+        let outcome = gate(
+            GateContext {
+                root: temporary.path(),
+                base: "origin/main",
+                group: &group,
+                strict: true,
+                oracle_allowed: false,
+                logs: temporary.path(),
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+            &group.gates[0],
+        );
+        assert_eq!((outcome.status.as_str(), outcome.code), ("fail", Some(3)));
+        assert_eq!(
+            outcome.excerpt,
+            [
+                ("stdout", "first\nlast".to_string()),
+                ("stderr", "cause".to_string())
+            ]
+        );
+        // The retained log still holds the complete output.
+        assert_eq!(
+            std::fs::read(outcome.log.as_ref().unwrap()).unwrap(),
+            b"first\nlast\ncause\n"
+        );
+        assert_eq!(
+            failure_report(&[outcome]),
+            "FAILED probe / failing probe (exit 3)\n--- end of stdout ---\nfirst\nlast\n--- end of stderr ---\ncause\n"
+        );
     }
 }

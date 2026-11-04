@@ -45,8 +45,9 @@ the maintenance phase:
 Each generated job checks out source, provisions Rust, builds `infra-engine`,
 then runs `infra-engine check --group GROUP --strict --base origin/main`.
 A missing required tool or input fails a strict run. Skipped work is reported
-separately from passes. Failed command logs are retained; interrupted checks are
-reported as cancelled.
+separately from passes. Failed command logs are retained, and each failed check
+also prints the last lines of its stdout and stderr on stderr, because a CI job
+keeps nothing once it ends; interrupted checks are reported as cancelled.
 
 | Group | Actual validation |
 | --- | --- |

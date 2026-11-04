@@ -24,6 +24,13 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- A failed native check shows why it failed. `infra-engine check` kept a
+  failed gate's output only in a log under the runner's temporary directory
+  and printed its path, so the `rust-contract` and `native-windows` jobs failed
+  on GitHub without a reason. Each failed check now also prints, on stderr, the
+  last 150 lines (at most 48 KiB) of its stdout and of its stderr: a test
+  harness reports its failures on stdout, while Cargo names the failed target
+  on stderr. The JSON summary on stdout and the retained log are unchanged.
 - The write-agent lock test no longer depends on directory order. It aged the
   first file in the lock folder whose name did not end in `.guard`, but the
   folder also holds the guards' hidden `.drain-lock` files. tmpfs lists the
