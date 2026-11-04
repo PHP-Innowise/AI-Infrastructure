@@ -50,7 +50,7 @@ jobs:
           key: native-cargo-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-native-windows-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
           restore-keys: native-cargo-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-native-windows-dev0-
       - name: Build the native engine
-        run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
+        run: cargo nextest run --workspace --manifest-path runtime-rust/Cargo.toml --locked --no-run
       - name: Run the catalog group
         run: |
           suffix=''

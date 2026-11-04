@@ -844,9 +844,10 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
   }
         // A prebuilt, checksummed runner; its absence would only send the
         // tests through their sequential fallback, so a missing release fails.
-        if group.gates.iter().any(|gate| {
+        let uses_nextest = group.gates.iter().any(|gate| {
             matches!(gate, Gate::Process { tools, .. } if tools.iter().any(|tool| tool == "cargo-nextest"))
-        }) {
+        });
+        if uses_nextest {
             output.push_str(concat!(
                 "      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30\n",
                 "        with:\n",
@@ -883,7 +884,18 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
         // The group's own Cargo builds rewrite this engine in the target
         // directory, and Windows cannot replace a running executable: the
         // catalog runs from a copy outside it.
-        output.push_str("      - name: Build the native engine\n        run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine\n      - name: Run the catalog group\n        run: |\n          suffix=''\n          if [ \"$RUNNER_OS\" = 'Windows' ]; then suffix='.exe'; fi\n          engine=\"${RUNNER_TEMP//\\\\//}/infra-check-engine$suffix\"\n          cp \"$CARGO_TARGET_DIR/debug/infra-engine$suffix\" \"$engine\"\n          \"$engine\" check --group \"$NATIVE_CHECK_GROUP\" --strict --base origin/main --log-dir \"${RUNNER_TEMP//\\\\//}/infra-check-logs\"");
+        output.push_str("      - name: Build the native engine\n        run: ");
+        if platform == "windows" && uses_nextest {
+            // CLI integration tests build their real engine too. Compile once
+            // with the workspace's test features instead of first linking the
+            // narrower default-member engine and then rebuilding for tests.
+            output.push_str("cargo nextest run --workspace --manifest-path runtime-rust/Cargo.toml --locked --no-run");
+        } else {
+            output.push_str(
+                "cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine",
+            );
+        }
+        output.push_str("\n      - name: Run the catalog group\n        run: |\n          suffix=''\n          if [ \"$RUNNER_OS\" = 'Windows' ]; then suffix='.exe'; fi\n          engine=\"${RUNNER_TEMP//\\\\//}/infra-check-engine$suffix\"\n          cp \"$CARGO_TARGET_DIR/debug/infra-engine$suffix\" \"$engine\"\n          \"$engine\" check --group \"$NATIVE_CHECK_GROUP\" --strict --base origin/main --log-dir \"${RUNNER_TEMP//\\\\//}/infra-check-logs\"");
         if oracle {
             output.push_str(" --include-oracles");
         }
@@ -1252,6 +1264,50 @@ mod compiler_workflow_tests {
         assert!(parallel.find("id: native-toolchain").unwrap() < install);
         assert!(install < parallel.find("name: Build the native engine").unwrap());
         assert!(!plain.contains("install-action"));
+    }
+
+    #[test]
+    fn windows_nextest_bootstrap_compiles_the_workspace_without_running_tests() {
+        let mut windows = group("windows", "windows");
+        windows["platform"] = "windows".into();
+        windows["gates"][0]["tools"] = json!(["cargo-nextest"]);
+        let mut linux = windows.clone();
+        linux["name"] = "linux".into();
+        linux["job"] = "linux".into();
+        linux["platform"] = "linux".into();
+        let mut plain = windows.clone();
+        plain["name"] = "plain".into();
+        plain["job"] = "plain".into();
+        plain["gates"][0]["tools"] = json!([]);
+        let jobs =
+            workflow_jobs(&workflow(&catalog(json!([windows, linux, plain])), "rust.yml").unwrap());
+        let build = |job: &str| {
+            job.split("      - name: Build the native engine\n")
+                .nth(1)
+                .unwrap()
+                .split("      - name: Run the catalog group\n")
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        let windows = jobs
+            .iter()
+            .find(|job| job.starts_with("  windows:\n"))
+            .unwrap();
+        assert_eq!(
+            build(windows),
+            "        run: cargo nextest run --workspace --manifest-path runtime-rust/Cargo.toml --locked --no-run\n"
+        );
+        for name in ["linux", "plain"] {
+            let job = jobs
+                .iter()
+                .find(|job| job.starts_with(&format!("  {name}:\n")))
+                .unwrap();
+            assert_eq!(
+                build(job),
+                "        run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine\n"
+            );
+        }
     }
 }
 

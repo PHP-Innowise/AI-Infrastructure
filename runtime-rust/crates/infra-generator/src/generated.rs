@@ -4,6 +4,7 @@ use serde_json::{Value, json as object};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -374,26 +375,35 @@ fn placeholders(
     files: &BTreeMap<String, String>,
     errors: &mut Vec<String>,
 ) -> Result<()> {
-    let patterns = [
-        r"\{skill-name\}",
-        r"\{NNNN\}",
-        r"\bTODO\b",
-        r"\bFIXME\b",
-        r"\bYYYY-MM-DD\b",
-        r"\[target[_ ]name\]",
-        r"\bTASK-\{N\}",
-        r"\{\{[A-Z_]+\}\}",
-    ];
+    static PATTERNS: OnceLock<[(&str, regex::Regex); 8]> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            r"\{skill-name\}",
+            r"\{NNNN\}",
+            r"\bTODO\b",
+            r"\bFIXME\b",
+            r"\bYYYY-MM-DD\b",
+            r"\[target[_ ]name\]",
+            r"\bTASK-\{N\}",
+            r"\{\{[A-Z_]+\}\}",
+        ]
+        .map(|pattern| {
+            (
+                pattern,
+                regex::Regex::new(pattern).expect("fixed generator placeholder expression"),
+            )
+        })
+    });
     for path in files.keys() {
         let raw = fs::read_regular(&ownership::confined(target, path)?)?;
         let Ok(text) = std::str::from_utf8(&raw) else {
             continue;
         };
-        for pattern in patterns {
-            if path == "memory-bank/templates/chunk.md" && pattern == r"\bYYYY-MM-DD\b" {
+        for (pattern, expression) in patterns {
+            if path == "memory-bank/templates/chunk.md" && *pattern == r"\bYYYY-MM-DD\b" {
                 continue;
             }
-            if matching(pattern, text) {
+            if expression.is_match(text) {
                 errors.push(format!("{path}: unresolved placeholder matching {pattern}"));
             }
         }
@@ -714,4 +724,41 @@ pub fn seed_assets(
     engine: Option<&Path>,
 ) -> Result<Value> {
     crate::seed::assets(assets, staging, framework, editions, engine)
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_diagnostics_keep_the_template_exception_and_read_changed_files() {
+        let temporary = infra_tooling::temp::Temporary::new("infra-placeholder-contract").unwrap();
+        let root = temporary.path();
+        std::fs::create_dir_all(root.join("memory-bank/templates")).unwrap();
+        std::fs::write(root.join("memory-bank/templates/chunk.md"), "YYYY-MM-DD").unwrap();
+        std::fs::write(root.join("policy.md"), "TODO {{PROJECT_NAME}}").unwrap();
+        std::fs::write(root.join("binary"), [0xff]).unwrap();
+        let files = BTreeMap::from([
+            ("memory-bank/templates/chunk.md".into(), String::new()),
+            ("policy.md".into(), String::new()),
+            ("binary".into(), String::new()),
+        ]);
+        let mut errors = vec![];
+        placeholders(root, &files, &mut errors).unwrap();
+        assert_eq!(
+            errors,
+            [
+                r"policy.md: unresolved placeholder matching \bTODO\b",
+                r"policy.md: unresolved placeholder matching \{\{[A-Z_]+\}\}",
+            ]
+        );
+        std::fs::write(root.join("policy.md"), "Completed.").unwrap();
+        std::fs::write(root.join("memory-bank/templates/chunk.md"), "TODO").unwrap();
+        errors.clear();
+        placeholders(root, &files, &mut errors).unwrap();
+        assert_eq!(
+            errors,
+            [r"memory-bank/templates/chunk.md: unresolved placeholder matching \bTODO\b"]
+        );
+    }
 }

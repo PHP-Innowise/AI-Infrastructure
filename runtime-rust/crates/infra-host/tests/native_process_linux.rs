@@ -48,7 +48,7 @@ fn pid(image: &Value) -> i32 {
         .filter(|pid| *pid > 0)
         .expect("actual native PID") as i32
 }
-fn state(image: &Value) -> Option<char> {
+fn state_details(image: &Value) -> Option<(char, u64)> {
     let path = format!("/proc/{}/stat", pid(image));
     let stat = match fs::read_to_string(&path) {
         Ok(stat) => stat,
@@ -64,7 +64,11 @@ fn state(image: &Value) -> Option<char> {
     if Some(birth) != image["birth"].as_u64() {
         return None;
     }
-    fields[0].chars().next()
+    let flags = fields[6].parse::<u64>().expect("native process flags");
+    fields[0].chars().next().map(|state| (state, flags))
+}
+fn state(image: &Value) -> Option<char> {
+    state_details(image).map(|(state, _)| state)
 }
 fn alive(image: &Value) -> bool {
     state(image).is_some_and(|state| state != 'Z' && state != 'X')
@@ -148,9 +152,10 @@ fn reap(image: &Value) {
 }
 fn stopped(image: &Value) {
     reap(image);
+    let observed = state_details(image);
     assert!(
-        !alive(image),
-        "native process survived confirmed cleanup: {image}"
+        !observed.is_some_and(|(state, _)| state != 'Z' && state != 'X'),
+        "native process survived confirmed cleanup: {image}; state/flags: {observed:?}"
     );
 }
 fn records(root: &Path) -> Vec<Value> {

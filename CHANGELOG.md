@@ -24,13 +24,24 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Linux nextest runs up to four end-to-end cases together and starts the long
+  generator lifecycle first. Windows and other platforms retain the two-case
+  limit; installation and executable-copy cases remain serial everywhere.
+  Native Linux cleanup failures include the captured process state and flags
+  so a running descendant can be distinguished from kernel exit teardown.
+- Windows CI compiles the workspace tests and their engine together before
+  running the catalog, avoiding a separate default-member bootstrap with a
+  narrower feature set. Its two longest generator cases start first without
+  increasing E2E concurrency or changing deadlines. Generated-tree validation
+  compiles its eight fixed placeholder expressions once instead of once per
+  file, retaining the same diagnostics and template exception.
 - Workspace tests run in parallel. The `rust` and `windows-native` groups run
   them through `cargo nextest run`, each test in its own process and many at
   once across all test binaries, where `cargo test` ran one binary after
   another, about seven of the Windows job's eleven minutes.
   `runtime-rust/.config/nextest.toml` keeps the dispatch custom-guard and
   installation cases serial, as their binaries did, and lets at most two
-  end-to-end cases run together: with more, the evaluation cases exceeded
+  end-to-end cases run together on Windows: with more, evaluation exceeded
   their 120-second bound. Doc tests have their own `cargo test --doc` gate.
   Generated jobs install nextest 0.9.149 through `taiki-e/install-action`
   pinned by commit, with checksums and no source fallback. A process gate's
