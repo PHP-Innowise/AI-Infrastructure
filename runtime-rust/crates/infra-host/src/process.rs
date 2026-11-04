@@ -800,7 +800,7 @@ async fn launch_guardian_options(
     let watch = Watchdog::new()?;
     let receipt = Watchdog::new()?;
     let nonce = *uuid::Uuid::new_v4().as_bytes();
-    let mut command = std::process::Command::new(std::env::current_exe()?);
+    let mut command = std::process::Command::new(guardian()?);
     command.arg("internal-guard");
     watch.configure(&mut command)?;
     let receipt_fd = receipt.write.as_raw_fd();
@@ -1602,6 +1602,33 @@ pub use windows::{
     run_environment, run_monitored, run_monitored_until, run_raw_with_lock, run_with_lock,
 };
 
+static GUARDIAN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Names the engine whose `internal-guard` command guards child processes.
+/// Without it the current executable guards them, as the engine does for
+/// itself. A process that embeds this library and cannot serve that command,
+/// such as a test binary, names an engine before it starts any child; the
+/// first engine named stays for the life of the process.
+pub fn use_guardian(engine: std::path::PathBuf) -> Result<()> {
+    if !engine.is_absolute() {
+        return Err(crate::HarnessError::invalid(
+            "The guardian engine path must be absolute.",
+        ));
+    }
+    if *GUARDIAN.get_or_init(|| engine.clone()) != engine {
+        return Err(crate::HarnessError::conflict(
+            "Another guardian engine is already in use.",
+        ));
+    }
+    Ok(())
+}
+fn guardian() -> Result<std::path::PathBuf> {
+    match GUARDIAN.get() {
+        Some(engine) => Ok(engine.clone()),
+        None => Ok(std::env::current_exe()?),
+    }
+}
+
 #[cfg(unix)]
 pub async fn run(
     argv: &[String],
@@ -2046,7 +2073,7 @@ mod experiment {
     ) -> Result<Command> {
         let read = watch.read.as_raw_fd();
         let write = receipt.write.as_raw_fd();
-        let mut command = Command::new(std::env::current_exe()?);
+        let mut command = Command::new(super::guardian()?);
         command
             .arg("internal-guard")
             .arg(mode)
@@ -3093,5 +3120,14 @@ mod line_framing_tests {
                 )),
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod guardian_tests {
+    #[test]
+    fn a_relative_guardian_is_refused_and_this_executable_still_guards() {
+        assert!(super::use_guardian("infra-engine".into()).is_err());
+        assert_eq!(super::guardian().unwrap(), std::env::current_exe().unwrap());
     }
 }

@@ -24,6 +24,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- A process that embeds the runtime names the engine that guards its
+  children. On Windows every child starts under a guardian that re-runs the
+  current executable as `internal-guard`; in a test binary that executable is
+  the test harness, which reads the command as a test filter and exits
+  without the cleanup receipt, so Creator copy and generator tests failed
+  with "Native guardian did not return a valid cleanup receipt (0 of 12
+  bytes)". `infra_host::process::use_guardian` names the engine instead; the
+  engine itself still guards its own children, and the generator tests name
+  the engine they test.
 - CI keeps compiled dependencies when a check fails. `actions/cache` saved
   only after a successful job, so the Windows job, which had not yet passed,
   started every run from an empty target directory and spent about eight of

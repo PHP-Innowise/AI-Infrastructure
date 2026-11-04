@@ -46,9 +46,13 @@ fn json_file(root: &Path, name: &str) -> Value {
     serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap()
 }
 fn selected_engine() -> PathBuf {
-    std::env::var_os("INFRA_NATIVE_TEST_ENGINE")
+    let engine = std::env::var_os("INFRA_NATIVE_TEST_ENGINE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_infra-engine")))
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_infra-engine")));
+    // Windows starts every child of this process under a guardian, which is
+    // the current executable unless named, and a test binary cannot be one.
+    infra_harness::process::use_guardian(engine.clone()).unwrap();
+    engine
 }
 fn native_fixture() -> (Vec<u8>, Value) {
     let engine = selected_engine();

@@ -863,7 +863,7 @@ fn spawn_prepared(
         .as_ref()
         .map(|f| Handle::duplicate(f.as_raw_handle(), true))
         .transpose()?;
-    let executable = std::env::current_exe()?;
+    let executable = super::guardian()?;
     let mut args = vec![
         OsString::from("internal-guard"),
         OsString::from("--watchdog-handle"),
@@ -1250,7 +1250,7 @@ impl CaptureChild {
         inheritable(stdin_write.raw(), false)?;
         let (stdout, stdout_write) = capture_pipe()?;
         let (stderr, stderr_write) = capture_pipe()?;
-        let executable = std::env::current_exe()?;
+        let executable = super::guardian()?;
         let mut arguments = vec![
             OsString::from("internal-guard"),
             OsString::from("--watchdog-handle"),
