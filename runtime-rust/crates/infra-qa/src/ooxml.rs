@@ -1590,11 +1590,14 @@ pub fn reconstruct(evidence: &Path, current: &Path, output: &Path, force: bool) 
     }
     let parent = output.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
+    // Only the name is kept open for removal on failure: the package write
+    // replaces that file, which Windows refuses while a handle holds it.
     let tmp = tempfile::Builder::new()
         .suffix(".xlsx")
-        .tempfile_in(parent)?;
-    target.write(tmp.path())?;
-    let errors = validate(&Package::read(tmp.path())?)?;
+        .tempfile_in(parent)?
+        .into_temp_path();
+    target.write(&tmp)?;
+    let errors = validate(&Package::read(&tmp)?)?;
     if !errors.is_empty() {
         bail!("{}", errors.join("; "));
     }

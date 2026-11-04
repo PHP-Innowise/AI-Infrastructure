@@ -39,6 +39,9 @@ edition's own files remain in that edition's changelog.
   attached state, archive publication and trace listings failed there, as the
   Harness update, Cursor overlay and retirement tests showed. The directory is
   now reopened through an empty relative name, as `ReOpenFile` does.
+- QA reconstruction writes its workbook on Windows. It held the temporary
+  file open while the package write replaced it, which Windows refuses
+  ("Access is denied"); only the name is kept now, for removal on failure.
 - Windows child processes accept the environment Windows itself keeps. A
   complete environment from `std::env::vars_os()` carries names such as `=C:`
   (each drive's working directory) and `=ExitCode`, and the native runner
