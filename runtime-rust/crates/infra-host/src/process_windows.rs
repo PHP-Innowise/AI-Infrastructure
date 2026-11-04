@@ -67,8 +67,8 @@ fn timeout_error() -> HarnessError {
         message: "Native time limit reached.".into(),
     }
 }
-fn invalid() -> HarnessError {
-    HarnessError::invalid("Invalid native Windows process request.")
+fn invalid(reason: impl std::fmt::Display) -> HarnessError {
+    HarnessError::invalid(format!("Invalid native Windows process request: {reason}."))
 }
 fn os_error() -> HarnessError {
     std::io::Error::last_os_error().into()
@@ -138,7 +138,7 @@ fn pipe() -> Result<(Handle, Handle)> {
 fn wide(value: &OsStr) -> Result<Vec<u16>> {
     let mut out = value.encode_wide().collect::<Vec<_>>();
     if out.contains(&0) {
-        return Err(invalid());
+        return Err(invalid("a string contains NUL"));
     }
     out.push(0);
     Ok(out)
@@ -163,7 +163,9 @@ fn environment(overrides: &BTreeMap<String, String>, remove: &[String]) -> Resul
         .iter()
         .any(|name| name.is_empty() || name.contains(['=', '\0']))
     {
-        return Err(invalid());
+        return Err(invalid(
+            "an environment name to remove is empty or contains = or NUL",
+        ));
     }
     let mut pairs = std::env::vars_os()
         .filter(|(key, _)| {
@@ -174,7 +176,7 @@ fn environment(overrides: &BTreeMap<String, String>, remove: &[String]) -> Resul
         .collect::<Vec<_>>();
     for (key, value) in overrides {
         if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
-            return Err(invalid());
+            return Err(invalid("an environment override name or value is invalid"));
         }
         pairs.retain(|(existing, _)| ordinal(existing, OsStr::new(key)) != CmpOrdering::Equal);
         pairs.push((key.into(), value.into()));
@@ -185,7 +187,7 @@ fn environment(overrides: &BTreeMap<String, String>, remove: &[String]) -> Resul
         let key = key.encode_wide().collect::<Vec<_>>();
         let value = value.encode_wide().collect::<Vec<_>>();
         if key.contains(&0) || value.contains(&0) {
-            return Err(invalid());
+            return Err(invalid("an environment entry contains NUL"));
         }
         block.extend(key);
         block.push('=' as u16);
@@ -207,8 +209,12 @@ fn env_value<'a>(pairs: &'a [(OsString, OsString)], key: &str) -> Option<&'a OsS
 fn complete_block(environment: &BTreeMap<String, String>) -> Result<Vec<u16>> {
     let mut pairs = Vec::<(OsString, OsString)>::new();
     for (key, value) in environment {
-        if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
-            return Err(invalid());
+        // Windows keeps each drive's working directory and the last exit
+        // code as `=C:` and `=ExitCode` in inherited environments: a leading
+        // `=` belongs to such a name, while any later one would split it.
+        let name = key.strip_prefix('=').unwrap_or(key);
+        if name.is_empty() || name.contains(['=', '\0']) || value.contains('\0') {
+            return Err(invalid(format!("the environment entry {key:?} is invalid")));
         }
         pairs.retain(|(prior, _)| ordinal(prior, OsStr::new(key)) != CmpOrdering::Equal);
         pairs.push((key.into(), value.into()));
@@ -241,7 +247,7 @@ fn native_candidate(path: PathBuf) -> Option<PathBuf> {
 }
 fn resolve(program: &str, cwd: &Path, pairs: &[(OsString, OsString)]) -> Result<PathBuf> {
     if program.is_empty() || program.contains('\0') {
-        return Err(invalid());
+        return Err(invalid("the program is empty or contains NUL"));
     }
     let p = Path::new(program);
     if p.is_absolute() || program.contains(['\\', '/']) || p.components().count() > 1 {
@@ -280,7 +286,7 @@ fn resolve(program: &str, cwd: &Path, pairs: &[(OsString, OsString)]) -> Result<
 fn quote(argument: &OsStr) -> Result<Vec<u16>> {
     let values = argument.encode_wide().collect::<Vec<_>>();
     if values.contains(&0) {
-        return Err(invalid());
+        return Err(invalid("an argument contains NUL"));
     }
     let mut out = vec!['"' as u16];
     let mut slashes = 0usize;
@@ -433,7 +439,7 @@ fn create(
     }
     command.push(0);
     if command.len() > 32767 {
-        return Err(invalid());
+        return Err(invalid("the command line exceeds 32767 characters"));
     }
     let mut handles = stdio.to_vec();
     handles.extend_from_slice(extra);
@@ -443,7 +449,7 @@ fn create(
         .iter()
         .any(|h| h.is_null() || *h == INVALID_HANDLE_VALUE)
     {
-        return Err(invalid());
+        return Err(invalid("a standard handle is unavailable"));
     }
     let attributes = Attributes::handles(&handles, job)?;
     let mut start: STARTUPINFOEXW = unsafe { mem::zeroed() };
@@ -540,9 +546,9 @@ impl Owner {
             }
         }
         if used != 12 || packet[..4] != RECEIPT_MAGIC {
-            return Err(HarnessError::unavailable(
-                "Native guardian did not return a valid cleanup receipt.",
-            ));
+            return Err(HarnessError::unavailable(format!(
+                "Native guardian did not return a valid cleanup receipt ({used} of 12 bytes)."
+            )));
         }
         let kind = u32::from_le_bytes(packet[4..8].try_into().unwrap());
         let code = i32::from_le_bytes(packet[8..12].try_into().unwrap());
@@ -837,11 +843,14 @@ fn spawn_prepared(
         return Err(unconfirmed());
     }
     if argv.is_empty() || argv.iter().any(|s| s.contains('\0')) {
-        return Err(invalid());
+        return Err(invalid("the argument vector is empty or contains NUL"));
     }
     let cwd = infra_core::fs::canonicalize(cwd)?;
     if !cwd.is_dir() {
-        return Err(invalid());
+        return Err(invalid(format!(
+            "the working directory {} is not a directory",
+            cwd.display()
+        )));
     }
     let job = new_job()?;
     let job_guard = Handle::duplicate(job.raw(), true)?;
@@ -1027,7 +1036,7 @@ impl CaptureReadPipe {
             return Ok(None);
         }
         if count > 65536 {
-            return Err(invalid());
+            return Err(invalid("a pipe read reported more bytes than its buffer"));
         }
         // SAFETY: GetOverlappedResult confirmed the operation has completed.
         let bytes = unsafe { &*pending.bytes.get() };
@@ -1188,7 +1197,7 @@ fn capture_pipe() -> Result<(CaptureReadPipe, Handle)> {
     if unsafe { GetNamedPipeClientProcessId(read.raw(), &mut client) } == 0
         || client != unsafe { GetCurrentProcessId() }
     {
-        return Err(invalid());
+        return Err(invalid("the pipe client is another process"));
     }
     Ok((
         CaptureReadPipe {
@@ -1220,11 +1229,14 @@ impl CaptureChild {
             return Err(unconfirmed());
         }
         if argv.is_empty() || argv.iter().any(|argument| argument.contains('\0')) {
-            return Err(invalid());
+            return Err(invalid("the argument vector is empty or contains NUL"));
         }
         let cwd = infra_core::fs::canonicalize(cwd)?;
         if !cwd.is_dir() {
-            return Err(invalid());
+            return Err(invalid(format!(
+                "the working directory {} is not a directory",
+                cwd.display()
+            )));
         }
         let environment = complete_block(complete_environment)?;
         let job = new_job()?;
@@ -1533,7 +1545,7 @@ impl NativeSession {
         self.input_used = self
             .input_used
             .checked_add(bytes.len())
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid("the input byte count overflows"))?;
         if self.input_limit.is_some_and(|n| self.input_used > n) {
             return Err(HarnessError::unavailable("Native input limit reached."));
         }
@@ -2035,11 +2047,11 @@ unsafe extern "system" fn guardian_control(signal: u32) -> i32 {
 fn inherited(raw: usize) -> Result<Handle> {
     let raw = raw as HANDLE;
     if raw.is_null() || raw == INVALID_HANDLE_VALUE {
-        return Err(invalid());
+        return Err(invalid("an inherited handle is null"));
     }
     let mut flags = 0;
     if unsafe { GetHandleInformation(raw, &mut flags) } == 0 {
-        return Err(invalid());
+        return Err(invalid("an inherited handle is not open"));
     }
     Ok(unsafe { Handle::adopt(raw) })
 }
@@ -2106,7 +2118,7 @@ pub fn guard_entry(arguments: &[String]) -> Result<i32> {
         let key = &arguments[index];
         if key == "--interactive" {
             if interactive {
-                return Err(invalid());
+                return Err(invalid("--interactive repeats"));
             }
             interactive = true;
             index += 1;
@@ -2123,27 +2135,31 @@ pub fn guard_entry(arguments: &[String]) -> Result<i32> {
             || index + 1 >= arguments.len()
             || raw.contains_key(key)
         {
-            return Err(invalid());
+            return Err(invalid(
+                "a guardian option is unknown, repeated or has no value",
+            ));
         }
         let value = arguments[index + 1]
             .parse::<usize>()
-            .map_err(|_| invalid())?;
+            .map_err(|_| invalid("a guardian handle is not a number"))?;
         raw.insert(key.clone(), value);
         index += 2;
     }
     if arguments.get(index).map(String::as_str) != Some("--") || index + 1 >= arguments.len() {
-        return Err(invalid());
+        return Err(invalid(
+            "the guardian command has no -- separator or no program",
+        ));
     }
     for required in ["--watchdog-handle", "--completion-handle", "--job-handle"] {
         if !raw.contains_key(required) {
-            return Err(invalid());
+            return Err(invalid("a required guardian handle is missing"));
         }
     }
     let mut values = raw.values().copied().collect::<Vec<_>>();
     values.sort_unstable();
     values.dedup();
     if values.len() != raw.len() {
-        return Err(invalid());
+        return Err(invalid("guardian handles repeat"));
     }
     let watch = inherited(raw["--watchdog-handle"])?;
     let status = inherited(raw["--completion-handle"])?;
@@ -2154,7 +2170,7 @@ pub fn guard_entry(arguments: &[String]) -> Result<i32> {
         .map(inherited)
         .transpose()?;
     if native_status.is_some() && interactive {
-        return Err(invalid());
+        return Err(invalid("an interactive run cannot capture the native exit"));
     }
     let capture_lifetime = native_status.is_some();
     let lock = raw
@@ -2167,12 +2183,12 @@ pub fn guard_entry(arguments: &[String]) -> Result<i32> {
         || unsafe { windows_sys::Win32::Storage::FileSystem::GetFileType(status.raw()) }
             != windows_sys::Win32::Storage::FileSystem::FILE_TYPE_PIPE
     {
-        return Err(invalid());
+        return Err(invalid("a guardian watch or status handle is not a pipe"));
     }
     if native_status.as_ref().is_some_and(|handle| unsafe {
         windows_sys::Win32::Storage::FileSystem::GetFileType(handle.raw())
     } != windows_sys::Win32::Storage::FileSystem::FILE_TYPE_PIPE) {
-        return Err(invalid());
+        return Err(invalid("the native exit handle is not a pipe"));
     }
     for handle in [&watch, &status, &job] {
         inheritable(handle.raw(), false)?
@@ -2206,7 +2222,7 @@ pub fn guard_entry(arguments: &[String]) -> Result<i32> {
             })?;
         let argv = &arguments[index + 1..];
         if argv.iter().any(|s| s.contains('\0')) {
-            return Err(invalid());
+            return Err(invalid("a guarded argument contains NUL"));
         }
         if dead.load(Ordering::Acquire) {
             return Ok(1);
@@ -2330,7 +2346,9 @@ pub fn guard_entry(arguments: &[String]) -> Result<i32> {
         // signaled state and actual exit code, even if parent stop won the
         // observation race; never use the guardian's synthetic stop result.
         let observed = (|| -> Result<i32> {
-            let process = native_process.as_ref().ok_or_else(invalid)?;
+            let process = native_process
+                .as_ref()
+                .ok_or_else(|| invalid("no native process handle was retained"))?;
             if unsafe { WaitForSingleObject(process.raw(), 1000) } != WAIT_OBJECT_0 {
                 return Err(HarnessError::unavailable(
                     "Captured native process did not signal after Job cleanup.",

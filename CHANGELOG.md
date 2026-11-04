@@ -24,6 +24,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Windows child processes accept the environment Windows itself keeps. A
+  complete environment from `std::env::vars_os()` carries names such as `=C:`
+  (each drive's working directory) and `=ExitCode`, and the native runner
+  refused any name containing `=` with "Invalid native Windows process
+  request", so a process spawned from such an environment never started. A
+  leading `=` is now part of the name; a later one still refuses it. Every
+  refused Windows process request names its check, a missing guardian receipt
+  says how many bytes arrived, and debug builds name the component NT refused
+  as invalid (os error 123) and show where such an error arose.
 - Harness setup verifies modes as the platform keeps them. After installing,
   it required each file to carry its planned Unix mode, but a Windows file
   keeps only whether it is read-only, which publication reports as 0o444 or

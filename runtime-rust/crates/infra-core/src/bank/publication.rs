@@ -1122,7 +1122,7 @@ mod native {
             } else {
                 0
             };
-        admitted(unsafe {
+        let code = unsafe {
             NtCreateFile(
                 &mut handle,
                 access,
@@ -1136,7 +1136,20 @@ mod native {
                 std::ptr::null_mut(),
                 0,
             )
-        })?;
+        };
+        // STATUS_OBJECT_NAME_INVALID surfaces as os error 123 without the
+        // name; a debug build says which one NT refused.
+        if cfg!(debug_assertions) && code as u32 == 0xC000_0033 {
+            eprintln!(
+                "infra-core: NT refused the {} name {name:?}",
+                if parent.is_some() {
+                    "relative"
+                } else {
+                    "rooted"
+                }
+            );
+        }
+        admitted(code)?;
         let file = unsafe { File::from_raw_handle(handle) };
         let mut basic = std::mem::MaybeUninit::<Basic>::uninit();
         admitted(unsafe {

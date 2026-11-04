@@ -68,6 +68,15 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {}
 impl From<std::io::Error> for RuntimeError {
     fn from(error: std::io::Error) -> Self {
+        // ERROR_INVALID_NAME names neither the path nor the call that
+        // refused it; a debug build shows where it arose.
+        #[cfg(all(windows, debug_assertions))]
+        if error.raw_os_error() == Some(123) {
+            eprintln!(
+                "infra-core: {error}\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         let mut value = Self::new(
             if error.kind() == std::io::ErrorKind::NotFound {
                 ErrorKind::NotFound
