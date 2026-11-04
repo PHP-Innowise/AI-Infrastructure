@@ -948,7 +948,8 @@ fn path_bytes(bytes: &[u8]) -> Result<PathBuf> {
     }
 }
 
-#[cfg(test)]
+// Windows always asks Git: ownership has no cheap reading there.
+#[cfg(all(test, unix))]
 mod plain_frame_tests {
     use super::*;
     struct Directory(PathBuf);

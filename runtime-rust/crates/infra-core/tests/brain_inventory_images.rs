@@ -15,6 +15,9 @@ impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!("infra-brain-image-{}", domain::uuid4()));
         fs::create_dir_all(root.join("project-brain/schemas")).unwrap();
+        // The runtime reads the canonical root: on Windows TEMP may name it by
+        // its short 8.3 form.
+        let root = infra_core::fs::canonicalize(root).unwrap();
         fs::copy(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../../PHP Core/project-brain/schemas/dynamic-record.schema.json"),
@@ -497,12 +500,14 @@ fn find_keeps_wrong_kind_and_unknown_kind_invalid_claimants() {
     fs::remove_file(brain.dynamic_path(&task).unwrap()).unwrap();
     let invalid = brain.get_task(task_id).unwrap_err();
     assert_eq!(invalid.kind, ErrorKind::InvalidInput);
+    // Separators follow how each side spelled the path, not the record.
     assert_eq!(
-        invalid.message,
+        invalid.message.replace('\\', "/"),
         format!(
             "Project Brain record is invalid: {}",
             unknown.strip_prefix(&fixture.root).unwrap().display()
         )
+        .replace('\\', "/")
     );
     let second_unknown = fixture.root.join("project-brain/dynamic/zz-more");
     fs::create_dir_all(&second_unknown).unwrap();

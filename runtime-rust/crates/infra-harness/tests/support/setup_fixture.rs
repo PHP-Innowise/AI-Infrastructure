@@ -539,15 +539,13 @@ async fn scenario(selected: &Path, name: &str) -> Result<Value> {
                 "Invalid setup preview.",
             );
             // Invalid admission did not consume the actual reviewed receipt.
-            assert_eq!(
-                value(
-                    fixture
-                        .domain
-                        .execute("setup.install", fixture.install(id))
-                        .await
-                )["ok"],
-                true
+            let installed = value(
+                fixture
+                    .domain
+                    .execute("setup.install", fixture.install(id))
+                    .await,
             );
+            assert_eq!(installed["ok"], true, "{installed}");
         }
         "fifo" => {
             let active = fixture.spawn("setup.status", fixture.status());
@@ -576,7 +574,7 @@ async fn scenario(selected: &Path, name: &str) -> Result<Value> {
                 )
                 .await,
             );
-            assert_eq!(installed["ok"], true);
+            assert_eq!(installed["ok"], true, "{installed}");
             assert!(
                 fixture
                     .store

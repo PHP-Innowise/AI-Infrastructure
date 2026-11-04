@@ -24,6 +24,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Tests that ran on Windows for the first time read paths the way the
+  runtime does. The Brain inventory fixture canonicalizes its temporary root
+  (Windows may name it by its short 8.3 form) and compares record messages
+  regardless of separators; the plain-checkout fast path tests run only on
+  Unix, the one platform where that path exists; and the Harness setup tests
+  print the install response when an install fails.
 - QA evidence records a command's working directory against the canonical
   root it checked. It stripped the root as given instead, and a root spelled
   differently from its canonical form, such as a Windows temporary directory
