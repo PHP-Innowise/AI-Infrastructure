@@ -1102,6 +1102,86 @@ fn hand_run_commands_report_what_they_did() {
     );
 }
 
+/// Cursor's rule is re-sent with every request, and its hook answers in JSON
+/// only. As in the retired runtime, a bare acknowledgement keeps the topic it
+/// answers instead of emptying the rule, and a previous result that was not
+/// saved reaches the agent through the rule's last-turn line.
+#[test]
+fn cursor_keeps_its_topic_and_hears_an_unsaved_result() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-CURSOR");
+    let refresh = |prompt: &str| {
+        fixture.success(
+            &[
+                "refresh",
+                "--json",
+                "--host",
+                "cursor",
+                "--delivery-profile",
+                "cursor-rule",
+                "--capsule-profile",
+                "full",
+                "--task-id",
+                "TASK-CURSOR",
+                "--ephemeral",
+                "--sanitize",
+                "--query",
+                prompt,
+            ],
+            None,
+        )
+    };
+    let text = |value: &Value| value["capsule_text"].as_str().unwrap_or("").to_owned();
+    let first = refresh("Where do cobalt retries stop at the metadata boundary?");
+    assert!(text(&first).contains("specs/source.md"), "{first}");
+    for reply in ["yes", "давай"] {
+        let value = refresh(reply);
+        assert!(text(&value).contains("specs/source.md"), "{reply}: {value}");
+        // The topic asks with the task's goal as it stands, undistilled.
+        assert_eq!(
+            value["capsule"]["query"], "Verify the cobalt boundary",
+            "{value}"
+        );
+        assert_eq!(value["capsule"]["query_source"], "task", "{value}");
+    }
+
+    let project = fixture.project.to_string_lossy().into_owned();
+    let prompt = |generation: &str| {
+        json!({"hook_event_name":"beforeSubmitPrompt","conversation_id":"cursor-contract",
+            "generation_id":generation,"prompt":"Inspect cobalt boundaries.","workspace_roots":[project]})
+    };
+    let native = |operation: &str, payload: &Value| {
+        fixture.success(
+            &[
+                operation,
+                "--task-id",
+                "TASK-CURSOR",
+                "--host",
+                "cursor",
+                "--json",
+            ],
+            Some(payload),
+        )
+    };
+    native("native-prompt", &prompt("g1"));
+    native(
+        "native-stop",
+        &json!({"hook_event_name":"stop","conversation_id":"cursor-contract","generation_id":"g1",
+            "status":"completed","loop_count":0,"workspace_roots":[project]}),
+    );
+    // The next prompt is the internal continuation the request asked for;
+    // the one after it finds the result still unsaved.
+    let continued = native("native-prompt", &prompt("g2"));
+    assert!(continued.get("warning").is_none(), "{continued}");
+    let warned = native("native-prompt", &prompt("g3"));
+    assert!(warned["warning"].is_string(), "{warned}");
+    let value = refresh("yes");
+    assert!(
+        text(&value).contains("Last turn: native memory result not saved completely"),
+        "{value}"
+    );
+}
+
 /// A hook without a prompt asks with the task's own words, as the retired
 /// hook did: a file adds its stem, never "src" or "php", and an
 /// auto-provisioned goal, the branch slug re-cased, adds nothing.

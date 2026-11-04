@@ -320,6 +320,27 @@ impl MemoryService {
         if let Some(r) = &mut request.capsule {
             let retrieval_started = Instant::now();
             let raw = r.query.clone();
+            // Whether a Cursor prompt only continues the conversation's topic,
+            // decided on the raw prompt before it is cleaned, as the retired
+            // runtime decided it: a redacted prompt is never a continuation,
+            // so redaction cannot turn a sensitive request into a topic lookup.
+            // Without this a bare "yes" or "давай" searched by itself and the
+            // re-sent rule lost the knowledge of the turn it answers.
+            let unchanged = r.sanitize
+                && domain::sanitize_automatic_query(&raw).is_ok_and(|cleaned| {
+                    cleaned == raw.trim_matches(|c: char| " \t\r\n,;".contains(c))
+                });
+            let cursor_continuation = request.cursor_continuation
+                || (unchanged
+                    && host == "cursor"
+                    && continuity::continuation(&raw, profile.persistent()));
+            let cursor_topic_eligible = request.cursor_topic_eligible
+                || (unchanged
+                    && profile.persistent()
+                    && raw.chars().count() <= 1024
+                    && !["do not continue", "не продолжай", "стоп", "stop"].contains(
+                        &query::folded(&raw).trim_matches(|c: char| " \t\r\n,.!?;".contains(c)),
+                    ));
             let mut query_source = "prompt".to_owned();
             r.refresh_index = false;
             r.entry_point = "refresh".into();
@@ -345,7 +366,13 @@ impl MemoryService {
                     withheld = true;
                     return Ok(None);
                 }
-                if request.cursor_continuation {
+                // The prompt is distilled to its informative terms; a
+                // continuation then asks with its topic or its task instead,
+                // undistilled, as the retired runtime did.
+                if warnings.is_empty() {
+                    r.query = query::distill_query(&store.conn, &r.query)?;
+                }
+                if cursor_continuation {
                     if profile.persistent() {
                         if let (Some(plan), Some(id)) = (&topic, &task_id)
                             && let Some((query, source)) =
@@ -357,15 +384,11 @@ impl MemoryService {
                     } else if self.context.mode == "governed"
                         && let Some(id) = &task_id
                         && let Some(uuid) = checkpoint::served_uuid(Some(store), &self.context, id)?
-                        && let Ok(task) =
-                            BrainRepository::new(self.context.clone())?.get_task(&uuid)
+                        && let Some((query, source)) = continuation_query(&self.context, id, &uuid)?
                     {
-                        r.query = query::build_capsule_query("", Some(&task))?;
-                        query_source = "continuation".into();
+                        r.query = query;
+                        query_source = source;
                     }
-                }
-                if warnings.is_empty() {
-                    r.query = query::distill_query(&store.conn, &r.query)?;
                 }
                 r.query_source = query_source.clone();
                 let c = if let Some(preparer) = preparer.take() {
@@ -401,10 +424,10 @@ impl MemoryService {
                     id,
                     plan,
                     &r.query,
-                    request.cursor_topic_eligible && capsule.is_some(),
+                    cursor_topic_eligible && capsule.is_some(),
                     &warnings,
                     query_source == "continuation",
-                    request.cursor_continuation,
+                    cursor_continuation,
                     selected,
                 );
             }
@@ -919,12 +942,27 @@ impl MemoryService {
                         &mut tasks,
                     )?
                 };
+                let cursor = matches!(host, crate::Host::Cursor);
+                if operation == "native-prompt" && cursor && value["warning"].is_string() {
+                    // Cursor's hook answers in JSON only, so its rule is where
+                    // the notice goes: the next capsule's last-turn line says
+                    // the previous result was not saved completely, as the
+                    // retired runtime wrote it. Claude Code's and Codex's hooks
+                    // print the warning line themselves.
+                    let mut report = crate::advisory::load_last_turn(&self.context)
+                        .unwrap_or_else(|| object!({"schema_version":1}));
+                    report["timestamp"] = object!(domain::utc_now());
+                    report["task_id"] = object!(task()?);
+                    report["native_capture_incomplete"] = object!(true);
+                    crate::advisory::write_last_turn(&self.context, &report);
+                }
                 if flag(&request, "json") {
                     Ok(value)
                 } else {
                     let stdout = if operation == "native-prompt" {
                         value["warning"]
                             .as_str()
+                            .filter(|_| !cursor)
                             .map(|warning| format!("{warning}\n"))
                             .unwrap_or_default()
                     } else if value.as_object().is_some_and(|object| !object.is_empty()) {
@@ -1579,13 +1617,50 @@ fn governed_hook_query(
     id: &str,
     uuid: &str,
 ) -> Result<Option<(String, String)>> {
-    let task = match BrainRepository::new(context.clone())?.get_task(uuid) {
-        Ok(task) => task,
-        Err(error) if error.code.as_deref() == Some("source-git") => return Err(error),
-        Err(_) => return Ok(None),
+    match readable_task(context, uuid)? {
+        Some(task) => task_hook_query(context, id, &task),
+        None => Ok(None),
+    }
+}
+fn readable_task(context: &RuntimeContext, uuid: &str) -> Result<Option<Value>> {
+    match BrainRepository::new(context.clone())?.get_task(uuid) {
+        Ok(task) => Ok(Some(task)),
+        Err(error) if error.code.as_deref() == Some("source-git") => Err(error),
+        Err(_) => Ok(None),
+    }
+}
+/// A governed continuation of a Cursor prompt asks with the current task, as
+/// the retired runtime did: an explicit goal alone (incidental progress and
+/// next-step words would dilute it below relevance), otherwise the task's
+/// state. A terminal or empty task leaves the prompt's own query.
+fn continuation_query(
+    context: &RuntimeContext,
+    id: &str,
+    uuid: &str,
+) -> Result<Option<(String, String)>> {
+    let Some(mut task) = readable_task(context, uuid)? else {
+        return Ok(None);
     };
+    if domain::is_terminal("task", task["status"].as_str().unwrap_or("")) {
+        return Ok(None);
+    }
+    if task["goal"]
+        .as_str()
+        .is_some_and(|goal| !goal.trim().is_empty() && goal != storage::derive_goal(id))
+    {
+        task["progress"] = object!("");
+        task["next_steps"] = object!([]);
+        task["files"] = object!([]);
+    }
+    task_hook_query(context, id, &task)
+}
+fn task_hook_query(
+    context: &RuntimeContext,
+    id: &str,
+    task: &Value,
+) -> Result<Option<(String, String)>> {
     let config = RuntimeConfig::load(&context.roots)?;
-    if index::record_eligibility(context, &config, &task)?.is_some() {
+    if index::record_eligibility(context, &config, task)?.is_some() {
         return Ok(None);
     }
     let goal = task["goal"]

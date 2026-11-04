@@ -86,6 +86,17 @@ edition's own files remain in that edition's changelog.
   no longer starts with its identifier. The words are plain words, each
   once, at most 32; aliases join when the query is searched instead of
   taking slots from the task's words.
+- Cursor keeps its rule's knowledge across a bare acknowledgement again.
+  The native refresh never decided whether a cleaned Cursor prompt only
+  continues the conversation ("yes", "continue", "давай"), so such a reply
+  searched by itself and the re-sent rule went from the turn's documents to
+  "no-match"; it now decides as the retired runtime did, on the raw prompt
+  before cleaning, and keeps the topic the reply answers, asked with the
+  topic's own words rather than distilled ones; a governed continuation
+  outside the rule asks with the task's explicit goal alone. A previous result
+  that was not saved reaches Cursor through the rule again: Cursor's hook
+  answers in JSON only, so the prompt hook marks the last-turn report and
+  the next capsule says "native memory result not saved completely".
 - `memory replay-result` takes `--prepared-scope` again, as the retired CLI
   required. The native CLI did not accept the option, and the runtime
   refuses a receipt-only replay without a scope, so the command could not
