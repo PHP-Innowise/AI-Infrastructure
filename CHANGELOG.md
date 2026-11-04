@@ -24,6 +24,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- A partial Harness setup names what stopped it. The reply said only
+  "Installation stopped and may be partial" once a reviewed file had been
+  written, and dropped the installer's or the verification's own error; it
+  now includes that cause, which the Setup page already shows.
 - Tests that ran on Windows for the first time read paths the way the
   runtime does. The Brain inventory fixture canonicalizes its temporary root
   (Windows may name it by its short 8.3 form) and compares record messages

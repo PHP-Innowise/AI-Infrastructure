@@ -423,9 +423,16 @@ impl Setup {
         let ok = verification.is_ok();
         let mut out = json!({"ok":ok,"project_id":preview.project,"installed":installed,"merged":merged,"unchanged":unchanged,"repaired":repaired,"summary":if ok{format!("{} files installed, {} merged, {} made executable, {} unchanged. Reviewed payload hashes and modes verified.",installed.len(),merged.len(),repaired.len(),unchanged.len())}else{format!("{} confirmed files added or replaced and {} merged; installation requires a fresh review.",installed.len(),merged.len())}});
         if !ok {
-            out["error"] =
-                "Installation stopped and may be partial. Refresh the project and preview again."
-                    .into();
+            // The step that stopped it lets the person, and a report, act.
+            let cause = match (&result, &verification) {
+                (Err(error), _) => error.to_string(),
+                (_, Err(error)) => error.message.clone(),
+                _ => String::new(),
+            };
+            out["error"] = format!(
+                "Installation stopped and may be partial ({cause}). Refresh the project and preview again."
+            )
+            .into();
             out["rollback_failed"] = json!(rollback_failed);
         }
         if let Some(recovery) = recovery {
