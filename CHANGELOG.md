@@ -174,6 +174,13 @@ edition's own files remain in that edition's changelog.
   limit is added where the project set none, and a project's own value
   stays. On copies of two clients the Codex bench now passes with the
   policy heard in full.
+- `infra-engine eval memory-rollout-rehearsal` reads a prompt hook's plain
+  output as its capsule again, as the retired rehearsal did. Claude Code and
+  Codex take that output as context, and the native hooks print the capsule
+  that way; the rehearsal read only a JSON answer, found no capsule and
+  reported every recall missing. On a copy of a client project it now
+  reports the saved finding recalled in the next session for both hosts
+  and both capsule profiles.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

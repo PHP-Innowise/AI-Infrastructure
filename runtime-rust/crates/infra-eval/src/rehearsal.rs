@@ -364,16 +364,20 @@ pub fn capsule(root: &Path, host: &str, results: &[Value]) -> String {
         return std::fs::read_to_string(root.join(".cursor/rules/working-memory.mdc"))
             .unwrap_or_default();
     }
+    // What the prompt hook gave the model: its JSON context, else its plain
+    // stdout, which Claude Code and Codex take as context as well, as the
+    // retired rehearsal read it. Reading JSON alone found no capsule in a
+    // plain one, and every recall was reported missing.
     results
         .iter()
         .filter_map(|r| r["stdout"].as_str())
-        .filter_map(|s| artifact::strict(s.as_bytes()).ok())
-        .map(|v| {
-            v["hookSpecificOutput"]["additionalContext"]
+        .map(|stdout| match artifact::strict(stdout.as_bytes()) {
+            Ok(v) => v["hookSpecificOutput"]["additionalContext"]
                 .as_str()
                 .or_else(|| v["additional_context"].as_str())
-                .unwrap_or("")
-                .to_string()
+                .unwrap_or(stdout)
+                .to_string(),
+            Err(_) => stdout.to_string(),
         })
         .collect::<Vec<_>>()
         .join("\n")
