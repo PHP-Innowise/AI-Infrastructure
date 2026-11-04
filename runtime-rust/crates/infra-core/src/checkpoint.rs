@@ -199,10 +199,17 @@ pub fn rebind(
     {
         return Err(RuntimeError::conflict("Task is unavailable for rebind"));
     }
+    // The task as `get` shows it, and whether this checkout already pointed at
+    // it: the text output reads both.
+    let rebound = |already_bound: bool| {
+        let mut view = crate::application::task_view(&task);
+        view["already_bound"] = already_bound.into();
+        view
+    };
     if let Some(binding) = store.binding(id)? {
         if binding.task_uuid == task["id"].as_str().unwrap_or("") {
             store.refresh_binding(id, task["revision"].as_u64().unwrap_or(1))?;
-            return Ok(serde_json::to_value(store.binding(id)?)?);
+            return Ok(rebound(true));
         }
         return Err(RuntimeError::conflict(
             "Working task already bound to another record",
@@ -213,7 +220,7 @@ pub fn rebind(
         task["id"].as_str().unwrap_or(""),
         task["revision"].as_u64().unwrap_or(1),
     )?;
-    Ok(serde_json::to_value(store.binding(id)?)?)
+    Ok(rebound(false))
 }
 pub fn footprint(context: &RuntimeContext) -> BTreeMap<String, String> {
     for name in [

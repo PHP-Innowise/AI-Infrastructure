@@ -334,8 +334,10 @@ fn render_lines(
         } else {
             "healthy"
         };
+        // A missing or empty index has no freshness to report.
         let staleness = database
             .as_ref()
+            .filter(|_| index == "healthy")
             .and_then(|path| std::fs::metadata(path).ok())
             .and_then(|meta| meta.modified().ok())
             .map(|at| {
@@ -427,6 +429,12 @@ fn render_lines(
         }
     }
     lines.extend(["".into(), "Structure:".into()]);
+    // The session's own host tree closes the list, as each host's hook did.
+    let host_trees: &[&str] = match scope.host.as_str() {
+        "codex" => &[".agents", ".codex"],
+        "cursor" => &[".cursor"],
+        _ => &[".claude"],
+    };
     for name in [
         "src",
         "app",
@@ -441,8 +449,10 @@ fn render_lines(
         "memory-bank",
         "project-brain",
         "examples",
-        ".claude",
-    ] {
+    ]
+    .iter()
+    .chain(host_trees)
+    {
         let path = scope.roots.project.join(name);
         if path.is_dir() {
             let count = std::fs::read_dir(path)?

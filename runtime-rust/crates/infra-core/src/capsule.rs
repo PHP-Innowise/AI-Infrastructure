@@ -680,7 +680,8 @@ pub fn render_plan(capsule: &Capsule, profile: DeliveryProfile) -> Result<Render
             head.insert(index, format!("{label}{}", paths.join(", ")));
         }
     }
-    if capsule.0["kind"] == "warming" && capsule.0["task_closed"] != true {
+    // A lightweight task is shown above from local state: nothing is pending.
+    if capsule.0["kind"] == "warming" && capsule.0["task_closed"] != true && !working.is_object() {
         head.push(if profile.persistent() {
             "warming: task checkpoint pending".into()
         } else {

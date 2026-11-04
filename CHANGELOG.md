@@ -24,6 +24,26 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Compared step by step with the retired runtime on twin projects, the
+  native memory CLI and hooks again match it where they had drifted:
+  - `memory record` stores a standalone episode again (docs/OPERATIONS.md
+    documents it; the native CLI answered "Unknown memory operation").
+  - `rebind` reports the task as `get` does and whether it was already
+    bound; its text said "rebound: None -> ...".
+  - `get`, `start`, `update` and `rebind` show the task's `status`, `phase`
+    (null when undeclared) and `authority`.
+  - `msg-read` says "No messages." when there are none; a lightweight task's
+    capsule no longer adds "warming: 0 turn(s) pending" under the task it
+    shows; `export` reports the folder it wrote, resolved.
+  - The session banner lists the session's own host tree (`.agents/` and
+    `.codex/` for Codex, `.cursor/` for Cursor) and reports an empty or
+    missing index's freshness as `unknown`, not `current`.
+  - The first save request of a conversation carries the rules measured with
+    live models again: the schema example, `verified=true` only for learnings
+    checked against current sources (it promotes them to durable memory), no
+    duplicate findings, recall-only saves with `learnings=[]`, and where the
+    checked fingerprints come from (`memory source-fingerprints`).
+
 - Claude Code saves a turn's result without asking again: the Stop request
   names `cd <installation> && echo -E '<JSON>' | memory-bank/bin/infra-engine
   memory ...`, the spelling the installed

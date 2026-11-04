@@ -661,6 +661,9 @@ pub fn render(operation: &str, request: &Value, result: Value) -> Result<Output>
                 .as_array()
                 .map(Vec::as_slice)
                 .unwrap_or_else(|| rows(&result, "messages"));
+            if messages.is_empty() {
+                lines.push("No messages.".into());
+            }
             for row in messages {
                 let body = v(row, "body")
                     .split_whitespace()

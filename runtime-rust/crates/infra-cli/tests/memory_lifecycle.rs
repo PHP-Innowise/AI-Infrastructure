@@ -664,6 +664,53 @@ fn claude_code_saves_and_recalls_in_a_worktree_the_main_checkout_serves() {
     );
 }
 
+/// The session banner lists the session's own host tree, as each host's hook
+/// did, and gives an index that was never built no freshness.
+#[test]
+fn the_session_banner_lists_its_hosts_own_tree() {
+    let project = Project::new();
+    for (host, event, own, others) in [
+        (
+            "claude",
+            "SessionStart",
+            &[".claude/ ("][..],
+            &[".codex/ (", ".cursor/ ("][..],
+        ),
+        (
+            "codex",
+            "SessionStart",
+            &[".agents/ (", ".codex/ ("][..],
+            &[".claude/ (", ".cursor/ ("][..],
+        ),
+        (
+            "cursor",
+            "sessionStart",
+            &[".cursor/ ("][..],
+            &[".claude/ (", ".codex/ ("][..],
+        ),
+    ] {
+        let banner = project.hook(
+            host,
+            "local-context",
+            &json!({"session_id": format!("banner-{host}"), "cwd": project.path,
+                "hook_event_name": event, "source": "startup"}),
+        );
+        assert!(
+            own.iter().all(|tree| banner.contains(tree))
+                && !others.iter().any(|tree| banner.contains(tree)),
+            "{host}: {banner}"
+        );
+        for state in ["missing", "empty"] {
+            if let Some(at) = banner.find(&format!("index={state}/")) {
+                assert!(
+                    banner[at..].starts_with(&format!("index={state}/unknown")),
+                    "{host}: {banner}"
+                );
+            }
+        }
+    }
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(

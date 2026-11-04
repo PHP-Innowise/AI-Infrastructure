@@ -799,6 +799,19 @@ impl MemoryService {
                 Ok(object!({"task_id":id}))
             }
             "complete" => self.complete(&request),
+            // A standalone completed-work episode in local SQLite, in either
+            // mode: no Brain record, handoff or promotion (docs/OPERATIONS.md).
+            "record" => {
+                let mut store = self.open()?;
+                let episode = store.record_episode(storage::EpisodeInput {
+                    summary: required(&request, "summary")?.into(),
+                    outcome: required(&request, "outcome")?.into(),
+                    files: list(&request, "files", "file")?,
+                    verification: list(&request, "verification", "verification")?,
+                    sources: list(&request, "sources", "source")?,
+                })?;
+                Ok(object!({"episode_id":episode}))
+            }
             "turn" => {
                 let request = TurnRequest {
                     task_id: task()?.into(),
@@ -1380,12 +1393,10 @@ impl MemoryService {
         Ok(task_view(&updated))
     }
 }
+/// A governed task as `get`, `start`, `update` and `rebind` show it: its
+/// status and phase (null when undeclared), and Project Brain as its authority.
 pub fn task_view(record: &Value) -> Value {
-    let mut value = object!({"task_id":record["external_id"],"task_uuid":record["id"],"revision":record["revision"],"goal":record["goal"],"progress":record["progress"],"auto_checkpoint":record.get("auto_checkpoint").cloned().unwrap_or(object!("")),"next_steps":record["next_steps"],"files":record["files"],"sources":record["sources"],"created_at":record["created_at"],"updated_at":record["updated_at"]});
-    if let Some(phase) = record.get("phase") {
-        value["phase"] = phase.clone();
-    }
-    value
+    object!({"task_id":record["external_id"],"phase":record.get("phase").cloned().unwrap_or(Value::Null),"task_uuid":record["id"],"revision":record["revision"],"status":record["status"],"goal":record["goal"],"progress":record["progress"],"auto_checkpoint":record.get("auto_checkpoint").cloned().unwrap_or(object!("")),"next_steps":record["next_steps"],"files":record["files"],"sources":record["sources"],"created_at":record["created_at"],"updated_at":record["updated_at"],"authority":"project-brain"})
 }
 pub fn text<'a>(request: &'a Value, key: &str) -> Option<&'a str> {
     request.get(key).and_then(Value::as_str)

@@ -917,6 +917,93 @@ fn promoted_memory_marks_changed_citations_in_retrieve_and_recall_refresh() {
     );
 }
 
+/// Commands a person or an agent runs by hand report what they did, as the
+/// retired runtime's did: a standalone episode, a rebind of a bound task, a
+/// task view with its status and authority, an empty mailbox, and a
+/// lightweight task shown without a pending-checkpoint line.
+#[test]
+fn hand_run_commands_report_what_they_did() {
+    let fixture = Fixture::new(true);
+    let recorded = fixture.success(
+        &[
+            "record",
+            "--summary",
+            "Investigated the cobalt retries",
+            "--outcome",
+            "Retries stop after the third guarded write",
+            "--file",
+            "specs/source.md",
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        recorded["episode_id"].as_i64().is_some_and(|id| id > 0),
+        "{recorded}"
+    );
+    let found = fixture.success(
+        &["search", "cobalt retries", "--layer", "episodic", "--json"],
+        None,
+    );
+    assert!(
+        found["episodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|episode| episode["summary"] == "Investigated the cobalt retries"),
+        "{found}"
+    );
+
+    fixture.start("TASK-REBIND");
+    let view = fixture.success(&["get", "--task-id", "TASK-REBIND", "--json"], None);
+    assert_eq!(view["status"], "active", "{view}");
+    assert_eq!(view["authority"], "project-brain", "{view}");
+    assert!(view.get("phase").is_some_and(Value::is_null), "{view}");
+    let output = fixture.run(&["rebind", "--task-id", "TASK-REBIND"], None);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && text.starts_with("Working task already bound: TASK-REBIND -> "),
+        "{text}"
+    );
+    let output = fixture.run(
+        &["msg-read", "--task-id", "TASK-REBIND", "--for", "planner"],
+        None,
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "No messages.\n");
+
+    fixture.success(
+        &[
+            "--mode",
+            "lightweight",
+            "start",
+            "--task-id",
+            "LOCAL-1",
+            "--goal",
+            "Local note",
+            "--json",
+        ],
+        None,
+    );
+    let output = fixture.run(
+        &[
+            "--mode",
+            "lightweight",
+            "retrieve",
+            "local note",
+            "--task-id",
+            "LOCAL-1",
+        ],
+        None,
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success()
+            && text.starts_with("working: LOCAL-1 — Local note")
+            && !text.contains("warming:"),
+        "{text}"
+    );
+}
+
 /// A record whose cited file changed or went away is intact: validation lists
 /// it with what retrieval does about it, as the retired runtime did, and
 /// still passes.
