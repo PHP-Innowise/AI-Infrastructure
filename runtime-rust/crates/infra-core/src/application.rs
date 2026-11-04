@@ -35,6 +35,10 @@ pub struct RefreshRequest {
     pub delivery_profile: DeliveryProfile,
     pub cursor_continuation: bool,
     pub cursor_topic_eligible: bool,
+    /// The caller prints the capsule and records the printed render once its
+    /// write succeeds. Otherwise the JSON's `capsule_text` is what reaches
+    /// the model, and its render is recorded before the answer is built.
+    pub printed: bool,
 }
 #[derive(Clone, Debug)]
 pub struct MemoryService {
@@ -464,13 +468,24 @@ impl MemoryService {
         if let Some(review) = &review_stage {
             result["memory_review"] = object!(review);
         }
+        // The capsule as its render plan writes it, without the review notice:
+        // the render a trace records and the funnel diagnosis checks.
+        let mut delivered = None;
         if let Some(c) = &capsule {
-            let mut rendered = capsule::render(c, profile)?;
+            let plain = capsule::render(c, profile)?;
+            let mut rendered = plain.clone();
             if let Some(review) = &review_stage {
                 rendered.push('\n');
                 rendered.push_str(review);
             }
             result["capsule_text"] = object!(rendered);
+            if !request.printed {
+                // The answer carries this text to the model (a Cursor rule,
+                // Memory MCP, the Harness), so it is the emitter's render, as
+                // the retired runtime recorded it before answering.
+                crate::observability::record_render(&self.context, c, &plain, "capsule_text");
+            }
+            delivered = Some(plain);
         } else if profile.persistent() {
             result["capsule_text"] = object!(
                 "working: unavailable\nwarning: memory refresh incomplete; verify current canonical sources"
@@ -505,7 +520,7 @@ impl MemoryService {
                 }),
                 rendered,
             );
-            if let Some(rendered) = rendered {
+            if let Some(rendered) = &delivered {
                 let expected = object!({"sha256":query::sha256(rendered.as_bytes()),"bytes":rendered.len(),"form":"capsule_text"});
                 let (diagnosis, receipt) =
                     crate::observability::diagnose_with_receipt(&self.context, c, &expected);
@@ -1621,6 +1636,7 @@ pub fn request_refresh(request: &Value) -> Result<RefreshRequest> {
             .unwrap_or_default(),
         cursor_continuation: flag(request, "cursor_continuation"),
         cursor_topic_eligible: flag(request, "cursor_topic_eligible"),
+        printed: false,
     })
 }
 fn refresh_capsule_shape(
@@ -1717,7 +1733,9 @@ impl MemoryService {
             });
         }
         if operation == "refresh" {
-            let outcome = self.refresh_output(request_refresh(request)?)?;
+            let mut refresh = request_refresh(request)?;
+            refresh.printed = !flag(request, "json");
+            let outcome = self.refresh_output(refresh)?;
             if outcome.value["native_continuation"] == true {
                 return Ok(CommandOutput {
                     value: Value::Null,

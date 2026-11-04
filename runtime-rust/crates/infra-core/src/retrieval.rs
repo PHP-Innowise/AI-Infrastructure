@@ -1320,7 +1320,12 @@ fn retrieve_inner(
             !seen
         });
     }
-    trace.boundary("repeat_withheld", &repeated_items);
+    // Only a session's conversation withholds what it already holds: without
+    // one nothing was checked, and the boundary stays unobserved, as the
+    // retired runtime left it, rather than an exact zero.
+    if session.is_some() {
+        trace.boundary("repeat_withheld", &repeated_items);
+    }
     rebase_explicit_working(
         context,
         request,

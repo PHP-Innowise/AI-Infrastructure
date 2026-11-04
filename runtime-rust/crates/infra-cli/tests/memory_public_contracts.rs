@@ -475,6 +475,32 @@ fn mcp_returns_canonical_status_and_refresh_without_bypassing_scope_guards() {
     assert_eq!(result["mode"], "governed");
     assert!(result["warnings"].is_array());
     assert!(result["phases"].is_object());
+    // The reply carries capsule_text to the model, so its render is recorded
+    // before the answer and the funnel is observed; with no session nothing
+    // was withheld as a repeat, which stays unobserved rather than zero.
+    let funnel = &result["funnel_diagnosis"];
+    assert_eq!(funnel["observation_state"], "observed", "{funnel}");
+    assert_eq!(
+        funnel["boundaries"]["selected_post_pack"]["state"], "exact",
+        "{funnel}"
+    );
+    assert_eq!(
+        funnel["boundaries"]["repeat_withheld"]["state"], "unknown",
+        "{funnel}"
+    );
+    let manifest = result["capsule"]["manifest"].as_str().unwrap();
+    let trace_name = Path::new(manifest).file_name().unwrap();
+    let trace: Value = serde_json::from_slice(
+        &fs::read(
+            fixture
+                .project
+                .join("memory-bank/local/retrieval-traces")
+                .join(trace_name),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(trace["render"]["form"], "capsule_text", "{trace}");
     assert!(!result.to_string().contains("PRIVATE-SCOPE-CANARY"));
     for id in 4..=7 {
         assert_eq!(

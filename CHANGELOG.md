@@ -53,6 +53,16 @@ edition's own files remain in that edition's changelog.
   and tool descriptions are the retired server's again, including that
   `memory_record_result` is for clients no Stop hook asks for the
   native-result save.
+- A capsule delivered as JSON is observed again. Cursor's prompt hook,
+  Memory MCP's `memory_retrieve`, the Harness and `refresh --json` hand the
+  answer's `capsule_text` to the model, and the retired runtime recorded that
+  render in the retrieval trace before answering; the native runtime recorded
+  only printed capsules, after their write. Those deliveries had no render in
+  their trace, and their `funnel_diagnosis` (in the answer and in
+  `refresh-health`) was always `unavailable`. They are recorded again, and the
+  diagnosis checks the capsule without the appended review notice, as before.
+  A retrieval without a session leaves `repeat_withheld` unobserved, not an
+  exact zero: nothing was checked for repeats.
 
 - Claude Code saves a turn's result without asking again: the Stop request
   names `cd <installation> && echo -E '<JSON>' | memory-bank/bin/infra-engine
