@@ -1174,6 +1174,8 @@ fn hand_run_commands_report_what_they_did() {
     assert_eq!(view["status"], "active", "{view}");
     assert_eq!(view["authority"], "project-brain", "{view}");
     assert!(view.get("phase").is_some_and(Value::is_null), "{view}");
+    // A task never checkpointed has no automatic summary yet, as before.
+    assert!(view.get("auto_checkpoint").is_some_and(Value::is_null), "{view}");
     let output = fixture.run(&["rebind", "--task-id", "TASK-REBIND"], None);
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(

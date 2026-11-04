@@ -31,7 +31,9 @@ edition's own files remain in that edition's changelog.
   - `rebind` reports the task as `get` does and whether it was already
     bound; its text said "rebound: None -> ...".
   - `get`, `start`, `update` and `rebind` show the task's `status`, `phase`
-    (null when undeclared) and `authority`.
+    (null when undeclared) and `authority`, and a governed task's
+    `auto_checkpoint` is null until its first automatic checkpoint, not an
+    empty string.
   - `msg-read` says "No messages." when there are none; a lightweight task's
     capsule no longer adds "warming: 0 turn(s) pending" under the task it
     shows; `export` reports the folder it wrote, resolved.

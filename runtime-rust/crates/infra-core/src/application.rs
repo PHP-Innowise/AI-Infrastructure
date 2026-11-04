@@ -1507,7 +1507,7 @@ impl MemoryService {
 /// A governed task as `get`, `start`, `update` and `rebind` show it: its
 /// status and phase (null when undeclared), and Project Brain as its authority.
 pub fn task_view(record: &Value) -> Value {
-    object!({"task_id":record["external_id"],"phase":record.get("phase").cloned().unwrap_or(Value::Null),"task_uuid":record["id"],"revision":record["revision"],"status":record["status"],"goal":record["goal"],"progress":record["progress"],"auto_checkpoint":record.get("auto_checkpoint").cloned().unwrap_or(object!("")),"next_steps":record["next_steps"],"files":record["files"],"sources":record["sources"],"created_at":record["created_at"],"updated_at":record["updated_at"],"authority":"project-brain"})
+    object!({"task_id":record["external_id"],"phase":record.get("phase").cloned().unwrap_or(Value::Null),"task_uuid":record["id"],"revision":record["revision"],"status":record["status"],"goal":record["goal"],"progress":record["progress"],"auto_checkpoint":record.get("auto_checkpoint").cloned().unwrap_or(Value::Null),"next_steps":record["next_steps"],"files":record["files"],"sources":record["sources"],"created_at":record["created_at"],"updated_at":record["updated_at"],"authority":"project-brain"})
 }
 pub fn text<'a>(request: &'a Value, key: &str) -> Option<&'a str> {
     request.get(key).and_then(Value::as_str)
