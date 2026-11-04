@@ -1524,18 +1524,18 @@ mod threaded_exit_tests {
             .unwrap();
         let system = std::env::var_os("SystemRoot")
             .expect("Windows must identify its native system directory");
-        let command = PathBuf::from(&system).join("System32/cmd.exe");
+        // cmd.exe reads its own command line: in `System32/cmd.exe` it takes
+        // `/cmd.exe` for its /C switch and runs `md`. Name it with backslashes.
+        let command = PathBuf::from(&system).join("System32").join("cmd.exe");
         for code in [0, 7] {
             // /D disables AutoRun. Only cmd builtins run: consume one complete
-            // request line, emit exact valid scores, then exit with this code.
-            // `exit /b` outside a batch file left cmd's exit code at the 1 that
-            // `set /p` from nul sets; plain `exit` ends cmd with this code.
+            // request line, emit exact valid scores, then end cmd with this code.
             let script =
                 format!(r#"set /p request=& <nul set /p ={{"scores":[0.25]}}& exit {code}"#);
             let errors = root.path().join(format!("stderr-{code}"));
             let child = Command::new(&command)
                 .args(["/D", "/Q", "/C"])
-                .raw_arg(&script)
+                .raw_arg(script)
                 .env_clear()
                 .env("SystemRoot", &system)
                 .env("ComSpec", &command)
@@ -1574,42 +1574,9 @@ mod threaded_exit_tests {
             );
             if code == 0 {
                 let raw = output.unwrap_or_else(|error| {
-                    // The same script, a bare exit and a bare exit with the
-                    // inherited environment, each outside the Job and the
-                    // worker threads, show which part decides the code.
-                    let probe = |arguments: &str, cleared: bool| {
-                        let mut probe = Command::new(&command);
-                        probe.args(["/D", "/Q", "/C"]).raw_arg(arguments);
-                        if cleared {
-                            probe
-                                .env_clear()
-                                .env("SystemRoot", &system)
-                                .env("ComSpec", &command)
-                                .env("TEMP", root.path())
-                                .env("TMP", root.path());
-                        }
-                        let mut child = probe
-                            .stdin(Stdio::piped())
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::piped())
-                            .spawn()
-                            .unwrap();
-                        use std::io::Write;
-                        let _ = child.stdin.take().unwrap().write_all(b"{}\n");
-                        let output = child.wait_with_output().unwrap();
-                        format!(
-                            "{:?} {:?} {:?}",
-                            output.status.code(),
-                            String::from_utf8_lossy(&output.stdout),
-                            String::from_utf8_lossy(&output.stderr)
-                        )
-                    };
                     panic!(
-                        "zero exit with full input and EOF must succeed: {error:?}, status {status:?}, stderr {:?}; plain script: {}; exit 0: {}; exit 0 inherited: {}",
-                        std::fs::read_to_string(&errors),
-                        probe(&script, true),
-                        probe("exit 0", true),
-                        probe("exit 0", false)
+                        "zero exit with full input and EOF must succeed: {error:?}, status {status:?}, stderr {:?}",
+                        std::fs::read_to_string(&errors)
                     )
                 });
                 let value = strict::decode(&raw, super::RESPONSE, 16, 4096).unwrap();

@@ -38,14 +38,13 @@ edition's own files remain in that edition's changelog.
   the same, and running the copy once beforehand did not settle it. The
   other fields still show the image was neither replaced nor rewritten, the
   way publication already compares a renamed image.
-- The Windows ONNX exit test reports what decided its worker's exit. Its
-  `cmd` worker exits with 1 within milliseconds although its script ends
-  with `exit 0` (`exit /b 0` before, which was not the cause). The test keeps
-  the worker's stderr and, on failure, also reports the same script, a bare
-  `exit 0` and a bare `exit 0` with the inherited environment, each run
-  outside the Job and the worker threads, next to the observed status, since
-  "worker-exit" stands for a failed write, a failed read and a nonzero exit
-  alike.
+- The Windows ONNX exit test names `cmd.exe` with backslashes. It built the
+  path as `System32/cmd.exe`, and `cmd.exe`, which parses its own command
+  line, took `/cmd.exe` for its `/C` switch and ran `md` with the rest, so
+  even a bare `exit 0` ended with code 1 and "The directory or file cannot be
+  created"; `exit /b` was never the cause. The test reports the worker's
+  stderr and observed status with a refusal, since "worker-exit" stands for a
+  failed write, a failed read and a nonzero exit alike.
 - A process that embeds the runtime names the engine that guards its
   children. On Windows every child starts under a guardian that re-runs the
   current executable as `internal-guard`; in a test binary that executable is
