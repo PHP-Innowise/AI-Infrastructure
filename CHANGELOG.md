@@ -24,6 +24,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- A failed CI job keeps its failed checks' complete output. `infra-engine
+  check --log-dir DIR` writes the failed logs to `DIR`; each generated job
+  passes a directory under the runner's temporary directory and uploads it as
+  the `check-logs-JOB` artifact when the job fails, since the printed excerpt
+  shows only the end of each stream. The Windows workspace tests run with
+  `--no-fail-fast`, so one run reports every failing test target there.
 - The native evaluation runtime tests give Git plain drive paths on Windows.
   `fs::canonicalize` spells them `\\?\C:\…`, and with such a home and global
   configuration `git init` stopped with "unknown error occurred while reading

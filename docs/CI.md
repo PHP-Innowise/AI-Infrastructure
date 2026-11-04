@@ -48,8 +48,13 @@ copy of it in the runner's temporary directory: the group's own Cargo builds
 replace the engine in the target directory, which Windows refuses while it runs.
 A missing required tool or input fails a strict run. Skipped work is reported
 separately from passes. Failed command logs are retained, and each failed check
-also prints the last lines of its stdout and stderr on stderr, because a CI job
-keeps nothing once it ends; interrupted checks are reported as cancelled.
+also prints the last lines of its stdout and stderr on stderr; interrupted
+checks are reported as cancelled. `--log-dir DIR` keeps the failed logs in
+`DIR` instead of a private temporary directory: each generated job passes one
+under the runner's temporary directory and uploads it as the
+`check-logs-JOB` artifact when the job fails, because a CI job keeps nothing
+once it ends. The Windows workspace tests run with `--no-fail-fast`, so one run
+reports every failing test target.
 
 | Group | Actual validation |
 | --- | --- |

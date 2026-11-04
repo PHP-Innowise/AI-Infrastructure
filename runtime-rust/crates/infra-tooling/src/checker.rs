@@ -528,8 +528,19 @@ pub fn execute(request: &Value) -> Result<Value> {
         .as_str()
         .unwrap_or("origin/main")
         .to_string();
-    let mut temporary = Temporary::new("infra-check")?;
-    let logs = temporary.path().to_path_buf();
+    let (mut temporary, logs) = match request["log_dir"].as_str() {
+        // A named directory keeps failed logs where a CI job can collect them.
+        Some(directory) => {
+            let directory = PathBuf::from(directory);
+            safe::ensure_directory(&directory, false)?;
+            (None, directory)
+        }
+        None => {
+            let temporary = Temporary::new("infra-check")?;
+            let logs = temporary.path().to_path_buf();
+            (Some(temporary), logs)
+        }
+    };
     let queue = Arc::new(Mutex::new(VecDeque::from(groups)));
     let cancelled = Arc::new(AtomicBool::new(false));
     let outcomes = Arc::new(Mutex::new(Vec::new()));
@@ -638,7 +649,11 @@ pub fn execute(request: &Value) -> Result<Value> {
         0
     };
     let retained = if failed > 0 {
-        Some(temporary.preserve())
+        Some(
+            temporary
+                .as_mut()
+                .map_or_else(|| logs.clone(), Temporary::preserve),
+        )
     } else {
         None
     };
@@ -820,11 +835,23 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
         // The group's own Cargo builds rewrite this engine in the target
         // directory, and Windows cannot replace a running executable: the
         // catalog runs from a copy outside it.
-        output.push_str("      - name: Build the native engine\n        run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine\n      - name: Run the catalog group\n        run: |\n          suffix=''\n          if [ \"$RUNNER_OS\" = 'Windows' ]; then suffix='.exe'; fi\n          engine=\"${RUNNER_TEMP//\\\\//}/infra-check-engine$suffix\"\n          cp \"$CARGO_TARGET_DIR/debug/infra-engine$suffix\" \"$engine\"\n          \"$engine\" check --group \"$NATIVE_CHECK_GROUP\" --strict --base origin/main");
+        output.push_str("      - name: Build the native engine\n        run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine\n      - name: Run the catalog group\n        run: |\n          suffix=''\n          if [ \"$RUNNER_OS\" = 'Windows' ]; then suffix='.exe'; fi\n          engine=\"${RUNNER_TEMP//\\\\//}/infra-check-engine$suffix\"\n          cp \"$CARGO_TARGET_DIR/debug/infra-engine$suffix\" \"$engine\"\n          \"$engine\" check --group \"$NATIVE_CHECK_GROUP\" --strict --base origin/main --log-dir \"${RUNNER_TEMP//\\\\//}/infra-check-logs\"");
         if oracle {
             output.push_str(" --include-oracles");
         }
         output.push('\n');
+        // The run's own output shows only the end of each failed stream; the
+        // job keeps every failed check's complete output.
+        output.push_str(concat!(
+            "      - name: Keep the complete output of failed checks\n",
+            "        if: failure()\n",
+            "        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2\n",
+            "        with:\n",
+            "          name: check-logs-${{ github.job }}\n",
+            "          path: ${{ runner.temp }}/infra-check-logs\n",
+            "          if-no-files-found: ignore\n",
+            "          retention-days: 14\n",
+        ));
     }
     Ok(output)
 }
@@ -1066,6 +1093,20 @@ mod compiler_workflow_tests {
                 assert!(
                     job[check..]
                         .contains("engine=\"${RUNNER_TEMP//\\\\//}/infra-check-engine$suffix\"\n")
+                );
+                // Failed logs go where the job's last step collects them.
+                assert!(
+                    job[check..].contains(" --log-dir \"${RUNNER_TEMP//\\\\//}/infra-check-logs\""),
+                    "{name}"
+                );
+                let keep = job
+                    .find("      - name: Keep the complete output of failed checks\n")
+                    .unwrap_or_else(|| panic!("{name}: failed logs are not kept"));
+                assert!(check < keep, "{name}");
+                assert!(job[keep..].contains("        if: failure()\n"), "{name}");
+                assert!(
+                    job[keep..].contains("          path: ${{ runner.temp }}/infra-check-logs\n"),
+                    "{name}"
                 );
                 assert!(!job[build..check].contains("        if:"), "{name}");
                 assert!(!job.contains("cache-hit"), "{name}");
@@ -1358,6 +1399,43 @@ mod failure_report_tests {
         assert_eq!(
             failure_report(&[outcome]),
             "FAILED probe / failing probe (exit 3)\n--- end of stdout ---\nfirst\nlast\n--- end of stderr ---\ncause\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_log_directory_keeps_failed_logs_for_the_job_to_collect() {
+        let temporary = Temporary::new("infra-check-named-logs").unwrap();
+        let root = temporary.path();
+        std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        std::fs::write(root.join(".github/workflows/probe.yml"), b"name: probe\n").unwrap();
+        std::fs::create_dir_all(root.join("install")).unwrap();
+        std::fs::write(
+            root.join("install/check-catalog.json"),
+            serde_json::to_vec(&json!({"schema_version":1,"groups":[{
+                "name":"probe","workflow":"probe.yml","job":"probe","timeout_minutes":1,
+                "gates":[{"kind":"process","name":"failing probe","program":"sh",
+                    "arguments":["-c","echo kept; exit 3"]}]
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let logs = root.join("named logs");
+        let value = execute(&json!({
+            "root":root,"groups":["probe"],"strict":true,"log_dir":logs
+        }))
+        .unwrap();
+        assert_eq!(value["result"]["exit_code"], 1);
+        assert_eq!(value["result"]["logs"], json!(logs));
+        let kept = std::fs::read_dir(&logs)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(std::fs::read(&kept[0]).unwrap(), b"kept\n");
+        assert_eq!(
+            value["_cli"]["stderr"],
+            "FAILED probe / failing probe (exit 3)\n--- end of stdout ---\nkept\n"
         );
     }
 }

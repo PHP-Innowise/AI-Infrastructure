@@ -435,7 +435,8 @@
             "--workspace",
             "--manifest-path",
             "{root}/runtime-rust/Cargo.toml",
-            "--locked"
+            "--locked",
+            "--no-fail-fast"
           ],
           "cwd": ".",
           "tools": [],

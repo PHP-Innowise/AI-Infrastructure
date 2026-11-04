@@ -50,4 +50,12 @@ jobs:
           if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
           engine="${RUNNER_TEMP//\\//}/infra-check-engine$suffix"
           cp "$CARGO_TARGET_DIR/debug/infra-engine$suffix" "$engine"
-          "$engine" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
+          "$engine" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main --log-dir "${RUNNER_TEMP//\\//}/infra-check-logs"
+      - name: Keep the complete output of failed checks
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: check-logs-${{ github.job }}
+          path: ${{ runner.temp }}/infra-check-logs
+          if-no-files-found: ignore
+          retention-days: 14
