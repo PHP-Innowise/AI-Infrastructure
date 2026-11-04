@@ -485,6 +485,78 @@ fn mcp_returns_canonical_status_and_refresh_without_bypassing_scope_guards() {
     }
 }
 
+/// Memory MCP's checkpoint is the command line's `rebind` and `turn --flush`:
+/// the files changed since the last turn reach the task although no hook ever
+/// ran, and the reply carries the flush report, as the retired server's did.
+#[test]
+fn mcp_checkpoint_records_the_working_tree_as_a_flushed_turn() {
+    let fixture = Fixture::new(false);
+    completion_git_commit(&fixture, "Baseline");
+    fs::write(
+        fixture.project.join("specs/source.md"),
+        "# Cobalt metadata boundary\nCobalt retries stop after the fourth guarded write.\n",
+    )
+    .unwrap();
+    let replies = fixture.rpc(&[
+        (
+            "memory_checkpoint",
+            json!({"task_id":"TASK-MCP-CHECKPOINT","goal":"Checkpoint over MCP"}),
+        ),
+        (
+            "memory_checkpoint",
+            json!({"task_id":"TASK-MCP-CHECKPOINT"}),
+        ),
+        ("memory_checkpoint", json!({"task_id":"TASK-MCP-NO-GOAL"})),
+    ]);
+    // The server tells a client where the record of its work comes from: a
+    // Stop hook's native-result save, else memory_record_result.
+    let instructions = replies[&1]["result"]["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains(
+            "memory_record_result before finishing authorized work only where no Stop hook asks for the native-result save"
+        ),
+        "{instructions}"
+    );
+    let first = &replies[&2]["result"];
+    assert_eq!(first["isError"], false, "{first}");
+    let first = &first["structuredContent"];
+    let report = &first["checkpoint"];
+    assert_eq!(report["flushed"], true, "{first}");
+    assert_eq!(report["delta_id"], 1, "{first}");
+    assert!(
+        report["files"].as_u64().is_some_and(|files| files >= 1),
+        "{first}"
+    );
+    assert_eq!(report["pending"], 0, "{first}");
+    assert_eq!(first["revision"], 2, "{first}");
+    assert_eq!(report["revision"], first["revision"], "{first}");
+    let second = &replies[&3]["result"]["structuredContent"];
+    assert_eq!(second["checkpoint"]["flushed"], true, "{second}");
+    assert_eq!(second["revision"], 3, "{second}");
+    assert_eq!(
+        replies[&4]["result"]["isError"], true,
+        "a new task needs a goal"
+    );
+
+    let view = fixture.success(&["get", "--task-id", "TASK-MCP-CHECKPOINT", "--json"], None);
+    assert_eq!(view["revision"], 3, "{view}");
+    assert!(
+        view["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file == "specs/source.md"),
+        "{view}"
+    );
+    assert!(
+        view["auto_checkpoint"]
+            .as_str()
+            .unwrap()
+            .starts_with("Auto-checkpoint: 1 turn(s) since "),
+        "{view}"
+    );
+}
+
 #[test]
 fn mcp_refuses_a_degraded_refresh_with_a_real_read_only_capsule_and_preserves_state() {
     fn rows(holder: &Store, sql: &str) -> Vec<Vec<String>> {

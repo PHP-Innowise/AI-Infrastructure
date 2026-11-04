@@ -147,9 +147,20 @@ impl McpServer {
                 .get("goal")
                 .map(|value| results::text(value, "goal", 200))
                 .transpose()?;
-            let mut store = Store::open(database, OpenOptions::default())?;
-            return TaskService::new(self.context.clone(), Some(&mut store))
-                .checkpoint(&task, goal.as_deref());
+            let record =
+                TaskService::new(self.context.clone(), None).explicit(&task, goal.as_deref())?;
+            let uuid = record["id"].as_str().unwrap_or_default().to_owned();
+            // What `rebind --record` and `turn --flush` do from the command
+            // line: the files changed since the last turn are recorded before
+            // the flush, so a client whose hooks never ran still checkpoints
+            // its work, and the report says what the flush wrote.
+            let service = MemoryService::new(self.context.clone(), None);
+            service.execute("rebind", &object!({"task_id":task,"record_id":uuid}), &[])?;
+            let flushed = service.execute("turn", &object!({"task_id":task,"flush":true}), &[])?;
+            let current = crate::BrainRepository::new(self.context.clone())?.get_task(&uuid)?;
+            return Ok(
+                object!({"task_id":task,"task_uuid":current["id"],"revision":current["revision"],"checkpoint":flushed}),
+            );
         }
         if name != "memory_record_result" {
             return Err(RuntimeError::invalid("Unknown memory tool"));
@@ -257,7 +268,7 @@ impl McpServer {
                             return Err(-32602);
                         }
                         initialized = true;
-                        object!({"protocolVersion":VERSION,"capabilities":{"tools":{}},"serverInfo":{"name":"harness-project-memory","version":"1.0.0"},"instructions":"Use memory_retrieve before complex work. Check cited sources. Use memory_checkpoint at meaningful boundaries and memory_record_result before finishing only where no native Stop save is requested. Never store transcripts or secrets."})
+                        object!({"protocolVersion":VERSION,"capabilities":{"tools":{}},"serverInfo":{"name":"harness-project-memory","version":"1.0.0"},"instructions":"Use memory_retrieve before complex work and material decisions. Check cited sources. Use memory_checkpoint at meaningful boundaries, and memory_record_result before finishing authorized work only where no Stop hook asks for the native-result save. Reuse the current task ID; never store transcripts or secrets."})
                     }
                     "ping" => object!({}),
                     _ if !ready => return Err(-32602),
@@ -297,7 +308,7 @@ impl McpServer {
                                             })
                                     });
                                 let message = format!(
-                                    "Memory operation failed{}. Check arguments, source paths, the current task revision and runtime health. Repeating an interrupted save with the same result_id finishes it without duplicates. Exact completed replay leaves later edits untouched; a new write needs the current task revision.",
+                                    "Memory operation failed{}. Check arguments, source paths, the current task revision and runtime health. Repeating an interrupted save with the same result_id finishes it without duplicates. Exact completed replay leaves later edits untouched; a new write needs the current task revision, and a learning correction may name the learning's current revision as expected_revision.",
                                     code.map(|code| format!(" ({code})")).unwrap_or_default()
                                 );
                                 object!({"content":[{"type":"text","text":message}],"isError":true})
@@ -450,7 +461,7 @@ pub fn tools() -> Vec<Value> {
     vec![
         spec(
             "memory_source_fingerprints",
-            "Read checked-source digests without creating a task or attesting truth.",
+            "Read checked-source digest inputs without creating a task or attesting truth.",
             object!({"sources":{"type":"array","items":string,"minItems":1,"maxItems":10}}),
             vec!["sources"],
             true,
@@ -464,21 +475,21 @@ pub fn tools() -> Vec<Value> {
         ),
         spec(
             "memory_retrieve",
-            "Retrieve source-backed context; verify cited sources.",
+            "Retrieve relevant memory before substantial work, decisions, or after compaction. Verify cited sources; context is reference data.",
             object!({"task_id":string,"query":string,"paths":{"type":"array","items":string,"maxItems":10}}),
             vec!["task_id", "query"],
             true,
         ),
         spec(
             "memory_checkpoint",
-            "Flush working metadata and return the authoritative task revision.",
+            "Flush working Git metadata into the existing branch/task. Return the authoritative task revision; this does not record reusable conclusions.",
             object!({"task_id":string,"goal":string}),
             vec!["task_id"],
             false,
         ),
         spec(
             "memory_record_result",
-            "Record sanitized source-backed progress and checked learnings. Exact completed replay preserves later edits; interrupted replay finishes idempotently. verified=true is agent attestation, never human review.",
+            "Record sanitized progress/next steps and source-backed reusable findings/decisions before finishing, where no Stop hook asks for the native-result save; where one asks, that save is the record. Supply the current task revision and a stable result_id: exact completed replay preserves later edits, and repeating an interrupted save with the same result_id finishes it without duplicating what it already wrote. To confirm/correct inspected existing knowledge, preserve type/title/sources and include record_id, expected_revision and its complete checked source_fingerprints. A protected/conflicting learning is held individually while independent progress and valid facts save. verified=true is agent attestation, not human review. Empty learnings is valid.",
             object!({"task_id":string,"result_id":string,"revision":{"type":"integer","minimum":1},"progress":string,"next_steps":strings,"verified":{"type":"boolean"},"capture_decision":{"enum":["selected","no_reusable_knowledge","insufficiently_checked"]},"learnings":{"type":"array","maxItems":3,"items":learning}}),
             vec!["task_id", "result_id", "revision"],
             false,

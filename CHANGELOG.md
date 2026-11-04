@@ -43,6 +43,16 @@ edition's own files remain in that edition's changelog.
     checked against current sources (it promotes them to durable memory), no
     duplicate findings, recall-only saves with `learnings=[]`, and where the
     checked fingerprints come from (`memory source-fingerprints`).
+- Memory MCP's `memory_checkpoint` records the work again: as the retired
+  server did, it rebinds the task and runs `turn --flush`, so the files
+  changed since the last turn reach the task and the reply carries the flush
+  report. The native server only flushed turns a hook had already buffered,
+  so a checkpoint from a client whose hooks had not run wrote nothing and
+  answered `"checkpoint": null` at the unchanged revision. The Harness keeps
+  its own admission, which records no Git delta. The server's instructions
+  and tool descriptions are the retired server's again, including that
+  `memory_record_result` is for clients no Stop hook asks for the
+  native-result save.
 
 - Claude Code saves a turn's result without asking again: the Stop request
   names `cd <installation> && echo -E '<JSON>' | memory-bank/bin/infra-engine
