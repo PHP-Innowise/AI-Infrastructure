@@ -1222,6 +1222,54 @@ fn a_hook_asks_with_the_tasks_words_and_file_stems() {
     assert!(query.starts_with("AUTO 7"), "{query}");
 }
 
+/// A branch with no task yet is never searched by its name, as in the
+/// retired runtime: without a change hook-context has no context (exit 3, on
+/// which Cursor retires a stale rule), and with one it gives the warming
+/// notice alone.
+#[test]
+fn hook_context_without_a_task_never_searches_the_branch_name() {
+    let fixture = Fixture::new(false);
+    // An installation ignores its engine and local state, as here.
+    fs::write(
+        fixture.project.join(".gitignore"),
+        "/memory-bank/bin/\n/memory-bank/local/\n",
+    )
+    .unwrap();
+    fixture.git(&[
+        "add",
+        "--",
+        ".gitignore",
+        "memory-bank/README.md",
+        "memory-bank/INDEX.md",
+    ]);
+    completion_git_commit(&fixture, "Baseline");
+    let output = fixture.run(
+        &[
+            "hook-context",
+            "--task-id",
+            "TASK-NONE",
+            "--delivery-profile",
+            "cursor-rule",
+        ],
+        None,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+
+    fs::write(fixture.project.join("specs/notes.md"), "# Notes\n").unwrap();
+    let value = fixture.success(&["hook-context", "--task-id", "TASK-NONE", "--json"], None);
+    assert_eq!(value["kind"], "warming", "{value}");
+    assert_eq!(value["semantic"], json!([]), "{value}");
+    assert!(value.get("query").is_none(), "{value}");
+    assert_eq!(value["changed_files"], 1, "{value}");
+}
+
 /// The prepared-result path the Harness drives works from the command line
 /// too: a prepared save is recorded under its scope, and a replay names that
 /// scope, which the retired CLI required and the native one could not take.

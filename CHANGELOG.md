@@ -101,6 +101,15 @@ edition's own files remain in that edition's changelog.
   that was not saved reaches Cursor through the rule again: Cursor's hook
   answers in JSON only, so the prompt hook marks the last-turn report and
   the next capsule says "native memory result not saved completely".
+- `memory hook-context` (Cursor's rule at session start and after a turn)
+  chooses its capsule as the retired runtime did. Cursor's rule follows the
+  conversation's current topic first; a task (lightweight, bound, or held by
+  the Brain before its first checkpoint) asks with its own state; and a
+  branch with no task yet is never searched by its name: without a change
+  the command has no context (exit 3, and Cursor retires a stale rule
+  instead of writing "query: from branch name only"), with one it gives the
+  warming notice alone. An enforced gate's skip exits 4, so the host keeps
+  its rule, and the capsule's manifest stays local, as before.
 - `memory replay-result` takes `--prepared-scope` again, as the retired CLI
   required. The native CLI did not accept the option, and the runtime
   refuses a receipt-only replay without a scope, so the command could not

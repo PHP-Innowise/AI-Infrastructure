@@ -604,6 +604,74 @@ impl MemoryService {
         }
         Ok(result)
     }
+    /// The capsule a hook asks for without a prompt, chosen as the retired
+    /// runtime chose it. Cursor's rule follows the conversation's current
+    /// topic first; then a lightweight task or a governed one (bound, or held
+    /// by the Brain before its first checkpoint) asks with its own state. A
+    /// branch with no task yet is never searched by its name: without a
+    /// change it has no context, and Cursor retires a stale rule on that
+    /// outcome; with one, it gets the warming notice alone.
+    fn hook_context(&self, request: &Value) -> Result<(HookContext, DeliveryProfile)> {
+        let mut store = self.open_recover(true)?;
+        let mut retrieval = request_retrieval(request)?;
+        let id = required(request, "task_id")?.to_string();
+        let profile = retrieval.delivery_profile;
+        retrieval.entry_point = "hook-context".into();
+        retrieval.limit = 3;
+        retrieval.ephemeral = true;
+        let mut chosen = None;
+        if profile.persistent() {
+            let plan = continuity::topic_begin(&store, &self.context, &id);
+            if let Some(found) = continuity::topic_query(&store, &self.context, &id, &plan) {
+                retrieval.allow_unprovisioned = true;
+                retrieval.automatic_links = true;
+                chosen = Some(found);
+            }
+        }
+        if chosen.is_none() {
+            let provisioned = if self.context.mode == "lightweight" {
+                store.working(&id)?.is_some()
+            } else {
+                checkpoint::served_uuid(Some(&store), &self.context, &id)?.is_some()
+            };
+            if provisioned {
+                if self.context.mode != "lightweight" {
+                    retrieval.allow_unprovisioned = store.binding(&id)?.is_none();
+                    retrieval.automatic_links = true;
+                }
+                chosen = Some(hook_query(&store, &self.context, &id)?);
+            }
+        }
+        let Some((query, source)) = chosen else {
+            let (files, excluded) = checkpoint::changed_paths(&self.context)?;
+            if files.is_empty() {
+                return Ok((HookContext::Nothing, profile));
+            }
+            let pending = store.pending_turns(&id)?.len();
+            return Ok((
+                HookContext::Capsule(Capsule::new(object!({
+                    "kind":"warming","task_id":id,"working":null,
+                    "procedural":[],"semantic":[],"episodic":[],
+                    "changed_files":files.len(),"excluded_files":excluded.len(),"pending_turns":pending,
+                    "warnings":["Governed task not provisioned yet; authoritative persistence starts at the 5-turn boundary."]
+                }))),
+                profile,
+            ));
+        };
+        retrieval.query = query;
+        retrieval.query_source = source;
+        let capsule = retrieval::retrieve(&mut store, &self.context, &retrieval)?;
+        let gate = &capsule.0["gate"];
+        if gate["mode"] == "enforce"
+            && gate["decision"] == "skip"
+            && !(profile.persistent()
+                && ["no-relevant-match", "empty-after-filter"]
+                    .contains(&gate["reason"].as_str().unwrap_or("")))
+        {
+            return Ok((HookContext::Withheld, profile));
+        }
+        Ok((HookContext::Capsule(capsule), profile))
+    }
     fn turn_direct(&self, request: TurnRequest) -> Result<Value> {
         let mut store = self.open_recover(true)?;
         checkpoint::run_turn(&mut store, &self.context, &request)
@@ -744,26 +812,21 @@ impl MemoryService {
                 }
             }
             "refresh" => self.refresh(request_refresh(&request)?),
-            "hook-context" => {
-                let mut store = self.open_recover(true)?;
-                let mut retrieval = request_retrieval(&request)?;
-                let id = required(&request, "task_id")?;
-                let (query, source) = hook_query(&store, &self.context, id)?;
-                retrieval.query = query;
-                retrieval.query_source = source;
-                retrieval.entry_point = "hook-context".into();
-                retrieval.allow_unprovisioned = true;
-                let capsule = retrieval::retrieve(&mut store, &self.context, &retrieval)?;
-                if flag(&request, "json") {
-                    Ok(capsule.0)
-                } else {
-                    Ok(envelope(
-                        capsule::render(&capsule, retrieval.delivery_profile)? + "\n",
-                        capsule.0,
-                        0,
-                    ))
+            "hook-context" => match self.hook_context(&request)? {
+                (HookContext::Capsule(capsule), profile) => {
+                    if flag(&request, "json") {
+                        Ok(capsule.0)
+                    } else {
+                        Ok(envelope(
+                            capsule::render(&capsule, profile)? + "\n",
+                            capsule.0,
+                            0,
+                        ))
+                    }
                 }
-            }
+                (HookContext::Nothing, _) => Ok(envelope(String::new(), Value::Null, 3)),
+                (HookContext::Withheld, _) => Ok(envelope(String::new(), Value::Null, 4)),
+            },
             "get" => {
                 let store = self.open()?;
                 if self.context.mode == "lightweight" {
@@ -1768,6 +1831,14 @@ pub struct RefreshOutcome {
     pub profile: DeliveryProfile,
 }
 
+/// What a hook-context request delivers.
+enum HookContext {
+    Capsule(Capsule),
+    /// A valid branch with no task and no change has no context (exit 3).
+    Nothing,
+    /// An enforced gate skipped the turn; the host keeps what it has (exit 4).
+    Withheld,
+}
 /// stdout=None delegates ordinary value formatting to the CLI. A captured
 /// raw protocol may intentionally supply Some("") and still succeed.
 pub struct CommandOutput {
@@ -1881,20 +1952,22 @@ impl MemoryService {
                     );
                 }
                 "hook-context" => {
-                    let mut store = self.open_recover(true)?;
-                    let mut retrieval = request_retrieval(request)?;
-                    let id = required(request, "task_id")?;
-                    let (query, source) = hook_query(&store, &self.context, id)?;
-                    retrieval.query = query;
-                    retrieval.query_source = source;
-                    retrieval.entry_point = "hook-context".into();
-                    retrieval.allow_unprovisioned = true;
-                    let capsule = retrieval::retrieve(&mut store, &self.context, &retrieval)?;
-                    return CommandOutput::capsule(
-                        &self.context,
-                        capsule,
-                        retrieval.delivery_profile,
-                    );
+                    return match self.hook_context(request)? {
+                        (HookContext::Capsule(capsule), profile) => {
+                            CommandOutput::capsule(&self.context, capsule, profile)
+                        }
+                        (outcome, _) => Ok(CommandOutput {
+                            value: Value::Null,
+                            stdout: Some(String::new()),
+                            stderr: String::new(),
+                            code: if matches!(outcome, HookContext::Nothing) {
+                                3
+                            } else {
+                                4
+                            },
+                            after_delivery: None,
+                        }),
+                    };
                 }
                 _ => {}
             }
