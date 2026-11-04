@@ -817,7 +817,10 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
         ));
         output.push_str(&group.job);
         output.push_str("-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}\n");
-        output.push_str("      - name: Build the native engine\n        run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine\n      - name: Run the catalog group\n        run: |\n          suffix=''\n          if [ \"$RUNNER_OS\" = 'Windows' ]; then suffix='.exe'; fi\n          \"$CARGO_TARGET_DIR/debug/infra-engine$suffix\" check --group \"$NATIVE_CHECK_GROUP\" --strict --base origin/main");
+        // The group's own Cargo builds rewrite this engine in the target
+        // directory, and Windows cannot replace a running executable: the
+        // catalog runs from a copy outside it.
+        output.push_str("      - name: Build the native engine\n        run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine\n      - name: Run the catalog group\n        run: |\n          suffix=''\n          if [ \"$RUNNER_OS\" = 'Windows' ]; then suffix='.exe'; fi\n          engine=\"${RUNNER_TEMP//\\\\//}/infra-check-engine$suffix\"\n          cp \"$CARGO_TARGET_DIR/debug/infra-engine$suffix\" \"$engine\"\n          \"$engine\" check --group \"$NATIVE_CHECK_GROUP\" --strict --base origin/main");
         if oracle {
             output.push_str(" --include-oracles");
         }
@@ -1051,6 +1054,19 @@ mod compiler_workflow_tests {
                 );
                 assert!(job.contains("      CARGO_PROFILE_DEV_DEBUG: \"0\"\n"));
                 assert!(job.contains("\"$CARGO_TARGET_DIR/debug/infra-engine$suffix\""));
+                // Cargo in the group replaces the built engine; Windows refuses
+                // that while the engine runs, so only a copy may run the group.
+                let copy = job[check..]
+                    .find("          cp \"$CARGO_TARGET_DIR/debug/infra-engine$suffix\" \"$engine\"\n")
+                    .unwrap_or_else(|| panic!("{name}: the group runs the built engine"));
+                let run = job[check..]
+                    .find("          \"$engine\" check --group \"$NATIVE_CHECK_GROUP\"")
+                    .unwrap();
+                assert!(copy < run, "{name}");
+                assert!(
+                    job[check..]
+                        .contains("engine=\"${RUNNER_TEMP//\\\\//}/infra-check-engine$suffix\"\n")
+                );
                 assert!(!job[build..check].contains("        if:"), "{name}");
                 assert!(!job.contains("cache-hit"), "{name}");
             }

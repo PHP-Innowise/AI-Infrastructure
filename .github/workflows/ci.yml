@@ -48,7 +48,9 @@ jobs:
         run: |
           suffix=''
           if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
-          "$CARGO_TARGET_DIR/debug/infra-engine$suffix" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
+          engine="${RUNNER_TEMP//\\//}/infra-check-engine$suffix"
+          cp "$CARGO_TARGET_DIR/debug/infra-engine$suffix" "$engine"
+          "$engine" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
   installation:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -83,7 +85,9 @@ jobs:
         run: |
           suffix=''
           if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
-          "$CARGO_TARGET_DIR/debug/infra-engine$suffix" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
+          engine="${RUNNER_TEMP//\\//}/infra-check-engine$suffix"
+          cp "$CARGO_TARGET_DIR/debug/infra-engine$suffix" "$engine"
+          "$engine" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
   links:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -118,7 +122,9 @@ jobs:
         run: |
           suffix=''
           if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
-          "$CARGO_TARGET_DIR/debug/infra-engine$suffix" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
+          engine="${RUNNER_TEMP//\\//}/infra-check-engine$suffix"
+          cp "$CARGO_TARGET_DIR/debug/infra-engine$suffix" "$engine"
+          "$engine" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -158,7 +164,9 @@ jobs:
         run: |
           suffix=''
           if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
-          "$CARGO_TARGET_DIR/debug/infra-engine$suffix" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
+          engine="${RUNNER_TEMP//\\//}/infra-check-engine$suffix"
+          cp "$CARGO_TARGET_DIR/debug/infra-engine$suffix" "$engine"
+          "$engine" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
   mirrors:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -193,7 +201,9 @@ jobs:
         run: |
           suffix=''
           if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
-          "$CARGO_TARGET_DIR/debug/infra-engine$suffix" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
+          engine="${RUNNER_TEMP//\\//}/infra-check-engine$suffix"
+          cp "$CARGO_TARGET_DIR/debug/infra-engine$suffix" "$engine"
+          "$engine" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
   parity:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -228,4 +238,6 @@ jobs:
         run: |
           suffix=''
           if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
-          "$CARGO_TARGET_DIR/debug/infra-engine$suffix" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
+          engine="${RUNNER_TEMP//\\//}/infra-check-engine$suffix"
+          cp "$CARGO_TARGET_DIR/debug/infra-engine$suffix" "$engine"
+          "$engine" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main

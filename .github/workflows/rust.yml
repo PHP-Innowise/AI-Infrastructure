@@ -48,7 +48,9 @@ jobs:
         run: |
           suffix=''
           if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
-          "$CARGO_TARGET_DIR/debug/infra-engine$suffix" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
+          engine="${RUNNER_TEMP//\\//}/infra-check-engine$suffix"
+          cp "$CARGO_TARGET_DIR/debug/infra-engine$suffix" "$engine"
+          "$engine" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
   rust-msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -84,7 +86,9 @@ jobs:
         run: |
           suffix=''
           if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
-          "$CARGO_TARGET_DIR/debug/infra-engine$suffix" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
+          engine="${RUNNER_TEMP//\\//}/infra-check-engine$suffix"
+          cp "$CARGO_TARGET_DIR/debug/infra-engine$suffix" "$engine"
+          "$engine" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
   rust-wasm:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -120,4 +124,6 @@ jobs:
         run: |
           suffix=''
           if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
-          "$CARGO_TARGET_DIR/debug/infra-engine$suffix" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main
+          engine="${RUNNER_TEMP//\\//}/infra-check-engine$suffix"
+          cp "$CARGO_TARGET_DIR/debug/infra-engine$suffix" "$engine"
+          "$engine" check --group "$NATIVE_CHECK_GROUP" --strict --base origin/main

@@ -43,7 +43,9 @@ the maintenance phase:
 ```
 
 Each generated job checks out source, provisions Rust, builds `infra-engine`,
-then runs `infra-engine check --group GROUP --strict --base origin/main`.
+then runs `infra-engine check --group GROUP --strict --base origin/main` from a
+copy of it in the runner's temporary directory: the group's own Cargo builds
+replace the engine in the target directory, which Windows refuses while it runs.
 A missing required tool or input fails a strict run. Skipped work is reported
 separately from passes. Failed command logs are retained, and each failed check
 also prints the last lines of its stdout and stderr on stderr, because a CI job

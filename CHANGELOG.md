@@ -24,6 +24,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- The `native-windows` job tests the workspace. Each generated job ran
+  `infra-engine check` from the engine it had just built in the Cargo target
+  directory; the group's own `cargo test` rebuilds that engine in place, and
+  Windows refuses to remove a running executable, so every run ended in
+  "failed to remove file … infra-engine.exe: Access is denied" before a test
+  ran. Jobs now run the check from a copy in the runner's temporary directory.
 - The creator's probe tests carry their own executable. They copied
   `/usr/bin/true` and `/usr/bin/false` and required each to be a native image
   of at most 1 MiB; on the `ubuntu-26.04` runner, whose coreutils package now
