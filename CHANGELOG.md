@@ -24,6 +24,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Memory Bank retrieval now reads canonical `source_digests`, so editing a
+  cited file marks the saved knowledge as changed and shows the source-check
+  warning. Incremental indexing upgrades older cached metadata transactionally,
+  preserving unfinished turns, working tasks and bindings.
 - Linux nextest runs up to four end-to-end cases together and starts the long
   generator lifecycle first. Windows and other platforms retain the two-case
   limit; installation and executable-copy cases remain serial everywhere.

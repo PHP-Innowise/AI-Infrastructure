@@ -821,6 +821,182 @@ fn public_fixture_store(fixture: &Fixture) -> Store {
     let database = infra_core::storage::default_database(&fixture.context().roots).unwrap();
     Store::open(database, Default::default()).unwrap()
 }
+
+fn promoted_source_finding(fixture: &Fixture) -> String {
+    let config = fixture.project.join("project-brain/config/runtime.json");
+    let mut value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    value["capsule_profile"] = "recall".into();
+    fs::write(config, serde_json::to_vec(&value).unwrap()).unwrap();
+    fixture.start("TASK-FRESHNESS");
+    let saved = fixture.success(
+        &[
+            "record-result",
+            "--task-id",
+            "TASK-FRESHNESS",
+            "--result-id",
+            "source-finding",
+            "--revision",
+            "auto",
+            "--input",
+            "-",
+            "--json",
+        ],
+        Some(&json!({
+            "verified":true,
+            "learnings":[{
+                "type":"finding", "title":"Cobalt guarded retry limit",
+                "consequence":"Cobalt retries stop after the third guarded write.",
+                "sources":["specs/source.md"]
+            }]
+        })),
+    );
+    assert_eq!(saved["promotion"]["promoted"].as_array().unwrap().len(), 1);
+    fixture.success(&["index", "--json"], None);
+    let chunks = fixture.chunks();
+    assert_eq!(chunks.len(), 1);
+    chunks[0]
+        .strip_prefix(&fixture.project)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .replace('\\', "/")
+}
+
+#[test]
+fn promoted_memory_marks_changed_citations_in_retrieve_and_recall_refresh() {
+    let fixture = Fixture::new(true);
+    let chunk = promoted_source_finding(&fixture);
+    let arguments = [
+        "retrieve",
+        "Cobalt guarded retry limit",
+        "--task-id",
+        "TASK-FRESHNESS",
+        "--json",
+    ];
+    let before = fixture.success(&arguments, None);
+    let selected = before["selected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["path"] == chunk)
+        .unwrap();
+    assert!(selected.get("source_changed").is_none());
+    fs::write(
+        fixture.project.join("specs/source.md"),
+        "# Cobalt metadata boundary\nCobalt retries now stop after the fifth guarded write.\n",
+    )
+    .unwrap();
+    let after = fixture.success(&arguments, None);
+    let selected = after["selected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["path"] == chunk)
+        .unwrap();
+    assert_eq!(selected["source_changed"], json!(["specs/source.md"]));
+    let refreshed = fixture.success(
+        &[
+            "refresh",
+            "--host",
+            "codex",
+            "--query",
+            "Cobalt guarded retry limit",
+            "--task-id",
+            "TASK-FRESHNESS",
+            "--ephemeral",
+            "--json",
+        ],
+        None,
+    );
+    let text = refreshed["capsule_text"].as_str().unwrap();
+    assert!(text.contains(&chunk), "{text}");
+    assert!(text.contains("third guarded write"), "{text}");
+    assert!(
+        text.contains("cited file changed: specs/source.md; check it before relying on this"),
+        "{text}"
+    );
+}
+
+#[test]
+fn legacy_memory_index_repairs_fingerprints_incrementally_and_preserves_pending_turns() {
+    let fixture = Fixture::new(true);
+    let chunk = promoted_source_finding(&fixture);
+    public_pending_turn(&fixture, "TASK-FRESHNESS");
+    let store = public_fixture_store(&fixture);
+    let pending = serde_json::to_value(store.pending_turns("TASK-FRESHNESS").unwrap()).unwrap();
+    assert!(!pending.as_array().unwrap().is_empty());
+    store
+        .conn
+        .execute(
+            "UPDATE document_metadata SET source_fingerprints='[]' WHERE path=?1",
+            [&chunk],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "DELETE FROM index_state WHERE key='index-document-format'",
+            [],
+        )
+        .unwrap();
+    drop(store);
+    // No source or chunk edit and no explicit full rebuild: routine indexing
+    // must repair metadata produced by an older engine.
+    fixture.success(&["index", "--incremental", "--json"], None);
+    let store = public_fixture_store(&fixture);
+    let raw: String = store
+        .conn
+        .query_row(
+            "SELECT source_fingerprints FROM document_metadata WHERE path=?1",
+            [&chunk],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let fingerprints: Value = serde_json::from_str(&raw).unwrap();
+    let source = fingerprints
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["path"] == "specs/source.md")
+        .expect("incremental refresh must restore the canonical citation digest");
+    assert_eq!(
+        source["sha256"],
+        infra_core::query::sha256(&fs::read(fixture.project.join("specs/source.md")).unwrap())
+    );
+    assert_eq!(
+        pending,
+        serde_json::to_value(store.pending_turns("TASK-FRESHNESS").unwrap()).unwrap()
+    );
+    let generation = store.state().unwrap()["index-generation"].clone();
+    let rowid: i64 = store
+        .conn
+        .query_row(
+            "SELECT rowid FROM documents WHERE path=?1",
+            [&chunk],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(store);
+    fixture.success(&["index", "--incremental", "--json"], None);
+    let store = public_fixture_store(&fixture);
+    assert_eq!(generation, store.state().unwrap()["index-generation"]);
+    assert_eq!(
+        rowid,
+        store
+            .conn
+            .query_row(
+                "SELECT rowid FROM documents WHERE path=?1",
+                [&chunk],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        pending,
+        serde_json::to_value(store.pending_turns("TASK-FRESHNESS").unwrap()).unwrap()
+    );
+}
+
 fn public_pending_turn(fixture: &Fixture, task_id: &str) -> i64 {
     public_fixture_store(fixture)
         .append_turn(task_id, &["specs/source.md".into()])

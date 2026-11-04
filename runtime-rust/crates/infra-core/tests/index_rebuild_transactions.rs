@@ -299,6 +299,100 @@ fn full_partial_and_noop_refresh_preserve_documents_orphans_and_local_work() {
 }
 
 #[test]
+fn legacy_index_upgrade_rolls_back_with_metadata_and_unfinished_work_on_late_failure() {
+    for ambient in [false, true] {
+        let mut fixture = Fixture::new();
+        fixture
+            .store
+            .conn
+            .execute(
+                "DELETE FROM index_state WHERE key='index-document-format'",
+                [],
+            )
+            .unwrap();
+        if ambient {
+            fixture
+                .store
+                .conn
+                .execute_batch(
+                    "BEGIN IMMEDIATE; UPDATE working_tasks SET progress='outer progress'",
+                )
+                .unwrap();
+        }
+        let observed = fixture.install_source_state_fault();
+        let before = database_snapshot(&fixture.store.conn);
+        let local = local_state(&fixture.store.conn);
+        let error = index::refresh_index(&mut fixture.store, &fixture.context, true).unwrap_err();
+        assert!(
+            observed.load(Ordering::SeqCst),
+            "unchanged sources must be reindexed for the legacy format"
+        );
+        assert_eq!(error.kind, ErrorKind::Unavailable);
+        assert_eq!(before, database_snapshot(&fixture.store.conn));
+        assert_eq!(local, local_state(&fixture.store.conn));
+        assert_eq!(fixture.store.conn.is_autocommit(), !ambient);
+        fixture
+            .store
+            .conn
+            .execute_batch("DROP TRIGGER temp.index_rebuild_fault")
+            .unwrap();
+        assert_eq!(fixture.refresh(true).documents, 3);
+        assert!(
+            fixture
+                .store
+                .state()
+                .unwrap()
+                .contains_key("index-document-format")
+        );
+        assert_eq!(local, local_state(&fixture.store.conn));
+        if ambient {
+            fixture.store.conn.execute_batch("ROLLBACK").unwrap();
+            assert!(
+                !fixture
+                    .store
+                    .state()
+                    .unwrap()
+                    .contains_key("index-document-format")
+            );
+        }
+    }
+}
+
+#[test]
+fn legacy_empty_index_still_commits_the_new_document_format() {
+    let mut fixture = Fixture::new();
+    for name in ["a", "b", "c"] {
+        fs::remove_file(fixture.directory.0.join(format!("docs/{name}.md"))).unwrap();
+    }
+    assert_eq!(fixture.refresh(false).documents, 0);
+    fixture
+        .store
+        .conn
+        .execute(
+            "UPDATE index_state SET value='older-format' WHERE key='index-document-format'",
+            [],
+        )
+        .unwrap();
+    let generation = fixture.store.state().unwrap()["index-generation"].clone();
+    let local = local_state(&fixture.store.conn);
+    assert_eq!(fixture.refresh(true).documents, 0);
+    assert_ne!(
+        generation,
+        fixture.store.state().unwrap()["index-generation"]
+    );
+    assert_ne!(
+        Some("older-format"),
+        fixture
+            .store
+            .state()
+            .unwrap()
+            .get("index-document-format")
+            .map(String::as_str)
+    );
+    assert_eq!(local, local_state(&fixture.store.conn));
+}
+
+#[test]
 fn failed_full_and_partial_rebuilds_restore_all_rows_with_or_without_an_ambient_transaction() {
     for ambient in [false, true] {
         for incremental in [false, true] {

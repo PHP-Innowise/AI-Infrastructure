@@ -14,6 +14,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+// Older indexes omitted canonical Memory Bank citation digests. Rebuild only
+// derived rows once; retain working tasks, pending turns and their bindings.
+const INDEX_DOCUMENT_FORMAT: &str = "source-digests-v1";
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Exclusion {
     pub path: String,
@@ -355,7 +359,8 @@ pub fn record_eligibility(
 }
 fn memory_fingerprints(metadata: &Value) -> Value {
     metadata
-        .get("chunk_source_digests")
+        .get("source_digests")
+        .or_else(|| metadata.get("chunk_source_digests"))
         .or_else(|| metadata.get("source_fingerprints"))
         .filter(|value| value.is_array())
         .cloned()
@@ -974,6 +979,8 @@ pub fn refresh_index(
     let scan_started = std::time::Instant::now();
     let config = RuntimeConfig::load(&context.roots)?;
     let stored = store.state()?;
+    let current_format =
+        stored.get("index-document-format").map(String::as_str) == Some(INDEX_DOCUMENT_FORMAT);
     let config_fingerprint = sha256(serde_json::to_string(&config.value)?.as_bytes());
     let policy_fingerprint = crate::domain::secret_policy_fingerprint()?;
     let effective = effective_canonical_edition(
@@ -991,6 +998,7 @@ pub fn refresh_index(
         std::time::SystemTime::now(),
     )?;
     let reusable = if incremental
+        && current_format
         && stored.get("config-fingerprint") == Some(&config_fingerprint)
         && stored.get("secret-policy-fingerprint") == Some(&policy_fingerprint)
         && stored.get("skill-tree-fingerprint") == Some(&skill_fingerprint)
@@ -1016,7 +1024,8 @@ pub fn refresh_index(
         .collect::<Vec<_>>();
     let brain_digest = sha256(serde_json::to_string(&brain_documents)?.as_bytes());
     let existing = paths(&store.conn)?;
-    let unchanged = existing == current
+    let unchanged = current_format
+        && existing == current
         && discovery
             .documents
             .iter()
@@ -1144,6 +1153,7 @@ pub fn refresh_index(
                 }
             }
             let mut state = discovery.extra_state.clone();
+            state.insert("index-document-format".into(), INDEX_DOCUMENT_FORMAT.into());
             state.insert("config-fingerprint".into(), config_fingerprint.clone());
             state.insert("skill-tree-fingerprint".into(), skill_fingerprint.clone());
             state.insert("secret-policy-fingerprint".into(), policy_fingerprint.clone());
