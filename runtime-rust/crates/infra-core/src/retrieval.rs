@@ -1277,6 +1277,7 @@ fn retrieve_inner(
         &warnings,
     )?;
     attach_local_working(store, context, request, &mut proposals)?;
+    let selector_prepared = preparer.is_some();
     if let Some(preparer) = preparer {
         crate::excerpts::prepare_with(
             &store.conn,
@@ -1557,6 +1558,26 @@ fn retrieve_inner(
     });
     trace.boundary("pack_omitted", &pack_omitted);
     episodes.retain(|episode| shown_episodes.contains(&episode.id));
+    // The retired renderer cut excerpts from the capsule it delivered, so the
+    // room their growth shares counted only the documents still in it. One the
+    // pack dropped (a changelog past its slot, a fourth result) spent that
+    // room here and kept the best excerpts from growing; they are prepared
+    // again for what remains.
+    if !selector_prepared
+        && capsule.1.as_ref().is_some_and(|prepared| {
+            prepared
+                .excerpts
+                .keys()
+                .any(|key| match key.strip_prefix("episode ") {
+                    Some(id) => id
+                        .parse::<i64>()
+                        .map_or(true, |id| !shown_episodes.contains(&id)),
+                    None => !shown.contains(key),
+                })
+        })
+    {
+        capsule.prepare(&store.conn, &selected)?;
+    }
     identities = selected.iter().map(receipts::identity).collect();
     identities.extend(
         episodes

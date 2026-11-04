@@ -377,16 +377,87 @@ fn file_stem(path: &str) -> &str {
         _ => name,
     }
 }
+/// A raw prompt reduced to its most informative words, as the retired runtime
+/// distilled it: the prompt's plain words, each once; words neither the
+/// documents nor the local episodes hold, and words most of them hold, are
+/// dropped (all held ones stay when that leaves none, the prompt's head when
+/// none is held); the 24 rarest stay, in prompt order. Rarity counts the
+/// episodes beside the documents, so a word the recorded history repeats is
+/// as common as it is. Aliases and expansions join when the query is searched.
 pub fn distill_query(conn: &Connection, prompt: &str) -> Result<String> {
-    let tokens = informative_tokens(conn, expand_query_tokens(conn, query_tokens(prompt)?)?)?;
-    let counts = frequencies(conn, &tokens)?;
-    let mut ranked = tokens.into_iter().enumerate().collect::<Vec<_>>();
-    ranked.sort_by_key(|(index, token)| (counts.get(token).copied().unwrap_or(0), *index));
-    ranked.truncate(24);
-    ranked.sort_by_key(|(index, _)| *index);
-    Ok(ranked
+    static WORDS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let words = WORDS
+        .get_or_init(|| regex::Regex::new(r"[\p{L}\p{N}_]+").expect("constant query word grammar"));
+    let mut tokens = Vec::<String>::new();
+    let mut seen = BTreeSet::new();
+    for word in words.find_iter(prompt) {
+        if seen.insert(folded(word.as_str())) {
+            tokens.push(word.as_str().into());
+        }
+    }
+    if tokens.is_empty() {
+        return Ok(prompt.into());
+    }
+    let documents = conn.query_row("SELECT COUNT(*) FROM documents", [], |row| {
+        row.get::<_, usize>(0)
+    })?;
+    let episodes = conn
+        .query_row("SELECT COUNT(*) FROM episodes", [], |row| {
+            row.get::<_, usize>(0)
+        })
+        .unwrap_or(0);
+    let total = documents + episodes;
+    let head = |tokens: &[String]| {
+        tokens
+            .iter()
+            .take(24)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    if total == 0 {
+        return Ok(head(&tokens));
+    }
+    let mut counts = frequencies(conn, &tokens)?;
+    if episodes > 0 {
+        let mut statement =
+            conn.prepare("SELECT COUNT(*) FROM episodes WHERE episodes MATCH ?1")?;
+        for token in &tokens {
+            let count = statement
+                .query_row([fts_expression(std::slice::from_ref(token))], |row| {
+                    row.get::<_, usize>(0)
+                })
+                .unwrap_or(0);
+            *counts.entry(token.clone()).or_default() += count;
+        }
+    }
+    let matched = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(position, token)| {
+            let count = counts.get(token).copied().unwrap_or(0);
+            (count > 0).then(|| (count, position, token.clone()))
+        })
+        .collect::<Vec<_>>();
+    let informative = matched
+        .iter()
+        .filter(|(count, _, _)| *count as f64 <= total as f64 * 0.5)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut pool = if informative.is_empty() {
+        matched
+    } else {
+        informative
+    };
+    if pool.is_empty() {
+        return Ok(head(&tokens));
+    }
+    pool.sort();
+    pool.truncate(24);
+    pool.sort_by_key(|(_, position, _)| *position);
+    Ok(pool
         .into_iter()
-        .map(|(_, token)| token)
+        .map(|(_, _, token)| token)
         .collect::<Vec<_>>()
         .join(" "))
 }
@@ -1094,5 +1165,49 @@ mod query_work_tests {
         );
         conn.execute_batch("DROP TABLE documents").unwrap();
         assert!(frequencies(&conn, &[]).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod distill_tests {
+    use super::*;
+
+    /// A word half the documents hold stays informative only while the
+    /// recorded episodes do not repeat it: rarity counts both, as the retired
+    /// distillation did.
+    #[test]
+    fn distillation_counts_episodes_beside_documents() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE documents USING fts5(content);
+             CREATE VIRTUAL TABLE episodes USING fts5(summary);",
+        )
+        .unwrap();
+        for text in [
+            "review alpha",
+            "review beta",
+            "review gamma",
+            "delta",
+            "epsilon zircon",
+            "zeta",
+        ] {
+            conn.execute("INSERT INTO documents(content) VALUES (?1)", [text])
+                .unwrap();
+        }
+        for text in ["review one", "review two", "review three", "review four"] {
+            conn.execute("INSERT INTO episodes(summary) VALUES (?1)", [text])
+                .unwrap();
+        }
+        assert_eq!(distill_query(&conn, "review the zircon").unwrap(), "zircon");
+        conn.execute("DELETE FROM episodes", []).unwrap();
+        assert_eq!(
+            distill_query(&conn, "review the zircon").unwrap(),
+            "review zircon"
+        );
+        // A prompt of words nothing holds keeps its head, word by word.
+        assert_eq!(
+            distill_query(&conn, "unseen, words!").unwrap(),
+            "unseen words"
+        );
     }
 }

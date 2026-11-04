@@ -110,6 +110,24 @@ edition's own files remain in that edition's changelog.
   instead of writing "query: from branch name only"), with one it gives the
   warming notice alone. An enforced gate's skip exits 4, so the host keeps
   its rule, and the capsule's manifest stays local, as before.
+- A prompt's query is distilled as the retired runtime distilled it: its
+  plain words, with rarity counted over the local episodes beside the
+  documents. The native distillation counted documents only and ran the
+  prompt through aliases and expansions first, so a word the recorded
+  history repeats stayed in the query: on a copy of a client project "code
+  review checklist" kept "review" (74 of 152 documents, but 92 of 180
+  documents and episodes) and returned two documents where the retired
+  runtime returned none. Since excerpts are weighted by the distilled query,
+  the same change restored which section a long document is quoted from.
+- Excerpts grow into the room the delivered capsule leaves, as the retired
+  renderer measured it. The native runtime measured that room before the
+  capsule was packed, so a document the pack then dropped (a changelog past
+  its slot) still spent it and the best-ranked excerpts stopped growing: a
+  600-character window where the retired runtime quoted 1,200 characters
+  from a better place. With both changes, 35 of 35 capsules on a copy of
+  the client project with the largest memory are identical to the retired
+  runtime's (18 before), and 29, 26, 24, 24 and 15 of as many on five other
+  client copies, with every active task's hook capsule identical too.
 - Project Brain records are read active first and archived after, each in
   path order, as the retired runtime read them, so `memory validate` lists
   the stale records an agent works with before the archived ones. The
