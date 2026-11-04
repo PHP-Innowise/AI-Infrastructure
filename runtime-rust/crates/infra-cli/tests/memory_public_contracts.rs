@@ -917,6 +917,66 @@ fn promoted_memory_marks_changed_citations_in_retrieve_and_recall_refresh() {
     );
 }
 
+/// A record whose cited file changed or went away is intact: validation lists
+/// it with what retrieval does about it, as the retired runtime did, and
+/// still passes.
+#[test]
+fn validate_lists_records_whose_citations_moved_without_failing() {
+    let fixture = Fixture::new(true);
+    promoted_source_finding(&fixture);
+    let clean = fixture.success(&["validate", "--json"], None);
+    assert_eq!(clean["valid"], true, "{clean}");
+    assert_eq!(clean["stale"], json!([]), "{clean}");
+    let source = fixture.project.join("specs/source.md");
+    fs::write(
+        &source,
+        "# Cobalt metadata boundary\nCobalt retries now stop after the fifth guarded write.\n",
+    )
+    .unwrap();
+    let changed = fixture.success(&["validate", "--json"], None);
+    assert_eq!(changed["valid"], true, "{changed}");
+    let states = changed["stale_states"].as_array().unwrap();
+    assert!(
+        states.iter().all(|row| row["state"] == "changed")
+            && states.iter().any(|row| {
+                row["path"]
+                    .as_str()
+                    .unwrap()
+                    .replace('\\', "/")
+                    .contains("/project-brain/dynamic/findings/")
+            }),
+        "{changed}"
+    );
+    assert_eq!(changed["stale"].as_array().unwrap().len(), states.len());
+    let output = fixture.run(&["validate"], None);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.starts_with("Project Brain validation passed.\n")
+            && text.contains(": a cited source changed after the record was written; retrieval serves it marked for checking\n"),
+        "{text}"
+    );
+    // A deleted citation also breaks the durable chunk promoted from the
+    // finding, which validation reports as an error; the record is listed.
+    fs::remove_file(&source).unwrap();
+    let output = fixture.run(&["validate", "--json"], None);
+    let missing: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        missing["stale_states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["state"] == "source-missing"),
+        "{missing}"
+    );
+    let output = fixture.run(&["validate"], None);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(": a cited source no longer exists; retrieval leaves the record out\n"),
+        "{text}"
+    );
+}
+
 #[test]
 fn legacy_memory_index_repairs_fingerprints_incrementally_and_preserves_pending_turns() {
     let fixture = Fixture::new(true);

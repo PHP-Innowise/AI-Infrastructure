@@ -37,11 +37,42 @@ fn save_command(continuation: &str) -> String {
         .unwrap_or_else(|| panic!("no save command in: {continuation}"));
     let command = rest.lines().next().unwrap();
     assert!(command.ends_with("--json"), "{command}");
+    // Claude Code refuses a program fed a descriptor it names once a session
+    // entered a worktree: a save naming the worktree reads stdin unnamed.
     assert!(
-        command.contains(" --input - "),
+        command.contains(" --input - ") || command.contains(" --project "),
         "the result travels on stdin: {command}"
     );
     command.into()
+}
+
+/// Claude Code runs a command without asking only when each part is a cd or
+/// a program its allow rules name, and the command holds no subshell, { }
+/// group, heredoc, substitution or printf; an absolute engine path matched no
+/// installed rule, so every save asked, and `claude -p` refused it.
+fn assert_claude_runs_without_asking(command: &str, project: &Path) {
+    let settings: Value =
+        serde_json::from_slice(&fs::read(project.join(".claude/settings.json")).unwrap()).unwrap();
+    let allowed = settings["permissions"]["allow"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|rule| rule.as_str()?.strip_prefix("Bash(")?.strip_suffix(":*)"))
+        .map(|prefix| format!("{prefix} "))
+        .collect::<Vec<_>>();
+    let shape = command.replace("'<JSON>'", "JSON");
+    for asked in ["(", ")", "{", "}", "<<", "$", "`", ";", "printf"] {
+        assert!(
+            !shape.contains(asked),
+            "Claude Code asks before {asked:?}: {command}"
+        );
+    }
+    for part in shape.split(" && ").flat_map(|part| part.split(" | ")) {
+        assert!(
+            part.starts_with("cd ") || allowed.iter().any(|prefix| part.starts_with(prefix)),
+            "no installed allow rule covers {part:?} of: {command}"
+        );
+    }
 }
 
 struct Project {
@@ -213,7 +244,19 @@ impl Project {
     /// One turn: the prompt's capsule, the Stop continuation, the save the
     /// model would run, and the Stop that follows it.
     fn turn(&self, host: &str, session: &str, prompt: &str, result: Option<Value>) -> String {
-        let base = json!({"session_id": session, "cwd": self.path});
+        self.turn_in(host, session, &self.path, prompt, result)
+    }
+
+    /// A turn of a session working in `cwd`, whose hooks this checkout runs.
+    fn turn_in(
+        &self,
+        host: &str,
+        session: &str,
+        cwd: &Path,
+        prompt: &str,
+        result: Option<Value>,
+    ) -> String {
+        let base = json!({"session_id": session, "cwd": cwd});
         let mut asked = base.clone();
         asked["hook_event_name"] = "UserPromptSubmit".into();
         asked["prompt"] = prompt.into();
@@ -237,10 +280,20 @@ impl Project {
             } else {
                 // Hook feedback, not a block: Claude Code labels a block an error.
                 assert!(output.get("decision").is_none(), "{output}");
-                output["hookSpecificOutput"]["additionalContext"]
+                let continuation = output["hookSpecificOutput"]["additionalContext"]
                     .as_str()
                     .unwrap()
-                    .to_string()
+                    .to_string();
+                // The spelling its allow rules cover, never an engine path.
+                let command = save_command(&continuation);
+                assert!(
+                    command.starts_with("cd ")
+                        && command.contains(
+                            "echo -E '<JSON>' | memory-bank/bin/infra-engine memory --root "
+                        ),
+                    "{command}"
+                );
+                continuation
             };
             self.save(&continuation, &result);
         }
@@ -249,15 +302,29 @@ impl Project {
         capsule
     }
 
-    /// Runs the save a continuation asks for with `result` on its stdin.
+    /// Runs the save a continuation asks for: Claude Code's command carries
+    /// `result` in place of <JSON> and runs in bash, as Claude Code runs it;
+    /// the others read `result` on their stdin.
     fn save(&self, continuation: &str, result: &Value) {
-        let mut command = self.command("sh");
-        let saved = run(
-            command
-                .args(["-c", &save_command(continuation)])
-                .stdin(Stdio::piped()),
-            &serde_json::to_vec(result).unwrap(),
-        );
+        let command = save_command(continuation);
+        let data = serde_json::to_string(result).unwrap();
+        let saved = if command.contains("'<JSON>'") {
+            assert_claude_runs_without_asking(&command, &self.path);
+            let quoted = format!("'{}'", data.replace('\'', "'\\''"));
+            run(
+                self.command("bash")
+                    .args(["-c", &command.replace("'<JSON>'", &quoted)])
+                    .stdin(Stdio::piped()),
+                b"",
+            )
+        } else {
+            run(
+                self.command("sh")
+                    .args(["-c", &command])
+                    .stdin(Stdio::piped()),
+                data.as_bytes(),
+            )
+        };
         assert!(saved.status.success(), "save: {}", described(&saved));
     }
 
@@ -269,6 +336,23 @@ impl Project {
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .filter(|event| event["stage"] == "save" && event["event"] == "saved")
             .count()
+    }
+
+    /// The native journal's Stop lines as `event:code`.
+    fn stops(&self) -> Vec<String> {
+        fs::read_to_string(self.path.join("memory-bank/local/native-results.ndjson"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|row| row["stage"] == "stop")
+            .map(|row| {
+                format!(
+                    "{}:{}",
+                    row["event"].as_str().unwrap_or(""),
+                    row["code"].as_str().unwrap_or("")
+                )
+            })
+            .collect()
     }
 
     fn validate(&self) {
@@ -372,6 +456,13 @@ fn follow_a_task(host: &str) {
     assert!(!capsule.contains("Refunds started"), "{capsule}");
 
     assert_eq!(project.saves(), 3, "every save reached the journal once");
+    // The funnel reads why each Stop ended as it did: three continuations
+    // found their save, two turns left the request unanswered.
+    let stops = project.stops();
+    let count = |line: &str| stops.iter().filter(|stop| *stop == line).count();
+    assert_eq!(count("requested:"), 5, "{stops:?}");
+    assert_eq!(count("skipped:recovery-saved"), 3, "{stops:?}");
+    assert_eq!(count("failed:unsaved"), 2, "{stops:?}");
     project.validate();
 }
 
@@ -452,6 +543,124 @@ fn cursor_keeps_the_last_prompts_rule_through_a_save_continuation() {
     assert!(
         project.ignored(".cursor/rules/working-memory.mdc"),
         "the rendered rule is never committed"
+    );
+}
+
+/// The first request of a new Cursor chat carries the rule its session start
+/// rendered, since Cursor reads the rule before the prompt hook runs. The
+/// start renders the branch task's memory; it once asked for an empty task
+/// and removed the rule, so every new chat began without memory.
+#[test]
+fn cursor_session_start_renders_the_branch_tasks_rule() {
+    let project = Project::new();
+    let cursor = |role: &str, chat: &str, generation: &str, mut payload: Value| {
+        payload["conversation_id"] = chat.into();
+        payload["generation_id"] = generation.into();
+        project.hook("cursor", role, &payload)
+    };
+    let stop = |turn: u64| {
+        let output = cursor(
+            "working-memory-write",
+            "first",
+            "g1",
+            json!({"hook_event_name": "stop", "status": "completed", "loop_count": turn}),
+        );
+        serde_json::from_str::<Value>(output.trim()).unwrap_or(Value::Null)["followup_message"]
+            .as_str()
+            .map(str::to_string)
+    };
+    cursor(
+        "working-memory-read",
+        "first",
+        "g1",
+        json!({"hook_event_name": "beforeSubmitPrompt", "prompt": "How are invoices numbered?"}),
+    );
+    let followup = stop(0).expect("the stop asks for a save");
+    project.save(
+        &followup,
+        &json!({"progress": "Read src/Invoice.php; invoice numbering is per tenant.",
+            "verified": true, "learnings": []}),
+    );
+    stop(1);
+    let rule = project.path.join(".cursor/rules/working-memory.mdc");
+    assert!(rule.is_file(), "the prompt rendered the rule");
+    // A checkout whose rule was never rendered: only the start can render it.
+    fs::remove_file(&rule).unwrap();
+
+    cursor(
+        "local-context",
+        "second",
+        "s1",
+        json!({"hook_event_name": "sessionStart"}),
+    );
+    let text = fs::read_to_string(&rule).expect("the session start rendered the rule");
+    assert!(
+        text.contains(&format!("(task: {FIRST})"))
+            && text.contains("progress: Read src/Invoice.php; invoice numbering is per tenant."),
+        "{text}"
+    );
+}
+
+/// Claude Code names the main checkout as the project directory of a session
+/// that works in a linked worktree: the main checkout's hooks serve the
+/// worktree, and the save they ask for runs from the main checkout, naming
+/// the worktree. That save was refused as naming no served worktree.
+#[test]
+fn claude_code_saves_and_recalls_in_a_worktree_the_main_checkout_serves() {
+    let project = Project::new();
+    let worktree = project.root.join("shop credit notes");
+    project.git(&[
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        "feature/SHOP-9-credit-notes",
+        worktree.to_str().unwrap(),
+    ]);
+    let worktree = infra_core::fs::canonicalize(&worktree).unwrap();
+    // The worktree has no memory-bank/bin/: the session hears the engine
+    // that runs the CLI the policy and skills name.
+    let banner = project.hook(
+        "claude",
+        "local-context",
+        &json!({"session_id": "worktree-one", "cwd": worktree,
+            "hook_event_name": "SessionStart", "source": "startup"}),
+    );
+    let engine = project.path.join("memory-bank/bin/infra-engine");
+    assert!(
+        banner.contains(&format!(
+            "Memory CLI: this worktree has none - run the commands the policy and skills name with `{} memory` in place of `memory-bank/bin/infra-engine memory`.",
+            engine.display()
+        )),
+        "{banner}"
+    );
+    project.turn_in(
+        "claude",
+        "worktree-one",
+        &worktree,
+        "Do credit notes keep the invoice date?",
+        Some(
+            json!({"progress": "Credit notes keep the invoice date.", "verified": true,
+            "learnings": [], "next_steps": ["Add the CreditNote class."]}),
+        ),
+    );
+    let capsule = project.turn_in(
+        "claude",
+        "worktree-two",
+        &worktree,
+        "Continue with credit notes.",
+        None,
+    );
+    assert!(
+        capsule.contains("feature/SHOP-9-credit-notes")
+            && capsule.contains("Credit notes keep the invoice date.")
+            && capsule.contains("Add the CreditNote class."),
+        "{capsule}"
+    );
+    assert_eq!(
+        project.saves(),
+        1,
+        "the worktree's save reached the journal"
     );
 }
 

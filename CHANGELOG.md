@@ -24,6 +24,47 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Claude Code saves a turn's result without asking again: the Stop request
+  names `cd <installation> && echo -E '<JSON>' | memory-bank/bin/infra-engine
+  memory ...`, the spelling the installed
+  `Bash(memory-bank/bin/infra-engine memory:*)` rule allows, as the retired
+  runtime did. The absolute engine path the native runtime gave matched no
+  rule, so Claude Code asked after every answer and refused the save under
+  `claude -p`. A worktree session reads the result without `--input -`;
+  `native-result --skip` no longer waits on standard input. Codex and Cursor
+  requests are unchanged.
+- Claude Code saves from the other places a session works as well:
+  - below the project root, the user-level dispatcher runs the project's own
+    engine for the project's hooks, as a session at the root does, so the
+    request names the engine the dispatcher's memory-command check allows;
+  - in a linked worktree the main checkout serves, `native-stop` accepts
+    `--entered` again (the CLI schema had lost it, so such a Stop exited 2 and
+    asked nothing), and `--project` naming that worktree is accepted from the
+    main checkout, where the save runs, as the retired runtime accepted it;
+  - an attached session's settings allow the memory command of the engine
+    its hooks are bound to, which the save names by its absolute path.
+- A session in a worktree the main checkout serves, or started below the
+  project root, again hears at its start which engine runs the memory CLI
+  the policy and skills name (`Memory CLI: ... in place of
+  memory-bank/bin/infra-engine memory`): neither place has that relative
+  path, so `/checkpoint` and other explicit memory commands failed there.
+- A new Cursor chat starts with the branch task's memory rule again. Since
+  the hook speed-up its session start rendered the rule for an empty task,
+  removed it, and the chat's first request went without memory, because
+  Cursor reads the rule before the prompt hook runs.
+- `memory validate` again lists records whose cited source changed, was
+  deleted or has no stored digest, with what retrieval does about each
+  (`stale` and `stale_states` in JSON); they do not fail validation.
+- The native result journal again keeps the codes `docs/MEMORY-INTEGRATION.md`
+  lists: why a prompt or Stop asked nothing (`skipped` with `not-armed`,
+  `plan-mode`, `task-completed`, `host-refused`, ...), how a continuation
+  settled its request (`skipped` `recovery-saved`; `failed` with `unsaved`,
+  `incomplete` or `host-refused`; `held` `unconfirmed`), what the last request
+  became when a prompt warns (`previous-failed`, `previous-in-flight`, ...),
+  how a save landed (`repeat`, `late`, `spooled`, `in-flight`, `rebased`) and
+  whether a request was brief. The native runtime had logged every skip and
+  settlement bare, so the funnel report counted no failed or held Stop and
+  troubleshooting found no `host-refused`.
 - Memory Bank retrieval now reads canonical `source_digests`, so editing a
   cited file marks the saved knowledge as changed and shows the source-check
   warning. Incremental indexing upgrades older cached metadata transactionally,

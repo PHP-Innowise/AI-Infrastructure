@@ -940,13 +940,29 @@ pub fn run(host: &str, store: &Path, hook: &str, input: &[u8]) -> Result<Output>
                 "--root".into(),
                 selected.root.display().to_string(),
             ];
-            process::engine(
-                &args,
-                &selected.project,
-                input,
-                declared.timeout,
-                &environment,
-            )?
+            // The project's own engine runs its hooks, as it does for a
+            // session at the root: the save a Stop asks for then names the
+            // engine the project's allow rules and this dispatcher's memory
+            // command check admit, not this store's copy.
+            let engine = hooks::installed_engine(&selected.root);
+            if engine.is_file() {
+                process::run(
+                    &engine,
+                    &args,
+                    &selected.project,
+                    input,
+                    declared.timeout,
+                    &environment,
+                )?
+            } else {
+                process::engine(
+                    &args,
+                    &selected.project,
+                    input,
+                    declared.timeout,
+                    &environment,
+                )?
+            }
         }
         ProjectLaunch::Script(name) => {
             let path = selected

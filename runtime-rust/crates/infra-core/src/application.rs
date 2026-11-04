@@ -619,7 +619,30 @@ impl MemoryService {
                 }
             }
         }
-        Ok(object!({"valid":errors.is_empty(),"records":inventory.records.len(),"errors":errors}))
+        // A record whose cited file changed is intact: retrieval serves it
+        // marked for checking. It is listed, archived ones too, and does not
+        // fail validation the way a broken record does.
+        let mut stale = Vec::new();
+        let mut states = Vec::new();
+        for image in &inventory.records {
+            let mut record = image.record.clone();
+            if record.get("source_fingerprints").is_none() {
+                record["source_fingerprints"] = object!([]);
+            }
+            // A record whose freshness cannot be read is not listed.
+            if let Ok(false) = domain::sources_are_fresh(&self.context.roots, &record) {
+                let state = domain::citation_problem(&self.context.roots, &record)
+                    .ok()
+                    .flatten()
+                    .unwrap_or("changed");
+                let path = image.path.display().to_string();
+                states.push(object!({"path":path,"state":state}));
+                stale.push(path);
+            }
+        }
+        Ok(
+            object!({"valid":errors.is_empty(),"records":inventory.records.len(),"errors":errors,"stale":stale,"stale_states":states}),
+        )
     }
     pub fn execute(&self, operation: &str, request: &Value, input: &[u8]) -> Result<Value> {
         let operation = operation.replace('_', "-");

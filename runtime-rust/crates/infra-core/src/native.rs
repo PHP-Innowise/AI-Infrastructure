@@ -348,10 +348,34 @@ impl NativeService {
         })();
         let _ = result;
     }
-    fn observed(&self, stage: &str, host: Option<Host>, result: Result<Value>) -> Result<Value> {
-        match &result {
+    /// Why `enabled` is false, as the code a journal line keeps.
+    fn disabled(&self) -> &'static str {
+        if self.context.mode != "governed" {
+            "not-governed"
+        } else if std::env::var("CONTEXT_CAPSULE_DELIVERED").as_deref() == Ok("1") {
+            "capsule-delivered"
+        } else {
+            "recovery-session"
+        }
+    }
+    fn observed(
+        &self,
+        stage: &str,
+        host: Option<Host>,
+        mut result: Result<Value>,
+    ) -> Result<Value> {
+        match &mut result {
             Ok(value) => {
-                let event = if value["armed"] == true {
+                // The journal's event and code: the funnel report, the host
+                // benchmark and troubleshooting read why a Stop asked nothing
+                // or how a continuation settled the request.
+                let noted = value
+                    .as_object_mut()
+                    .and_then(|map| map.remove("_journal"))
+                    .unwrap_or(Value::Null);
+                let event = if let Some(event) = noted["event"].as_str() {
+                    event
+                } else if value["armed"] == true {
                     "armed"
                 } else if value["continuation"] == true {
                     "continuation"
@@ -365,7 +389,7 @@ impl NativeService {
                 } else {
                     "skipped"
                 };
-                self.journal(host, stage, event, None, &Value::Null);
+                self.journal(host, stage, event, noted["code"].as_str(), &noted);
             }
             Err(error) => self.journal(
                 host,
@@ -380,24 +404,32 @@ impl NativeService {
     pub fn begin(&self, task: &str, host: Host, payload: &Value) -> Result<Value> {
         let outcome = (|| {
             let task = results::task_id(task)?;
-            if !self.enabled()
-                || self.setting(
-                    "CONTEXT_NATIVE_RESULT_REQUEST",
-                    "native_result_request",
-                    "every-turn",
-                    &["every-turn", "off"],
-                )? == "off"
+            if !self.enabled() {
+                return Ok(noted(object!({"armed":false}), "skipped", self.disabled()));
+            }
+            if self.setting(
+                "CONTEXT_NATIVE_RESULT_REQUEST",
+                "native_result_request",
+                "every-turn",
+                &["every-turn", "off"],
+            )? == "off"
             {
-                return Ok(object!({"armed":false}));
+                return Ok(noted(object!({"armed":false}), "skipped", "switched-off"));
             }
             let Some(key) = self.key(&task, host, payload)? else {
-                return Ok(object!({"armed":false}));
+                return Ok(noted(object!({"armed":false}), "skipped", "no-session-id"));
             };
             let brain = self.results.brain()?;
             let _guard = brain.lock()?;
+            // A state this runtime cannot read - another version wrote it, or
+            // it is damaged - is replaced by the new request.
+            let mut unreadable = false;
             let mut previous = match self.read_state(&key, None) {
                 Ok(state) => state,
-                Err(error) if error.refusal_code() == "native-result:invalid-state" => None,
+                Err(error) if error.refusal_code() == "native-result:invalid-state" => {
+                    unreadable = true;
+                    None
+                }
                 Err(error) => return Err(error),
             };
             let aside_key = Self::aside(&key);
@@ -413,7 +445,7 @@ impl NativeService {
                     return Ok(object!({"armed":false,"continuation":true}));
                 }
             }
-            let mut unsettled = false;
+            let mut unsettled = None::<String>;
             if let Some(mut old) = aside {
                 let _ = std::fs::remove_file(self.state_path(&aside_key)?);
                 if matches!(old.phase.as_str(), "requested" | "failed")
@@ -428,11 +460,11 @@ impl NativeService {
                     && previous.as_ref().is_none_or(|state| state.phase == "armed")
                 {
                     previous = Some(old);
-                } else {
-                    unsettled = matches!(
-                        old.phase.as_str(),
-                        "requested" | "failed" | "held" | "refused"
-                    );
+                } else if matches!(
+                    old.phase.as_str(),
+                    "requested" | "failed" | "held" | "refused"
+                ) {
+                    unsettled = Some(old.phase);
                 }
             }
             if let Some(state) = previous.as_mut() {
@@ -449,14 +481,16 @@ impl NativeService {
                     && (0.0..86400.0).contains(&age)
                 {
                     if state.phase == "declined" {
-                        return Ok(object!({"armed":false}));
+                        return Ok(noted(object!({"armed":false}), "skipped", "host-refused"));
                     }
                     state.phase = "declined".into();
                     state.updated = seconds();
                     self.write_state(&key, state)?;
-                    return Ok(
+                    return Ok(noted(
                         object!({"armed":false,"warning":"Previous native memory result was not saved completely."}),
-                    );
+                        "skipped",
+                        "host-refused",
+                    ));
                 }
             }
             let moved = previous.as_ref().is_some_and(|state| {
@@ -468,7 +502,7 @@ impl NativeService {
                     previous.as_ref().ok_or_else(|| error("invalid-state"))?,
                 )?;
             }
-            let warning = unsettled
+            let warning = unsettled.is_some()
                 || !moved
                     && previous.as_ref().is_some_and(|state| {
                         matches!(
@@ -483,7 +517,22 @@ impl NativeService {
                 output["warning"] =
                     "Previous native memory result was not saved completely.".into();
             }
-            Ok(output)
+            // The warning is counted by what the last request became.
+            let code = if warning {
+                unsettled
+                    .or_else(|| previous.as_ref().map(|state| state.phase.clone()))
+                    .map(|phase| format!("previous-{phase}"))
+            } else if moved {
+                Some("previous-in-flight".into())
+            } else if unreadable {
+                Some("previous-unreadable".into())
+            } else {
+                None
+            };
+            Ok(match code {
+                Some(code) => noted(output, "armed", &code),
+                None => output,
+            })
         })();
         self.observed("prompt", Some(host), outcome)
     }
@@ -506,28 +555,32 @@ impl NativeService {
     pub fn stop(&self, input: NativeStop, tasks: &mut impl TaskResolver) -> Result<Value> {
         let host = input.host;
         let outcome = (|| {
-            if !self.enabled()
-                || self.setting(
-                    "CONTEXT_NATIVE_RESULT_REQUEST",
-                    "native_result_request",
-                    "every-turn",
-                    &["every-turn", "off"],
-                )? == "off"
+            if !self.enabled() {
+                return Ok(noted(object!({}), "skipped", self.disabled()));
+            }
+            if self.setting(
+                "CONTEXT_NATIVE_RESULT_REQUEST",
+                "native_result_request",
+                "every-turn",
+                &["every-turn", "off"],
+            )? == "off"
             {
-                return Ok(object!({}));
+                return Ok(noted(object!({}), "skipped", "switched-off"));
             }
             let task = results::task_id(&input.task_id)?;
             let Some(key) = self.key(&task, host, &input.payload)? else {
-                return Ok(object!({}));
+                return Ok(noted(object!({}), "skipped", "no-session-id"));
             };
-            if host == Host::Cursor && input.payload["status"] != "completed"
-                || host != Host::Cursor
-                    && input
-                        .payload
-                        .get("hook_event_name")
-                        .is_some_and(|value| value != "Stop")
+            if host == Host::Cursor && input.payload["status"] != "completed" {
+                return Ok(noted(object!({}), "skipped", "not-completed"));
+            }
+            if host != Host::Cursor
+                && input
+                    .payload
+                    .get("hook_event_name")
+                    .is_some_and(|value| value != "Stop")
             {
-                return Ok(object!({}));
+                return Ok(noted(object!({}), "skipped", "not-stop-event"));
             }
             let brain = self.results.brain()?;
             let _guard = brain.lock()?;
@@ -538,7 +591,7 @@ impl NativeService {
                 self.write_state(&key, state.as_ref().ok_or_else(|| error("invalid-state"))?)?;
             }
             let Some(mut state) = state else {
-                return Ok(object!({}));
+                return Ok(noted(object!({}), "skipped", "not-armed"));
             };
             if recovery {
                 let mut slot = key.clone();
@@ -562,11 +615,34 @@ impl NativeService {
                     }
                     .into();
                     self.write_state(&slot, &state)?;
+                    // Held: a finished save the state never took. Failed: no
+                    // save began, or one began and did not finish. Refused:
+                    // Claude Code refused the save command itself.
+                    let code = match state.phase.as_str() {
+                        "held" => "unconfirmed",
+                        "refused" => "host-refused",
+                        _ if state.digest.is_some() => "incomplete",
+                        _ => "unsaved",
+                    };
+                    let event = if state.phase == "held" {
+                        "held"
+                    } else {
+                        "failed"
+                    };
+                    return Ok(noted(object!({}), event, code));
                 }
-                return Ok(object!({}));
+                return Ok(noted(
+                    object!({}),
+                    "skipped",
+                    &format!("recovery-{}", state.phase),
+                ));
             }
             if state.phase != "armed" {
-                return Ok(object!({}));
+                return Ok(noted(
+                    object!({}),
+                    "skipped",
+                    &format!("phase-{}", state.phase),
+                ));
             }
             let turn = if host == Host::Codex {
                 rollout_turn(&input.payload)
@@ -575,9 +651,11 @@ impl NativeService {
             };
             if input.payload["permission_mode"] == "plan"
                 || turn["collaboration_mode"]["mode"] == "plan"
-                || turn["sandbox_policy"]["type"] == "read-only"
             {
-                return Ok(object!({}));
+                return Ok(noted(object!({}), "skipped", "plan-mode"));
+            }
+            if turn["sandbox_policy"]["type"] == "read-only" {
+                return Ok(noted(object!({}), "skipped", "read-only-sandbox"));
             }
             let policy = &turn["file_system_sandbox_policy"];
             if policy["kind"] == "restricted"
@@ -591,17 +669,19 @@ impl NativeService {
                         .is_some_and(|parent| sandbox_writes(policy, parent))
                 })
             {
-                return Ok(object!({}));
+                return Ok(noted(object!({}), "skipped", "outside-sandbox"));
             }
             let current = match self.task(&task, tasks) {
                 Ok(task) => Some(task),
                 Err(error) if error.kind == ErrorKind::NotFound => None,
-                Err(error) if error.kind == ErrorKind::InvalidInput => return Ok(object!({})),
+                Err(error) if error.kind == ErrorKind::InvalidInput => {
+                    return Ok(noted(object!({}), "skipped", "task-unreadable"));
+                }
                 Err(error) => return Err(error),
             };
             if let Some(task) = current {
-                if matches!(task["status"].as_str(), Some("completed" | "cancelled")) {
-                    return Ok(object!({}));
+                if let Some(status @ ("completed" | "cancelled")) = task["status"].as_str() {
+                    return Ok(noted(object!({}), "skipped", &format!("task-{status}")));
                 }
                 state.task_uuid = task["id"].as_str().map(String::from);
                 state.revision = task["revision"].as_u64();
@@ -612,14 +692,18 @@ impl NativeService {
             state.adapter = Some(adapter());
             state.updated = seconds();
             self.write_state(&key, &state)?;
-            let instruction = self.instruction(&key, &state, &input.payload, input.entered)?;
-            Ok(match host {
+            let (instruction, brief) =
+                self.instruction(&key, &state, &input.payload, input.entered)?;
+            let mut output = match host {
                 Host::Claude => {
                     object!({"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":instruction}})
                 }
                 Host::Cursor => object!({"followup_message":instruction}),
                 Host::Codex => object!({"decision":"block","reason":instruction}),
-            })
+            };
+            output["_journal"] =
+                object!({"event":"requested","answer":if brief {"brief"} else {"repeat"}});
+            Ok(output)
         })();
         self.observed("stop", Some(host), outcome)
     }
@@ -718,13 +802,33 @@ impl NativeService {
             return Err(error("invalid-state"));
         }
         self.check_scope(&state)?;
+        // For the journal: a repeat of a finished save, or a begun save
+        // finished after the recovery Stop marked it failed; one the agent's
+        // sandbox spooled, or one that landed after a prompt moved its
+        // request aside.
+        let repeat = match state.phase.as_str() {
+            "saved" | "held" => Some("repeat"),
+            "failed" => Some("late"),
+            _ => None,
+        };
+        let place = if input.spooled {
+            Some("spooled")
+        } else if slot != input.key {
+            Some("in-flight")
+        } else {
+            None
+        };
         if input.skip {
             if begun {
                 return Err(error("save-already-started"));
             }
             state.phase = "omitted".into();
             self.write_state(&slot, &state)?;
-            return Ok(object!({"state":"omitted","attestation":"agent"}));
+            let omitted = object!({"state":"omitted","attestation":"agent"});
+            return Ok(match place {
+                Some(code) => noted(omitted, "omitted", code),
+                None => omitted,
+            });
         }
         let normalized = self.results.normalize(&input.data, !begun)?;
         if state.task_uuid.is_none()
@@ -735,12 +839,16 @@ impl NativeService {
             return Err(error("nothing-to-record"));
         }
         let fresh = (0.0..600.0).contains(&(seconds() - state.updated));
+        // Recorded at a task another session created or moved since the
+        // request.
+        let mut rebased = false;
         if state.task_uuid.is_none() {
             let task = match self.task(&state.task_id, tasks) {
                 Ok(task) => {
                     if !fresh {
                         return Err(error("task-changed"));
                     }
+                    rebased = true;
                     task
                 }
                 Err(error) if error.kind == ErrorKind::NotFound => {
@@ -758,6 +866,7 @@ impl NativeService {
             }
             if task["revision"].as_u64() != state.revision && fresh {
                 state.revision = task["revision"].as_u64();
+                rebased = true;
             }
         }
         let task = state
@@ -797,7 +906,8 @@ impl NativeService {
             .map(|learning| results::learning_id(task, learning))
             .collect::<Result<BTreeSet<_>>>()?
             .len();
-        self.journal(Some(state.host),"save",&state.phase,None,&object!({"submitted":submitted,"learnings":records.iter().filter(|row|matches!(row["state"].as_str(),Some("created"|"completed"|"updated"))).count(),"existing":records.iter().filter(|row|matches!(row["state"].as_str(),Some("existing"|"archived"))).count(),"held":records.iter().filter(|row|matches!(row["state"].as_str(),Some("differs"|"archived-differs"|"missing"))).count(),"promoted":result["promotion"]["promoted"].as_array().map(Vec::len).unwrap_or(0),"capture_decision":normalized.capture_decision}));
+        let code = repeat.or(place).or(rebased.then_some("rebased"));
+        self.journal(Some(state.host),"save",&state.phase,code,&object!({"submitted":submitted,"learnings":records.iter().filter(|row|matches!(row["state"].as_str(),Some("created"|"completed"|"updated"))).count(),"existing":records.iter().filter(|row|matches!(row["state"].as_str(),Some("existing"|"archived"))).count(),"held":records.iter().filter(|row|matches!(row["state"].as_str(),Some("differs"|"archived-differs"|"missing"))).count(),"promoted":result["promotion"]["promoted"].as_array().map(Vec::len).unwrap_or(0),"capture_decision":normalized.capture_decision}));
         Ok(result)
     }
     fn spool(&self, input: &NativeSave) -> Result<Value> {
@@ -964,23 +1074,66 @@ impl NativeService {
         state: &NativeState,
         payload: &Value,
         entered: bool,
-    ) -> Result<String> {
+    ) -> Result<(String, bool)> {
         let executable = std::env::current_exe()?;
-        let mut command = format!(
-            "{} memory --root {}",
-            quote(&executable.to_string_lossy()),
-            quote(&self.context.roots.state.to_string_lossy())
-        );
-        if self.context.roots.shared || entered {
-            command.push_str(&format!(
+        let roots = &self.context.roots;
+        let named = roots.shared || entered;
+        let mut arguments = format!(" memory --root {}", quote(&roots.state.to_string_lossy()));
+        if named {
+            arguments.push_str(&format!(
                 " --project {}",
-                quote(&self.context.roots.project.to_string_lossy())
+                quote(&roots.project.to_string_lossy())
             ));
         }
-        command.push_str(&format!(
-            " native-result --request {} --token {} --input - --json",
+        arguments.push_str(&format!(
+            " native-result --request {} --token {}",
             key, state.token
         ));
+        let (ask, skip) = if state.host == Host::Claude {
+            // Claude Code asks before every command its allow rules do not
+            // cover, and before any subshell, { } group, heredoc with braces
+            // and quotes, or printf operand holding [ with $ or a backtick,
+            // whatever the rules say. A cd into the installation, echo -E and
+            // the installed `memory-bank/bin/infra-engine memory` spelling
+            // pass; -E keeps the JSON's backslashes in zsh as in bash. An
+            // absolute engine path matches no installed rule: the save then
+            // asked after every answer and was refused under `claude -p`.
+            let program = claude_program(&roots.tooling, &executable);
+            let enter = format!("cd {} && ", quote(&roots.tooling.to_string_lossy()));
+            // Once a session has entered a worktree, Claude Code refuses a
+            // program fed a descriptor it names ("-"): there the engine reads
+            // the piped result without --input -.
+            let piped = if named { "" } else { " --input -" };
+            // Attached, the cd is into the clone the launch adds as a working
+            // directory; a save that went through returns to where the
+            // session was, a refused one keeps its exit status.
+            let back = payload["cwd"]
+                .as_str()
+                .filter(|cwd| {
+                    roots.attached()
+                        && !roots.shared
+                        && Path::new(cwd).is_absolute()
+                        && !cwd.contains(['\n', '\r', '\0'])
+                })
+                .map(|cwd| format!(" && cd {}", quote(cwd)))
+                .unwrap_or_default();
+            (
+                format!(
+                    "Use your shell tool to run this exact command: {enter}echo -E '<JSON>' | {program}{arguments}{piped} --json{back}\nPut one JSON object in place of <JSON>, writing each ' inside it as '\\''. "
+                ),
+                format!(
+                    "If no safe result exists, run this command instead: {enter}{program}{arguments} --skip --json{back}\n"
+                ),
+            )
+        } else {
+            (
+                format!(
+                    "Use your shell tool to pipe one JSON object into this exact command: {}{arguments} --input - --json\n",
+                    quote(&executable.to_string_lossy())
+                ),
+                "If no safe result exists, replace --input - with --skip. ".into(),
+            )
+        };
         let answer = self
             .setting(
                 "CONTEXT_NATIVE_RESULT_ANSWER",
@@ -1013,7 +1166,7 @@ impl NativeService {
             || state.host == Host::Cursor
             || !rules_in_context(payload, &marker);
         let mut body = format!(
-            "This is an internal continuation: do not announce routine memory operations. Save only the result of work already performed. Do not repeat the task, edit application files, run tests, delegate, or mark the task completed. Use your shell tool to pipe one JSON object into this exact command: {command}\nNative result reference schema v1. Capture policy {}. JSON: progress (summary, at most 1000 characters), optional next_steps (at most 3 strings of 300 characters; omit to preserve the current plan), learnings (at most 3 objects with type finding|decision, title, consequence, sources). verified is a TOP-LEVEL boolean, NEVER a learning field. Sources must be canonical project files actually checked. To revise existing knowledge preserve type/title/sources and provide record_id, expected_revision and the complete checked source_fingerprints. Agent attestation is never human review. Empty learnings is valid. No raw requests, transcripts, logs, credentials or personal data. If no safe result exists, replace --input - with --skip. Check the command result. ",
+            "This is an internal continuation: do not announce routine memory operations. Save only the result of work already performed. Do not repeat the task, edit application files, run tests, delegate, or mark the task completed. {ask}Native result reference schema v1. Capture policy {}. JSON: progress (summary, at most 1000 characters), optional next_steps (at most 3 strings of 300 characters; omit to preserve the current plan), learnings (at most 3 objects with type finding|decision, title, consequence, sources). verified is a TOP-LEVEL boolean, NEVER a learning field. Sources must be canonical project files actually checked. To revise existing knowledge preserve type/title/sources and provide record_id, expected_revision and the complete checked source_fingerprints. Agent attestation is never human review. Empty learnings is valid. No raw requests, transcripts, logs, credentials or personal data. {skip}Check the command result. ",
             if proposal {
                 "proposal-only"
             } else {
@@ -1058,15 +1211,42 @@ impl NativeService {
         }
         body.push_str("Correct JSON/schema once only if refused before any write. On stale revision, scope or ownership refusal stop; never override newer work or repeat the user task.");
         let marker = format!("INTERNAL_NATIVE_MEMORY_RESULT {}", state.token);
-        Ok(if state.host == Host::Claude {
-            format!("{body}\n{marker}")
-        } else {
-            format!("{marker}\n{body}")
-        })
+        Ok((
+            if state.host == Host::Claude {
+                format!("{body}\n{marker}")
+            } else {
+                format!("{marker}\n{body}")
+            },
+            brief,
+        ))
     }
 }
 pub fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+/// A prompt or Stop result with the journal event and code it is observed
+/// with; `observed` removes the note before the result leaves.
+fn noted(mut value: Value, event: &str, code: &str) -> Value {
+    value["_journal"] = object!({"event":event,"code":code});
+    value
+}
+/// The engine as a Claude Code save names it: the spelling the installed
+/// `Bash(memory-bank/bin/infra-engine memory:*)` rule allows after a cd into
+/// the installation, when the engine serving this request is the one installed
+/// there. Another engine - an attached session's, say - keeps its absolute
+/// path: the installed one could be a different build.
+pub fn claude_program(tooling: &Path, executable: &Path) -> String {
+    let name = if cfg!(windows) {
+        "memory-bank/bin/infra-engine.exe"
+    } else {
+        "memory-bank/bin/infra-engine"
+    };
+    let installed = fs::canonicalize(tooling.join(name)).ok();
+    if installed.is_some() && installed == fs::canonicalize(executable).ok() {
+        name.into()
+    } else {
+        quote(&executable.to_string_lossy())
+    }
 }
 pub fn recovery(host: Host, payload: &Value) -> bool {
     if host == Host::Cursor {

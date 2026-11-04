@@ -37,6 +37,13 @@ const TASK_ROLES: &[&str] = &[
     "working-memory-write",
     "subagent-dispatch",
 ];
+/// Whether a role acts on the session's task. Cursor reads its memory rule
+/// before the prompt hook runs, so its session start renders the task's rule:
+/// without the task it asked for an empty one and removed the rule instead,
+/// and the first request of every chat went without memory.
+fn acts_on_task(host: &str, role: &str) -> bool {
+    TASK_ROLES.contains(&role) || host == "cursor" && role == "local-context"
+}
 #[derive(Clone, Debug)]
 pub struct Context {
     pub roots: Roots,
@@ -511,7 +518,7 @@ pub fn execute(root: &Path, host: &str, role: &str, raw: &[u8]) -> Result<Output
         None
     };
     let context =
-        match Context::create_with_payload(root, host, raw, TASK_ROLES.contains(&role), parsed) {
+        match Context::create_with_payload(root, host, raw, acts_on_task(host, role), parsed) {
             Ok(context) => context,
             // The shell guard never lets a command through because its own
             // context failed: it then checks the command from the bound root.

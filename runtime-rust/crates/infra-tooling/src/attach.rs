@@ -783,6 +783,10 @@ pub fn build_overlay(
                 )
                 .into(),
             );
+            // The save a Stop asks for runs the engine these hooks are bound
+            // to, which no edition rule names: Claude Code asked after every
+            // answer and refused the save under `claude -p`.
+            allow.push(format!("Bash({} memory:*)", project_text(&engine)?).into());
             settings["permissions"]["allow"] = json!(allow);
             settings["permissions"]["deny"] = json!(deny);
             settings["hooks"] = hooks(&home, "claude", &engine)?;
@@ -1695,4 +1699,45 @@ pub fn classify_native_hook(
         }
     }
     Ok(None)
+}
+
+#[cfg(all(test, unix))]
+mod overlay_permission_tests {
+    use super::*;
+
+    /// The save a Stop asks an attached Claude Code session for runs the
+    /// engine its hooks are bound to, by its absolute path.
+    #[test]
+    fn claude_overlay_allows_the_memory_command_of_its_bound_engine() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .to_path_buf();
+        let scratch = std::env::temp_dir().join(format!(
+            "infra-attach-overlay-{}",
+            infra_core::domain::uuid4()
+        ));
+        std::fs::create_dir_all(scratch.join("project")).unwrap();
+        std::fs::write(
+            scratch.join("project/composer.json"),
+            br#"{"name":"fixture/project"}"#,
+        )
+        .unwrap();
+        let scratch = infra_core::fs::canonicalize(&scratch).unwrap();
+        let project = scratch.join("project");
+        let built = state_directory(&project, Some(&scratch.join("state")))
+            .and_then(|state| build_overlay(&repository, &project, &state, "PHP Core", "claude"));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let overlay = built.unwrap();
+        let rule = format!(
+            "Bash({} memory:*)",
+            std::env::current_exe().unwrap().display()
+        );
+        let allowed = overlay.settings["permissions"]["allow"].as_array().unwrap();
+        assert!(
+            allowed.iter().any(|value| value.as_str() == Some(&rule)),
+            "{rule} missing from {allowed:?}"
+        );
+    }
 }

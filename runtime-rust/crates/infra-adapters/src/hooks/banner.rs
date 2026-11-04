@@ -137,6 +137,44 @@ pub fn render(scope: &Context) -> Result<Output> {
         )
     })
 }
+/// The policy and skills name the memory CLI by its path from the root, which
+/// a worktree this installation serves has none of, and which a session
+/// started below the root does not reach: the session hears the engine that
+/// works from where it is. Run there, it finds the memory and the task itself.
+fn memory_cli(scope: &Context) -> Option<String> {
+    if scope.roots.attached() && !scope.roots.shared {
+        return None;
+    }
+    let place = if scope.roots.shared {
+        (scope.roots.state == scope.roots.tooling
+            && !super::installed_engine(&scope.roots.project).is_file())
+        .then_some("this worktree has none")
+    } else {
+        let root = infra_core::fs::canonicalize(&scope.roots.tooling).ok()?;
+        super::valid_path(scope.payload["cwd"].as_str(), 4096)
+            .and_then(|cwd| infra_core::fs::canonicalize(cwd).ok())
+            .filter(|cwd| cwd != &root && cwd.starts_with(&root))
+            .map(|_| "this session started below the project root")
+    }?;
+    let engine = super::installed_engine(&scope.roots.tooling);
+    if !engine.is_file() {
+        return None;
+    }
+    // Bare, or in single quotes: the dispatcher's allow for the memory CLI
+    // takes no double-quoted path, which the shell expands.
+    let name = engine.to_string_lossy();
+    let spelled = if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c))
+    {
+        name.into_owned()
+    } else {
+        infra_core::native::quote(&name)
+    };
+    Some(format!(
+        "Memory CLI: {place} - run the commands the policy and skills name with `{spelled} memory` in place of `memory-bank/bin/infra-engine memory`."
+    ))
+}
 fn render_lines(
     scope: &Context,
     php: impl FnOnce() -> Option<String>,
@@ -173,6 +211,9 @@ fn render_lines(
         ));
     } else if scope.roots.shared {
         lines.push(format!("Accelerator: the installation in {}, whose memory this worktree shares (Git gives the worktree none of it): the memory-bank/ and project-brain/ paths the policy and skills name are there.",scope.roots.tooling.display()));
+    }
+    if let Some(line) = memory_cli(scope) {
+        lines.push(line);
     }
     let managers = [
         ("composer.json", "composer"),
