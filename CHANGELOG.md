@@ -24,6 +24,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Workspace tests run in parallel. The `rust` and `windows-native` groups run
+  them through `cargo nextest run`, each test in its own process and many at
+  once across all test binaries, where `cargo test` ran one binary after
+  another, about seven of the Windows job's eleven minutes.
+  `runtime-rust/.config/nextest.toml` keeps the dispatch custom-guard and
+  installation cases serial, as their binaries did, and lets at most two
+  end-to-end cases run together: with more, the evaluation cases exceeded
+  their 120-second bound. Doc tests have their own `cargo test --doc` gate.
+  Generated jobs install nextest 0.9.149 through `taiki-e/install-action`
+  pinned by commit, with checksums and no source fallback. A process gate's
+  new `fallback` runs when one of its tools is unavailable, so a checkout
+  without nextest runs the same tests through `cargo test --tests`, and the
+  gate's reason names the missing tool.
 - Two Linux test helpers treat a process that exits mid-read as gone.
   Reading `/proc/<pid>/stat` of a process that exits between opening and
   reading the file fails with ESRCH rather than as a missing file, and the

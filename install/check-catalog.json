@@ -84,7 +84,41 @@
           "name": "Workspace Rust tests",
           "program": "cargo",
           "arguments": [
+            "nextest",
+            "run",
+            "--workspace",
+            "--manifest-path",
+            "{root}/runtime-rust/Cargo.toml",
+            "--locked"
+          ],
+          "cwd": ".",
+          "tools": [
+            "cargo-nextest"
+          ],
+          "fallback": {
+            "program": "cargo",
+            "arguments": [
+              "test",
+              "--workspace",
+              "--manifest-path",
+              "{root}/runtime-rust/Cargo.toml",
+              "--locked",
+              "--tests"
+            ]
+          },
+          "paths": [
+            "runtime-rust/Cargo.toml"
+          ],
+          "timeout_seconds": 1200,
+          "oracle": false
+        },
+        {
+          "kind": "process",
+          "name": "Workspace documentation tests",
+          "program": "cargo",
+          "arguments": [
             "test",
+            "--doc",
             "--workspace",
             "--manifest-path",
             "{root}/runtime-rust/Cargo.toml",
@@ -95,7 +129,7 @@
           "paths": [
             "runtime-rust/Cargo.toml"
           ],
-          "timeout_seconds": 1200,
+          "timeout_seconds": 600,
           "oracle": false
         },
         {
@@ -431,7 +465,43 @@
           "name": "Native Windows workspace contracts",
           "program": "cargo",
           "arguments": [
+            "nextest",
+            "run",
+            "--workspace",
+            "--manifest-path",
+            "{root}/runtime-rust/Cargo.toml",
+            "--locked",
+            "--no-fail-fast"
+          ],
+          "cwd": ".",
+          "tools": [
+            "cargo-nextest"
+          ],
+          "fallback": {
+            "program": "cargo",
+            "arguments": [
+              "test",
+              "--workspace",
+              "--manifest-path",
+              "{root}/runtime-rust/Cargo.toml",
+              "--locked",
+              "--tests",
+              "--no-fail-fast"
+            ]
+          },
+          "paths": [
+            "runtime-rust/Cargo.toml"
+          ],
+          "timeout_seconds": 2100,
+          "oracle": false
+        },
+        {
+          "kind": "process",
+          "name": "Native Windows documentation tests",
+          "program": "cargo",
+          "arguments": [
             "test",
+            "--doc",
             "--workspace",
             "--manifest-path",
             "{root}/runtime-rust/Cargo.toml",
@@ -443,7 +513,7 @@
           "paths": [
             "runtime-rust/Cargo.toml"
           ],
-          "timeout_seconds": 2100,
+          "timeout_seconds": 900,
           "oracle": false
         }
       ]

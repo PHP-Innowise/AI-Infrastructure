@@ -32,6 +32,10 @@ jobs:
         id: native-toolchain
         with:
           components: rustfmt, clippy
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest@0.9.149
+          fallback: none
       - name: Select the native target directory
         run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
       - name: Restore native Cargo artifacts

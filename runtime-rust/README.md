@@ -46,6 +46,11 @@ Cargo unifies features across selected packages. Ordinary `cargo test
 --workspace` therefore enables the standalone packages' ONNX defaults; use
 `--workspace --no-default-features` to validate the lean workspace.
 
+`cargo nextest run --workspace` runs the same tests in parallel across all test
+binaries (`cargo install cargo-nextest --locked`). [`.config/nextest.toml`](.config/nextest.toml)
+keeps two binaries serial and at most two end-to-end cases at once. Doc tests
+still run through `cargo test --doc --workspace`.
+
 For faster local optimized builds, select the opt-in `quick-release` profile.
 It inherits the release settings, disables LTO and uses 16 codegen units. This
 trades binary size and potentially runtime performance for shorter compilation;

@@ -64,9 +64,23 @@ job starts from its newest entry for the same compiler and Cargo rebuilds what
 changed. Jobs build without incremental state (`CARGO_INCREMENTAL=0`), which a
 CI build never reuses and the cache would only carry.
 
+The `rust` and `windows-native` groups run the workspace tests through
+`cargo nextest run`: each test in its own process, as many at once as the
+runner has CPUs, across all test binaries, where `cargo test` runs one binary
+after another. [`runtime-rust/.config/nextest.toml`](../runtime-rust/.config/nextest.toml)
+keeps the conditions some tests were written for: the dispatch custom-guard and
+installation cases run one at a time, and at most two end-to-end cases run
+together. Doc tests, which nextest does not run, have their own
+`cargo test --doc` gate. Generated jobs install a pinned nextest release through
+`taiki-e/install-action`, with checksums and no source fallback. A process gate
+may name a `fallback` that runs when one of its `tools` is unavailable, instead
+of failing or skipping: a checkout without `cargo-nextest` runs the same tests
+through `cargo test --tests`, one binary at a time, and the gate's reason names
+the missing tool.
+
 | Group | Actual validation |
 | --- | --- |
-| `rust` | Workspace Rust tests, rustfmt and Clippy. |
+| `rust` | Workspace Rust tests in parallel, doc tests, rustfmt and Clippy. |
 | `parity` | Canonical shared-resource parity and generator assets. |
 | `mirrors` | Native mirror generation compared with canonical resources for every edition. |
 | `installation` | Native inventory contracts for Laravel, Symfony, PHP Core and WordPress. |

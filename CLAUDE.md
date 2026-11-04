@@ -53,7 +53,9 @@ infra-engine check --group mirrors --group parity --strict
 ```
 
 The declarative catalog is `install/check-catalog.json`. The same native
-catalog runner backs local checks and generated GitHub workflows. Retained
+catalog runner backs local checks and generated GitHub workflows. Workspace
+tests run in parallel through `cargo-nextest` when it is installed
+(`cargo install cargo-nextest --locked`) and through `cargo test` otherwise. Retained
 Python tests and fixtures are historical references; they are not a production
 runtime or a working differential oracle after their imported implementation
 has been retired.

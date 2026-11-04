@@ -76,6 +76,10 @@ pub enum Gate {
         cwd: String,
         #[serde(default)]
         tools: Vec<String>,
+        /// The same check through programs every checkout has, run instead
+        /// of failing or skipping when a listed tool is unavailable.
+        #[serde(default)]
+        fallback: Option<Fallback>,
         #[serde(default)]
         paths: Vec<String>,
         #[serde(default = "seconds")]
@@ -83,6 +87,13 @@ pub enum Gate {
         #[serde(default)]
         oracle: bool,
     },
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fallback {
+    program: String,
+    #[serde(default)]
+    arguments: Vec<String>,
 }
 fn yes() -> bool {
     true
@@ -287,9 +298,14 @@ fn load_catalog(root: &Path, require_workflows: bool) -> Result<Catalog> {
                 return Err(RuntimeError::invalid("Check catalog gate has no name"));
             }
             if let Gate::Process {
-                program, oracle, ..
+                program,
+                fallback,
+                oracle,
+                ..
             } = gate
-                && (program == "python" || program.starts_with("python3"))
+                && std::iter::once(program)
+                    .chain(fallback.as_ref().map(|fallback| &fallback.program))
+                    .any(|program| program == "python" || program.starts_with("python3"))
                 && !*oracle
             {
                 return Err(RuntimeError::policy(
@@ -384,6 +400,7 @@ fn gate(context: GateContext<'_>, gate: &Gate) -> Outcome {
                 arguments,
                 cwd,
                 tools,
+                fallback,
                 paths,
                 timeout_seconds,
                 oracle,
@@ -403,15 +420,26 @@ fn gate(context: GateContext<'_>, gate: &Gate) -> Outcome {
                         return Ok((if strict { Some(1) } else { None }, vec![]));
                     }
                 }
-                let program = expand(program);
-                for tool in
-                    std::iter::once(program.as_str()).chain(tools.iter().map(String::as_str))
-                {
-                    if !available(tool, root) {
-                        outcome.status = if strict { "fail" } else { "skipped" }.into();
-                        outcome.reason =
-                            Some(format!("Required executable is unavailable: {tool}"));
-                        return Ok((if strict { Some(1) } else { None }, vec![]));
+                let mut program = expand(program);
+                let mut arguments = arguments;
+                let missing = std::iter::once(program.as_str())
+                    .chain(tools.iter().map(String::as_str))
+                    .find(|tool| !available(tool, root))
+                    .map(str::to_string);
+                if let Some(tool) = missing {
+                    match fallback {
+                        Some(fallback) if available(&expand(&fallback.program), root) => {
+                            outcome.reason =
+                                Some(format!("{tool} is unavailable; ran the fallback"));
+                            program = expand(&fallback.program);
+                            arguments = &fallback.arguments;
+                        }
+                        _ => {
+                            outcome.status = if strict { "fail" } else { "skipped" }.into();
+                            outcome.reason =
+                                Some(format!("Required executable is unavailable: {tool}"));
+                            return Ok((if strict { Some(1) } else { None }, vec![]));
+                        }
                     }
                 }
                 let arguments = arguments
@@ -814,6 +842,18 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
         if group.gates.iter().any(|gate|matches!(gate,Gate::Tool{operation,request,..}if operation=="php-snippets"&&request["require_php"]==true)){
    output.push_str("      - uses: shivammathur/setup-php@v2\n        with:\n          php-version: '8.3'\n          coverage: none\n          tools: none\n");
   }
+        // A prebuilt, checksummed runner; its absence would only send the
+        // tests through their sequential fallback, so a missing release fails.
+        if group.gates.iter().any(|gate| {
+            matches!(gate, Gate::Process { tools, .. } if tools.iter().any(|tool| tool == "cargo-nextest"))
+        }) {
+            output.push_str(concat!(
+                "      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30\n",
+                "        with:\n",
+                "          tool: cargo-nextest@0.9.149\n",
+                "          fallback: none\n",
+            ));
+        }
         // RUNNER_TEMP is a backslash path on Windows; Cargo and Git Bash both
         // accept the forward-slash spelling.
         output.push_str("      - name: Select the native target directory\n        run: echo \"CARGO_TARGET_DIR=${RUNNER_TEMP//\\\\//}/infra-native-target\" >> \"$GITHUB_ENV\"\n");
@@ -1189,6 +1229,30 @@ mod compiler_workflow_tests {
             assert!(!rendered.contains("          toolchain:"));
         }
     }
+
+    #[test]
+    fn only_jobs_that_run_nextest_install_it_before_building() {
+        let mut parallel = group("parallel", "parallel");
+        parallel["gates"][0]["tools"] = json!(["cargo-nextest"]);
+        let rendered = workflow(
+            &catalog(json!([parallel, group("plain", "plain")])),
+            "rust.yml",
+        )
+        .unwrap();
+        let jobs = workflow_jobs(&rendered);
+        let (parallel, plain) = (&jobs[0], &jobs[1]);
+        let install = parallel
+            .find(concat!(
+                "      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30\n",
+                "        with:\n",
+                "          tool: cargo-nextest@0.9.149\n",
+                "          fallback: none\n",
+            ))
+            .expect("the nextest job installs a pinned release");
+        assert!(parallel.find("id: native-toolchain").unwrap() < install);
+        assert!(install < parallel.find("name: Build the native engine").unwrap());
+        assert!(!plain.contains("install-action"));
+    }
 }
 
 #[cfg(test)]
@@ -1497,5 +1561,78 @@ mod failure_report_tests {
             value["_cli"]["stderr"],
             "FAILED probe / failing probe (exit 3)\n--- end of stdout ---\nkept\n"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod fallback_tests {
+    use super::*;
+
+    fn outcome_of(check: Value) -> Outcome {
+        let temporary = Temporary::new("infra-check-fallback").unwrap();
+        let group: Group = serde_json::from_value(json!({
+            "name":"probe","workflow":"ci.yml","job":"probe","timeout_minutes":1,"gates":[check]
+        }))
+        .unwrap();
+        gate(
+            GateContext {
+                root: temporary.path(),
+                base: "origin/main",
+                group: &group,
+                strict: true,
+                oracle_allowed: false,
+                logs: temporary.path(),
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+            &group.gates[0],
+        )
+    }
+
+    #[test]
+    fn an_unavailable_tool_runs_the_fallback_instead_of_failing() {
+        let outcome = outcome_of(json!({"kind":"process","name":"probe","program":"sh",
+            "arguments":["-c","exit 3"],"tools":["infra-absent-tool"],
+            "fallback":{"program":"sh","arguments":["-c","exit 0"]}}));
+        assert_eq!((outcome.status.as_str(), outcome.code), ("pass", Some(0)));
+        assert_eq!(
+            outcome.reason.as_deref(),
+            Some("infra-absent-tool is unavailable; ran the fallback")
+        );
+        // Without a fallback the same gate still fails a strict run.
+        let outcome = outcome_of(json!({"kind":"process","name":"probe","program":"sh",
+            "arguments":["-c","exit 3"],"tools":["infra-absent-tool"]}));
+        assert_eq!(outcome.status, "fail");
+        assert_eq!(
+            outcome.reason.as_deref(),
+            Some("Required executable is unavailable: infra-absent-tool")
+        );
+    }
+
+    #[test]
+    fn an_available_tool_runs_the_check_itself() {
+        let outcome = outcome_of(json!({"kind":"process","name":"probe","program":"sh",
+            "arguments":["-c","exit 3"],"tools":["sh"],
+            "fallback":{"program":"sh","arguments":["-c","exit 0"]}}));
+        assert_eq!((outcome.status.as_str(), outcome.code), ("fail", Some(3)));
+        assert_eq!(outcome.reason, None);
+    }
+
+    #[test]
+    fn a_fallback_cannot_bring_python_back() {
+        let temporary = Temporary::new("infra-check-fallback-python").unwrap();
+        let root = temporary.path();
+        std::fs::create_dir_all(root.join("install")).unwrap();
+        std::fs::write(
+            root.join("install/check-catalog.json"),
+            serde_json::to_vec(&json!({"schema_version":1,"groups":[{
+                "name":"probe","workflow":"probe.yml","job":"probe","timeout_minutes":1,
+                "gates":[{"kind":"process","name":"probe","program":"cargo",
+                    "tools":["cargo-nextest"],"fallback":{"program":"python3"}}]
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = load_catalog(root, false).unwrap_err();
+        assert_eq!(error.kind, infra_core::ErrorKind::Policy);
     }
 }
