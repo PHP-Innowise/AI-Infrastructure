@@ -720,6 +720,95 @@ fn the_session_banner_lists_its_hosts_own_tree() {
     }
 }
 
+/// Each edition's session banner reads the project as that edition's retired
+/// hook did: Symfony names its framework or says bin/console is missing,
+/// Laravel reads its version from composer.lock and names its frontend,
+/// WordPress names the site's shape and its release alone, and each counts
+/// its own folders. The native banner was PHP Core's for every edition.
+#[test]
+fn the_session_banner_reads_the_project_as_its_edition_did() {
+    let project = Project::new();
+    let config = project.path.join("project-brain/config/runtime.json");
+    let base: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    let banner = |framework: &str| {
+        let mut value = base.clone();
+        value["framework"] = framework.into();
+        fs::write(&config, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        project.hook(
+            "claude",
+            "local-context",
+            &json!({"session_id": format!("edition-{framework}"), "cwd": project.path,
+                "hook_event_name": "SessionStart", "source": "startup"}),
+        )
+    };
+    let write = |path: &str, text: &str| {
+        let file = project.path.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, text).unwrap();
+    };
+    fs::create_dir_all(project.path.join("app")).unwrap();
+    let symfony = banner("symfony");
+    assert!(
+        symfony.contains("\n\nNOTE: Symfony bin/console was not detected. Apply these Symfony rules only after confirming this is a Symfony project.\n")
+            && symfony.contains("\n  src/ (")
+            && !symfony.contains("project-brain/ (")
+            && symfony.contains("(policy "),
+        "{symfony}"
+    );
+    write("bin/console", "#!/usr/bin/env php\n");
+    let symfony = banner("symfony");
+    assert!(
+        symfony.contains("\n\nFramework: Symfony detected. Use Symfony Controller -> Service -> Repository conventions.\n"),
+        "{symfony}"
+    );
+    write("artisan", "#!/usr/bin/env php\n");
+    write(
+        "composer.lock",
+        "{\n    \"packages\": [\n        {\n            \"name\": \"laravel/framework\",\n            \"version\": \"v11.9.2\"\n        }\n    ]\n}\n",
+    );
+    write("vite.config.js", "");
+    write(
+        "composer.json",
+        "{\"require\": {\"livewire/livewire\": \"^3\"}}\n",
+    );
+    let laravel = banner("laravel");
+    for line in [
+        "\nLaravel: laravel/framework v11.9.2 (composer.lock)\n",
+        "\nFrontend build: Vite present\nFrontend stack: Livewire\n\nNOTE: Symfony console detected alongside Laravel. Verify project intent.\n",
+        "\n  app/ (",
+    ] {
+        assert!(laravel.contains(line), "{line:?} in {laravel}");
+    }
+    assert!(
+        !laravel.contains("\n  src/ (") && !laravel.contains("Framework: Symfony"),
+        "{laravel}"
+    );
+    write("wp-config.php", "<?php\n");
+    write("blocks/block.json", "{}\n");
+    write("composer.json", "{\"type\": \"wordpress-plugin\"}\n");
+    let wordpress = banner("wordpress");
+    for line in [
+        "\nWordPress: full-site configuration present\nWordPress: block metadata present\n",
+        "\nWordPress shape: Composer plugin package\n",
+        "\n  project-brain/ (",
+    ] {
+        assert!(wordpress.contains(line), "{line:?} in {wordpress}");
+    }
+    assert!(
+        !wordpress.contains("(policy ") && !wordpress.contains("NOTE:"),
+        "{wordpress}"
+    );
+    let core = banner("php-core");
+    assert!(
+        core.contains(
+            "\n\nNOTE: Symfony detected. This is the native-PHP base folder (PHP Core/).\n"
+        ) && core.contains("\n  project-brain/ (")
+            && core.contains("(policy ")
+            && !core.contains("WordPress:"),
+        "{core}"
+    );
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(

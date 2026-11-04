@@ -233,6 +233,20 @@ edition's own files remain in that edition's changelog.
   the retired digest did: a file Git starts tracking gains its edge at the
   next refresh, where the native index kept the old edges until a record
   changed.
+- Each edition's session banner reads the project as that edition's
+  retired hook did. The native banner was PHP Core's for every
+  installation: a Symfony project lost "Framework: Symfony detected. Use
+  Symfony Controller -> Service -> Repository conventions." (or the note
+  that `bin/console` is missing), a Laravel project its laravel/framework
+  version, Pint, Larastan, Vite and Livewire or Inertia lines and its
+  warning about a Symfony console beside Laravel, and a WordPress project
+  its site lines; each counted PHP Core's folders (a Symfony banner listed
+  `project-brain/`), and a WordPress banner named a policy digest it never
+  showed. The banners of five Symfony client copies and of Laravel,
+  WordPress and PHP Core twins now match the retired ones line for line.
+  One difference stays: a memory chunk citing a URL is not reported as
+  citing a file that is gone; the URL is no file, and the chunk is
+  retrieved.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
