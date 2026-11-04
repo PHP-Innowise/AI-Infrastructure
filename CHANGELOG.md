@@ -33,6 +33,12 @@ edition's own files remain in that edition's changelog.
   compiler, and jobs build without incremental state, which only added writes
   and cache weight. The key moved to `native-cargo-v2`, so no entry carrying
   incremental state is restored.
+- Publication lists directories on Windows. Every listing reopened the
+  directory through the name `.` relative to its own handle, which NTFS
+  refuses as an invalid name (os error 123), so securing the private tree of
+  attached state, archive publication and trace listings failed there, as the
+  Harness update, Cursor overlay and retirement tests showed. The directory is
+  now reopened through an empty relative name, as `ReOpenFile` does.
 - Windows child processes accept the environment Windows itself keeps. A
   complete environment from `std::env::vars_os()` carries names such as `=C:`
   (each drive's working directory) and `=ExitCode`, and the native runner

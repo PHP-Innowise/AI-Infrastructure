@@ -1022,9 +1022,12 @@ mod cursor_native {
         names_strict(parent, limit)
     }
     pub fn names_strict(parent: &File, limit: Option<usize>) -> Result<Vec<String>> {
-        let mut wide = [b'.' as u16];
+        // NTFS refuses "." as a name. An empty name relative to the parent
+        // reopens the directory itself, as ReOpenFile does, with an
+        // enumeration position of its own.
+        let mut wide = [0u16];
         let mut unicode = Unicode {
-            length: 2,
+            length: 0,
             maximum: 2,
             buffer: wide.as_mut_ptr(),
         };
