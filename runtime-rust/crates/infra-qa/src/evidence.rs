@@ -269,7 +269,10 @@ pub fn run_case_with_catalog(
                 continue;
             }
             let cwd = crate::spelling::canonicalize(cwd)?;
-            if !cwd.starts_with(crate::spelling::canonicalize(root)?) {
+            // The recorded cwd is relative to this same spelling of the root:
+            // a short Windows name or a linked temporary root reads otherwise.
+            let base = crate::spelling::canonicalize(root)?;
+            if !cwd.starts_with(&base) {
                 bail!("command cwd escapes repository");
             }
             if let Some(required) = c["requires_executable"].as_str()
@@ -294,7 +297,10 @@ pub fn run_case_with_catalog(
             let stderr = format!("stderr/{:02}-{id}.txt", index + 1);
             atomic(&dir.join(&stdout), &result.stdout)?;
             atomic(&dir.join(&stderr), &result.stderr)?;
-            let relative_cwd = cwd.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
+            let relative_cwd = cwd
+                .strip_prefix(&base)?
+                .to_string_lossy()
+                .replace('\\', "/");
             let recorded_cwd = if relative_cwd.is_empty() {
                 "."
             } else {

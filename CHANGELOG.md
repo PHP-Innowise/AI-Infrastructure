@@ -24,6 +24,11 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- QA evidence records a command's working directory against the canonical
+  root it checked. It stripped the root as given instead, and a root spelled
+  differently from its canonical form, such as a Windows temporary directory
+  under its short 8.3 name (`C:\Users\RUNNER~1\…`) or a linked temporary
+  directory elsewhere, stopped the run with "prefix not found".
 - Canonical paths keep a spelling other programs read on Windows.
   `std::fs::canonicalize` returns every Windows path as `\\?\C:\…`: Git
   refuses it, `CreateProcess` rejects it as a working directory ("The
