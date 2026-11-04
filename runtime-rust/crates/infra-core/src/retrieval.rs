@@ -1279,11 +1279,14 @@ fn retrieve_inner(
     let mut episodes = layers.episodes;
     let mut layer_excluded = layers.excluded;
     excluded.extend(layers.budget_excluded);
+    let terms =
+        (!selected.is_empty()).then(|| crate::excerpts::QueryTerms::read(&store.conn, &query));
     for item in &mut selected {
-        item.delivery_identity = Some(crate::excerpts::delivery_identity(
+        item.delivery_identity = Some(crate::excerpts::delivery_identity_with(
             &store.conn,
             item,
             &query,
+            terms.as_ref(),
         ));
     }
     trace.boundary("layer_pre_novelty", &selected);

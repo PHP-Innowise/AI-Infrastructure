@@ -210,6 +210,14 @@ edition's own files remain in that edition's changelog.
   `memory retrieve` counted its indexing twice (`index` and `retrieval`)
   and `retrieval-report`'s phase percentiles read several times slower than
   retrieval ran. The gate's `top_score` is rounded to six places again.
+- Ranking reads the query's evidence words and excerpt weights once, as the
+  retired quoting did, instead of three times for every candidate it quotes
+  (each with a full count of the index), and no longer builds an excerpt
+  for every matched row that only the surviving candidates' quotes
+  replace. On a twin project ranking took 8 ms instead of 20 and
+  `memory retrieve` 61 ms instead of 72; a prompt hook on a client copy,
+  whose time goes to its source scan, is unchanged. The capsules are
+  unchanged: 153 of 153 on six client copies match the retired runtime.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

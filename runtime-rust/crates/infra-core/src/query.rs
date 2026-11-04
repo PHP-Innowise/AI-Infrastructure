@@ -755,13 +755,6 @@ pub fn rank_candidates_observed(
             }
             continue;
         }
-        let snippet = body_excerpt(
-            &document.content,
-            320,
-            &evidence,
-            document.kind == "changelog",
-        );
-        let cost = estimated_tokens(&format!("{}{snippet}", document.title));
         let adjusted_score = (-score).max(0.0)
             * ranking_weight(
                 &document.authority,
@@ -776,8 +769,10 @@ pub fn rank_candidates_observed(
             match_strength: Some(if covered { "covered" } else { "distinctive" }.into()),
             selection: None,
             source_changed: vec![],
-            snippet,
-            estimated_tokens: cost,
+            // Quoted below for the candidates that pass the score floor, as
+            // the retired ranking quoted only its survivors.
+            snippet: String::new(),
+            estimated_tokens: 0,
             delivery_identity: None,
             via: None,
             hint_raw_sha256: None,
@@ -824,6 +819,7 @@ pub fn rank_candidates_observed(
         admitted
     });
     let mut observed_rank = 0usize;
+    let mut terms = None;
     for (index, item) in output.iter_mut().enumerate() {
         item.rank = Some(index + 1);
         if let Some(trace) = trace.as_deref_mut() {
@@ -835,7 +831,8 @@ pub fn rank_candidates_observed(
                 &json!({"rank":observed_rank}),
             );
         }
-        item.snippet = crate::excerpts::quote_candidate(conn, item, query, 320)?;
+        let terms = terms.get_or_insert_with(|| crate::excerpts::QueryTerms::read(conn, query));
+        item.snippet = crate::excerpts::quote_candidate_with(conn, item, query, 320, terms)?;
         item.estimated_tokens =
             estimated_tokens(&format!("{}{}", item.document.title, item.snippet));
     }

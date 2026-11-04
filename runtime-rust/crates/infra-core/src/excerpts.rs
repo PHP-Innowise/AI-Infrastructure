@@ -602,20 +602,41 @@ fn answering_stretch(text: &str, tokens: &[String]) -> String {
             .collect::<String>()
     )
 }
-pub fn marked(conn: &Connection, item: &Candidate, query: &str) -> String {
-    let tokens = query::query_tokens(query)
+/// What quoting reads from the index for one query: its evidence words and
+/// their excerpt weights. Both depend on the query and the index alone, so a
+/// ranking reads them once for all its candidates, as the retired quoting read
+/// its weights once per query.
+pub struct QueryTerms {
+    evidence: Vec<String>,
+    weights: BTreeMap<String, f64>,
+}
+impl QueryTerms {
+    pub fn read(conn: &Connection, query: &str) -> Self {
+        Self {
+            evidence: evidence_words(conn, query),
+            weights: weights(conn, query),
+        }
+    }
+}
+fn evidence_words(conn: &Connection, query: &str) -> Vec<String> {
+    query::query_tokens(query)
         .and_then(|tokens| query::expand_query_tokens(conn, tokens))
         .and_then(|tokens| query::informative_tokens(conn, tokens))
         .map(|tokens| query::evidence_tokens(&tokens))
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+pub fn marked(conn: &Connection, item: &Candidate, query: &str) -> String {
+    marked_with(item, &evidence_words(conn, query))
+}
+fn marked_with(item: &Candidate, tokens: &[String]) -> String {
     let mut image = item.image();
     if image.content.chars().count() > MARKED_LIMIT {
-        image.content = answering_stretch(&image.content, &tokens);
+        image.content = answering_stretch(&image.content, tokens);
     }
     if tokens.is_empty() {
         return image.content;
     }
-    held_marked(&image, &tokens).unwrap_or(image.content)
+    held_marked(&image, tokens).unwrap_or(image.content)
 }
 pub fn window(
     units: &[String],
@@ -835,25 +856,45 @@ pub fn quote_candidate(
     query: &str,
     limit: usize,
 ) -> Result<String> {
+    quote_candidate_with(conn, item, query, limit, &QueryTerms::read(conn, query))
+}
+pub fn quote_candidate_with(
+    conn: &Connection,
+    item: &Candidate,
+    query: &str,
+    limit: usize,
+    terms: &QueryTerms,
+) -> Result<String> {
     let image = item.image();
-    let marked = marked(conn, item, query);
+    let marked = marked_with(item, &terms.evidence);
     let text = if item.document.kind == "changelog" {
         &image.content
     } else {
         &marked
     };
-    Ok(section(conn, item, text, &weights(conn, query), query)
+    Ok(section(conn, item, text, &terms.weights, query)
         .map(|section| {
             window(
                 &section.units,
                 limit,
-                &weights(conn, query),
+                &terms.weights,
                 item.document.kind == "changelog",
             )
         })
         .unwrap_or_else(|| query::body_excerpt(&image.content, limit, &[], false)))
 }
 pub fn delivery_identity(conn: &Connection, item: &Candidate, query: &str) -> (String, String) {
+    delivery_identity_with(conn, item, query, None)
+}
+/// `delivery_identity` with the query's terms when the caller holds them;
+/// without them, they are read only when the item's identity depends on the
+/// section its quote comes from.
+pub fn delivery_identity_with(
+    conn: &Connection,
+    item: &Candidate,
+    query: &str,
+    terms: Option<&QueryTerms>,
+) -> (String, String) {
     let mut key = item.document.path.clone();
     let mut revision = item.document.source_hash.clone();
     if item.document.layer != "procedural"
@@ -863,18 +904,26 @@ pub fn delivery_identity(conn: &Connection, item: &Candidate, query: &str) -> (S
             Some("prompt-link" | "touch-link")
         ) && item.document.kind == "brain-task")
     {
+        let read;
+        let terms = match terms {
+            Some(terms) => terms,
+            None => {
+                read = QueryTerms::read(conn, query);
+                &read
+            }
+        };
         let image = item.image();
-        let marked = marked(conn, item, query);
+        let marked = marked_with(item, &terms.evidence);
         let text = if item.document.kind == "changelog" {
             &image.content
         } else {
             &marked
         };
-        if let Some(selected) = section(conn, item, text, &weights(conn, query), query) {
+        if let Some(selected) = section(conn, item, text, &terms.weights, query) {
             let ordinary = quoted_section(
                 &marked,
                 &item.document.title,
-                &weights(conn, query),
+                &terms.weights,
                 None,
                 &BTreeSet::new(),
                 false,
