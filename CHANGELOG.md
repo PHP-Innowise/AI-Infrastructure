@@ -77,6 +77,19 @@ edition's own files remain in that edition's changelog.
   gave identical capsules, the 24th differed by this handoff alone.
   Admitting open handoffs would be a retrieval change to measure on its own
   (docs/MEMORY-EVAL.md).
+- A hook without a prompt (session start and compaction capsules, Cursor's
+  rule) asks memory with the task's own words again, as the retired hook
+  did: a file adds its stem (`src/Refund.php` asks for "Refund", not for
+  "src" and "php", which match most of a PHP project), an auto-provisioned
+  goal, the branch slug re-cased, adds nothing, a task with nothing
+  substantive asks with its bare identifier, and a lightweight task's query
+  no longer starts with its identifier. The words are plain words, each
+  once, at most 32; aliases join when the query is searched instead of
+  taking slots from the task's words.
+- `memory replay-result` takes `--prepared-scope` again, as the retired CLI
+  required. The native CLI did not accept the option, and the runtime
+  refuses a receipt-only replay without a scope, so the command could not
+  succeed from the command line.
 - Bringing a project to the native runtime leaves Codex a working memory
   server and its whole policy. Four installed client projects carry an
   older Codex registration, `[mcp_servers.harness-memory]` running the

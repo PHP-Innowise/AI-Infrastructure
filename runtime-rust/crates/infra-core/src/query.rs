@@ -319,32 +319,63 @@ pub fn evidence_tokens(tokens: &[String]) -> Vec<String> {
         .cloned()
         .collect()
 }
+/// The words a capsule asks with when no prompt names them: the given text,
+/// then the task's goal, progress and next steps and its files' stems
+/// (`src/Refund.php` asks for "Refund", not for "src" and "php", which match
+/// most of a PHP project), each word once and at most 32, as the retired
+/// runtime built it. Plain words only: aliases join when the query is
+/// searched, so they never take a slot from the task's own words.
 pub fn build_capsule_query(query: &str, working: Option<&Value>) -> Result<String> {
-    let mut text = query.to_string();
+    static WORDS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let words = WORDS
+        .get_or_init(|| regex::Regex::new(r"[\p{L}\p{N}_]+").expect("constant query word grammar"));
+    let mut values = vec![query.to_string()];
     if let Some(working) = working {
         for field in ["goal", "progress"] {
             if let Some(value) = working[field].as_str() {
-                text.push(' ');
-                text.push_str(value);
+                values.push(value.into());
             }
         }
-        for field in ["next_steps", "files"] {
-            for value in working[field]
+        let texts = |field: &str| {
+            working[field]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
-            {
-                text.push(' ');
-                text.push_str(value);
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
+        values.extend(texts("next_steps"));
+        values.extend(
+            texts("files")
+                .iter()
+                .map(|path| file_stem(path).to_string()),
+        );
+    }
+    let text = values.join(" ");
+    let mut tokens = Vec::new();
+    let mut seen = BTreeSet::new();
+    for word in words.find_iter(&text) {
+        if seen.insert(folded(word.as_str())) {
+            tokens.push(word.as_str());
+            if tokens.len() == 32 {
+                break;
             }
         }
     }
-    Ok(query_tokens(&text)?
-        .into_iter()
-        .take(32)
-        .collect::<Vec<_>>()
-        .join(" "))
+    if tokens.is_empty() {
+        return Err(RuntimeError::invalid("Search query must contain a word"));
+    }
+    Ok(tokens.join(" "))
+}
+/// A path's final name without its last suffix, as Python's `PurePath.stem`:
+/// a leading or trailing dot is part of the name.
+fn file_stem(path: &str) -> &str {
+    let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    match name.rfind('.') {
+        Some(at) if at > 0 && at + 1 < name.len() => &name[..at],
+        _ => name,
+    }
 }
 pub fn distill_query(conn: &Connection, prompt: &str) -> Result<String> {
     let tokens = informative_tokens(conn, expand_query_tokens(conn, query_tokens(prompt)?)?)?;

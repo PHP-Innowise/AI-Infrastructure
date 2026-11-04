@@ -1558,18 +1558,52 @@ fn hook_query(store: &Store, context: &RuntimeContext, id: &str) -> Result<(Stri
     if context.mode == "lightweight" {
         if let Some(task) = store.working(id)? {
             return Ok((
-                query::build_capsule_query(id, Some(&serde_json::to_value(task)?))?,
+                query::build_capsule_query("", Some(&serde_json::to_value(task)?))?,
                 "task".into(),
             ));
         }
-    } else if let Some(uuid) = checkpoint::served_uuid(Some(store), context, id)? {
-        let task = BrainRepository::new(context.clone())?.get_task(&uuid)?;
-        let config = RuntimeConfig::load(&context.roots)?;
-        if index::record_eligibility(context, &config, &task)?.is_none() {
-            return Ok((query::build_capsule_query(id, Some(&task))?, "task".into()));
-        }
+    } else if let Some(uuid) = checkpoint::served_uuid(Some(store), context, id)?
+        && let Some(found) = governed_hook_query(context, id, &uuid)?
+    {
+        return Ok(found);
     }
     Ok((id.into(), "task-id".into()))
+}
+/// A governed task's own state, as the retired hook asked with it: the goal
+/// unless it is the auto-provisioned one (the branch slug re-cased, noise
+/// under another name), the manual progress note, next steps and files. With
+/// nothing substantive left, or a task that cannot be read, the bare
+/// identifier asks instead.
+fn governed_hook_query(
+    context: &RuntimeContext,
+    id: &str,
+    uuid: &str,
+) -> Result<Option<(String, String)>> {
+    let task = match BrainRepository::new(context.clone())?.get_task(uuid) {
+        Ok(task) => task,
+        Err(error) if error.code.as_deref() == Some("source-git") => return Err(error),
+        Err(_) => return Ok(None),
+    };
+    let config = RuntimeConfig::load(&context.roots)?;
+    if index::record_eligibility(context, &config, &task)?.is_some() {
+        return Ok(None);
+    }
+    let goal = task["goal"]
+        .as_str()
+        .filter(|goal| *goal != storage::derive_goal(id))
+        .unwrap_or("");
+    let listed = |field: &str| task[field].as_array().cloned().unwrap_or_default();
+    let working = object!({"goal":goal,"progress":task["progress"].as_str().unwrap_or(""),"next_steps":listed("next_steps"),"files":listed("files")});
+    let substantive = !goal.is_empty()
+        || !working["progress"].as_str().unwrap_or("").is_empty()
+        || !listed("next_steps").is_empty()
+        || !listed("files").is_empty();
+    if !substantive {
+        return Ok(None);
+    }
+    Ok(query::build_capsule_query(id, Some(&working))
+        .ok()
+        .map(|query| (query, "task".into())))
 }
 fn codebase_status(store: &Store, context: &RuntimeContext) -> Result<Value> {
     let rows = (|| -> std::result::Result<Vec<String>, rusqlite::Error> {

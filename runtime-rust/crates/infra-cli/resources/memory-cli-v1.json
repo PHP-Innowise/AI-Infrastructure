@@ -1441,6 +1441,12 @@
       },
       {
         "flags": [
+          "--prepared-scope"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
           "--json"
         ],
         "action": "store_true"

@@ -1102,6 +1102,104 @@ fn hand_run_commands_report_what_they_did() {
     );
 }
 
+/// A hook without a prompt asks with the task's own words, as the retired
+/// hook did: a file adds its stem, never "src" or "php", and an
+/// auto-provisioned goal, the branch slug re-cased, adds nothing.
+#[test]
+fn a_hook_asks_with_the_tasks_words_and_file_stems() {
+    let fixture = Fixture::new(false);
+    fixture.success(
+        &[
+            "start",
+            "--task-id",
+            "TASK-STEMS",
+            "--goal",
+            "Cobalt retry boundary",
+            "--file",
+            "specs/source.md",
+            "--json",
+        ],
+        None,
+    );
+    let value = fixture.success(&["hook-context", "--task-id", "TASK-STEMS", "--json"], None);
+    assert_eq!(value["query_source"], "task", "{value}");
+    assert_eq!(
+        value["query"], "TASK STEMS Cobalt retry boundary source",
+        "{value}"
+    );
+
+    completion_git_commit(&fixture, "Baseline");
+    fs::write(fixture.project.join("specs/notes.md"), "# Notes\n").unwrap();
+    fixture.success(&["turn", "--task-id", "AUTO-7", "--flush", "--json"], None);
+    let task = fixture.success(&["get", "--task-id", "AUTO-7", "--json"], None);
+    assert!(
+        task["goal"].as_str().unwrap().contains("auto-provisioned"),
+        "{task}"
+    );
+    let value = fixture.success(&["hook-context", "--task-id", "AUTO-7", "--json"], None);
+    let query = value["query"].as_str().unwrap();
+    assert!(!query.contains("provisioned"), "{query}");
+    assert!(query.starts_with("AUTO 7"), "{query}");
+}
+
+/// The prepared-result path the Harness drives works from the command line
+/// too: a prepared save is recorded under its scope, and a replay names that
+/// scope, which the retired CLI required and the native one could not take.
+#[test]
+fn replay_result_takes_the_prepared_scope() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-PREPARED");
+    let input = fixture.root.join("prepared.json");
+    fs::write(
+        &input,
+        serde_json::to_vec(&json!({
+            "progress":"Read specs/source.md: cobalt retries stop after the third write.",
+            "verified":true,
+            "learnings":[]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let input = input.to_string_lossy().into_owned();
+    let common = [
+        "--task-id",
+        "TASK-PREPARED",
+        "--result-id",
+        "prepared-1",
+        "--revision",
+        "1",
+        "--input",
+        input.as_str(),
+        "--reason",
+        "Prepared by a test harness",
+    ];
+    let prepared = fixture.success(
+        &[&["prepare-result"][..], &common, &["--json"]].concat(),
+        None,
+    );
+    let scope = prepared["scope"]
+        .as_str()
+        .expect("a prepared scope")
+        .to_owned();
+    let with_scope = |operation: &'static str| {
+        [
+            &[operation][..],
+            &common,
+            &["--prepared-scope", scope.as_str(), "--json"],
+        ]
+        .concat()
+    };
+    let recorded = fixture.success(&with_scope("record-result"), None);
+    assert_eq!(recorded["replayed"], false, "{recorded}");
+    let replayed = fixture.success(&with_scope("replay-result"), None);
+    assert_eq!(replayed["replayed"], true, "{replayed}");
+    let missing = fixture.run(&[&["replay-result"][..], &common].concat(), None);
+    assert!(
+        !missing.status.success(),
+        "a replay without its scope is refused"
+    );
+}
+
 /// No handoff reaches a capsule, as in the retired runtime: another task's
 /// open handoff repeated that task's record, which is admitted on its own.
 #[test]
