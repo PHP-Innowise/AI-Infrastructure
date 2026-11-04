@@ -554,7 +554,7 @@ fn assets(dir: &Path) -> std::result::Result<(BTreeMap<String, PathBuf>, bool), 
     if files.keys().map(String::as_str).collect::<BTreeSet<_>>() != required {
         return Err("invalid-assets");
     }
-    let base = fs::canonicalize(dir).map_err(|_| "asset-missing")?;
+    let base = infra_core::fs::canonicalize(dir).map_err(|_| "asset-missing")?;
     let mut out = BTreeMap::new();
     for (name, meta) in files {
         if Path::new(name).file_name().and_then(|n| n.to_str()) != Some(name) {
@@ -575,7 +575,7 @@ fn assets(dir: &Path) -> std::result::Result<(BTreeMap<String, PathBuf>, bool), 
         {
             return Err("invalid-assets");
         }
-        let p = fs::canonicalize(dir.join(name)).map_err(|_| "asset-missing")?;
+        let p = infra_core::fs::canonicalize(dir.join(name)).map_err(|_| "asset-missing")?;
         if !p.starts_with(&base) || !p.is_file() {
             return Err("asset-missing");
         }

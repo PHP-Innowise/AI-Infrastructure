@@ -48,7 +48,7 @@ fn norm(path: &Path) -> String {
     }
 }
 pub fn details(root: &Path, status: bool) -> Result<Value> {
-    let root = std::fs::canonicalize(root)?;
+    let root = infra_core::fs::canonicalize(root)?;
     let top = run(&root, &["rev-parse", "--show-toplevel"])?;
     if top.code != 0 {
         return Ok(
@@ -57,7 +57,7 @@ pub fn details(root: &Path, status: bool) -> Result<Value> {
     }
     let top = PathBuf::from(stripped(output(top)?));
     let common = stripped(output(run(&root, &["rev-parse", "--git-common-dir"])?)?);
-    let common = std::fs::canonicalize(root.join(common))?;
+    let common = infra_core::fs::canonicalize(root.join(common))?;
     let branch = run(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     if ![0, 1].contains(&branch.code) {
         return Err(HarnessError::unavailable(
@@ -157,7 +157,7 @@ pub fn choices(store: &SessionStore, project: &Value) -> Result<Value> {
             || !path.is_absolute()
             || !folder.is_dir()
             || choices.len() == 200
-            || std::fs::canonicalize(&folder).ok().as_ref() != Some(&folder)
+            || infra_core::fs::canonicalize(&folder).ok().as_ref() != Some(&folder)
         {
             skipped += 1;
             continue;
@@ -488,7 +488,8 @@ pub fn browse(data: &Value) -> Result<Value> {
     let default = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
         .ok_or_else(|| HarnessError::unavailable("User home is unavailable."))?;
-    let root = std::fs::canonicalize(data["path"].as_str().map(PathBuf::from).unwrap_or(default))?;
+    let root =
+        infra_core::fs::canonicalize(data["path"].as_str().map(PathBuf::from).unwrap_or(default))?;
     let mut queue = VecDeque::from([(root.clone(), 0)]);
     let mut entries = Vec::new();
     let mut examined = 0;

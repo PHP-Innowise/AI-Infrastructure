@@ -224,7 +224,7 @@ fn runtime_profile(
     }
     for name in ["node", "bun"] {
         if let Some(path) = infra_host::provider::find_executable(name) {
-            let path = std::fs::canonicalize(path)?;
+            let path = infra_core::fs::canonicalize(path)?;
             runtime.insert(path.clone());
             if let Some(parent) = path.parent() {
                 runtime.insert(parent.to_path_buf());

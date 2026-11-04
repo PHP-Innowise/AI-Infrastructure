@@ -17,7 +17,7 @@ pub fn recent_key(context: &RuntimeContext) -> Result<String> {
     if !context.roots.attached() {
         return Ok("recent_files".into());
     }
-    let path = std::fs::canonicalize(&context.roots.project)?;
+    let path = crate::fs::canonicalize(&context.roots.project)?;
     #[cfg(unix)]
     let bytes = {
         use std::os::unix::ffi::OsStrExt;
@@ -120,7 +120,7 @@ fn project_file(word: &str, base: &Path, root: &Path) -> Option<String> {
         } else {
             base.join(candidate)
         };
-        let Ok(resolved) = std::fs::canonicalize(joined) else {
+        let Ok(resolved) = crate::fs::canonicalize(joined) else {
             continue;
         };
         if resolved.is_file()
@@ -311,7 +311,7 @@ fn shell_files(command: &str, base: &Path, powershell: bool) -> Vec<(String, boo
         {
             if let Some(path) = segment.get(at) {
                 let joined = directory.join(&path.text);
-                if let Ok(path) = std::fs::canonicalize(joined) {
+                if let Ok(path) = crate::fs::canonicalize(joined) {
                     *directory = path;
                 }
             }
@@ -408,7 +408,7 @@ fn shell_files(command: &str, base: &Path, powershell: bool) -> Vec<(String, boo
             while at < segment.len() && segment[at].text.starts_with('-') {
                 if segment[at].text == "-C" && at + 1 < segment.len() {
                     let joined = directory.join(&segment[at + 1].text);
-                    if let Ok(path) = std::fs::canonicalize(joined) {
+                    if let Ok(path) = crate::fs::canonicalize(joined) {
                         *directory = path;
                     }
                     at += 2;
@@ -813,7 +813,7 @@ pub fn transcript_files(transcript: Option<&Path>, context: &RuntimeContext) -> 
             .or_else(|| records.iter().rposition(prompt))
             .map(|index| index + 1)
             .unwrap_or(0);
-        let root = std::fs::canonicalize(&context.roots.project)?;
+        let root = crate::fs::canonicalize(&context.roots.project)?;
         let deadline = Instant::now() + Duration::from_secs(1);
         let patch_paths = regex::Regex::new(
             r"(?m)^\*\*\* (?:Update|Add|Delete) File: (.+)$|^\*\*\* Move to: (.+)$",
@@ -1026,7 +1026,7 @@ pub fn host_loaded(context: &RuntimeContext, host: &str) -> BTreeSet<String> {
                         }
                         let relative =
                             captures[1].trim_matches(|character| ".,;:".contains(character));
-                        let Ok(target) = std::fs::canonicalize(
+                        let Ok(target) = crate::fs::canonicalize(
                             path.parent()
                                 .unwrap_or(&context.roots.project)
                                 .join(relative),
@@ -1420,7 +1420,7 @@ pub fn ticket_files(
 }
 
 fn topic_root_digest(project: &Path) -> Result<String> {
-    let project = std::fs::canonicalize(project)?;
+    let project = crate::fs::canonicalize(project)?;
     #[cfg(unix)]
     let bytes = {
         use std::os::unix::ffi::OsStrExt;

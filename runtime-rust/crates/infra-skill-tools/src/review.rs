@@ -154,8 +154,8 @@ fn recurse(
     if !current.is_dir() {
         return Ok(());
     }
-    let canonical = current.canonicalize()?;
-    if !canonical.starts_with(root.canonicalize()?) || !seen.insert(canonical) {
+    let canonical = infra_core::fs::canonicalize(current)?;
+    if !canonical.starts_with(infra_core::fs::canonicalize(root)?) || !seen.insert(canonical) {
         return Ok(());
     }
     if current.join("outputs").is_dir() {

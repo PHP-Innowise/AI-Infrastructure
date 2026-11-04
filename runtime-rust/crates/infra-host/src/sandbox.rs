@@ -20,7 +20,7 @@ pub struct Spec {
     pub evidence: Option<PathBuf>,
 }
 fn canonical(path: &Path) -> Result<PathBuf> {
-    let root = std::fs::canonicalize(path)?;
+    let root = infra_core::fs::canonicalize(path)?;
     let meta = std::fs::symlink_metadata(path)?;
     if infra_core::fs::linked(&meta) {
         return Err(HarnessError::forbidden("Sandbox paths must not be links."));
@@ -294,7 +294,7 @@ fn command(spec: &Spec, argv: &[String], discovery: bool) -> Result<Vec<String>>
                 for name in public {
                     let path = Path::new(name);
                     if path.exists() {
-                        let resolved = std::fs::canonicalize(path)?;
+                        let resolved = infra_core::fs::canonicalize(path)?;
                         if spec.protected.iter().any(|p| overlap(p, &resolved)) {
                             return Err(HarnessError::forbidden(
                                 "Source folders must be outside OS runtime directories.",

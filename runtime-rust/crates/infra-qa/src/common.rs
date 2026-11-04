@@ -81,7 +81,7 @@ pub fn write_json(path: &Path, v: &Value) -> Result<()> {
 }
 pub fn root() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("INFRA_REPOSITORY_ROOT") {
-        return fs::canonicalize(p).context("repository root");
+        return crate::spelling::canonicalize(p).context("repository root");
     }
     let cwd = std::env::current_dir()?;
     for p in cwd.ancestors() {
@@ -103,8 +103,8 @@ pub fn git(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?)
 }
 pub fn relative(path: &Path, root: &Path) -> Result<String> {
-    Ok(fs::canonicalize(path)?
-        .strip_prefix(fs::canonicalize(root)?)
+    Ok(crate::spelling::canonicalize(path)?
+        .strip_prefix(crate::spelling::canonicalize(root)?)
         .context("artifact outside repository")?
         .to_string_lossy()
         .replace('\\', "/"))
@@ -117,7 +117,7 @@ pub fn confined(root: &Path, name: &str) -> Result<PathBuf> {
     {
         bail!("unsafe artifact path");
     }
-    let base = fs::canonicalize(root)?;
+    let base = crate::spelling::canonicalize(root)?;
     let mut out = base.clone();
     for c in p.components() {
         out.push(c);
@@ -128,7 +128,7 @@ pub fn confined(root: &Path, name: &str) -> Result<PathBuf> {
             bail!("artifact contains symlink");
         }
     }
-    if out.exists() && !fs::canonicalize(&out)?.starts_with(&base) {
+    if out.exists() && !crate::spelling::canonicalize(&out)?.starts_with(&base) {
         bail!("artifact escapes root");
     }
     Ok(out)

@@ -24,20 +24,6 @@ const ENGINE_NAME: &str = if cfg!(windows) {
     "infra-engine"
 };
 
-/// `fs::canonicalize` spells a Windows drive path `\\?\C:\…`, and Git for
-/// Windows cannot read its configuration through such a path; the same drive
-/// path needs no verbatim prefix.
-fn canonical(path: impl AsRef<Path>) -> PathBuf {
-    let path = fs::canonicalize(path).unwrap();
-    #[cfg(windows)]
-    if let Some(drive) = path.to_str().and_then(|text| text.strip_prefix(r"\\?\"))
-        && drive.as_bytes().get(1) == Some(&b':')
-    {
-        return PathBuf::from(drive);
-    }
-    path
-}
-
 struct Fixture {
     root: PathBuf,
     env: BTreeMap<String, String>,
@@ -56,7 +42,7 @@ impl Fixture {
         ));
         fs::create_dir(&root).unwrap();
         private_mode(&root, 0o700);
-        let root = canonical(root);
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let mut env = std::env::vars()
             .filter(|(name, _)| {
                 [
@@ -253,7 +239,9 @@ fn source_image(root: &Path) -> BTreeMap<String, Vec<u8>> {
 fn public_memory_eval_accepts_hardlinked_selected_native_runtime_without_a_provider() {
     let fixture = Fixture::new();
     let original_engine = Path::new(env!("CARGO_BIN_EXE_infra-engine"));
-    let repository = canonical(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let repository =
+        infra_core::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+            .unwrap();
     let selected = fixture.root.join("selected").join(ENGINE_NAME);
     let second = fixture.root.join("selected/second-engine-image");
     executable::copy(original_engine, &selected);
@@ -492,7 +480,9 @@ fn public_memory_eval_accepts_hardlinked_selected_native_runtime_without_a_provi
 fn public_native_ab_plan_admits_only_the_canonical_engine_outside_data_budgets() {
     let fixture = Fixture::new();
     let cargo_engine = Path::new(env!("CARGO_BIN_EXE_infra-engine"));
-    let repository = canonical(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let repository =
+        infra_core::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+            .unwrap();
     let selected = fixture.root.join("selected").join(ENGINE_NAME);
     executable::copy(cargo_engine, &selected);
     private_mode(&selected, 0o700);
@@ -610,7 +600,9 @@ fn public_native_ab_plan_admits_only_the_canonical_engine_outside_data_budgets()
 fn public_outcome_seal_consolidation_retains_the_selected_native_engine_without_a_provider() {
     let fixture = Fixture::new();
     let cargo_engine = Path::new(env!("CARGO_BIN_EXE_infra-engine"));
-    let repository = canonical(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let repository =
+        infra_core::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+            .unwrap();
     let selected = fixture.root.join("selected").join(ENGINE_NAME);
     executable::copy(cargo_engine, &selected);
     private_mode(&selected, 0o700);

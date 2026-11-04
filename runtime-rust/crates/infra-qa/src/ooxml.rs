@@ -1407,7 +1407,7 @@ pub fn reconstruct(evidence: &Path, current: &Path, output: &Path, force: bool) 
     let output_abs = compat::output_path(output)?;
     if [snapshot, current]
         .iter()
-        .any(|p| fs::canonicalize(p).ok().as_ref() == Some(&output_abs))
+        .any(|p| crate::spelling::canonicalize(p).ok().as_ref() == Some(&output_abs))
     {
         bail!("output cannot overwrite either input");
     }

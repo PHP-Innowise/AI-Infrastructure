@@ -245,7 +245,7 @@ mod assembled_attribute_tests {
             let root = std::env::temp_dir()
                 .join(format!("infra-mirror-attributes-{}", uuid::Uuid::new_v4()));
             fs::create_dir(&root).unwrap();
-            let root = fs::canonicalize(root).unwrap();
+            let root = infra_core::fs::canonicalize(root).unwrap();
             common::git_ok(&root, &["-c", "init.templateDir=", "init", "--quiet"], None).unwrap();
             #[cfg(unix)]
             common::git_ok(&root, &["config", "core.fileMode", "true"], None).unwrap();

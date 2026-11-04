@@ -808,7 +808,7 @@ pub fn project_member(project: &Path, cwd: &str) -> bool {
     let common = |p: &Path| {
         reconstruction::git(p, &["rev-parse", "--git-common-dir"])
             .ok()
-            .and_then(|s| std::fs::canonicalize(p.join(s)).ok())
+            .and_then(|s| infra_core::fs::canonicalize(p.join(s)).ok())
     };
     common(project).zip(common(p)).is_some_and(|(a, b)| a == b)
 }

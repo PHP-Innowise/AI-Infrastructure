@@ -24,7 +24,7 @@ impl Repository {
             infra_core::domain::uuid4()
         ));
         fs::create_dir(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let repository = Self {
             checkout: root.join("project"),
             root,

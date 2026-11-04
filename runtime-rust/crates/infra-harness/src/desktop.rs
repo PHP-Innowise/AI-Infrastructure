@@ -227,9 +227,9 @@ fn options(arguments: &[String], source: &Path) -> Result<(String, ServerConfig)
             .get(i + 1)
             .ok_or_else(|| HarnessError::invalid("Missing server option value."))?;
         match flag.as_str() {
-            "--source" => config.source = std::fs::canonicalize(value)?,
+            "--source" => config.source = infra_core::fs::canonicalize(value)?,
             "--state-dir" => config.state = PathBuf::from(value),
-            "--project" => config.projects.push(std::fs::canonicalize(value)?),
+            "--project" => config.projects.push(infra_core::fs::canonicalize(value)?),
             "--port" => {
                 config.port = value
                     .parse()
@@ -254,7 +254,7 @@ fn options(arguments: &[String], source: &Path) -> Result<(String, ServerConfig)
     }
     if config.projects.is_empty() {
         let current = std::env::current_dir()?;
-        if std::fs::canonicalize(&current)? != config.source {
+        if infra_core::fs::canonicalize(&current)? != config.source {
             config.projects.push(current);
         }
     }
@@ -543,7 +543,7 @@ pub fn install(source: &Path) -> Result<Vec<PathBuf>> {
 pub fn install_engine(source: &Path, engine: &Path) -> Result<Vec<PathBuf>> {
     // A missing late icon, native helper or engine is refused before any
     // application config/desktop mkdir, chmod, write or registry operation.
-    let source = std::fs::canonicalize(source)?;
+    let source = infra_core::fs::canonicalize(source)?;
     let mut inputs = publication::Inputs::admit(&source, engine)?;
     let config = infra_core::fs::absolute(&config_directory()?)?;
     let publication_paths = publication::install_paths(&config)?;

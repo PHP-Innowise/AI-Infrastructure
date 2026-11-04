@@ -6,7 +6,7 @@ pub fn source_fingerprints(roots: &Roots, sources: &[String]) -> Result<Vec<Valu
     let mut output = Vec::new();
     for source in sources.iter().collect::<BTreeSet<_>>() {
         let relative = source.split('#').next().unwrap_or(source);
-        let path = std::fs::canonicalize(roots.resolve(relative))?;
+        let path = crate::fs::canonicalize(roots.resolve(relative))?;
         if !roots.contains(&path)? {
             return Err(RuntimeError::policy("Source escapes repository roots"));
         }
@@ -101,7 +101,7 @@ pub fn citation_problem(roots: &Roots, record: &Value) -> Result<Option<&'static
         }
     }
     for path in paths {
-        let resolved = match std::fs::canonicalize(roots.resolve(path)) {
+        let resolved = match crate::fs::canonicalize(roots.resolve(path)) {
             Ok(path) => path,
             Err(_) => return Ok(Some("source-missing")),
         };

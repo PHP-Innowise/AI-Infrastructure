@@ -450,7 +450,7 @@ pub fn inventory(
         if path.is_symlink() {
             let lexical = path
                 .parent()
-                .and_then(|p| p.canonicalize().ok())
+                .and_then(|p| infra_core::fs::canonicalize(p).ok())
                 .unwrap_or_else(|| skills_dir.to_owned())
                 .join(&name);
             if !allowed.contains(&lexical) {

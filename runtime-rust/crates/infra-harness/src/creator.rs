@@ -351,7 +351,8 @@ impl CreatorManager {
         {
             return Err(HarnessError::invalid("Invalid additional-agent settings."));
         }
-        let source = std::fs::canonicalize(Path::new(project["path"].as_str().unwrap_or("")))?;
+        let source =
+            infra_core::fs::canonicalize(Path::new(project["path"].as_str().unwrap_or("")))?;
         for boundary in [&self.source, &self.store.state] {
             if overlap(&source, boundary) {
                 return Err(HarnessError::forbidden(

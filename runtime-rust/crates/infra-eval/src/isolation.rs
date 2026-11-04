@@ -67,7 +67,7 @@ pub fn prepare(
     let bwrap = which("bwrap").ok_or_else(|| {
         artifact::invalid("task-complete requires Linux bubblewrap read isolation")
     })?;
-    let corpus = std::fs::canonicalize(artifact::ordinary(corpus)?)?;
+    let corpus = infra_core::fs::canonicalize(artifact::ordinary(corpus)?)?;
     let private = artifact::ordinary(private)?;
     if !corpus.is_dir() || artifact::overlaps(&corpus, &private)? {
         return Err(artifact::invalid("private inputs overlap agent corpus"));
@@ -79,7 +79,7 @@ pub fn prepare(
         .collect::<Vec<_>>();
     let mut native = command.to_vec();
     if let Some(program) = native.first_mut() {
-        let resolved = std::fs::canonicalize(
+        let resolved = infra_core::fs::canonicalize(
             which(program).ok_or_else(|| artifact::invalid("native executable unavailable"))?,
         )?;
         let package = resolved
@@ -182,7 +182,7 @@ pub fn prepare(
             }
             prefix.extend([
                 "--ro-bind".into(),
-                std::fs::canonicalize(auth)?.to_string_lossy().into(),
+                infra_core::fs::canonicalize(auth)?.to_string_lossy().into(),
                 "/home/agent/.codex/auth.json".into(),
             ]);
         }
@@ -211,7 +211,7 @@ pub fn verifier(candidate: &Path, argv: &[String], roots: &[PathBuf]) -> Result<
         .join(".not-an-agent-input");
     let mut view = prepare(candidate, &sentinel, argv, false, None)?;
     for root in roots {
-        let root = std::fs::canonicalize(artifact::ordinary(root)?)?;
+        let root = infra_core::fs::canonicalize(artifact::ordinary(root)?)?;
         if artifact::overlaps(&root, candidate)? {
             return Err(artifact::invalid("verifier root overlaps candidate"));
         }

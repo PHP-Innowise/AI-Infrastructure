@@ -166,7 +166,7 @@ impl Fixture {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let project = root.join("shop with spaces");
         let temporary = root.join("tmp");
         let locks = root.join("locks");

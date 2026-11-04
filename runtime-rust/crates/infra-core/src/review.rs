@@ -976,7 +976,7 @@ impl ReviewService {
         if !path.is_absolute() {
             return Err(fail("semantic-review:external-input-required"));
         }
-        let resolved = std::fs::canonicalize(path)?;
+        let resolved = crate::fs::canonicalize(path)?;
         for root in [
             &self.context.roots.project,
             &self.context.roots.state,

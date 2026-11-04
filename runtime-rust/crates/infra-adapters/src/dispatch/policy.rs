@@ -78,13 +78,15 @@ pub fn main_checkout(checkout: &Path) -> PathBuf {
             .strip_prefix("gitdir:")
             .ok_or_else(|| RuntimeError::invalid("Not a worktree marker"))?
             .trim();
-        let private = std::fs::canonicalize(checkout.join(value))?;
-        let common =
-            std::fs::canonicalize(private.join(fs::read_text(&private.join("commondir"))?.trim()))?;
-        let back =
-            std::fs::canonicalize(private.join(fs::read_text(&private.join("gitdir"))?.trim()))?;
+        let private = infra_core::fs::canonicalize(checkout.join(value))?;
+        let common = infra_core::fs::canonicalize(
+            private.join(fs::read_text(&private.join("commondir"))?.trim()),
+        )?;
+        let back = infra_core::fs::canonicalize(
+            private.join(fs::read_text(&private.join("gitdir"))?.trim()),
+        )?;
         if private.parent() != Some(common.join("worktrees").as_path())
-            || back != std::fs::canonicalize(marker)?
+            || back != infra_core::fs::canonicalize(marker)?
         {
             return Err(RuntimeError::invalid("Unbound worktree marker"));
         }

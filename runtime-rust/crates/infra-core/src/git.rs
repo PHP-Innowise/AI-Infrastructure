@@ -232,7 +232,7 @@ fn image(path: &Path, contents: bool) -> Result<Option<crate::fs::NativeIdentity
     }))
 }
 fn frame_identity(project: &Path, frame: &GitFrame) -> Result<FrameIdentity> {
-    let project = fs::canonicalize(project)?;
+    let project = crate::fs::canonicalize(project)?;
     let mut rows = Vec::new();
     let mut found = false;
     for directory in project.ancestors() {
@@ -265,7 +265,7 @@ pub struct BranchSnapshot {
     pub reftable: Option<crate::fs::NativeIdentity>,
 }
 pub fn branch_snapshot(project: &Path) -> Option<BranchSnapshot> {
-    let project = fs::canonicalize(project).ok()?;
+    let project = crate::fs::canonicalize(project).ok()?;
     let checkout = checkout(&project).ok()??;
     let marker = checkout.join(".git");
     let admin = admin(&checkout)?;
@@ -282,12 +282,12 @@ fn admin(checkout: &Path) -> Option<PathBuf> {
     let marker = checkout.join(".git");
     let metadata = fs::metadata(&marker).ok()?;
     if metadata.is_dir() {
-        fs::canonicalize(&marker).ok()
+        crate::fs::canonicalize(&marker).ok()
     } else if metadata.is_file() {
         let text = fs::read_to_string(&marker).ok()?;
         let pointer = text.strip_prefix("gitdir: ")?.trim();
         let path = Path::new(pointer);
-        fs::canonicalize(if path.is_absolute() {
+        crate::fs::canonicalize(if path.is_absolute() {
             path.to_owned()
         } else {
             checkout.join(path)
@@ -299,7 +299,7 @@ fn admin(checkout: &Path) -> Option<PathBuf> {
 }
 /// The identity of the frame `project` would have, read before Git is asked.
 fn provisional_identity(project: &Path) -> Option<FrameIdentity> {
-    let project = fs::canonicalize(project).ok()?;
+    let project = crate::fs::canonicalize(project).ok()?;
     let top = checkout(&project).ok()??;
     let admin = admin(&top)?;
     let frame = GitFrame {
@@ -371,7 +371,7 @@ fn plain_frame(project: &Path, checkout: &Path) -> Option<GitFrame> {
     if bare || config.contains("worktree") || config.contains("include") {
         return None;
     }
-    let admin = fs::canonicalize(&marker).ok()?;
+    let admin = crate::fs::canonicalize(&marker).ok()?;
     let relative = project.strip_prefix(checkout).ok()?;
     let mut prefix_bytes = os_bytes(relative.as_os_str());
     if !prefix_bytes.is_empty() {
@@ -409,7 +409,7 @@ fn owned_on_one_device(_: &Path, _: &Path, _: &fs::Metadata) -> bool {
 
 impl GitFrame {
     fn discover_uncached(project: &Path, deadline: Instant) -> Result<Option<Self>> {
-        let project = fs::canonicalize(project)?;
+        let project = crate::fs::canonicalize(project)?;
         let Some(checkout) = checkout(&project)? else {
             return Ok(None);
         };
@@ -447,8 +447,8 @@ impl GitFrame {
                 "Git source frame paths are not absolute",
             ));
         }
-        let top = fs::canonicalize(top_name)?;
-        let admin = fs::canonicalize(admin_name)?;
+        let top = crate::fs::canonicalize(top_name)?;
+        let admin = crate::fs::canonicalize(admin_name)?;
         let relative = project
             .strip_prefix(&top)
             .map_err(|_| RuntimeError::unavailable("Git source context unavailable"))?;
@@ -832,7 +832,7 @@ impl GitFrame {
             bytes = previous;
         }
         let path = path_bytes(bytes)?;
-        Ok(fs::canonicalize(if path.is_absolute() {
+        Ok(crate::fs::canonicalize(if path.is_absolute() {
             path
         } else {
             self.project.join(path)
@@ -975,12 +975,12 @@ mod plain_frame_tests {
         let root =
             std::env::temp_dir().join(format!("infra-plain-frame-{}", crate::domain::uuid4()));
         fs::create_dir_all(root.join("shop/src")).unwrap();
-        let root = fs::canonicalize(&root).unwrap();
+        let root = crate::fs::canonicalize(&root).unwrap();
         git(&root, &["init", "--quiet"]);
         (Directory(root.clone()), root)
     }
     fn checkout_of(project: &Path) -> (PathBuf, PathBuf) {
-        let project = fs::canonicalize(project).unwrap();
+        let project = crate::fs::canonicalize(project).unwrap();
         let checkout = checkout(&project).unwrap().unwrap();
         (project, checkout)
     }
@@ -1037,6 +1037,9 @@ mod plain_frame_tests {
             &["worktree", "add", "--quiet", "-b", "linked", "linked"],
         );
         assert_eq!(plain(&linked), None);
-        assert_eq!(asked(&linked).top, fs::canonicalize(&linked).unwrap());
+        assert_eq!(
+            asked(&linked).top,
+            crate::fs::canonicalize(&linked).unwrap()
+        );
     }
 }

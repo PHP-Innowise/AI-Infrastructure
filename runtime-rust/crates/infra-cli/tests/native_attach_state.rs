@@ -31,7 +31,7 @@ impl Sandbox {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .nth(3)

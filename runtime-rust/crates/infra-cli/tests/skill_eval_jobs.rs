@@ -28,7 +28,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let project = root.join("private project");
         fs::create_dir_all(project.join(".agents")).unwrap();
         fs::create_dir_all(project.join(".codex")).unwrap();

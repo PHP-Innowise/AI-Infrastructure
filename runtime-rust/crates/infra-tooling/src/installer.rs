@@ -241,7 +241,7 @@ pub fn merge_additive(existing: &str, release: &str) -> Result<String> {
 }
 impl Installer {
     pub fn new(source: &Path) -> Result<Self> {
-        let source = std::fs::canonicalize(source)?;
+        let source = infra_core::fs::canonicalize(source)?;
         if !source.join("install/inventories").is_dir() {
             return Err(RuntimeError::not_found(
                 "Accelerator inventories are absent",
@@ -251,7 +251,7 @@ impl Installer {
         Ok(Self { source, engine })
     }
     pub fn with_engine(mut self, engine: &Path) -> Result<Self> {
-        self.engine = std::fs::canonicalize(engine)?;
+        self.engine = infra_core::fs::canonicalize(engine)?;
         let image = std::fs::symlink_metadata(&self.engine)?;
         if safe::linked(&image) || !image.is_file() || image.len() > FILE_LIMIT as u64 {
             return Err(RuntimeError::policy(
@@ -892,7 +892,7 @@ impl Installer {
                 "overwrite and merge_existing are mutually exclusive",
             ));
         }
-        let target = std::fs::canonicalize(target)?;
+        let target = infra_core::fs::canonicalize(target)?;
         let Some(edition) = self.detect_edition(&target)? else {
             return Err(RuntimeError::not_found(
                 "Target is not an identified accelerator installation",

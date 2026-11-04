@@ -67,7 +67,7 @@ impl Fixture {
             infra_core::domain::uuid4()
         ));
         fs::create_dir(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let project = root.join("project with spaces");
         let database = root.join("legacy state").join("context.db");
         let helper_database = root.join("inspection.db");

@@ -1280,8 +1280,8 @@ impl QueueDispatcher for MemoryService {
     fn dispatch(&mut self, command: &QueuedCommand) -> Result<Value> {
         let mut service = self.clone();
         if let Some(project) = &command.project
-            && std::fs::canonicalize(project)?
-                != std::fs::canonicalize(&service.context.roots.project)?
+            && crate::fs::canonicalize(project)?
+                != crate::fs::canonicalize(&service.context.roots.project)?
         {
             return Err(RuntimeError::policy(
                 "Queued project does not match this checkout",

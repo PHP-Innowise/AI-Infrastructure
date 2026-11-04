@@ -180,7 +180,7 @@ impl crate::results::ResultsBackend for ResultsBridge {
                 .as_str()
                 .ok_or_else(|| HarnessError::invalid("Session workspace missing."))?,
         );
-        let canonical = std::fs::canonicalize(&path)?;
+        let canonical = infra_core::fs::canonicalize(&path)?;
         if canonical != path {
             return Err(HarnessError::forbidden("Session workspace changed."));
         }

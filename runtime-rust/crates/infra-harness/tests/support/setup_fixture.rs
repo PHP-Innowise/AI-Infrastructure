@@ -33,7 +33,7 @@ fn root(raw: &str) -> Result<PathBuf> {
     if !selected.is_absolute() || !selected.is_dir() {
         return Err(invalid("Expected an existing absolute fixture directory"));
     }
-    Ok(fs::canonicalize(selected)?)
+    Ok(infra_core::fs::canonicalize(selected)?)
 }
 fn signal(selected: &Path, name: &str) -> Result<()> {
     fs::write(selected.join(name), b"ready")?;
@@ -754,11 +754,12 @@ fn fake_git(arguments: &[String]) -> Result<i32> {
     if arguments.len() != 10 || arguments[..7] != prefix || arguments[8] != "rev-parse" {
         return Err(invalid("Unexpected fake Git invocation"));
     }
-    let directory = fs::canonicalize(&arguments[7])?;
-    let scope = if directory == fs::canonicalize(selected.join("source"))? && arguments[9] == "HEAD"
+    let directory = infra_core::fs::canonicalize(&arguments[7])?;
+    let scope = if directory == infra_core::fs::canonicalize(selected.join("source"))?
+        && arguments[9] == "HEAD"
     {
         "source"
-    } else if directory == fs::canonicalize(selected.join("project"))?
+    } else if directory == infra_core::fs::canonicalize(selected.join("project"))?
         && arguments[9] == "--show-toplevel"
     {
         "project"

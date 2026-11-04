@@ -62,7 +62,7 @@ impl Root {
         let selected =
             std::env::temp_dir().join(format!("infra-provider-discovery-{}", uuid::Uuid::new_v4()));
         infra_host::util::private_directory(&selected).unwrap();
-        let selected = fs::canonicalize(selected).unwrap();
+        let selected = infra_core::fs::canonicalize(selected).unwrap();
         assert_eq!(
             Driver::spawn(&selected, &["prepare".as_ref(), selected.as_os_str()]).wait(),
             json!({"prepared":true})

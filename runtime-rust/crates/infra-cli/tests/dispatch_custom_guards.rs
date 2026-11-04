@@ -66,7 +66,7 @@ impl Fixture {
             infra_core::domain::uuid4()
         ));
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let home = root.join("private HOME");
         let claude = root.join("private Claude");
         let codex = root.join("private Codex");

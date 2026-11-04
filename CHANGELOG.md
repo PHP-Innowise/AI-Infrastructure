@@ -24,6 +24,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Canonical paths keep a spelling other programs read on Windows.
+  `std::fs::canonicalize` returns every Windows path as `\\?\C:\…`: Git
+  refuses it, `CreateProcess` rejects it as a working directory ("The
+  directory name is invalid"), and a relative name joined to it with `/` names
+  no file ("The filename, directory name, or volume label syntax is
+  incorrect"), which the first complete Windows test run showed across
+  installation, Harness updates, attach and evaluation. Every call now goes
+  through `infra_core::fs::canonicalize`, which drops the prefix from a drive
+  path whose plain spelling names the same file (shorter than `MAX_PATH`, no
+  reserved device name, no component Win32 rewrites); other forms stay
+  verbatim and Unix is unchanged. The QA crate includes the same file rather
+  than depending on infra-core. Python installations stored plain paths, so
+  native ones match them again. A refused relative distribution path is now
+  named in its error.
 - A failed CI job keeps its failed checks' complete output. `infra-engine
   check --log-dir DIR` writes the failed logs to `DIR`; each generated job
   passes a directory under the runner's temporary directory and uploads it as

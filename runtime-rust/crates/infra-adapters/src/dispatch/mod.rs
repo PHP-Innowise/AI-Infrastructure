@@ -90,7 +90,7 @@ fn mode_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     #[cfg(not(unix))]
     let _ = mode;
     let resolved = if linked_file(path) {
-        std::fs::canonicalize(path)?
+        infra_core::fs::canonicalize(path)?
     } else {
         path.into()
     };
@@ -591,7 +591,7 @@ pub fn install(root: &Path, host: &str, payload: Option<&Value>) -> Result<Value
     if payload.is_some_and(|payload| !own_session(host, payload)) {
         return Ok(json!({"state":"unrelated-session"}));
     }
-    let root = std::fs::canonicalize(root)?;
+    let root = infra_core::fs::canonicalize(root)?;
     let home = home(host);
     let source = root.join(if host == "codex" {
         ".codex/hooks.json"
@@ -686,7 +686,7 @@ pub fn install(root: &Path, host: &str, payload: Option<&Value>) -> Result<Value
         "settings.json"
     });
     let target = if linked_file(&settings) {
-        std::fs::canonicalize(&settings)?
+        infra_core::fs::canonicalize(&settings)?
     } else {
         settings
     };
@@ -843,7 +843,7 @@ pub fn run(host: &str, store: &Path, hook: &str, input: &[u8]) -> Result<Output>
     } else {
         std::env::current_dir()?
     };
-    let start = std::fs::canonicalize(start)?;
+    let start = infra_core::fs::canonicalize(start)?;
     let payload = serde_json::from_slice::<Value>(input).unwrap_or_else(|_| json!({}));
     let Some(selected) = selection(store, &start, host)? else {
         if host == "claude" && hook == "bash-validator.sh" {

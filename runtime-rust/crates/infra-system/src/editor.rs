@@ -584,7 +584,7 @@ mod missing_file_mode_tests {
     fn interrupted_new_file_uses_the_same_mode_projection_as_recovery() {
         let root = std::env::temp_dir().join(format!("infra-system-mode-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
-        let root = std::fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let before = snapshot(&root, "new-system.json").unwrap();
         assert_eq!(before.mode, 0o644);
         assert_eq!(before.body, None);

@@ -1440,7 +1440,7 @@ mod apply_tests {
     impl Fixture {
         fn new() -> Self {
             let directory = tempfile::tempdir().unwrap();
-            let base = std::fs::canonicalize(directory.path()).unwrap();
+            let base = infra_core::fs::canonicalize(directory.path()).unwrap();
             let source = base.join("source");
             std::fs::create_dir_all(source.join("install/open-source-kit")).unwrap();
             std::fs::write(

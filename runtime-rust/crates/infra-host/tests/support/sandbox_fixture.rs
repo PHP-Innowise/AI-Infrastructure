@@ -613,8 +613,8 @@ mod native {
                         .map(PathBuf::from)
                         .ok_or_else(|| fail("sandbox child temporary variable missing"))?;
                     require(
-                        fs::canonicalize(actual)?
-                            == fs::canonicalize(workspace.join(".harness-tmp"))?,
+                        infra_core::fs::canonicalize(actual)?
+                            == infra_core::fs::canonicalize(workspace.join(".harness-tmp"))?,
                         "sandbox child did not set its private temporary directory",
                     )?;
                 }

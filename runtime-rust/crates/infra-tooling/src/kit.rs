@@ -542,7 +542,7 @@ pub fn resolve_source(root: &Path, value: &str, resources: &[Value]) -> Result<S
         if !path.is_dir() {
             return Err(RuntimeError::invalid("Local source is not a directory"));
         }
-        return std::fs::canonicalize(path)?
+        return infra_core::fs::canonicalize(path)?
             .into_os_string()
             .into_string()
             .map_err(|_| RuntimeError::invalid("Local source is not UTF-8"));
@@ -688,7 +688,7 @@ fn native_launch(command: &[String], cwd: &Path) -> Result<(OsString, Vec<OsStri
         ));
     }
     // Admit the standard npm layout; never parse or execute a command shim.
-    let directory = std::fs::canonicalize(
+    let directory = infra_core::fs::canonicalize(
         selected
             .parent()
             .ok_or_else(|| RuntimeError::unavailable("npx installation root unavailable"))?,
@@ -733,7 +733,7 @@ fn native_launch(command: &[String], cwd: &Path) -> Result<(OsString, Vec<OsStri
                 RuntimeError::unavailable("node.exe is required for native npx transport")
             })?
     };
-    let node = std::fs::canonicalize(&node)?;
+    let node = infra_core::fs::canonicalize(&node)?;
     let mut arguments = vec![script.into_os_string()];
     arguments.extend(command[1..].iter().map(OsString::from));
     files.check()?;
@@ -751,7 +751,7 @@ fn native_launch(command: &[String], cwd: &Path) -> Result<(OsString, Vec<OsStri
     ))
 }
 fn run_native(root: &Path, operation: &str, request: &Value, resources: &[Value]) -> Result<Value> {
-    let target = std::fs::canonicalize(target(request)?)?;
+    let target = infra_core::fs::canonicalize(target(request)?)?;
     let command = native_command(root, operation, request, resources)?;
     if request["dry_run"] == true {
         return Ok(json!({"dry_run":true,"made":false,"target":target,"command":command}));

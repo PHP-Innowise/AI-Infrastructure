@@ -639,7 +639,7 @@ async fn discover_provider(
             }
         }
         if verified {
-            executable = Some(std::fs::canonicalize(path)?);
+            executable = Some(infra_core::fs::canonicalize(path)?);
             break;
         }
     }

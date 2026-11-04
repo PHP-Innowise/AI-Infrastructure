@@ -395,7 +395,7 @@ mod attached_recovery_tests {
             let root =
                 std::env::temp_dir().join(format!("infra-attach-recovery-{}", domain::uuid4()));
             fs::create_dir(&root).unwrap();
-            let root = fs::canonicalize(root).unwrap();
+            let root = crate::fs::canonicalize(root).unwrap();
             let tooling = root.join("tooling");
             let project = root.join("project");
             let state = root.join("state");

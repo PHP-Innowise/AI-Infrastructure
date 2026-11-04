@@ -135,7 +135,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("workspace");
         fs::create_dir(&root)?;
-        let root = fs::canonicalize(root)?;
+        let root = infra_core::fs::canonicalize(root)?;
         Ok((temp, root))
     }
 

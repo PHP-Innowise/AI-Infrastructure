@@ -65,17 +65,23 @@ pub fn verifier_digest(case: &Value) -> Result<String> {
     }
     for raw in case["read_roots"].as_array().into_iter().flatten() {
         let p = artifact::ordinary(Path::new(raw.as_str().unwrap()))?;
-        images.push(json!([std::fs::canonicalize(&p)?, oracle_digest(&p)?]));
+        images.push(json!([
+            infra_core::fs::canonicalize(&p)?,
+            oracle_digest(&p)?
+        ]));
     }
     for (index, raw) in case["argv"].as_array().into_iter().flatten().enumerate() {
         let p = Path::new(raw.as_str().unwrap());
         if p.is_absolute() && p.is_file() {
             let p = if index == 0 {
-                std::fs::canonicalize(p)?
+                infra_core::fs::canonicalize(p)?
             } else {
                 artifact::ordinary(p)?
             };
-            images.push(json!([std::fs::canonicalize(&p)?, oracle_digest(&p)?]));
+            images.push(json!([
+                infra_core::fs::canonicalize(&p)?,
+                oracle_digest(&p)?
+            ]));
         }
     }
     artifact::digest(&json!([case, images]))

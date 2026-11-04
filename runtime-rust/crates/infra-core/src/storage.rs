@@ -190,7 +190,7 @@ pub fn default_database(roots: &Roots) -> Result<PathBuf> {
             && crate::git::GitFrame::discover(&roots.project)?
                 .is_some_and(|frame| frame.admin != frame.top.join(".git")));
     if own {
-        let canonical = std::fs::canonicalize(&roots.project)?;
+        let canonical = crate::fs::canonicalize(&roots.project)?;
         #[cfg(unix)]
         let bytes = {
             use std::os::unix::ffi::OsStrExt;

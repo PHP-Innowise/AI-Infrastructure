@@ -54,7 +54,7 @@ impl Fixture {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).expect("create private test root");
-        let root = fs::canonicalize(root).expect("resolve private test root");
+        let root = infra_core::fs::canonicalize(root).expect("resolve private test root");
         assert!(
             !root
                 .ancestors()
@@ -116,7 +116,7 @@ impl Fixture {
             ])
             .arg(target)
             .arg("--source-root")
-            .arg(fs::canonicalize(source).unwrap())
+            .arg(infra_core::fs::canonicalize(source).unwrap())
             .current_dir(&self.root);
         if dry_run {
             command.arg("--dry-run");
@@ -427,17 +427,21 @@ fn a_clone_works_after_installing_only_its_engine() {
     )
     .unwrap();
     assert!(
-        report["database"]
-            .as_str()
-            .unwrap()
-            .starts_with(fs::canonicalize(&clone).unwrap().to_str().unwrap()),
+        report["database"].as_str().unwrap().starts_with(
+            infra_core::fs::canonicalize(&clone)
+                .unwrap()
+                .to_str()
+                .unwrap()
+        ),
         "{report}"
     );
 }
 
 #[test]
 fn committed_launchers_are_the_generated_ones_and_find_their_root() {
-    let source = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap();
+    let source =
+        infra_core::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+            .unwrap();
     let mut compared = 0;
     for edition in [
         "Laravel",
@@ -487,7 +491,7 @@ fn committed_launchers_are_the_generated_ones_and_find_their_root() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let expected = fs::canonicalize(&root).unwrap();
+    let expected = infra_core::fs::canonicalize(&root).unwrap();
     for (cwd, name) in [
         (&hooks, "loop-detection.sh"),
         (&root, ".claude/hooks/loop-detection.sh"),

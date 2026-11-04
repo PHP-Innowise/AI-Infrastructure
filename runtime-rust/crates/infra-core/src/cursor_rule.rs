@@ -307,9 +307,9 @@ fn maintain_inner(
     result: &mut Value,
 ) -> Result<()> {
     let mut files = CursorFiles::new(&context.roots.state)?;
-    let root = std::fs::canonicalize(&context.roots.state)?;
-    if root != std::fs::canonicalize(&context.roots.tooling)?
-        || root != std::fs::canonicalize(&context.roots.project)?
+    let root = crate::fs::canonicalize(&context.roots.state)?;
+    if root != crate::fs::canonicalize(&context.roots.tooling)?
+        || root != crate::fs::canonicalize(&context.roots.project)?
         || linked_state_entry(&root)
     {
         return Ok(());
@@ -715,7 +715,7 @@ fn configuration_unavailable(context: &RuntimeContext) -> bool {
     }
     match (
         crate::fs::canonical_or_missing(&state),
-        std::fs::canonicalize(&project),
+        crate::fs::canonicalize(&project),
     ) {
         (Ok(state), Ok(project)) => state == project || state.starts_with(project),
         _ => true,
@@ -912,7 +912,7 @@ fn protected_safe_root(root: &Path) -> Result<bool> {
     {
         return Ok(false);
     }
-    let target = normcase(&std::fs::canonicalize(root)?)?;
+    let target = normcase(&crate::fs::canonicalize(root)?)?;
     let mut allowed = false;
     let text = std::str::from_utf8(&output.stdout)
         .map_err(|_| RuntimeError::invalid("Cursor Git policy is not UTF-8"))?;
@@ -1014,7 +1014,7 @@ fn git_untracked(root: &Path, extra: &[&str]) -> Result<bool> {
         if output.code == 128 && trust.is_none() && protected_safe_root(root)? {
             trust = Some(format!(
                 "safe.directory={}",
-                root_text(&std::fs::canonicalize(root)?)?
+                root_text(&crate::fs::canonicalize(root)?)?
             ));
             output = git_read(
                 root,
@@ -1038,7 +1038,7 @@ struct SourceFrame {
     prefix: String,
 }
 fn source_frame(root: &Path, deadline: Instant) -> Result<Option<SourceFrame>> {
-    let root = std::fs::canonicalize(root)?;
+    let root = crate::fs::canonicalize(root)?;
     let mut checkout = None;
     for directory in root.ancestors() {
         let marker = directory.join(".git");
@@ -1110,8 +1110,8 @@ fn source_frame(root: &Path, deadline: Instant) -> Result<Option<SourceFrame>> {
             "Cursor source Git frame is not absolute",
         ));
     }
-    let top = std::fs::canonicalize(top)?;
-    let admin = std::fs::canonicalize(admin)?;
+    let top = crate::fs::canonicalize(top)?;
+    let admin = crate::fs::canonicalize(admin)?;
     let relative = root
         .strip_prefix(&top)
         .map_err(|_| RuntimeError::unavailable("Cursor source Git frame escapes root"))?;
@@ -1534,7 +1534,7 @@ pub fn scope_branch(context: &RuntimeContext) -> Result<String> {
                 "-c",
                 &format!(
                     "safe.directory={}",
-                    root_text(&std::fs::canonicalize(project)?)?
+                    root_text(&crate::fs::canonicalize(project)?)?
                 ),
                 "symbolic-ref",
                 "--quiet",

@@ -25,7 +25,7 @@ impl Fixture {
             infra_core::domain::uuid4()
         ));
         fs::create_dir(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let project = root.join("installed project with spaces");
         let spool = root.join("spool");
         for name in [

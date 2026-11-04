@@ -1076,7 +1076,7 @@ mod telemetry_contract_tests {
                 crate::domain::uuid4()
             ));
             std::fs::create_dir(&root).unwrap();
-            let root = std::fs::canonicalize(root).unwrap();
+            let root = crate::fs::canonicalize(root).unwrap();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

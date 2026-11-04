@@ -937,7 +937,7 @@ mod private_state_tests {
             let root = std::env::temp_dir()
                 .join(format!("infra-private-state-{}", crate::domain::uuid4()));
             std::fs::create_dir(&root).unwrap();
-            let root = std::fs::canonicalize(root).unwrap();
+            let root = crate::fs::canonicalize(root).unwrap();
             let tooling = root.join("tooling");
             let project = root.join("project");
             let state = root.join("state");
@@ -1057,7 +1057,7 @@ mod directory_root_policy_tests {
                 .join(format!("infra-directory-policy-{}", crate::domain::uuid4()));
             fs::create_dir(&path).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-            Self(fs::canonicalize(path).unwrap())
+            Self(crate::fs::canonicalize(path).unwrap())
         }
     }
     impl Drop for Directory {

@@ -70,7 +70,7 @@ struct Tool {
 impl Tool {
     fn open(candidate: &Path) -> Result<Self> {
         let selected = infra_core::fs::absolute(candidate)?;
-        let canonical = std::fs::canonicalize(&selected).map_err(|_| {
+        let canonical = infra_core::fs::canonicalize(&selected).map_err(|_| {
             RuntimeError::unavailable(format!(
                 "Native build executable is unavailable: {}",
                 selected.display()
@@ -180,7 +180,7 @@ impl Tool {
     }
     fn check(&self) -> Result<()> {
         self.files.check()?;
-        if std::fs::canonicalize(&self.selected)? != self.canonical {
+        if infra_core::fs::canonicalize(&self.selected)? != self.canonical {
             return Err(RuntimeError::conflict(
                 "Build executable resolution changed",
             ));
@@ -368,7 +368,7 @@ struct Stage {
 }
 impl Stage {
     fn new() -> Result<Self> {
-        let temporary = std::fs::canonicalize(std::env::temp_dir())?;
+        let temporary = infra_core::fs::canonicalize(std::env::temp_dir())?;
         let mut outer = PublicationFiles::new(&temporary)?;
         let name = format!("infra-ui-build-{}", uuid::Uuid::new_v4().simple());
         outer.archive_create_directory(&name, true)?;

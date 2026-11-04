@@ -25,7 +25,7 @@ fn source_git(mut error: RuntimeError) -> RuntimeError {
 /// Empty ordinary marker directories grant no Git authority. Every other
 /// nearest marker must resolve to its own valid canonical Git frame.
 fn admitted_frame(root: &Path) -> Result<Option<GitFrame>> {
-    let canonical = fs::canonicalize(root).map_err(|error| source_git(error.into()))?;
+    let canonical = infra_core::fs::canonicalize(root).map_err(|error| source_git(error.into()))?;
     if !canonical.is_dir() {
         return Err(source_git(RuntimeError::unavailable(
             "File-mode source is not a directory",

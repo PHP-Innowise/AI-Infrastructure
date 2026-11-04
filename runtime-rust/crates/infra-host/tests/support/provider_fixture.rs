@@ -43,7 +43,7 @@ fn root(value: &str) -> Result<PathBuf> {
     if !selected.is_absolute() || !selected.is_dir() {
         return Err(fail("Expected an existing absolute fixture directory"));
     }
-    Ok(fs::canonicalize(selected)?)
+    Ok(infra_core::fs::canonicalize(selected)?)
 }
 fn executable(root: &Path, prefix: &str, id: &str) -> PathBuf {
     root.join(format!("{prefix}-{id}{}", std::env::consts::EXE_SUFFIX))
@@ -85,7 +85,7 @@ async fn discover(source: &Path) -> Result<Value> {
     let selected = source
         .parent()
         .ok_or_else(|| fail("Missing fixture request parent"))?;
-    let selected = fs::canonicalize(selected)?;
+    let selected = infra_core::fs::canonicalize(selected)?;
     let request: Request = read(source)?;
     if request.overrides.len() != IDS.len() {
         return Err(fail("Every fake provider override is required"));

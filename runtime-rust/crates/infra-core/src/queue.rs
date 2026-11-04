@@ -632,7 +632,7 @@ pub fn worker_capabilities() -> Value {
 }
 impl NativeQueueWorker {
     pub fn admit(engine: PathBuf, context: &RuntimeContext) -> Result<Self> {
-        let engine = std::fs::canonicalize(engine)?;
+        let engine = crate::fs::canonicalize(engine)?;
         let identity = engine_identity(&engine)?;
         #[cfg(unix)]
         if identity.2 & 0o111 == 0 {
@@ -974,7 +974,7 @@ mod selected_queue_engine_source_tests {
             crate::domain::uuid4()
         ));
         std::fs::create_dir(&root).unwrap();
-        let root = std::fs::canonicalize(root).unwrap();
+        let root = crate::fs::canonicalize(root).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -438,7 +438,11 @@ pub fn capture(
                     .join(format!("{key}.json")),
                 1048576,
             )?;
-            let project = artifact::sha(std::fs::canonicalize(root)?.to_string_lossy().as_bytes());
+            let project = artifact::sha(
+                infra_core::fs::canonicalize(root)?
+                    .to_string_lossy()
+                    .as_bytes(),
+            );
             let session_hash = artifact::sha(session.as_bytes());
             let expected = artifact::spaced_digest(
                 &json!([
@@ -1329,7 +1333,7 @@ mod native_command_evidence_tests {
             let directory = std::env::temp_dir()
                 .join(format!("infra-native-evidence-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir(&directory).unwrap();
-            let directory = std::fs::canonicalize(directory).unwrap();
+            let directory = infra_core::fs::canonicalize(directory).unwrap();
             let root = directory.join("corpus with spaces");
             std::fs::create_dir_all(root.join("memory-bank/bin")).unwrap();
             let runtime = directory.join("selected engine");

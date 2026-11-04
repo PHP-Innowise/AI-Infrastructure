@@ -155,7 +155,7 @@ impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!("infra-install-tty-{}", uuid4()));
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let source = root.join("isolated release");
         let home = root.join("private HOME");
         let claude = root.join("private Claude configuration");
@@ -180,7 +180,8 @@ impl Fixture {
         fs::hard_link(&binary, root.join("same selected native image")).unwrap();
         assert_eq!(fs::metadata(&binary).unwrap().nlink(), 2);
         let repo =
-            fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap();
+            infra_core::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
         let mut inventory: Value = serde_json::from_slice(
             &fs::read(repo.join("install/inventories/php-core.json")).unwrap(),
         )

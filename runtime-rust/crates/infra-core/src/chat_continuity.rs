@@ -354,7 +354,7 @@ impl ChatContinuity {
         }
     }
     fn repository_id(&self) -> Result<String> {
-        let path = std::fs::canonicalize(&self.roots.project)?;
+        let path = crate::fs::canonicalize(&self.roots.project)?;
         let value = path
             .to_str()
             .ok_or_else(|| fail("checkout identity is not UTF-8"))?;
@@ -395,8 +395,8 @@ impl ChatContinuity {
             return None;
         }
         Some((
-            std::fs::canonicalize(lines[0]).ok()?,
-            std::fs::canonicalize(directory.join(lines[1])).ok()?,
+            crate::fs::canonicalize(lines[0]).ok()?,
+            crate::fs::canonicalize(directory.join(lines[1])).ok()?,
         ))
     }
     fn other_worktree(&self, payload: &Value) -> bool {
@@ -411,7 +411,7 @@ impl ChatContinuity {
             return false;
         }
         // The project's own directory is the same checkout: no Git question.
-        if std::fs::canonicalize(cwd).ok() == std::fs::canonicalize(&self.roots.project).ok() {
+        if crate::fs::canonicalize(cwd).ok() == crate::fs::canonicalize(&self.roots.project).ok() {
             return false;
         }
         let theirs = Self::checkout(cwd);

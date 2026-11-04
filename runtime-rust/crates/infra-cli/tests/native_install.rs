@@ -34,7 +34,7 @@ fn engine() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_infra-engine"))
 }
 fn repository() -> PathBuf {
-    fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap()
+    infra_core::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap()
 }
 fn write(path: &Path, bytes: impl AsRef<[u8]>) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -142,7 +142,7 @@ impl Sandbox {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let home = root.join("private home");
         let codex_home = root.join("private Codex home");
         fs::create_dir(&home).unwrap();

@@ -52,7 +52,7 @@ impl InstalledCli {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).expect("create private test root");
-        let root = fs::canonicalize(root).expect("resolve private test root");
+        let root = infra_core::fs::canonicalize(root).expect("resolve private test root");
         assert!(
             !root
                 .ancestors()

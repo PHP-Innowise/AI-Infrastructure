@@ -332,7 +332,9 @@ pub fn grade(
         let request = private.join("request.json");
         artifact::fresh_file(&request, &raw, 0o600)?;
         let argv = vec![
-            std::fs::canonicalize(executable)?.to_string_lossy().into(),
+            infra_core::fs::canonicalize(executable)?
+                .to_string_lossy()
+                .into(),
             "__response-oracle".into(),
             request.to_string_lossy().into(),
         ];

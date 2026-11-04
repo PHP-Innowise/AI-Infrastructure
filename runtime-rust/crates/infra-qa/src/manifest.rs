@@ -95,7 +95,7 @@ pub fn run(args: &[String]) -> Result<i32> {
     if p.len() != 1 {
         bail!("manifest ROOT [--output FILE] [--check]");
     }
-    let root = fs::canonicalize(&p[0])?;
+    let root = crate::spelling::canonicalize(&p[0])?;
     let output = o
         .get("--output")
         .and_then(|v| v.last())

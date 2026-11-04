@@ -630,8 +630,8 @@ mod native {
                 );
                 let folder = path(&get_text(&link, link.table()._get_working_directory)).unwrap();
                 assert_eq!(
-                    folder.canonicalize().unwrap(),
-                    source.canonicalize().unwrap()
+                    infra_core::fs::canonicalize(&folder).unwrap(),
+                    infra_core::fs::canonicalize(&source).unwrap()
                 );
                 let mut buffer = vec![0; PATH_UNITS + 1];
                 let mut index = -1;
@@ -660,11 +660,8 @@ mod native {
                 .unwrap();
                 let length = target_buffer.iter().position(|unit| *unit == 0).unwrap();
                 assert_eq!(
-                    path(&target_buffer[..length])
-                        .unwrap()
-                        .canonicalize()
-                        .unwrap(),
-                    target.canonicalize().unwrap()
+                    infra_core::fs::canonicalize(path(&target_buffer[..length]).unwrap()).unwrap(),
+                    infra_core::fs::canonicalize(&target).unwrap()
                 );
             }
             outer.cleanup().unwrap();

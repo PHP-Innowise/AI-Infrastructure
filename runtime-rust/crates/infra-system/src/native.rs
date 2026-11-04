@@ -35,7 +35,7 @@ pub async fn executable(provider: &str, explicit: Option<&str>) -> Result<PathBu
             .and_then(|value| value.executable)
             .ok_or_else(|| fail("Worker executable was not found"))?
     };
-    let path = std::fs::canonicalize(&selected)?;
+    let path = infra_core::fs::canonicalize(&selected)?;
     let metadata = std::fs::metadata(&path)?;
     if !metadata.is_file() {
         return Err(fail("Worker executable must be executable file"));
@@ -359,7 +359,7 @@ pub fn validate_state_sync(
         return Err(fail("Invalid saved execution options"));
     }
     if for_execution {
-        let current = std::fs::canonicalize(string(&state["executable"]))?;
+        let current = infra_core::fs::canonicalize(string(&state["executable"]))?;
         if !current.is_file() {
             return Err(fail("Worker executable unavailable"));
         }

@@ -45,7 +45,7 @@ impl Sandbox {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let base = fs::canonicalize(&path).unwrap();
+        let base = infra_core::fs::canonicalize(&path).unwrap();
         let root = PrivateDirectory(base.clone());
         let source = base.join("source fixture");
         let home = base.join("private home");

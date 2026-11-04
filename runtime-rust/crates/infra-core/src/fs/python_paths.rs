@@ -235,7 +235,7 @@ mod windows {
         let mut current = path.to_path_buf();
         let mut tail = Vec::<OsString>::new();
         loop {
-            match fs::canonicalize(&current) {
+            match crate::fs::canonicalize(&current) {
                 Ok(target) => return Ok(append(target, &tail)),
                 Err(error) => {
                     let Some(code) = error.raw_os_error() else {
@@ -292,7 +292,7 @@ mod windows {
             return resolved;
         };
         let candidate = PathBuf::from(OsString::from_wide(&candidate));
-        match fs::canonicalize(&candidate) {
+        match crate::fs::canonicalize(&candidate) {
             Ok(actual) if actual.as_os_str() == resolved.as_os_str() => candidate,
             Err(error) if initial_error.is_some() && error.raw_os_error() == initial_error => {
                 candidate
@@ -303,7 +303,7 @@ mod windows {
     pub fn realpath(path: &Path) -> io::Result<PathBuf> {
         let original = path;
         let normalized = normalize(path)?;
-        let (resolved, initial_error) = match fs::canonicalize(&normalized) {
+        let (resolved, initial_error) = match crate::fs::canonicalize(&normalized) {
             Ok(path) => (path, None),
             Err(error) => {
                 let code = error.raw_os_error();

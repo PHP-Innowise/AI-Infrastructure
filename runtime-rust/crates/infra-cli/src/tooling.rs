@@ -599,7 +599,7 @@ pub fn execute(operation: &str, mut request: Value) -> Result<Output> {
         && let Some(path) = request["plan"].as_str()
     {
         use std::io::Read;
-        let path = std::fs::canonicalize(path)?;
+        let path = infra_core::fs::canonicalize(path)?;
         let meta = std::fs::symlink_metadata(&path)?;
         if !meta.is_file() || infra_core::fs::linked(&meta) || meta.len() > 16 * 1024 * 1024 {
             return Err(RuntimeError::policy(

@@ -824,7 +824,7 @@ pub(crate) fn copy_tree(source: &Path, target: &Path, excluded: &BTreeSet<String
             let to = target.join(&name);
             let m = e.file_type()?;
             if m.is_symlink() {
-                let Ok(resolved) = std::fs::canonicalize(&path) else {
+                let Ok(resolved) = infra_core::fs::canonicalize(&path) else {
                     continue;
                 };
                 if !resolved.starts_with(root) {

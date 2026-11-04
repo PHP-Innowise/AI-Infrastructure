@@ -187,7 +187,7 @@ impl Accelerators {
         )?))
     }
     pub fn overlay_for_workspace(&self, root: &Path, host: &str) -> Result<Option<Overlay>> {
-        let root = std::fs::canonicalize(root)?;
+        let root = infra_core::fs::canonicalize(root)?;
         let spelling = root.to_string_lossy().into_owned();
         let project = {
             let db = self.store.connection()?;
@@ -430,8 +430,8 @@ impl infra_host::provider::LaunchAdapter for ProjectLaunchAdapter {
                 .as_str()
                 .ok_or_else(|| HarnessError::invalid("Registered project path missing."))?,
         );
-        let requested = std::fs::canonicalize(&input.project)?;
-        if requested != std::fs::canonicalize(&registered)? {
+        let requested = infra_core::fs::canonicalize(&input.project)?;
+        if requested != infra_core::fs::canonicalize(&registered)? {
             let a = infra_core::git::GitFrame::discover(&registered)?.ok_or_else(|| {
                 HarnessError::forbidden("Session workspace is outside the registered project.")
             })?;
@@ -492,8 +492,8 @@ impl infra_host::provider::LaunchAdapter for EvidenceLaunchAdapter {
         input: &infra_host::provider::Launch,
         mut command: infra_host::provider::PreparedCommand,
     ) -> Result<infra_host::provider::PreparedCommand> {
-        let workspace = std::fs::canonicalize(&self.workspace)?;
-        if std::fs::canonicalize(&input.project)? != workspace {
+        let workspace = infra_core::fs::canonicalize(&self.workspace)?;
+        if infra_core::fs::canonicalize(&input.project)? != workspace {
             return Err(HarnessError::forbidden(
                 "Discovery launch is outside its owned evidence workspace.",
             ));

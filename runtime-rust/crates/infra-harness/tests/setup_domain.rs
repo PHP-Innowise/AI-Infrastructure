@@ -15,7 +15,7 @@ impl Root {
         let selected =
             std::env::temp_dir().join(format!("infra-setup-domain-{}", uuid::Uuid::new_v4()));
         infra_host::util::private_directory(&selected).unwrap();
-        let root = Self(fs::canonicalize(selected).unwrap());
+        let root = Self(infra_core::fs::canonicalize(selected).unwrap());
         assert_eq!(
             Driver::spawn(&root.0, "prepare", false).wait(),
             json!({"prepared":true})

@@ -25,8 +25,8 @@ impl Snapshot {
         let value: Value = serde_json::from_slice(&raw).context("invalid case catalog JSON")?;
         let version = schema_version(&value)?.to_owned();
         let cases = evidence::catalog(&value)?;
-        let path = fs::canonicalize(path)?;
-        let root = fs::canonicalize(root)?;
+        let path = crate::spelling::canonicalize(path)?;
+        let root = crate::spelling::canonicalize(root)?;
         let source = path
             .strip_prefix(root)
             .ok()

@@ -27,7 +27,7 @@ impl Fixture {
             infra_core::domain::uuid4()
         ));
         fs::create_dir(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let project = root.join("project with spaces");
         let claude = root.join("empty claude transcripts");
         let codex = root.join("empty codex transcripts");

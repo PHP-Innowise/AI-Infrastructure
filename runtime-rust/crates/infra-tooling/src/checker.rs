@@ -472,7 +472,7 @@ fn gate(context: GateContext<'_>, gate: &Gate) -> Outcome {
     outcome
 }
 pub fn execute(request: &Value) -> Result<Value> {
-    let root = std::fs::canonicalize(request["root"].as_str().unwrap_or("."))?;
+    let root = infra_core::fs::canonicalize(request["root"].as_str().unwrap_or("."))?;
     let catalog = load_catalog(&root, true)?;
     let names = request["groups"]
         .as_array()
@@ -704,7 +704,7 @@ fn validate_json_syntax(bytes: &[u8]) -> std::result::Result<(), String> {
 /// The 512 MiB per-file ceiling is an explicit read admission bound, not a schema.
 pub fn check_tracked_json(root: &Path) -> Result<Value> {
     const MAX_JSON_BYTES: usize = 512 * 1024 * 1024;
-    let root = std::fs::canonicalize(root)?;
+    let root = infra_core::fs::canonicalize(root)?;
     let names = common::tracked(&root, &["*.json".into()])?;
     let mut files = infra_core::bank::publication::PublicationFiles::new(&root)?;
     let mut findings = Vec::new();
@@ -857,7 +857,7 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
 }
 /// Emit only catalog-owned workflow files; unrelated workflows are untouched.
 pub fn write_ci(root: &Path, write: bool) -> Result<Value> {
-    let root = std::fs::canonicalize(root)?;
+    let root = infra_core::fs::canonicalize(root)?;
     let catalog = load_catalog(&root, false)?;
     let mut names = BTreeSet::new();
     for group in &catalog.groups {

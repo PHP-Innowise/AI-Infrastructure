@@ -99,7 +99,7 @@ fn open_inner(native_id: &str, project: &Path) -> crate::Result<Option<Rollout>>
     let path = PathBuf::from(recorded);
     if path.extension().and_then(|s| s.to_str()) != Some("jsonl")
         || !path.is_absolute()
-        || std::fs::canonicalize(&path).ok().as_ref() != Some(&path)
+        || infra_core::fs::canonicalize(&path).ok().as_ref() != Some(&path)
     {
         return Ok(None);
     }

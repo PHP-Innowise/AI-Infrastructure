@@ -17,7 +17,7 @@ impl Root {
             uuid::Uuid::new_v4()
         ));
         infra_core::fs::ensure_directory(&root, true).unwrap();
-        Self(fs::canonicalize(root).unwrap())
+        Self(infra_core::fs::canonicalize(root).unwrap())
     }
 }
 impl Drop for Root {

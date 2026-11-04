@@ -17,7 +17,7 @@ impl Temp {
             SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
-        Self(fs::canonicalize(path).unwrap())
+        Self(infra_core::fs::canonicalize(path).unwrap())
     }
     fn dir(&self, name: &str) -> PathBuf {
         let path = self.0.join(name);

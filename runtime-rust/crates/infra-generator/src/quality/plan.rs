@@ -26,7 +26,7 @@ pub fn expand_user(path: &Path) -> PathBuf {
 }
 pub fn absolute(path: &Path) -> PathBuf {
     let p = expand_user(path);
-    if let Ok(p) = p.canonicalize() {
+    if let Ok(p) = infra_core::fs::canonicalize(&p) {
         p
     } else if p.is_absolute() {
         p

@@ -4,6 +4,11 @@ pub mod evidence;
 pub mod ledger;
 pub mod manifest;
 pub mod ooxml;
+// infra-core's canonical spelling, shared as a file: this crate keeps none of
+// its dependencies. Only Windows uses the verbatim rewrite outside tests.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[path = "../../infra-core/src/fs/spelling.rs"]
+mod spelling;
 pub mod validate;
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;

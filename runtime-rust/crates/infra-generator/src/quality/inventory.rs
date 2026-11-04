@@ -29,7 +29,7 @@ pub fn preexisting(value: &Value, target: &Path, d: &mut Vec<Diagnostic>) -> Ski
         "symlink_sha256",
         "files",
     ];
-    let root = target.canonicalize().unwrap_or_else(|_| target.to_owned());
+    let root = infra_core::fs::canonicalize(target).unwrap_or_else(|_| target.to_owned());
     for (i, v) in arr(value).iter().enumerate() {
         let label = format!("preexisting_team_skills[{i}]");
         if !exact(v, &fields)
@@ -73,7 +73,7 @@ pub fn preexisting(value: &Value, target: &Path, d: &mut Vec<Diagnostic>) -> Ski
         let candidate = root.join(s(&v["path"]));
         if !candidate
             .parent()
-            .and_then(|p| p.canonicalize().ok())
+            .and_then(|p| infra_core::fs::canonicalize(p).ok())
             .is_some_and(|p| p.starts_with(&root))
         {
             diag(

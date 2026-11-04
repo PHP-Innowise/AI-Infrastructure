@@ -991,7 +991,7 @@ impl Domain for CommandCatalog {
                                 .as_str()
                                 .ok_or_else(|| HarnessError::invalid("Missing workspace."))?,
                         );
-                        let canonical = std::fs::canonicalize(&cwd).map_err(|_| {
+                        let canonical = infra_core::fs::canonicalize(&cwd).map_err(|_| {
                             HarnessError::unavailable("Session workspace unavailable.")
                         })?;
                         if canonical != cwd {

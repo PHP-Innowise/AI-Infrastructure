@@ -18,7 +18,7 @@ use std::{
 const FIRST: &str = "feature/SHOP-7-invoices";
 
 fn repository() -> PathBuf {
-    fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap()
+    infra_core::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap()
 }
 
 fn described(output: &Output) -> String {
@@ -62,7 +62,7 @@ impl Project {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         for name in ["home", "tmp"] {
             fs::create_dir(root.join(name)).unwrap();
         }

@@ -143,7 +143,7 @@ pub fn confined(target: &Path, value: &str) -> Option<PathBuf> {
     if !safe(value) {
         return None;
     }
-    let root = target.canonicalize().ok()?;
+    let root = infra_core::fs::canonicalize(target).ok()?;
     let mut path = root.clone();
     for part in Path::new(value).components() {
         if let std::path::Component::Normal(name) = part {
@@ -159,7 +159,7 @@ pub fn confined(target: &Path, value: &str) -> Option<PathBuf> {
         tail.push(parent.file_name()?.to_owned());
         parent = parent.parent()?;
     }
-    let mut resolved = parent.canonicalize().ok()?;
+    let mut resolved = infra_core::fs::canonicalize(parent).ok()?;
     if !resolved.starts_with(&root) {
         return None;
     }

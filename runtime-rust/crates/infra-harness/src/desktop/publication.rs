@@ -123,7 +123,7 @@ impl Inputs {
                 )?,
             );
         }
-        let executable = std::fs::canonicalize(engine)?;
+        let executable = infra_core::fs::canonicalize(engine)?;
         let engine_image = SourceImage::read(&executable, 512 * 1024 * 1024)?;
         #[cfg(windows)]
         let worker = std::env::current_exe()?;
@@ -997,7 +997,7 @@ mod tests {
     #[test]
     fn actionable_external_cleanup_failure_preserves_record_and_missing_target_retry() {
         let fixture = sandbox();
-        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let root = infra_core::fs::canonicalize(fixture.path()).unwrap();
         let record = file(
             &root,
             "app.json",
@@ -1025,7 +1025,7 @@ mod tests {
     #[test]
     fn same_byte_replacement_is_preserved_and_record_is_kept() {
         let fixture = sandbox();
-        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let root = infra_core::fs::canonicalize(fixture.path()).unwrap();
         let record = file(&root, "app.json", b"unchanged record");
         let target = file(&root, "ai-accelerator.desktop", b"same bytes");
         let pending = plan(&record, &target);
@@ -1043,7 +1043,7 @@ mod tests {
     #[test]
     fn pending_quarantine_refuses_a_blind_missing_target_retry() {
         let fixture = sandbox();
-        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let root = infra_core::fs::canonicalize(fixture.path()).unwrap();
         let target = root.join("ai-accelerator.desktop");
         let quarantine = file(
             &root,
@@ -1061,7 +1061,7 @@ mod tests {
     #[test]
     fn missing_native_parent_is_an_absence_witness_without_creating_directories() {
         let fixture = sandbox();
-        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let root = infra_core::fs::canonicalize(fixture.path()).unwrap();
         let missing = root.join(r"missing\literal data");
         let target = missing.join("applications/ai-accelerator.desktop");
         let mut admitted = Target::admit(&target, OUTPUT_LIMIT).unwrap();

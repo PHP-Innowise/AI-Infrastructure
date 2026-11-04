@@ -54,7 +54,7 @@ fn root_source(args: &[String]) -> Result<PathBuf> {
         }
     }
     for path in candidates {
-        if let Ok(path) = std::fs::canonicalize(path)
+        if let Ok(path) = infra_core::fs::canonicalize(path)
             && path.join("harness/web/index.html").is_file()
             && path.join("Infrastructure-Creator/AGENTS.md").is_file()
         {
@@ -175,7 +175,7 @@ async fn fleet(args: &[String]) -> Result<i32> {
         &[],
         &["approve", "reject"],
     )?;
-    let project = std::fs::canonicalize(required(&data, "project")?)?;
+    let project = infra_core::fs::canonicalize(required(&data, "project")?)?;
     let state = absolute(data["state_dir"].as_str().unwrap_or("state"))?;
     let reports = absolute(data["reports_dir"].as_str().unwrap_or("reports"))?;
     infra_core::fs::ensure_directory(&reports, false)?;

@@ -268,8 +268,8 @@ pub fn run_case_with_catalog(
                 ));
                 continue;
             }
-            let cwd = fs::canonicalize(cwd)?;
-            if !cwd.starts_with(fs::canonicalize(root)?) {
+            let cwd = crate::spelling::canonicalize(cwd)?;
+            if !cwd.starts_with(crate::spelling::canonicalize(root)?) {
                 bail!("command cwd escapes repository");
             }
             if let Some(required) = c["requires_executable"].as_str()

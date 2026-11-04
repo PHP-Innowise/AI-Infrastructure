@@ -155,7 +155,7 @@ pub fn execute(request: &Value) -> Result<Value> {
     if flag(request, "list")? || request.get("scope").is_none() {
         return Ok(json!({"scopes":scopes(),"always_exclude":ALWAYS}));
     }
-    let root = std::fs::canonicalize(request["root"].as_str().unwrap_or("."))?;
+    let root = infra_core::fs::canonicalize(request["root"].as_str().unwrap_or("."))?;
     let scope = request["scope"]
         .as_str()
         .ok_or_else(|| RuntimeError::invalid("Collection scope must be text"))?;

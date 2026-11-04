@@ -1294,7 +1294,7 @@ impl Fuzz {
                 .checkouts
                 .iter()
                 .filter(|(n, _)| n.as_str() != "root" && !self.removed.contains(*n))
-                .filter_map(|(_, p)| std::fs::canonicalize(p).ok())
+                .filter_map(|(_, p)| infra_core::fs::canonicalize(p).ok())
                 .collect::<BTreeSet<_>>();
             let root = self.h.state.join("memory-bank/local/worktrees");
             if let Ok(entries) = std::fs::read_dir(root) {

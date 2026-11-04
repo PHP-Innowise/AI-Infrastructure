@@ -545,7 +545,7 @@ pub(super) fn output_path(path: &Path) -> Result<PathBuf> {
                                 links,
                             )?;
                         }
-                        Ok(_) => result = fs::canonicalize(next)?,
+                        Ok(_) => result = crate::spelling::canonicalize(next)?,
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => result = next,
                         Err(error) => return Err(error.into()),
                     }

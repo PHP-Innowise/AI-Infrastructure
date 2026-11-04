@@ -69,15 +69,17 @@ pub fn tracked(root: &Path, specs: &[String]) -> Result<Vec<String>> {
     Ok(paths.into_iter().collect())
 }
 pub fn relative(value: &str) -> Result<PathBuf> {
+    // The refused value names the caller that built it, on any platform.
+    let refused = || RuntimeError::policy(format!("Unsafe relative distribution path: {value:?}"));
     if value.is_empty() || value.contains(['\\', '\0', ':']) {
-        return Err(RuntimeError::policy("Unsafe relative distribution path"));
+        return Err(refused());
     }
     let path = Path::new(value);
     if path
         .components()
         .any(|part| !matches!(part, Component::Normal(_)))
     {
-        return Err(RuntimeError::policy("Unsafe relative distribution path"));
+        return Err(refused());
     }
     Ok(path.to_path_buf())
 }

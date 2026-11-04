@@ -27,7 +27,7 @@ fn project_text(path: &Path) -> Result<String> {
         .ok_or_else(|| RuntimeError::invalid("Attached project path is not UTF-8"))
 }
 pub fn project_key(project: &Path) -> Result<String> {
-    let canonical = std::fs::canonicalize(project)?;
+    let canonical = infra_core::fs::canonicalize(project)?;
     let mut spelling = project_text(&canonical)?;
     if cfg!(windows) {
         spelling = spelling.replace('/', "\\").to_lowercase();
@@ -69,7 +69,7 @@ fn read_optional(root: &Path, name: &str) -> Result<Value> {
     }
 }
 pub fn detect(project: &Path) -> Result<(Option<String>, String)> {
-    let project = std::fs::canonicalize(project)?;
+    let project = infra_core::fs::canonicalize(project)?;
     let composer = read_optional(&project, "composer.json")?;
     let lock = read_optional(&project, "composer.lock")?;
     let mut packages = BTreeSet::new();
@@ -710,7 +710,7 @@ pub fn build_overlay(
     }
     validate_attach_host(host)?;
     let project = independent_project(repository, project)?;
-    let home = std::fs::canonicalize(repository.join(edition))?;
+    let home = infra_core::fs::canonicalize(repository.join(edition))?;
     let state = safe::absolute(state)?;
     if state == project || state.starts_with(&project) {
         return Err(RuntimeError::policy(
@@ -1207,7 +1207,7 @@ pub fn execute(operation: &str, request: &Value) -> Result<Value> {
     };
     validate_attach_host(host)?;
     let source = request["root"].as_str().unwrap_or(".");
-    let root = std::fs::canonicalize(source)?;
+    let root = infra_core::fs::canonicalize(source)?;
     let project =
         independent_project(&root, Path::new(request["project"].as_str().unwrap_or(".")))?;
     let detected = detect(&project)?;
@@ -1399,7 +1399,7 @@ pub fn installed_hook_trust_selection(
         .read(".codex/hooks.json", 4 * 1024 * 1024)?
         .ok_or_else(|| RuntimeError::not_found("Installed Codex hooks are absent"))?;
     let installed = launches(&serde_json::from_slice::<Value>(&local)?)?;
-    let expected = std::fs::canonicalize(project.join(".codex/hooks.json"))?;
+    let expected = infra_core::fs::canonicalize(project.join(".codex/hooks.json"))?;
     let native_digest = common::sha256(&safe::read_regular(native)?);
     let binary_matches = files
         .read(binary, 512 * 1024 * 1024)?
@@ -1415,7 +1415,7 @@ pub fn installed_hook_trust_selection(
             let Some(location) = hook["sourcePath"].as_str() else {
                 continue;
             };
-            if std::fs::canonicalize(location).ok().as_ref() != Some(&expected) {
+            if infra_core::fs::canonicalize(location).ok().as_ref() != Some(&expected) {
                 continue;
             }
             let key = hook["key"]
@@ -1488,8 +1488,8 @@ pub fn hook_definitions(
 }
 
 pub fn independent_project(repository: &Path, project: &Path) -> Result<PathBuf> {
-    let repository = std::fs::canonicalize(repository)?;
-    let project = std::fs::canonicalize(project)?;
+    let repository = infra_core::fs::canonicalize(repository)?;
+    let project = infra_core::fs::canonicalize(project)?;
     if !project.is_dir() {
         return Err(RuntimeError::invalid("Attached project is not a directory"));
     }
@@ -1534,7 +1534,7 @@ fn prepare_state_custody(
         ));
     }
     let project = independent_project(repository, project)?;
-    let home = std::fs::canonicalize(repository.join(edition))?;
+    let home = infra_core::fs::canonicalize(repository.join(edition))?;
     let state = safe::absolute(state)?;
     if state == project || state.starts_with(&project) {
         return Err(RuntimeError::policy(

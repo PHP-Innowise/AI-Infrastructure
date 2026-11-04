@@ -26,7 +26,7 @@ fn percent_decode(value: &str) -> Result<String> {
     String::from_utf8(decoded).map_err(|_| RuntimeError::invalid("Link target is not UTF-8"))
 }
 pub fn check(root: &Path, standalone: bool) -> Result<Value> {
-    let root = std::fs::canonicalize(root)?;
+    let root = infra_core::fs::canonicalize(root)?;
     let files = if standalone {
         common::walk(&root)?
     } else {

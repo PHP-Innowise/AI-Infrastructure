@@ -41,7 +41,7 @@ const MEMORY_SKILL: &str = ".agents/skills/memory/SKILL.md";
 const CHECKPOINT_SKILL: &str = ".agents/skills/checkpoint/SKILL.md";
 const WIRING: &str = ".codex/hooks.json";
 fn repository() -> PathBuf {
-    fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap()
+    infra_core::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap()
 }
 
 fn write(path: &Path, bytes: impl AsRef<[u8]>) {
@@ -166,7 +166,7 @@ impl Fixture {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = infra_core::fs::canonicalize(root).unwrap();
         let home = root.join("private home");
         fs::create_dir(&home).unwrap();
         let fixture = Self {

@@ -33,7 +33,7 @@ pub fn project_source_key(context: &RuntimeContext, name: &str) -> Result<Option
     let named = context.roots.resolve(relative);
     let lexical = crate::fs::absolute(&named).map_err(|_| source_git())?;
     let physical = crate::fs::canonical_or_missing(&named).map_err(|_| source_git())?;
-    let project = std::fs::canonicalize(&context.roots.project).map_err(|_| source_git())?;
+    let project = crate::fs::canonicalize(&context.roots.project).map_err(|_| source_git())?;
     let relative = match lexical.strip_prefix(&project) {
         Ok(relative) => relative,
         Err(_) => {
@@ -74,7 +74,7 @@ impl CurrentSourcePolicy {
         candidates: &mut [Candidate],
     ) -> Result<()> {
         let root = crate::fs::canonical_or_missing(&context.roots.state)?;
-        let project = std::fs::canonicalize(&context.roots.project)?;
+        let project = crate::fs::canonicalize(&context.roots.project)?;
         let identity = connection as *const Connection as usize;
         if self.root.as_ref().is_some_and(|held| held != &root)
             || self.project.as_ref().is_some_and(|held| held != &project)
@@ -269,7 +269,7 @@ fn citation_exists(context: &RuntimeContext, name: &str) -> bool {
     let operation = (|| -> Result<bool> {
         let name = name.split('#').next().unwrap_or(name);
         let path = context.roots.resolve(name);
-        let resolved = std::fs::canonicalize(&path)?;
+        let resolved = crate::fs::canonicalize(&path)?;
         if !context.roots.contains(&resolved)? {
             return Ok(false);
         }
@@ -343,7 +343,7 @@ pub fn point_reason(
         raw_hint_read(context, &document.path, expected)?
     } else {
         let path = context.roots.resolve(&document.path);
-        let resolved = match std::fs::canonicalize(&path) {
+        let resolved = match crate::fs::canonicalize(&path) {
             Ok(path) => path,
             Err(_) => return Ok(Some("stale".into())),
         };

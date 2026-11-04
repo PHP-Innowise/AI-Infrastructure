@@ -78,7 +78,7 @@ fn engine_image(path: &Path, size: u64) -> Result<Vec<u8>> {
 }
 impl Gate {
     pub fn current() -> Result<Self> {
-        let binary = std::fs::canonicalize(std::env::current_exe()?)?;
+        let binary = infra_core::fs::canonicalize(std::env::current_exe()?)?;
         let size = std::fs::metadata(&binary)?.len();
         let digest = infra_core::query::sha256(&engine_image(&binary, size)?);
         Ok(Self {
@@ -106,7 +106,7 @@ impl Gate {
                 "Generated runtime gate accepts only status --json and validate",
             ));
         }
-        let target = std::fs::canonicalize(target)?;
+        let target = infra_core::fs::canonicalize(target)?;
         let source = hooks::installed_engine(&target);
         let installed = engine_image(&source, self.size)?;
         if infra_core::query::sha256(&installed) != self.digest {
@@ -172,7 +172,7 @@ impl Gate {
             || invocation.argv != invocation.expected_argv
             || invocation.environment != installed_environment()
             || invocation.binary.parent() != Some(invocation._custody.path())
-            || std::fs::canonicalize(&invocation.cwd)? != invocation.cwd
+            || infra_core::fs::canonicalize(&invocation.cwd)? != invocation.cwd
         {
             return Err(RuntimeError::policy(
                 "Native gate invocation custody changed",
@@ -321,7 +321,7 @@ impl NativeGateServices for Gate {
         owned: &BTreeMap<String, String>,
     ) -> Result<Vec<String>> {
         self.engine()?;
-        let target = std::fs::canonicalize(target)?;
+        let target = infra_core::fs::canonicalize(target)?;
         let delivery = fs::absolute(delivery_root)?;
         let hooks_dir = directory(host)?;
         let wiring_path = wiring(host)?;
@@ -533,7 +533,7 @@ mod installed_context_tests {
             vec![
                 "memory".to_string(),
                 "--root".into(),
-                std::fs::canonicalize(target.path())
+                infra_core::fs::canonicalize(target.path())
                     .unwrap()
                     .display()
                     .to_string(),

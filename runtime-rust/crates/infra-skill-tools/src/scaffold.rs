@@ -129,7 +129,7 @@ pub fn package_skill(
     let mut zip = zip::ZipWriter::new(file);
     let mut files = vec![];
     collect(&skill, &mut files)?;
-    let canonical = skill.canonicalize()?;
+    let canonical = infra_core::fs::canonicalize(&skill)?;
     for path in files {
         if should_exclude(&path, &skill) {
             log.push_str(&format!(
@@ -138,7 +138,7 @@ pub fn package_skill(
             ));
             continue;
         }
-        if !path.canonicalize()?.starts_with(&canonical) {
+        if !infra_core::fs::canonicalize(&path)?.starts_with(&canonical) {
             return Err(RuntimeError::policy(
                 "Archive member escapes skill directory",
             ));

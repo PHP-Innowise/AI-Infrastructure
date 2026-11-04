@@ -684,7 +684,7 @@ pub fn run(v: &Value) -> Result<Value> {
         )?
         .0;
         let oracle = Oracle {
-            php: std::fs::canonicalize(v["php"].as_str().unwrap_or("/usr/bin/php"))?,
+            php: infra_core::fs::canonicalize(v["php"].as_str().unwrap_or("/usr/bin/php"))?,
         };
         let correct = oracle.evaluate(&std::env::current_dir()?, &source, &test)?;
         Ok(json!({"schema":"task-outcome-verifier-v1","completed":true,"correct":correct}))

@@ -21,7 +21,7 @@ impl Temp {
             SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
-        Self(fs::canonicalize(path).unwrap())
+        Self(infra_core::fs::canonicalize(path).unwrap())
     }
     fn dir(&self, name: &str) -> PathBuf {
         let path = self.0.join(name);
@@ -508,7 +508,7 @@ fn exercise_generated_pipeline(
     engine: &[u8],
     installed: &str,
 ) {
-    let selected = fs::canonicalize(selected_engine()).unwrap();
+    let selected = infra_core::fs::canonicalize(selected_engine()).unwrap();
     let gate = infra_cli::generator_gate::Gate {
         binary: selected,
         digest: common::sha(engine),
@@ -1334,11 +1334,10 @@ fn creator_native_hook(
 fn copied_creator_hooks_preserve_framework_union_after_rename() {
     use infra_harness::creator_files;
     let temp = Temp::new();
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .unwrap()
-        .join("Infrastructure-Creator");
+    let source =
+        infra_core::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+            .unwrap()
+            .join("Infrastructure-Creator");
     let agent = temp.0.join("agent");
     let mut engine = creator_files::admit_engine(&selected_engine()).unwrap();
     creator_files::copy_generator(&source, &agent, &mut engine).unwrap();

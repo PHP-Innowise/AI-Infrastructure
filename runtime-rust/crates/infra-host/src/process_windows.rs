@@ -839,7 +839,7 @@ fn spawn_prepared(
     if argv.is_empty() || argv.iter().any(|s| s.contains('\0')) {
         return Err(invalid());
     }
-    let cwd = cwd.canonicalize()?;
+    let cwd = infra_core::fs::canonicalize(cwd)?;
     if !cwd.is_dir() {
         return Err(invalid());
     }
@@ -1222,7 +1222,7 @@ impl CaptureChild {
         if argv.is_empty() || argv.iter().any(|argument| argument.contains('\0')) {
             return Err(invalid());
         }
-        let cwd = cwd.canonicalize()?;
+        let cwd = infra_core::fs::canonicalize(cwd)?;
         if !cwd.is_dir() {
             return Err(invalid());
         }

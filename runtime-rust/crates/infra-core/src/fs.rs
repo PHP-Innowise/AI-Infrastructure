@@ -15,8 +15,10 @@ use uuid::Uuid;
 pub type FileSnapshot = BTreeMap<PathBuf, Option<Vec<u8>>>;
 
 mod python_paths;
+mod spelling;
 pub use python_paths::python_realpath;
 pub use python_paths::python_realpath_spelling;
+pub use spelling::{canonicalize, plain_windows_path};
 
 pub fn linked(metadata: &fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
@@ -57,7 +59,7 @@ pub fn canonical_or_missing(path: &Path) -> Result<PathBuf> {
     let mut current = absolute(path)?;
     let mut missing = Vec::new();
     loop {
-        match fs::canonicalize(&current) {
+        match canonicalize(&current) {
             Ok(mut base) => {
                 for item in missing.iter().rev() {
                     base.push(item);
@@ -482,7 +484,7 @@ mod anchored_lock_identity_tests {
     fn anchored_reentrancy_shares_the_same_file_and_refuses_a_new_inode_at_the_key() {
         let root = std::env::temp_dir().join(format!("infra-anchored-lock-{}", Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = canonicalize(root).unwrap();
         let temp = Directory(root.clone());
         fs::create_dir_all(root.join("project-brain/local")).unwrap();
         let path = root.join("project-brain/local/runtime.lock");

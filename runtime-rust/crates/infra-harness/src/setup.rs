@@ -200,7 +200,7 @@ impl Setup {
     }
     fn target(&self, project: &str) -> Result<PathBuf> {
         let value = self.store.project(project)?;
-        let root = std::fs::canonicalize(
+        let root = infra_core::fs::canonicalize(
             value["path"]
                 .as_str()
                 .ok_or_else(|| HarnessError::invalid("Project path missing."))?,
