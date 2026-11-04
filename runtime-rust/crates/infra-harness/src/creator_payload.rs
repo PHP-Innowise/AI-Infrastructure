@@ -600,7 +600,11 @@ pub fn copy(source: &Path, destination: &Path, engine: &mut CreatorEngine) -> Re
     Ok(())
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(
+    test,
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 mod probe_tests {
     use super::*;
     use std::{
@@ -624,6 +628,57 @@ mod probe_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// A static executable whose only instructions exit with `code`. The
+    /// system's `true` and `false` need not be small native images that keep
+    /// their meaning under another name: Ubuntu 26.04 ships uutils ones.
+    fn exiting(code: u8) -> Vec<u8> {
+        // mov edi, code; mov eax, 60 (exit); syscall
+        #[cfg(target_arch = "x86_64")]
+        let (machine, text) = (62u16, [0xbf, code, 0, 0, 0, 0xb8, 60, 0, 0, 0, 0x0f, 0x05]);
+        // mov x0, #code; mov x8, #93 (exit); svc #0
+        #[cfg(target_arch = "aarch64")]
+        let (machine, text) = (183u16, {
+            let mut text = [0u8; 12];
+            for (word, at) in [
+                0xd280_0000 | (u32::from(code) << 5),
+                0xd280_0ba8,
+                0xd400_0001,
+            ]
+            .into_iter()
+            .zip([0, 4, 8])
+            {
+                text[at..at + 4].copy_from_slice(&u32::to_le_bytes(word));
+            }
+            text
+        });
+        // One read-and-execute segment maps the whole file at a fixed base.
+        const BASE: u64 = 0x40_0000;
+        const HEADERS: u64 = 64 + 56;
+        let size = HEADERS + text.len() as u64;
+        // 64-bit little-endian ELF: executable, machine, version.
+        let mut image = b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0".to_vec();
+        image.extend_from_slice(&2u16.to_le_bytes());
+        image.extend_from_slice(&machine.to_le_bytes());
+        image.extend_from_slice(&1u32.to_le_bytes());
+        // Entry point, program header offset, no section headers, no flags.
+        for word in [BASE + HEADERS, 64, 0] {
+            image.extend_from_slice(&word.to_le_bytes());
+        }
+        image.extend_from_slice(&0u32.to_le_bytes());
+        // Header sizes and counts: one program header, no sections.
+        for half in [64u16, 56, 1, 64, 0, 0] {
+            image.extend_from_slice(&half.to_le_bytes());
+        }
+        // PT_LOAD, readable and executable: offset, addresses, sizes, alignment.
+        image.extend_from_slice(&1u32.to_le_bytes());
+        image.extend_from_slice(&5u32.to_le_bytes());
+        for word in [0, BASE, BASE, size, size, 0x1000] {
+            image.extend_from_slice(&word.to_le_bytes());
+        }
+        image.extend_from_slice(&text);
+        image
+    }
+
     struct Probe {
         _root: tempfile::TempDir,
         held: PublicationFiles,
@@ -631,13 +686,7 @@ mod probe_tests {
         image: FileImageIdentity,
     }
     impl Probe {
-        fn new(system: &str, mode: u32) -> Self {
-            let source = std::fs::canonicalize(system).unwrap();
-            let bytes = infra_core::fs::read_regular(&source).unwrap();
-            assert!(
-                bytes.starts_with(b"\x7fELF") && bytes.len() <= 1024 * 1024,
-                "the private fixture must be a small actual native executable"
-            );
+        fn new(bytes: Vec<u8>, mode: u32) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("creator-held-probe-")
                 .tempdir()
@@ -857,7 +906,7 @@ mod probe_tests {
     #[test]
     fn inherited_cloexec_writer_releases_then_same_probe_succeeds() {
         let _serial = exclusive();
-        let mut probe = Probe::new("/usr/bin/true", 0o500);
+        let mut probe = Probe::new(exiting(0), 0o500);
         let holder = Rc::new(RefCell::new(probe.inherit_writer().unwrap()));
         let observed = Rc::new(Cell::new(0usize));
         let release_error = Rc::new(RefCell::new(None));
@@ -896,7 +945,7 @@ mod probe_tests {
     #[test]
     fn persistent_inherited_writer_uses_only_the_original_deadline() {
         let _serial = exclusive();
-        let mut probe = Probe::new("/usr/bin/true", 0o500);
+        let mut probe = Probe::new(exiting(0), 0o500);
         let mut holder = probe.inherit_writer().unwrap();
         let started = Instant::now();
         let result = probe.run(Duration::from_millis(80));
@@ -915,7 +964,7 @@ mod probe_tests {
     fn busy_probe_rejects_replaced_changed_or_repermissioned_images() {
         let _serial = exclusive();
         for mutation in ["replace", "bytes", "mode"] {
-            let mut probe = Probe::new("/usr/bin/true", 0o500);
+            let mut probe = Probe::new(exiting(0), 0o500);
             let holder = Rc::new(RefCell::new(probe.inherit_writer().unwrap()));
             let path = probe.path();
             let expected = probe.bytes.clone();
@@ -994,7 +1043,7 @@ mod probe_tests {
     #[test]
     fn permission_error_preserves_raw_errno_without_busy_retry() {
         let _serial = exclusive();
-        let mut probe = Probe::new("/usr/bin/true", 0o400);
+        let mut probe = Probe::new(exiting(0), 0o400);
         let result = probe.run(Duration::from_secs(2));
         let error = result.unwrap_err();
         assert_eq!(error.code.as_deref(), Some("native-spawn"));
@@ -1004,7 +1053,7 @@ mod probe_tests {
     #[test]
     fn nonzero_native_exit_is_not_a_busy_spawn_failure() {
         let _serial = exclusive();
-        let mut probe = Probe::new("/usr/bin/false", 0o500);
+        let mut probe = Probe::new(exiting(1), 0o500);
         let result = probe.run(Duration::from_secs(2)).unwrap();
         assert_eq!(result.code, 1);
         assert!(result.stdout.is_empty());

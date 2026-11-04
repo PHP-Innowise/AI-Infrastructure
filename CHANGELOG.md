@@ -24,6 +24,13 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- The creator's probe tests carry their own executable. They copied
+  `/usr/bin/true` and `/usr/bin/false` and required each to be a native image
+  of at most 1 MiB; on the `ubuntu-26.04` runner, whose coreutils package now
+  installs uutils, `/usr/bin/false` failed that check, which stopped
+  `rust-contract` before the later test targets ran. The tests now write a
+  132-byte static image that only exits with the expected status, for x86-64
+  and AArch64 Linux.
 - A failed native check shows why it failed. `infra-engine check` kept a
   failed gate's output only in a log under the runner's temporary directory
   and printed its path, so the `rust-contract` and `native-windows` jobs failed
