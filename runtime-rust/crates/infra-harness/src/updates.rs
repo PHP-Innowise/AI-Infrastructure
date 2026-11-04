@@ -782,6 +782,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn full_inference_requirements_reject_lean_update_artifacts() {
+        let fixture = Fixture::new();
+        fixture.assemble(Some(fixture.sources().0));
+        let admission: Weak<dyn Admission> = Arc::<Gate>::downgrade(&fixture.gate);
+        let full = Updates::new(
+            fixture.clone.clone(),
+            admission.clone(),
+            fixture.handoffs.clone(),
+            vec![json!("harness"), json!("onnx-inference-v1")],
+        );
+        let lean = Updates::new(
+            fixture.clone.clone(),
+            admission,
+            fixture.handoffs.clone(),
+            vec![json!("harness"), json!("memory")],
+        );
+        // The same source-bound, digest-verified artifact is admitted by the
+        // lean requirements and refused only by the missing inference marker.
+        let admitted = lean.native_engine().unwrap().unwrap();
+        assert!(
+            admitted
+                .0
+                .ends_with("PHP Core/memory-bank/bin/infra-engine")
+        );
+        assert_eq!(full.native_engine().unwrap().unwrap_err(), Stale::Missing);
+
+        let name = "PHP Core/memory-bank/runtime-capabilities.json";
+        let mut descriptor: Value =
+            serde_json::from_slice(&fs::read(fixture.clone.join(name)).unwrap()).unwrap();
+        descriptor["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("onnx-inference-v1"));
+        write(
+            &fixture.clone,
+            name,
+            serde_json::to_vec(&descriptor).unwrap(),
+        );
+        assert_eq!(full.native_engine().unwrap().unwrap(), admitted);
+        assert_eq!(lean.native_engine().unwrap().unwrap(), admitted);
+    }
+
     #[tokio::test]
     async fn new_engine_sources_hold_the_restart_until_a_rebuilt_engine_is_assembled() {
         let fixture = Fixture::new();

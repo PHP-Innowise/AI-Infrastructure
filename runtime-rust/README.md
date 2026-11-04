@@ -25,6 +25,46 @@ cargo build --manifest-path runtime-rust/Cargo.toml --locked --release --bin inf
 ./infra-engine capabilities --json
 ```
 
+The default build includes local ONNX inference. For a smaller build that does
+not need local ONNX models, select the CLI package without default features:
+
+```bash
+cargo build --manifest-path runtime-rust/Cargo.toml --locked --release --package infra-cli --bin infra-engine --no-default-features
+```
+
+Add `--features onnx` to enable it explicitly. Memory, hooks, repository tools
+and the application remain available in either variant; a lean local worker
+returns the existing `dependency-unavailable` response for valid inference
+requests. External ONNX workers remain usable. `capabilities --json` includes
+`onnx-inference-v1` only when the compiled pilots dependency supports inference,
+so running engines advertising that marker require it in replacement artifacts.
+Earlier engines without the marker cannot distinguish full from lean this way.
+Source identity names the source tree; the executable hash and capabilities
+distinguish the two artifacts.
+
+Cargo unifies features across selected packages. Ordinary `cargo test
+--workspace` therefore enables the standalone packages' ONNX defaults; use
+`--workspace --no-default-features` to validate the lean workspace.
+
+For faster local optimized builds, select the opt-in `quick-release` profile.
+It inherits the release settings, disables LTO and uses 16 codegen units. This
+trades binary size and potentially runtime performance for shorter compilation;
+distribution builds continue to use `--release`.
+
+```bash
+# Full build with local ONNX inference
+cargo build --manifest-path runtime-rust/Cargo.toml --locked --package infra-cli --bin infra-engine --profile quick-release
+runtime-rust/target/quick-release/infra-engine capabilities --json
+
+# Lean build
+cargo build --manifest-path runtime-rust/Cargo.toml --locked --package infra-cli --bin infra-engine --profile quick-release --no-default-features
+runtime-rust/target/quick-release/infra-engine capabilities --json
+```
+
+These paths assume Cargo's default target directory. With `CARGO_TARGET_DIR`,
+run its `quick-release/infra-engine`; on Windows the executable is
+`quick-release/infra-engine.exe`.
+
 The maintainer launcher accepts an explicit `INFRA_ENGINE_BINARY` when the
 binary lives elsewhere. Installed hooks and MCP registrations use the
 explicit installed artifact. Installing an accelerator does not build or

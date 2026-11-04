@@ -6,9 +6,13 @@ rust-version = "1.89"
 publish = false
 license = "Apache-2.0"
 
+[features]
+default = ["onnx"]
+onnx = ["infra-eval/onnx"]
+
 [dependencies]
 infra-core = { path = "../infra-core" }
-infra-eval = { path = "../infra-eval" }
+infra-eval = { path = "../infra-eval", default-features = false }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.150", features = ["preserve_order"] }
 serde_yaml = "0.9"

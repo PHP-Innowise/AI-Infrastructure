@@ -2,7 +2,7 @@ use infra_core::{Result, RuntimeError, fs as safe, git};
 use regex::Regex;
 use serde_json::Value;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
     path::{Component, Path, PathBuf},
@@ -130,7 +130,7 @@ pub fn walk(root: &Path) -> Result<Vec<String>> {
     visit(root, root, &mut found)?;
     Ok(found)
 }
-pub fn matches(pattern: &str, name: &str, slash_sensitive: bool) -> Result<bool> {
+fn compile_glob(pattern: &str, slash_sensitive: bool) -> Result<Regex> {
     let chars: Vec<char> = pattern.chars().collect();
     let mut index = 0;
     let mut expression = String::from("^");
@@ -185,9 +185,38 @@ pub fn matches(pattern: &str, name: &str, slash_sensitive: bool) -> Result<bool>
         index += 1;
     }
     expression.push('$');
-    Ok(Regex::new(&expression)
-        .map_err(|_| RuntimeError::invalid("Invalid glob expression"))?
-        .is_match(name))
+    Regex::new(&expression).map_err(|_| RuntimeError::invalid("Invalid glob expression"))
+}
+pub fn matches(pattern: &str, name: &str, slash_sensitive: bool) -> Result<bool> {
+    Ok(compile_glob(pattern, slash_sensitive)?.is_match(name))
+}
+/// A command's finite configuration patterns, compiled only when reached.
+/// Keeping this state local preserves ordered matching and late glob errors.
+#[derive(Default)]
+pub(crate) struct Globs {
+    sensitive: BTreeMap<String, Regex>,
+    loose: BTreeMap<String, Regex>,
+}
+impl Globs {
+    pub(crate) fn matches(
+        &mut self,
+        pattern: &str,
+        name: &str,
+        slash_sensitive: bool,
+    ) -> Result<bool> {
+        let cache = if slash_sensitive {
+            &mut self.sensitive
+        } else {
+            &mut self.loose
+        };
+        if let Some(compiled) = cache.get(pattern) {
+            return Ok(compiled.is_match(name));
+        }
+        let compiled = compile_glob(pattern, slash_sensitive)?;
+        let matched = compiled.is_match(name);
+        cache.insert(pattern.into(), compiled);
+        Ok(matched)
+    }
 }
 pub fn ignored(path: &str) -> bool {
     path.split('/')
@@ -217,4 +246,46 @@ pub fn edition(value: &str) -> Result<&'static str> {
         .copied()
         .find(|known| *known == name)
         .ok_or_else(|| RuntimeError::invalid("Unknown accelerator edition"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_globs_preserve_slash_and_bracket_semantics_on_repeated_calls() {
+        let mut globs = Globs::default();
+        for _ in 0..2 {
+            for (pattern, name, sensitive, expected) in [
+                ("src/**/*.php", "src/A.php", true, true),
+                ("src/**/*.php", "src/deep/A.php", true, true),
+                ("src/*.php", "src/deep/A.php", true, false),
+                ("src/*.php", "src/deep/A.php", false, true),
+                ("file?.md", "filex.md", true, true),
+                ("file?.md", "file/.md", true, false),
+                ("file?.md", "file/.md", false, true),
+                ("[!a-c].md", "d.md", true, true),
+                ("[!a-c].md", "b.md", true, false),
+                ("file[0-9].md", "file2.md", true, true),
+                ("literal[", "literal[", true, true),
+            ] {
+                assert_eq!(
+                    globs.matches(pattern, name, sensitive).unwrap(),
+                    expected,
+                    "pattern={pattern}, name={name}, slash_sensitive={sensitive}"
+                );
+                assert_eq!(matches(pattern, name, sensitive).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_globs_keep_the_original_error_on_repeated_calls() {
+        let mut globs = Globs::default();
+        for sensitive in [true, false, true, false] {
+            let error = globs.matches("[z-a]", "file", sensitive).unwrap_err();
+            assert_eq!(error.kind, infra_core::ErrorKind::InvalidInput);
+            assert_eq!(error.message, "Invalid glob expression");
+        }
+    }
 }

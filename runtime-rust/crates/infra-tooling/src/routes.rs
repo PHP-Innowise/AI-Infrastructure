@@ -15,8 +15,27 @@ const TOOLS: [(&str, &str, &str); 3] = [
     ("codex", ".codex", ".codex/hooks.json"),
 ];
 const NAME: &str = r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*";
-fn re(pattern: &str) -> Result<Regex> {
-    Regex::new(pattern).map_err(|_| RuntimeError::invalid("Invalid routing expression"))
+// Called only by a per-call-site OnceLock initializer, including in loops.
+fn compile_constant(pattern: &str) -> std::result::Result<Regex, regex::Error> {
+    Regex::new(pattern)
+}
+// Only literals and formats of the constant NAME grammar may use this macro.
+// A separate static per call site bounds storage without caching input patterns.
+macro_rules! re {
+    ($pattern:literal $(,)?) => {
+        re!(@compiled $pattern)
+    };
+    (&format!($pattern:literal $(,)?)) => {
+        re!(@compiled &format!($pattern))
+    };
+    (@compiled $pattern:expr) => {{
+        static REGEX: std::sync::OnceLock<std::result::Result<Regex, regex::Error>> =
+            std::sync::OnceLock::new();
+        REGEX
+            .get_or_init(|| compile_constant($pattern))
+            .as_ref()
+            .map_err(|_| RuntimeError::invalid("Invalid routing expression"))
+    }};
 }
 fn bare(value: &str) -> bool {
     !value.is_empty()
@@ -396,13 +415,14 @@ impl Checker<'_> {
         }
     }
     fn references(&mut self, tool: &str, path: &Path, number: usize, line: &str) -> Result<()> {
-        let invocation = re(&format!(r"^/({NAME})(?:[\s\[].*)?$"))?;
-        for span in re(r"\x60([^\x60\n]+)\x60")?.captures_iter(line) {
+        let invocation = re!(&format!(r"^/({NAME})(?:[\s\[].*)?$"))?;
+        for span in re!(r"\x60([^\x60\n]+)\x60")?.captures_iter(line) {
             if let Some(found) = invocation.captures(&span[1]) {
                 self.invocation(tool, path, number, &found[1], &format!("/{}", &found[1]));
             }
         }
-        for found in re(r"\.(claude|cursor|agents)/skills/([A-Za-z0-9_-]+)/")?.captures_iter(line) {
+        for found in re!(r"\.(claude|cursor|agents)/skills/([A-Za-z0-9_-]+)/")?.captures_iter(line)
+        {
             if self
                 .edition
                 .tool_skills
@@ -421,7 +441,7 @@ impl Checker<'_> {
                 );
             }
         }
-        for found in re(&format!(
+        for found in re!(&format!(
             r"(?i)\b(?:invoke|execute)\s+(?:the\s+)?(?:\x60({NAME})\x60|({NAME}-{NAME}))\s+skill\b"
         ))?
         .captures_iter(line)
@@ -646,10 +666,10 @@ impl Checker<'_> {
         Ok(())
     }
     fn commands(&mut self) -> Result<()> {
-        let subagent = re(r"subagent_type[*:\s]*\x60([^\x60]+)\x60")?;
-        let spawn = re(&format!(r"\b(?i:spawn)\s+(?:(?i:the)\s+)?\x60({NAME})\x60"))?;
-        let bare_spawn = re(&format!(r"^\s*Spawn\s+(?:the\s+)?({NAME})\s+agent\b"))?;
-        let negated = re(r"(?i)(?:\bnot|\bnever|n't)\s*$")?;
+        let subagent = re!(r"subagent_type[*:\s]*\x60([^\x60]+)\x60")?;
+        let spawn = re!(&format!(r"\b(?i:spawn)\s+(?:(?i:the)\s+)?\x60({NAME})\x60"))?;
+        let bare_spawn = re!(&format!(r"^\s*Spawn\s+(?:the\s+)?({NAME})\s+agent\b"))?;
+        let negated = re!(r"(?i)(?:\bnot|\bnever|n't)\s*$")?;
         let determiners = [
             "a", "all", "an", "another", "any", "both", "each", "every", "first", "its", "last",
             "new", "next", "no", "one", "only", "same", "several", "single", "that", "the",
@@ -694,7 +714,7 @@ impl Checker<'_> {
                         .take(start.saturating_sub(1))
                         .skip(1)
                     {
-                        for capture in re(r"agents:\s*\[([^\]]*)\]")?.captures_iter(line) {
+                        for capture in re!(r"agents:\s*\[([^\]]*)\]")?.captures_iter(line) {
                             for value in names(&capture[1]) {
                                 self.spawned(tool, &path, index + 1, &value, "flow stage agent");
                             }
@@ -767,7 +787,7 @@ impl Checker<'_> {
                     self.invocation(tool, &path, number, &value, &format!("/{value}"));
                 }
                 for found in
-                    re(&format!(r"\x60({NAME})(?:[ \t]+[<\[][^\x60]*)?\x60"))?.captures_iter(line)
+                    re!(&format!(r"\x60({NAME})(?:[ \t]+[<\[][^\x60]*)?\x60"))?.captures_iter(line)
                 {
                     self.invocation(tool, &path, number, &found[1], &format!("'{}'", &found[1]));
                 }
@@ -839,7 +859,7 @@ impl Checker<'_> {
                     );
                 }
             }
-            for found in re(&format!(r"\x60({NAME})\x60\s+(skill|agent|command|hook)\b"))?
+            for found in re!(&format!(r"\x60({NAME})\x60\s+(skill|agent|command|hook)\b"))?
                 .captures_iter(&line)
             {
                 let (name, kind) = (&found[1], &found[2]);
@@ -903,8 +923,8 @@ impl Checker<'_> {
 }
 fn code_slashes(line: &str) -> Result<Vec<String>> {
     let mut output = vec![];
-    let invocation = re(&format!(r"^/({NAME})(?:[\s\[].*)?$"))?;
-    for span in re(r"\x60([^\x60\n]+)\x60")?.captures_iter(line) {
+    let invocation = re!(&format!(r"^/({NAME})(?:[\s\[].*)?$"))?;
+    for span in re!(r"\x60([^\x60\n]+)\x60")?.captures_iter(line) {
         if let Some(found) = invocation.captures(&span[1]) {
             output.push(found[1].into());
         }
@@ -912,7 +932,7 @@ fn code_slashes(line: &str) -> Result<Vec<String>> {
     Ok(output)
 }
 fn slash_tokens(line: &str) -> Result<Vec<String>> {
-    let pattern = re(&format!(r"/({NAME})"))?;
+    let pattern = re!(&format!(r"/({NAME})"))?;
     let mut output = vec![];
     for capture in pattern.captures_iter(line) {
         let whole = capture
@@ -938,11 +958,11 @@ fn slash_tokens(line: &str) -> Result<Vec<String>> {
     Ok(output)
 }
 fn flow_steps(line: &str) -> Result<Vec<String>> {
-    let starts = re(r"^[ \t]*(?:(?:->|→)[ \t]*)?|[├└]─+[ \t]*")?;
-    let candidate = re(&format!(
+    let starts = re!(r"^[ \t]*(?:(?:->|→)[ \t]*)?|[├└]─+[ \t]*")?;
+    let candidate = re!(&format!(
         r"^({NAME}(?:[ \t]*,[ \t]*(?:or[ \t]+)?{NAME}|[ \t]+or[ \t]+{NAME})*)"
     ))?;
-    let split = re(r"[ \t]*,[ \t]*(?:or[ \t]+)?|[ \t]+or[ \t]+")?;
+    let split = re!(r"[ \t]*,[ \t]*(?:or[ \t]+)?|[ \t]+or[ \t]+")?;
     let mut output = vec![];
     for start in starts.find_iter(line) {
         if let Some(found) = candidate.captures(&line[start.end()..]) {
@@ -1252,4 +1272,49 @@ fn py_lines(text: &str) -> Vec<String> {
         output.push(line);
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_patterns_preserve_routing_boundaries_on_repeated_calls() {
+        for _ in 0..2 {
+            assert_eq!(
+                code_slashes("Invoke `/code-review [target]` then `/memory`. ").unwrap(),
+                ["code-review", "memory"]
+            );
+            assert!(
+                code_slashes("`/Not-a-command` and `/path/file`")
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                slash_tokens("Use /code-review, then (/memory). src/hidden and /path/file")
+                    .unwrap(),
+                ["code-review", "memory"]
+            );
+            assert!(
+                slash_tokens("https://example.test/path /name_suffix /name.md")
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                flow_steps("  -> scan, or review (optional)").unwrap(),
+                ["scan", "review"]
+            );
+            assert_eq!(flow_steps("  └── generate <target>").unwrap(), ["generate"]);
+            assert!(flow_steps("scan arbitrary prose").unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn invalid_constant_pattern_remains_an_error_on_repeated_calls() {
+        for _ in 0..2 {
+            let error = re!("[").unwrap_err();
+            assert_eq!(error.kind, infra_core::ErrorKind::InvalidInput);
+            assert_eq!(error.message, "Invalid routing expression");
+        }
+    }
 }

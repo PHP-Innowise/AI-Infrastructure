@@ -207,6 +207,43 @@ pub async fn run_raw_with_lock(
     .await
 }
 #[cfg(unix)]
+fn emit_lines<F>(line: &mut Vec<u8>, limit: usize, event: &mut F) -> Result<()>
+where
+    F: FnMut(&[u8]) -> Result<()> + ?Sized,
+{
+    let mut consumed = 0;
+    while let Some(end) = line[consumed..].iter().position(|byte| *byte == b'\n') {
+        if end > limit {
+            if consumed > 0 {
+                drop(line.drain(..consumed));
+            }
+            return Err(HarnessError {
+                status: 503,
+                code: "output-line-limit",
+                message: "Native output line limit reached.".into(),
+            });
+        }
+        let next = consumed + end + 1;
+        if let Err(error) = event(&line[consumed..next]) {
+            // The old drain removed this packet before calling the observer.
+            drop(line.drain(..next));
+            return Err(error);
+        }
+        consumed = next;
+    }
+    if consumed > 0 {
+        drop(line.drain(..consumed));
+    }
+    if line.len() > limit {
+        return Err(HarnessError {
+            status: 503,
+            code: "output-line-limit",
+            message: "Native output line limit reached.".into(),
+        });
+    }
+    Ok(())
+}
+#[cfg(unix)]
 #[expect(
     clippy::too_many_arguments,
     reason = "A single dispatch path carries immutable process options and retained custody without global state."
@@ -334,24 +371,7 @@ async fn run_engine(
                 }
                 output.extend_from_slice(&chunk[..count]);
                 line.extend_from_slice(&chunk[..count]);
-                while let Some(end) = line.iter().position(|b| *b == b'\n') {
-                    if end > limits.line {
-                        return Err(HarnessError {
-                            status: 503,
-                            code: "output-line-limit",
-                            message: "Native output line limit reached.".into(),
-                        });
-                    }
-                    let packet = line.drain(..=end).collect::<Vec<_>>();
-                    event(&packet)?;
-                }
-                if line.len() > limits.line {
-                    return Err(HarnessError {
-                        status: 503,
-                        code: "output-line-limit",
-                        message: "Native output line limit reached.".into(),
-                    });
-                }
+                emit_lines(&mut line, limits.line, &mut event)?;
             }
         }
         Ok(())
@@ -2911,5 +2931,167 @@ mod experiment {
                 .status_valid()
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod line_framing_tests {
+    use super::{HarnessError, Result, emit_lines};
+
+    // Frozen framing loop before the cursor optimization. The reference owns
+    // every packet and removes it before invoking the callback.
+    fn reference_lines(
+        line: &mut Vec<u8>,
+        limit: usize,
+        event: &mut impl FnMut(&[u8]) -> Result<()>,
+    ) -> Result<()> {
+        while let Some(end) = line.iter().position(|byte| *byte == b'\n') {
+            if end > limit {
+                return Err(HarnessError {
+                    status: 503,
+                    code: "output-line-limit",
+                    message: "Native output line limit reached.".into(),
+                });
+            }
+            let packet = line.drain(..=end).collect::<Vec<_>>();
+            event(&packet)?;
+        }
+        if line.len() > limit {
+            return Err(HarnessError {
+                status: 503,
+                code: "output-line-limit",
+                message: "Native output line limit reached.".into(),
+            });
+        }
+        Ok(())
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct Image {
+        packets: Vec<Vec<u8>>,
+        residual: Vec<u8>,
+        error: Option<(u16, &'static str, String)>,
+    }
+
+    fn error_image(error: HarnessError) -> (u16, &'static str, String) {
+        (error.status, error.code, error.message)
+    }
+
+    fn feed(chunks: &[&[u8]], limit: usize, fail_at: Option<usize>, reference: bool) -> Image {
+        let mut line = Vec::new();
+        let mut packets = Vec::new();
+        let mut error = None;
+        let mut event = |packet: &[u8]| {
+            let index = packets.len();
+            packets.push(packet.to_vec());
+            if fail_at == Some(index) {
+                return Err(HarnessError {
+                    status: 409,
+                    code: "framing-callback-fixture",
+                    message: "Frozen callback failure.".into(),
+                });
+            }
+            Ok(())
+        };
+        for chunk in chunks.iter().filter(|chunk| !chunk.is_empty()) {
+            line.extend_from_slice(chunk);
+            let result = if reference {
+                reference_lines(&mut line, limit, &mut event)
+            } else {
+                emit_lines(&mut line, limit, &mut event)
+            };
+            if let Err(failure) = result {
+                error = Some(error_image(failure));
+                break;
+            }
+        }
+        // run_engine delivers the remaining unterminated packet at EOF,
+        // without removing it, only after every read passed its line limit.
+        if error.is_none()
+            && !line.is_empty()
+            && let Err(failure) = event(&line)
+        {
+            error = Some(error_image(failure));
+        }
+        Image {
+            packets,
+            residual: line,
+            error,
+        }
+    }
+
+    #[test]
+    fn cursor_framing_matches_frozen_packets_errors_and_residuals_at_all_splits() {
+        for payload in [b"\nA\r\n\0\xff\nTAIL".as_slice(), b"\xc3\xa5\nZ".as_slice()] {
+            for first in 0..=payload.len() {
+                for second in first..=payload.len() {
+                    let chunks = [
+                        &payload[..first],
+                        &payload[first..second],
+                        &payload[second..],
+                    ];
+                    for limit in [0, 1, 2, 3, 4, usize::MAX] {
+                        for fail_at in [None, Some(0), Some(1), Some(2), Some(3)] {
+                            assert_eq!(
+                                feed(&chunks, limit, fail_at, false),
+                                feed(&chunks, limit, fail_at, true),
+                                "payload={payload:?}, cuts={first}/{second}, limit={limit}, fail={fail_at:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packet_boundaries_include_lf_cr_binary_and_unterminated_eof() {
+        let image = feed(&[b"\nAB\r\n\0\xff\nTAIL"], 4, None, false);
+        assert_eq!(
+            image,
+            Image {
+                packets: vec![
+                    b"\n".to_vec(),
+                    b"AB\r\n".to_vec(),
+                    b"\0\xff\n".to_vec(),
+                    b"TAIL".to_vec()
+                ],
+                residual: b"TAIL".to_vec(),
+                error: None,
+            }
+        );
+        assert_eq!(
+            feed(&[b"AB\n"], 2, None, false).packets,
+            vec![b"AB\n".to_vec()]
+        );
+        assert_eq!(feed(&[b"AB"], 2, None, false).packets, vec![b"AB".to_vec()]);
+        assert!(feed(&[], 0, None, false).packets.is_empty());
+    }
+
+    #[test]
+    fn failures_keep_exact_error_and_previously_consumed_prefix_state() {
+        let expected_error = Some((
+            503,
+            "output-line-limit",
+            "Native output line limit reached.".into(),
+        ));
+        for payload in [b"ok\nLONG\nlater\nTAIL".as_slice(), b"ok\nLONG".as_slice()] {
+            let image = feed(&[payload], 3, None, false);
+            assert_eq!(image.packets, vec![b"ok\n".to_vec()]);
+            assert_eq!(image.residual, payload[3..]);
+            assert_eq!(image.error, expected_error);
+        }
+        assert_eq!(
+            feed(&[b"one\ntwo\nthree\n"], usize::MAX, Some(1), false),
+            Image {
+                packets: vec![b"one\n".to_vec(), b"two\n".to_vec()],
+                residual: b"three\n".to_vec(),
+                error: Some((
+                    409,
+                    "framing-callback-fixture",
+                    "Frozen callback failure.".into()
+                )),
+            }
+        );
     }
 }

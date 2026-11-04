@@ -73,10 +73,10 @@ pub fn query_tokens(query: &str) -> Result<Vec<String>> {
     let mut seen = BTreeSet::new();
     for word in words.find_iter(query) {
         let word = word.as_str();
-        if seen.insert(folded(word)) {
+        let folded_word = folded(word);
+        if seen.insert(folded_word.clone()) {
             tokens.push(word.into());
         }
-        let folded_word = folded(word);
         // Every alias form begins with a lowercase Cyrillic letter.
         if !folded_word.starts_with(|c: char| ('а'..='я').contains(&c) || c == 'ё') {
             continue;
@@ -104,7 +104,12 @@ pub fn fts_expression(tokens: &[String]) -> String {
 }
 pub fn identifier_terms(path: &str, content: &str) -> Vec<(String, String)> {
     let _ = path;
-    let Ok(words) = regex::Regex::new(r"[A-Za-z_\\][A-Za-z0-9_\\]*(?:\.[A-Za-z0-9_]+)*") else {
+    static WORDS: std::sync::OnceLock<std::result::Result<regex::Regex, regex::Error>> =
+        std::sync::OnceLock::new();
+    let Ok(words) = WORDS
+        .get_or_init(|| regex::Regex::new(r"[A-Za-z_\\][A-Za-z0-9_\\]*(?:\.[A-Za-z0-9_]+)*"))
+        .as_ref()
+    else {
         return Vec::new();
     };
     let text = identifier_text(content);
@@ -265,12 +270,14 @@ pub fn expand_query_tokens(conn: &Connection, tokens: Vec<String>) -> Result<Vec
 }
 pub fn frequencies(conn: &Connection, tokens: &[String]) -> Result<BTreeMap<String, usize>> {
     let mut output = BTreeMap::new();
+    if tokens.is_empty() {
+        return Ok(output);
+    }
+    let mut statement = conn.prepare("SELECT COUNT(*) FROM documents WHERE documents MATCH ?1")?;
     for token in tokens {
-        let count = conn.query_row(
-            "SELECT COUNT(*) FROM documents WHERE documents MATCH ?1",
-            [fts_expression(std::slice::from_ref(token))],
-            |row| row.get::<_, usize>(0),
-        )?;
+        let count = statement.query_row([fts_expression(std::slice::from_ref(token))], |row| {
+            row.get::<_, usize>(0)
+        })?;
         output.insert(token.clone(), count);
     }
     Ok(output)
@@ -305,7 +312,10 @@ pub fn evidence_tokens(tokens: &[String]) -> Vec<String> {
     const STOP: &str = "a about above after again against all am an and any are aren as at be because been before being below between both but by can cannot could couldn did didn do does doesn doing don down during each few for from further had hadn has hasn have haven having he her here hers herself him himself his how i if in into is isn it its itself just let me more most mustn my myself no nor not now of off on once only or other ought our ours ourselves out over own same shan she should shouldn so some such than that the their theirs them themselves then there these they this those through to too under until up very was wasn we were weren what when where which while who whom why will with won would wouldn you your yours yourself yourselves s t ll re ve d m o y also anything everything something someone anyone please thanks thank ok okay yes yeah sure get got make made want need like one two way thing things still again really и в во не что он на я с со как а то все она так его но да ты к у же вы за бы по только ее мне было вот от меня еще нет о из ему теперь когда даже ну вдруг ли если уже или ни быть был него до вас нибудь опять уж вам ведь там потом себя ничего ей может они тут где есть надо ней для мы тебя их чем была сам чтоб без будто чего раз тоже себе под будет ж тогда кто этот того потому этого какой совсем ним здесь этом один почти мой тем чтобы нее сейчас были куда зачем всех никогда можно при наконец два об другой хоть после над больше тот через эти нас про всего них какая много разве три эту моя впрочем хорошо свою этой перед иногда лучше чуть том нельзя такой им более всегда конечно всю между это эта мои давай пожалуйста спасибо ок сделай сделать нужно какие good great nice fine cool perfect awesome excellent done look looks looking seems seem works working continue proceed go ahead lets right correct thx cheers hi hello hey bye agreed approve approved lgtm отлично супер класс готово продолжай продолжи продолжить дальше норм нормально верно понятно ясно ага угу привет пока согласен";
     tokens
         .iter()
-        .filter(|token| !STOP.split_whitespace().any(|stop| stop == folded(token)))
+        .filter(|token| {
+            let folded_token = folded(token);
+            !STOP.split_whitespace().any(|stop| stop == folded_token)
+        })
         .cloned()
         .collect()
 }
@@ -772,38 +782,44 @@ pub fn term_forms(words: &[String]) -> BTreeMap<String, String> {
             .into_iter()
             .collect::<Vec<_>>()
     });
-    let fresh = (|| -> rusqlite::Result<BTreeMap<String, String>> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch("CREATE VIRTUAL TABLE words USING fts5(word,tokenize='porter unicode61'); CREATE VIRTUAL TABLE forms USING fts5vocab(words,'instance');")?;
-        for (index, word) in missing.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO words(rowid,word) VALUES(?1,?2)",
-                params![index + 1, word],
-            )?;
-        }
-        let mut statement = conn.prepare("SELECT doc,term FROM forms ORDER BY doc,offset")?;
-        let mut stems = BTreeMap::<usize, Vec<String>>::new();
-        for row in statement.query_map([], |row| {
-            Ok((row.get::<_, usize>(0)?, row.get::<_, String>(1)?))
-        })? {
-            let (id, term) = row?;
-            stems.entry(id).or_default().push(term);
-        }
-        Ok(missing
-            .iter()
-            .enumerate()
-            .map(|(index, word)| {
-                (
-                    word.clone(),
-                    stems
-                        .get(&(index + 1))
-                        .cloned()
-                        .unwrap_or_default()
-                        .join(" "),
-                )
-            })
-            .collect())
-    })();
+    // Warm hits need no tokenizer database. Keep the shared eviction and
+    // projection below: a single oversized batch can exceed the cache limit.
+    let fresh = if missing.is_empty() {
+        Ok(BTreeMap::new())
+    } else {
+        (|| -> rusqlite::Result<BTreeMap<String, String>> {
+            let conn = Connection::open_in_memory()?;
+            conn.execute_batch("CREATE VIRTUAL TABLE words USING fts5(word,tokenize='porter unicode61'); CREATE VIRTUAL TABLE forms USING fts5vocab(words,'instance');")?;
+            for (index, word) in missing.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO words(rowid,word) VALUES(?1,?2)",
+                    params![index + 1, word],
+                )?;
+            }
+            let mut statement = conn.prepare("SELECT doc,term FROM forms ORDER BY doc,offset")?;
+            let mut stems = BTreeMap::<usize, Vec<String>>::new();
+            for row in statement.query_map([], |row| {
+                Ok((row.get::<_, usize>(0)?, row.get::<_, String>(1)?))
+            })? {
+                let (id, term) = row?;
+                stems.entry(id).or_default().push(term);
+            }
+            Ok(missing
+                .iter()
+                .enumerate()
+                .map(|(index, word)| {
+                    (
+                        word.clone(),
+                        stems
+                            .get(&(index + 1))
+                            .cloned()
+                            .unwrap_or_default()
+                            .join(" "),
+                    )
+                })
+                .collect())
+        })()
+    };
     let fresh = fresh.unwrap_or_else(|_| {
         missing
             .into_iter()
@@ -937,4 +953,115 @@ pub fn search_episodes(conn: &Connection, query: &str, limit: usize) -> Result<V
         })
     })
     .collect()
+}
+
+#[cfg(test)]
+mod term_forms_tests {
+    use super::*;
+
+    #[test]
+    fn cold_warm_and_partial_cache_preserve_tokenizer_forms() {
+        TERM_FORMS.with(|cache| cache.borrow_mut().clear());
+        let words = ["Running", "FILES", "ПРОВЕРКА", "Task_ID", "HTTPServer"].map(String::from);
+        let expected = BTreeMap::from([
+            ("Running".into(), "run".into()),
+            ("FILES".into(), "file".into()),
+            ("ПРОВЕРКА".into(), "проверка".into()),
+            ("Task_ID".into(), "task id".into()),
+            ("HTTPServer".into(), "httpserver".into()),
+        ]);
+        assert_eq!(term_forms(&words), expected);
+        assert_eq!(term_forms(&words), expected);
+        assert!(term_forms(&[]).is_empty());
+
+        let partial = ["Running", "jumping", "ПРОВЕРКА", "Task_ID"].map(String::from);
+        assert_eq!(
+            term_forms(&partial),
+            BTreeMap::from([
+                ("Running".into(), "run".into()),
+                ("jumping".into(), "jump".into()),
+                ("ПРОВЕРКА".into(), "проверка".into()),
+                ("Task_ID".into(), "task id".into()),
+            ])
+        );
+        TERM_FORMS.with(|cache| cache.borrow_mut().clear());
+    }
+
+    #[test]
+    fn oversized_warm_cache_keeps_existing_eviction_and_fallback() {
+        TERM_FORMS.with(|cache| cache.borrow_mut().clear());
+        let mut words = (0..4095)
+            .map(|index| format!("entry_{index}"))
+            .collect::<Vec<_>>();
+        words.push("Running".into());
+        assert_eq!(term_forms(&words)["Running"], "run");
+        assert_eq!(term_forms(&["Running".into()])["Running"], "run");
+
+        TERM_FORMS.with(|cache| cache.borrow_mut().clear());
+        words.push("entry_4095".into());
+        assert_eq!(term_forms(&words)["Running"], "run");
+        // Existing behavior clears an oversized cache even on an all-hit
+        // request, then uses folding because no fresh forms were requested.
+        assert_eq!(term_forms(&["Running".into()])["Running"], "running");
+        assert_eq!(term_forms(&["Running".into()])["Running"], "run");
+        TERM_FORMS.with(|cache| cache.borrow_mut().clear());
+    }
+}
+
+#[cfg(test)]
+mod query_work_tests {
+    use super::*;
+
+    #[test]
+    fn folded_token_filters_preserve_unicode_spelling_order_and_duplicates() {
+        let tokens = [
+            "THE", "И", "Please", "Straße", "CACHE", "CACHE", "İ", "theory", "",
+        ]
+        .map(String::from);
+        assert_eq!(
+            evidence_tokens(&tokens),
+            ["Straße", "CACHE", "CACHE", "İ", "theory", ""]
+        );
+        assert_eq!(
+            query_tokens("CACHE cache Straße STRASSE файлы ФАЙЛЫ действительно").unwrap(),
+            ["CACHE", "Straße", "файлы", "files", "действительно"]
+        );
+    }
+
+    #[test]
+    fn identifier_rows_preserve_order_deduplication_and_omitted_sections() {
+        let content = "CachePolicy CachePolicy App\\CachePolicy\n## Files\nHiddenThing.php\n## Notes\nHTTPClient";
+        let expected = vec![
+            ("CachePolicy".into(), "cache policy".into()),
+            ("App\\CachePolicy".into(), "app cache policy".into()),
+            ("HTTPClient".into(), "http client".into()),
+        ];
+        for _ in 0..2 {
+            assert_eq!(identifier_terms("notes.md", content), expected);
+            assert!(identifier_terms("notes.md", "plain words").is_empty());
+        }
+    }
+
+    #[test]
+    fn frequencies_keep_empty_input_independent_of_schema_and_repeat_counts() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(frequencies(&conn, &[]).unwrap().is_empty());
+        assert!(frequencies(&conn, &["alpha".into()]).is_err());
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE documents USING fts5(content);\
+             INSERT INTO documents(content) VALUES('alpha beta'),('alpha');",
+        )
+        .unwrap();
+        let tokens = ["alpha", "missing", "alpha", "beta"].map(String::from);
+        assert_eq!(
+            frequencies(&conn, &tokens).unwrap(),
+            BTreeMap::from([
+                ("alpha".into(), 2),
+                ("beta".into(), 1),
+                ("missing".into(), 0)
+            ])
+        );
+        conn.execute_batch("DROP TABLE documents").unwrap();
+        assert!(frequencies(&conn, &[]).unwrap().is_empty());
+    }
 }

@@ -8,6 +8,7 @@ fn clean(s: &str) -> String {
         .collect()
 }
 pub fn reset() {
+    dom::cancel_timer("run-clock");
     for key in ["run", "agents", "run-file-filter", "run-command-filter"] {
         m::take(key);
     }
@@ -166,7 +167,8 @@ pub fn observe(event: V) {
     m::set("run", run);
     activity(&event);
     conversation(&event);
-    render();
+    // Poll controls render the derived panels once after all fresh events.
+    // Completion notifications must run before a later event can change launch.
     notify_finished();
 }
 fn record_file(run: &mut V, path: &str, kind: &str, event: &V) {
@@ -238,21 +240,69 @@ fn conversation(v: &V) {
     }
     dom::append("events", &block);
 }
+fn native_run(run: &V) -> bool {
+    !run["kinds"].as_array().into_iter().flatten().any(|kind| {
+        matches!(
+            kind.as_str(),
+            Some("fleet_stage" | "fleet_reviewer" | "clash_turn" | "agent" | "agent_activity")
+        )
+    })
+}
+#[derive(Debug, PartialEq)]
+struct RunClock {
+    started: Option<String>,
+    running: bool,
+}
+fn clock_state(run: &V, session: &V) -> Option<RunClock> {
+    if !run.is_object() || !native_run(run) {
+        return None;
+    }
+    Some(RunClock {
+        started: run["started"].as_str().map(str::to_owned),
+        running: !m::yes(&run["finished"]) && m::active(session),
+    })
+}
+fn update_clock() {
+    let clock = m::read(|state| {
+        state
+            .data
+            .get("run")
+            .and_then(|run| clock_state(run, &state.selected))
+    });
+    let Some(clock) = clock else {
+        dom::cancel_timer("run-clock");
+        return;
+    };
+    let since = clock
+        .started
+        .as_deref()
+        .map(js_sys::Date::parse)
+        .filter(|n| n.is_finite())
+        .map(|n| ((js_sys::Date::now() - n) / 1000.).max(0.) as u64);
+    dom::text(
+        "run-clock",
+        &since
+            .map(|n| format!("{}m {:02}s", n / 60, n % 60))
+            .unwrap_or_default(),
+    );
+    if clock.running {
+        dom::later("run-clock", 1000, update_clock);
+    } else {
+        dom::cancel_timer("run-clock");
+    }
+}
 pub fn render() {
     let run = m::data("run");
     if !run.is_object() {
+        dom::cancel_timer("run-clock");
         dom::hidden("run-view", true);
         return;
     }
     let session = m::read(|s| s.selected.clone());
-    let native = !m::array(&run["kinds"]).iter().any(|k| {
-        matches!(
-            k.as_str(),
-            Some("fleet_stage" | "fleet_reviewer" | "clash_turn" | "agent" | "agent_activity")
-        )
-    });
+    let native = native_run(&run);
     dom::hidden("run-view", !native);
     if !native {
+        dom::cancel_timer("run-clock");
         return;
     }
     let calls = run["calls"].as_object().cloned().unwrap_or_default();
@@ -283,22 +333,7 @@ pub fn render() {
     } else {
         "Model’s turn".into()
     };
-    let since = run["started"]
-        .as_str()
-        .map(js_sys::Date::parse)
-        .filter(|n| n.is_finite())
-        .map(|n| ((js_sys::Date::now() - n) / 1000.).max(0.) as u64);
-    dom::text(
-        "run-clock",
-        &since
-            .map(|n| format!("{}m {:02}s", n / 60, n % 60))
-            .unwrap_or_default(),
-    );
-    if !done {
-        dom::later("run-clock", 1000, render);
-    } else {
-        dom::cancel_timer("run-clock");
-    }
+    update_clock();
     dom::text("run-now-text", &now);
     dom::text("run-verb", &now);
     dom::text(
@@ -742,5 +777,50 @@ fn notify_finished() {
         });
         note.set_onclick(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    #[test]
+    fn the_clock_tracks_only_an_active_unfinished_native_run() {
+        let mut run =
+            json!({"started":"2026-11-03T12:00:00Z","finished":false,"kinds":["tool","text"]});
+        let active = json!({"status":"running"});
+        assert_eq!(
+            clock_state(&run, &active),
+            Some(RunClock {
+                started: Some("2026-11-03T12:00:00Z".into()),
+                running: true,
+            })
+        );
+        for status in ["completed", "failed", "cancelled", "interrupted"] {
+            assert!(
+                !clock_state(&run, &json!({"status":status}))
+                    .unwrap()
+                    .running
+            );
+        }
+        run["finished"] = json!(true);
+        assert!(!clock_state(&run, &active).unwrap().running);
+        run["started"] = V::Null;
+        assert!(clock_state(&run, &active).unwrap().started.is_none());
+    }
+
+    #[test]
+    fn missing_and_managed_runs_do_not_keep_a_clock_timer() {
+        let active = json!({"status":"running"});
+        assert!(clock_state(&V::Null, &active).is_none());
+        for kind in [
+            "fleet_stage",
+            "fleet_reviewer",
+            "clash_turn",
+            "agent",
+            "agent_activity",
+        ] {
+            assert!(clock_state(&json!({"kinds":["tool",kind]}), &active).is_none());
+        }
     }
 }

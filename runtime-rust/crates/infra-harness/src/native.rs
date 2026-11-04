@@ -178,24 +178,26 @@ impl ServicesFactory for NativeFactory {
                 links: links.clone(),
                 store: store.clone(),
             });
-            let systems = Arc::new(SystemsDomain {
-                manager: Arc::new(infra_system::SystemManager::new(
+            let systems = Arc::new(SystemsDomain::new(Arc::new(
+                infra_system::SystemManager::new(
                     config.source.clone(),
                     store.state.clone(),
                     system_bridge,
-                )?),
-            });
+                )?,
+            )));
             let creator = Arc::new(CreatorManager::new(
                 store.clone(),
                 config.source.clone(),
                 Arc::downgrade(&sessions),
             )?);
-            let setup = Arc::new(crate::setup::Setup::new(
-                store.clone(),
-                config.source.clone(),
-                Arc::downgrade(&sessions),
-                accelerators.clone(),
-            ));
+            let setup = Arc::new(crate::setup::SetupDomain::new(Arc::new(
+                crate::setup::Setup::new(
+                    store.clone(),
+                    config.source.clone(),
+                    Arc::downgrade(&sessions),
+                    accelerators.clone(),
+                ),
+            )));
             let skills = Arc::new(SkillChanges {
                 skills: Arc::new(crate::skills::SkillsDomain::new(
                     store.clone(),
@@ -221,10 +223,10 @@ impl ServicesFactory for NativeFactory {
             for group in ["sessions", "brain", "context"] {
                 domains.insert(group.into(), sessions.clone());
             }
-            domains.insert("setup".into(), setup);
+            domains.insert("setup".into(), setup.clone());
             domains.insert("accelerators".into(), accelerators.clone());
             domains.insert("systems".into(), systems.clone());
-            domains.insert("discovery".into(), systems);
+            domains.insert("discovery".into(), systems.clone());
             domains.insert("creator".into(), creator);
             domains.insert("skills".into(), skills);
             domains.insert(
@@ -255,10 +257,15 @@ impl ServicesFactory for NativeFactory {
             let closer = Arc::new(move || {
                 let closing = closing.clone();
                 let updates = update_close.clone();
+                let systems = systems.clone();
+                let setup = setup.clone();
                 Box::pin(async move {
                     updates.close();
-                    closing.close()?;
-                    closing.wait_closed().await
+                    let requested = closing.close();
+                    setup.close().await;
+                    systems.close().await;
+                    let reaped = closing.wait_closed().await;
+                    requested.and(reaped)
                 }) as crate::services::CloseFuture<'static>
             });
             let services = Arc::new(NativeServices::new(

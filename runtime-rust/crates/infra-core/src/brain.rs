@@ -141,9 +141,20 @@ impl BrainRepository {
     }
 
     pub fn inventory(&self, include_archive: bool) -> Result<RecordInventory> {
+        let (records, problems) = self.inventory_map(include_archive, |image, _raw| image)?;
+        Ok(RecordInventory { records, problems })
+    }
+
+    /// Keep a consumer's projection of each admitted image without reading or
+    /// parsing its source again. The public inventory needs only parsed data.
+    pub(crate) fn inventory_map<T>(
+        &self,
+        include_archive: bool,
+        mut map: impl FnMut(RecordImage, String) -> T,
+    ) -> Result<(Vec<T>, Vec<RecordProblem>)> {
         let anchor = self.roots().brain_root();
         if !fs::admit_directory(&anchor)? {
-            return Ok(RecordInventory::default());
+            return Ok((Vec::new(), Vec::new()));
         }
         let mut candidates = Vec::new();
         collect_records(&anchor.join("dynamic"), &mut candidates)?;
@@ -151,7 +162,8 @@ impl BrainRepository {
             collect_records(&anchor.join("archive"), &mut candidates)?;
         }
         candidates.sort();
-        let mut result = RecordInventory::default();
+        let mut records = Vec::new();
+        let mut problems = Vec::new();
         for path in candidates {
             let archived = path.strip_prefix(&anchor).is_ok_and(|relative| {
                 relative
@@ -159,19 +171,22 @@ impl BrainRepository {
                     .any(|part| part.as_os_str() == "archive")
             });
             let text = fs::read_text(&path);
-            if let Ok(text) = &text
-                && let Ok((metadata, _)) = parse_markdown_record(text)
+            let parsed = text
+                .as_ref()
+                .map_err(|error| RuntimeError::invalid(error.to_string()))
+                .and_then(|text| parse_markdown_record(text));
+            if let Ok((metadata, _)) = &parsed
                 && metadata["type"] == "handoff"
             {
                 let expected = metadata["task_id"].as_str().unwrap_or("");
                 if path.parent() == Some(anchor.join("archive/handoffs").as_path())
                     && path.file_stem().and_then(|name| name.to_str()) == Some(expected)
                     && metadata["status"] == "closed"
-                    && validate_handoff(&metadata, None).is_ok()
+                    && validate_handoff(metadata, None).is_ok()
                 {
                     continue;
                 }
-                result.problems.push(RecordProblem {
+                problems.push(RecordProblem {
                     path,
                     error: "Unexpected or invalid archived handoff in authority path".into(),
                     record_type: None,
@@ -184,21 +199,20 @@ impl BrainRepository {
                 });
                 continue;
             }
-            let parsed = text
-                .as_ref()
-                .map_err(|error| RuntimeError::invalid(error.to_string()))
-                .and_then(|text| parse_markdown_record(text))
-                .and_then(|(record, body)| {
-                    validate_record(&record, archived)?;
-                    Ok((record, body))
-                });
+            let parsed = parsed.and_then(|(record, body)| {
+                validate_record(&record, archived)?;
+                Ok((record, body))
+            });
             match parsed {
-                Ok((record, body)) => result.records.push(RecordImage {
-                    path,
-                    record,
-                    body,
-                    archived,
-                }),
+                Ok((record, body)) => records.push(map(
+                    RecordImage {
+                        path,
+                        record,
+                        body,
+                        archived,
+                    },
+                    text?,
+                )),
                 Err(error) => {
                     let (kind, id, external) = text
                         .as_ref()
@@ -211,7 +225,7 @@ impl BrainRepository {
                             .filter(|name| is_uuid4(name))
                             .map(String::from)
                     });
-                    result.problems.push(RecordProblem {
+                    problems.push(RecordProblem {
                         path,
                         error: error.to_string(),
                         record_type: kind,
@@ -221,7 +235,7 @@ impl BrainRepository {
                 }
             }
         }
-        Ok(result)
+        Ok((records, problems))
     }
 
     pub fn records(&self, include_archive: bool) -> Result<Vec<RecordImage>> {
@@ -234,18 +248,16 @@ impl BrainRepository {
         record_type: Option<&str>,
         include_archive: bool,
     ) -> Result<RecordImage> {
-        let inventory = self.inventory(include_archive)?;
-        let matches: Vec<_> = inventory
-            .records
-            .into_iter()
-            .filter(|image| {
-                record_type.is_none_or(|kind| image.record["type"].as_str() == Some(kind))
-                    && (image.record["id"].as_str() == Some(identifier)
-                        || image.record["external_id"].as_str() == Some(identifier))
-            })
-            .collect();
-        let claimants: Vec<_> = inventory
-            .problems
+        let mut matches = Vec::new();
+        let (_, problems) = self.inventory_map(include_archive, |image, _raw| {
+            if record_type.is_none_or(|kind| image.record["type"].as_str() == Some(kind))
+                && (image.record["id"].as_str() == Some(identifier)
+                    || image.record["external_id"].as_str() == Some(identifier))
+            {
+                matches.push(image);
+            }
+        })?;
+        let claimants: Vec<_> = problems
             .iter()
             .filter(|problem| {
                 (problem.id.as_deref() == Some(identifier)

@@ -550,104 +550,111 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
     None
 }
 pub async fn discover(overrides: &BTreeMap<String, String>) -> Result<Vec<Provider>> {
-    let mut out = Vec::new();
-    for (id, name) in [
-        ("claude", "Claude Code"),
-        ("codex", "Codex"),
-        ("cursor", "Cursor Agent"),
-    ] {
-        let candidates = overrides
-            .get(id)
-            .map(|s| vec![s.clone()])
-            .unwrap_or_else(|| {
-                if id == "cursor" {
-                    vec!["cursor-agent".into(), "agent".into()]
-                } else {
-                    vec![id.into()]
-                }
-            });
-        let mut executable = None;
-        for candidate in candidates {
-            let Some(path) = find_executable(&candidate) else {
-                continue;
-            };
-            let mut verified = true;
-            for flag in ["--version", "--help"] {
-                let mut argv = match command_argv(&[path.to_string_lossy().into_owned()], Some(id))
-                {
-                    Ok(argv) => argv,
-                    Err(_) => {
-                        verified = false;
-                        break;
-                    }
-                };
-                if id == "cursor" {
-                    argv.push("--disable-auto-update".into());
-                }
-                argv.push(flag.into());
-                match process::run_raw_with_lock(
-                    &argv,
-                    &std::env::current_dir()?,
-                    &BTreeMap::new(),
-                    &[],
-                    Limits {
-                        seconds: Some(3),
-                        output: 65536,
-                        line: 65536,
-                    },
-                    Arc::new(AtomicBool::new(false)),
-                    None,
-                    |_| Ok(()),
-                )
-                .await
-                {
-                    Ok(result) if result.code == 0 => {
-                        let body = String::from_utf8_lossy(&result.bytes);
-                        if flag == "--help" {
-                            verified &= match id {
-                                "claude" => body.contains("Claude Code"),
-                                "codex" => body.contains("Codex") || body.contains("codex"),
-                                _ => {
-                                    [
-                                        "--print",
-                                        "--output-format",
-                                        "--resume",
-                                        "--workspace",
-                                        "--sandbox",
-                                        "--mode",
-                                    ]
-                                    .iter()
-                                    .all(|v| body.contains(v))
-                                        && body.contains("Cursor")
-                                }
-                            };
-                        }
-                    }
-                    _ => {
-                        verified = false;
-                        break;
-                    }
-                }
+    // Only providers overlap: each retains its candidate and version/help
+    // sequence. Await all three before selecting the original error order so
+    // an ordinary error never abandons another provider's guardian cleanup.
+    // Peers may already be probing when a provider reports a filesystem error.
+    let (claude, codex, cursor) = tokio::join!(
+        discover_provider(overrides, "claude", "Claude Code"),
+        discover_provider(overrides, "codex", "Codex"),
+        discover_provider(overrides, "cursor", "Cursor Agent"),
+    );
+    Ok(vec![claude?, codex?, cursor?])
+}
+async fn discover_provider(
+    overrides: &BTreeMap<String, String>,
+    id: &str,
+    name: &str,
+) -> Result<Provider> {
+    let candidates = overrides
+        .get(id)
+        .map(|s| vec![s.clone()])
+        .unwrap_or_else(|| {
+            if id == "cursor" {
+                vec!["cursor-agent".into(), "agent".into()]
+            } else {
+                vec![id.into()]
             }
-            if verified {
-                executable = Some(std::fs::canonicalize(path)?);
-                break;
+        });
+    let mut executable = None;
+    for candidate in candidates {
+        let Some(path) = find_executable(&candidate) else {
+            continue;
+        };
+        let mut verified = true;
+        for flag in ["--version", "--help"] {
+            let mut argv = match command_argv(&[path.to_string_lossy().into_owned()], Some(id)) {
+                Ok(argv) => argv,
+                Err(_) => {
+                    verified = false;
+                    break;
+                }
+            };
+            if id == "cursor" {
+                argv.push("--disable-auto-update".into());
+            }
+            argv.push(flag.into());
+            match process::run_raw_with_lock(
+                &argv,
+                &std::env::current_dir()?,
+                &BTreeMap::new(),
+                &[],
+                Limits {
+                    seconds: Some(3),
+                    output: 65536,
+                    line: 65536,
+                },
+                Arc::new(AtomicBool::new(false)),
+                None,
+                |_| Ok(()),
+            )
+            .await
+            {
+                Ok(result) if result.code == 0 => {
+                    let body = String::from_utf8_lossy(&result.bytes);
+                    if flag == "--help" {
+                        verified &= match id {
+                            "claude" => body.contains("Claude Code"),
+                            "codex" => body.contains("Codex") || body.contains("codex"),
+                            _ => {
+                                [
+                                    "--print",
+                                    "--output-format",
+                                    "--resume",
+                                    "--workspace",
+                                    "--sandbox",
+                                    "--mode",
+                                ]
+                                .iter()
+                                .all(|v| body.contains(v))
+                                    && body.contains("Cursor")
+                            }
+                        };
+                    }
+                }
+                _ => {
+                    verified = false;
+                    break;
+                }
             }
         }
-        let available = executable.is_some();
-        out.push(Provider {
-            id: id.into(),
-            name: name.into(),
-            available,
-            executable: executable.clone(),
-            detail: if executable.is_some() {
-                "CLI identity verified; sign-in is queried separately.".into()
-            } else {
-                "CLI not found or identity/required flags could not be verified.".into()
-            },
-        });
+        if verified {
+            executable = Some(std::fs::canonicalize(path)?);
+            break;
+        }
     }
-    Ok(out)
+    let available = executable.is_some();
+    Ok(Provider {
+        id: id.into(),
+        name: name.into(),
+        available,
+        executable: executable.clone(),
+        detail: if executable.is_some() {
+            "CLI identity verified; sign-in is queried separately.".into()
+        } else {
+            "CLI not found or identity/required flags could not be verified.".into()
+        },
+    })
 }
 
 pub fn command_argv(command: &[String], _provider: Option<&str>) -> Result<Vec<String>> {

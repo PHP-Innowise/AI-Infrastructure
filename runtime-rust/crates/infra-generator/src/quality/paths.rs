@@ -69,29 +69,80 @@ pub fn collisions(left: &Value, right: &Value) -> BTreeSet<String> {
     }
     out
 }
-fn glob_path(pattern: &[String], path: &[String]) -> Result<bool> {
-    fn walk(
-        p: &[String],
-        v: &[String],
-        seen: &mut BTreeSet<(usize, usize)>,
-        pi: usize,
-        vi: usize,
-    ) -> Result<bool> {
-        if !seen.insert((pi, vi)) {
-            return Ok(false);
-        }
-        if pi == p.len() {
-            return Ok(vi == v.len());
-        }
-        if p[pi] == "**" {
-            Ok(walk(p, v, seen, pi + 1, vi)? || (vi < v.len() && walk(p, v, seen, pi, vi + 1)?))
-        } else {
-            Ok(vi < v.len()
-                && crate::common::glob_match_path(&p[pi], &v[vi], cfg!(windows))?
-                && walk(p, v, seen, pi + 1, vi + 1)?)
+struct PathMatcher<'a> {
+    pattern: &'a [String],
+    compiled: Vec<Option<regex::Regex>>,
+    ignore_case: bool,
+    literal_prefix: usize,
+    #[cfg(test)]
+    compilations: usize,
+}
+impl<'a> PathMatcher<'a> {
+    fn new(pattern: &'a [String], ignore_case: bool) -> Self {
+        Self {
+            pattern,
+            compiled: vec![None; pattern.len()],
+            ignore_case,
+            literal_prefix: pattern.iter().take_while(|part| !wildcard(part)).count(),
+            #[cfg(test)]
+            compilations: 0,
         }
     }
-    walk(pattern, path, &mut BTreeSet::new(), 0, 0)
+    fn component(&mut self, index: usize, value: &str) -> Result<bool> {
+        if self.compiled[index].is_none() {
+            #[cfg(test)]
+            {
+                self.compilations += 1;
+            }
+            let Some(matcher) =
+                crate::common::compile_path_component(&self.pattern[index], self.ignore_case)?
+            else {
+                return Ok(false);
+            };
+            self.compiled[index] = Some(matcher);
+        }
+        Ok(self.compiled[index]
+            .as_ref()
+            .is_some_and(|matcher| matcher.is_match(value)))
+    }
+    fn matches(&mut self, path: &[String]) -> Result<bool> {
+        fn walk(
+            matcher: &mut PathMatcher<'_>,
+            path: &[String],
+            seen: &mut BTreeSet<(usize, usize)>,
+            pi: usize,
+            vi: usize,
+        ) -> Result<bool> {
+            if !seen.insert((pi, vi)) {
+                return Ok(false);
+            }
+            if pi == matcher.pattern.len() {
+                return Ok(vi == path.len());
+            }
+            if matcher.pattern[pi] == "**" {
+                Ok(walk(matcher, path, seen, pi + 1, vi)?
+                    || (vi < path.len() && walk(matcher, path, seen, pi, vi + 1)?))
+            } else {
+                Ok(vi < path.len()
+                    && matcher.component(pi, &path[vi])?
+                    && walk(matcher, path, seen, pi + 1, vi + 1)?)
+            }
+        }
+        walk(self, path, &mut BTreeSet::new(), 0, 0)
+    }
+    fn can_descend(&self, path: &[String]) -> bool {
+        // Called after matches(): these leading literal comparisons have
+        // already been reached. None includes rejected expressions and must
+        // stay a non-match without another compilation attempt.
+        path.iter()
+            .take(self.literal_prefix)
+            .enumerate()
+            .all(|(index, value)| {
+                self.compiled[index]
+                    .as_ref()
+                    .is_some_and(|matcher| matcher.is_match(value))
+            })
+    }
 }
 pub fn path_matches(target: &Path, value: &str) -> Result<Vec<PathBuf>> {
     if !wildcard(value) {
@@ -101,14 +152,20 @@ pub fn path_matches(target: &Path, value: &str) -> Result<Vec<PathBuf>> {
             .collect());
     }
     let mut out = Vec::new();
-    fn walk(root: &Path, p: &Path, pattern: &[String], out: &mut Vec<PathBuf>) -> Result<()> {
+    fn walk(
+        root: &Path,
+        p: &Path,
+        matcher: &mut PathMatcher<'_>,
+        out: &mut Vec<PathBuf>,
+    ) -> Result<()> {
         let Ok(entries) = std::fs::read_dir(p) else {
             return Ok(());
         };
         for entry in entries.flatten() {
             let q = entry.path();
             let rel = relative(root, &q);
-            if glob_path(pattern, &segments(&rel))?
+            let components = segments(&rel);
+            if matcher.matches(&components)?
                 && let Some(c) = confined(root, &rel).filter(|c| c.exists())
             {
                 out.push(c)
@@ -116,13 +173,16 @@ pub fn path_matches(target: &Path, value: &str) -> Result<Vec<PathBuf>> {
             if entry
                 .file_type()
                 .is_ok_and(|t| t.is_dir() && !t.is_symlink())
+                && matcher.can_descend(&components)
             {
-                walk(root, &q, pattern, out)?
+                walk(root, &q, matcher, out)?
             }
         }
         Ok(())
     }
-    walk(target, target, &segments(value), &mut out)?;
+    let pattern = segments(value);
+    let mut matcher = PathMatcher::new(&pattern, cfg!(windows));
+    walk(target, target, &mut matcher, &mut out)?;
     out.sort();
     out.dedup();
     Ok(out)

@@ -182,6 +182,7 @@ fn worksheet_bounded(sheet: &mut Element, output_limit: usize, work_limit: usize
         }
     }
     let mut masters = BTreeMap::<String, (String, String, usize)>::new();
+    let mut has_shared = false;
     let (mut master_bytes, mut work_bytes) = (0usize, 0usize);
     for row in children(data, "row") {
         for cell in children(row, "c") {
@@ -191,6 +192,7 @@ fn worksheet_bounded(sheet: &mut Element, output_limit: usize, work_limit: usize
                     .get("t")
                     .is_some_and(|value| value == "shared")
             {
+                has_shared = true;
                 // Count borrowed text before content() can clone a large master.
                 let length = formula_text_bytes(formula)?;
                 if length == 0 {
@@ -216,6 +218,10 @@ fn worksheet_bounded(sheet: &mut Element, output_limit: usize, work_limit: usize
                 masters.insert(index, (attr(cell, "r"), expression, expanded_bound));
             }
         }
+    }
+    // An empty master table can still have invalid followers to reject.
+    if !has_shared {
+        return Ok(());
     }
     // Admit ALL copies and translation work before changing any shared formula.
     // Quoted literal text is charged once per copy, not an arbitrary reference

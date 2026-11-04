@@ -7,6 +7,15 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
 };
+const EDIT_TOOLS: &[&str] = &[
+    "write",
+    "edit",
+    "multiedit",
+    "multi_edit",
+    "notebookedit",
+    "notebook_edit",
+    "apply_patch",
+];
 fn allowed_tool(payload: &Value, names: &[&str]) -> bool {
     let tools = strings(payload, &["tool_name"]);
     tools.is_empty()
@@ -18,6 +27,15 @@ fn allowed_tool(payload: &Value, names: &[&str]) -> bool {
                 .to_ascii_lowercase();
             names.contains(&name.as_str())
         })
+}
+pub(super) fn payload_noop(role: &str, payload: &Value) -> bool {
+    match role {
+        // These borrowed searches have the same existence test as strings(),
+        // without copying a possibly large command before shell validation.
+        "bash-validator" => first(payload, "command").is_none() && first(payload, "cmd").is_none(),
+        "file-naming-validator" | "loop-detection" => !allowed_tool(payload, EDIT_TOOLS),
+        _ => false,
+    }
 }
 fn context(event: &str, message: &str) -> Result<Output> {
     Output::json(&json!({"hookSpecificOutput":{"hookEventName":event,"additionalContext":message}}))
@@ -158,18 +176,7 @@ fn patch_paths(value: &Value, paths: &mut BTreeSet<String>) {
     }
 }
 pub fn file_naming(scope: &Context) -> Result<Output> {
-    if !allowed_tool(
-        &scope.payload,
-        &[
-            "write",
-            "edit",
-            "multiedit",
-            "multi_edit",
-            "notebookedit",
-            "notebook_edit",
-            "apply_patch",
-        ],
-    ) {
+    if !allowed_tool(&scope.payload, EDIT_TOOLS) {
         return Ok(Output::default());
     }
     let mut paths = strings(&scope.payload, &["file_path", "path"])
@@ -251,18 +258,7 @@ pub fn file_naming(scope: &Context) -> Result<Output> {
     Ok(Output::default())
 }
 pub fn edit_loop(scope: &Context) -> Result<Output> {
-    if !allowed_tool(
-        &scope.payload,
-        &[
-            "write",
-            "edit",
-            "multiedit",
-            "multi_edit",
-            "notebookedit",
-            "notebook_edit",
-            "apply_patch",
-        ],
-    ) {
+    if !allowed_tool(&scope.payload, EDIT_TOOLS) {
         return Ok(Output::default());
     }
     let mut paths = BTreeSet::new();

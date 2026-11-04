@@ -1,6 +1,6 @@
 use crate::{Result, common};
 use serde_json::Value;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 fn list<'a>(h: &'a Value, key: &str, fallback: &str) -> &'a [Value] {
     h.get(key)
         .or_else(|| h.get(fallback))
@@ -38,6 +38,9 @@ fn value(v: &Value, key: &str, default: &str) -> String {
     v.get(key)
         .map(common::display)
         .unwrap_or_else(|| default.into())
+}
+fn results_by_query(results: &[Value]) -> HashMap<&Value, &Value> {
+    results.iter().map(|r| (&r["query"], r)).collect()
 }
 pub fn generate_html(data: &Value, auto_refresh: bool, name: &str) -> String {
     let history = data["history"].as_array().map(Vec::as_slice).unwrap_or(&[]);
@@ -102,8 +105,9 @@ pub fn generate_html(data: &Value, auto_refresh: bool, name: &str) -> String {
         let (bc, bt) = aggregate(b);
         out.push_str(&format!("<tr class=\"{}\"><td>{}</td><td><span class=\"score {}\">{ac}/{at}</span></td><td><span class=\"score {}\">{bc}/{bt}</span></td><td class=\"description\">{}</td>",if best==Some(index){"best-row"}else{""},common::html(&value(h,"iteration","?")),score_class(ac,at),score_class(bc,bt),common::html(h["description"].as_str().unwrap_or(""))));
         for (is_test, queries, results) in [(false, train, a), (true, test, b)] {
+            let results = results_by_query(results);
             for q in queries {
-                let result = results.iter().rev().find(|r| r["query"] == q["query"]);
+                let result = results.get(&q["query"]).copied();
                 let passed = result.is_some_and(|r| r["pass"] == true);
                 out.push_str(&format!(
                     "<td class=\"result {}{}\">{}<span class=\"rate\">{}/{}</span></td>",
@@ -142,5 +146,83 @@ pub fn execute(v: &Value) -> Result<Value> {
         ))
     } else {
         Ok(common::cli(0, html, "", Value::Null))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn duplicate_queries_display_the_last_train_and_test_results() {
+        let data = json!({"history":[{
+            "train_results":[
+                {"query":"train","pass":false,"triggers":1,"runs":9},
+                {"query":"train","pass":true,"triggers":7,"runs":11}
+            ],
+            "test_results":[
+                {"query":"test","pass":true,"triggers":9,"runs":10},
+                {"query":"test","pass":false,"triggers":2,"runs":3}
+            ]
+        }]});
+        let html = generate_html(&data, false, "");
+        assert_eq!(
+            html.matches("<td class=\"result pass\">✓<span class=\"rate\">7/11</span></td>")
+                .count(),
+            2
+        );
+        assert_eq!(
+            html.matches(
+                "<td class=\"result test-result fail\">✗<span class=\"rate\">2/3</span></td>"
+            )
+            .count(),
+            2
+        );
+        assert!(!html.contains("class=\"rate\">1/9"));
+        assert!(!html.contains("class=\"rate\">9/10"));
+    }
+
+    #[test]
+    fn result_lookup_preserves_json_equality_missing_values_and_column_order() {
+        let data = json!({"history":[
+            {"train_results":[
+                {"query":"missing"},
+                {"query":null},
+                {"query":{"a":1,"b":[2]}},
+                {"query":1},
+                {"query":"1"}
+            ]},
+            {"train_results":[
+                {"query":null,"pass":false,"triggers":2,"runs":3},
+                {"pass":true,"triggers":5,"runs":6},
+                {"query":{"b":[2],"a":1},"pass":true,"triggers":7,"runs":8},
+                {"query":1,"pass":true,"triggers":9,"runs":10},
+                {"query":"1","pass":false,"triggers":11,"runs":12}
+            ]}
+        ]});
+        let html = generate_html(&data, false, "");
+        let expected = concat!(
+            "<td class=\"result fail\">✗<span class=\"rate\">0/0</span></td>",
+            "<td class=\"result pass\">✓<span class=\"rate\">5/6</span></td>",
+            "<td class=\"result pass\">✓<span class=\"rate\">7/8</span></td>",
+            "<td class=\"result pass\">✓<span class=\"rate\">9/10</span></td>",
+            "<td class=\"result fail\">✗<span class=\"rate\">11/12</span></td>"
+        );
+        assert!(html.contains(expected), "query columns changed: {html}");
+    }
+
+    #[test]
+    fn query_headers_keep_source_order_and_html_escaping() {
+        let data = json!({"history":[{"train_results":[
+            {"query":"<b>&\"","pass":true,"triggers":1,"runs":1},
+            {"query":"after","pass":false,"triggers":0,"runs":1}
+        ]}]});
+        let html = generate_html(&data, false, "<name>");
+        let escaped = html.find("&lt;b&gt;&amp;&quot;").expect("escaped query");
+        let after = html.find(">after</th>").expect("second query");
+        assert!(escaped < after);
+        assert!(html.contains("&lt;name&gt;"));
+        assert!(!html.contains("<b>&\""));
     }
 }

@@ -79,7 +79,11 @@ pub fn unmarked(text: &str) -> String {
         .collect()
 }
 fn marked_words(text: &str) -> Vec<String> {
-    regex::Regex::new("(?s)\u{2}(.*?)\u{3}")
+    static MARKED: std::sync::OnceLock<std::result::Result<regex::Regex, regex::Error>> =
+        std::sync::OnceLock::new();
+    MARKED
+        .get_or_init(|| regex::Regex::new("(?s)\u{2}(.*?)\u{3}"))
+        .as_ref()
         .map(|pattern| {
             pattern
                 .captures_iter(text)
@@ -139,7 +143,12 @@ pub fn units(lines: &[String]) -> Vec<String> {
             output.push(piece);
         }
     }
-    let list = regex::Regex::new(r"^(?:[-*+]|[0-9]+[.)])\s|^\|").ok();
+    static LIST: std::sync::OnceLock<std::result::Result<regex::Regex, regex::Error>> =
+        std::sync::OnceLock::new();
+    let list = LIST
+        .get_or_init(|| regex::Regex::new(r"^(?:[-*+]|[0-9]+[.)])\s|^\|"))
+        .as_ref()
+        .ok();
     let mut output = Vec::new();
     let mut block = Vec::new();
     for line in lines {
@@ -918,8 +927,15 @@ pub fn linked_task_excerpt(content: &str, via: &str, limit: usize) -> (String, S
     } else {
         "Files"
     };
-    let grave = char::from(96);
-    let pattern = regex::Regex::new(&format!("^- {grave}?([^{grave}\\n]+?){grave}?\\s*$")).ok();
+    static ENTRIES: std::sync::OnceLock<std::result::Result<regex::Regex, regex::Error>> =
+        std::sync::OnceLock::new();
+    let pattern = ENTRIES
+        .get_or_init(|| {
+            let grave = char::from(96);
+            regex::Regex::new(&format!("^- {grave}?([^{grave}\\n]+?){grave}?\\s*$"))
+        })
+        .as_ref()
+        .ok();
     let entries = sections
         .get(heading)
         .into_iter()
@@ -1297,4 +1313,66 @@ pub fn prepare_with(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod constant_pattern_tests {
+    use super::*;
+
+    #[test]
+    fn marked_spans_keep_multiline_empty_and_unterminated_boundaries() {
+        let text = "plain\u{2}Cache\u{3} \u{2}multi\nline\u{3} \u{2}\u{3} tail\u{2}unterminated";
+        for _ in 0..2 {
+            assert_eq!(marked_words(text), ["Cache", "multi\nline", ""]);
+            assert!(marked_words("unmarked text").is_empty());
+        }
+    }
+
+    #[test]
+    fn units_keep_sentence_list_continuation_and_table_boundaries() {
+        let lines = [
+            "Paragraph one. Next sentence!",
+            "",
+            "- first item",
+            "continues",
+            "2) second item",
+            "| A | B |",
+            "| 1 | 2 |",
+        ]
+        .map(String::from);
+        for _ in 0..2 {
+            assert_eq!(
+                units(&lines),
+                [
+                    "Paragraph one.",
+                    "Next sentence!",
+                    "- first item continues",
+                    "2) second item",
+                    "| A | B |",
+                    "| 1 | 2 |",
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn linked_entries_keep_selected_source_and_reverse_file_order() {
+        let content = "## Goal\nPreserve order\n\n## Files\n- `src/A.php`\n- src/B.php\n\n## Sources\n- `docs/C.md`\n";
+        for _ in 0..2 {
+            assert_eq!(
+                linked_task_excerpt(content, "src/B.php", 400),
+                (
+                    "Goal: Preserve order. Files: src/B.php, src/A.php".into(),
+                    "Files".into()
+                )
+            );
+            assert_eq!(
+                linked_task_excerpt(content, "docs/C.md", 400),
+                (
+                    "Goal: Preserve order. Sources: docs/C.md".into(),
+                    "Sources".into()
+                )
+            );
+        }
+    }
 }

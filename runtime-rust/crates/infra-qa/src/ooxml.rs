@@ -526,6 +526,14 @@ impl Package {
     }
     /// Admit outer row slots and inner value slots before either Vec grows.
     pub fn rows_bounded(&self, name: &str, maximum_slots: usize) -> Result<Vec<Vec<Value>>> {
+        Ok(self.sheet_rows_bounded(name, maximum_slots)?.1)
+    }
+    /// Return one normalized worksheet image together with its bounded dense rows.
+    pub fn sheet_rows_bounded(
+        &self,
+        name: &str,
+        maximum_slots: usize,
+    ) -> Result<(Element, Vec<Vec<Value>>)> {
         let e = self.part(self.sheets.get(name).context("missing worksheet")?)?;
         let mut allocated = 0usize;
         let mut out = vec![];
@@ -561,7 +569,7 @@ impl Package {
                 }
             }
         }
-        Ok(out)
+        Ok((e, out))
     }
     pub fn records(&self, name: &str) -> Result<Vec<Value>> {
         let rows = self.rows(name)?;

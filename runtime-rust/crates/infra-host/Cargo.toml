@@ -11,6 +11,12 @@ path = "tests/support/sandbox_fixture.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "infra-host-provider-fixture"
+path = "tests/support/provider_fixture.rs"
+test = false
+bench = false
+
 [dependencies]
 infra-core = { path = "../infra-core" }
 serde = { version = "=1.0.228", features = ["derive"] }

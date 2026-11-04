@@ -21,13 +21,22 @@ pub struct Chunk {
 }
 
 pub fn id_pattern() -> Result<regex::Regex> {
-    regex::Regex::new(r"^MEM-(?:\d{8}-[0-9a-f]{8}|\d{4,})$")
+    static ID: std::sync::OnceLock<std::result::Result<regex::Regex, regex::Error>> =
+        std::sync::OnceLock::new();
+    ID.get_or_init(|| regex::Regex::new(r"^MEM-(?:\d{8}-[0-9a-f]{8}|\d{4,})$"))
+        .as_ref()
+        .cloned()
         .map_err(|_| RuntimeError::invalid("Invalid internal memory ID expression"))
 }
 pub fn filename_id(name: &str) -> Result<Option<String>> {
-    let pattern =
-        regex::Regex::new(r"^(MEM-(?:\d{8}-[0-9a-f]{8}|\d{4,}))-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
-            .map_err(|_| RuntimeError::invalid("Invalid internal memory filename expression"))?;
+    static FILENAME: std::sync::OnceLock<std::result::Result<regex::Regex, regex::Error>> =
+        std::sync::OnceLock::new();
+    let pattern = FILENAME
+        .get_or_init(|| {
+            regex::Regex::new(r"^(MEM-(?:\d{8}-[0-9a-f]{8}|\d{4,}))-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
+        })
+        .as_ref()
+        .map_err(|_| RuntimeError::invalid("Invalid internal memory filename expression"))?;
     Ok(pattern.captures(name).map(|capture| capture[1].into()))
 }
 pub fn parse_raw(bytes: &[u8]) -> Result<(Value, String)> {
@@ -37,7 +46,11 @@ pub fn parse_raw(bytes: &[u8]) -> Result<(Value, String)> {
         .strip_prefix("---\r\n")
         .or_else(|| text.strip_prefix("---\n"))
         .ok_or_else(|| RuntimeError::invalid("Memory frontmatter opening delimiter is missing"))?;
-    let delimiter = regex::Regex::new(r"\r?\n---(?:\r?\n|$)")
+    static DELIMITER: std::sync::OnceLock<std::result::Result<regex::Regex, regex::Error>> =
+        std::sync::OnceLock::new();
+    let delimiter = DELIMITER
+        .get_or_init(|| regex::Regex::new(r"\r?\n---(?:\r?\n|$)"))
+        .as_ref()
         .map_err(|_| RuntimeError::invalid("Invalid delimiter expression"))?;
     let found = delimiter
         .find(rest)
@@ -265,4 +278,73 @@ pub fn slug(title: &str) -> Result<String> {
     } else {
         slug
     })
+}
+
+#[cfg(test)]
+mod constant_pattern_tests {
+    use super::*;
+
+    #[test]
+    fn memory_names_keep_modern_legacy_unicode_and_slug_boundaries() {
+        for _ in 0..2 {
+            for (name, id) in [
+                (
+                    "MEM-20261103-1234abcd-cache-policy.md",
+                    "MEM-20261103-1234abcd",
+                ),
+                ("MEM-0001-cache.md", "MEM-0001"),
+                ("MEM-٠٠٠١-cache.md", "MEM-٠٠٠١"),
+            ] {
+                assert_eq!(filename_id(name).unwrap().as_deref(), Some(id));
+                assert!(id_pattern().unwrap().is_match(id));
+            }
+            for name in [
+                "MEM-001-cache.md",
+                "MEM-0001-Cache.md",
+                "MEM-0001-cache.md.bak",
+            ] {
+                assert!(filename_id(name).unwrap().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_delimiters_keep_lf_crlf_and_terminal_body_bytes() {
+        for _ in 0..2 {
+            for (raw, body) in [
+                ("---\n{\"id\":\"MEM-0001\"}\n---\nbody", "body"),
+                (
+                    "---\r\n{\"id\":\"MEM-0001\"}\r\n---\r\nbody\r\n",
+                    "body\r\n",
+                ),
+                ("---\n{\"id\":\"MEM-0001\"}\n---", ""),
+            ] {
+                let (metadata, actual_body) = parse_raw(raw.as_bytes()).unwrap();
+                assert_eq!(metadata, object!({"id":"MEM-0001"}));
+                assert_eq!(actual_body, body);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_chunks_keep_their_specific_errors_on_repeated_calls() {
+        for _ in 0..2 {
+            for (raw, message) in [
+                (&b"\xff"[..], "Memory chunk is not UTF-8"),
+                (
+                    &b"{}"[..],
+                    "Memory frontmatter opening delimiter is missing",
+                ),
+                (&b"---\n{}\nbody"[..], "Memory frontmatter is unterminated"),
+                (
+                    &b"---\n[]\n---\n"[..],
+                    "Memory frontmatter must be an object",
+                ),
+            ] {
+                let error = parse_raw(raw).unwrap_err();
+                assert_eq!(error.kind, crate::ErrorKind::InvalidInput);
+                assert_eq!(error.message, message);
+            }
+        }
+    }
 }

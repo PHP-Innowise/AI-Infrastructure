@@ -32,26 +32,30 @@ impl NativeIdentity {
         self
     }
 }
+#[cfg(unix)]
+pub(super) fn from_metadata(m: &fs::Metadata) -> NativeIdentity {
+    use std::os::unix::fs::MetadataExt;
+    NativeIdentity {
+        device: m.dev(),
+        file: m.ino() as u128,
+        kind: m.mode(),
+        links: m.nlink(),
+        size: m.size(),
+        modified: m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128,
+        changed: m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128,
+        reparse_tag: 0,
+        attributes: 0,
+    }
+}
 pub fn identity(path: &Path) -> Result<Option<NativeIdentity>> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         let m = match fs::symlink_metadata(path) {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        Ok(Some(NativeIdentity {
-            device: m.dev(),
-            file: m.ino() as u128,
-            kind: m.mode(),
-            links: m.nlink(),
-            size: m.size(),
-            modified: m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128,
-            changed: m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128,
-            reparse_tag: 0,
-            attributes: 0,
-        }))
+        Ok(Some(from_metadata(&m)))
     }
     #[cfg(windows)]
     {
@@ -72,19 +76,8 @@ pub fn identity(path: &Path) -> Result<Option<NativeIdentity>> {
 pub fn handle_identity(file: &File) -> Result<NativeIdentity> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         let m = file.metadata()?;
-        Ok(NativeIdentity {
-            device: m.dev(),
-            file: m.ino() as u128,
-            kind: m.mode(),
-            links: m.nlink(),
-            size: m.size(),
-            modified: m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128,
-            changed: m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128,
-            reparse_tag: 0,
-            attributes: 0,
-        })
+        Ok(from_metadata(&m))
     }
     #[cfg(windows)]
     {

@@ -719,7 +719,9 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
             group.timeout_minutes
         ));
         output.push_str(&yaml_string(&group.name)?);
-        output.push_str("\n    defaults:\n      run:\n        shell: bash\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n      - uses: dtolnay/rust-toolchain@stable\n        with:\n          components: rustfmt, clippy\n");
+        // Match the test profile's debuginfo without changing local dev builds
+        // or the debug/ engine path used by the catalog bootstrap.
+        output.push_str("\n      CARGO_PROFILE_DEV_DEBUG: \"0\"\n    defaults:\n      run:\n        shell: bash\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n      - uses: dtolnay/rust-toolchain@stable\n        id: native-toolchain\n        with:\n          components: rustfmt, clippy\n");
         validate_rust_configuration(group)?;
         if group.rust_toolchain != "stable" {
             output.push_str("          toolchain: ");
@@ -740,6 +742,23 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
         // RUNNER_TEMP is a backslash path on Windows; Cargo and Git Bash both
         // accept the forward-slash spelling.
         output.push_str("      - name: Select the native target directory\n        run: echo \"CARGO_TARGET_DIR=${RUNNER_TEMP//\\\\//}/infra-native-target\" >> \"$GITHUB_ENV\"\n");
+        // The toolchain action exports CARGO_HOME and an identity of the actual
+        // installed compiler. Keep jobs separate so a lightweight engine-only
+        // job cannot occupy the immutable cache key of the complete test job.
+        // Cached artifacts are inputs to Cargo, never authority to skip it.
+        output.push_str(concat!(
+            "      - name: Cache native Cargo artifacts\n",
+            "        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\n",
+            "        with:\n",
+            "          path: |\n",
+            "            ${{ env.CARGO_HOME }}/registry/index\n",
+            "            ${{ env.CARGO_HOME }}/registry/cache\n",
+            "            ${{ env.CARGO_HOME }}/git/db\n",
+            "            ${{ env.CARGO_TARGET_DIR }}\n",
+            "          key: native-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-",
+        ));
+        output.push_str(&group.job);
+        output.push_str("-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}\n");
         output.push_str("      - name: Build the native engine\n        run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine\n      - name: Run the catalog group\n        run: |\n          suffix=''\n          if [ \"$RUNNER_OS\" = 'Windows' ]; then suffix='.exe'; fi\n          \"$CARGO_TARGET_DIR/debug/infra-engine$suffix\" check --group \"$NATIVE_CHECK_GROUP\" --strict --base origin/main");
         if oracle {
             output.push_str(" --include-oracles");
@@ -925,6 +944,20 @@ mod compiler_workflow_tests {
         found
     }
 
+    fn workflow_jobs(rendered: &str) -> Vec<String> {
+        let mut jobs: Vec<String> = Vec::new();
+        for line in rendered.split("\njobs:\n").nth(1).unwrap().lines() {
+            if line.starts_with("  ") && !line.starts_with("   ") {
+                jobs.push(String::new());
+            }
+            if let Some(job) = jobs.last_mut() {
+                job.push_str(line);
+                job.push('\n');
+            }
+        }
+        jobs
+    }
+
     #[test]
     fn job_level_env_uses_only_contexts_github_provides_there() {
         // GitHub rejects the whole workflow file otherwise, and no job starts.
@@ -944,24 +977,24 @@ mod compiler_workflow_tests {
             for context in job_env_contexts(&rendered) {
                 assert!(allowed.contains(&context.as_str()), "{name}: {context}");
             }
-            let mut jobs: Vec<String> = Vec::new();
-            for line in rendered.split("\njobs:\n").nth(1).unwrap().lines() {
-                if line.starts_with("  ") && !line.starts_with("   ") {
-                    jobs.push(String::new());
-                }
-                if let Some(job) = jobs.last_mut() {
-                    job.push_str(line);
-                    job.push('\n');
-                }
-            }
+            let jobs = workflow_jobs(&rendered);
             assert!(!jobs.is_empty(), "{name}");
             for job in jobs {
+                let compiler = job.find("id: native-toolchain").unwrap();
                 let target = job
                     .find("name: Select the native target directory")
                     .unwrap_or_else(|| panic!("{name}: no target directory step"));
+                let cache = job.find("name: Cache native Cargo artifacts").unwrap();
                 let build = job.find("name: Build the native engine").unwrap();
-                assert!(target < build, "{name}");
+                let check = job.find("name: Run the catalog group").unwrap();
+                assert!(
+                    compiler < target && target < cache && cache < build && build < check,
+                    "{name}"
+                );
+                assert!(job.contains("      CARGO_PROFILE_DEV_DEBUG: \"0\"\n"));
                 assert!(job.contains("\"$CARGO_TARGET_DIR/debug/infra-engine$suffix\""));
+                assert!(!job[build..check].contains("        if:"), "{name}");
+                assert!(!job.contains("cache-hit"), "{name}");
             }
         }
         assert_eq!(

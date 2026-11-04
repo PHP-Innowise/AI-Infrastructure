@@ -5,6 +5,12 @@ edition = "2024"
 rust-version = "1.89"
 publish = false
 
+[[bin]]
+name = "infra-harness-setup-fixture"
+path = "tests/support/setup_fixture.rs"
+test = false
+bench = false
+
 [dependencies]
 infra-host = { path = "../infra-host" }
 infra-core = { path = "../infra-core" }

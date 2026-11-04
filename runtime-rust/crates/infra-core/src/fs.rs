@@ -181,9 +181,20 @@ pub fn read_regular(path: &Path) -> Result<Vec<u8>> {
     let before = native_identity::identity(path)?
         .ok_or_else(|| RuntimeError::unavailable("Source disappeared"))?;
     let mut file = regular_options().open(path)?;
-    let opened = native_identity::handle_identity(&file)?;
-    if before != opened || !file.metadata()?.is_file() {
-        return Err(RuntimeError::conflict("Opened source identity changed"));
+    #[cfg(unix)]
+    {
+        let metadata = file.metadata()?;
+        let opened = native_identity::from_metadata(&metadata);
+        if before != opened || !metadata.is_file() {
+            return Err(RuntimeError::conflict("Opened source identity changed"));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let opened = native_identity::handle_identity(&file)?;
+        if before != opened || !file.metadata()?.is_file() {
+            return Err(RuntimeError::conflict("Opened source identity changed"));
+        }
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;

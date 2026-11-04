@@ -42,8 +42,8 @@ impl SystemManager {
                 .lock()
                 .map_err(|_| fail("System editor lock poisoned"))?;
             editor.recover(&manager.state, None, false)?;
-            for (id, _) in manager.state.db.all("system_runs", None)? {
-                manager.record(&id)?;
+            for (id, record) in manager.state.db.all("system_runs", None)? {
+                manager.reconcile_record(&id, record)?;
             }
         }
         Ok(manager)
@@ -60,11 +60,17 @@ impl SystemManager {
         if !hex(rid, 32) {
             return Err(fail("Invalid system run ID"));
         }
-        let mut record = self
+        let record = self
             .state
             .db
             .get("system_runs", rid)?
             .ok_or_else(|| RuntimeError::not_found("Unknown system run"))?;
+        self.reconcile_record(rid, record)
+    }
+    fn reconcile_record(&self, rid: &str, mut record: Value) -> Result<Value> {
+        if !hex(rid, 32) {
+            return Err(fail("Invalid system run ID"));
+        }
         if let Some(nonce) = record["pending_nonce"]
             .as_str()
             .filter(|value| !value.is_empty())
@@ -444,7 +450,7 @@ impl SystemManager {
                     .ok_or_else(|| fail("Project identity required"))?;
                 self.state.project(project)?;
                 Ok(
-                    object!({"runs":self.state.db.all("system_runs",Some(project))?.into_iter().map(|(rid,_)|self.record(&rid).and_then(|record|self.view(&record,false))).collect::<Result<Vec<_>>>()?}),
+                    object!({"runs":self.state.db.all("system_runs",Some(project))?.into_iter().map(|(rid,record)|self.reconcile_record(&rid,record).and_then(|record|self.view(&record,false))).collect::<Result<Vec<_>>>()?}),
                 )
             }
             "systems.get" => self.view(

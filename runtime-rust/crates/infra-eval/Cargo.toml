@@ -11,6 +11,10 @@ path = "tests/support/process_fixture.rs"
 test = false
 bench = false
 
+[features]
+default = ["onnx"]
+onnx = ["infra-pilots/onnx"]
+
 [dependencies]
 infra-core = { path = "../infra-core" }
 infra-host = { path = "../infra-host" }
@@ -26,5 +30,5 @@ base64 = "0.22"
 infra-tooling = { path = "../infra-tooling" }
 shell-words = "1"
 rusqlite = { version = "=0.37.0", features = ["bundled", "modern_sqlite", "functions"] }
-infra-pilots = { path = "../infra-pilots" }
+infra-pilots = { path = "../infra-pilots", default-features = false }
 

@@ -341,6 +341,10 @@ pub fn glob_match(pattern: &str, value: &str) -> Result<bool> {
 
 /// Python fnmatch.fnmatchcase: never normalize pathname case or separators.
 pub fn glob_match_case(pattern: &str, value: &str) -> bool {
+    glob_match_path(pattern, value, false).unwrap_or(false)
+}
+
+fn glob_case_expression(pattern: &str) -> String {
     let mut output = String::from(r"\A(?s:");
     let chars = pattern.chars().collect::<Vec<_>>();
     let mut at = 0;
@@ -377,7 +381,7 @@ pub fn glob_match_case(pattern: &str, value: &str) -> bool {
         }
     }
     output.push_str(r")\z");
-    matching(&output, value)
+    output
 }
 
 // Python re.IGNORECASE treats I/i/İ/ı as one character-equivalence set.
@@ -414,8 +418,20 @@ fn path_glob_class(body: &[char]) -> Result<String> {
 /// Unicode 16 simple character equivalences, never multi-character full folds.
 /// Explicit mode permits the same Windows matching oracle on every test host.
 pub(crate) fn glob_match_path(pattern: &str, value: &str, ignore_case: bool) -> Result<bool> {
+    Ok(
+        compile_path_component(pattern, ignore_case)?
+            .is_some_and(|matcher| matcher.is_match(value)),
+    )
+}
+
+/// Compile one reached component. Case-sensitive fnmatch treats a rejected
+/// expression as a non-match; the case-insensitive Path.glob route reports it.
+pub(crate) fn compile_path_component(
+    pattern: &str,
+    ignore_case: bool,
+) -> Result<Option<regex::Regex>> {
     if !ignore_case {
-        return Ok(glob_match_case(pattern, value));
+        return Ok(regex::Regex::new(&glob_case_expression(pattern)).ok());
     }
     let mut output = String::from(r"\A(?s:");
     let chars = pattern.chars().collect::<Vec<_>>();
@@ -458,7 +474,7 @@ pub(crate) fn glob_match_path(pattern: &str, value: &str, ignore_case: bool) -> 
         .case_insensitive(true)
         .build()
         .map_err(|_| RuntimeError::invalid("Path glob expression could not be compiled"))?;
-    Ok(matcher.is_match(value))
+    Ok(Some(matcher))
 }
 
 pub fn trailing<'a>(value: &'a str, characters: &[char]) -> &'a str {

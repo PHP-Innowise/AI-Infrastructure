@@ -70,14 +70,20 @@ impl CoreManifest {
         Ok(value)
     }
     pub fn retired(&self, path: &str) -> Result<bool> {
+        self.retired_with_globs(path, &mut common::Globs::default())
+    }
+    pub(crate) fn retired_with_globs(&self, path: &str, globs: &mut common::Globs) -> Result<bool> {
         for pattern in &self.retired {
-            if common::matches(pattern, path, true)? {
+            if globs.matches(pattern, path, true)? {
                 return Ok(true);
             }
         }
         Ok(false)
     }
     pub fn core(&self, path: &str) -> Result<bool> {
+        self.core_with_globs(path, &mut common::Globs::default())
+    }
+    pub(crate) fn core_with_globs(&self, path: &str, globs: &mut common::Globs) -> Result<bool> {
         if self.allowed_drift.keys().any(|entry| {
             if entry.ends_with('/') {
                 path.starts_with(entry)
@@ -88,7 +94,7 @@ impl CoreManifest {
             return Ok(false);
         }
         for pattern in &self.includes {
-            if common::matches(pattern, path, true)? {
+            if globs.matches(pattern, path, true)? {
                 return Ok(true);
             }
         }
@@ -121,5 +127,72 @@ impl MirrorManifest {
             }
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest() -> CoreManifest {
+        CoreManifest {
+            version: 1,
+            canonical: "PHP Core".into(),
+            editions: BTreeMap::new(),
+            includes: vec!["*.md".into(), "[z-a]".into()],
+            allowed_drift: BTreeMap::from([
+                ("local/".into(), "project-owned directory".into()),
+                ("explicit.txt".into(), "project-owned file".into()),
+            ]),
+            retired: vec!["retired/**".into(), "[z-a]".into()],
+        }
+    }
+
+    #[test]
+    fn command_matching_preserves_short_circuit_and_late_errors() {
+        let manifest = manifest();
+        let mut globs = common::Globs::default();
+        for _ in 0..2 {
+            assert!(manifest.core_with_globs("README.md", &mut globs).unwrap());
+            assert!(
+                manifest
+                    .retired_with_globs("retired/old.txt", &mut globs)
+                    .unwrap()
+            );
+            assert!(manifest.core("README.md").unwrap());
+            assert!(manifest.retired("retired/old.txt").unwrap());
+            for error in [
+                manifest
+                    .core_with_globs("other.txt", &mut globs)
+                    .unwrap_err(),
+                manifest
+                    .retired_with_globs("other.txt", &mut globs)
+                    .unwrap_err(),
+                manifest.core("other.txt").unwrap_err(),
+                manifest.retired("other.txt").unwrap_err(),
+            ] {
+                assert_eq!(error.kind, infra_core::ErrorKind::InvalidInput);
+                assert_eq!(error.message, "Invalid glob expression");
+            }
+        }
+    }
+
+    #[test]
+    fn allowed_drift_skips_invalid_includes_for_exact_files_and_directories() {
+        let mut manifest = manifest();
+        manifest.includes = vec!["[z-a]".into()];
+        let mut globs = common::Globs::default();
+        for _ in 0..2 {
+            for path in ["local/notes.txt", "local/nested/file.md", "explicit.txt"] {
+                assert!(!manifest.core_with_globs(path, &mut globs).unwrap());
+                assert!(!manifest.core(path).unwrap());
+            }
+            assert!(
+                manifest
+                    .core_with_globs("explicit.txt.backup", &mut globs)
+                    .is_err()
+            );
+            assert!(manifest.core_with_globs("local.txt", &mut globs).is_err());
+        }
     }
 }

@@ -5,18 +5,25 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
+    collections::BTreeMap,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
     time::{Duration, Instant},
 };
+#[cfg(feature = "onnx")]
+use std::{collections::BTreeSet, fs};
 pub const MAX_PASSAGES: usize = 32;
+/// Whether this build contains inference itself. An external scorer worker
+/// may provide it independently, even when this dependency was built without it.
+pub const fn compiled() -> bool {
+    cfg!(feature = "onnx")
+}
 const REQUEST: usize = 48 * 1024;
 const RESPONSE: usize = 16 * 1024;
 static OWNER: Mutex<Option<PendingWorker>> = Mutex::new(None);
+#[cfg(feature = "onnx")]
 const JINA: &[(&str, &str, u64)] = &[
     (
         "tokenizer.json",
@@ -514,6 +521,7 @@ impl Drop for WindowsJob {
     }
 }
 
+#[cfg(feature = "onnx")]
 fn assets(dir: &Path) -> std::result::Result<(BTreeMap<String, PathBuf>, bool), &'static str> {
     let manifest = fs::read(dir.join("manifest.json")).map_err(|_| "asset-missing")?;
     let v = strict::decode(&manifest, 128 * 1024, 16, 4096).map_err(|_| "asset-missing")?;

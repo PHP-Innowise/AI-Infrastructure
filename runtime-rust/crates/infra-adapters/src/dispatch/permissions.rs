@@ -5,7 +5,9 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
+type CompiledRegex = std::result::Result<regex::Regex, regex::Error>;
 #[derive(Clone, Debug)]
 pub enum Token {
     Word(String),
@@ -381,7 +383,10 @@ fn file_paths(input: &Value, key: &str, start: &Path) -> Vec<PathBuf> {
     }
 }
 fn assignments(value: &str) -> bool {
-    regex::Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*\+?=.*$")
+    static ASSIGNMENT: OnceLock<CompiledRegex> = OnceLock::new();
+    ASSIGNMENT
+        .get_or_init(|| regex::Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*\+?=.*$"))
+        .as_ref()
         .is_ok_and(|pattern| pattern.is_match(value))
 }
 fn segments(command: &str) -> Vec<Vec<String>> {
@@ -400,7 +405,11 @@ fn segments(command: &str) -> Vec<Vec<String>> {
         .collect()
 }
 fn forms(words: &[String]) -> Vec<Vec<String>> {
-    let duration_pattern = regex::Regex::new(r"^[0-9.]+[smhd]?$").ok();
+    static DURATION: OnceLock<CompiledRegex> = OnceLock::new();
+    let duration_pattern = DURATION
+        .get_or_init(|| regex::Regex::new(r"^[0-9.]+[smhd]?$"))
+        .as_ref()
+        .ok();
     let mut current = words.to_vec();
     let mut output = vec![current.clone()];
     let wrappers = [
@@ -486,7 +495,10 @@ fn bash_matches(content: &str, words: &[String]) -> bool {
     }
 }
 fn matches(rule: &str, tool: &str, input: &Value, root: &Path, start: &Path, allow: bool) -> bool {
-    let Ok(pattern) = regex::Regex::new(r"(?s)^\s*([A-Za-z_][A-Za-z0-9_-]*)(?:\((.*)\))?\s*$")
+    static PERMISSION: OnceLock<CompiledRegex> = OnceLock::new();
+    let Ok(pattern) = PERMISSION
+        .get_or_init(|| regex::Regex::new(r"(?s)^\s*([A-Za-z_][A-Za-z0-9_-]*)(?:\((.*)\))?\s*$"))
+        .as_ref()
     else {
         return false;
     };
@@ -610,7 +622,11 @@ pub fn permission(
     None
 }
 pub fn environment(root: &Path, project: Option<&Path>) -> Vec<String> {
-    let environment_name = regex::Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").ok();
+    static ENVIRONMENT_NAME: OnceLock<CompiledRegex> = OnceLock::new();
+    let environment_name = ENVIRONMENT_NAME
+        .get_or_init(|| regex::Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$"))
+        .as_ref()
+        .ok();
     let mut values = BTreeMap::new();
     for name in ["settings.json", "settings.local.json"] {
         if let Ok(data) = fs::read_text(&root.join(".claude").join(name))
@@ -647,4 +663,173 @@ pub fn environment(root: &Path, project: Option<&Path>) -> Vec<String> {
         .into_iter()
         .map(|(key, value)| format!("export {key}={}", infra_core::native::quote(&value)))
         .collect()
+}
+
+#[cfg(test)]
+mod fixed_grammar_tests {
+    use super::*;
+    use std::fs as std_fs;
+
+    #[test]
+    fn assignments_keep_ascii_names_append_syntax_and_newline_boundaries() {
+        for _ in 0..2 {
+            for value in ["A=", "A+=value", "_2=value=other", "Name=значение"] {
+                assert!(assignments(value), "{value:?}");
+            }
+            for value in [
+                "",
+                "1A=value",
+                "é=value",
+                "A++=value",
+                "A-B=value",
+                "A=line\nbreak",
+            ] {
+                assert!(!assignments(value), "{value:?}");
+            }
+        }
+        let split = segments("A='line\nbreak' echo harmless");
+        assert_eq!(
+            split,
+            vec![vec![
+                "A=line\nbreak".to_string(),
+                "echo".into(),
+                "harmless".into()
+            ]]
+        );
+    }
+
+    #[test]
+    fn duration_grammar_and_wrapper_unwrapping_keep_existing_forms() {
+        for _ in 0..2 {
+            for duration in [".", "1..2m", "0.5s", "42", "3h", "4d"] {
+                let words = ["timeout", duration, "echo", "harmless"].map(String::from);
+                assert_eq!(
+                    forms(&words).last().unwrap(),
+                    &["echo", "harmless"],
+                    "{duration}"
+                );
+            }
+            for duration in ["1ms", "1M", "1s2", "forever"] {
+                let words = ["timeout", duration, "echo", "harmless"].map(String::from);
+                assert!(
+                    !forms(&words)
+                        .iter()
+                        .any(|form| form.first().is_some_and(|word| word == "echo")),
+                    "{duration}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn permission_grammar_keeps_bare_multiline_mcp_and_case_semantics() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        for _ in 0..2 {
+            for (rule, tool, input, expected) in [
+                ("Bash", "Bash", json!({}), true),
+                (" Bash\n", "Bash", json!({}), true),
+                ("bash", "Bash", json!({}), false),
+                ("1Bad", "1Bad", json!({}), false),
+                (
+                    "Bash(echo",
+                    "Bash",
+                    json!({"command":"echo harmless"}),
+                    false,
+                ),
+                (
+                    "Bash(echo\n harmless)",
+                    "Bash",
+                    json!({"command":"echo harmless"}),
+                    true,
+                ),
+                ("mcp__files", "mcp__files__read", json!({}), true),
+                ("mcp__files", "mcp__files2__read", json!({}), false),
+                ("mcp__files(read)", "mcp__files__read", json!({}), false),
+            ] {
+                assert_eq!(
+                    matches(rule, tool, &input, root, root, false),
+                    expected,
+                    "{rule:?}, {tool}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn private_deny_projection_preserves_assignment_and_wrapper_decisions() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std_fs::create_dir(root.join(".claude")).unwrap();
+        let settings = root.join(".claude/settings.json");
+        let raw = serde_json::to_vec(
+            &json!({"permissions":{"deny":["Read","Bash(unmatched:*)","Bash(echo:*)"]}}),
+        )
+        .unwrap();
+        std_fs::write(&settings, &raw).unwrap();
+        let expected = json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"The project's settings deny this (Bash(echo:*)), as they would in the project root."}});
+        // Only deny rules are present: this never projects personal allow/ask rules.
+        for _ in 0..2 {
+            for (command, denied) in [
+                ("A+=value echo harmless", true),
+                ("A0=x A1=y env A2=z timeout 1s echo harmless", true),
+                (
+                    "env -u DROP A=x timeout -s TERM -k 1s 2m echo harmless",
+                    true,
+                ),
+                ("timeout . echo harmless", true),
+                ("timeout 1..2m echo harmless", true),
+                ("command -- echo harmless", true),
+                ("xargs echo harmless", true),
+                ("command -v echo", false),
+                ("command -V echo", false),
+                ("xargs -n 1 echo harmless", false),
+                ("1A=x echo harmless", false),
+                ("A='line\nbreak' echo harmless", false),
+            ] {
+                let payload = json!({"tool_name":"Bash","tool_input":{"command":command}});
+                assert_eq!(
+                    permission(&payload, root, root, None),
+                    denied.then(|| expected.clone()),
+                    "{command:?}"
+                );
+            }
+        }
+        assert_eq!(std_fs::read(&settings).unwrap(), raw);
+        std_fs::write(&settings, br#"{"permissions":{"deny":["Bash(other:*)"]}}"#).unwrap();
+        assert_eq!(
+            permission(
+                &json!({"tool_name":"Bash","tool_input":{"command":"echo harmless"}}),
+                root,
+                root,
+                None
+            ),
+            None,
+            "fixed grammar reuse must not cache settings"
+        );
+    }
+
+    #[test]
+    fn environment_projection_keeps_name_filters_local_overrides_and_scalar_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std_fs::create_dir(root.join(".claude")).unwrap();
+        std_fs::write(root.join(".claude/settings.json"), serde_json::to_vec(&json!({"env":{
+            "BOOL":true,"NUMBER":7,"PLAIN":"base","QUOTED":"a'b","_ALLOWED":"yes",
+            "CLAUDE_PRIVATE":"skip","ANTHROPIC_PRIVATE":"skip","1BAD":"skip","BAD-NAME":"skip","é":"skip","ARRAY":[],"NULL":null
+        }})).unwrap()).unwrap();
+        let local = root.join(".claude/settings.local.json");
+        std_fs::write(&local, br#"{"env":{"PLAIN":"hello world"}}"#).unwrap();
+        let expected = [
+            "export BOOL='true'",
+            "export NUMBER='7'",
+            "export PLAIN='hello world'",
+            "export QUOTED='a'\\''b'",
+            "export _ALLOWED='yes'",
+        ];
+        assert_eq!(environment(root, None), expected);
+        assert_eq!(environment(root, None), expected);
+        std_fs::write(local, br#"{"env":{"PLAIN":"updated"}}"#).unwrap();
+        assert!(environment(root, None).contains(&"export PLAIN='updated'".into()));
+    }
 }

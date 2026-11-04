@@ -386,11 +386,30 @@ fn base(value: &str) -> &str {
         value.rsplit('/').next().unwrap_or(value)
     }
 }
-fn re(pattern: &str) -> Result<Regex> {
-    Regex::new(pattern).map_err(|_| RuntimeError::invalid("Invalid native hook policy expression"))
+// Called only by a per-call-site OnceLock initializer, including in loops.
+fn compile_constant(pattern: &str) -> std::result::Result<Regex, regex::Error> {
+    Regex::new(pattern)
+}
+// Only constant patterns may use this macro.
+// A separate static per call site bounds storage without caching input patterns.
+macro_rules! re {
+    ($pattern:literal $(,)?) => {
+        re!(@compiled $pattern)
+    };
+    (&format!($pattern:literal $(,)?)) => {
+        re!(@compiled &format!($pattern))
+    };
+    (@compiled $pattern:expr) => {{
+        static REGEX: std::sync::OnceLock<std::result::Result<Regex, regex::Error>> =
+            std::sync::OnceLock::new();
+        REGEX
+            .get_or_init(|| compile_constant($pattern))
+            .as_ref()
+            .map_err(|_| RuntimeError::invalid("Invalid native hook policy expression"))
+    }};
 }
 fn assign(value: &str) -> bool {
-    re(r"^[A-Za-z_][A-Za-z0-9_]*[+]?=").is_ok_and(|p| p.is_match(value))
+    re!(r"^[A-Za-z_][A-Za-z0-9_]*[+]?=").is_ok_and(|p| p.is_match(value))
 }
 pub(crate) fn short(value: &str, key: char, stops: &str) -> bool {
     if !value.starts_with('-') || value.starts_with("--") || value.len() > 64 {
@@ -960,7 +979,7 @@ fn broad(value: &str) -> bool {
         "\u{60}pwd\u{60}",
     ]
     .contains(&value)
-        || re(r"^(?:/[^/]*|~[A-Za-z0-9._-]*|(?:\.\.?/)*\.\.?)$")
+        || re!(r"^(?:/[^/]*|~[A-Za-z0-9._-]*|(?:\.\.?/)*\.\.?)$")
             .is_ok_and(|pattern| pattern.is_match(if value.is_empty() { "/" } else { value }))
 }
 fn git(words: &[String], mut i: usize, nested: &mut Vec<String>) -> Option<String> {
@@ -1345,20 +1364,20 @@ fn sql_runner(segment: &Segment) -> bool {
     })
 }
 fn sql(text: &str, runs: bool) -> Result<Option<String>> {
-    if re(r"(?i)(?:^|[^[:alnum:]_])drop[\s\x1f]+(?:table|database|schema)(?:[^[:alnum:]_]|$)")?
+    if re!(r"(?i)(?:^|[^[:alnum:]_])drop[\s\x1f]+(?:table|database|schema)(?:[^[:alnum:]_]|$)")?
         .is_match(text)
     {
         return Ok(Some("destructive SQL - DROP TABLE/DATABASE/SCHEMA".into()));
     }
-    if re(r"(?i)(?:^|[^[:alnum:]_])truncate[\s\x1f]+table(?:[^[:alnum:]_]|$)")?.is_match(text)||runs&&re(r#"(?i)(?:^|[^[:alnum:]_])truncate[\s\x1f]+(?:only[\s\x1f]+)?["\x60[:alpha:]_][\]"\x60[:alnum:]_.$]*(?:\s*(?:;|,|\x1f|$)|[\s\x1f]+(?:cascade|restrict|restart|continue)(?:[^[:alnum:]_]|$))"#)?.is_match(text){return Ok(Some("destructive SQL - TRUNCATE".into()));}
-    let pattern = re(r"(?i)(?:^|[^[:alnum:]_])delete[\s\x1f]+from[\s\x1f]+[^;\s\x1f][^;]*")?;
+    if re!(r"(?i)(?:^|[^[:alnum:]_])truncate[\s\x1f]+table(?:[^[:alnum:]_]|$)")?.is_match(text)||runs&&re!(r#"(?i)(?:^|[^[:alnum:]_])truncate[\s\x1f]+(?:only[\s\x1f]+)?["\x60[:alpha:]_][\]"\x60[:alnum:]_.$]*(?:\s*(?:;|,|\x1f|$)|[\s\x1f]+(?:cascade|restrict|restart|continue)(?:[^[:alnum:]_]|$))"#)?.is_match(text){return Ok(Some("destructive SQL - TRUNCATE".into()));}
+    let pattern = re!(r"(?i)(?:^|[^[:alnum:]_])delete[\s\x1f]+from[\s\x1f]+[^;\s\x1f][^;]*")?;
     for found in pattern.find_iter(text).take(16) {
         let statement = found.as_str();
-        if re(
+        if re!(
             r"(?i)where[\s\x1f]+(?:1\s*=\s*1|true)(?:[^[:alnum:]_]|$)|where[\s\x1f]+1\s*(?:\x1f|$)",
         )?
         .is_match(statement)
-            || runs && !re(r"(?i)(?:^|[^[:alnum:]_])where(?:[^[:alnum:]_]|$)")?.is_match(statement)
+            || runs && !re!(r"(?i)(?:^|[^[:alnum:]_])where(?:[^[:alnum:]_]|$)")?.is_match(statement)
         {
             return Ok(Some("destructive SQL - DELETE without a row filter".into()));
         }
@@ -1459,5 +1478,50 @@ pub fn validate(command: &str, policy: &Policy) -> Result<Option<String>> {
     Ok(None)
 }
 pub fn polling(command: &str) -> bool {
-    !command.contains('\n')&&!command.contains("||")&&Regex::new(r"^(sleep [0-9.]+[smhd]? *(&&|;) *)?(git status|gh pr (checks|status|view)|gh run (list|view|watch)|docker (compose )?(ps|logs)|kubectl (get|describe|logs)|tail)( [^;&\x60$()<>|]*)?(\| *(head|tail|wc|cut|grep|jq)( [^;&\x60$()<>|]*)?)*$").is_ok_and(|pattern|pattern.is_match(command))
+    !command.contains('\n')&&!command.contains("||")&&re!(r"^(sleep [0-9.]+[smhd]? *(&&|;) *)?(git status|gh pr (checks|status|view)|gh run (list|view|watch)|docker (compose )?(ps|logs)|kubectl (get|describe|logs)|tail)( [^;&\x60$()<>|]*)?(\| *(head|tail|wc|cut|grep|jq)( [^;&\x60$()<>|]*)?)*$").is_ok_and(|pattern|pattern.is_match(command))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_patterns_preserve_shell_decisions_on_repeated_calls() {
+        for _ in 0..2 {
+            for value in ["NAME=value", "_name+=value", "A1="] {
+                assert!(assign(value), "assignment: {value}");
+            }
+            for value in ["1NAME=value", "A-B=value", "echo"] {
+                assert!(!assign(value), "not an assignment: {value}");
+            }
+            for value in ["/", "/*", "/home", "~user", "../*", "${HOME}"] {
+                assert!(broad(value), "broad target: {value}");
+            }
+            for value in ["/home/project", "./project", "release/*", "foo"] {
+                assert!(!broad(value), "scoped target: {value}");
+            }
+            assert_eq!(
+                sql("DROP TABLE users", false).unwrap().as_deref(),
+                Some("destructive SQL - DROP TABLE/DATABASE/SCHEMA")
+            );
+            assert_eq!(
+                sql("TRUNCATE users;", true).unwrap().as_deref(),
+                Some("destructive SQL - TRUNCATE")
+            );
+            assert!(sql("DELETE FROM users WHERE id=1", true).unwrap().is_none());
+            assert!(sql("DELETE FROM users", true).unwrap().is_some());
+            assert!(sql("DELETE FROM users WHERE 1=1", false).unwrap().is_some());
+            assert!(polling("git status | head"));
+            assert!(!polling("git status || git reset --hard"));
+        }
+    }
+
+    #[test]
+    fn invalid_constant_pattern_remains_an_error_on_repeated_calls() {
+        for _ in 0..2 {
+            let error = re!("[").unwrap_err();
+            assert_eq!(error.kind, infra_core::ErrorKind::InvalidInput);
+            assert_eq!(error.message, "Invalid native hook policy expression");
+        }
+    }
 }

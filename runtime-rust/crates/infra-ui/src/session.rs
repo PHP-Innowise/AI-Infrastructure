@@ -823,27 +823,36 @@ pub async fn open_view(view: &str, record: bool) {
         _ => load_git().await,
     }
 }
+fn history_projection(sessions: &[V], sid: &str) -> V {
+    V::Array(
+        sessions
+            .iter()
+            .map(|session| {
+                let id = m::text(session, "id");
+                json!({"id":id,"label":format!("{} · {}",m::summary(session),m::label(session["status"].as_str().unwrap_or(""))),"selected":id==sid})
+            })
+            .collect(),
+    )
+}
 pub fn history() {
-    let sessions = m::read(|s| s.sessions.clone());
-    let sid = m::read(|s| s.sid.clone());
+    if dom::get("history").is_none() {
+        return;
+    }
+    let projection = m::read(|s| history_projection(&s.sessions, &s.sid));
+    if m::data("history-projection") == projection {
+        return;
+    }
     dom::clear("history");
-    for v in sessions {
-        let id = m::text(&v, "id");
-        let b = dom::button(
-            &format!(
-                "{} · {}",
-                m::summary(&v),
-                m::label(v["status"].as_str().unwrap_or(""))
-            ),
-            "session-open",
-            json!(id),
-        );
+    for v in projection.as_array().into_iter().flatten() {
+        let id = m::text(v, "id");
+        let b = dom::button(&m::text(v, "label"), "session-open", json!(id));
         b.set_class_name("history-item");
-        if id == sid {
+        if m::yes(&v["selected"]) {
             let _ = b.set_attribute("aria-current", "true");
         }
         dom::append("history", &b);
     }
+    m::set("history-projection", projection);
 }
 pub async fn refresh() {
     match api::get("/api/sessions").await {
@@ -3029,6 +3038,56 @@ pub fn budget_fields_valid(prefix: &str) -> bool {
     ["usd", "tokens", "seconds"]
         .iter()
         .all(|key| dom::numeric_valid(&format!("{prefix}-{key}")))
+}
+
+#[cfg(test)]
+mod history_projection_tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_projection_preserves_labels_order_and_selection() {
+        let sessions = vec![
+            json!({"id":"a","name":"Named chat","title":"Unused title","status":"running"}),
+            json!({"id":"b","title":"Second chat","status":"awaiting_approval"}),
+        ];
+        assert_eq!(
+            history_projection(&sessions, "b"),
+            json!([
+                {"id":"a","label":"Named chat · running","selected":false},
+                {"id":"b","label":"Second chat · awaiting approval","selected":true}
+            ])
+        );
+        let original = history_projection(&sessions, "b");
+        assert_ne!(original, history_projection(&sessions, "a"));
+        let mut reversed = sessions.clone();
+        reversed.reverse();
+        assert_ne!(original, history_projection(&reversed, "b"));
+        assert_eq!(history_projection(&[], "b"), json!([]));
+    }
+
+    #[test]
+    fn sidebar_changes_only_when_rendered_fields_change() {
+        let session = json!({"id":"a","title":"Chat","status":"running"});
+        let original = history_projection(std::slice::from_ref(&session), "a");
+        let mut report_changed = session.clone();
+        report_changed["budget_usage"] = json!({"tokens":900});
+        report_changed["fleet_result"] = json!({"report":"new report"});
+        assert_eq!(original, history_projection(&[report_changed], "a"));
+        for (field, value) in [
+            ("id", "b"),
+            ("title", "Renamed chat"),
+            ("name", "Preferred name"),
+            ("status", "completed"),
+        ] {
+            let mut changed = session.clone();
+            changed[field] = json!(value);
+            assert_ne!(original, history_projection(&[changed], "a"), "{field}");
+        }
+        assert_eq!(
+            history_projection(&[json!({"id":"fallback"})], ""),
+            json!([{"id":"fallback","label":"fallback · ","selected":false}])
+        );
+    }
 }
 
 #[cfg(test)]

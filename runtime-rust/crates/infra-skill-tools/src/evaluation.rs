@@ -168,14 +168,14 @@ pub struct EvalOptions {
     pub threshold: f64,
     pub model: Option<String>,
 }
-pub fn run_eval(
-    eval_set: &[Value],
-    name: &str,
-    description: &str,
-    project: &Path,
-    options: &EvalOptions,
-    log: &mut String,
-) -> Result<Value> {
+struct PreparedJobs<'a> {
+    items: &'a [Value],
+    query_order: Vec<&'a str>,
+    query_items: BTreeMap<&'a str, &'a Value>,
+    job_count: usize,
+}
+
+fn prepare_jobs<'a>(eval_set: &'a [Value], options: &EvalOptions) -> Result<PreparedJobs<'a>> {
     let native = options.config.key != "claude";
     if options.workers == 0 || options.runs == 0 {
         return Err(RuntimeError::invalid(
@@ -189,7 +189,6 @@ pub fn run_eval(
     }
     let mut query_order = vec![];
     let mut query_items = BTreeMap::new();
-    let mut queue = VecDeque::new();
     for item in eval_set {
         let query = item["query"]
             .as_str()
@@ -205,67 +204,51 @@ pub fn run_eval(
             )));
         }
         if native {
-            query_order.push(query.to_owned());
+            query_order.push(query);
         }
-        query_items.insert(query.to_owned(), item.clone());
-        for _ in 0..options.runs {
-            queue.push_back((query.to_owned(), item.clone()));
-        }
+        query_items.insert(query, item);
     }
-    if queue.len() > 1_000_000 {
-        return Err(RuntimeError::invalid(
-            "Evaluation exceeds the bounded job limit",
-        ));
-    }
-    let queue = Arc::new(Mutex::new(queue));
-    let (tx, rx) = mpsc::channel();
-    let environment = common::env();
-    let mut completed = vec![];
-    std::thread::scope(|scope| {
-        for _ in 0..options.workers.min(128) {
-            let queue = queue.clone();
-            let tx = tx.clone();
-            let environment = environment.clone();
-            scope.spawn(move || {
-                loop {
-                    if infra_eval::cancel::interrupted() {
-                        break;
-                    }
-                    let job = queue.lock().unwrap().pop_front();
-                    let Some((query, item)) = job else {
-                        break;
-                    };
-                    let result = run_single_query(
-                        &options.config,
-                        &query,
-                        name,
-                        description,
-                        options.timeout,
-                        project,
-                        options.model.as_deref(),
-                        &environment,
-                    );
-                    if tx.send((query, item, result)).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(tx);
-        for result in rx {
-            completed.push(result);
-        }
-    });
-    if infra_eval::cancel::interrupted() {
+    let job_count = eval_set
+        .len()
+        .checked_mul(options.runs)
+        .filter(|count| *count <= 1_000_000)
+        .ok_or_else(|| RuntimeError::invalid("Evaluation exceeds the bounded job limit"))?;
+    Ok(PreparedJobs {
+        items: eval_set,
+        query_order,
+        query_items,
+        job_count,
+    })
+}
+
+fn finish_eval(
+    jobs: PreparedJobs<'_>,
+    completed: Vec<(usize, Result<bool>)>,
+    name: &str,
+    description: &str,
+    options: &EvalOptions,
+    cancelled: bool,
+    log: &mut String,
+) -> Result<Value> {
+    if cancelled {
         return Err(RuntimeError::unavailable("Trigger evaluation interrupted"));
     }
-    let mut triggers: BTreeMap<String, Vec<bool>> = BTreeMap::new();
+    let native = options.config.key != "claude";
+    let PreparedJobs {
+        items,
+        mut query_order,
+        mut query_items,
+        ..
+    } = jobs;
+    let mut triggers: BTreeMap<&str, Vec<bool>> = BTreeMap::new();
     let mut first_error = None;
-    for (query, item, result) in completed {
-        if !native && !triggers.contains_key(&query) {
-            query_order.push(query.clone());
+    for (index, result) in completed {
+        let item = &items[index];
+        let query = item["query"].as_str().expect("validated evaluation query");
+        if !native && !triggers.contains_key(query) {
+            query_order.push(query);
         }
-        query_items.insert(query.clone(), item);
+        query_items.insert(query, item);
         let hit = match result {
             Ok(hit) => hit,
             Err(e) => {
@@ -289,7 +272,7 @@ pub fn run_eval(
     }
     let mut results = vec![];
     for query in query_order {
-        let values = triggers.remove(&query).unwrap_or_default();
+        let values = triggers.remove(query).unwrap_or_default();
         if values.is_empty() {
             return Err(RuntimeError::unavailable(
                 "Evaluation ended before every scheduled probe completed",
@@ -297,7 +280,7 @@ pub fn run_eval(
         }
         let count = values.iter().filter(|b| **b).count();
         let rate = count as f64 / values.len() as f64;
-        let expected = query_items[&query]["should_trigger"].as_bool().unwrap();
+        let expected = query_items[query]["should_trigger"].as_bool().unwrap();
         let passed = if expected {
             rate >= options.threshold
         } else {
@@ -311,6 +294,72 @@ pub fn run_eval(
         output["platform"] = json!(options.config.key);
     }
     Ok(output)
+}
+
+pub fn run_eval(
+    eval_set: &[Value],
+    name: &str,
+    description: &str,
+    project: &Path,
+    options: &EvalOptions,
+    log: &mut String,
+) -> Result<Value> {
+    let jobs = prepare_jobs(eval_set, options)?;
+    let mut queue = VecDeque::with_capacity(jobs.job_count);
+    for index in 0..eval_set.len() {
+        queue.extend(std::iter::repeat_n(index, options.runs));
+    }
+    let queue = Arc::new(Mutex::new(queue));
+    let (tx, rx) = mpsc::channel();
+    let environment = common::env();
+    let mut completed = vec![];
+    std::thread::scope(|scope| {
+        for _ in 0..options.workers.min(128) {
+            let queue = queue.clone();
+            let tx = tx.clone();
+            let environment = environment.clone();
+            scope.spawn(move || {
+                loop {
+                    if infra_eval::cancel::interrupted() {
+                        break;
+                    }
+                    let job = queue.lock().unwrap().pop_front();
+                    let Some(index) = job else {
+                        break;
+                    };
+                    let query = eval_set[index]["query"]
+                        .as_str()
+                        .expect("validated evaluation query");
+                    let result = run_single_query(
+                        &options.config,
+                        query,
+                        name,
+                        description,
+                        options.timeout,
+                        project,
+                        options.model.as_deref(),
+                        &environment,
+                    );
+                    if tx.send((index, result)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(tx);
+        for result in rx {
+            completed.push(result);
+        }
+    });
+    finish_eval(
+        jobs,
+        completed,
+        name,
+        description,
+        options,
+        infra_eval::cancel::interrupted(),
+        log,
+    )
 }
 pub fn options(v: &Value) -> Result<EvalOptions> {
     let config = platform_cli::platform_config(v)?;
@@ -409,4 +458,189 @@ pub fn execute(v: &Value) -> Result<Value> {
         log.push_str(&stats("Eval", output["results"].as_array().unwrap(), 0.0));
     }
     common::json_cli(output, log)
+}
+
+#[cfg(test)]
+mod job_tests {
+    use super::*;
+
+    fn config(platform: &str, runs: usize) -> EvalOptions {
+        EvalOptions {
+            config: platform_cli::platform_config(&json!({"platform":platform})).unwrap(),
+            workers: 2,
+            timeout: Duration::from_secs(1),
+            runs,
+            threshold: 0.5,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn job_limit_is_checked_without_expanding_jobs_and_keeps_validation_priority() {
+        let items = [json!({"query":"first","should_trigger":true})];
+        assert_eq!(
+            prepare_jobs(&items, &config("codex", 1_000_000))
+                .unwrap()
+                .job_count,
+            1_000_000
+        );
+        let error = prepare_jobs(&items, &config("codex", 1_000_001))
+            .err()
+            .unwrap();
+        assert_eq!(error.message, "Evaluation exceeds the bounded job limit");
+        let two = [
+            items[0].clone(),
+            json!({"query":"second","should_trigger":false}),
+        ];
+        assert_eq!(
+            prepare_jobs(&two, &config("codex", usize::MAX))
+                .err()
+                .unwrap()
+                .message,
+            error.message
+        );
+        let duplicate = [items[0].clone(), items[0].clone()];
+        assert_eq!(
+            prepare_jobs(&duplicate, &config("codex", usize::MAX))
+                .err()
+                .unwrap()
+                .message,
+            "Duplicate eval query: first"
+        );
+        let invalid = [
+            items[0].clone(),
+            json!({"query":false,"should_trigger":true}),
+        ];
+        assert_eq!(
+            prepare_jobs(&invalid, &config("codex", usize::MAX))
+                .err()
+                .unwrap()
+                .message,
+            "Every eval item requires a string query"
+        );
+        for (workers, runs) in [(0, 1), (1, 0)] {
+            let mut options = config("codex", runs);
+            options.workers = workers;
+            assert_eq!(
+                prepare_jobs(&items, &options).err().unwrap().message,
+                "workers and runs_per_query must be positive"
+            );
+        }
+    }
+
+    #[test]
+    fn native_results_keep_input_order_and_first_receiver_error() {
+        let items = [
+            json!({"query":"first","should_trigger":true}),
+            json!({"query":"second","should_trigger":false}),
+        ];
+        let options = config("codex", 1);
+        let mut log = String::from("seed\n");
+        let result = finish_eval(
+            prepare_jobs(&items, &options).unwrap(),
+            vec![(1, Ok(false)), (0, Ok(true))],
+            "name",
+            "description",
+            &options,
+            false,
+            &mut log,
+        )
+        .unwrap();
+        assert_eq!(result["results"][0]["query"], "first");
+        assert_eq!(result["results"][1]["query"], "second");
+        assert_eq!(result["summary"], json!({"total":2,"passed":2,"failed":0}));
+        assert_eq!(result["platform"], "codex");
+        let error = finish_eval(
+            prepare_jobs(&items, &options).unwrap(),
+            vec![
+                (1, Err(RuntimeError::unavailable("second error"))),
+                (0, Err(RuntimeError::unavailable("first error"))),
+            ],
+            "name",
+            "description",
+            &options,
+            false,
+            &mut log,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "Trigger probe failed for \"second\": second error"
+        );
+        assert_eq!(log, "seed\n");
+    }
+
+    #[test]
+    fn legacy_duplicates_use_receiver_order_and_last_completed_item() {
+        let items = [
+            json!({"query":"duplicate","should_trigger":true}),
+            json!({"query":"other","should_trigger":false}),
+            json!({"query":"duplicate","should_trigger":false}),
+        ];
+        let options = config("claude", 1);
+        let mut log = String::new();
+        let result = finish_eval(
+            prepare_jobs(&items, &options).unwrap(),
+            vec![(2, Ok(false)), (1, Ok(false)), (0, Ok(true))],
+            "name",
+            "description",
+            &options,
+            false,
+            &mut log,
+        )
+        .unwrap();
+        assert_eq!(
+            result["results"],
+            json!([
+                {"query":"duplicate","should_trigger":true,"trigger_rate":0.5,"triggers":1,"runs":2,"pass":true},
+                {"query":"other","should_trigger":false,"trigger_rate":0.0,"triggers":0,"runs":1,"pass":true}
+            ])
+        );
+        assert!(result.get("platform").is_none());
+        assert!(log.is_empty());
+    }
+
+    #[test]
+    fn warnings_follow_receiver_order_but_cancellation_does_not_change_log() {
+        let items = [
+            json!({"query":"first","should_trigger":false}),
+            json!({"query":"second","should_trigger":false}),
+        ];
+        let options = config("claude", 1);
+        let completions = || {
+            vec![
+                (1, Err(RuntimeError::unavailable("second error"))),
+                (0, Err(RuntimeError::unavailable("first error"))),
+            ]
+        };
+        let mut log = String::from("seed\n");
+        let error = finish_eval(
+            prepare_jobs(&items, &options).unwrap(),
+            completions(),
+            "name",
+            "description",
+            &options,
+            true,
+            &mut log,
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "Trigger evaluation interrupted");
+        assert_eq!(log, "seed\n");
+        let result = finish_eval(
+            prepare_jobs(&items, &options).unwrap(),
+            completions(),
+            "name",
+            "description",
+            &options,
+            false,
+            &mut log,
+        )
+        .unwrap();
+        assert_eq!(
+            log,
+            "seed\nWarning: query failed: second error\nWarning: query failed: first error\n"
+        );
+        assert_eq!(result["results"][0]["query"], "second");
+        assert_eq!(result["summary"]["passed"], 2);
+    }
 }

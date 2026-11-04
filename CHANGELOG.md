@@ -24,6 +24,55 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Reuse warm tokenizer results without rebuilding SQLite, compile constant
+  hook/routing expressions once, and keep glob matchers within each repository
+  command. Brain lookup retains matching records while still admitting the
+  full inventory and preserving ambiguity and invalid-record errors. Brain
+  indexing parses and checks one admitted record image; full
+  refresh clears FTS rows in one pass when no relevant triggers are present,
+  and reuses SQL statements within its rollback-safe transaction. Session
+  and system lists reuse loaded rows, and session polling validates its record
+  once. Workbook previews share normalized worksheets and optimization reports
+  index results by query without changing their output contracts.
+- Core retrieval folds each token once, reuses fixed excerpt and memory-codec
+  expressions, and prepares frequency-count SQL once per call. Ordinary
+  worksheets skip shared-formula rewrite passes, and workbook embedding avoids
+  unused data-URI copies. Generator repetition checks compute longest blocks
+  once per exact owner set while preserving diagnostic order and ties.
+- CLI, evaluation and skill-tool builds forward the optional ONNX feature
+  explicitly. Default builds retain inference; `infra-cli --no-default-features`
+  excludes its heavy dependencies. An inference capability marker follows the
+  compiled dependency; full engines advertising it reject lean replacement
+  artifacts. Earlier engines without that marker cannot distinguish the two.
+- The Rust browser interface renders a page of session events once, keeps
+  completion notifications per event, updates its clock independently and
+  preserves unchanged session navigation nodes. Native CI jobs reuse Cargo
+  artifacts within compiler/platform/job scopes and align bootstrap debuginfo
+  with the test profile; Cargo still validates every restored build.
+- Partial index refresh maps obsolete paths to rowids inside its existing
+  transaction. Custom main or temporary triggers retain the original path
+  deletion sequence. Duplicate-memory checks reuse exact shingle sets without
+  retaining a second corpus, and Unix regular-file reads share one opened
+  metadata image while preserving fresh before/after identity checks.
+- Native Systems and Setup requests use bounded blocking workers whose
+  admission survives caller cancellation and drains before teardown. Setup
+  retains mutation busy responses and reviewed-plan rollback. Provider identity
+  discovery overlaps three independently guarded probes while keeping each
+  provider's candidate, version/help and result ordering.
+- Nonapplicable shell/naming/loop hooks skip context construction; applicable
+  requests reuse the parsed payload and retain the raw fail-closed shell
+  fallback. Permission projection reuses fixed grammars. Skill publication
+  avoids full-body copies while retaining its database admission barrier,
+  fresh file checks and publication order. Generator path contracts reuse
+  compiled glob components within one traversal and skips subtrees outside
+  already-tested literal prefixes.
+- Unix native output framing borrows complete packets and compacts each read
+  buffer once, preserving packet boundaries, byte limits and callback errors.
+- Evaluation validates its bounded job count before expansion and queues
+  borrowed item indices, preserving completion/error order. Review HTML
+  serializes borrowed values with the existing script escapes. The opt-in
+  `quick-release` Cargo profile disables LTO for shorter local rebuilds;
+  distribution builds use the release profile.
 - The generated workflows start on GitHub again. Each job named
   `${{ runner.temp }}` in its job-level `env`, where GitHub provides no
   `runner` context, so every workflow file was rejected before a job existed:

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::{Mutex, Weak},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 const EDITIONS: [&str; 4] = ["Laravel", "Symfony", "PHP Core", "Cms/wordpress"];
@@ -28,6 +28,132 @@ pub struct Setup {
     accelerators: std::sync::Arc<crate::accelerators::Accelerators>,
     previews: Mutex<BTreeMap<String, Preview>>,
     serial: Mutex<()>,
+}
+struct PreviewInput<'a> {
+    project: &'a str,
+    edition: &'a str,
+    tools: Vec<String>,
+}
+fn preview_input(data: &Value) -> Result<PreviewInput<'_>> {
+    if !store::exact(data, &["project_id", "edition", "tools"], &[]) {
+        return Err(HarnessError::invalid(
+            "Select a project, edition and tools.",
+        ));
+    }
+    let project = data["project_id"]
+        .as_str()
+        .ok_or_else(|| HarnessError::invalid("Select a project."))?;
+    let edition = data["edition"]
+        .as_str()
+        .filter(|e| EDITIONS.contains(e))
+        .ok_or_else(|| HarnessError::invalid("Select a supported edition."))?;
+    let tools = creator_files::texts(&data["tools"])?;
+    if tools.is_empty()
+        || tools.len() > 3
+        || tools
+            .iter()
+            .any(|t| !["claude", "codex", "cursor"].contains(&t.as_str()))
+        || tools.iter().collect::<BTreeSet<_>>().len() != tools.len()
+    {
+        return Err(HarnessError::invalid("Select distinct supported tools."));
+    }
+    Ok(PreviewInput {
+        project,
+        edition,
+        tools,
+    })
+}
+fn install_keys(data: &Value) -> Result<()> {
+    if !store::exact(data, &["preview_id"], &[]) {
+        return Err(HarnessError::invalid(
+            "Install using the reviewed preview ID.",
+        ));
+    }
+    Ok(())
+}
+
+/// Bounded native offload; public synchronous Setup callers retain their locks.
+pub struct SetupDomain {
+    setup: Arc<Setup>,
+    lifecycle: Arc<tokio::sync::Mutex<bool>>,
+    mutation: Arc<tokio::sync::Mutex<()>>,
+}
+impl SetupDomain {
+    pub fn new(setup: Arc<Setup>) -> Self {
+        Self {
+            setup,
+            lifecycle: Arc::new(tokio::sync::Mutex::new(false)),
+            mutation: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+    pub async fn close(&self) {
+        // FIFO admission drains previously queued work, including detached
+        // blocking closures, before rejecting later callers.
+        *self.lifecycle.lock().await = true;
+    }
+}
+impl Domain for SetupDomain {
+    fn execute<'a>(&'a self, op: &'a str, request: Value) -> Reply<'a> {
+        Box::pin(async move {
+            let mutating = match op {
+                "setup.status" => false,
+                "setup.preview" => {
+                    preview_input(&request["body"])?;
+                    true
+                }
+                "setup.install" => {
+                    // The ID's type and one-use receipt are deliberately
+                    // checked only after the original serial lock is acquired.
+                    install_keys(&request["body"])?;
+                    true
+                }
+                _ => return Err(HarnessError::missing("Unknown setup operation.")),
+            };
+            let reservation = if mutating {
+                Some(
+                    self.mutation
+                        .clone()
+                        .try_lock_owned()
+                        .map_err(|_| HarnessError::conflict("Accelerator setup is busy."))?,
+                )
+            } else {
+                None
+            };
+            let runtime = match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => runtime,
+                Err(_) => {
+                    let closed = self.lifecycle.blocking_lock();
+                    if *closed {
+                        drop(reservation);
+                        return Err(HarnessError::conflict("Accelerator setup is closed."));
+                    }
+                    let reply = self.setup.execute_value(op, &request).map(Payload::Json);
+                    drop(reservation);
+                    drop(closed);
+                    return reply;
+                }
+            };
+            // One blocking job at a time. Status also queues here, so an active
+            // installation cannot accumulate blocking status workers.
+            let closed = self.lifecycle.clone().lock_owned().await;
+            if *closed {
+                drop(reservation);
+                return Err(HarnessError::conflict("Accelerator setup is closed."));
+            }
+            let setup = self.setup.clone();
+            let op = op.to_owned();
+            runtime
+                .spawn_blocking(move || {
+                    // Request cancellation must not release custody while the
+                    // installer is still publishing or rolling back files.
+                    let _closed = closed;
+                    let _reservation = reservation;
+                    setup.execute_value(&op, &request).map(Payload::Json)
+                })
+                .await
+                .map_err(|_| HarnessError::unavailable("Setup operation worker stopped."))?
+        })
+    }
 }
 fn installation_failure(
     error: &infra_core::RuntimeError,
@@ -90,28 +216,11 @@ impl Setup {
         Ok(root)
     }
     pub fn preview(&self, data: &Value) -> Result<Value> {
-        if !store::exact(data, &["project_id", "edition", "tools"], &[]) {
-            return Err(HarnessError::invalid(
-                "Select a project, edition and tools.",
-            ));
-        }
-        let project = data["project_id"]
-            .as_str()
-            .ok_or_else(|| HarnessError::invalid("Select a project."))?;
-        let edition = data["edition"]
-            .as_str()
-            .filter(|e| EDITIONS.contains(e))
-            .ok_or_else(|| HarnessError::invalid("Select a supported edition."))?;
-        let tools = creator_files::texts(&data["tools"])?;
-        if tools.is_empty()
-            || tools.len() > 3
-            || tools
-                .iter()
-                .any(|t| !["claude", "codex", "cursor"].contains(&t.as_str()))
-            || tools.iter().collect::<BTreeSet<_>>().len() != tools.len()
-        {
-            return Err(HarnessError::invalid("Select distinct supported tools."));
-        }
+        let PreviewInput {
+            project,
+            edition,
+            tools,
+        } = preview_input(data)?;
         let _serial = self
             .serial
             .try_lock()
@@ -188,11 +297,7 @@ impl Setup {
         Ok(reply)
     }
     pub fn install(&self, data: &Value) -> Result<Value> {
-        if !store::exact(data, &["preview_id"], &[]) {
-            return Err(HarnessError::invalid(
-                "Install using the reviewed preview ID.",
-            ));
-        }
+        install_keys(data)?;
         let _serial = self
             .serial
             .try_lock()
@@ -424,20 +529,18 @@ impl Setup {
         }
         Ok(output)
     }
+    fn execute_value(&self, op: &str, request: &Value) -> Result<Value> {
+        match op {
+            "setup.status" => self.status(request["params"]["project_id"].as_str().unwrap_or("")),
+            "setup.preview" => self.preview(&request["body"]),
+            "setup.install" => self.install(&request["body"]),
+            _ => Err(HarnessError::missing("Unknown setup operation.")),
+        }
+    }
 }
 impl Domain for Setup {
     fn execute<'a>(&'a self, op: &'a str, request: Value) -> Reply<'a> {
-        Box::pin(async move {
-            let value = match op {
-                "setup.status" => {
-                    self.status(request["params"]["project_id"].as_str().unwrap_or(""))?
-                }
-                "setup.preview" => self.preview(&request["body"])?,
-                "setup.install" => self.install(&request["body"])?,
-                _ => return Err(HarnessError::missing("Unknown setup operation.")),
-            };
-            Ok(Payload::Json(value))
-        })
+        Box::pin(async move { self.execute_value(op, &request).map(Payload::Json) })
     }
 }
 

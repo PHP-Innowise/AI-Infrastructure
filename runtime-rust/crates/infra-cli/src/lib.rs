@@ -213,7 +213,16 @@ pub fn capabilities() -> Value {
     let source = env!("INFRA_ENGINE_SOURCE_SHA256");
     let source = (!source.is_empty())
         .then(|| json!({"scheme":infra_tooling::source_identity::SCHEME,"sha256":source}));
-    json!({"engine":"infra-engine","version":env!("CARGO_PKG_VERSION"),"capability_profile":"infra-engine-v1","capabilities":["memory","brain","bank","hooks","mcp","install","attach","kit","collect","creator","system","harness","serve","app","eval","qa","pilot","bench","continuity","skill-tools","routing-eval","release","memory-queue-worker-v1","memory-eval-clock-v1","hook-policy-v1"],"source":source})
+    let mut descriptor = json!({"engine":"infra-engine","version":env!("CARGO_PKG_VERSION"),"capability_profile":"infra-engine-v1","capabilities":["memory","brain","bank","hooks","mcp","install","attach","kit","collect","creator","system","harness","serve","app","eval","qa","pilot","bench","continuity","skill-tools","routing-eval","release","memory-queue-worker-v1","memory-eval-clock-v1","hook-policy-v1"],"source":source});
+    // Report dependency truth: workspace feature unification can enable ONNX
+    // in pilots even when this package's forwarding feature was not selected.
+    if infra_pilots::onnx::compiled() {
+        descriptor["capabilities"]
+            .as_array_mut()
+            .expect("the native capability descriptor contains an array")
+            .push("onnx-inference-v1".into());
+    }
+    descriptor
 }
 fn memory_command(rest: &[String], controlled: bool) -> Result<Output> {
     let arguments = match arguments::memory(rest) {

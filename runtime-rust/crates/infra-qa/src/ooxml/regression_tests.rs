@@ -1077,3 +1077,97 @@ fn shared_literal_formula_budget_preserves_normal_boundary_and_caches() -> Resul
     }
     Ok(())
 }
+
+#[test]
+fn sheet_rows_share_normalized_coordinates_formulas_and_dense_admission() -> Result<()> {
+    let source = fixture(vec![(
+        "Shared",
+        format!(
+            r#"<worksheet xmlns="{MAIN}"><sheetData>
+<row><c><f t="shared" si="7" ref="A1:A2">B1+1</f><v>999</v></c><c><v>7</v></c></row>
+<row><c><f t="shared" si="7"/><v>1000</v></c><c><v>8</v></c></row>
+</sheetData></worksheet>"#
+        ),
+    )]);
+    let original = source.parts.clone();
+    // Two row slots plus four value slots must be admitted before allocation.
+    let (sheet, rows) = source.sheet_rows_bounded("Shared", 6)?;
+    let expected = vec![
+        vec![json!("=B1+1"), json!(7)],
+        vec![json!("=B2+1"), json!(8)],
+    ];
+    assert_eq!(rows, expected);
+    assert_eq!(source.rows_bounded("Shared", 6)?, expected);
+    for (address, formula, cached) in [("A1", "B1+1", 999), ("A2", "B2+1", 1000)] {
+        let value = cell(&sheet, address);
+        let expression = child(value, "f").context("normalized shared formula")?;
+        assert_eq!(content(expression), formula);
+        assert!(!expression.attributes.contains_key("t"));
+        assert_eq!(source.cached_value(value), json!(cached));
+    }
+    assert_eq!(source.cached_value(cell(&sheet, "B1")), json!(7));
+    assert_eq!(source.cached_value(cell(&sheet, "B2")), json!(8));
+    let error = source.sheet_rows_bounded("Shared", 5).unwrap_err();
+    assert!(error.to_string().contains("worksheet dense slot bound"));
+    assert_eq!(source.parts, original, "projection changed source parts");
+    Ok(())
+}
+
+#[test]
+fn ordinary_worksheets_normalize_coordinates_without_spending_shared_formula_budget() -> Result<()>
+{
+    let mut sheet = xml(format!(
+        r#"<worksheet xmlns="{MAIN}"><sheetData>
+<row><c><f>A1+1</f><v>41</v></c></row>
+<row><c r="C2"><v>9</v></c><c><v>10</v></c></row>
+</sheetData></worksheet>"#
+    )
+    .as_bytes())?;
+    compat::worksheet_test_limits(&mut sheet, 0, 0)?;
+    assert_eq!(content(child(cell(&sheet, "A1"), "f").unwrap()), "A1+1");
+    assert_eq!(content(child(cell(&sheet, "A1"), "v").unwrap()), "41");
+    assert_eq!(content(child(cell(&sheet, "C2"), "v").unwrap()), "9");
+    assert_eq!(content(child(cell(&sheet, "D2"), "v").unwrap()), "10");
+    let rows = children(child(&sheet, "sheetData").unwrap(), "row");
+    assert_eq!(attr(rows[0], "r"), "1");
+    assert_eq!(attr(rows[1], "r"), "2");
+    Ok(())
+}
+
+#[test]
+fn absent_shared_masters_do_not_bypass_formula_or_coordinate_refusals() -> Result<()> {
+    for (body, reason) in [
+        (
+            r#"<row r="0"><c r="A1"><v>1</v></c></row>"#,
+            "worksheet row coordinate out of range",
+        ),
+        (
+            r#"<row><c r="XFE1"><v>1</v></c></row>"#,
+            "cell coordinate out of range",
+        ),
+        (
+            r#"<row><c><f t="shared" si="7"/></c></row>"#,
+            "shared formula lacks master",
+        ),
+        (
+            r#"<row><c><f t="shared"/></c></row>"#,
+            "shared formula lacks index",
+        ),
+        (
+            r#"<row><c><f t="shared" si="bad"/></c></row>"#,
+            "invalid shared formula index",
+        ),
+        (
+            r#"<row><c><f t="shared">A1+1</f></c></row>"#,
+            "shared formula lacks index",
+        ),
+    ] {
+        let mut sheet = xml(format!(
+            r#"<worksheet xmlns="{MAIN}"><sheetData>{body}</sheetData></worksheet>"#
+        )
+        .as_bytes())?;
+        let error = compat::worksheet(&mut sheet).unwrap_err();
+        assert!(error.to_string().contains(reason), "{reason}: {error:#}");
+    }
+    Ok(())
+}

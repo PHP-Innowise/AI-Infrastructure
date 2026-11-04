@@ -668,111 +668,128 @@ fn append_brain(
     result: &mut Discovery,
 ) -> Result<()> {
     let brain = BrainRepository::new(context.clone())?;
-    let inventory = brain.inventory(false)?;
     let mut tasks = BTreeMap::<String, Value>::new();
     let mut twins = BTreeMap::<String, Vec<(String, String)>>::new();
     let mut prefixes = BTreeSet::new();
-    for image in inventory.records {
-        let key = image
-            .path
-            .strip_prefix(&context.roots.state)
-            .map_err(|_| RuntimeError::policy("Brain source escapes state"))?
-            .to_str()
-            .ok_or_else(|| RuntimeError::invalid("Brain source path is not UTF-8"))?
-            .replace('\\', "/");
-        let record = &image.record;
-        if record["type"] == "task" && !is_terminal("task", record["status"].as_str().unwrap_or(""))
-        {
-            twins
-                .entry(record["external_id"].as_str().unwrap_or("").into())
-                .or_default()
-                .push((
-                    record["created_at"].as_str().unwrap_or("").into(),
-                    record["id"].as_str().unwrap_or("").into(),
-                ));
+    let mut first_error = None;
+    // Consume each admitted raw image before the next one is read. Unit
+    // projections keep no second copy of the complete inventory in memory.
+    // Finish inventory even after a projection fails so its hard errors keep
+    // precedence over per-record eligibility or Git errors, as before.
+    let (_, problems) = brain.inventory_map(false, |image, raw| {
+        if first_error.is_some() {
+            return;
         }
-        if let Some(reason) = record_eligibility(context, config, record)? {
-            result.excluded.push(Exclusion { path: key, reason });
-            continue;
-        }
-        let raw = fs::read_text(&image.path)?;
-        if sensitive_label(&raw)?.is_some() {
-            result.excluded.push(Exclusion {
+        let projected = (|| -> Result<()> {
+            let key = image
+                .path
+                .strip_prefix(&context.roots.state)
+                .map_err(|_| RuntimeError::policy("Brain source escapes state"))?
+                .to_str()
+                .ok_or_else(|| RuntimeError::invalid("Brain source path is not UTF-8"))?
+                .replace('\\', "/");
+            let record = &image.record;
+            if record["type"] == "task"
+                && !is_terminal("task", record["status"].as_str().unwrap_or(""))
+            {
+                twins
+                    .entry(record["external_id"].as_str().unwrap_or("").into())
+                    .or_default()
+                    .push((
+                        record["created_at"].as_str().unwrap_or("").into(),
+                        record["id"].as_str().unwrap_or("").into(),
+                    ));
+            }
+            if let Some(reason) = record_eligibility(context, config, record)? {
+                result.excluded.push(Exclusion { path: key, reason });
+                return Ok(());
+            }
+            if sensitive_label(&raw)?.is_some() {
+                result.excluded.push(Exclusion {
+                    path: key,
+                    reason: "secret".into(),
+                });
+                return Ok(());
+            }
+            let document = Document {
                 path: key,
-                reason: "secret".into(),
-            });
-            continue;
-        }
-        let document = Document {
-            path: key,
-            layer: if record["type"] == "event" {
-                "episodic"
-            } else {
-                "semantic"
-            }
-            .into(),
-            kind: format!("brain-{}", record["type"].as_str().unwrap_or("")),
-            title: record["title"].as_str().unwrap_or("").into(),
-            summary: format!(
-                "{} {}",
-                record["title"].as_str().unwrap_or(""),
-                record["goal"].as_str().unwrap_or("")
-            ),
-            content: image.body,
-            category: "dynamic".into(),
-            privacy: record["privacy"].as_str().unwrap_or("").into(),
-            owner: record["owner"].as_str().unwrap_or("").into(),
-            authority: record["authority"].as_str().unwrap_or("").into(),
-            lifecycle: record["status"].as_str().unwrap_or("").into(),
-            source_hash: sha256(raw.as_bytes()),
-            record_id: record["id"].as_str().map(String::from),
-            conflicts: strings(record, "conflicts"),
-            source_fingerprints: record["source_fingerprints"].clone(),
-            updated_at: record["updated_at"].as_str().unwrap_or("").into(),
-            confidence: record["confidence"].as_f64().unwrap_or(1.0),
-            attestation: record_attestation(record).into(),
-        };
-        result
-            .links
-            .extend(links(&document, &record["sources"], "source"));
-        if record["type"] == "task" {
-            let files = strings(record, "files");
-            let mut admissible = Vec::new();
-            for file in files.iter().rev().take(50) {
-                if source_path_problem(file).is_none() {
-                    admissible.push(file.clone());
+                layer: if record["type"] == "event" {
+                    "episodic"
+                } else {
+                    "semantic"
                 }
-            }
-            if !admissible.is_empty() {
-                let mut arguments = crate::git::strings(&["ls-files", "-z", "--"]);
-                arguments.extend(admissible.iter().map(std::ffi::OsString::from));
-                let tracked = crate::git::run(
-                    &context.roots.project,
-                    &arguments,
-                    None,
-                    std::time::Duration::from_secs(3),
-                    8 * 1024 * 1024,
-                )?;
-                if tracked.code == 0 {
-                    for path in tracked
-                        .stdout
-                        .split(|byte| *byte == 0)
-                        .filter(|path| !path.is_empty())
-                    {
-                        let path = std::str::from_utf8(path)
-                            .map_err(|_| RuntimeError::invalid("Tracked source is not UTF-8"))?;
-                        result
-                            .links
-                            .push((document.path.clone(), path.into(), "file".into()));
+                .into(),
+                kind: format!("brain-{}", record["type"].as_str().unwrap_or("")),
+                title: record["title"].as_str().unwrap_or("").into(),
+                summary: format!(
+                    "{} {}",
+                    record["title"].as_str().unwrap_or(""),
+                    record["goal"].as_str().unwrap_or("")
+                ),
+                content: image.body,
+                category: "dynamic".into(),
+                privacy: record["privacy"].as_str().unwrap_or("").into(),
+                owner: record["owner"].as_str().unwrap_or("").into(),
+                authority: record["authority"].as_str().unwrap_or("").into(),
+                lifecycle: record["status"].as_str().unwrap_or("").into(),
+                source_hash: sha256(raw.as_bytes()),
+                record_id: record["id"].as_str().map(String::from),
+                conflicts: strings(record, "conflicts"),
+                source_fingerprints: record["source_fingerprints"].clone(),
+                updated_at: record["updated_at"].as_str().unwrap_or("").into(),
+                confidence: record["confidence"].as_f64().unwrap_or(1.0),
+                attestation: record_attestation(record).into(),
+            };
+            result
+                .links
+                .extend(links(&document, &record["sources"], "source"));
+            if record["type"] == "task" {
+                let files = strings(record, "files");
+                let mut admissible = Vec::new();
+                for file in files.iter().rev().take(50) {
+                    if source_path_problem(file).is_none() {
+                        admissible.push(file.clone());
                     }
                 }
+                if !admissible.is_empty() {
+                    let mut arguments = crate::git::strings(&["ls-files", "-z", "--"]);
+                    arguments.extend(admissible.iter().map(std::ffi::OsString::from));
+                    let tracked = crate::git::run(
+                        &context.roots.project,
+                        &arguments,
+                        None,
+                        std::time::Duration::from_secs(3),
+                        8 * 1024 * 1024,
+                    )?;
+                    if tracked.code == 0 {
+                        for path in tracked
+                            .stdout
+                            .split(|byte| *byte == 0)
+                            .filter(|path| !path.is_empty())
+                        {
+                            let path = std::str::from_utf8(path).map_err(|_| {
+                                RuntimeError::invalid("Tracked source is not UTF-8")
+                            })?;
+                            result
+                                .links
+                                .push((document.path.clone(), path.into(), "file".into()));
+                        }
+                    }
+                }
+                tasks.insert(record["id"].as_str().unwrap_or("").into(), record.clone());
             }
-            tasks.insert(record["id"].as_str().unwrap_or("").into(), record.clone());
+            prefixes.extend(crate::history::work_prefixes(record));
+            result.documents.push(document);
+            Ok(())
+        })();
+        if let Err(error) = projected {
+            first_error = Some(error);
         }
-        prefixes.extend(crate::history::work_prefixes(record));
-        result.documents.push(document);
+    })?;
+    if let Some(error) = first_error {
+        return Err(error);
     }
-    for problem in inventory.problems {
+    for problem in problems {
         result.excluded.push(Exclusion {
             path: problem
                 .path
@@ -901,6 +918,51 @@ pub fn load_source_state(conn: &Connection) -> Result<SourceState> {
         .collect::<std::result::Result<_, _>>()?)
 }
 
+fn index_cache_inconsistent() -> RuntimeError {
+    RuntimeError::coded(
+        crate::ErrorKind::Conflict,
+        "index-cache-inconsistent",
+        "Index cache is inconsistent; a full refresh is required",
+    )
+}
+
+fn document_delete_triggers(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM main.sqlite_schema WHERE type='trigger' AND lower(tbl_name) IN ('documents','document_metadata','document_links','identifier_terms')
+           UNION ALL
+           SELECT 1 FROM temp.sqlite_schema WHERE type='trigger' AND lower(tbl_name) IN ('documents','document_metadata','document_links','identifier_terms')
+         )",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// The transaction owns this scan and its deletes. Retained names borrow the
+/// existing source set; only obsolete paths keep rowids, including duplicates.
+fn obsolete_document_rowids(
+    conn: &Connection,
+    retained: &BTreeSet<String>,
+) -> Result<BTreeMap<String, Vec<i64>>> {
+    let mut seen_retained = BTreeSet::new();
+    let mut obsolete = BTreeMap::<String, Vec<i64>>::new();
+    let mut statement = conn.prepare("SELECT rowid,path FROM documents")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let rowid = row.get::<_, i64>(0)?;
+        let path = row.get::<_, String>(1)?;
+        if let Some(path) = retained.get(&path) {
+            seen_retained.insert(path.as_str());
+        } else {
+            obsolete.entry(path).or_default().push(rowid);
+        }
+    }
+    if seen_retained.len() != retained.len() {
+        return Err(index_cache_inconsistent());
+    }
+    Ok(obsolete)
+}
+
 pub fn refresh_index(
     store: &mut Store,
     context: &RuntimeContext,
@@ -965,18 +1027,136 @@ pub fn refresh_index(
         && stored.get("skill-tree-fingerprint") == Some(&skill_fingerprint);
     let removed = existing.difference(&current).count();
     if !unchanged {
-        let rebuilt=store.transaction(|conn|{
-            let latest=paths(conn)?;if !retained.is_subset(&latest){return Err(RuntimeError::coded(crate::ErrorKind::Conflict,"index-cache-inconsistent","Index cache is inconsistent; a full refresh is required"));}
-            for path in latest.difference(&retained){for table in ["documents","document_metadata","document_links","identifier_terms"]{conn.execute(&format!("DELETE FROM {table} WHERE path=?1"),[path])?;}}
-            for document in &discovery.documents{
-                conn.execute("INSERT INTO documents(path,layer,kind,title,summary,content) VALUES(?1,?2,?3,?4,?5,?6)",params![document.path,document.layer,document.kind,document.title,document.summary,document.content])?;
-                conn.execute("INSERT INTO document_metadata(path,category,privacy,owner,authority,lifecycle,source_hash,record_id,conflicts,source_fingerprints,updated_at,confidence,attestation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![document.path,document.category,document.privacy,document.owner,document.authority,document.lifecycle,document.source_hash,document.record_id,serde_json::to_string(&document.conflicts)?,serde_json::to_string(&document.source_fingerprints)?,document.updated_at,document.confidence,document.attestation])?;
-                for (identifier,expansion) in crate::query::identifier_terms(&document.path,&document.content){conn.execute("INSERT OR REPLACE INTO identifier_terms(path,identifier,expansion) VALUES(?1,?2,?3)",params![document.path,identifier,expansion])?;}
+        let rebuilt = store.transaction(|conn| {
+            {
+                enum Deletions {
+                    Paths(BTreeSet<String>),
+                    Rowids(BTreeMap<String, Vec<i64>>),
+                }
+                // A trigger can introduce new FTS rows after a captured map.
+                // Keep the original path predicates whenever such callbacks
+                // can run, including TEMP triggers and differently cased names.
+                let delete_triggers = document_delete_triggers(conn)?;
+                let bulk_delete = retained.is_empty() && !delete_triggers;
+                let deletions = if retained.is_empty() || delete_triggers {
+                    let latest = paths(conn)?;
+                    if !retained.is_subset(&latest) {
+                        return Err(index_cache_inconsistent());
+                    }
+                    Deletions::Paths(latest)
+                } else {
+                    Deletions::Rowids(obsolete_document_rowids(conn, &retained)?)
+                };
+                match deletions {
+                    Deletions::Paths(latest) => {
+                        // Auxiliary rows still follow the old paths, keeping
+                        // unrelated orphan rows even on a complete rebuild.
+                        let mut delete_document = if bulk_delete {
+                            conn.execute("DELETE FROM documents", [])?;
+                            None
+                        } else {
+                            Some(conn.prepare("DELETE FROM documents WHERE path=?1")?)
+                        };
+                        let mut delete_auxiliary = [
+                            conn.prepare("DELETE FROM document_metadata WHERE path=?1")?,
+                            conn.prepare("DELETE FROM document_links WHERE path=?1")?,
+                            conn.prepare("DELETE FROM identifier_terms WHERE path=?1")?,
+                        ];
+                        for path in latest.difference(&retained) {
+                            if let Some(statement) = delete_document.as_mut() {
+                                statement.execute([path])?;
+                            }
+                            for statement in &mut delete_auxiliary {
+                                statement.execute([path])?;
+                            }
+                        }
+                    }
+                    Deletions::Rowids(obsolete) => {
+                        let mut delete_document =
+                            conn.prepare("DELETE FROM documents WHERE rowid=?1")?;
+                        let mut delete_auxiliary = [
+                            conn.prepare("DELETE FROM document_metadata WHERE path=?1")?,
+                            conn.prepare("DELETE FROM document_links WHERE path=?1")?,
+                            conn.prepare("DELETE FROM identifier_terms WHERE path=?1")?,
+                        ];
+                        for (path, rowids) in obsolete {
+                            for rowid in rowids {
+                                delete_document.execute([rowid])?;
+                            }
+                            for statement in &mut delete_auxiliary {
+                                statement.execute([&path])?;
+                            }
+                        }
+                    }
+                }
             }
-            for (path,reference,kind) in &discovery.links{conn.execute("INSERT OR REPLACE INTO document_links(path,ref_path,ref_kind) VALUES(?1,?2,?3)",params![path,reference,kind])?;}
-            conn.execute("DELETE FROM document_source_state",[])?;
-            for (path,stamp) in &discovery.state{conn.execute("INSERT INTO document_source_state(path,mtime_ns,size,eligible_until) VALUES(?1,?2,?3,?4)",params![path,stamp.mtime_ns,stamp.size,stamp.eligible_until])?;}
-            let mut state=discovery.extra_state.clone();state.insert("config-fingerprint".into(),config_fingerprint.clone());state.insert("skill-tree-fingerprint".into(),skill_fingerprint.clone());state.insert("secret-policy-fingerprint".into(),policy_fingerprint.clone());state.insert("provenance-policy-fingerprint".into(),sha256(include_str!("domain/sources.rs").as_bytes()));state.insert("brain-rows-digest".into(),brain_digest.clone());state.insert("index-generation".into(),uuid4());state.insert("identifier_terms_ready".into(),"1".into());state.insert("skill-parity-drift".into(),serde_json::to_string(&parity_drift)?);store_state(conn,&state)?;Ok(())
+            {
+                let mut insert_document = conn.prepare("INSERT INTO documents(path,layer,kind,title,summary,content) VALUES(?1,?2,?3,?4,?5,?6)")?;
+                let mut insert_metadata = conn.prepare("INSERT INTO document_metadata(path,category,privacy,owner,authority,lifecycle,source_hash,record_id,conflicts,source_fingerprints,updated_at,confidence,attestation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)")?;
+                let mut insert_identifier = conn.prepare("INSERT OR REPLACE INTO identifier_terms(path,identifier,expansion) VALUES(?1,?2,?3)")?;
+                for document in &discovery.documents {
+                    insert_document.execute(params![
+                        document.path,
+                        document.layer,
+                        document.kind,
+                        document.title,
+                        document.summary,
+                        document.content
+                    ])?;
+                    insert_metadata.execute(params![
+                        document.path,
+                        document.category,
+                        document.privacy,
+                        document.owner,
+                        document.authority,
+                        document.lifecycle,
+                        document.source_hash,
+                        document.record_id,
+                        serde_json::to_string(&document.conflicts)?,
+                        serde_json::to_string(&document.source_fingerprints)?,
+                        document.updated_at,
+                        document.confidence,
+                        document.attestation
+                    ])?;
+                    for (identifier, expansion) in
+                        crate::query::identifier_terms(&document.path, &document.content)
+                    {
+                        insert_identifier.execute(params![document.path, identifier, expansion])?;
+                    }
+                }
+            }
+            {
+                let mut insert_link = conn.prepare("INSERT OR REPLACE INTO document_links(path,ref_path,ref_kind) VALUES(?1,?2,?3)")?;
+                for (path, reference, kind) in &discovery.links {
+                    insert_link.execute(params![path, reference, kind])?;
+                }
+            }
+            conn.execute("DELETE FROM document_source_state", [])?;
+            {
+                let mut insert_source = conn.prepare("INSERT INTO document_source_state(path,mtime_ns,size,eligible_until) VALUES(?1,?2,?3,?4)")?;
+                for (path, stamp) in &discovery.state {
+                    insert_source.execute(params![
+                        path,
+                        stamp.mtime_ns,
+                        stamp.size,
+                        stamp.eligible_until
+                    ])?;
+                }
+            }
+            let mut state = discovery.extra_state.clone();
+            state.insert("config-fingerprint".into(), config_fingerprint.clone());
+            state.insert("skill-tree-fingerprint".into(), skill_fingerprint.clone());
+            state.insert("secret-policy-fingerprint".into(), policy_fingerprint.clone());
+            state.insert(
+                "provenance-policy-fingerprint".into(),
+                sha256(include_str!("domain/sources.rs").as_bytes()),
+            );
+            state.insert("brain-rows-digest".into(), brain_digest.clone());
+            state.insert("index-generation".into(), uuid4());
+            state.insert("identifier_terms_ready".into(), "1".into());
+            state.insert("skill-parity-drift".into(), serde_json::to_string(&parity_drift)?);
+            store_state(conn, &state)?;
+            Ok(())
         });
         if let Err(error) = rebuilt {
             if incremental && error.code.as_deref() == Some("index-cache-inconsistent") {
@@ -1274,6 +1454,39 @@ pub(crate) const DOCUMENT_SELECT: &str = "d.path,d.layer,d.kind,d.title,d.summar
 pub fn load_document(conn: &Connection, path: &str) -> Result<Option<Document>> {
     use rusqlite::OptionalExtension;
     Ok(conn.query_row(&format!("SELECT {DOCUMENT_SELECT} FROM documents d JOIN document_metadata m ON m.path=d.path WHERE d.path=?1"),[path],document_from_row).optional()?)
+}
+
+#[cfg(test)]
+mod partial_rowid_plan_tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_retained_path_refuses_the_rowid_plan_without_deleting_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE documents USING fts5(path UNINDEXED,content);
+             INSERT INTO documents(rowid,path,content) VALUES(-1,'kept.md','kept'),(2,'obsolete.md','obsolete');",
+        )
+        .unwrap();
+        let retained = BTreeSet::from(["kept.md".into(), "missing.md".into()]);
+        let error = obsolete_document_rowids(&conn, &retained).unwrap_err();
+        assert_eq!(error.kind, crate::ErrorKind::Conflict);
+        assert_eq!(error.code.as_deref(), Some("index-cache-inconsistent"));
+        let mut statement = conn
+            .prepare("SELECT rowid,path FROM documents ORDER BY rowid")
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![(-1, "kept.md".into()), (2, "obsolete.md".into())]
+        );
+    }
 }
 
 #[cfg(test)]

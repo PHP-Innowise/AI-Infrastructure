@@ -190,6 +190,12 @@ fn outside_notice(session: &Path, project: &Path) -> Output {
         project.display()
     ))
 }
+fn payload(raw: &[u8]) -> Value {
+    serde_json::from_slice::<Value>(raw)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}))
+}
 impl Context {
     pub fn new(root: &Path, host: &str, raw: &[u8]) -> Result<Self> {
         Self::create(root, host, raw, true)
@@ -197,6 +203,15 @@ impl Context {
     /// Without `with_task` the session's task is not inferred from the branch,
     /// which costs Git queries the guards do not need.
     fn create(root: &Path, host: &str, raw: &[u8], with_task: bool) -> Result<Self> {
+        Self::create_with_payload(root, host, raw, with_task, None)
+    }
+    fn create_with_payload(
+        root: &Path,
+        host: &str,
+        raw: &[u8],
+        with_task: bool,
+        parsed: Option<Value>,
+    ) -> Result<Self> {
         if !["claude", "codex", "cursor"].contains(&host) {
             return Err(RuntimeError::invalid("Unsupported hook host"));
         }
@@ -207,10 +222,7 @@ impl Context {
             .filter(|path| path.is_absolute())
             .unwrap_or_else(|| root.clone());
         let mut roots = Roots::discover(&state, &root)?;
-        let payload = serde_json::from_slice::<Value>(raw)
-            .ok()
-            .filter(Value::is_object)
-            .unwrap_or_else(|| json!({}));
+        let payload = parsed.unwrap_or_else(|| payload(raw));
         let mut entered = false;
         let mut other_worktree = false;
         // Git metadata of the session directory that cannot be read only means
@@ -486,13 +498,26 @@ pub fn execute(root: &Path, host: &str, role: &str, raw: &[u8]) -> Result<Output
     {
         return Ok(pass());
     }
-    let context = match Context::create(root, host, raw, TASK_ROLES.contains(&role)) {
-        Ok(context) => context,
-        // The shell guard never lets a command through because its own
-        // context failed: it then checks the command from the bound root.
-        Err(_) if role == "bash-validator" => return guards::bash_without_context(root, raw),
-        Err(_) => return Ok(pass()),
+    let parsed = if matches!(
+        role,
+        "bash-validator" | "file-naming-validator" | "loop-detection"
+    ) {
+        let payload = payload(raw);
+        if guards::payload_noop(role, &payload) {
+            return Ok(pass());
+        }
+        Some(payload)
+    } else {
+        None
     };
+    let context =
+        match Context::create_with_payload(root, host, raw, TASK_ROLES.contains(&role), parsed) {
+            Ok(context) => context,
+            // The shell guard never lets a command through because its own
+            // context failed: it then checks the command from the bound root.
+            Err(_) if role == "bash-validator" => return guards::bash_without_context(root, raw),
+            Err(_) => return Ok(pass()),
+        };
     if host == "claude"
         && context.payload.get("cursor_version").is_some()
         && context.roots.tooling.join(".cursor/hooks.json").is_file()

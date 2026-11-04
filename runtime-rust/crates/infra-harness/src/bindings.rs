@@ -236,10 +236,47 @@ impl crate::results::ResultsBackend for ResultsBridge {
 }
 pub struct SystemsDomain {
     pub manager: Arc<infra_system::SystemManager>,
+    // One owned guard covers both submitted and running blocking work. The
+    // flag closes admission after the last preceding operation has drained.
+    gate: Arc<tokio::sync::Mutex<bool>>,
+}
+impl SystemsDomain {
+    pub fn new(manager: Arc<infra_system::SystemManager>) -> Self {
+        Self {
+            manager,
+            gate: Arc::new(tokio::sync::Mutex::new(false)),
+        }
+    }
+    pub async fn close(&self) {
+        *self.gate.lock().await = true;
+    }
 }
 impl Domain for SystemsDomain {
     fn execute<'a>(&'a self, op: &'a str, request: Value) -> Reply<'a> {
-        Box::pin(async move { Ok(Payload::Json(self.manager.execute(op, &request)?)) })
+        Box::pin(async move {
+            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                let gate = self.gate.blocking_lock();
+                if *gate {
+                    return Err(HarnessError::conflict("The system manager is closed."));
+                }
+                return Ok(Payload::Json(self.manager.execute(op, &request)?));
+            };
+            let gate = self.gate.clone().lock_owned().await;
+            if *gate {
+                return Err(HarnessError::conflict("The system manager is closed."));
+            }
+            let manager = self.manager.clone();
+            let operation = op.to_owned();
+            runtime
+                .spawn_blocking(move || {
+                    // Dropping the caller must not admit another operation
+                    // until this synchronous custody boundary has finished.
+                    let _gate = gate;
+                    Ok(Payload::Json(manager.execute(&operation, &request)?))
+                })
+                .await
+                .map_err(|_| HarnessError::unavailable("System operation worker stopped."))?
+        })
     }
 }
 struct WorkflowObserver {
@@ -401,3 +438,7 @@ impl SpecialWorkflow for SystemWorkflow {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "bindings_tests.rs"]
+mod tests;

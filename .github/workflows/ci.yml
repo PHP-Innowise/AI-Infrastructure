@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 5
     env:
       NATIVE_CHECK_GROUP: "changelog"
+      CARGO_PROFILE_DEV_DEBUG: "0"
     defaults:
       run:
         shell: bash
@@ -27,10 +28,20 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        id: native-toolchain
         with:
           components: rustfmt, clippy
       - name: Select the native target directory
         run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
+      - name: Cache native Cargo artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            ${{ env.CARGO_TARGET_DIR }}
+          key: native-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-changelog-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -43,6 +54,7 @@ jobs:
     timeout-minutes: 15
     env:
       NATIVE_CHECK_GROUP: "installation"
+      CARGO_PROFILE_DEV_DEBUG: "0"
     defaults:
       run:
         shell: bash
@@ -51,10 +63,20 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        id: native-toolchain
         with:
           components: rustfmt, clippy
       - name: Select the native target directory
         run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
+      - name: Cache native Cargo artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            ${{ env.CARGO_TARGET_DIR }}
+          key: native-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-installation-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -67,6 +89,7 @@ jobs:
     timeout-minutes: 5
     env:
       NATIVE_CHECK_GROUP: "links"
+      CARGO_PROFILE_DEV_DEBUG: "0"
     defaults:
       run:
         shell: bash
@@ -75,10 +98,20 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        id: native-toolchain
         with:
           components: rustfmt, clippy
       - name: Select the native target directory
         run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
+      - name: Cache native Cargo artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            ${{ env.CARGO_TARGET_DIR }}
+          key: native-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-links-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -91,6 +124,7 @@ jobs:
     timeout-minutes: 15
     env:
       NATIVE_CHECK_GROUP: "lint"
+      CARGO_PROFILE_DEV_DEBUG: "0"
     defaults:
       run:
         shell: bash
@@ -99,6 +133,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        id: native-toolchain
         with:
           components: rustfmt, clippy
       - uses: shivammathur/setup-php@v2
@@ -108,6 +143,15 @@ jobs:
           tools: none
       - name: Select the native target directory
         run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
+      - name: Cache native Cargo artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            ${{ env.CARGO_TARGET_DIR }}
+          key: native-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-lint-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -120,6 +164,7 @@ jobs:
     timeout-minutes: 10
     env:
       NATIVE_CHECK_GROUP: "mirrors"
+      CARGO_PROFILE_DEV_DEBUG: "0"
     defaults:
       run:
         shell: bash
@@ -128,10 +173,20 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        id: native-toolchain
         with:
           components: rustfmt, clippy
       - name: Select the native target directory
         run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
+      - name: Cache native Cargo artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            ${{ env.CARGO_TARGET_DIR }}
+          key: native-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-mirrors-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group
@@ -144,6 +199,7 @@ jobs:
     timeout-minutes: 10
     env:
       NATIVE_CHECK_GROUP: "parity"
+      CARGO_PROFILE_DEV_DEBUG: "0"
     defaults:
       run:
         shell: bash
@@ -152,10 +208,20 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        id: native-toolchain
         with:
           components: rustfmt, clippy
       - name: Select the native target directory
         run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP//\\//}/infra-native-target" >> "$GITHUB_ENV"
+      - name: Cache native Cargo artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            ${{ env.CARGO_TARGET_DIR }}
+          key: native-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-toolchain.outputs.cachekey }}-parity-dev0-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/**/Cargo.toml', 'install/check-catalog.json', '.cargo/**', 'runtime-rust/.cargo/**') }}
       - name: Build the native engine
         run: cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
       - name: Run the catalog group

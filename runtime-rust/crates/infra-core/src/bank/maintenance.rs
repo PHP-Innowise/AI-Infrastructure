@@ -145,10 +145,13 @@ fn shingles(text: &str) -> BTreeSet<Vec<String>> {
 pub fn similarity(left: &str, right: &str) -> f64 {
     let a = shingles(left);
     let b = shingles(right);
+    similarity_shingles(&a, &b)
+}
+fn similarity_shingles(a: &BTreeSet<Vec<String>>, b: &BTreeSet<Vec<String>>) -> f64 {
     if a.is_empty() || b.is_empty() {
         0.0
     } else {
-        a.intersection(&b).count() as f64 / a.union(&b).count() as f64
+        a.intersection(b).count() as f64 / a.union(b).count() as f64
     }
 }
 pub fn duplicate_ratio(config: &Value) -> f64 {
@@ -176,10 +179,14 @@ pub fn near_duplicate(
     chunks: &[(String, String)],
     threshold: f64,
 ) -> Option<String> {
+    if chunks.is_empty() {
+        return None;
+    }
+    let content = shingles(content);
     let mut best = None;
     let mut score = threshold;
     for (id, text) in chunks {
-        let current = similarity(content, text);
+        let current = similarity_shingles(&content, &shingles(text));
         if current >= score {
             score = current;
             best = Some(id.clone());
@@ -284,9 +291,10 @@ pub fn audit(service: &BankService, provenance: bool) -> Result<Value> {
     let texts = active_texts(service)?;
     let threshold = duplicate_ratio(&service.config()?.value);
     let mut duplicates = Vec::new();
-    for (index, (left, a)) in texts.iter().enumerate() {
+    for (index, (left, a)) in texts.iter().enumerate().take(texts.len().saturating_sub(1)) {
+        let a = shingles(a);
         for (right, b) in &texts[index + 1..] {
-            let score = similarity(a, b);
+            let score = similarity_shingles(&a, &shingles(b));
             if score >= threshold {
                 duplicates.push(
                     object!({"left":left,"right":right,"similarity":(score*1000.0).round()/1000.0}),
@@ -682,7 +690,10 @@ pub fn retry_pending(service: &BankService) -> Result<Value> {
 
 #[cfg(test)]
 mod duplicate_unicode_tests {
-    use super::{duplicate_tokens, python_digit, similarity};
+    use super::{audit, duplicate_tokens, near_duplicate, python_digit, similarity};
+    use crate::{BankService, Roots, RuntimeContext, domain};
+    use serde_json::{Value, json};
+    use std::{collections::BTreeSet, fs, path::PathBuf};
 
     #[test]
     fn combining_marks_and_join_controls_do_not_join_python_word_tokens() {
@@ -734,5 +745,226 @@ mod duplicate_unicode_tests {
     fn error_code_digits_remain_distinct_duplicate_evidence() {
         assert_eq!(similarity("timeout 502 retry", "timeout 503 retry"), 0.0);
         assert_eq!(similarity("timeout 502 retry", "timeout 502 retry"), 1.0);
+    }
+
+    #[test]
+    fn exact_jaccard_and_short_text_goldens_preserve_boundary_matches() {
+        let third = 1.0 / 3.0;
+        let left = "alpha beta gamma delta";
+        let right = "alpha beta gamma epsilon";
+        assert_eq!(similarity(left, right), third);
+        assert_eq!(similarity("alpha", "ALPHA"), 1.0);
+        assert_eq!(similarity("alpha beta", "alpha beta"), 1.0);
+        assert_eq!(similarity("alpha beta", "alpha beta gamma"), 0.0);
+        assert_eq!(
+            similarity("alpha alpha alpha alpha", "alpha alpha alpha"),
+            1.0
+        );
+        assert_eq!(similarity("the and", "the and"), 0.0);
+        assert_eq!(similarity("", "alpha"), 0.0);
+        let chunks = vec![("right".into(), right.into())];
+        assert_eq!(near_duplicate(left, &chunks, third), Some("right".into()));
+        assert_eq!(near_duplicate(left, &chunks, third + f64::EPSILON), None);
+    }
+
+    #[test]
+    fn ties_empty_text_and_nonfinite_thresholds_keep_iteration_semantics() {
+        let content = "alpha beta gamma";
+        let mut chunks = vec![
+            ("z-last-in-sort".into(), content.into()),
+            ("a-last-in-input".into(), content.into()),
+        ];
+        assert_eq!(
+            near_duplicate(content, &chunks, 1.0),
+            Some("a-last-in-input".into())
+        );
+        chunks.reverse();
+        assert_eq!(
+            near_duplicate(content, &chunks, 1.0),
+            Some("z-last-in-sort".into())
+        );
+        for threshold in [f64::NEG_INFINITY, -1.0, 0.0] {
+            assert_eq!(
+                near_duplicate(content, &chunks, threshold),
+                Some("z-last-in-sort".into())
+            );
+        }
+        for threshold in [1.001, f64::INFINITY, f64::NAN] {
+            assert_eq!(near_duplicate(content, &chunks, threshold), None);
+        }
+        let empty = vec![
+            ("first".into(), String::new()),
+            ("last".into(), "the and".into()),
+        ];
+        assert_eq!(near_duplicate("", &empty, 0.0), Some("last".into()));
+        assert_eq!(near_duplicate("", &empty, 0.1), None);
+        assert_eq!(near_duplicate(content, &[], f64::NEG_INFINITY), None);
+    }
+
+    // Frozen pre-reuse pairwise implementation. Tokenizer goldens above are
+    // independent; this reference checks exact arithmetic and reuse/order.
+    fn original_similarity(left: &str, right: &str) -> f64 {
+        fn original_shingles(text: &str) -> BTreeSet<Vec<String>> {
+            let words = duplicate_tokens(text);
+            if words.len() < 3 {
+                if words.is_empty() {
+                    BTreeSet::new()
+                } else {
+                    BTreeSet::from([words])
+                }
+            } else {
+                words.windows(3).map(|window| window.to_vec()).collect()
+            }
+        }
+        let a = original_shingles(left);
+        let b = original_shingles(right);
+        if a.is_empty() || b.is_empty() {
+            0.0
+        } else {
+            a.intersection(&b).count() as f64 / a.union(&b).count() as f64
+        }
+    }
+
+    fn original_near_duplicate(
+        content: &str,
+        chunks: &[(String, String)],
+        threshold: f64,
+    ) -> Option<String> {
+        let mut best = None;
+        let mut score = threshold;
+        for (id, text) in chunks {
+            let current = original_similarity(content, text);
+            if current >= score {
+                score = current;
+                best = Some(id.clone());
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn shingle_reuse_matches_frozen_pairwise_reference_across_multilingual_inputs() {
+        let corpus = [
+            "",
+            "a and the",
+            "alpha",
+            "alpha beta",
+            "alpha beta gamma",
+            "alpha beta gamma delta",
+            "alpha beta gamma epsilon",
+            "cafe\u{0301} route",
+            "cafe route",
+            "alpha\u{200d} beta",
+            "ПРОВЕРКА маршрута 502",
+            "проверка маршрута 503",
+            "Straße Καφές ²",
+            "STRASSE ΚΑΦΈΣ ²",
+            "１ 2 Ⅳ \u{1ccf0}",
+            "word word word word",
+        ];
+        let mut chunks = corpus
+            .iter()
+            .enumerate()
+            .map(|(index, text)| (format!("chunk-{index}"), (*text).into()))
+            .collect::<Vec<_>>();
+        for left in corpus {
+            for right in corpus {
+                assert_eq!(
+                    similarity(left, right).to_bits(),
+                    original_similarity(left, right).to_bits(),
+                    "{left:?}, {right:?}"
+                );
+            }
+            for threshold in [
+                f64::NEG_INFINITY,
+                -1.0,
+                0.0,
+                1.0 / 3.0,
+                0.6,
+                1.0,
+                1.001,
+                f64::INFINITY,
+                f64::NAN,
+            ] {
+                for _ in 0..2 {
+                    assert_eq!(
+                        near_duplicate(left, &chunks, threshold),
+                        original_near_duplicate(left, &chunks, threshold),
+                        "{left:?}, {threshold:?}"
+                    );
+                    chunks.reverse();
+                }
+            }
+        }
+    }
+
+    struct AuditFixture {
+        root: PathBuf,
+        bank: BankService,
+    }
+    impl AuditFixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("infra-bank-shingles-{}", domain::uuid4()));
+            fs::create_dir_all(root.join("memory-bank/chunks")).unwrap();
+            fs::create_dir_all(root.join("project-brain/config")).unwrap();
+            fs::write(
+                root.join("project-brain/config/runtime.json"),
+                serde_json::to_vec(&json!({"bank_duplicate_ratio":1.0/3.0})).unwrap(),
+            )
+            .unwrap();
+            let context =
+                RuntimeContext::new(Roots::installed(&root).unwrap(), "local", "governed").unwrap();
+            Self {
+                root,
+                bank: BankService::new(context),
+            }
+        }
+        fn write_chunk(&self, number: u32, status: &str, body: &str) -> String {
+            let id = format!("MEM-20261103-{number:08x}");
+            let metadata = json!({"id":id,"title":"and","type":"convention","status":status,"scope":["application"],"tags":[],"created":"2026-01-01","last_verified":"2026-01-01","review_after":"9999-12-31","sources":[],"supersedes":[],"superseded_by":null});
+            let bytes = super::codec::render_chunk(&metadata, body).unwrap();
+            fs::write(
+                self.root
+                    .join(format!("memory-bank/chunks/{id}-case-{number}.md")),
+                bytes,
+            )
+            .unwrap();
+            id
+        }
+    }
+    impl Drop for AuditFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn real_audit_keeps_pair_order_rounding_and_inactive_or_invalid_handling() {
+        let fixture = AuditFixture::new();
+        let empty = json!({"chunks":0,"source_changed":[],"overdue_review":[],"undigested":[],"duplicates":[]});
+        assert_eq!(audit(&fixture.bank, false).unwrap(), empty);
+        let first = fixture.write_chunk(1, "active", "alpha beta gamma delta");
+        let mut single = empty.clone();
+        single["chunks"] = json!(1);
+        assert_eq!(audit(&fixture.bank, false).unwrap(), single);
+        // Creation order differs from the canonical filename iteration order.
+        let third = fixture.write_chunk(3, "active", "alpha beta gamma delta");
+        let second = fixture.write_chunk(2, "active", "alpha beta gamma epsilon");
+        fixture.write_chunk(4, "archived", "alpha beta gamma delta");
+        fs::write(
+            fixture
+                .root
+                .join("memory-bank/chunks/MEM-20261103-00000005-invalid.md"),
+            b"invalid frontmatter",
+        )
+        .unwrap();
+        let actual = audit(&fixture.bank, false).unwrap();
+        let expected: Value = json!({"chunks":4,"source_changed":[],"overdue_review":[],"undigested":[],"duplicates":[
+            {"left":first,"right":second,"similarity":0.333},
+            {"left":first,"right":third,"similarity":1.0},
+            {"left":second,"right":third,"similarity":0.333}
+        ]});
+        assert_eq!(actual, expected);
     }
 }

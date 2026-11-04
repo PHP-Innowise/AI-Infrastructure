@@ -92,9 +92,8 @@ impl Services for NativeServices {
                         .unwrap_or("0")
                         .parse::<i64>()
                         .map_err(|_| HarnessError::invalid("Invalid event cursor."))?;
-                    Ok(Payload::Json(
-                        json!({"session":self.store.get(sid)?,"events":self.store.events(sid,after)?}),
-                    ))
+                    let (session, events) = self.store.session_events(sid, after)?;
+                    Ok(Payload::Json(json!({"session":session,"events":events})))
                 }
                 "sessions.merge_archive" => Ok(Payload::Json(self.store.merge_archive(sid)?)),
                 "sessions.delete_merge" => {

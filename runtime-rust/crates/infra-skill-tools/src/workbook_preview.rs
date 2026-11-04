@@ -13,7 +13,10 @@ fn children<'a>(e: &'a Element, name: &str) -> Vec<&'a Element> {
         .collect()
 }
 fn child<'a>(e: &'a Element, name: &str) -> Option<&'a Element> {
-    children(e, name).into_iter().next()
+    e.children
+        .iter()
+        .filter_map(|n| n.as_element())
+        .find(|e| e.name.rsplit(':').next() == Some(name))
 }
 fn text(e: &Element) -> String {
     e.children
@@ -109,8 +112,8 @@ fn project(book: Package) -> Result<Vec<Value>> {
     let mut result = vec![];
     let mut dense_slots_left = 200_000usize;
     for name in names {
-        let mut rows = book
-            .rows_bounded(&name, dense_slots_left)
+        let (sheet, mut rows) = book
+            .sheet_rows_bounded(&name, dense_slots_left)
             .map_err(|e| RuntimeError::invalid(e.to_string()))?;
         let used_slots = rows
             .iter()
@@ -119,9 +122,6 @@ fn project(book: Package) -> Result<Vec<Value>> {
         dense_slots_left = dense_slots_left
             .checked_sub(used_slots)
             .ok_or_else(|| RuntimeError::invalid("worksheet dense slot bound"))?;
-        let sheet = book
-            .part(&book.sheets[&name])
-            .map_err(|e| RuntimeError::invalid(e.to_string()))?;
         admit_cell_coordinates(&sheet)?;
         let mut formulas = serde_json::Map::new();
         if let Some(data) = child(&sheet, "sheetData") {
@@ -182,3 +182,21 @@ fn project(book: Package) -> Result<Vec<Value>> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod child_tests {
+    use super::*;
+
+    #[test]
+    fn first_local_name_match_preserves_child_order() {
+        let mut parent = Element::new("cell");
+        parent.children.push(xmltree::XMLNode::Text("text".into()));
+        for (name, id) in [("other", "skip"), ("sheet:f", "first"), ("f", "second")] {
+            let mut element = Element::new(name);
+            element.attributes.insert("id".into(), id.into());
+            parent.children.push(xmltree::XMLNode::Element(element));
+        }
+        assert_eq!(child(&parent, "f").unwrap().attributes["id"], "first");
+        assert!(child(&parent, "missing").is_none());
+    }
+}

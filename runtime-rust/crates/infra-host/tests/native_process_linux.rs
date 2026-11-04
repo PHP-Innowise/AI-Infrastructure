@@ -378,6 +378,23 @@ fn binary_stdin_argument_exit_code_and_line_callbacks_are_preserved() {
     expected.extend_from_slice(INPUT);
     assert_eq!(bytes(&value["bytes"]), expected);
     assert_eq!(packets(&value), expected);
+    let mut first_packet = LITERAL.as_bytes().to_vec();
+    first_packet.push(b'\n');
+    let actual_packets = value["packets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_packets,
+        vec![
+            first_packet,
+            b"native stdin\r\n".to_vec(),
+            b"second\n".to_vec(),
+            b"\0\xfftail".to_vec(),
+        ]
+    );
     let signals = value["events"]
         .as_array()
         .unwrap()

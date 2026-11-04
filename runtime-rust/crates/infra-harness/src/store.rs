@@ -240,35 +240,33 @@ impl SessionStore {
         get_session(&db, sid)
     }
     pub fn summaries(&self) -> Result<Vec<Value>> {
-        let ids = {
-            let db = self.connection()?;
-            let mut q = db
-                .prepare("SELECT id FROM sessions ORDER BY updated_at DESC,rowid DESC LIMIT 200")?;
-            q.query_map([], |r| r.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        ids.iter().map(|s| self.get(s)).collect()
+        let db = self.connection()?;
+        let mut q = db.prepare(
+            "SELECT s.*,m.summary FROM sessions s LEFT JOIN session_merges m ON m.session_id=s.id ORDER BY s.updated_at DESC,s.rowid DESC LIMIT 200",
+        )?;
+        let names = session_columns(&q);
+        let mut rows = q.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push(decode_session(row, &names)?);
+        }
+        Ok(out)
+    }
+    pub fn session_events(&self, sid: &str, after: i64) -> Result<(Value, Vec<Value>)> {
+        let db = self.connection()?;
+        // The HTTP route has always validated the session before rejecting a
+        // negative cursor. Standalone `events` keeps its cursor-first order.
+        let session = get_session(&db, sid)?;
+        let events = session_events(&db, sid, after)?;
+        Ok((session, events))
     }
     pub fn events(&self, sid: &str, after: i64) -> Result<Vec<Value>> {
         if after < 0 {
             return Err(HarnessError::invalid("Invalid event cursor."));
         }
-        self.get(sid)?;
         let db = self.connection()?;
-        let mut q = db.prepare(
-            "SELECT id,data FROM events WHERE session_id=?1 AND id>?2 ORDER BY id LIMIT 250",
-        )?;
-        let rows = q.query_map(params![sid, after], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, raw) = row?;
-            let mut v = crate::strict_json::parse(raw.as_bytes(), 4 * 1024 * 1024)?;
-            v["id"] = id.into();
-            out.push(v);
-        }
-        Ok(out)
+        get_session(&db, sid)?;
+        session_events(&db, sid, after)
     }
     pub fn event(&self, sid: &str, event: &Value) -> Result<i64> {
         if !event.is_object() {
@@ -821,18 +819,30 @@ pub fn agent_plan(session: &Value) -> Value {
 }
 
 pub(crate) fn get_session(db: &Connection, sid: &str) -> Result<Value> {
-    let mut q = db.prepare("SELECT * FROM sessions WHERE id=?1")?;
-    let names = q
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>();
+    let mut q = db.prepare(
+        "SELECT s.*,m.summary FROM sessions s LEFT JOIN session_merges m ON m.session_id=s.id WHERE s.id=?1",
+    )?;
+    let names = session_columns(&q);
     let mut rows = q.query([sid])?;
     let row = rows
         .next()?
         .ok_or_else(|| HarnessError::missing("Session not found."))?;
+    decode_session(row, &names)
+}
+
+fn session_columns(statement: &rusqlite::Statement<'_>) -> Vec<String> {
+    // The final column belongs to the join, rather than the public session.
+    statement
+        .column_names()
+        .iter()
+        .take(statement.column_count() - 1)
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn decode_session(row: &rusqlite::Row<'_>, names: &[String]) -> Result<Value> {
     let mut result = Map::new();
-    for (i, name) in names.into_iter().enumerate() {
+    for (i, name) in names.iter().enumerate() {
         use rusqlite::types::ValueRef;
         let value = match row.get_ref(i)? {
             ValueRef::Null => Value::Null,
@@ -845,7 +855,7 @@ pub(crate) fn get_session(db: &Connection, sid: &str) -> Result<Value> {
             ),
             _ => return Err(HarnessError::invalid("Invalid session field.")),
         };
-        result.insert(name, value);
+        result.insert(name.clone(), value);
     }
     for key in ["project_context", "agents_enabled"] {
         let value = result.get(key).and_then(Value::as_i64).unwrap_or(0) != 0;
@@ -873,13 +883,7 @@ pub(crate) fn get_session(db: &Connection, sid: &str) -> Result<Value> {
         }
     }
     result.remove("fleet_action");
-    let summary: Option<String> = db
-        .query_row(
-            "SELECT summary FROM session_merges WHERE session_id=?1",
-            [sid],
-            |r| r.get(0),
-        )
-        .optional()?;
+    let summary: Option<String> = row.get(names.len())?;
     result.insert(
         "merge".into(),
         summary
@@ -897,9 +901,240 @@ pub(crate) fn get_session(db: &Connection, sid: &str) -> Result<Value> {
             json!({"usd":usd,"tokens":null,"seconds":900}),
         );
     }
-    result.insert(
-        "agent_budget_plan".into(),
-        agent_plan(&Value::Object(result.clone())),
-    );
-    Ok(Value::Object(result))
+    let mut result = Value::Object(result);
+    let plan = agent_plan(&result);
+    result["agent_budget_plan"] = plan;
+    Ok(result)
+}
+
+fn session_events(db: &Connection, sid: &str, after: i64) -> Result<Vec<Value>> {
+    if after < 0 {
+        return Err(HarnessError::invalid("Invalid event cursor."));
+    }
+    let mut q = db.prepare(
+        "SELECT id,data FROM events WHERE session_id=?1 AND id>?2 ORDER BY id LIMIT 250",
+    )?;
+    let rows = q.query_map(params![sid, after], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, raw) = row?;
+        let mut v = crate::strict_json::parse(raw.as_bytes(), 4 * 1024 * 1024)?;
+        v["id"] = id.into();
+        out.push(v);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, SessionStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&directory.path().join("state")).unwrap();
+        (directory, store)
+    }
+
+    fn insert(db: &Connection, sid: &str, updated: &str) {
+        db.execute(
+            "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at) VALUES(?1,'Example','project','/project','codex','plan','native',0,'completed','created',?2)",
+            params![sid, updated],
+        )
+        .unwrap();
+    }
+
+    fn merge(db: &Connection, sid: &str, summary: &str) {
+        db.execute(
+            "INSERT INTO session_merges(session_id,request_id,request_hash,bundle,summary,context) VALUES(?1,?1,'hash','{}',?2,'context')",
+            params![sid, summary],
+        )
+        .unwrap();
+    }
+
+    fn error<T>(result: Result<T>) -> (u16, &'static str, String) {
+        match result {
+            Ok(_) => panic!("expected an error"),
+            Err(error) => (error.status, error.code, error.message),
+        }
+    }
+
+    #[test]
+    fn summaries_preserve_timestamp_and_rowid_order_and_cap() {
+        let (_directory, store) = fixture();
+        {
+            let db = store.connection().unwrap();
+            for i in 0..205 {
+                insert(&db, &format!("session-{i}"), &format!("updated-{}", i % 3));
+            }
+            merge(&db, "session-204", r#"{"sources":["earlier"]}"#);
+        }
+        let summaries = store.summaries().unwrap();
+        let mut expected = (0..205).collect::<Vec<_>>();
+        expected.sort_by_key(|i| std::cmp::Reverse((i % 3, *i)));
+        let expected = expected
+            .into_iter()
+            .take(200)
+            .map(|i| format!("session-{i}"))
+            .collect::<Vec<_>>();
+        assert_eq!(summaries.len(), 200);
+        for (summary, sid) in summaries.iter().zip(&expected) {
+            assert_eq!(summary["id"], sid.as_str());
+            assert_eq!(*summary, store.get(sid).unwrap());
+            assert!(!summary.as_object().unwrap().contains_key("summary"));
+        }
+        assert_eq!(
+            summaries.iter().find(|s| s["id"] == "session-204").unwrap()["merge"],
+            json!({"sources":["earlier"]})
+        );
+    }
+
+    #[test]
+    fn joined_sessions_keep_normalization_defaults_and_null_merge() {
+        let (_directory, store) = fixture();
+        {
+            let db = store.connection().unwrap();
+            insert(&db, "session", "updated");
+            db.execute(
+                "UPDATE sessions SET project_context=2,agents_enabled=-1,fleet=?1,fleet_action='private',brain=?2 WHERE id='session'",
+                params![r#"{"budget_usd":12}"#, r#"{"task":"TASK-1"}"#],
+            )
+            .unwrap();
+        }
+        let session = store.get("session").unwrap();
+        assert_eq!(session["project_context"], true);
+        assert_eq!(session["agents_enabled"], true);
+        assert_eq!(session["brain"], json!({"task":"TASK-1"}));
+        assert_eq!(
+            session["budgets"],
+            json!({"usd":12,"tokens":null,"seconds":900})
+        );
+        assert_eq!(session["agent_budget_plan"]["agents"], 4);
+        assert_eq!(session["agent_budget_plan"]["concurrent"], 3);
+        assert_eq!(session["agent_budget_plan"]["usd"], 3.0);
+        assert_eq!(session["merge"], Value::Null);
+        assert!(!session.as_object().unwrap().contains_key("fleet_action"));
+        assert!(!session.as_object().unwrap().contains_key("summary"));
+        assert_eq!(store.summaries().unwrap(), vec![session]);
+    }
+
+    #[test]
+    fn summaries_validate_selected_json_without_reading_older_corruption() {
+        let (_directory, store) = fixture();
+        {
+            let db = store.connection().unwrap();
+            for i in 0..205 {
+                insert(&db, &format!("session-{i}"), "updated");
+            }
+            db.execute(
+                "UPDATE sessions SET brain=?1 WHERE id='session-0'",
+                [r#"{"task":1,"task":2}"#],
+            )
+            .unwrap();
+            merge(&db, "session-1", r#"{"sources":1,"sources":2}"#);
+        }
+        assert_eq!(store.summaries().unwrap().len(), 200);
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET updated_at='z-newest' WHERE id='session-0'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(error(store.summaries()), error(store.get("session-0")));
+        {
+            let db = store.connection().unwrap();
+            db.execute("UPDATE sessions SET brain=NULL WHERE id='session-0'", [])
+                .unwrap();
+            db.execute(
+                "UPDATE sessions SET updated_at='z-newest' WHERE id='session-1'",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(error(store.summaries()), error(store.get("session-1")));
+    }
+
+    #[test]
+    fn combined_poll_preserves_event_order_cursor_limit_and_session() {
+        let (_directory, store) = fixture();
+        {
+            let db = store.connection().unwrap();
+            insert(&db, "session", "updated");
+            insert(&db, "other", "updated");
+        }
+        store.event("other", &json!({"kind":"status"})).unwrap();
+        for sequence in 0..251 {
+            store
+                .event(
+                    "session",
+                    &json!({"kind":"status","sequence":sequence,"id":"untrusted"}),
+                )
+                .unwrap();
+        }
+        let (session, events) = store.session_events("session", 0).unwrap();
+        assert_eq!(session, store.get("session").unwrap());
+        assert_eq!(events, store.events("session", 0).unwrap());
+        assert_eq!(events.len(), 250);
+        assert_eq!(events.first().unwrap()["id"], 2);
+        assert_eq!(events.first().unwrap()["sequence"], 0);
+        assert_eq!(events.last().unwrap()["id"], 251);
+        assert_eq!(events.last().unwrap()["sequence"], 249);
+        let (_, tail) = store.session_events("session", 251).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0]["id"], 252);
+        assert_eq!(tail[0]["sequence"], 250);
+        assert!(store.session_events("session", 252).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn poll_error_order_and_strict_session_and_event_json_are_preserved() {
+        let (_directory, store) = fixture();
+        assert_eq!(
+            error(store.events("missing", -1)).2,
+            "Invalid event cursor."
+        );
+        assert_eq!(
+            error(store.session_events("missing", -1)).2,
+            "Session not found."
+        );
+        assert_eq!(error(store.events("missing", 0)).0, 404);
+        assert_eq!(error(store.session_events("missing", 0)).0, 404);
+        {
+            let db = store.connection().unwrap();
+            insert(&db, "session", "updated");
+            db.execute(
+                "UPDATE sessions SET brain=?1 WHERE id='session'",
+                [r#"{"a":1,"a":2}"#],
+            )
+            .unwrap();
+        }
+        let invalid_session = error(store.get("session"));
+        assert_eq!(error(store.events("session", 0)), invalid_session);
+        assert_eq!(error(store.session_events("session", -1)), invalid_session);
+        assert_eq!(
+            error(store.events("session", -1)).2,
+            "Invalid event cursor."
+        );
+        {
+            let db = store.connection().unwrap();
+            db.execute("UPDATE sessions SET brain=NULL WHERE id='session'", [])
+                .unwrap();
+            db.execute(
+                "INSERT INTO events(session_id,data) VALUES('session',?1)",
+                [r#"{"kind":"status","kind":"other"}"#],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            error(store.session_events("session", -1)).2,
+            "Invalid event cursor."
+        );
+        let invalid_event = error(store.events("session", 0));
+        assert_eq!(invalid_event.0, 400);
+        assert_eq!(error(store.session_events("session", 0)), invalid_event);
+        assert!(store.session_events("session", 1).unwrap().1.is_empty());
+    }
 }

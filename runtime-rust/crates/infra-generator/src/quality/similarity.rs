@@ -280,16 +280,15 @@ pub fn repeated(groups: &BTreeMap<String, Vec<String>>, skeleton: bool, d: &mut 
             }
         }
     }
+    let mut longest = BTreeMap::<&BTreeSet<String>, usize>::new();
     for (block, names) in &owners {
-        if names.len() > 1
-            && block.len()
-                == owners
-                    .iter()
-                    .filter(|(_, n)| *n == names)
-                    .map(|(b, _)| b.len())
-                    .max()
-                    .unwrap_or(0)
-        {
+        if names.len() > 1 {
+            let size = longest.entry(names).or_default();
+            *size = (*size).max(block.len());
+        }
+    }
+    for (block, names) in &owners {
+        if names.len() > 1 && block.len() == longest.get(&names).copied().unwrap_or(0) {
             let message = format!(
                 "repeated {} across {}: {}",
                 if skeleton {
@@ -358,4 +357,128 @@ pub fn projection(skill: &Value) -> BTreeMap<String, (Vec<String>, Vec<String>)>
         out.insert(field.to_owned(), (lines, tokens));
     }
     out
+}
+
+#[cfg(test)]
+mod repeated_tests {
+    use super::*;
+
+    fn lines(prefix: &str, count: usize, tokens: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| {
+                std::iter::once(format!("{prefix}{index}"))
+                    .chain((1..tokens).map(|token| format!("term{token}")))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+    fn expected(skeleton: bool, owners: &str, first: &str, second: &str) -> Diagnostic {
+        Diagnostic {
+            severity: if skeleton { "warning" } else { "error" }.into(),
+            code: if skeleton {
+                "SKILL_TEMPLATE_BLOCK"
+            } else {
+                "REPEATED_BLOCK"
+            }
+            .into(),
+            message: format!(
+                "repeated {} across {owners}: {first} | {second}",
+                if skeleton {
+                    "prose skeleton"
+                } else {
+                    "substantive block"
+                }
+            ),
+        }
+    }
+
+    #[test]
+    fn longest_blocks_use_exact_owner_sets_and_keep_ties_in_generation_order() {
+        let left = lines("left", 7, 10);
+        let right = lines("right", 3, 10);
+        let groups = BTreeMap::from([
+            ("alpha".into(), left.clone()),
+            ("bravo".into(), left.clone()),
+            ("charlie".into(), right.clone()),
+            ("delta".into(), right.clone()),
+            ("echo".into(), left[..3].to_vec()),
+            ("solo".into(), lines("unique", 7, 10)),
+        ]);
+        for skeleton in [false, true] {
+            let prefix = Diagnostic {
+                severity: "warning".into(),
+                code: "EXISTING".into(),
+                message: "Retain earlier diagnostics in their existing order".into(),
+            };
+            let mut diagnostics = vec![prefix.clone()];
+            repeated(&groups, skeleton, &mut diagnostics);
+            assert_eq!(
+                diagnostics,
+                vec![
+                    prefix,
+                    expected(skeleton, "alpha, bravo, echo", &left[0], &left[1]),
+                    expected(skeleton, "alpha, bravo", &left[0], &left[1]),
+                    expected(skeleton, "alpha, bravo", &left[1], &left[2]),
+                    expected(skeleton, "charlie, delta", &right[0], &right[1]),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_blocks_keep_owner_line_and_token_thresholds() {
+        for (count, tokens) in [(1, 30), (2, 9), (3, 6)] {
+            let content = lines("short", count, tokens);
+            let groups =
+                BTreeMap::from([("alpha".into(), content.clone()), ("bravo".into(), content)]);
+            for skeleton in [false, true] {
+                let mut diagnostics = vec![];
+                repeated(&groups, skeleton, &mut diagnostics);
+                assert!(
+                    diagnostics.is_empty(),
+                    "lines={count}, tokens={tokens}, skeleton={skeleton}"
+                );
+            }
+        }
+        let content = lines("enough", 2, 10);
+        let groups = BTreeMap::from([
+            ("alpha".into(), content.clone()),
+            ("bravo".into(), content.clone()),
+        ]);
+        let mut substantive = vec![];
+        repeated(&groups, false, &mut substantive);
+        assert!(substantive.is_empty());
+        let mut skeleton = vec![];
+        repeated(&groups, true, &mut skeleton);
+        assert_eq!(
+            skeleton,
+            vec![expected(true, "alpha, bravo", &content[0], &content[1])]
+        );
+        for skeleton in [false, true] {
+            let mut diagnostics = vec![];
+            repeated(
+                &BTreeMap::from([("solo".into(), lines("unique", 7, 10))]),
+                skeleton,
+                &mut diagnostics,
+            );
+            assert!(diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn substantive_blocks_do_not_cross_table_boundaries() {
+        let rich = lines("table", 3, 10);
+        let content = vec![
+            rich[0].clone(),
+            rich[1].clone(),
+            "| Column | Description |".into(),
+            "| --- | --- |".into(),
+            rich[2].clone(),
+        ];
+        let groups = BTreeMap::from([("alpha".into(), content.clone()), ("bravo".into(), content)]);
+        let mut diagnostics = vec![];
+        repeated(&groups, false, &mut diagnostics);
+        assert!(diagnostics.is_empty());
+    }
 }

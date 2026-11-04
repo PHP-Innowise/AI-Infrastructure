@@ -16,16 +16,20 @@ path = "tests/support/eval_process_fixture.rs"
 test = false
 bench = false
 
+[features]
+default = ["onnx"]
+onnx = ["infra-pilots/onnx", "infra-eval/onnx", "infra-skill-tools/onnx"]
+
 [dependencies]
 infra-core = { path = "../infra-core" }
 infra-adapters = { path = "../infra-adapters" }
 infra-tooling = { path = "../infra-tooling" }
 infra-generator = { path = "../infra-generator" }
 infra-system = { path = "../infra-system" }
-infra-eval = { path = "../infra-eval" }
-infra-skill-tools = { path = "../infra-skill-tools" }
+infra-eval = { path = "../infra-eval", default-features = false }
+infra-skill-tools = { path = "../infra-skill-tools", default-features = false }
 infra-qa = { path = "../infra-qa" }
-infra-pilots = { path = "../infra-pilots" }
+infra-pilots = { path = "../infra-pilots", default-features = false }
 infra-harness = { path = "../infra-harness" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.150", features = ["preserve_order","arbitrary_precision","raw_value"] }

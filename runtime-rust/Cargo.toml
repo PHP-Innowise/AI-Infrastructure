@@ -15,6 +15,12 @@ lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
 
+# Opt in for local optimized builds; distribution artifacts keep release's LTO.
+[profile.quick-release]
+inherits = "release"
+lto = "off"
+codegen-units = 16
+
 # Integration cases install and fingerprint the actual engine. Keep test
 # artifacts small; symbol-heavy copies otherwise dominate those contracts.
 [profile.test]

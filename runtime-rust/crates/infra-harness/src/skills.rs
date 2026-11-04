@@ -794,17 +794,7 @@ impl SkillsDomain {
         }
         if let Some(path) = preview.path.as_ref() {
             let tree = Self::tree(&root, path, &mut files)?;
-            let actual = tree
-                .iter()
-                .map(|(name, image)| (format!("{path}/{name}"), image.clone()))
-                .collect::<BTreeMap<_, _>>();
-            if actual.len() != preview.before.len()
-                || actual.iter().any(|(name, image)| {
-                    preview.before.get(name).is_none_or(|before| {
-                        before.identity != image.identity || before.fingerprint != image.fingerprint
-                    })
-                })
-            {
+            if !matches_reviewed_tree(path, &tree, &preview.before) {
                 return Err(HarnessError::conflict(
                     "Skill content or extra files changed after preview.",
                 ));
@@ -828,7 +818,9 @@ impl SkillsDomain {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        paths.sort_by_key(|p| (p.ends_with("/SKILL.md"), p.clone()));
+        paths.sort_by(|left, right| {
+            (left.ends_with("/SKILL.md"), left).cmp(&(right.ends_with("/SKILL.md"), right))
+        });
         let (mut changed, mut unchanged) = (vec![], vec![]);
         let result = (|| -> Result<()> {
             for path in paths {
@@ -879,15 +871,11 @@ impl SkillsDomain {
                     .as_ref()
                     .ok_or_else(|| HarnessError::invalid("Change preview has no skill path."))?;
                 let actual = Self::tree(&root, path, &mut files)?;
-                let expected = preview
-                    .payloads
-                    .iter()
-                    .filter_map(|(p, a)| {
-                        p.strip_prefix(&format!("{path}/"))
-                            .map(|p| (p.to_owned(), a.clone()))
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                if fingerprints(&actual) != asset_fingerprints(&expected) {
+                let prefix = format!("{path}/");
+                let expected = preview.payloads.iter().filter_map(|(name, asset)| {
+                    name.strip_prefix(&prefix).map(|relative| (relative, asset))
+                });
+                if fingerprints(&actual) != asset_fingerprints_from(expected) {
                     return Err(HarnessError::conflict(
                         "The resulting skill differs from the reviewed files.",
                     ));
@@ -1190,11 +1178,29 @@ fn fingerprints(tree: &BTreeMap<String, Image>) -> V {
             .collect::<BTreeMap<_, _>>()
     )
 }
+fn matches_reviewed_tree(
+    prefix: &str,
+    tree: &BTreeMap<String, Image>,
+    before: &BTreeMap<String, Image>,
+) -> bool {
+    tree.len() == before.len()
+        && tree.iter().all(|(name, image)| {
+            before
+                .get(&format!("{prefix}/{name}"))
+                .is_some_and(|before| {
+                    before.identity == image.identity && before.fingerprint == image.fingerprint
+                })
+        })
+}
 fn asset_fingerprints(tree: &BTreeMap<String, Asset>) -> V {
+    asset_fingerprints_from(tree.iter().map(|(name, asset)| (name.as_str(), asset)))
+}
+fn asset_fingerprints_from<'a>(assets: impl IntoIterator<Item = (&'a str, &'a Asset)>) -> V {
     json!(
-        tree.iter()
+        assets
+            .into_iter()
             .map(|(k, v)| (
-                k.clone(),
+                k.to_owned(),
                 Fingerprint {
                     hash: core::query::sha256(&v.body),
                     mode: v.mode
@@ -1273,4 +1279,414 @@ fn repeated_suffix_removed<'a>(mut value: &'a str, suffix: &str) -> &'a str {
         value = rest;
     }
     value
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::*;
+
+    const PREFIX: &str = ".agents/skills/fixture";
+
+    // Frozen pre-optimization comparison: cloning bodies is intentional in
+    // this small reference oracle, never in the production comparison.
+    fn original_tree_matches(
+        prefix: &str,
+        tree: &BTreeMap<String, Image>,
+        before: &BTreeMap<String, Image>,
+    ) -> bool {
+        let actual = tree
+            .iter()
+            .map(|(name, image)| (format!("{prefix}/{name}"), image.clone()))
+            .collect::<BTreeMap<_, _>>();
+        !(actual.len() != before.len()
+            || actual.iter().any(|(name, image)| {
+                before.get(name).is_none_or(|before| {
+                    before.identity != image.identity || before.fingerprint != image.fingerprint
+                })
+            }))
+    }
+    fn original_asset_fingerprints(tree: &BTreeMap<String, Asset>) -> V {
+        json!(
+            tree.iter()
+                .map(|(name, asset)| (
+                    name.clone(),
+                    Fingerprint {
+                        hash: core::query::sha256(&asset.body),
+                        mode: asset.mode
+                    }
+                ))
+                .collect::<BTreeMap<_, _>>()
+        )
+    }
+    fn image(body: &[u8], inode: u64) -> Image {
+        Image {
+            body: body.to_vec(),
+            fingerprint: Fingerprint {
+                hash: core::query::sha256(body),
+                mode: 0o644,
+            },
+            identity: (1, inode, 0o100644, 1, body.len() as u64, 1, 1),
+        }
+    }
+    #[test]
+    fn borrowed_tree_comparison_preserves_identity_and_fingerprint_contract() {
+        let tree = BTreeMap::from([
+            ("SKILL.md".into(), image(b"instructions", 1)),
+            ("assets/\u{fc}.bin".into(), image(&[0, 255, 1], 2)),
+        ]);
+        let before = tree
+            .iter()
+            .map(|(name, image)| (format!("{PREFIX}/{name}"), image.clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert!(matches_reviewed_tree(PREFIX, &tree, &before));
+        let mut cases = vec![(tree.clone(), true)];
+        let mut missing = tree.clone();
+        missing.remove("SKILL.md");
+        cases.push((missing, false));
+        let mut extra = tree.clone();
+        extra.insert("extra.txt".into(), image(b"extra", 3));
+        cases.push((extra, false));
+        let mut replaced = tree.clone();
+        replaced.get_mut("SKILL.md").unwrap().identity.1 += 1;
+        cases.push((replaced, false));
+        let mut fingerprint = tree.clone();
+        fingerprint.get_mut("SKILL.md").unwrap().fingerprint.hash = "different".into();
+        cases.push((fingerprint, false));
+        let mut mode = tree.clone();
+        mode.get_mut("SKILL.md").unwrap().fingerprint.mode = 0o755;
+        cases.push((mode, false));
+        let mut opaque_body = tree.clone();
+        opaque_body.get_mut("SKILL.md").unwrap().body = b"not part of this comparison".to_vec();
+        cases.push((opaque_body, true));
+        for (actual, expected) in cases {
+            assert_eq!(matches_reviewed_tree(PREFIX, &actual, &before), expected);
+            assert_eq!(
+                matches_reviewed_tree(PREFIX, &actual, &before),
+                original_tree_matches(PREFIX, &actual, &before)
+            );
+        }
+        assert!(!matches_reviewed_tree(
+            ".agents/skills/other",
+            &tree,
+            &before
+        ));
+        assert!(matches_reviewed_tree(
+            PREFIX,
+            &BTreeMap::new(),
+            &BTreeMap::new()
+        ));
+    }
+
+    #[test]
+    fn borrowed_asset_fingerprints_keep_exact_bytes_modes_order_and_prefix_selection() {
+        let payloads = BTreeMap::from([
+            (
+                format!("{PREFIX}/SKILL.md"),
+                Asset {
+                    body: b"abc".to_vec(),
+                    mode: 0o644,
+                },
+            ),
+            (
+                format!("{PREFIX}/data/\u{fc}.bin"),
+                Asset {
+                    body: vec![],
+                    mode: 0o755,
+                },
+            ),
+            (
+                format!("{PREFIX}-other/SKILL.md"),
+                Asset {
+                    body: b"excluded".to_vec(),
+                    mode: 0o644,
+                },
+            ),
+        ]);
+        let prefix = format!("{PREFIX}/");
+        let original = payloads
+            .iter()
+            .filter_map(|(name, asset)| {
+                name.strip_prefix(&prefix)
+                    .map(|name| (name.to_owned(), asset.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let expected = json!({
+            "SKILL.md":{"hash":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","mode":420},
+            "data/\u{fc}.bin":{"hash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","mode":493}
+        });
+        let actual = asset_fingerprints_from(
+            payloads
+                .iter()
+                .filter_map(|(name, asset)| name.strip_prefix(&prefix).map(|name| (name, asset))),
+        );
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&original_asset_fingerprints(&original)).unwrap()
+        );
+        assert_eq!(asset_fingerprints(&original), actual);
+        assert_eq!(asset_fingerprints_from(std::iter::empty()), json!({}));
+    }
+
+    struct Fixture {
+        domain: SkillsDomain,
+        project: V,
+        root: PathBuf,
+        _directory: tempfile::TempDir,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let base = std::fs::canonicalize(directory.path()).unwrap();
+            let source = base.join("source");
+            std::fs::create_dir_all(source.join("install/open-source-kit")).unwrap();
+            std::fs::write(
+                source.join("install/open-source-kit/resources.json"),
+                br#"{"resources":[]}"#,
+            )
+            .unwrap();
+            let root = base.join("project");
+            std::fs::create_dir(&root).unwrap();
+            let store = SessionStore::open(&base.join("state")).unwrap();
+            let project = store.register(&root).unwrap();
+            let domain = SkillsDomain::new(store, source).unwrap();
+            Self {
+                domain,
+                project,
+                root,
+                _directory: directory,
+            }
+        }
+        fn call(&self, operation: &str, body: V) -> Result<V> {
+            match self.domain.dispatch(
+                operation,
+                json!({"body":body,"params":{"project_id":self.project["id"]},"query":{}}),
+            )? {
+                Payload::Json(value) => Ok(value),
+                Payload::Bytes { .. } => panic!("skill route must return JSON"),
+            }
+        }
+        fn create_and_install(&self) -> (V, Vec<u8>) {
+            let preview = self.call("skills.create_preview", json!({
+                "project_id":self.project["id"],"agents":["codex"],"name":"fixture",
+                "description":"Private skill fixture","instructions":"# Original\n\nKeep the existing files."
+            })).unwrap();
+            let content = preview["content"].as_str().unwrap().as_bytes().to_vec();
+            let installed = self
+                .call(
+                    "skills.install",
+                    json!({"preview_id":preview["preview_id"]}),
+                )
+                .unwrap();
+            assert_eq!(installed["ok"], true);
+            assert_eq!(
+                installed["installed"],
+                json!([format!("{PREFIX}/SKILL.md")])
+            );
+            assert_eq!(
+                std::fs::read(self.root.join(PREFIX).join("SKILL.md")).unwrap(),
+                content
+            );
+            (preview, content)
+        }
+        // Build the same owned reviewed-change image as upstream previewing,
+        // substituting local bytes for its network-only source fetch. Every
+        // subsequent apply/validation/publication uses the actual dispatcher.
+        fn reviewed_update(&self) -> String {
+            let removal = self.call("skills.change_preview", json!({
+                "project_id":self.project["id"],"agent":"codex","name":"fixture","operation":"remove"
+            })).unwrap();
+            let mut preview = self
+                .domain
+                .consume(removal["preview_id"].as_str().unwrap(), "change")
+                .unwrap();
+            let assets = BTreeMap::from([
+                (
+                    "SKILL.md".to_owned(),
+                    Asset {
+                        body: b"# Reviewed update\n".to_vec(),
+                        mode: 0o644,
+                    },
+                ),
+                (
+                    "assets/data.bin".to_owned(),
+                    Asset {
+                        body: vec![0, 255, 1, 2],
+                        mode: 0o644,
+                    },
+                ),
+                (
+                    "z.txt".to_owned(),
+                    Asset {
+                        body: b"reviewed\n".to_vec(),
+                        mode: 0o644,
+                    },
+                ),
+            ]);
+            let (_, mut records) = self.domain.records(&self.project).unwrap();
+            records["skills"][PREFIX]["files"] = original_asset_fingerprints(&assets);
+            records["skills"][PREFIX]["revision"] = json!("reviewed-local-update");
+            preview.operation = "update".into();
+            preview.payloads = assets
+                .into_iter()
+                .map(|(name, asset)| (format!("{PREFIX}/{name}"), asset))
+                .collect();
+            preview.records_after = records;
+            let id = Uuid::new_v4().simple().to_string();
+            self.domain.cache(id.clone(), preview).unwrap();
+            id
+        }
+        fn tracking(&self) -> Vec<u8> {
+            self.domain.records(&self.project).unwrap().0.unwrap()
+        }
+        fn activate(&self, status: &str) {
+            self.domain.store.connection().unwrap().execute(
+                "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at)VALUES('active','fixture',?1,?2,'codex','edit','native',0,?3,'created','updated')",
+                rusqlite::params![self.project["id"].as_str().unwrap(), self.project["path"].as_str().unwrap(), status],
+            ).unwrap();
+        }
+    }
+    fn assert_conflict(result: Result<V>, message: &str) {
+        let error = result.unwrap_err();
+        assert_eq!(
+            (error.status, error.code, error.message.as_str()),
+            (409, "conflict", message)
+        );
+    }
+
+    #[test]
+    fn actual_custom_skill_create_update_remove_and_one_use_previews() {
+        let fixture = Fixture::new();
+        let (created, _) = fixture.create_and_install();
+        assert_conflict(
+            fixture.call(
+                "skills.install",
+                json!({"preview_id":created["preview_id"]}),
+            ),
+            "The preview expired or was already used. Preview again.",
+        );
+        let update = fixture.reviewed_update();
+        let changed = fixture
+            .call("skills.apply_change", json!({"preview_id":update}))
+            .unwrap();
+        assert_eq!(changed["ok"], true);
+        assert_eq!(
+            changed["changed"],
+            json!([
+                format!("{PREFIX}/assets/data.bin"),
+                format!("{PREFIX}/z.txt"),
+                format!("{PREFIX}/SKILL.md")
+            ])
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.join(PREFIX).join("SKILL.md")).unwrap(),
+            b"# Reviewed update\n"
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.join(PREFIX).join("assets/data.bin")).unwrap(),
+            [0, 255, 1, 2]
+        );
+        let installed = fixture.call("skills.installed", json!({})).unwrap();
+        assert_eq!(installed["installed"][0]["state"], "clean");
+        assert_eq!(
+            installed["installed"][0]["revision"],
+            "reviewed-local-update"
+        );
+        assert_conflict(
+            fixture.call("skills.apply_change", json!({"preview_id":update})),
+            "The preview expired or was already used. Preview again.",
+        );
+        let remove = fixture.call("skills.change_preview", json!({
+            "project_id":fixture.project["id"],"agent":"codex","name":"fixture","operation":"remove"
+        })).unwrap();
+        let removed = fixture
+            .call(
+                "skills.apply_change",
+                json!({"preview_id":remove["preview_id"]}),
+            )
+            .unwrap();
+        assert_eq!(removed["ok"], true);
+        for name in ["SKILL.md", "assets/data.bin", "z.txt"] {
+            assert!(!fixture.root.join(PREFIX).join(name).exists());
+        }
+        assert!(
+            fixture.domain.records(&fixture.project).unwrap().1["skills"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+        assert_conflict(
+            fixture.call(
+                "skills.apply_change",
+                json!({"preview_id":remove["preview_id"]}),
+            ),
+            "The preview expired or was already used. Preview again.",
+        );
+    }
+
+    #[test]
+    fn changed_extra_and_replaced_sources_fail_before_any_publication() {
+        for mutation in ["body", "extra", "inode"] {
+            let fixture = Fixture::new();
+            let (_, original) = fixture.create_and_install();
+            let update = fixture.reviewed_update();
+            let tracking = fixture.tracking();
+            let skill = fixture.root.join(PREFIX).join("SKILL.md");
+            match mutation {
+                "body" => std::fs::write(&skill, b"unreviewed change\n").unwrap(),
+                "extra" => {
+                    std::fs::write(fixture.root.join(PREFIX).join("extra.txt"), b"preserve\n")
+                        .unwrap()
+                }
+                "inode" => {
+                    std::fs::rename(&skill, fixture.root.join("preserved-original.md")).unwrap();
+                    std::fs::write(&skill, &original).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let expected_body = std::fs::read(&skill).unwrap();
+            assert_conflict(
+                fixture.call("skills.apply_change", json!({"preview_id":update})),
+                if mutation == "extra" {
+                    "Skill content or extra files changed after preview."
+                } else {
+                    "Skill files changed after preview. No files were changed."
+                },
+            );
+            assert_eq!(std::fs::read(&skill).unwrap(), expected_body);
+            assert_eq!(fixture.tracking(), tracking);
+            assert!(!fixture.root.join(PREFIX).join("assets/data.bin").exists());
+            assert!(!fixture.root.join(PREFIX).join("z.txt").exists());
+            if mutation == "extra" {
+                assert_eq!(
+                    std::fs::read(fixture.root.join(PREFIX).join("extra.txt")).unwrap(),
+                    b"preserve\n"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn active_admission_refusal_keeps_priority_over_changed_source() {
+        for status in ["queued", "running"] {
+            let fixture = Fixture::new();
+            fixture.create_and_install();
+            let update = fixture.reviewed_update();
+            let tracking = fixture.tracking();
+            let skill = fixture.root.join(PREFIX).join("SKILL.md");
+            std::fs::write(&skill, b"unreviewed change\n").unwrap();
+            fixture.activate(status);
+            assert_conflict(
+                fixture.call("skills.apply_change", json!({"preview_id":update})),
+                "Wait for active sessions to finish before changing skills.",
+            );
+            assert_eq!(std::fs::read(skill).unwrap(), b"unreviewed change\n");
+            assert_eq!(fixture.tracking(), tracking);
+            assert!(!fixture.root.join(PREFIX).join("assets/data.bin").exists());
+            assert!(!fixture.root.join(PREFIX).join("z.txt").exists());
+        }
+    }
 }

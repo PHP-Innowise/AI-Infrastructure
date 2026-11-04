@@ -4,15 +4,16 @@ use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path};
 pub fn core_sync(root: &Path, write: bool, chain: bool) -> Result<Value> {
     let manifest = CoreManifest::load(root)?;
+    let mut globs = common::Globs::default();
     let canon = root.join(&manifest.canonical);
     let source_modes = FileModes::read(&canon)?;
     let all = common::walk(&canon)?;
     let mut canonical = BTreeSet::new();
     let mut retired_canonical = Vec::new();
     for name in all {
-        if manifest.retired(&name)? {
+        if manifest.retired_with_globs(&name, &mut globs)? {
             retired_canonical.push(name);
-        } else if manifest.core(&name)? {
+        } else if manifest.core_with_globs(&name, &mut globs)? {
             canonical.insert(name);
         }
     }
@@ -29,7 +30,9 @@ pub fn core_sync(root: &Path, write: bool, chain: bool) -> Result<Value> {
         let mut modes = FileModes::read(&base)?;
         let mut existing = BTreeSet::new();
         for name in common::walk(&base)? {
-            if manifest.core(&name)? || manifest.retired(&name)? {
+            if manifest.core_with_globs(&name, &mut globs)?
+                || manifest.retired_with_globs(&name, &mut globs)?
+            {
                 existing.insert(name);
             }
         }
@@ -112,10 +115,11 @@ pub fn asset_sync(root: &Path, write: bool) -> Result<Value> {
     let findings: Vec<String> = Vec::new();
     let modes = FileModes::read(&canon)?;
     let mut asset_modes = FileModes::read(&asset)?;
+    let mut globs = common::Globs::default();
     for path in common::walk(&canon)? {
         let mut selected = false;
         for pattern in &includes {
-            if common::matches(pattern, &path, true)? {
+            if globs.matches(pattern, &path, true)? {
                 selected = true;
                 break;
             }
