@@ -755,7 +755,14 @@ fn capsule_projection(
     } else {
         task.map(|task|json!({"task_id":task["external_id"],"goal":task["goal"],"progress":task["progress"],"auto_checkpoint":task.get("auto_checkpoint").cloned().unwrap_or(json!("")),"next_steps":task["next_steps"],"files":task["files"],"sources":task["sources"],"phase":task.get("phase").cloned().unwrap_or(Value::Null),"created_at":task["created_at"],"updated_at":task["updated_at"]}))
     };
-    let (working, omitted) = capsule::project_working(working, request.delivery_profile)?;
+    let (mut working, omitted) = capsule::project_working(working, request.delivery_profile)?;
+    // The task's declared phase and its times travel with the projected state,
+    // as the retired capsule carried them: the render shows the phase.
+    if let (Some(working), Some(task)) = (working.as_mut(), task) {
+        working["phase"] = task.get("phase").cloned().unwrap_or(Value::Null);
+        working["created_at"] = task["created_at"].clone();
+        working["updated_at"] = task["updated_at"].clone();
+    }
     let projection = grouped_projection(selected, episodes)?;
     let visible = selected
         .iter()
@@ -784,6 +791,10 @@ pub fn retrieve(
 ) -> Result<Capsule> {
     retrieve_inner(store, context, request, None)
 }
+/// Seconds to the microsecond, as the retired manifests and gates rounded them.
+fn micro(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
 pub fn retrieve_with_preparer(
     store: &mut Store,
     context: &RuntimeContext,
@@ -798,7 +809,6 @@ fn retrieve_inner(
     request: &RetrievalRequest,
     preparer: Option<&mut dyn crate::excerpts::ExcerptPreparer>,
 ) -> Result<Capsule> {
-    let started = Instant::now();
     validate_request(request)?;
     let mut request = request.clone();
     if request.sanitize {
@@ -829,6 +839,10 @@ fn retrieve_inner(
             .entry("index".into())
             .or_insert_with(|| index_started.elapsed().as_secs_f64());
     }
+    // The body of retrieval, as the retired manifest timed it: after the
+    // index phases it reports beside it, and without packing the capsule.
+    let started = Instant::now();
+    let mut pack_seconds = 0.0_f64;
     let config = RuntimeConfig::load(&context.roots)?;
     let profile = config.capsule_profile(request.capsule_profile.as_deref())?;
     let mut trace = crate::observability::Trace::new(config.clone(), &request.trace_paths)?;
@@ -1434,7 +1448,9 @@ fn retrieve_inner(
     }
     trace.boundary("pack_input", &selected);
     capsule.1 = prepared;
+    let pack_started = Instant::now();
     capsule = capsule::pack(capsule, request.delivery_profile)?;
+    pack_seconds += pack_started.elapsed().as_secs_f64();
     let shown = capsule.shown_paths();
     let shown_episodes = capsule.shown_episodes();
     let mut pack_omitted = Vec::new();
@@ -1547,7 +1563,9 @@ fn retrieve_inner(
         }
     }
     capsule::synchronize(&mut capsule);
+    let pack_started = Instant::now();
     capsule = capsule::pack(capsule, request.delivery_profile)?;
+    pack_seconds += pack_started.elapsed().as_secs_f64();
     let shown = capsule.shown_paths();
     let shown_episodes = capsule.shown_episodes();
     selected.retain(|item| {
@@ -1655,7 +1673,7 @@ fn retrieve_inner(
             value["source_changed"] = json!(true);
         }
         value
-    }).collect::<Vec<_>>(),"excluded":excluded,"token_estimates":capsule.0["token_estimates"],"provider":final_config.value["provider"],"source_links":{"anchors":graph_anchor_count,"candidates":graph_candidate_count,"delivered":selected.iter().filter(|item|item.selection.as_deref()==Some("source-link")).count()},"escalation_reason":escalation,"query_source":capsule.0["query_source"],"host":request.host,"entry_point":request.entry_point,"gate":gate,"phase_seconds":{"stat":phase_seconds.get("stat"),"index":phase_seconds.get("index"),"retrieval":started.elapsed().as_secs_f64()}});
+    }).collect::<Vec<_>>(),"excluded":excluded,"token_estimates":capsule.0["token_estimates"],"provider":final_config.value["provider"],"source_links":{"anchors":graph_anchor_count,"candidates":graph_candidate_count,"delivered":selected.iter().filter(|item|item.selection.as_deref()==Some("source-link")).count()},"escalation_reason":escalation,"query_source":capsule.0["query_source"],"host":request.host,"entry_point":request.entry_point,"gate":gate,"phase_seconds":{"stat":phase_seconds.get("stat").copied().map(micro),"index":phase_seconds.get("index").copied().map(micro),"retrieval":micro((started.elapsed().as_secs_f64()-pack_seconds).max(0.0))}});
     if let Some(mut stats) = hint_stats {
         stats["delivered"] = json!(
             selected

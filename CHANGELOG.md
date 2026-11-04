@@ -196,6 +196,20 @@ edition's own files remain in that edition's changelog.
   twin projects a 35-word request whose subject came after the 32nd word
   retrieved two documents natively and none before. Recorded history is
   still searched with the whole request.
+- A task's declared phase reaches its capsule again. The working state the
+  native capsule carried dropped the task's `phase`, `created_at` and
+  `updated_at`, so the `phase: ...` line the render prints under the task
+  never appeared, in hooks or in `memory retrieve`, and Memory MCP's
+  `memory_retrieve` answer lacked the three fields the retired capsule
+  carried. They are carried again, and count toward the capsule's size as
+  before. The capsule's `omitted` reports `last_turn_characters` (and
+  `working_progress_characters`) as zero when nothing was cut, as it did.
+- A retrieval manifest times its `retrieval` phase as the retired one did:
+  from after the turn's own index refresh, without packing the capsule, to
+  the microsecond. The native phase began before the index refresh, so a
+  `memory retrieve` counted its indexing twice (`index` and `retrieval`)
+  and `retrieval-report`'s phase percentiles read several times slower than
+  retrieval ran. The gate's `top_score` is rounded to six places again.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

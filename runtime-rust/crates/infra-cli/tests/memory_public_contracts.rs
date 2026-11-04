@@ -2730,3 +2730,54 @@ fn an_explicit_request_asks_with_its_first_thirty_two_words() {
         "{long}"
     );
 }
+
+/// A task's declared phase reaches its capsule, as it did before: the
+/// working state carries the phase and the record's times, and the render
+/// shows the phase under the task line.
+#[test]
+fn a_declared_phase_reaches_the_capsule() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-PHASE");
+    fixture.success(
+        &[
+            "update",
+            "--task-id",
+            "TASK-PHASE",
+            "--phase",
+            "implementation",
+            "--json",
+        ],
+        None,
+    );
+    fixture.success(&["index", "--json"], None);
+    let capsule = fixture.success(
+        &[
+            "retrieve",
+            "--task-id",
+            "TASK-PHASE",
+            "--json",
+            "cobalt retries",
+        ],
+        None,
+    );
+    let working = &capsule["working"];
+    assert_eq!(working["phase"], "implementation", "{capsule}");
+    assert!(
+        working["created_at"].is_string() && working["updated_at"].is_string(),
+        "{capsule}"
+    );
+    let output = fixture.run(
+        &["retrieve", "--task-id", "TASK-PHASE", "cobalt retries"],
+        None,
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines = text.lines().take(2).collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        [
+            "working: TASK-PHASE — Verify the cobalt boundary",
+            "phase: implementation"
+        ],
+        "{text}"
+    );
+}

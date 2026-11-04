@@ -845,7 +845,10 @@ pub fn rank_candidates_observed(
             .iter()
             .filter(|item| item.match_strength.as_deref() == Some("distinctive"))
             .count(),
-        top_score: output.first().map(|item| item.adjusted_score),
+        // Rounded as the retired gate recorded it: telemetry, never a threshold.
+        top_score: output
+            .first()
+            .map(|item| (item.adjusted_score * 1_000_000.0).round() / 1_000_000.0),
         coverage,
     };
     Ok((output, diagnostics))
