@@ -110,6 +110,13 @@ edition's own files remain in that edition's changelog.
   instead of writing "query: from branch name only"), with one it gives the
   warming notice alone. An enforced gate's skip exits 4, so the host keeps
   its rule, and the capsule's manifest stays local, as before.
+- A governed command that finds no task bound here (`get`, `update`,
+  `complete`, `clear`) says again which task and how one comes to be bound:
+  "Working task not found: <id>; start records it (so does the first
+  checkpoint), and rebind --task-id <id> binds one recorded on another
+  machine". It was the refusal agents met most often in the retired
+  runtime, and the native text was a bare "Working task not found". A
+  lightweight task's refusal names the task too.
 - `memory replay-result` takes `--prepared-scope` again, as the retired CLI
   required. The native CLI did not accept the option, and the runtime
   refuses a receipt-only replay without a scope, so the command could not

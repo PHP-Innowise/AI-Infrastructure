@@ -829,14 +829,13 @@ impl MemoryService {
             },
             "get" => {
                 let store = self.open()?;
+                let id = task()?;
                 if self.context.mode == "lightweight" {
-                    Ok(serde_json::to_value(store.working(task()?)?.ok_or_else(
-                        || RuntimeError::not_found("Working task not found"),
+                    Ok(serde_json::to_value(store.working(id)?.ok_or_else(
+                        || RuntimeError::not_found(format!("Working task not found: {id}")),
                     )?)?)
                 } else {
-                    let binding = store
-                        .binding(task()?)?
-                        .ok_or_else(|| RuntimeError::not_found("Working task not found"))?;
+                    let binding = store.binding(id)?.ok_or_else(|| unbound(id))?;
                     Ok(task_view(&brain.get_task(&binding.task_uuid)?))
                 }
             }
@@ -887,9 +886,7 @@ impl MemoryService {
                 if self.context.mode == "lightweight" {
                     store.clear(id)?;
                 } else {
-                    let binding = store
-                        .binding(id)?
-                        .ok_or_else(|| RuntimeError::not_found("Working task not found"))?;
+                    let binding = store.binding(id)?.ok_or_else(|| unbound(id))?;
                     let snapshot = brain.snapshot_record(&binding.task_uuid)?;
                     brain.cancel_task(&binding.task_uuid)?;
                     if let Err(error) = store.remove_binding(&binding.external_id) {
@@ -1264,9 +1261,7 @@ impl MemoryService {
         if self.context.mode == "lightweight" {
             return Ok(serde_json::to_value(store.update(update)?)?);
         }
-        let binding = store
-            .binding(id)?
-            .ok_or_else(|| RuntimeError::not_found("Working task not found"))?;
+        let binding = store.binding(id)?.ok_or_else(|| unbound(id))?;
         let brain = BrainRepository::new(self.context.clone())?;
         let _guard = brain.lock()?;
         let record = brain.get_task(&binding.task_uuid)?;
@@ -1314,9 +1309,7 @@ impl MemoryService {
             .ok_or_else(|| {
                 RuntimeError::invalid("Governed completion requires the current numeric --revision")
             })?;
-        let binding = store
-            .binding(id)?
-            .ok_or_else(|| RuntimeError::not_found("Working task not found"))?;
+        let binding = store.binding(id)?.ok_or_else(|| unbound(id))?;
         let brain = BrainRepository::new(self.context.clone())?;
         let _guard = brain.lock()?;
         let before = brain.get_task(&binding.task_uuid)?;
@@ -1476,9 +1469,7 @@ impl MemoryService {
             )?);
         }
         let id = required(request, "task_id")?;
-        let binding = store
-            .binding(id)?
-            .ok_or_else(|| RuntimeError::not_found("Working task not found"))?;
+        let binding = store.binding(id)?.ok_or_else(|| unbound(id))?;
         let brain = BrainRepository::new(self.context.clone())?;
         let _guard = brain.lock()?;
         let record = brain.get_task(&binding.task_uuid)?;
@@ -1618,6 +1609,13 @@ fn payload(request: &Value, input: &[u8]) -> Result<Value> {
     } else {
         crate::results::strict_input(input)
     }
+}
+/// The refusal agents met most often in the retired runtime, which says how a
+/// task comes to be bound in this checkout.
+fn unbound(id: &str) -> RuntimeError {
+    RuntimeError::not_found(format!(
+        "Working task not found: {id}; start records it (so does the first checkpoint), and rebind --task-id {id} binds one recorded on another machine"
+    ))
 }
 pub fn envelope(stdout: String, result: Value, code: i32) -> Value {
     object!({"_cli":{"stdout":stdout,"stderr":"","code":code},"result":result})

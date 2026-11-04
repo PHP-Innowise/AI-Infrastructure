@@ -583,7 +583,9 @@ impl Store {
         let id = validate_task_id(id)?;
         self.transaction(|conn| {
             if conn.execute("DELETE FROM working_tasks WHERE task_id=?1", [&id])? != 1 {
-                return Err(RuntimeError::not_found("Working task not found"));
+                return Err(RuntimeError::not_found(format!(
+                    "Working task not found: {id}"
+                )));
             }
             Ok(())
         })
@@ -595,7 +597,7 @@ impl Store {
         let id = validate_task_id(&input.task_id)?;
         self.transaction(|conn| {
             let task = working(conn, &id)?
-                .ok_or_else(|| RuntimeError::not_found("Working task not found"))?;
+                .ok_or_else(|| RuntimeError::not_found(format!("Working task not found: {id}")))?;
             let episode = EpisodeInput {
                 summary: input.summary.unwrap_or(task.goal),
                 outcome: input.outcome,
