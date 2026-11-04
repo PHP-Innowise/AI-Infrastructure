@@ -832,6 +832,51 @@ fn cleanup_helpers(home: &Path) -> usize {
         0
     }
 }
+/// Bring a copied installation to this clone the way its owner would update
+/// it, on a copy nobody else uses: the accelerator files the project commits
+/// are written, and Codex's trust-bound hook wiring is rewritten (no trust
+/// record is). An installed project commits its accelerator and wires Codex,
+/// so a default sync held the whole runtime migration back, and the copy
+/// kept its previous runtime: the bench then measured that runtime instead
+/// of this one. A copy that still does not reach this runtime is refused.
+pub(crate) fn sync_copy(
+    installer: &infra_tooling::installer::Installer,
+    project: &Path,
+) -> Result<Value> {
+    let report = installer.sync(
+        project,
+        &infra_tooling::installer::InstallOptions {
+            update_tracked: true,
+            rewire_codex: true,
+            ..Default::default()
+        },
+    )?;
+    if report["status"] != "complete" {
+        let held = report["kept"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| {
+                item["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("held") || reason.contains("cannot"))
+            })
+            .take(3)
+            .map(|item| {
+                format!(
+                    "{} ({})",
+                    item["path"].as_str().unwrap_or(""),
+                    item["reason"].as_str().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>();
+        return Err(artifact::invalid(&format!(
+            "the copied installation did not reach this runtime: {}",
+            held.join("; ")
+        )));
+    }
+    Ok(report)
+}
 pub(crate) fn copy_tree(source: &Path, target: &Path, excluded: &BTreeSet<String>) -> Result<()> {
     fn walk(root: &Path, source: &Path, target: &Path, excluded: &BTreeSet<String>) -> Result<()> {
         std::fs::create_dir_all(target)?;
@@ -1087,7 +1132,7 @@ pub fn run(source: &Path, runtime: &Path, host: &str, request: &Value) -> Result
         }
         copy_tree(&target, &project, &excluded)?;
         if flag(&request, "sync") {
-            installer.sync(&project, &Default::default())?;
+            sync_copy(&installer, &project)?;
         }
     } else {
         write(

@@ -612,7 +612,7 @@ pub fn run(source: &Path, runtime: &Path, v: &Value) -> Result<Value> {
             excluded.insert(p);
         }
         bench_driver::copy_tree(&target, &base, &excluded)?;
-        let sync = installer.sync(&base, &Default::default())?;
+        let sync = bench_driver::sync_copy(&installer, &base)?;
         let profile = artifact::read_json(
             &base.join("project-brain/config/runtime.json"),
             artifact::MAX_FILE,

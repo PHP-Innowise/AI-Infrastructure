@@ -77,6 +77,16 @@ edition's own files remain in that edition's changelog.
   gave identical capsules, the 24th differed by this handoff alone.
   Admitting open handoffs would be a retrieval change to measure on its own
   (docs/MEMORY-EVAL.md).
+- `infra-engine bench --target <project> --sync` and the hook rehearsal's
+  `--target` bring the copied project to the native runtime again. They
+  synced the copy with default options, and an installed project commits
+  its accelerator and wires Codex hooks, so the sync held the whole runtime
+  migration back and the copy kept its previous runtime: the bench measured
+  that runtime (on a copy of one client it failed with no save; another
+  client's older runtime passed in its place). The copy is now synced as
+  its owner would update it, with `update_tracked` and `rewire_codex`, and
+  a copy that still does not reach this runtime is refused with the files
+  that held it back.
 - `memory health` and `memory retrieval-report` list a refresh's phases in
   the order it runs them (`stat`, `index`, `retrieval`), as the retired
   reports did; the native text followed the sorted keys of the JSON object.
