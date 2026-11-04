@@ -77,6 +77,20 @@ edition's own files remain in that edition's changelog.
   gave identical capsules, the 24th differed by this handoff alone.
   Admitting open handoffs would be a retrieval change to measure on its own
   (docs/MEMORY-EVAL.md).
+- Bringing a project to the native runtime leaves Codex a working memory
+  server and its whole policy. Four installed client projects carry an
+  older Codex registration, `[mcp_servers.harness-memory]` running the
+  Python bootstrap (with host `claude`), outside the managed block; the
+  migration retired the script it starts, so Codex would report that server
+  failing in every session beside the new `harness_memory`. The merge now
+  recognizes the bootstrap by its signature, as the JSON registrations are,
+  and cuts that table alone; a server of that name with another command
+  stays. The same configurations set no `project_doc_max_bytes`, and Codex
+  cut a 43 KB `AGENTS.md` at its 32 KiB default, before the Memory Bank,
+  security, verification and Definition of Done sections: the release's
+  limit is added where the project set none, and a project's own value
+  stays. On copies of two clients the Codex bench now passes with the
+  policy heard in full.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
