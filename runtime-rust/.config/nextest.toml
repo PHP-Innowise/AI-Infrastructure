@@ -1,0 +1,48 @@
+# cargo-nextest runs each test in its own process, many at once across all
+# test binaries. These groups keep the conditions some tests were written for.
+
+[test-groups]
+# Each case keeps engine copies of about 130 MB on the temporary filesystem;
+# the binary serializes its cases for that budget.
+engine-copies = { max-threads = 1 }
+# The installation cases serialize themselves within their binary.
+installation = { max-threads = 1 }
+# Keep the two-case limit on Windows, where evaluation has real deadlines,
+# and on other platforms without a measured higher-concurrency configuration.
+end-to-end = { max-threads = 2 }
+# Linux measurements admit four cases when the long lifecycle starts first.
+end-to-end-linux = { max-threads = 4 }
+
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "linux")'
+filter = 'binary_id(infra-cli::native_generator) & test(=generate_edit_classify_keep_revalidate_lifecycle)'
+priority = 100
+
+# These were the Windows run's late tail. Start them while the rest of the
+# suite still has work, keeping the same two E2E slots and real deadlines.
+[[profile.default.overrides]]
+platform = 'cfg(windows)'
+filter = 'binary_id(infra-cli::native_generator) & test(=generate_edit_classify_keep_revalidate_lifecycle)'
+priority = 100
+
+[[profile.default.overrides]]
+platform = 'cfg(windows)'
+filter = 'binary_id(infra-cli::native_generator) & test(=copied_creator_hooks_preserve_framework_union_after_rename)'
+priority = 90
+
+[[profile.default.overrides]]
+filter = 'binary_id(infra-cli::dispatch_custom_guards)'
+test-group = 'engine-copies'
+
+[[profile.default.overrides]]
+filter = 'binary_id(infra-cli::native_install)'
+test-group = 'installation'
+
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "linux")'
+filter = 'binary_id(infra-cli::eval_native_runtime) | binary_id(infra-cli::native_generator) | binary_id(infra-cli::portable_wiring) | binary_id(infra-cli::memory_lifecycle)'
+test-group = 'end-to-end-linux'
+
+[[profile.default.overrides]]
+filter = 'binary_id(infra-cli::eval_native_runtime) | binary_id(infra-cli::native_generator) | binary_id(infra-cli::portable_wiring) | binary_id(infra-cli::memory_lifecycle)'
+test-group = 'end-to-end'

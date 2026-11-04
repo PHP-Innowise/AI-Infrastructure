@@ -1,6 +1,6 @@
 # Document reranker pilot
 
-`scripts/memory_rerank_pilot.py` is an optional, source-only experiment. It
+`infra-engine eval memory-rerank-pilot` is an optional, source-only experiment. It
 does not change the runtime, the index, or CI: it compares the runtime's normal
 candidate order with a deterministic document-feature reranker on the same
 `context.db` and the same judged queries.
@@ -14,7 +14,7 @@ file name such as `context_retrieval.py`; a model is not involved.
 ## Run
 
 ```bash
-python3 scripts/memory_rerank_pilot.py \
+infra-engine eval memory-rerank-pilot \
   --database path/to/memory-bank/local/context.db \
   --queries queries.json \
   --judgments judgments.json \

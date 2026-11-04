@@ -30,7 +30,7 @@ Neither is installed or downloaded by this repository.
 Assets are provided by a maintainer, from local paths:
 
 ```bash
-python3 scripts/memory_sqlite_vec_pilot.py probe \
+infra-engine pilot sqlite-vec probe \
   --vec-extension ~/models/sqlite-vec/vec0.so \
   --lembed-extension ~/models/sqlite-lembed/lembed0.so \
   --model ~/models/minilm.gguf --json
@@ -49,7 +49,7 @@ with the model revision and hash.
 `k=60`), which needs no score scale shared between the lexical and dense pools:
 
 ```bash
-python3 scripts/memory_sqlite_vec_pilot.py fuse \
+infra-engine pilot sqlite-vec fuse \
   --lexical lexical.json --dense dense.json --json
 ```
 
@@ -73,7 +73,9 @@ p50/p95 including extension load and embedding time, and the index size. A
 dense candidate that only adds noise at the same recall is a negative result,
 not a tuning invitation. Do not adopt an alpha extension as a default
 dependency, and do not let a similarity score satisfy a lexical coverage or
-authority claim.
+authority claim. These numbers decide whether a variant earns a task-outcome
+run, never whether it ships: a default changes only on its own sealed
+outcome measurement (`docs/MEMORY-EVAL.md`, "Accepting a retrieval change").
 
 ## Tests
 

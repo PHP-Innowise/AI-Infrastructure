@@ -35,7 +35,7 @@ You - the MAIN conversation - are the orchestrator and the synthesizer.
      user said about intent, and the constraint behind each decision the
      reviewer must not undo.
    Before each spawn, save the capsule to a scratch file and record it -
-   `python3 memory-bank/scripts/context.py msg-dispatch --task-id <ID> --agent <name> --event spawn --capsule-file <file>`
+   `memory-bank/bin/infra-engine memory msg-dispatch --task-id <ID> --agent <name> --event spawn --capsule-file <file>`
    (it refuses an under-specified capsule). The SubagentStop hook normally
    records completions in the channel; when it reports a failed write, or an
    agent returned without a completion entry, record it yourself instead of
@@ -46,7 +46,7 @@ You - the MAIN conversation - are the orchestrator and the synthesizer.
 4. Materialize each confirmed finding as a Project Brain record, from the
    main conversation - not from the subagents, which stay read-only in this
    flow:
-   `python3 memory-bank/scripts/context.py brain-create finding --external-id <TASK>-F<N> --title "<one line>" --source <path>`.
+   `memory-bank/bin/infra-engine memory brain-create finding --external-id <TASK>-F<N> --title "<one line>" --source <path>`.
    Cite a bare path or `path#L42`; `--source` rejects `path:42`. One record
    per confirmed finding, none for anything you dropped in step 3. This is
    the step the consolidation pipeline has been waiting for: a review's
@@ -54,7 +54,7 @@ You - the MAIN conversation - are the orchestrator and the synthesizer.
    record, and the `task` type can never be promoted, so nothing a review
    produced could ever become durable memory.
 5. Record the outcome:
-   `python3 memory-bank/scripts/context.py update --task-id <ID> --progress "flow-review: <N> findings, <top severity>"`.
+   `memory-bank/bin/infra-engine memory update --task-id <ID> --progress "flow-review: <N> findings, <top severity>"`.
 6. When a finding is later fixed and verified, close it on the record so it
    becomes promotable - two calls, because authority and status are separate
    edges:

@@ -91,7 +91,7 @@ capability that is not universal.
 | --- | --- | --- | --- |
 | Capsule retrieved into each prompt | yes (fresh) | yes (fresh) | **yes, through a rule** rendered from the prompt (same turn when Cursor reads its rules after the hook, else the next; not verified on a live client) |
 | Turn change set buffered and flushed | yes | yes | yes |
-| Explicit `context.py retrieve` / `memory` | yes | yes | yes |
+| Explicit `memory-bank/bin/infra-engine memory retrieve` / `memory` | yes | yes | yes |
 
 Cursor cannot add context to a prompt from a hook. Its prompt-time event,
 `beforeSubmitPrompt`, receives the prompt but answers only
@@ -185,12 +185,17 @@ capsule is delivered through `.cursor/rules/working-memory.mdc`:
   nothing and remove another branch's rule instead of serving it.
 - Every render stands down when `CONTEXT_CAPSULE_DELIVERED=1`: the Harness has
   put the capsule into the prompt already.
+- The save continuation, which Cursor submits as a prompt, renders nothing: the
+  prompt hook arms and exits, so the rule stays the one the last real prompt
+  wrote for the next request. Rendered for the instruction's words, it had
+  replaced that rule's memory with whatever the instruction matched, often
+  `no-match`.
 
 The rule is replaced atomically only when a render succeeds and is ignored
 local state (each edition's `.gitignore` lists it). These are declared
-MIRROR_RULES transformations of the canonical hooks (the `_WM_DELIVERY_*` and
-`_WM_PROMPT_*` constants in `memory-bank/scripts/context_retrieval.py`), not
-drift: `scripts/build_mirrors.py --check` verifies them.
+native host behavior and the versioned `memory-bank/config/mirror-rules.json`
+transformations of canonical resources, not mirror drift:
+`infra-engine repo mirrors --check` verifies the generated resource copies.
 
 Cursor also runs the Claude Code hooks it finds (third-party hooks are on by
 default and every matching hook from every source runs). The Claude copies of
@@ -200,7 +205,7 @@ running both doubled every checkpoint and wrote retrievals nobody received.
 
 Continuity is unaffected: `stop` runs at turn end without prompt access, so
 the record is written exactly as on the other two clients. Retrieval on
-Cursor can also be explicit - run `context.py retrieve` or the `memory`
+Cursor can also be explicit - run `memory-bank/bin/infra-engine memory retrieve` or the `memory`
 command when a task needs prior context sharper than the rendered rule.
 
 What the capsule is retrieved *for*: Claude Code, Codex and Cursor's prompt
@@ -260,15 +265,16 @@ anchors the script path its own way:
 
 | Host | Command form | Why |
 | --- | --- | --- |
-| Claude Code | `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` | Hooks run in the session's current directory, which follows every `cd`; Claude Code exports the project root as `CLAUDE_PROJECT_DIR` and asks for the placeholder double-quoted in shell form. |
-| Codex | `sh -c '...' sh <script>.sh` - a fixed launcher (spelled out in `.codex/hooks/README.md`) that walks up from the session's directory to the nearest directory holding `.codex/hooks.json` and execs that project's `.codex/hooks/<script>.sh` | Codex runs hooks in the session cwd through `$SHELL -lc` and exports no project-root variable. The walk works from a subdirectory, without Git, and for a project nested in a larger repository, and `sh` keeps it independent of the login shell. It stops at the project that declared the hook, so a missing script exits 127 instead of running a same-named script from an ancestor such as `~/.codex/hooks/`. |
-| Cursor | `.cursor/hooks/<script>.sh` | Cursor runs project hooks from the project root. |
+| Claude Code | `e="$CLAUDE_PROJECT_DIR"/memory-bank/bin/infra-engine; [ -x "$e" ] && exec "$e" hook claude <role> --root "$CLAUDE_PROJECT_DIR"; exec "$CLAUDE_PROJECT_DIR"/.claude/hooks/<role>.sh` | Hooks run in the session's current directory, which follows every `cd`; Claude Code exports the project root as `CLAUDE_PROJECT_DIR` and runs the command in a POSIX shell. The checkout's engine starts directly; the launcher script runs only without it, which uses the main checkout's engine in a linked worktree and refuses guarded commands when no engine is installed. |
+| Codex | `sh -c 'r="$(git rev-parse --show-toplevel 2>/dev/null \|\| pwd)/<prefix>"; e="$r"memory-bank/bin/infra-engine; [ -x "$e" ] && exec "$e" hook codex <role> --root "$r"; exec "$r".codex/hooks/<role>.sh'` | Codex runs hooks in the session cwd through `$SHELL -lc` and exports no project-root variable, so the command finds the project from Git's top level (`<prefix>` is the project's path below it); `sh` keeps it independent of the login shell. The engine and the launcher fall back as on Claude Code. Codex trusts a hook by the hash of its definition, so a changed command must be trusted again in `/hooks`. |
+| Cursor | `.cursor/hooks/<role>.sh` | Cursor runs project hooks from the project root; the command stays a path, since Cursor need not pass it through a shell. |
 
 A bare relative path on Claude Code or Codex exits 127 as soon as the
 session's directory is not the project root, and both hosts treat every exit
 other than 2 as non-blocking, so a safety hook would stop guarding without an
-error. `tests/test_hook_wiring.py` runs every wired command from a nested
-directory to keep it that way.
+error. `runtime-rust/crates/infra-cli/tests/portable_wiring.rs` runs the
+committed commands, Codex's from a nested directory, with and without an
+installed engine.
 
 ## Claude Code Activation
 
@@ -390,7 +396,7 @@ Two properties make the companion composable rather than parallel
 infrastructure: workers run in the project directory *without* `--bare`, so
 the project's `.claude/` world — permission deny rules, the subagent gate,
 skills, the SubagentStop observer — applies inside every worker; and all
-durable state flows through the project's own `context.py` (task lifecycle,
+durable state flows through the project's selected native memory engine (task lifecycle,
 capsule validation, the `msg-dispatch` journal), so interactive sessions
 and unattended runs share one audit trail. LangGraph's checkpointer holds
 only graph position. See `docs/AGENT-ORCHESTRATION-DESIGN.md` (Stage D)
@@ -414,7 +420,7 @@ better tool.
 
 ## Optional Developer Tooling: Context Collection
 
-`scripts/collect_context.py` packages a chosen slice of this repository into
+`infra-engine collect` packages a chosen slice of this repository into
 one bundle for pasting into an external model — a code review in a chat
 window, a second opinion on the memory core, a diff explained to a model that
 cannot see the checkout. It wraps the
@@ -434,16 +440,16 @@ maintainer's, to produce a bundle scoped on purpose.
 ```
 
 `./collect` is a one-line `exec` wrapper at the repository root, so arguments
-and the exit status pass through unchanged; `scripts/collect_context.py` is
-executable and behaves identically. The wrapper carries no `.sh` extension, so
-the `lint` job lists it by name alongside `*.sh` — see [CI](CI.md) — keeping
-every tracked shell file inside `bash -n` and `shellcheck`.
+and the exit status pass through unchanged to `infra-engine collect`.
+The shim contains no collection logic; the Rust service owns scope selection,
+Git custody, external CLI invocation and output bounds. See [CI](CI.md) for
+the current native validation catalog.
 
 Inside Claude Code the same thing is `/collect <scope> [options]`, from
 `.claude/commands/collect.md` at the **repository root** — outside every
 edition, so an installed accelerator never carries a command for a tool it
-does not ship, and `build_mirrors.py`, which walks only the four edition
-directories, never sees it. The command runs the script through bash
+does not ship, and the native mirror engine, which walks the configured edition
+directories, never sees it. The command invokes the native collection route through host
 injection, caps the injected output, and instructs the model to report the
 summary without opening the bundle: the bundle exists for a model that cannot
 see the checkout, and reading it in the session that produced it would spend
@@ -463,7 +469,7 @@ code2prompt 4.3.0; they are regression context, not current repository totals:
 |---|---|
 | `.git` always excluded | The root with `--hidden` and no `-i` reads 2,213 files, `.git/config` (remote URLs) and `.git/COMMIT_EDITMSG` among them. |
 | `Task/` excluded by default | `Laravel/Task/Epics/Epic-0*_*_SPEC.md` is named-client product specification. Collecting `Laravel/**/*.md` without the exclude adds 10 files and ~87k tokens of it. `--with-task` opts in and prints a warning. |
-| Mirrors excluded by default | `.claude/`, `.cursor/` and `.codex/` are generated from canon by `build_mirrors.py`; including them triples a bundle for no added information. `--with-mirrors`, or the `hooks` scope, opts in. |
+| Mirrors excluded by default | `.claude/`, `.cursor/` and `.codex/` are generated from canon by `infra-engine repo mirrors`; including them triples a bundle for no added information. `--with-mirrors`, or the `hooks` scope, opts in. |
 | Every run is config-isolated | A `.c2pconfig` in the working directory is auto-loaded and silently injects settings such as `line_numbers`, with no flag to disable it. Runs execute in an empty temporary directory with `XDG_CONFIG_HOME` pointed at it. |
 
 Two upstream behaviours are worth knowing before writing custom patterns.
@@ -472,7 +478,7 @@ wrapper turns that into an error. And `code2prompt`'s `*` **crosses directory
 separators**: `-i "*.md"` at the repository root reads 419 files, not the four
 at the top level, and `-i "CHANGELOG.md"` matches five, one per edition. Only
 a `./`-prefixed literal anchors. Scopes declare top-level wants separately and
-the wrapper expands them with Python's own non-recursive glob.
+the native collector expands them with its bounded, non-recursive path matcher.
 
 The snapshot token counts came from cl100k (OpenAI BPE, the tokenizer
 code2prompt 4.3.0 carried). **They are not counts of Claude tokens** — they are
@@ -488,10 +494,10 @@ local memory server (see above and [Security](SECURITY.md)). The 2026-08-08
 evaluation found the server surface poorer than this wrapper and the Python
 SDK unsuitable for the repository; re-check those upstream surfaces manually
 before relying on that comparison.
-The CLI is never a blocking CI gate: CI has no Rust toolchain, so
-`tests/test_collect_context.py` skips its live checks and runs its contract
-checks — including `test_containment`, which fails if `code2prompt` is ever
-referenced from an edition or the installer.
+The optional external `code2prompt` CLI is required only when collection is
+invoked. CI uses the native Rust workspace and declarative check catalog.
+Historical Python collection tests are retained as references; their presence
+does not establish a working runtime oracle or live external-CLI execution.
 
 ## Shared Context Activation
 
@@ -499,9 +505,9 @@ Tool activation and context activation are separate. From the project root,
 after confirming `memory-bank/local/` is ignored:
 
 ```bash
-python3 memory-bank/scripts/validate.py
-python3 project-brain/scripts/validate.py --root .
-python3 memory-bank/scripts/context.py index
+memory-bank/bin/infra-engine bank validate
+memory-bank/bin/infra-engine bank validate --root .
+memory-bank/bin/infra-engine memory index
 ```
 
 The default is governed mode. Read [Context Modes](CONTEXT-MODES.md) before

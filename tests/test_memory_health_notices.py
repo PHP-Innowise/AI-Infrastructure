@@ -63,4 +63,22 @@ class HealthNoticeTests(unittest.TestCase):
         self.assertTrue(outputs[1].endswith(P['text']),outputs[1]);self.assertEqual(1,outputs[1].count('sources omitted:'))
         self.assertNotIn('private/path/canary',''.join(outputs));self.assertNotIn('IRIS_PRIVATE_MANIFEST_CANARY',''.join(outputs))
         self.assertEqual(self.image,(self.journal.read_bytes(),stat.S_IMODE(self.journal.stat().st_mode)))
+    def broken(self,count=0):
+        """The series with a line a full disk cut inside a character, as bytes."""
+        good=[json.dumps({'source':'hook','hook_status':0}).encode('utf-8')]*count
+        return b'\n'.join([json.dumps({'source':'hook','hook_status':0}).encode('utf-8'),
+                            b'{"source":"hook","task":"feature/\xd0',*good,
+                            json.dumps({'source':'hook','hook_status':124}).encode('utf-8')])+b'\n'
+    def test_a_line_cut_inside_a_character_is_one_bad_line(self):
+        # It stopped every read of the series: `health` failed on it.
+        self.journal.write_bytes(self.broken())
+        self.image=(self.journal.read_bytes(),stat.S_IMODE(self.journal.stat().st_mode))
+        value=self.health();self.assertEqual(2,value['turns']);self.assertEqual({'0':1,'124':1},value['hook_status'])
+    def test_an_append_after_a_line_cut_inside_a_character_still_trims_the_series(self):
+        # It stopped every trim: the series grew for good, read whole on every prompt.
+        self.journal.write_bytes(self.broken(4))
+        with mock.patch.object(self.c,'refresh_health_retention',return_value=3):
+            self.c.append_refresh_health(self.root,{'source':'hook','hook_status':0})
+        lines=self.journal.read_bytes().decode('utf-8').splitlines()
+        self.assertEqual(3,len(lines));self.assertEqual({'source':'hook','hook_status':0},json.loads(lines[-1]))
 if __name__=='__main__':unittest.main()

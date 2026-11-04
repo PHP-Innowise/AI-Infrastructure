@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -102,6 +103,15 @@ class DirectQueryPrivacyBoundaryTest(unittest.TestCase):
                             )
 
 
+def calendar_shifted(days: int) -> dict[str, str] | None:
+    """An environment whose local date is a day after (+1) or before (-1)
+    the UTC date, at any hour: a POSIX TZ offset runs to 24 hours. Elsewhere
+    there is no such offset, and the caller skips."""
+    if os.name != "posix":
+        return None
+    return {**os.environ, "TZ": "XXX-24" if days > 0 else "XXX+24"}
+
+
 class RuntimeHarness(unittest.TestCase):
     """Temporary governed repository shared by the runtime test classes."""
 
@@ -131,7 +141,9 @@ class RuntimeHarness(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def run_cli(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_cli(
+        self, *arguments: str, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
@@ -142,6 +154,7 @@ class RuntimeHarness(unittest.TestCase):
             ],
             text=True,
             capture_output=True,
+            env=env,
         )
 
     def run_main(self, *arguments: str) -> tuple[int, str, str]:
@@ -2122,12 +2135,16 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
                 path = self.repository.joinpath(
                     "project-brain/control/promotions", f"{proposal['id']}.json"
                 )
+                original_proposal = path.read_bytes()
                 tampered = json.loads(path.read_text(encoding="utf-8"))
                 tampered["outcome"] = wrong_outcome
                 path.write_text(json.dumps(tampered), encoding="utf-8")
 
                 with self.assertRaisesRegex(brain.BrainError, "outcome"):
                     brain.apply_promotion(self.repository, proposal["id"])
+                self.assertEqual(tampered, json.loads(path.read_text(encoding="utf-8")))
+                # Do not let the next mode fail on this mode's damaged row.
+                path.write_bytes(original_proposal)
 
         self.assertEqual([], list(self.repository.joinpath("memory-bank/chunks").glob("*.md")))
 
@@ -2710,6 +2727,168 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         self.assertIn("prompt", telemetry["prohibited_fields"])
 
 
+class ConflictDeliveryTest(RuntimeHarness):
+    def pair(self, *, mutual=True, private=False, conflict=True):
+        task = brain.create_task(self.repository, "TASK-DISPUTE", "Investigate routing.", [], [], owner="alice")
+        first = brain.create_record(self.repository, "finding", "ALPHA-DISPUTE", "Alpha lexical position",
+                                    [], ["specs/authority.md"], owner="alice", goal="Alpha routing uses the first position.")
+        second = brain.create_record(self.repository, "finding", "BETA-DISPUTE", "Beta opposing position",
+                                     [], ["specs/authority.md"], owner="alice",
+                                     privacy="restricted" if private else "public", goal="Routing uses the second position.")
+        if conflict:
+            first = brain.update_record(self.repository, first["id"], expected_revision=1, progress=None,
+                                        next_steps=[], files=[], sources=[], actor="alice", conflicts=[second["id"]])
+            if mutual:
+                second = brain.update_record(self.repository, second["id"], expected_revision=1, progress=None,
+                                             next_steps=[], files=[], sources=[], actor="alice", conflicts=[first["id"]])
+        return task, first, second
+
+    def retrieve(self, task, *, pack=None, session=None, reindex=True):
+        connection = context_cli.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            if reindex:
+                context_cli.index_repository(connection, self.repository)
+            return retrieval.retrieve(connection, self.repository, "alpha", task["id"], limit=8,
+                                      gate_mode="off", manifest_scope="local", pack=pack, session_id=session)
+        finally:
+            connection.close()
+
+    def assert_disputed(self, packet, record):
+        rows = [row for row in packet["selected"] if row.get("record_id") == record["id"]]
+        self.assertEqual(1, len(rows))
+        self.assertIs(rows[0].get("conflict_recorded"), True)
+        rendered = "\n".join(context_cli.render_capsule_lines({**packet, "warnings": []}))
+        self.assertIn("recorded conflict; verify sources", rendered)
+        self.assertNotIn("another item here", rendered)
+
+    def assert_partner_hidden(self, packet, record):
+        raw = json.dumps(packet)
+        self.assertNotIn(record["id"], raw)
+        self.assertNotIn(record["title"], raw)
+        path = brain.find_record(self.repository, record["id"])[0].relative_to(self.repository).as_posix()
+        self.assertNotIn(path, raw)
+
+    @staticmethod
+    def omit(packet, record):
+        for key in ("selected", "procedural", "semantic", "episodic"):
+            packet[key] = [row for row in packet.get(key, []) if row.get("record_id") != record["id"]]
+        packet["categories"] = {key: [row for row in rows if row.get("record_id") != record["id"]]
+                                for key, rows in packet["categories"].items()}
+        return packet
+
+    def test_layer_limit_keeps_warning_without_changing_slots(self):
+        task, first, second = self.pair()
+        for index in range(2):
+            (self.repository / f"specs/alpha-{index}.md").write_text(f"# Alpha specification {index}\n\nAlpha routing specification.\n")
+        packet = self.retrieve(task)
+        self.assertEqual(3, len(packet["semantic"]))
+        self.assert_disputed(packet, first)
+        self.assert_partner_hidden(packet, second)
+
+    def test_private_partner_does_not_remove_the_warning_or_reveal_identity(self):
+        task, first, second = self.pair(private=True)
+        packet = self.retrieve(task)
+        self.assert_disputed(packet, first)
+        self.assert_partner_hidden(packet, second)
+
+    def test_missing_partner_leaves_a_generic_warning(self):
+        task, first, second = self.pair()
+        path = brain.find_record(self.repository, second["id"])[0]
+        relative = path.relative_to(self.repository).as_posix()
+        path.unlink()
+        packet = self.retrieve(task)
+        self.assert_disputed(packet, first)
+        self.assertNotIn(second["id"], json.dumps(packet))
+        self.assertNotIn(relative, json.dumps(packet))
+
+    def test_pack_pruning_reconciles_all_public_relation_views(self):
+        task, first, second = self.pair()
+        packet = self.retrieve(task, pack=lambda result: self.omit(result, second))
+        self.assert_disputed(packet, first)
+        self.assert_partner_hidden(packet, second)
+
+    def test_one_way_fetched_partner_warns_after_origin_is_packed_out(self):
+        task, first, second = self.pair(mutual=False)
+        packet = self.retrieve(task, pack=lambda result: self.omit(result, first))
+        self.assert_disputed(packet, second)
+        self.assert_partner_hidden(packet, first)
+
+    def test_final_privacy_change_clears_partner_ids_and_paths(self):
+        task, first, second = self.pair()
+
+        def privacy_race(packet):
+            path, metadata, body = brain.find_record(self.repository, second["id"])
+            metadata["privacy"] = "restricted"
+            metadata["revision"] += 1
+            brain.atomic_write(path, brain.render_markdown_record(metadata, body))
+            return packet
+
+        packet = self.retrieve(task, pack=privacy_race)
+        self.assert_disputed(packet, first)
+        self.assert_partner_hidden(packet, second)
+
+    def test_hard_budget_keeps_a_dispute_marker_for_a_single_survivor(self):
+        task, first, second = self.pair()
+        real = retrieval._apply_budgets
+
+        def one_survivor(candidates):
+            with mock.patch.object(retrieval, "HARD_BUDGET", candidates[0]["estimated_tokens"]), \
+                    mock.patch.dict(retrieval.BUDGETS, {"dynamic": 1}):
+                return real(candidates)
+
+        with mock.patch.object(retrieval, "_apply_budgets", side_effect=one_survivor):
+            packet = self.retrieve(task)
+        self.assertEqual(1, len(packet["selected"]))
+        self.assert_disputed(packet, first)
+        self.assert_partner_hidden(packet, second)
+
+    def test_metadata_only_conflict_changes_release_session_novelty(self):
+        task, first, second = self.pair(private=True, conflict=False)
+        session = "conflict-session-01"
+        before = self.retrieve(task, session=session)
+        self.assertTrue(any(row["record_id"] == first["id"] for row in before["selected"]))
+        self.assertTrue(all(not row.get("conflict_recorded") for row in before["selected"]))
+        repeated = self.retrieve(task, session=session)
+        self.assertEqual([], repeated["selected"])
+        first = brain.update_record(self.repository, first["id"], expected_revision=first["revision"], progress=None,
+                                    next_steps=[], files=[], sources=[], actor="alice", conflicts=[second["id"]])
+        disputed = self.retrieve(task, session=session)
+        self.assert_disputed(disputed, first)
+        self.assert_partner_hidden(disputed, second)
+        self.assertEqual([], self.retrieve(task, session=session)["selected"])
+        # A resolved canonical image may arrive through Git. The update CLI
+        # intentionally appends conflicts, so an empty CLI list is not a reset.
+        path, current, body = brain.find_record(self.repository, first["id"])
+        current["conflicts"] = []
+        current["revision"] += 1
+        brain.validate_record(current)
+        brain.atomic_write(path, brain.render_markdown_record(current, body))
+        restored = self.retrieve(task, session=session)
+        self.assertTrue(any(row["record_id"] == first["id"] for row in restored["selected"]))
+        self.assertTrue(all(not row.get("conflict_recorded") for row in restored["selected"]))
+        self.assertEqual([], self.retrieve(task, session=session)["selected"])
+
+    def test_final_relation_reconciliation_does_not_expand_packed_capsule(self):
+        task, _, _ = self.pair()
+        packed_sizes = []
+
+        def pack(value):
+            packed = context_cli.enforce_governed_capsule_contract(value)
+            packed_sizes.append(context_cli.capsule_character_count(packed))
+            return packed
+
+        self.retrieve(task, pack=pack)
+        room = context_cli.CAPSULE_CHARACTER_LIMIT - packed_sizes[-1] - 5
+        task = brain.update_task(self.repository, task["id"], expected_revision=task["revision"],
+                                 progress="x" * room, next_steps=[], files=[], sources=[], actor="alice")
+        packet = self.retrieve(task, pack=pack)
+        self.assertEqual(2, len(packet["selected"]))
+        final_size = context_cli.capsule_character_count(packet)
+        self.assertLessEqual(packed_sizes[-1], context_cli.CAPSULE_CHARACTER_LIMIT)
+        self.assertLessEqual(final_size, context_cli.CAPSULE_CHARACTER_LIMIT)
+        self.assertLessEqual(final_size, packed_sizes[-1])
+
+
 class AuthorityLifecycleTest(RuntimeHarness):
     """The observed -> verified authority edge that unlocks auto-promotion."""
 
@@ -2933,6 +3112,197 @@ class AuthorityLifecycleTest(RuntimeHarness):
         )
 
 
+class CheckedFingerprintTest(RuntimeHarness):
+    """A verified record's fingerprints are the versions that were checked,
+    and the ledger says who checked them, on every write path."""
+
+    SOURCE = "specs/authority.md"
+
+    def write(self, **changes) -> dict:
+        record = brain.get_record(self.repository, self.record_id)
+        fields = {"progress": None, "next_steps": [], "files": [], "sources": [], **changes}
+        return brain.update_record(self.repository, self.record_id, expected_revision=record["revision"],
+                                   actor="alice", **fields)
+
+    def verified_finding(self, attestation: str = "agent") -> dict:
+        record = brain.create_record(self.repository, "finding", "FIND-CHECKED",
+                                     "Cobalt guard closes the request gap", [], [self.SOURCE], owner="alice")
+        self.record_id = record["id"]
+        return self.write(progress="Cobalt guard confirmed.", authority="verified",
+                          attestation=attestation, reason="Verified against the spec")
+
+    def digest(self, record: dict, path: str = SOURCE) -> str:
+        return next(item["sha256"] for item in record["source_fingerprints"] if item["path"] == path)
+
+    def edit_source(self) -> str:
+        (self.repository / self.SOURCE).write_text("# Authority\n\nThe rule moved.\n", encoding="utf-8")
+        return brain.fingerprint(self.repository, self.SOURCE)["sha256"]
+
+    def test_a_write_that_checks_nothing_keeps_the_checked_versions(self) -> None:
+        checked = self.digest(self.verified_finding())
+        current = self.edit_source()
+        tidied = self.write(progress="Cobalt guard confirmed (wording tidied).")
+        self.assertEqual(checked, self.digest(tidied))
+        self.assertFalse(brain.sources_are_fresh(self.repository, tidied))
+        resolved = self.write(transition_to="resolved", reason="Resolved")
+        self.assertEqual(checked, self.digest(resolved))
+        # Checking it again is what moves the fingerprints, and says who did.
+        again = self.write(reverify=True, attestation="agent", reason="Re-checked the moved rule")
+        self.assertEqual(current, self.digest(again))
+        self.assertTrue(brain.sources_are_fresh(self.repository, again))
+        self.assertEqual("agent", brain.record_attestation(again))
+
+    def test_a_source_cited_for_the_first_time_is_fingerprinted_now(self) -> None:
+        checked = self.digest(self.verified_finding())
+        self.edit_source()
+        (self.repository / "specs/limits.md").write_text("# Limits\n", encoding="utf-8")
+        cited = self.write(sources=["specs/limits.md"])
+        self.assertEqual(checked, self.digest(cited))
+        self.assertEqual(brain.fingerprint(self.repository, "specs/limits.md")["sha256"],
+                         self.digest(cited, "specs/limits.md"))
+        self.assertEqual(["specs/authority.md", "specs/limits.md"],
+                         [item["path"] for item in cited["source_fingerprints"]])
+
+    def test_a_citation_never_digested_stays_undigested(self) -> None:
+        # A record from before fingerprints: a write that checks nothing must
+        # not take the file as it is now for the version that was checked.
+        self.verified_finding()
+        path, record, _ = brain.find_record(self.repository, self.record_id)
+        record["source_fingerprints"] = []
+        brain._write_record(self.repository, record, path)
+        self.edit_source()
+        self.assertEqual([], self.write(progress="Cobalt guard confirmed (tidied).")["source_fingerprints"])
+
+    def test_an_unchecked_record_still_follows_its_sources(self) -> None:
+        record = brain.create_record(self.repository, "finding", "FIND-OPEN", "Open question", [],
+                                     [self.SOURCE], owner="alice")
+        self.record_id = record["id"]
+        current = self.edit_source()
+        self.assertEqual(current, self.digest(self.write(progress="Still looking.")))
+
+    def test_a_persons_verified_claim_is_revised_only_by_a_person(self) -> None:
+        self.verified_finding(attestation="person")
+        for attestation in (None, "agent"):
+            with self.subTest(attestation=attestation), self.assertRaisesRegex(
+                    brain.BrainError, "only a person revises it"):
+                self.write(progress="An agent's rewrite.", attestation=attestation)
+        with self.assertRaisesRegex(brain.BrainError, "only a person revises it"):
+            self.write(reverify=True, attestation="agent", progress="An agent's re-check.")
+        # A lifecycle move or a next step revises nothing.
+        self.write(transition_to="resolved", reason="Resolved")
+        revised = self.write(reverify=True, attestation="person", progress="The person's correction.")
+        self.assertEqual("person", brain.record_attestation(revised))
+
+    def test_a_record_created_verified_says_who_checked_it(self) -> None:
+        for attestation in ("agent", "person"):
+            with self.subTest(attestation=attestation):
+                record = brain.create_record(self.repository, "decision", f"DEC-{attestation}", "Keep cobalt",
+                                             [], [self.SOURCE], owner="alice", authority="verified",
+                                             attestation=attestation)
+                brain.validate_record(record)
+                self.assertEqual(attestation, brain.record_attestation(record))
+        with self.assertRaisesRegex(brain.BrainError, "who checked a verified record"):
+            brain.create_record(self.repository, "decision", "DEC-OBSERVED", "Keep cobalt", [], [self.SOURCE],
+                                owner="alice", attestation="agent")
+
+    def test_the_cli_records_who_checked(self) -> None:
+        created = json.loads(self.run_cli(
+            "brain-create", "finding", "--external-id", "FIND-CLI", "--title", "Cobalt guard",
+            "--source", self.SOURCE, "--authority", "verified", "--json").stdout)
+        self.assertEqual("agent", brain.record_attestation(created))
+        person = json.loads(self.run_cli(
+            "brain-create", "finding", "--external-id", "FIND-PERSON", "--title", "Cobalt guard",
+            "--source", self.SOURCE, "--authority", "verified", "--attestation", "person", "--json").stdout)
+        self.assertEqual("person", brain.record_attestation(person))
+        observed = json.loads(self.run_cli(
+            "brain-create", "finding", "--external-id", "FIND-LATER", "--title", "Cobalt guard",
+            "--source", self.SOURCE, "--attestation", "person", "--json").stdout)
+        self.assertEqual(("observed", ""), (observed["authority"], brain.record_attestation(observed)))
+        verified = json.loads(self.run_cli(
+            "brain-update", "--record-id", observed["id"], "--revision", "auto", "--authority", "verified",
+            "--reason", "Verified", "--json").stdout)
+        self.assertEqual("agent", brain.record_attestation(verified))
+        current = self.edit_source()
+        rechecked = self.run_cli("brain-update", "--record-id", observed["id"], "--revision", "auto",
+                                 "--reverify", "--reason", "Re-checked", "--json")
+        self.assertEqual(0, rechecked.returncode, rechecked.stderr)
+        self.assertEqual(current, self.digest(json.loads(rechecked.stdout)))
+        refused = self.run_cli("brain-update", "--record-id", person["id"], "--revision", "auto",
+                               "--progress", "An agent's rewrite.", "--json")
+        self.assertNotEqual(0, refused.returncode)
+        self.assertIn("only a person revises it", refused.stderr)
+        accepted = self.run_cli("brain-update", "--record-id", person["id"], "--revision", "auto",
+                                "--progress", "The person's note.", "--attestation", "person", "--json")
+        self.assertEqual(0, accepted.returncode, accepted.stderr)
+
+    def test_an_edit_after_promotion_keeps_the_chunk_marked_changed(self) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"mode": "governed", "automatic_promotion": True}), encoding="utf-8")
+        created = json.loads(self.run_cli(
+            "brain-create", "finding", "--external-id", "FIND-PROMOTED", "--title", "Cobalt guard",
+            "--source", self.SOURCE, "--json").stdout)
+        for change in (("--authority", "verified"), ("--progress", "Cobalt guard confirmed.",
+                                                     "--transition", "resolved")):
+            done = self.run_cli("brain-update", "--record-id", created["id"], "--revision", "auto",
+                                *change, "--json")
+            self.assertEqual(0, done.returncode, done.stderr)
+        checked = self.digest(brain.get_record(self.repository, created["id"]))
+        current = self.edit_source()
+        tidied = self.run_cli("brain-update", "--record-id", created["id"], "--revision", "auto",
+                              "--progress", "Cobalt guard confirmed, wording tidied.", "--json")
+        self.assertEqual(0, tidied.returncode, tidied.stderr)
+        chunks = "\n".join(path.read_text(encoding="utf-8")
+                           for path in (self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        self.assertIn(checked, chunks)
+        self.assertNotIn(current, chunks)
+
+
+class AgentCliSlipTest(RuntimeHarness):
+    """The two slips agents made most in a client project's September
+    sessions are answered: brain-validate is validate, and an evidence level
+    passed as a status says how to set it."""
+
+    def test_brain_validate_is_validate(self) -> None:
+        self.start("TASK-SLIP")
+        plain = self.run_cli("validate", "--json")
+        aliased = self.run_cli("brain-validate", "--json")
+        self.assertEqual((plain.returncode, plain.stdout), (aliased.returncode, aliased.stdout))
+
+    def test_an_evidence_level_passed_as_a_status_says_how_to_set_it(self) -> None:
+        created = json.loads(self.run_cli("brain-create", "finding", "--external-id", "FIND-SLIP", "--title",
+                                          "Cobalt guard", "--source", "specs/authority.md", "--json").stdout)
+        for level, how in (("verified", "set it with brain-update --authority verified"),
+                           ("observed", "a record starts observed, and only brain-update --authority verified "
+                                        "changes it")):
+            with self.subTest(level=level):
+                refused = self.run_cli("brain-update", "--record-id", created["id"], "--revision", "auto",
+                                       "--transition", level, "--json")
+                self.assertNotEqual(0, refused.returncode)
+                self.assertIn(f"Illegal finding transition: open -> {level}; {level} is an evidence level, "
+                              f"not a finding status: {how}", refused.stderr)
+        # A task not bound here says how one comes to be.
+        unknown = self.run_cli("get", "--task-id", "TASK-SLIP-NONE", "--json")
+        self.assertNotEqual(0, unknown.returncode)
+        self.assertIn("Working task not found: TASK-SLIP-NONE; start records it", unknown.stderr)
+        self.assertIn("rebind --task-id TASK-SLIP-NONE", unknown.stderr)
+        # A second start of the task under way says what to run instead.
+        self.start("TASK-SLIP-DONE")
+        again = self.run_cli("start", "--task-id", "TASK-SLIP-DONE", "--goal", "Apply the cobalt rule.", "--json")
+        self.assertNotEqual(0, again.returncode)
+        self.assertIn("it is the task under way: context.py get --task-id TASK-SLIP-DONE reads it", again.stderr)
+        # Completion pins a revision the caller read, and says where it is.
+        pinned = self.run_cli("complete", "--task-id", "TASK-SLIP-DONE", "--revision", "auto",
+                              "--outcome", "success", "--summary", "Done.")
+        self.assertNotEqual(0, pinned.returncode)
+        self.assertIn("context.py get --task-id TASK-SLIP-DONE shows it", pinned.stderr)
+        # A status the lifecycle does not allow says nothing more.
+        refused = self.run_cli("brain-update", "--record-id", created["id"], "--revision", "auto",
+                               "--transition", "accepted", "--json")
+        self.assertIn("Illegal finding transition: open -> accepted", refused.stderr)
+        self.assertNotIn("evidence level", refused.stderr)
+
+
 class ConsolidationPipelineTest(RuntimeHarness):
     """The pipeline had no producers, so its emptiness was unreportable."""
 
@@ -3042,6 +3412,100 @@ class EventConsolidationTest(RuntimeHarness):
 
     def status(self, external_id: str) -> str:
         return brain.find_record(self.repository, external_id, include_archive=True)[1]["status"]
+
+    def test_stale_event_checks_are_not_rebound_to_current_sources_as_verified(self) -> None:
+        self.configure(automatic_consolidation_verification=True,automatic_promotion=True)
+        for number in (1,2):
+            self.event(f'EV-{number}',f'Completed CMS-741: change {number}',
+                       f'Closed gap {number}. Verification: unit tests passed.')
+        source=self.repository/'specs/authority.md';source.write_text(source.read_text()+'A newer rule.\n')
+        result=brain.consolidate(self.repository,apply=True)
+        self.assertEqual(0,result['verified'])
+        finding=brain.get_record(self.repository,'CONSOLIDATED-CMS-741')
+        self.assertEqual('observed',finding['authority'])
+        self.assertEqual([],brain.auto_promote(self.repository,owner='local')['promoted'])
+        self.assertEqual(0,brain.consolidate(self.repository,apply=True)['superseded'])
+        self.assertEqual(['recorded','recorded'],[self.status(f'EV-{i}') for i in (1,2)])
+
+    def test_source_race_during_consolidation_cannot_attest_unseen_bytes(self) -> None:
+        self.configure(automatic_consolidation_verification=True)
+        for number in (1,2):
+            self.event(f'EV-{number}',f'Completed CMS-741: change {number}',
+                       f'Closed gap {number}. Verification: unit tests passed.')
+        create=brain.create_record
+        def race(*args,**kwargs):
+            source=self.repository/'specs/authority.md';source.write_text(source.read_text()+'Concurrent edit.\n')
+            return create(*args,**kwargs)
+        with mock.patch.object(brain,'create_record',side_effect=race):
+            result=brain.consolidate(self.repository,apply=True)
+        self.assertEqual(1,result['blocked']);self.assertEqual(0,result['verified'])
+        with self.assertRaises(brain.BrainRecordNotFound):brain.get_record(self.repository,'CONSOLIDATED-CMS-741')
+
+    def test_observed_summary_cannot_harden_stale_carried_event_checks(self) -> None:
+        for number in (1,2):
+            self.event(f'EV-{number}',f'Completed CMS-741: change {number}',
+                       f'Closed gap {number}. Verification: unit tests passed.')
+        brain.consolidate(self.repository,apply=True)
+        source=self.repository/'specs/authority.md';source.write_text(source.read_text()+'A newer rule.\n')
+        self.configure(automatic_consolidation_verification=True)
+        self.event('EV-3','Completed CMS-741: change 3','Closed gap 3. Verification: unit tests passed.')
+        result=brain.consolidate(self.repository,apply=True)
+        self.assertEqual(0,result['verified'])
+        self.assertEqual('observed',brain.get_record(self.repository,'CONSOLIDATED-CMS-741')['authority'])
+
+    def test_overdue_successor_does_not_remove_events_from_active_diary(self) -> None:
+        self.configure(automatic_consolidation_verification=True,automatic_promotion=True)
+        for number in (1,2):
+            self.event(f'EV-{number}',f'Completed CMS-741: change {number}',
+                       f'Closed gap {number}. Verification: unit tests passed.')
+        brain.consolidate(self.repository,apply=True);brain.auto_promote(self.repository,owner='local')
+        import validate as bank_validation
+        real_date=bank_validation.date
+        class LaterDate(real_date):
+            @classmethod
+            def today(cls):return real_date.today()+timedelta(days=400)
+        with mock.patch.object(bank_validation,'date',LaterDate):
+            result=brain.consolidate(self.repository,apply=True)
+        self.assertEqual(0,result['superseded'])
+        self.assertEqual(['recorded','recorded'],[self.status(f'EV-{i}') for i in (1,2)])
+
+    def test_successor_is_rechecked_under_lock_before_retiring_events(self) -> None:
+        self.configure(automatic_consolidation_verification=True,automatic_promotion=True)
+        for number in (1,2):
+            self.event(f'EV-{number}',f'Completed CMS-741: change {number}',
+                       f'Closed gap {number}. Verification: unit tests passed.')
+        brain.consolidate(self.repository,apply=True)
+        memory_id=brain.auto_promote(self.repository,owner='local')['promoted'][0]['memory_id']
+        retire=brain._retire_consolidated_events
+        def race(*args,**kwargs):
+            brain.retire_chunk(self.repository,memory_id,valid_to=datetime.now(timezone.utc).date().isoformat())
+            return retire(*args,**kwargs)
+        with mock.patch.object(brain,'_retire_consolidated_events',side_effect=race):
+            result=brain.consolidate(self.repository,apply=True)
+        self.assertEqual(0,result['superseded']);self.assertEqual(1,result['blocked'])
+        self.assertEqual(['recorded','recorded'],[self.status(f'EV-{i}') for i in (1,2)])
+
+    def test_unretrievable_successor_frontmatter_does_not_hide_events(self) -> None:
+        self.configure(automatic_consolidation_verification=True,automatic_promotion=True)
+        for number in (1,2):
+            self.event(f'EV-{number}',f'Completed CMS-741: change {number}',
+                       f'Closed gap {number}. Verification: unit tests passed.')
+        brain.consolidate(self.repository,apply=True)
+        memory_id=brain.auto_promote(self.repository,owner='local')['promoted'][0]['memory_id']
+        path,metadata,body=brain._find_chunk(self.repository/'memory-bank',memory_id)
+        metadata['title']='DB_PASSWORD=opaque-synthetic-4711'
+        brain.atomic_write(path,brain._render_chunk(metadata,body))
+        result=brain.consolidate(self.repository,apply=True)
+        self.assertEqual(0,result['superseded'])
+        self.assertEqual(['recorded','recorded'],[self.status(f'EV-{i}') for i in (1,2)])
+
+    def test_automatic_flags_require_json_booleans(self) -> None:
+        for flag in ('automatic_consolidation','automatic_consolidation_verification',
+                     'automatic_promotion','automatic_compaction','automatic_completion'):
+            for value in ('false','true',0,1,None):
+                self.configure(**{flag:value})
+                with self.subTest(flag=flag,value=value),self.assertRaisesRegex(brain.BrainError,'must be boolean'):
+                    brain.load_config(self.repository)
 
     def test_a_dry_run_plans_without_writing(self) -> None:
         self.event("EV-1", "Completed CMS-741: first", "Resolved the first cobalt gap.")
@@ -4460,6 +4924,67 @@ class RefreshHealthTest(RuntimeHarness):
         path = self.repository / "memory-bank/local/refresh-health.ndjson"
         self.assertNotIn("cobalt", path.read_text(encoding="utf-8"))
 
+    def test_a_health_record_counts_what_the_capsule_carried(self) -> None:
+        # The usage funnel (memory_eval.py funnel) adds capsules up by their
+        # shape. Counts and the profile only: no path, title or query.
+        self.start("TASK-SHAPE")
+        for profile in ("navigation", "full"):
+            result = self.run_cli(
+                "refresh", "--query", "cobalt authority rollout", "--task-id", "TASK-SHAPE",
+                "--ephemeral", "--capsule-profile", profile,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+        path = self.repository / "memory-bank/local/refresh-health.ndjson"
+        shapes = [json.loads(line).get("capsule") for line in path.read_text(encoding="utf-8").splitlines()]
+        navigation, full = shapes[-2], shapes[-1]
+        for shape in (navigation, full):
+            self.assertEqual({"profile", "working", "recent_files", "ticket_files", "documents", "tokens", "bytes"},
+                             set(shape))
+            self.assertIsInstance(shape["working"], bool)
+            self.assertIsInstance(shape["recent_files"], int)
+            self.assertEqual(0, shape["ticket_files"])
+            # The printed capsule's size, which a capsule without documents has too.
+            self.assertIsInstance(shape["bytes"], int)
+            self.assertGreater(shape["bytes"], 0)
+        self.assertEqual(("navigation", 0), (navigation["profile"], navigation["documents"]))
+        self.assertEqual("full", full["profile"])
+        text = path.read_text(encoding="utf-8")
+        self.assertNotIn("cobalt", text)
+        self.assertNotIn("TASK-SHAPE", text)
+
+    def test_a_capsule_asked_for_and_not_assembled_is_recorded_as_none(self) -> None:
+        # A runtime that refused the capsule wrote no shape, as one before
+        # shapes did, and a funnel counted the turn as a capsule built.
+        refused = self.run_cli("refresh", "--query", "cobalt authority", "--task-id", "TASK:ODD",
+                               "--ephemeral", "--json")
+        self.assertEqual(0, refused.returncode, refused.stderr)
+        self.assertTrue(any("Capsule unavailable" in warning for warning in json.loads(refused.stdout)["warnings"]))
+        path = self.repository / "memory-bank/local/refresh-health.ndjson"
+        line = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertIn("capsule", line)
+        self.assertIsNone(line["capsule"])
+        self.assertNotIn("cobalt", path.read_text(encoding="utf-8"))
+        # A refresh that asked for no capsule says nothing of one.
+        self.assertEqual(0, self.run_cli("refresh").returncode)
+        self.assertNotIn("capsule", json.loads(path.read_text(encoding="utf-8").splitlines()[-1]))
+
+    def test_a_hook_context_line_counts_the_bytes_it_prints(self) -> None:
+        self.start("TASK-HOOK-SHAPE")
+        printed = self.run_cli("hook-context", "--task-id", "TASK-HOOK-SHAPE")
+        self.assertEqual(0, printed.returncode, printed.stderr)
+        path = self.repository / "memory-bank/local/refresh-health.ndjson"
+        line = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(("hook-context", "cli"), (line["source"], line["host"]))
+        self.assertEqual(len(printed.stdout.encode("utf-8")), line["capsule"]["bytes"])
+        # The host a hook names is the line's, for a funnel to split by.
+        self.assertEqual(0, self.run_cli("refresh", "--query", "cobalt authority", "--task-id", "TASK-HOOK-SHAPE",
+                                         "--ephemeral", "--host", "codex").returncode)
+        self.assertEqual("codex", json.loads(path.read_text(encoding="utf-8").splitlines()[-1])["host"])
+        # The JSON form prints no capsule text, and says nothing of its size.
+        self.assertEqual(0, self.run_cli("hook-context", "--task-id", "TASK-HOOK-SHAPE", "--json").returncode)
+        line = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertIsNone(line["capsule"]["bytes"])
+
 
 class MemoryProbeTest(RuntimeHarness):
     """Category contracts for retrieval, with negatives declared as data.
@@ -4851,8 +5376,8 @@ class BankRetireTest(BankFixture):
         calls = {"n": 0}
 
         def failing_write(path: Path, content: str) -> None:
-            calls["n"] += 1
-            if calls["n"] == 2:
+            if Path(path) == successor and calls["n"] == 0:
+                calls["n"] += 1
                 raise OSError("interrupted between the two sides of the link")
             real_write(path, content)
 
@@ -4865,6 +5390,7 @@ class BankRetireTest(BankFixture):
                     superseded_by="MEM-20260102-bbbbbbbb",
                 )
 
+        self.assertEqual(1, calls["n"], "the second authority effect must reach the injected failure")
         self.assertEqual(before_chunk, self.chunk.read_text(encoding="utf-8"))
         self.assertEqual(before_successor, successor.read_text(encoding="utf-8"))
         self.assertEqual(
@@ -4921,6 +5447,314 @@ class BankRetireTest(BankFixture):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("ISO date", result.stderr)
         self.assertEqual(before, self.chunk.read_text(encoding="utf-8"))
+
+
+class BankRetirementRecoveryTest(BankFixture):
+    """Real process death must leave recoverable retirement custody."""
+
+    CHILD = r'''
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import brain_runtime as brain
+root=Path(sys.argv[2]);cut=sys.argv[3];original=brain.atomic_write
+old=root/'memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md'
+new=root/'memory-bank/chunks/MEM-20260102-bbbbbbbb-new-rule.md'
+rolling=[]
+def die():
+    fd=os.open(root/'retirement-cut.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+    os.write(fd,json.dumps({'cut':cut,'committed':True}).encode());os.fsync(fd);os.close(fd)
+    os._exit(73)
+def stop_after_commit(destination,text):
+    result=original(destination,text);destination=Path(destination)
+    selected={'predecessor':old,'successor':new,'index':root/'memory-bank/INDEX.md',
+              'intent':root/'project-brain/control/bank-retirement.json'}.get(cut)
+    if destination==selected:die()
+    if cut=='rollback' and destination==root/'memory-bank/INDEX.md' and not rolling:
+        rolling.append(True);raise OSError('Begin rollback after the INDEX effect')
+    if cut=='rollback' and rolling and destination==old and '"status": "active"' in text:die()
+    return result
+brain.atomic_write=stop_after_commit
+original_unlink=brain._PublicationFiles.unlink
+def unlink(self,relative,expected):
+    result=original_unlink(self,relative,expected)
+    if cut=='commit' and relative=='project-brain/control/bank-retirement.json':die()
+    return result
+brain._PublicationFiles.unlink=unlink
+brain.retire_chunk(root,'MEM-20260101-aaaaaaaa',valid_to=sys.argv[4],superseded_by='MEM-20260102-bbbbbbbb')
+raise AssertionError('requested death cut was not reached')
+'''
+
+    def setUp(self):
+        super().setUp()
+        self.successor=self.write_chunk('MEM-20260102-bbbbbbbb','new-rule','The cerulean rollout changed.')
+        self.assertEqual(0,self.run_cli('reindex-bank').returncode)
+        self.before_chunks={entry.name:entry.read_bytes() for entry in (self.chunk,self.successor)}
+
+    def crash(self, cut):
+        result=subprocess.run([sys.executable,'-B','-c',self.CHILD,str(SCRIPTS),str(self.repository),cut,
+            datetime.now(timezone.utc).date().isoformat()],capture_output=True,text=True,timeout=10)
+        self.assertEqual(73,result.returncode,result.stderr)
+        self.assertEqual({'cut':cut,'committed':True},json.loads((self.repository/'retirement-cut.json').read_text()))
+
+    def assert_recovered(self, cut):
+        self.crash(cut)
+        repaired=self.run_cli('reindex-bank','--json')
+        self.assertEqual(0,repaired.returncode,repaired.stderr)
+        self.assertEqual([],self.bank_errors())
+        self.assertEqual(self.before_chunks,{entry.name:entry.read_bytes() for entry in (self.chunk,self.successor)})
+        self.assertFalse((self.repository/'project-brain/control/bank-retirement.json').exists())
+        # Recovery never invents a successful retirement: explicitly retry it.
+        done=self.run_cli('bank-retire','--id','MEM-20260101-aaaaaaaa',
+            '--valid-to',datetime.now(timezone.utc).date().isoformat(),
+            '--superseded-by','MEM-20260102-bbbbbbbb','--json')
+        self.assertEqual(0,done.returncode,done.stderr)
+        self.assertEqual([],self.bank_errors())
+        old,_=brain._parse_chunk(self.chunk);new,_=brain._parse_chunk(self.successor)
+        self.assertEqual('superseded',old['status']);self.assertEqual(new['id'],old['superseded_by'])
+        self.assertIn(old['id'],new['supersedes'])
+
+    def test_predecessor_process_death_rolls_back_on_next_mutation(self):
+        self.assert_recovered('predecessor')
+
+    def test_successor_process_death_rolls_back_on_next_mutation(self):
+        self.assert_recovered('successor')
+
+    def test_index_process_death_before_commit_rolls_back_on_next_mutation(self):
+        self.assert_recovered('index')
+
+    def retire(self):
+        return brain.retire_chunk(self.repository,'MEM-20260101-aaaaaaaa',
+            valid_to=datetime.now(timezone.utc).date().isoformat(),superseded_by='MEM-20260102-bbbbbbbb')
+
+    def images(self):
+        entries=[self.chunk,self.successor,self.repository/'memory-bank/INDEX.md',
+                 self.repository/'project-brain/control/bank-retirement.json']
+        return {entry.relative_to(self.repository).as_posix():entry.read_bytes()
+                for entry in entries if entry.is_file() and not entry.is_symlink()}
+
+    def assert_refused_without_authority_change(self):
+        before=self.images();result=self.run_cli('reindex-bank','--json')
+        self.assertNotEqual(0,result.returncode,result.stderr)
+        self.assertEqual(before,self.images())
+        return result
+
+    def test_intent_process_death_rolls_back_on_next_mutation(self):
+        self.assert_recovered('intent')
+
+    def test_process_death_during_rollback_keeps_custody(self):
+        self.assert_recovered('rollback')
+
+    def test_process_death_after_checkpoint_unlink_keeps_committed_retirement(self):
+        self.crash('commit')
+        before=self.images();self.assertFalse((self.repository/'project-brain/control/bank-retirement.json').exists())
+        self.assertEqual(0,self.run_cli('reindex-bank').returncode)
+        self.assertEqual(before,self.images());self.assertEqual([],self.bank_errors())
+        self.assertEqual('superseded',brain._parse_chunk(self.chunk)[0]['status'])
+
+    def test_failure_after_commit_unlink_preserves_committed_state_and_original_error(self):
+        unlink=brain._PublicationFiles.unlink
+        def committed_then_failed(files,relative,expected):
+            result=unlink(files,relative,expected)
+            if relative==brain.BANK_RETIRE_CHECKPOINT:
+                raise OSError('directory sync failed after commit')
+            return result
+        with mock.patch.object(brain._PublicationFiles,'unlink',committed_then_failed):
+            with self.assertRaisesRegex(OSError,'directory sync failed after commit'):
+                self.retire()
+        self.assertFalse((self.repository/brain.BANK_RETIRE_CHECKPOINT).exists())
+        self.assertEqual([],self.bank_errors())
+        self.assertEqual('superseded',brain._parse_chunk(self.chunk)[0]['status'])
+
+    def test_foreign_edit_to_either_chunk_stops_all_recovery_writes(self):
+        for which in ('predecessor','successor'):
+            fixture=BankRetirementRecoveryTest();fixture.setUp()
+            try:
+                fixture.crash('predecessor')
+                entry=fixture.chunk if which=='predecessor' else fixture.successor
+                entry.write_bytes(entry.read_bytes()+b'\nA separate checked exception.\n')
+                fixture.assert_refused_without_authority_change()
+            finally:fixture.doCleanups();fixture.tearDown()
+
+    def test_corrupt_checksum_and_forged_body_are_refused_without_writes(self):
+        for corruption in ('checksum','body','path'):
+            fixture=BankRetirementRecoveryTest();fixture.setUp()
+            try:
+                fixture.crash('predecessor');checkpoint=fixture.repository/brain.BANK_RETIRE_CHECKPOINT
+                plan=json.loads(checkpoint.read_text())
+                if corruption=='checksum':plan['sha256']='0'*64
+                elif corruption=='body':
+                    raw=brain._publication_decode(plan['chunks'][0]['after'])+b'\nAn unapproved replacement.\n'
+                    plan['chunks'][0]['after']=brain._publication_blob(raw);brain._publication_seal(plan)
+                else:
+                    plan['chunks'][0]['path']='project-brain/control/foreign.json';brain._publication_seal(plan)
+                checkpoint.write_text(json.dumps(plan))
+                fixture.assert_refused_without_authority_change()
+            finally:fixture.doCleanups();fixture.tearDown()
+
+    def test_failed_recovery_index_keeps_checkpoint_for_next_process(self):
+        self.crash('index');write=brain.atomic_write
+        def refuse_index(destination,text):
+            if Path(destination)==self.repository/'memory-bank/INDEX.md':raise OSError('INDEX remains unavailable')
+            return write(destination,text)
+        with mock.patch.object(brain,'atomic_write',refuse_index):
+            with self.assertRaisesRegex(OSError,'INDEX remains unavailable'):
+                brain.reindex_bank(self.repository)
+        self.assertTrue((self.repository/brain.BANK_RETIRE_CHECKPOINT).exists())
+        self.assertEqual(self.before_chunks,{entry.name:entry.read_bytes() for entry in (self.chunk,self.successor)})
+        self.assertEqual(0,self.run_cli('reindex-bank').returncode)
+        self.assertFalse((self.repository/brain.BANK_RETIRE_CHECKPOINT).exists())
+        self.assertEqual([],self.bank_errors())
+
+    def test_late_foreign_edit_during_rollback_is_preserved_with_checkpoint(self):
+        self.crash('predecessor');write=brain.atomic_write;changed=[]
+        def foreign_after_first_restore(destination,text):
+            result=write(destination,text)
+            if Path(destination)==self.chunk and not changed:
+                self.successor.write_bytes(self.successor.read_bytes()+b'\nA separate team-owned exception.\n')
+                changed.append(True)
+            return result
+        with mock.patch.object(brain,'atomic_write',foreign_after_first_restore):
+            with self.assertRaises(brain.BrainError):brain.reindex_bank(self.repository)
+        self.assertTrue(changed);self.assertIn(b'team-owned exception',self.successor.read_bytes())
+        self.assertTrue((self.repository/brain.BANK_RETIRE_CHECKPOINT).exists())
+        self.assertEqual(self.before_chunks[self.chunk.name],self.chunk.read_bytes())
+
+    def test_late_foreign_edit_before_commit_is_preserved_with_checkpoint(self):
+        write=brain.atomic_write;changed=[]
+        def foreign_after_index(destination,text):
+            result=write(destination,text)
+            if Path(destination)==self.repository/'memory-bank/INDEX.md' and not changed:
+                self.successor.write_bytes(self.successor.read_bytes()+b'\nA separate team-owned exception.\n')
+                changed.append(True)
+            return result
+        with mock.patch.object(brain,'atomic_write',foreign_after_index):
+            with self.assertRaises(brain.BrainError):self.retire()
+        self.assertTrue(changed);self.assertIn(b'team-owned exception',self.successor.read_bytes())
+        self.assertTrue((self.repository/brain.BANK_RETIRE_CHECKPOINT).exists())
+
+    def test_inaccessible_checkpoint_parent_is_not_treated_as_absence(self):
+        if os.name!='posix' or not hasattr(os,'geteuid') or os.geteuid()==0:
+            self.skipTest('requires POSIX permission enforcement for an ordinary user')
+        self.crash('predecessor');control=self.repository/'project-brain/control'
+        before=self.images();mode=control.stat().st_mode & 0o777
+        try:
+            control.chmod(0)
+            result=self.run_cli('reindex-bank','--json')
+        finally:control.chmod(mode)
+        self.assertNotEqual(0,result.returncode,result.stderr)
+        self.assertEqual(before,self.images())
+
+        # The failed admission released its lock; safe recovery can proceed.
+        self.assertEqual(0,self.run_cli('reindex-bank').returncode)
+        self.assertEqual([],self.bank_errors())
+
+    def test_nested_lock_does_not_rollback_its_own_retirement(self):
+        with brain.mutation_lock(self.repository):
+            self.retire()
+        self.assertEqual('superseded',brain._parse_chunk(self.chunk)[0]['status'])
+        self.assertEqual([],self.bank_errors())
+
+    def test_crlf_body_survives_successful_retirement_byte_for_byte(self):
+        self.chunk.write_bytes(self.chunk.read_bytes().replace(b'\n',b'\r\n'))
+        before=brain._publication_metadata(self.chunk.read_bytes())[1].encode()
+        self.retire()
+        after=brain._publication_metadata(self.chunk.read_bytes())[1].encode()
+        self.assertEqual(before,after);self.assertIn(b'\r\n',after)
+
+    def test_nonordinary_target_and_successor_refuse_before_checkpoint(self):
+        for kind in ('symlink','hardlink','oversized','directory','duplicate'):
+            for which in ('predecessor','successor'):
+                with self.subTest(kind=kind,which=which):
+                    fixture=BankRetirementRecoveryTest();fixture.setUp()
+                    try:
+                        entry=fixture.chunk if which=='predecessor' else fixture.successor
+                        other=fixture.successor if which=='predecessor' else fixture.chunk
+                        unchanged=other.read_bytes();index=(fixture.repository/'memory-bank/INDEX.md').read_bytes()
+                        outside=fixture.repository/'separate-claim.txt';outside.write_bytes(entry.read_bytes())
+                        if kind=='duplicate':
+                            duplicate=entry.with_name(entry.name.replace('-rule.md','-duplicate.md'))
+                            duplicate.write_bytes(entry.read_bytes())
+                        else:
+                            entry.unlink()
+                            if kind=='oversized':entry.write_bytes(b'c'*(brain.PUBLICATION_IMAGE_LIMIT+1))
+                            elif kind=='directory':entry.mkdir()
+                            elif kind=='hardlink':
+                                try:os.link(outside,entry)
+                                except OSError:self.skipTest('hardlinks unavailable on this host')
+                            else:
+                                try:entry.symlink_to(outside)
+                                except OSError:self.skipTest('symlinks unavailable on this host')
+                        original=outside.read_bytes()
+                        with self.assertRaises((brain.BrainError,OSError)):fixture.retire()
+                        self.assertEqual(original,outside.read_bytes());self.assertEqual(unchanged,other.read_bytes())
+                        self.assertEqual(index,(fixture.repository/'memory-bank/INDEX.md').read_bytes())
+                        self.assertFalse((fixture.repository/brain.BANK_RETIRE_CHECKPOINT).exists())
+                    finally:fixture.doCleanups();fixture.tearDown()
+
+    def test_linked_or_oversized_checkpoint_refuses_without_recovery_writes(self):
+        for kind in ('symlink','hardlink','oversized'):
+            with self.subTest(kind=kind):
+                fixture=BankRetirementRecoveryTest();fixture.setUp()
+                try:
+                    fixture.crash('predecessor');checkpoint=fixture.repository/brain.BANK_RETIRE_CHECKPOINT
+                    outside=fixture.repository/'separate-checkpoint.json';outside.write_bytes(checkpoint.read_bytes())
+                    checkpoint.unlink()
+                    if kind=='oversized':checkpoint.write_bytes(b'c'*(2*brain.PUBLICATION_LIMIT+1))
+                    elif kind=='hardlink':
+                        try:os.link(outside,checkpoint)
+                        except OSError:self.skipTest('hardlinks unavailable on this host')
+                    else:
+                        try:checkpoint.symlink_to(outside)
+                        except OSError:self.skipTest('symlinks unavailable on this host')
+                    original=outside.read_bytes();fixture.assert_refused_without_authority_change()
+                    self.assertEqual(original,outside.read_bytes())
+                finally:fixture.doCleanups();fixture.tearDown()
+
+    def test_symlink_control_without_checkpoint_refuses_before_bank_changes(self):
+        external=self.repository/'separate-control';external.mkdir()
+        control=self.repository/'project-brain/control'
+        if control.exists():shutil.rmtree(control)
+        try:control.symlink_to(external,target_is_directory=True)
+        except OSError:self.skipTest('directory symlinks unavailable on this host')
+        before=self.images()
+        with self.assertRaises((brain.BrainError,OSError)):self.retire()
+        self.assertEqual(before,self.images());self.assertEqual([],list(external.iterdir()))
+
+    def test_another_state_does_not_recover_an_attached_states_checkpoint(self):
+        self.crash('predecessor');before=self.images()
+        other=BankRetirementRecoveryTest();other.setUp()
+        try:
+            project=self.repository/'source-project';(project/'specs').mkdir(parents=True)
+            (project/'specs/authority.md').write_bytes((self.repository/'specs/authority.md').read_bytes())
+            environment={'ACCELERATOR_HOME':str(EDITION),'ACCELERATOR_STATE_DIR':str(self.repository),
+                         'ACCELERATOR_PROJECT_DIR':str(project)}
+            with mock.patch.dict(os.environ,environment):
+                self.assertTrue(brain.workspace_roots.roots(self.repository).attached)
+                brain.reindex_bank(other.repository)
+                self.assertEqual(before,self.images())
+                brain.reindex_bank(self.repository)
+            self.assertFalse((self.repository/brain.BANK_RETIRE_CHECKPOINT).exists())
+            self.assertEqual(self.before_chunks,{entry.name:entry.read_bytes() for entry in (self.chunk,self.successor)})
+            self.assertEqual([],self.bank_errors())
+        finally:other.doCleanups();other.tearDown()
+
+    def test_fifo_target_and_successor_refuse_before_checkpoint(self):
+        if not hasattr(os,'mkfifo'):self.skipTest('FIFO requires POSIX')
+        for which in ('predecessor','successor'):
+            fixture=BankRetirementRecoveryTest();fixture.setUp()
+            try:
+                entry=fixture.chunk if which=='predecessor' else fixture.successor
+                untouched=fixture.successor if which=='predecessor' else fixture.chunk
+                before=untouched.read_bytes();index=(fixture.repository/'memory-bank/INDEX.md').read_bytes()
+                entry.unlink();os.mkfifo(entry)
+                result=subprocess.run([sys.executable,'-B',str(CONTEXT_SCRIPT),'--root',str(fixture.repository),
+                    'bank-retire','--id','MEM-20260101-aaaaaaaa','--valid-to',datetime.now(timezone.utc).date().isoformat(),
+                    '--superseded-by','MEM-20260102-bbbbbbbb'],capture_output=True,text=True,timeout=10)
+                self.assertNotEqual(0,result.returncode);self.assertEqual(before,untouched.read_bytes())
+                self.assertEqual(index,(fixture.repository/'memory-bank/INDEX.md').read_bytes())
+                self.assertFalse((fixture.repository/brain.BANK_RETIRE_CHECKPOINT).exists())
+            finally:fixture.doCleanups();fixture.tearDown()
 
 
 class DocumentLinkTest(BankFixture):
@@ -5919,9 +6753,11 @@ class ProvenanceAuditTest(BankFixture):
         )
 
     def test_quarantine_stops_serving_and_closes_validity(self) -> None:
+        # East of UTC after midnight the local date runs a day ahead; the
+        # date written is the UTC one, as every other date the runtime writes.
         result = self.run_cli(
             "bank-quarantine", "--id", "MEM-20260101-aaaaaaaa",
-            "--reason", "suspected poisoning", "--json",
+            "--reason", "suspected poisoning", "--json", env=calendar_shifted(+1),
         )
         self.assertEqual(0, result.returncode, result.stderr)
         payload = json.loads(result.stdout)
@@ -6130,6 +6966,45 @@ class ChunkSourceDigestTest(BankFixture):
             [item["path"] for item in capsule["selected"]],
             capsule,
         )
+
+
+class ChunkCalendarTest(BankFixture):
+    """Chunk dates are UTC calendar dates - promotion and re-verification
+    write them so - and west of UTC the evening's UTC date is the local
+    tomorrow. Judged by the local calendar, such a chunk was "in the future":
+    it failed validation and left retrieval until local midnight."""
+
+    def test_a_chunk_dated_today_in_utc_is_served_where_it_is_still_yesterday(self) -> None:
+        behind = calendar_shifted(-1)
+        if behind is None:
+            self.skipTest("the local calendar is set through a POSIX TZ offset")
+        # The fixture's chunk was verified today by the UTC calendar.
+        self.assertEqual(0, self.run_cli("index", "--json", env=behind).returncode)
+        started = self.run_cli(
+            "start", "--task-id", "TASK-WEST", "--goal", "Apply the cobalt authority rule.",
+            "--source", "specs/authority.md", "--json", env=behind,
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+        capsule = json.loads(
+            self.run_cli(
+                "retrieve", "cerulean rollout", "--task-id", "TASK-WEST",
+                "--ephemeral", "--json", env=behind,
+            ).stdout
+        )
+        self.assertIn(
+            "memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md",
+            [item["path"] for item in capsule["selected"]],
+            capsule,
+        )
+        # A date ahead of both calendars is still refused.
+        later = (datetime.now(timezone.utc).date() + timedelta(days=2)).isoformat()
+        future = self.write_chunk(
+            "MEM-20260101-bbbbbbbb", "later-rule", "The cobalt rollout is later.",
+            last_verified=later, review_after=later,
+        )
+        metadata = json.loads(future.read_text(encoding="utf-8")[4:].split("\n---\n", 1)[0])
+        with self.assertRaisesRegex(brain.BankValidationError, "must not be in the future"):
+            brain.validate_bank_metadata(future, metadata, self.repository)
 
 
 class OverdueBankWriteTest(BankFixture):
@@ -6876,6 +7751,28 @@ class FileLinkSeedTest(RuntimeHarness):
             retrieval.prompt_path_seeds(connection, self.repository, text),
         )
 
+    def test_a_path_under_a_root_with_a_space_is_found(self) -> None:
+        # A root such as "/Users/ann/My Projects/shop": the pattern for the
+        # whole path stopped at the space and lost every path under it.
+        connection = self.link_table("src/Http/Kernel.php", "composer.json")
+        project = self.repository / "My Projects" / "shop"
+        project.mkdir(parents=True)
+        root = project.as_posix()
+        text = f"the error is in {root}/src/Http/Kernel.php:40, after {root}/composer.json changed"
+        self.assertEqual(["src/Http/Kernel.php", "composer.json"],
+                         retrieval.prompt_path_seeds(connection, project, text))
+
+    def test_a_windows_path_under_the_root_is_found(self) -> None:
+        # Windows writes the root with backslashes - C:\work\ann lee\shop -
+        # and only its slash form was looked for.
+        from pathlib import PureWindowsPath
+        connection = self.link_table("src/http/kernel.php")
+        root = PureWindowsPath("C:/work/ann lee/shop")
+        with mock.patch.object(retrieval.workspace_roots, "project_root", return_value=root):
+            seeds = retrieval.prompt_path_seeds(
+                connection, self.repository, "it fails in C:\\work\\ann lee\\shop\\src\\http\\kernel.php:40")
+        self.assertEqual(["src/http/kernel.php"], seeds)
+
     def test_fqcn_maps_through_psr4_autoload_and_autoload_dev(self) -> None:
         connection = self.link_table("app/Billing/InvoiceTotal.php", "extra/Money.php", "tests/Unit/FooTest.php")
         self.repository.joinpath("composer.json").write_text(json.dumps({
@@ -7310,6 +8207,172 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
         self.assertLessEqual(len(paths) + len(excluded), 4)
         self.assertNotIn("sibling/outside.txt", paths)
+
+    def test_changed_paths_leave_out_the_install_as_its_record_wrote_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="untracked-install-test-") as temporary:
+            project = Path(temporary)
+            git = ["git", "-C", str(project)]
+            subprocess.run(["git", "init", "--quiet", str(project)], check=True, capture_output=True)
+            (project / ".gitignore").write_text("/memory-bank/local/\n", encoding="utf-8")
+            (project / "app.php").write_text("<?php\n", encoding="utf-8")
+            subprocess.run([*git, "add", "."], check=True, capture_output=True)
+            subprocess.run([*git, "-c", "user.name=Test", "-c", "user.email=test@example.test",
+                            "commit", "-qm", "base"], check=True, capture_output=True)
+            installed = {
+                ".claude/settings.json": "{}\n",
+                ".claude/hooks/working-memory-read.sh": "#!/bin/bash\n",
+                "memory-bank/scripts/context.py": "# runtime\n",
+                "AGENTS.md": "# Policy\n",
+                "VERSION": "2.0.0\n",
+                "ACCELERATOR.md": "# Accelerator\n",
+            }
+            for name, text in installed.items():
+                (project / name).parent.mkdir(parents=True, exist_ok=True)
+                (project / name).write_text(text, encoding="utf-8")
+            record = {
+                name: hashlib.sha1(b"blob %d\0" % len(text.encode()) + text.encode()).hexdigest()
+                for name, text in installed.items()
+            }
+            (project / "memory-bank/local").mkdir(parents=True)
+            record_file = project / "memory-bank/local/accelerator-install.json"
+            record_file.write_text(json.dumps({"schema": 1, "files": record}), encoding="utf-8")
+
+            # Nothing but the install: a turn has changed nothing.
+            self.assertEqual(([], []), context_cli.changed_paths(project))
+
+            # The team edits one installed file and adds its own work.
+            (project / "ACCELERATOR.md").write_text("# Accelerator, our notes\n", encoding="utf-8")
+            (project / "app.php").write_text("<?php // changed\n", encoding="utf-8")
+            (project / "src").mkdir()
+            (project / "src/Report.php").write_text("<?php\n", encoding="utf-8")
+            paths, excluded = context_cli.changed_paths(project)
+            self.assertEqual(["ACCELERATOR.md", "app.php", "src/"], sorted(paths))
+            self.assertEqual([], excluded)
+
+            # Without a record every untracked entry is reported, as before.
+            record_file.unlink()
+            paths, _ = context_cli.changed_paths(project)
+            self.assertEqual(
+                [".claude/", "ACCELERATOR.md", "AGENTS.md", "VERSION", "app.php", "memory-bank/", "src/"],
+                sorted(paths),
+            )
+
+    def test_a_generated_projects_manifest_marks_its_files_the_same_way(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="generated-project-test-") as temporary:
+            project = Path(temporary)
+            git = ["git", "-C", str(project)]
+            subprocess.run(["git", "init", "--quiet", str(project)], check=True, capture_output=True)
+            (project / "app.php").write_text("<?php\n", encoding="utf-8")
+            subprocess.run([*git, "add", "."], check=True, capture_output=True)
+            subprocess.run([*git, "-c", "user.name=Test", "-c", "user.email=test@example.test",
+                            "commit", "-qm", "base"], check=True, capture_output=True)
+            generated = {".claude/settings.json": "{}\n", "AGENTS.md": "# Generated policy\n"}
+            for name, text in generated.items():
+                (project / name).parent.mkdir(parents=True, exist_ok=True)
+                (project / name).write_text(text, encoding="utf-8")
+            # The generator's manifest: sha256 of each file it owns.
+            (project / ".infra-manifest.json").write_text(json.dumps({"files": {
+                name: hashlib.sha256(text.encode()).hexdigest() for name, text in generated.items()
+            }}), encoding="utf-8")
+            self.assertEqual(([], []), context_cli.changed_paths(project))
+            (project / "AGENTS.md").write_text("# Generated policy\n\nOur addition.\n", encoding="utf-8")
+            self.assertEqual(["AGENTS.md"], context_cli.changed_paths(project)[0])
+
+    def test_a_turn_in_an_untouched_untracked_install_buffers_nothing(self) -> None:
+        git = ["git", "-C", str(self.repository)]
+        self.repository.joinpath(".gitignore").write_text("/memory-bank/local/\n", encoding="utf-8")
+        subprocess.run([*git, "add", "."], check=True, capture_output=True)
+        subprocess.run([*git, "-c", "user.name=Test", "-c", "user.email=test@example.test",
+                        "commit", "-qm", "base"], check=True, capture_output=True)
+        installed = {"AGENTS.md": "# Policy\n", "VERSION": "2.0.0\n",
+                     ".claude/settings.json": "{}\n"}
+        for name, text in installed.items():
+            self.repository.joinpath(name).parent.mkdir(parents=True, exist_ok=True)
+            self.repository.joinpath(name).write_text(text, encoding="utf-8")
+        record = self.repository / "memory-bank/local/accelerator-install.json"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"schema": 1, "files": {
+            name: hashlib.sha1(b"blob %d\0" % len(text.encode()) + text.encode()).hexdigest()
+            for name, text in installed.items()
+        }}), encoding="utf-8")
+        turn = self.run_cli("turn", "--task-id", "feature/read-only", "--flush-after", "5", "--json")
+        self.assertEqual(0, turn.returncode, turn.stderr)
+        report = json.loads(turn.stdout)
+        self.assertEqual(0, report["files"])
+        self.assertIsNone(report["delta_id"])
+        # A branch with no meaningful change has no context (code 3), not a
+        # warming capsule counting the install as changed files.
+        warming = self.run_cli("hook-context", "--task-id", "feature/read-only", "--json")
+        self.assertEqual(3, warming.returncode, warming.stdout + warming.stderr)
+
+    def test_a_flush_drops_the_install_turns_buffered_before_the_record(self) -> None:
+        git = ["git", "-C", str(self.repository)]
+        self.repository.joinpath(".gitignore").write_text("/memory-bank/local/\n", encoding="utf-8")
+        subprocess.run([*git, "add", "."], check=True, capture_output=True)
+        subprocess.run([*git, "-c", "user.name=Test", "-c", "user.email=test@example.test",
+                        "commit", "-qm", "base"], check=True, capture_output=True)
+        installed = {"AGENTS.md": "# Policy\n", ".claude/settings.json": "{}\n"}
+        for name, text in installed.items():
+            self.repository.joinpath(name).parent.mkdir(parents=True, exist_ok=True)
+            self.repository.joinpath(name).write_text(text, encoding="utf-8")
+        self.repository.joinpath("app.php").write_text("<?php\n", encoding="utf-8")
+        # A turn buffered by a runtime that took the install for work.
+        buffered = self.run_cli("turn", "--task-id", "feature/legacy", "--flush-after", "5", "--json")
+        self.assertEqual(0, buffered.returncode, buffered.stderr)
+        self.assertEqual(3, json.loads(buffered.stdout)["files"])
+        record = self.repository / "memory-bank/local/accelerator-install.json"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"schema": 1, "files": {
+            name: hashlib.sha1(b"blob %d\0" % len(text.encode()) + text.encode()).hexdigest()
+            for name, text in installed.items()
+        }}), encoding="utf-8")
+        flushed = self.run_cli("turn", "--task-id", "feature/legacy", "--flush", "--json")
+        self.assertEqual(0, flushed.returncode, flushed.stderr)
+        capsule = self.run_cli("hook-context", "--task-id", "feature/legacy", "--json")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertEqual(["app.php"], json.loads(capsule.stdout)["working"]["files"])
+
+    def commit_base(self) -> None:
+        git = ["git", "-C", str(self.repository)]
+        self.repository.joinpath(".gitignore").write_text("/memory-bank/local/\n", encoding="utf-8")
+        subprocess.run([*git, "add", "."], check=True, capture_output=True)
+        subprocess.run([*git, "-c", "user.name=Test", "-c", "user.email=test@example.test",
+                        "commit", "-qm", "base"], check=True, capture_output=True)
+
+    def test_a_promoted_saves_memory_files_are_not_the_turns_work(self) -> None:
+        # A team that commits its memory: a save with a learning writes a
+        # chunk and rewrites the index, and that is the runtime's writing.
+        self.commit_base()
+        self.repository.joinpath("memory-bank/chunks/MEM-20261023-0000abcd-promoted.md").write_text(
+            "---\n{}\n---\n", encoding="utf-8")
+        index = self.repository / "memory-bank/INDEX.md"
+        index.write_text(index.read_text(encoding="utf-8") + "| MEM-20261023-0000abcd | Promoted |\n",
+                         encoding="utf-8")
+        only_memory = self.run_cli("turn", "--task-id", "feature/memory", "--flush-after", "5", "--json")
+        self.assertEqual(0, only_memory.returncode, only_memory.stderr)
+        self.assertEqual(0, json.loads(only_memory.stdout)["files"])
+        self.repository.joinpath("app.php").write_text("<?php\n", encoding="utf-8")
+        with_work = self.run_cli("turn", "--task-id", "feature/memory", "--flush-after", "5", "--json")
+        self.assertEqual(0, with_work.returncode, with_work.stderr)
+        self.assertEqual(1, json.loads(with_work.stdout)["files"])
+
+    def test_a_flush_drops_memory_writes_buffered_before_they_were_known(self) -> None:
+        self.commit_base()
+        self.repository.joinpath("app.php").write_text("<?php\n", encoding="utf-8")
+        first = self.run_cli("turn", "--task-id", "feature/memory", "--flush-after", "5", "--json")
+        self.assertEqual(0, first.returncode, first.stderr)
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        self.addCleanup(connection.close)
+        # A turn buffered by a runtime that took the promoted chunk and the
+        # index for work: the flush would have made them the newest files.
+        context_cli.append_turn_delta(connection, "feature/memory", ["memory-bank/chunks/", "memory-bank/INDEX.md"])
+        flushed = self.run_cli("turn", "--task-id", "feature/memory", "--flush", "--json")
+        self.assertEqual(0, flushed.returncode, flushed.stderr)
+        capsule = self.run_cli("hook-context", "--task-id", "feature/memory", "--json")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertEqual(["app.php"], json.loads(capsule.stdout)["working"]["files"])
 
     def test_hook_context_warms_four_turns_then_switches_to_governed(self) -> None:
         self.repository.joinpath("safe.php").write_text(
@@ -8182,6 +9245,37 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             self.run_cli("get", "--task-id", task_id, "--json").stdout
         )["auto_checkpoint"]
 
+    def test_an_explicit_flush_with_nothing_buffered_makes_the_task(self) -> None:
+        # The checkpoint skill flushes, then updates: on a new branch with
+        # nothing buffered the flush made no task and the update was
+        # refused ("Working task not found").
+        self.commit_main()
+        self.git("checkout", "-q", "-b", "feature/discussed")
+        visit = json.loads(self.run_cli("turn", "--task-id", "feature/discussed", "--json").stdout)
+        self.assertFalse(visit["provisioned"])
+        self.assertNotEqual(0, self.run_cli("get", "--task-id", "feature/discussed", "--json").returncode)
+        flushed = self.run_cli("turn", "--task-id", "feature/discussed", "--flush", "--json")
+        self.assertEqual(0, flushed.returncode, flushed.stderr)
+        self.assertEqual((True, False), (json.loads(flushed.stdout)["provisioned"], json.loads(flushed.stdout)["flushed"]))
+        updated = self.run_cli("update", "--task-id", "feature/discussed", "--revision", "auto",
+                               "--progress", "Agreed to date refunds by their invoice", "--json")
+        self.assertEqual(0, updated.returncode, updated.stderr)
+        task = json.loads(self.run_cli("get", "--task-id", "feature/discussed", "--json").stdout)
+        self.assertEqual("Agreed to date refunds by their invoice", task["progress"])
+        again = json.loads(self.run_cli("turn", "--task-id", "feature/discussed", "--flush", "--json").stdout)
+        self.assertFalse(again["provisioned"])
+        # A completed task is not made again.
+        revision = json.loads(self.run_cli("get", "--task-id", "feature/discussed", "--json").stdout)["revision"]
+        done = self.run_cli("complete", "--task-id", "feature/discussed", "--revision", str(revision),
+                            "--summary", "Refunds dated", "--outcome", "done", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        closed = self.run_cli("turn", "--task-id", "feature/discussed", "--flush", "--json")
+        self.assertEqual(0, closed.returncode, closed.stderr)
+        self.assertFalse(json.loads(closed.stdout)["provisioned"])
+        tasks = [path for path in (self.repository / "project-brain/dynamic/tasks").glob("*.md")
+                 if "feature/discussed" in path.read_text(encoding="utf-8")]
+        self.assertEqual(1, len(tasks))
+
     def test_a_checkpoint_names_the_branch_commits(self) -> None:
         # Paths said where the work happened; nothing said what it was, though
         # every commit already carried a person's one-line summary of it.
@@ -8744,7 +9838,8 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
                 "from": "observed",
                 "to": "verified",
                 "actor": "local",
-                "reason": "Verified: authority source re-read",
+                # The command says who checked: the agent, unless a person did.
+                "reason": "Verified: authority source re-read [attestation:agent]",
             },
             {
                 key: authority_transition[key]
@@ -9496,6 +10591,443 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
 
 
+class LastTurnReportCustodyTest(RuntimeHarness):
+    def setUp(self):
+        super().setUp();self.start('TASK-ADVISORY-CUSTODY')
+        self.leaf=self.repository/'memory-bank/local/last-turn-report.json'
+        self.leaf.parent.mkdir(parents=True,exist_ok=True)
+        self.payload={'schema_version':1,'task_id':'PROJECT-DIAGNOSTICS',
+            'timestamp':datetime.now(timezone.utc).isoformat(),'error':'CedarAdvisorySyntheticMarker'}
+
+    def refresh(self):
+        try:
+            result=subprocess.run([sys.executable,'-B',str(CONTEXT_SCRIPT),
+                '--root',str(self.repository),'refresh','--query','cobalt authority',
+                '--task-id','TASK-ADVISORY-CUSTODY','--ephemeral','--json'],
+                capture_output=True,text=True,timeout=3)
+        except subprocess.TimeoutExpired:
+            self.fail('Advisory input blocked the actual refresh beyond its watchdog')
+        self.assertEqual(0,result.returncode,result.stderr)
+        self.last_refresh_stdout=result.stdout
+        return json.loads(result.stdout)['capsule']
+
+    def test_foreign_symlink_is_omitted_from_actual_capsule(self):
+        with tempfile.TemporaryDirectory(prefix='advisory-foreign-data-') as temporary:
+            outside=Path(temporary)/'synthetic-report.json';outside.write_text(json.dumps(self.payload))
+            try:self.leaf.symlink_to(outside)
+            except OSError:self.skipTest('symlinks unavailable on this host')
+            self.assertIsNone(self.refresh()['last_turn'])
+            self.assertEqual(self.payload,json.loads(outside.read_text()))
+
+    def test_fifo_never_blocks_actual_refresh(self):
+        if not hasattr(os,'mkfifo'):self.skipTest('FIFO requires POSIX')
+        os.mkfifo(self.leaf)
+        self.assertIsNone(self.refresh()['last_turn'])
+
+    def test_oversized_ordinary_report_is_omitted(self):
+        raw=json.dumps(self.payload).encode();self.leaf.write_bytes(raw+b' '*(65537-len(raw)))
+        self.assertIsNone(self.refresh()['last_turn'])
+
+    def test_deep_optional_json_never_breaks_refresh(self):
+        prefix=json.dumps(self.payload)[:-1]
+        self.leaf.write_text(prefix+',"padding":'+('['*1500)+'0'+(']'*1500)+'}')
+        # Interpreter decoders differ: accepted bounded JSON may retain the
+        # regular summary; a recursion refusal must quietly omit it.
+        summary=self.refresh()['last_turn']
+        self.assertTrue(summary is None or self.payload['error'] in summary)
+
+    def test_parser_recursion_failure_is_optional_not_a_refresh_failure(self):
+        self.leaf.write_text(json.dumps(self.payload))
+        with mock.patch.object(context_cli.json,'loads',side_effect=RecursionError('decoder limit')):
+            self.assertIsNone(context_cli.load_last_turn_report(self.repository))
+
+    def test_linked_parent_never_redirects_the_actual_turn_report_write(self):
+        with tempfile.TemporaryDirectory(prefix='advisory-write-foreign-data-') as temporary:
+            outside=Path(temporary);sentinel=outside/self.leaf.name
+            original=b'External synthetic report must stay unchanged.\n';sentinel.write_bytes(original)
+            local=self.leaf.parent;ordinary=self.repository/'ordinary-local';local.rename(ordinary)
+            try:local.symlink_to(outside,target_is_directory=True)
+            except OSError:self.skipTest('directory symlinks unavailable on this host')
+            result=subprocess.run([sys.executable,'-B',str(CONTEXT_SCRIPT),
+                '--root',str(self.repository),'--db',str(ordinary/'context.db'),
+                'turn','--task-id','TASK-ADVISORY-CUSTODY','--flush-after','99','--json'],
+                capture_output=True,text=True,timeout=10)
+            self.assertEqual(0,result.returncode,result.stderr)
+            self.assertEqual(original,sentinel.read_bytes())
+            self.assertEqual([self.leaf.name],sorted(entry.name for entry in outside.iterdir()))
+
+    def test_report_write_keeps_the_existing_file_sync_guarantee(self):
+        sync=os.fsync;regular_files=[]
+        def flush(descriptor):
+            regular_files.append((os.fstat(descriptor).st_mode & 0o170000)==0o100000)
+            return sync(descriptor)
+        with mock.patch.object(os,'fsync',flush):
+            context_cli.write_last_turn_report(self.repository,self.payload)
+        self.assertEqual(self.payload,json.loads(self.leaf.read_text()))
+        self.assertIn(True,regular_files,'The report data must be synchronized before publication')
+
+    def test_sensitive_advisory_summary_is_withheld_before_truncation(self):
+        values=['ghp_'+'A'*36,'sk_live_'+'B'*24,'person'+'@'+'example.test']
+        values.append('m'*575+' '+values[0])
+        for index,value in enumerate(values):
+            with self.subTest(case=index):
+                self.assertTrue(brain.sensitive_label(value),'Fixture must exercise the existing privacy policy')
+                context_cli.write_last_turn_report(self.repository,{**self.payload,'error':value})
+                capsule=self.refresh()
+                self.assertIn('diagnostics withheld',capsule['last_turn'])
+                self.assertEqual('TASK-ADVISORY-CUSTODY',capsule['task_id'])
+                self.assertFalse(value in self.last_refresh_stdout,'Sensitive advisory text reached refresh output')
+                self.assertNotIn('ghp_',self.last_refresh_stdout,'A clipped sensitive token reached refresh output')
+
+    def test_normal_turn_does_not_deliver_sensitive_excluded_filename(self):
+        token='ghp_'+'C'*36
+        name='fixture-'+token+'.key';(self.repository/name).write_text('public synthetic fixture\n')
+        turn=self.run_cli('turn','--task-id','TASK-ADVISORY-CUSTODY','--flush-after','99','--json')
+        self.assertEqual(0,turn.returncode,turn.stderr)
+        report=json.loads(self.leaf.read_text())
+        self.assertIn(name,report['excluded_paths'])
+        capsule=self.refresh()
+        self.assertIn('diagnostics withheld',capsule['last_turn'])
+        self.assertFalse(token in self.last_refresh_stdout,'Excluded sensitive filename reached refresh output')
+
+    def test_deep_nontext_reason_never_breaks_refresh(self):
+        self.leaf.write_text('{"timestamp":'+json.dumps(self.payload['timestamp'])+
+            ',"promotion_blocked":[{"reason":'+('['*1500)+'0'+(']'*1500)+'}]}')
+        self.assertIsNone(self.refresh()['last_turn'])
+
+    def test_fresh_regular_report_at_the_boundary_remains_visible(self):
+        raw=json.dumps(self.payload).encode();self.leaf.write_bytes(raw+b' '*(65536-len(raw)))
+        self.assertIn(self.payload['error'],self.refresh()['last_turn'])
+
+    def test_large_advisory_text_does_not_block_the_actual_refresh(self):
+        for unit in ('a.', 'a_', 'a-'):
+            with self.subTest(unit=unit):
+                value = unit * 32000
+                context_cli.write_last_turn_report(self.repository, {**self.payload, 'error': value})
+                self.assertLessEqual(self.leaf.stat().st_size, 65536)
+                capsule = self.refresh()
+                self.assertIn('diagnostics too large', capsule['last_turn'])
+                self.assertTrue(json.loads(self.leaf.read_text())['error'] == value,
+                                'Delivery refusal must preserve the local diagnostic')
+
+    def test_summary_work_limit_keeps_the_complete_boundary_under_the_privacy_guard(self):
+        prefix = 'turn failed: '
+        for length in (4096, 4097):
+            with self.subTest(summary_characters=length):
+                value = 'a' * (length - len(prefix))
+                context_cli.write_last_turn_report(self.repository, {**self.payload, 'error': value})
+                summary = self.refresh()['last_turn']
+                if length == 4096:
+                    self.assertTrue(summary.startswith(prefix))
+                    self.assertEqual(600, len(summary))
+                else:
+                    self.assertIn('diagnostics too large', summary)
+
+        token = 'ghp_' + 'D' * 36
+        value = 'a' * (4096 - len(prefix) - len(token) - 1) + ' ' + token
+        context_cli.write_last_turn_report(self.repository, {**self.payload, 'error': value})
+        self.assertIn('diagnostics withheld', self.refresh()['last_turn'])
+        self.assertFalse(token in self.last_refresh_stdout, 'A token beyond the display limit leaked')
+
+
+class AdvisoryCancellationTest(unittest.TestCase):
+    def native_publication_method(self, name, primary, cleanup):
+        """Exact installed backend body with fake ABI; not native NT evidence."""
+        import ast
+        from types import SimpleNamespace
+        factory = next(node for node in ast.parse(Path(retrieval.__file__).read_text(encoding='utf-8')).body
+                       if isinstance(node, ast.FunctionDef) and node.name == '_cursor_nt_backend')
+        names = {name, '_disposition'} if name == 'unlink' else {name}
+        methods = [node for node in factory.body
+                   if isinstance(node, ast.FunctionDef) and node.name in names]
+        namespace = {
+            'sys': sys, 'os': SimpleNamespace(close=mock.Mock(side_effect=cleanup)),
+            '_open_relative': mock.Mock(return_value=777), 'DELETE': 1, 'SYNCHRONIZE': 2,
+            'FILE_READ_ATTRIBUTES': 4, 'FILE_OPEN': 1, 'FILE_NON_DIRECTORY_FILE': 2,
+            'FILE_DIRECTORY_FILE': 1, 'FileDispositionInformation': 13,
+            'fstat': mock.Mock(side_effect=primary, return_value=mock.sentinel.metadata),
+            'atomic_replace_open': mock.Mock(side_effect=primary),
+            '_rename_information': mock.Mock(return_value=b'fixed information'),
+            'IO_STATUS_BLOCK': lambda: object(),
+            '_nt_set': mock.Mock(side_effect=primary, return_value=0),
+            'HANDLE': lambda value: value, 'raw_handle': lambda descriptor: descriptor,
+            'ctypes': SimpleNamespace(byref=lambda value: value, c_ubyte=lambda value: object()),
+            'FileRenameInformation': 10, '_raise': mock.Mock(),
+        }
+        self.assertEqual(names, {method.name for method in methods})
+        module = ast.Module(body=methods, type_ignores=[])
+        exec(compile(ast.fix_missing_locations(module), 'installed-NT-publication', 'exec'), namespace)
+        return namespace
+
+    def test_native_publication_cancellation_reaches_the_advisory_caller(self):
+        from types import SimpleNamespace
+        for name in ('replace', 'publish_absent'):
+            for cancellation in (KeyboardInterrupt, SystemExit):
+                for broken_close in (False, True):
+                    with self.subTest(method=name, cancellation=cancellation.__name__, close_fails=broken_close):
+                        primary = cancellation('cancel advisory publication')
+                        cleanup = OSError('synthetic close failure') if broken_close else None
+                        namespace = self.native_publication_method(name, primary, cleanup)
+                        files = SimpleNamespace(WINDOWS=True, O_NOFOLLOW=0,
+                            open=mock.Mock(return_value=888), unlink=mock.Mock(),
+                            replace=mock.Mock(), publish_absent=mock.Mock())
+                        setattr(files, name, namespace[name])
+                        previous = (b'old report', [1, 2, 3, 4, 5]) if name == 'replace' else None
+
+                        @contextlib.contextmanager
+                        def directory(*unused, **options):
+                            yield files, 99, lambda: None
+
+                        with mock.patch.object(context_cli, '_last_turn_report_directory', directory), \
+                                mock.patch.object(context_cli, '_cursor_image', return_value=previous), \
+                                mock.patch.object(retrieval, '_cursor_image', return_value=previous), \
+                                mock.patch.object(os, 'write', side_effect=lambda descriptor, payload: len(payload)), \
+                                mock.patch.object(os, 'fsync'), mock.patch.object(os, 'close'):
+                            with self.assertRaises(cancellation) as caught:
+                                context_cli.write_last_turn_report(EDITION, {'timestamp': '2026-11-01T00:00:00Z'})
+                            self.assertIs(primary, caught.exception)
+                        namespace['_open_relative'].assert_called_once()
+                        namespace['os'].close.assert_called_once_with(777)
+
+    def test_native_backend_success_does_not_hide_a_close_failure(self):
+        for name in ('replace', 'publish_absent', 'stat', 'unlink'):
+            for broken_close in (False, True):
+                for handled in (False, True):
+                    with self.subTest(method=name, close_fails=broken_close, handled_caller_error=handled):
+                        cleanup = OSError('synthetic close failure') if broken_close else None
+                        namespace = self.native_publication_method(name, None, cleanup)
+                        def invoke():
+                            if name == 'stat':
+                                return namespace[name]('report', dir_fd=1, follow_symlinks=False)
+                            if name == 'unlink':
+                                return namespace[name]('temporary', dir_fd=1)
+                            return namespace[name]('temporary', 'destination', src_dir_fd=1, dst_dir_fd=2)
+                        def check():
+                            if cleanup is None:
+                                invoke()
+                            else:
+                                with self.assertRaises(OSError) as caught:
+                                    invoke()
+                                self.assertIs(cleanup, caught.exception)
+                        if handled:
+                            try:
+                                raise OSError('Already handled by the caller')
+                            except OSError:
+                                check()
+                        else:
+                            check()
+                        namespace['os'].close.assert_called_once_with(777)
+
+    def test_shared_success_cleanup_error_survives_a_handled_caller_exception(self):
+        if retrieval._cursor_backend() is not os:
+            self.skipTest('Direct POSIX descriptor controls; NT body controls are separate')
+        for stage in ('read-close', 'write-close', 'temporary-unlink', 'root-close'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory(prefix='advisory-handled-caller-') as temporary:
+                root = Path(temporary)
+                (root / 'report.json').write_bytes(b'{}')
+                parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+                real_open, real_close, real_unlink = os.open, os.close, os.unlink
+                cleanup = OSError('Owned cleanup failed after a successful body')
+                state = {}
+                files = None
+                if stage == 'root-close':
+                    state['owned'] = real_open(root / 'descriptor', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    files = mock.Mock()
+                    files.open_root.return_value = state['owned']
+                    files.fstat.return_value = root.stat()
+
+                def opened(name, *arguments, **options):
+                    descriptor = real_open(name, *arguments, **options)
+                    if name == 'report.json' or str(name).startswith('.cursor-rule-'):
+                        state['owned'] = descriptor
+                    return descriptor
+
+                def closed(descriptor):
+                    result = real_close(descriptor)
+                    if descriptor == state.get('owned') and stage != 'temporary-unlink':
+                        state['cleanup_reached'] = True
+                        raise cleanup
+                    return result
+
+                def removed(name, *arguments, **options):
+                    try:
+                        result = real_unlink(name, *arguments, **options)
+                    except FileNotFoundError:
+                        result = None
+                    if stage == 'temporary-unlink' and str(name).startswith('.cursor-rule-'):
+                        state['cleanup_reached'] = True
+                        raise cleanup
+                    return result
+
+                def invoke():
+                    if stage == 'root-close':
+                        return retrieval._cursor_safe_directory(root, files=files)
+                    if stage == 'read-close':
+                        return retrieval._cursor_image(parent, 'report.json', 65536)
+                    return retrieval._cursor_publish(parent, 'new-report.json', b'{}', None, 65536)
+
+                try:
+                    with mock.patch.object(os, 'open', opened), mock.patch.object(os, 'close', closed), \
+                            mock.patch.object(os, 'unlink', removed):
+                        try:
+                            raise OSError('Already handled by the caller')
+                        except OSError:
+                            with self.assertRaises(OSError) as caught:
+                                invoke()
+                            self.assertIs(cleanup, caught.exception)
+                    self.assertTrue(state.get('cleanup_reached'))
+                finally:
+                    real_close(parent)
+
+    def test_native_metadata_cancellation_survives_the_actual_advisory_directory(self):
+        from types import SimpleNamespace
+        image = EDITION.stat()
+        for cancellation in (KeyboardInterrupt, SystemExit):
+            for broken_close in (False, True):
+                with self.subTest(cancellation=cancellation.__name__, close_fails=broken_close):
+                    primary = cancellation('cancel advisory metadata')
+                    cleanup = OSError('synthetic metadata close failure') if broken_close else None
+                    namespace = self.native_publication_method('stat', primary, cleanup)
+                    files = SimpleNamespace(WINDOWS=True, O_DIRECTORY=0, O_NOFOLLOW=0, O_NONBLOCK=0,
+                        open_root=mock.Mock(return_value=100), open=mock.Mock(return_value=201),
+                        fstat=mock.Mock(return_value=image), stat=namespace['stat'], mkdir=mock.Mock())
+                    with mock.patch.object(context_cli, '_cursor_backend', return_value=files), \
+                            mock.patch.object(os, 'close'):
+                        with self.assertRaises(cancellation) as caught:
+                            context_cli.write_last_turn_report(EDITION, {'timestamp': '2026-11-01T00:00:00Z'})
+                        self.assertIs(primary, caught.exception)
+                    namespace['_open_relative'].assert_called_once()
+                    namespace['os'].close.assert_called_once_with(777)
+
+    def test_native_temporary_cleanup_cancellation_reaches_the_advisory_caller(self):
+        from types import SimpleNamespace
+        for cancellation in (KeyboardInterrupt, SystemExit):
+            for broken_close in (False, True):
+                with self.subTest(cancellation=cancellation.__name__, close_fails=broken_close):
+                    primary = cancellation('cancel temporary cleanup')
+                    cleanup = OSError('synthetic deletion close failure') if broken_close else None
+                    namespace = self.native_publication_method('unlink', primary, cleanup)
+                    files = SimpleNamespace(WINDOWS=True, O_NOFOLLOW=0,
+                        open=mock.Mock(return_value=888), unlink=namespace['unlink'])
+
+                    @contextlib.contextmanager
+                    def directory(*unused, **options):
+                        yield files, 99, lambda: None
+
+                    with mock.patch.object(context_cli, '_last_turn_report_directory', directory), \
+                            mock.patch.object(context_cli, '_cursor_image', return_value=None), \
+                            mock.patch.object(os, 'write', side_effect=OSError('synthetic payload failure')), \
+                            mock.patch.object(os, 'close'):
+                        with self.assertRaises(cancellation) as caught:
+                            context_cli.write_last_turn_report(EDITION, {'timestamp': '2026-11-01T00:00:00Z'})
+                        self.assertIs(primary, caught.exception)
+                    namespace['_open_relative'].assert_called_once()
+                    namespace['os'].close.assert_called_once_with(777)
+
+    def test_read_cancellation_survives_close_failure(self):
+        for cancellation in (KeyboardInterrupt,SystemExit):
+            with self.subTest(cancellation=cancellation.__name__),tempfile.TemporaryDirectory(prefix='advisory-cancel-read-') as temporary:
+                root=Path(temporary);(root/'report.json').write_bytes(b'{}')
+                files=retrieval._cursor_backend()
+                if files is None:self.skipTest('secure backend unavailable')
+                parent=os.open(root,os.O_RDONLY|os.O_DIRECTORY) if files is os else files.open_root(root)
+                real_open,real_close=files.open,os.close;state={};cancel=cancellation('cancel advisory read')
+                def opened(name,*args,**kwargs):
+                    descriptor=real_open(name,*args,**kwargs)
+                    if name=='report.json':state['target']=descriptor
+                    return descriptor
+                def cancelled(descriptor,*args):
+                    state['cancel_reached']=True;raise cancel
+                def cleanup(descriptor):
+                    result=real_close(descriptor)
+                    if descriptor==state.get('target') and not state.get('cleanup_failed'):
+                        state['cleanup_failed']=True;raise OSError('synthetic close failure after actual close')
+                    return result
+                try:
+                    with mock.patch.object(files,'open',opened),mock.patch.object(os,'read',cancelled),mock.patch.object(os,'close',cleanup):
+                        with self.assertRaises(cancellation) as caught:
+                            retrieval._cursor_image(parent,'report.json',65536,files=files)
+                        self.assertIs(cancel,caught.exception)
+                finally:real_close(parent)
+                self.assertTrue(state.get('cancel_reached'));self.assertTrue(state.get('cleanup_failed'))
+
+    def test_write_cancellation_survives_close_or_unlink_failure(self):
+        for cancellation in (KeyboardInterrupt,SystemExit):
+            for stage in ('close','unlink'):
+                with self.subTest(cancellation=cancellation.__name__,stage=stage),tempfile.TemporaryDirectory(prefix='advisory-cancel-write-') as temporary:
+                    root=Path(temporary);files=retrieval._cursor_backend()
+                    if files is None:self.skipTest('secure backend unavailable')
+                    parent=os.open(root,os.O_RDONLY|os.O_DIRECTORY) if files is os else files.open_root(root)
+                    real_open,real_close,real_unlink=files.open,os.close,files.unlink
+                    state={};cancel=cancellation('cancel advisory write')
+                    def opened(name,*args,**kwargs):
+                        descriptor=real_open(name,*args,**kwargs)
+                        if str(name).startswith('.cursor-rule-'):state['target']=descriptor
+                        return descriptor
+                    def cancelled(descriptor,*args):
+                        state['cancel_reached']=True;raise cancel
+                    def cleanup_close(descriptor):
+                        result=real_close(descriptor)
+                        if stage=='close' and descriptor==state.get('target') and not state.get('cleanup_failed'):
+                            state['cleanup_failed']=True;raise OSError('synthetic close failure after actual close')
+                        return result
+                    def cleanup_unlink(name,*args,**kwargs):
+                        result=real_unlink(name,*args,**kwargs)
+                        if stage=='unlink' and str(name).startswith('.cursor-rule-'):
+                            state['cleanup_failed']=True;raise OSError('synthetic unlink failure after actual removal')
+                        return result
+                    try:
+                        with mock.patch.object(files,'open',opened),mock.patch.object(os,'write',cancelled),mock.patch.object(os,'close',cleanup_close),mock.patch.object(files,'unlink',cleanup_unlink):
+                            with self.assertRaises(cancellation) as caught:
+                                retrieval._cursor_publish(parent,'report.json',b'{}',None,65536,files=files)
+                            self.assertIs(cancel,caught.exception)
+                    finally:real_close(parent)
+                    self.assertTrue(state.get('cancel_reached'));self.assertTrue(state.get('cleanup_failed'))
+
+
+    def test_directory_cancellation_survives_close_failure(self):
+        for cancellation in (KeyboardInterrupt,SystemExit):
+            with self.subTest(cancellation=cancellation.__name__),tempfile.TemporaryDirectory(prefix='advisory-cancel-directory-') as temporary:
+                files=retrieval._cursor_backend()
+                if files is not os:self.skipTest('direct POSIX directory cleanup probe')
+                root=Path(temporary);(root/'child').mkdir();parent=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+                real_open,real_close,real_stat=os.open,os.close,os.fstat
+                state={};cancel=cancellation('cancel directory admission')
+                def opened(name,*args,**kwargs):
+                    descriptor=real_open(name,*args,**kwargs)
+                    if name=='child':state['target']=descriptor
+                    return descriptor
+                def cancelled(descriptor):
+                    if descriptor==state.get('target'):state['cancel_reached']=True;raise cancel
+                    return real_stat(descriptor)
+                def cleanup(descriptor):
+                    result=real_close(descriptor)
+                    if descriptor==state.get('target'):
+                        state['cleanup_failed']=True;raise OSError('synthetic close failure after actual close')
+                    return result
+                try:
+                    with mock.patch.object(os,'open',opened),mock.patch.object(os,'fstat',cancelled),mock.patch.object(os,'close',cleanup):
+                        with self.assertRaises(cancellation) as caught:retrieval._cursor_directory(parent,'child')
+                        self.assertIs(cancel,caught.exception)
+                finally:real_close(parent)
+                self.assertTrue(state.get('cancel_reached'));self.assertTrue(state.get('cleanup_failed'))
+
+    def test_native_root_cancellation_survives_close_failure(self):
+        for cancellation in (KeyboardInterrupt,SystemExit):
+            with self.subTest(cancellation=cancellation.__name__),tempfile.TemporaryDirectory(prefix='advisory-cancel-native-root-') as temporary:
+                descriptor=os.open(Path(temporary)/'held-descriptor',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);real_close=os.close
+                cancel=cancellation('cancel native root admission');state={}
+                files=mock.Mock();files.open_root.return_value=descriptor;files.fstat.side_effect=cancel
+                def cleanup(current):
+                    result=real_close(current)
+                    if current==descriptor:state['cleanup_failed']=True;raise OSError('synthetic close failure after actual close')
+                    return result
+                with mock.patch.object(os,'close',cleanup):
+                    with self.assertRaises(cancellation) as caught:retrieval._cursor_safe_directory(Path(temporary),files=files)
+                    self.assertIs(cancel,caught.exception)
+                self.assertTrue(files.fstat.called);self.assertTrue(state.get('cleanup_failed'))
+
+
 class LastTurnReportTest(RuntimeHarness):
     """The silenced Stop-hook turn reports through the next request's capsule.
 
@@ -9641,12 +11173,13 @@ class LastTurnReportTest(RuntimeHarness):
 
     def test_an_unwritable_report_degrades_silently(self) -> None:
         self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
-        with mock.patch.object(
-            context_cli, "atomic_json", side_effect=PermissionError("denied")
-        ):
-            code, stdout, stderr = self.run_main(
-                "turn", "--task-id", "feature/degrade", "--flush", "--json"
-            )
+        # Keep the real index writable while making the advisory parent
+        # unavailable, independent of the implementation's write helper.
+        self.report_path().parent.write_text('not a directory\n',encoding='utf-8')
+        code, stdout, stderr = self.run_main(
+            "--db",str(self.repository/'ordinary-local/context.db'),
+            "turn", "--task-id", "feature/degrade", "--flush", "--json"
+        )
         # The checkpoint landed; telemetry that could not be written must not
         # turn it into a failed turn.
         self.assertEqual(0, code, stderr)
@@ -9756,6 +11289,83 @@ class MultiMachineContinuityTest(RuntimeHarness):
             "--ephemeral", "--json").stdout)["capsule"]
         self.assertEqual(first["task_uuid"], capsule["task_uuid"])
         self.assertFalse(any("also claims" in warning for warning in capsule["warnings"]))
+
+    def test_a_clone_without_a_binding_uses_the_channel_of_the_record_it_serves(self) -> None:
+        # The channel asked for the task ID alone and failed as ambiguous: an
+        # orchestrator read none of its subagents' results, and the dispatch
+        # hook reported each completion lost.
+        first = self.start("feature/shared")
+        self.twin("feature/shared")
+        self.simulate_second_machine()
+        sent = self.run_cli("msg-send", "--task-id", "feature/shared", "--from", "coder", "--to", "*",
+                            "--type", "finding", "--body", "Cobalt authority checked.", "--json")
+        self.assertEqual(0, sent.returncode, sent.stderr)
+        self.assertEqual(first["task_uuid"], json.loads(sent.stdout)["task_id"])
+        dispatched = self.run_cli("msg-dispatch", "--task-id", "feature/shared", "--agent", "coder",
+                                  "--event", "complete", "--json")
+        self.assertEqual(0, dispatched.returncode, dispatched.stderr)
+        read = self.run_cli("msg-read", "--task-id", "feature/shared", "--json")
+        self.assertEqual(0, read.returncode, read.stderr)
+        self.assertEqual("Cobalt authority checked.", json.loads(read.stdout)[0]["body"])
+
+    def test_a_clone_bound_to_the_later_twin_is_told_to_cancel_its_own(self) -> None:
+        # Each clone's capsule named the other record: the clone bound to the
+        # later twin and one bound to the earlier cancelled one each, and
+        # the branch was left with no active task.
+        first = self.start("feature/shared")
+        second = self.twin("feature/shared")
+        # The machine that started the later twin: its binding names it.
+        self.simulate_second_machine()
+        rebound = self.run_cli("rebind", "--task-id", "feature/shared", "--record", second["id"], "--json")
+        self.assertEqual(0, rebound.returncode, rebound.stderr)
+        capsule = json.loads(self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", "feature/shared",
+            "--ephemeral", "--json").stdout)["capsule"]
+        self.assertEqual(second["id"], capsule["task_uuid"])
+        advice = [warning for warning in capsule["warnings"] if "Keep one task per branch" in warning]
+        self.assertEqual(1, len(advice), capsule["warnings"])
+        self.assertIn(f"--record-id {second['id']}", advice[0])
+        # Followed, the clone works with the earliest record, as every other does.
+        cancel = self.run_cli("brain-update", "--record-id", second["id"], "--revision", "auto",
+                              "--transition", "cancelled")
+        self.assertEqual(0, cancel.returncode, cancel.stderr)
+        capsule = json.loads(self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", "feature/shared",
+            "--ephemeral", "--json").stdout)["capsule"]
+        self.assertEqual(first["task_uuid"], capsule["task_uuid"])
+        self.assertFalse(any("also claims" in warning for warning in capsule["warnings"]))
+
+    def conflicted(self, task_uuid: str) -> None:
+        """The task record as merging two clones that both checkpointed it
+        leaves it: an unresolved conflict in its frontmatter."""
+        path = self.repository / "project-brain/dynamic/tasks" / f"{task_uuid}.md"
+        raw, body = path.read_text(encoding="utf-8")[4:].split("\n---\n", 1)
+        record = json.loads(raw)
+        sides = [json.dumps(dict(record, revision=record["revision"] + 1, progress=side)) for side in ("Ours.", "Theirs.")]
+        path.write_text(f"---\n<<<<<<< HEAD\n{sides[0]}\n=======\n{sides[1]}\n>>>>>>> 1234567 (more work)\n---\n{body}",
+                        encoding="utf-8")
+
+    def test_a_task_record_left_in_a_merge_conflict_is_not_taken_for_none(self) -> None:
+        # Two clones that both checkpointed the branch's task conflict in its
+        # record. A lookup by the branch said "not found": a clone without a
+        # binding was told "not recorded yet", and its next checkpoint made a
+        # second task beside the one being merged.
+        task = self.start("feature/merged")
+        self.conflicted(task["task_uuid"])
+        self.simulate_second_machine()
+        with self.assertRaises(brain.BrainError) as raised:
+            brain.find_task(self.repository, "feature/merged")
+        self.assertNotIsInstance(raised.exception, brain.BrainRecordNotFound)
+        self.assertIn("unresolved Git merge conflict", str(raised.exception))
+        capsule = self.run_cli("refresh", "--query", "cobalt authority", "--task-id", "feature/merged",
+                               "--ephemeral")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertIn(f"Unresolved Git merge conflict in project-brain/dynamic/tasks/{task['task_uuid']}.md",
+                      capsule.stdout)
+        self.assertNotIn("not recorded yet", capsule.stdout)
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        self.run_cli("turn", "--task-id", "feature/merged", "--flush", "--json")
+        self.assertEqual(1, len(list((self.repository / "project-brain/dynamic/tasks").glob("*.md"))))
 
     def test_a_second_machine_reads_the_task_before_its_first_checkpoint(self) -> None:
         # Until the first checkpoint rebound it, the branch's existing task
@@ -10101,6 +11711,369 @@ class RenamedBranchTaskTest(RuntimeHarness):
         started = self.run_cli("start", "--task-id", "feature/ledger-sync-v2", "--goal", "Next", "--json")
         self.assertEqual(0, started.returncode, started.stderr)
         self.assertEqual("feature/ledger-sync-v2", json.loads(started.stdout)["task_id"])
+
+
+class CodexThreadTaskTest(RuntimeHarness):
+    """A worktree Codex makes for a thread - `codex --worktree`, a new worktree
+    in the Codex app - is checked out on a detached HEAD, with the thread that
+    owns it in codex-thread.json of its Git directory. The hooks name its task
+    codex-thread/<thread>; `status` said HEAD could not supply one and told
+    the person to set CONTEXT_TASK_ID."""
+
+    OWNER = "01a1776d-b888-7ac2-8a1b-9557bdbd1dad"
+    TASK = "codex-thread/" + OWNER
+
+    def git(self, *arguments: str, where: Path | None = None) -> str:
+        return subprocess.run(["git", "-C", str(where or self.repository), "-c", "user.email=h@example.invalid",
+                               "-c", "user.name=H", *arguments], check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.git("commit", "-q", "--allow-empty", "-m", "base")
+        self.git("checkout", "-q", "--detach")
+        self.record = self.repository / ".git" / "codex-thread.json"
+        self.record.write_bytes(('{"version":1,"ownerThreadId":"%s"}' % self.OWNER).encode("utf-8"))
+
+    def identity(self) -> dict:
+        status = self.run_cli("status", "--json")
+        self.assertEqual(0, status.returncode, status.stderr)
+        return json.loads(status.stdout)["automatic_memory"]
+
+    def test_status_names_the_owning_thread_while_head_is_detached(self) -> None:
+        readiness = self.identity()
+        self.assertEqual("active", readiness["status"])
+        self.assertEqual(("active", "codex-thread", self.TASK),
+                         tuple(readiness["task_identity"][key] for key in ("status", "source", "task_id")))
+        self.assertEqual("detached-head", readiness["git_metadata"]["state"])
+        self.assertIsNone(readiness["git_metadata"]["remediation"])
+        # Any other detached HEAD names none, as before.
+        self.record.unlink()
+        readiness = self.identity()
+        self.assertEqual(("degraded", None), (readiness["task_identity"]["status"],
+                                              readiness["task_identity"]["task_id"]))
+        self.assertIn("CONTEXT_TASK_ID", readiness["git_metadata"]["remediation"])
+        # A branch made in the worktree names the task from then on.
+        self.record.write_bytes(('{"version":1,"ownerThreadId":"%s"}' % self.OWNER).encode("utf-8"))
+        self.git("switch", "-q", "-c", "codex/refunds")
+        self.assertEqual(("git-branch", "codex/refunds"),
+                         tuple(self.identity()["task_identity"][key] for key in ("source", "task_id")))
+
+    def prompt_as_the_hooks_do(self) -> subprocess.CompletedProcess[str]:
+        return self.run_cli("refresh", "--query", "cobalt authority", "--task-id", self.TASK,
+                            "--expected-branch", self.TASK, "--ephemeral", "--sanitize")
+
+    def test_the_thread_task_is_read_and_recorded(self) -> None:
+        def prompt() -> str:
+            read = self.prompt_as_the_hooks_do()
+            self.assertEqual(0, read.returncode, read.stderr)
+            return read.stdout
+
+        # No branch tells the agent the task's ID before it is recorded.
+        self.assertIn(f"working: not recorded yet (task {self.TASK}; the task starts at the", prompt())
+        self.repository.joinpath("app.txt").write_text("refunds\n", encoding="utf-8")
+        turn = self.run_cli("turn", "--task-id", self.TASK, "--flush", "--json")
+        self.assertEqual(0, turn.returncode, turn.stderr)
+        self.assertTrue(json.loads(turn.stdout)["provisioned"])
+        # The goal keeps the thread's ID whole instead of reading it as words.
+        self.assertIn(f"working: {self.TASK} — Work of the Codex thread that owns its worktree "
+                      f"(auto-provisioned from {self.TASK})", prompt())
+        record = json.loads(self.run_cli("get", "--task-id", self.TASK, "--json").stdout)
+        self.assertIn("app.txt", record["files"])
+
+    def test_the_thread_task_is_admitted_only_while_the_thread_owns_the_detached_checkout(self) -> None:
+        # The hooks inferred it; before anything is delivered the runtime
+        # checks it still holds, as it checks a branch.
+        self.assertEqual(0, self.prompt_as_the_hooks_do().returncode)
+        for change, undo in (
+                (lambda: self.record.write_bytes(
+                    b'{"version":1,"ownerThreadId":"01a1776e-0000-7000-8000-000000000001"}'),
+                 lambda: self.record.write_bytes(('{"version":1,"ownerThreadId":"%s"}' % self.OWNER).encode())),
+                (lambda: self.record.unlink(),
+                 lambda: self.record.write_bytes(('{"version":1,"ownerThreadId":"%s"}' % self.OWNER).encode())),
+                (lambda: self.git("switch", "-q", "-c", "codex/refunds"),
+                 lambda: self.git("checkout", "-q", "--detach"))):
+            change()
+            refused = self.prompt_as_the_hooks_do()
+            self.assertNotEqual(0, refused.returncode)
+            self.assertIn("Inferred task branch changed or unavailable", refused.stderr)
+            undo()
+            self.assertEqual(0, self.prompt_as_the_hooks_do().returncode)
+
+    def test_a_rebase_there_or_a_branch_shaped_like_the_task_is_not_the_thread(self) -> None:
+        # During a rebase the hooks name the branch being rebased, not the thread.
+        rebase = self.repository / ".git" / "rebase-merge"
+        rebase.mkdir()
+        (rebase / "head-name").write_text("refs/heads/feature/refunds\n", encoding="utf-8")
+        self.assertNotEqual("codex-thread", self.identity()["task_identity"]["source"])
+        shutil.rmtree(rebase)
+        self.assertEqual("codex-thread", self.identity()["task_identity"]["source"])
+        self.assertFalse(context_cli.derive_goal("codex-thread/notes").startswith("Work of the Codex thread"))
+
+    def test_a_linked_worktree_keeps_its_owner_in_its_own_git_directory(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="codex-made worktree ")
+        self.addCleanup(temporary.cleanup)
+        worktree = Path(temporary.name) / "worktrees" / "b3c4" / "project"
+        self.git("worktree", "add", "-q", "--detach", str(worktree))
+        git_dir = Path(self.git("rev-parse", "--absolute-git-dir", where=worktree))
+        self.assertIsNone(context_cli._owner_thread(worktree))
+        other = "01a1776e-0000-7000-8000-000000000001"
+        # The app writes it one key a line.
+        (git_dir / "codex-thread.json").write_bytes(
+            ('{\n  "version": 1,\n  "ownerThreadId": "%s"\n}\n' % other).encode("utf-8"))
+        self.assertEqual(other, context_cli._owner_thread(worktree))
+        (worktree / "src").mkdir()
+        self.assertEqual(other, context_cli._owner_thread(worktree / "src"))
+        self.assertEqual(self.OWNER, context_cli._owner_thread(self.repository))
+
+
+@unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                 "a read-only folder of the owner's own needs POSIX permissions and a user they bind")
+class SandboxQueueTest(RuntimeHarness):
+    """A sandbox that lets a command write only its own folder - Codex's in a
+    worktree or below the root, Claude Code's - refused the memory writes the
+    policy and the checkpoint skill have an agent run: `update` at the Brain's
+    lock, `turn --flush` at the index. Read-only folders stand in for it here;
+    the commands wait in a temporary folder of the user's, and the next turn
+    a hook records, outside the sandbox, makes them."""
+
+    TASK = "feature/refunds"
+
+    def setUp(self) -> None:
+        super().setUp()
+        spool = tempfile.TemporaryDirectory(prefix="queue tmp ")
+        self.addCleanup(spool.cleanup)
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("GIT_", "CONTEXT_", "ACCELERATOR_", "CLAUDE"))}
+        self.env.update(TMPDIR=spool.name, PROJECT_BRAIN_OWNER="local")
+        self.spool = Path(spool.name)
+        started = self.cli("start", "--task-id", self.TASK, "--goal", "Date refunds", "--json")
+        self.assertEqual(0, started.returncode, started.stderr)
+
+    def cli(self, *arguments: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        return self.run_cli(*arguments, env=dict(self.env, **extra))
+
+    def tearDown(self) -> None:
+        self.unsandboxed()
+        super().tearDown()
+
+    def sandboxed(self) -> None:
+        """The project's memory read-only to this user's commands, as a
+        sandbox mounts it; undone before the hook's turn."""
+        for folder in (self.repository / "project-brain/local", self.repository / "memory-bank/local"):
+            folder.chmod(0o555)
+
+    def unsandboxed(self) -> None:
+        for folder in (self.repository / "project-brain/local", self.repository / "memory-bank/local"):
+            if folder.is_dir():
+                folder.chmod(0o755)
+
+    def waiting(self) -> list:
+        return sorted(self.spool.glob("ai-accelerator-memory-queue-*/command-*.json"))
+
+    def task(self) -> dict:
+        found = self.cli("get", "--task-id", self.TASK, "--json")
+        self.assertEqual(0, found.returncode, found.stderr)
+        return json.loads(found.stdout)
+
+    def hook_turn(self) -> None:
+        """The Stop hook's turn, outside the sandbox."""
+        self.unsandboxed()
+        done = self.cli("turn", "--task-id", self.TASK, "--flush-after", "5", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+
+    def journal(self) -> list:
+        path = self.repository / "memory-bank/local/native-results.ndjson"
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        return [(line["event"], line.get("code")) for line in map(json.loads, lines) if line["stage"] == "queue"]
+
+    def test_the_checkpoints_writes_wait_and_the_next_hook_makes_them_in_order(self) -> None:
+        before = self.task()["revision"]
+        self.repository.joinpath("refund.txt").write_text("refunds keep their invoice date\n", encoding="utf-8")
+        self.sandboxed()
+        for arguments in (("turn", "--task-id", self.TASK, "--flush", "--json"),
+                          ("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "First",
+                           "--next-step", "Write the refund test", "--json"),
+                          # A value that reads like an option is still the value.
+                          ("update", "--task-id", self.TASK, "--revision", "auto",
+                           "--progress", "--dated refunds: last", "--json")):
+            with self.subTest(command=arguments[0]):
+                done = self.cli(*arguments)
+                self.assertEqual(0, done.returncode, done.stderr)
+                answer = json.loads(done.stdout)
+                self.assertEqual((self.TASK, True), (answer["task_id"], answer["queued"]))
+                self.assertIn("when this turn ends", answer["detail"])
+        self.assertEqual(3, len(self.waiting()))
+        self.assertEqual(before, self.task()["revision"])
+        for record in self.waiting():
+            self.assertEqual(0o600, record.stat().st_mode & 0o777)
+        self.hook_turn()
+        task = self.task()
+        self.assertEqual([], self.waiting())
+        self.assertEqual([("made", None)] * 3, self.journal())
+        # Oldest first: the flush recorded the file, each update a revision,
+        # and the last one's progress stands.
+        self.assertIn("refund.txt", task["files"])
+        self.assertEqual(before + 3, task["revision"])
+        self.assertEqual("--dated refunds: last", task["progress"])
+        self.assertEqual(["Write the refund test"], task["next_steps"])
+
+    def test_what_a_command_refuses_it_still_refuses_at_once(self) -> None:
+        self.sandboxed()
+        for arguments, refusal in (
+                (("update", "--task-id", self.TASK, "--revision", "auto",
+                  "--progress", "token sk-live-1234567890abcdef1234567890abcdef"), "token"),
+                (("update", "--task-id", self.TASK, "--revision", "auto"), "requires a changed field"),
+                (("update", "--task-id", "bad task!", "--progress", "x"), "Task ID")):
+            with self.subTest(refusal=refusal):
+                done = self.cli(*arguments)
+                self.assertEqual(1, done.returncode, done.stdout)
+                self.assertIn(refusal, done.stderr)
+        self.assertEqual([], self.waiting())
+
+    def test_a_command_refused_when_made_reaches_the_next_capsule(self) -> None:
+        self.sandboxed()
+        done = self.cli("update", "--task-id", "feature/never-started", "--revision", "auto",
+                        "--progress", "Lost refunds", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.hook_turn()
+        self.assertEqual([("refused", "refused")], self.journal())
+        capsule = self.cli("refresh", "--query", "cobalt authority", "--task-id", self.TASK, "--ephemeral")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertIn("queued memory command not made: update - context: Working task not found: "
+                      "feature/never-started", capsule.stdout)
+
+    def test_only_a_waiting_update_or_flush_of_this_project_is_made(self) -> None:
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Kept", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        [kept] = self.waiting()
+        record = json.loads(kept.read_text(encoding="utf-8"))
+        folder, key = kept.parent, record["key"]
+
+        def plant(name: str, **changes: object) -> Path:
+            path = folder / f"command-{key}-{name}.json"
+            path.write_text(json.dumps(dict(record, **changes)), encoding="utf-8")
+            path.chmod(0o600)
+            return path
+
+        # What a file could name besides: another command, the index, another root.
+        plant("00000000000000000001-1-a", argv=["complete", "--task-id", self.TASK, "--json"])
+        plant("00000000000000000002-1-b", argv=["--db=/tmp/elsewhere.db", *record["argv"]])
+        plant("00000000000000000003-1-c", argv=["--root=/tmp", *record["argv"]])
+        plant("00000000000000000004-1-d", argv=["turn", "--task-id", self.TASK, "--json"])
+        plant("00000000000000000005-1-e", created=time.time() - 2 * 24 * 60 * 60)
+        linked = folder / f"command-{key}-00000000000000000006-1-f.json"
+        linked.symlink_to(kept)
+        other = folder / f"command-{'0' * 16}-00000000000000000007-1-g.json"
+        other.write_text(kept.read_text(encoding="utf-8"), encoding="utf-8")
+        other.chmod(0o600)
+        self.hook_turn()
+        task = self.task()
+        self.assertEqual(("active", "Kept"), (task["status"], task["progress"]))
+        self.assertEqual([("refused", "unreadable")] * 4 + [("refused", "expired")] + [("refused", "unreadable")]
+                         + [("made", None)], self.journal())
+        # Another project's queue is left to it.
+        self.assertEqual([other], self.waiting())
+
+    @unittest.skipUnless(os.name == "posix", "a flock and a process group stand in for the hook")
+    def test_a_command_a_stopped_hook_began_is_made_by_the_next_hook(self) -> None:
+        # The Stop hook's turn drains the queue under `timeout` with a 5 s
+        # budget. A command that waited on another session's lock outlived
+        # it: its file was removed before it ran, and the checkpoint was
+        # lost with nothing journaled.
+        import fcntl
+        import signal
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Kept", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.unsandboxed()
+        before = self.task()["revision"]
+        lock = (self.repository / "project-brain/local/runtime.lock").open("a+")
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        turn = subprocess.Popen([sys.executable, str(CONTEXT_SCRIPT), "--root", str(self.repository), "turn",
+                                 "--task-id", self.TASK, "--flush-after", "5", "--json"],
+                                env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        deadline = time.monotonic() + 10
+        while not any(".attempt1." in path.name for path in self.waiting()) and turn.poll() is None \
+                and time.monotonic() < deadline:
+            time.sleep(0.02)
+        begun = [path.name for path in self.waiting()]
+        # The command waits on the lock; the budget ends the hook's whole
+        # process group as timeout does.
+        os.killpg(turn.pid, signal.SIGTERM)
+        turn.wait()
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        self.assertEqual(1, len(begun))
+        self.assertIn(".attempt1.", begun[0])
+        self.assertEqual(begun, [path.name for path in self.waiting()])
+        self.assertEqual(before, self.task()["revision"])
+        self.hook_turn()
+        self.assertEqual([], self.waiting())
+        self.assertEqual([("made", None)], self.journal())
+        self.assertEqual("Kept", self.task()["progress"])
+
+    @unittest.skipUnless(os.name == "posix", "a flock stands in for another session's lock")
+    def test_two_hooks_draining_at_once_make_a_command_once(self) -> None:
+        # The queue is the project's, not a session's: two sessions' Stops
+        # drain it at once. The one that came second took a file the first
+        # had begun - still running, waiting on the lock - for a stopped
+        # drain's and made the command again.
+        import fcntl
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Once", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.unsandboxed()
+        before = self.task()["revision"]
+        lock = (self.repository / "project-brain/local/runtime.lock").open("a+")
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        turns = []
+        for _ in range(2):
+            turns.append(subprocess.Popen([sys.executable, str(CONTEXT_SCRIPT), "--root", str(self.repository),
+                                           "turn", "--task-id", self.TASK, "--flush-after", "5", "--json"],
+                                          env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            deadline = time.monotonic() + 10
+            while not any(".attempt" in path.name for path in self.waiting()) and time.monotonic() < deadline:
+                time.sleep(0.02)
+        time.sleep(0.3)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        for turn in turns:
+            self.assertEqual(0, turn.wait(timeout=60))
+        self.assertEqual([], self.waiting())
+        self.assertEqual([("made", None)], self.journal())
+        self.assertEqual(before + 1, self.task()["revision"])
+
+    def test_a_command_three_stopped_hooks_began_is_given_up_as_interrupted(self) -> None:
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Lost", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        [waiting] = self.waiting()
+        waiting.rename(waiting.with_name(waiting.stem + ".attempt3.json"))
+        self.hook_turn()
+        self.assertEqual([], self.waiting())
+        self.assertEqual([("refused", "interrupted")], self.journal())
+        self.assertNotEqual("Lost", self.task()["progress"])
+        capsule = self.cli("refresh", "--query", "cobalt authority", "--task-id", self.TASK, "--ephemeral")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertIn("queued memory command not made: update - it was stopped before it finished, 3 times",
+                      capsule.stdout)
+
+    def test_a_command_a_drain_runs_fails_instead_of_waiting_again(self) -> None:
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Again",
+                        CONTEXT_QUEUE_DRAIN="1")
+        self.assertNotEqual(0, done.returncode)
+        self.assertEqual([], self.waiting())
+
+    def test_a_writable_project_writes_as_before(self) -> None:
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Direct", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertNotIn("queued", json.loads(done.stdout))
+        self.assertEqual([], self.waiting())
+        self.assertEqual("Direct", self.task()["progress"])
 
 
 class AutoCheckpointFieldTest(RuntimeHarness):
@@ -11166,6 +13139,33 @@ class DeliveryTest(RuntimeHarness):
                 append(record)
                 self.assertIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
                 self.assertNotIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
+
+    def test_a_transcript_written_after_the_first_turn_still_shows_a_compaction(self) -> None:
+        # Claude Code writes a new conversation's transcript after its first
+        # prompt hook has run. That turn found no file and kept no position,
+        # so a /compact before the second turn went unseen and the capsule
+        # said memory the summary had dropped "still applies".
+        self.write_auth_guide()
+        self.start("TASK-DELIVER")
+        folder = tempfile.TemporaryDirectory(prefix="transcript-")
+        self.addCleanup(folder.cleanup)
+        query = "how do I revoke sessions after a password reset"
+        for compacted in (True, False):
+            with self.subTest(compacted=compacted):
+                transcript = Path(folder.name) / f"{compacted}.jsonl"
+                conversation = ("--session-id", f"c-new-{compacted}", "--transcript", str(transcript))
+                self.assertIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
+                self.assertFalse(transcript.exists())
+                records = ['{"type":"user"}', '{"type":"assistant"}']
+                if compacted:
+                    records.append('{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}')
+                transcript.write_text("\n".join(records) + "\n", encoding="utf-8")
+                second = self.refresh(query, *conversation)
+                self.assertEqual(compacted, "SessionStore::purge" in second["capsule_text"], second["capsule_text"])
+                if compacted:
+                    self.assertEqual(0, second["capsule"]["repeated"])
+                else:
+                    self.assertGreater(second["capsule"]["repeated"], 0)
 
     def test_one_rare_word_admits_a_document_only_when_it_names_something(self) -> None:
         # In a small index most words are rare; one of them shared with the
@@ -12538,11 +14538,19 @@ class LinkedMemoryExcerptTest(unittest.TestCase):
         self.assertIn("src/continuity.py", excerpts[self.PATH])
         self.assertEqual("Sources", excerpts[self.PATH].heading)
 
-    def test_lexical_selection_and_distinctive_pointer_are_unchanged(self) -> None:
+    def test_a_chunk_found_by_its_own_words_quotes_its_rule_too(self) -> None:
+        # Found by the cited filenames in its own text, a chunk was quoted by
+        # that footer - the paths without the rule. It is held to the linked
+        # records' rule now; a question about the sources still gets them, and
+        # a distinctive pointer still carries no excerpt.
         self.document("# Safety boundary\n\n" + self.RULE + "\n\n## Sources\n- src/continuity.py\n- src/rejection.py\n")
         capsule = self.capsule(selection="")
         excerpts = context_cli.capsule_excerpts(self.connection, capsule)
-        self.assertEqual("Sources", excerpts[self.PATH].heading)
+        self.assertNotEqual("Sources", excerpts[self.PATH].heading)
+        self.assertIn("A safe current event is independently scanned and appended.", excerpts[self.PATH])
+        asked = context_cli.capsule_excerpts(self.connection, self.capsule(
+            selection="", query="Sources src/continuity.py src/rejection.py"))
+        self.assertEqual("Sources", asked[self.PATH].heading)
         capsule["semantic"][0]["match"] = "distinctive"
         self.assertEqual({}, context_cli.capsule_excerpts(self.connection, capsule))
 
@@ -12552,6 +14560,89 @@ class LinkedMemoryExcerptTest(unittest.TestCase):
         key, revision = retrieval.delivery_identity(self.connection, capsule["semantic"][0], capsule["query"])
         self.assertEqual(self.PATH + "#safety-boundary", key)
         self.assertTrue(revision)
+
+
+class FingerprintBackendTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        (self.root / 'source.txt').write_bytes(b'allow\r\n')
+
+    def backend(self, digest, library='1', adapter='2'):
+        return brain.using_fingerprint_backend(digest, library_sha256=library * 64,
+                                               adapter_sha256=adapter * 64)
+
+    def test_explicit_scope_uses_captured_bytes_and_restores_default(self):
+        seen = []
+        def digest(data):
+            seen.append(data)
+            return hashlib.sha256(brain._line_ending_neutral(data)).hexdigest()
+        baseline = brain.fingerprint(self.root, 'source.txt')
+        self.assertIsNone(brain.fingerprint_backend_identity())
+        with self.backend(digest):
+            self.assertEqual(brain.fingerprint(self.root, 'source.txt'), baseline)
+            self.assertEqual(seen, [b'allow\r\n'])
+            identity = brain.fingerprint_backend_identity()
+            self.assertEqual(identity, {'profile': 'rust-fingerprint-v1', 'abi': 1,
+                                       'library_sha256': '1' * 64, 'adapter_sha256': '2' * 64})
+            identity['abi'] = 99
+            self.assertEqual(brain.fingerprint_backend_identity()['abi'], 1)
+        self.assertIsNone(brain.fingerprint_backend_identity())
+        self.assertEqual(brain.fingerprint(self.root, 'source.txt'), baseline)
+
+    def test_native_failure_never_falls_back_or_echoes_input(self):
+        def failed(_data):
+            raise ValueError('private captured bytes')
+        for digest in (failed, lambda data: 'INVALID', lambda data: b'0' * 64):
+            with self.subTest(digest=digest), self.backend(digest):
+                with self.assertRaises(brain.BrainError) as caught:
+                    brain.fingerprint(self.root, 'source.txt')
+                self.assertNotIn('private', str(caught.exception))
+        self.assertIsNone(brain.fingerprint_backend_identity())
+
+    def test_cache_is_invalidated_when_backend_scope_changes(self):
+        cache = brain._CitationDigestCache()
+        expected = brain.fingerprint(self.root, 'source.txt', _normalization_cache=cache)
+        with self.backend(lambda data: '0' * 64):
+            self.assertEqual(brain.fingerprint(self.root, 'source.txt', _normalization_cache=cache)['sha256'], '0' * 64)
+            self.assertEqual(brain.fingerprint(self.root, 'source.txt', _normalization_cache=cache)['sha256'], '0' * 64)
+            self.assertEqual(cache.hits, 1)
+        self.assertEqual(brain.fingerprint(self.root, 'source.txt', _normalization_cache=cache), expected)
+        self.assertEqual(cache.misses, 3)
+
+    def test_nested_scope_and_new_thread_do_not_leak_backend(self):
+        with self.backend(lambda data: '0' * 64):
+            with self.backend(lambda data: '3' * 64, library='3'):
+                self.assertEqual(brain.fingerprint_backend_identity()['library_sha256'], '3' * 64)
+            self.assertEqual(brain.fingerprint_backend_identity()['library_sha256'], '1' * 64)
+            observed = []
+            thread = threading.Thread(target=lambda: observed.append(brain.fingerprint_backend_identity()))
+            thread.start()
+            thread.join()
+            self.assertEqual(observed, [None])
+
+    def test_prepared_scope_binds_library_and_adapter_identity(self):
+        def scope():
+            return memory_results.prepared_scope(self.root, 'local', 'checked', 'agent')
+        baseline = scope()
+        with self.backend(lambda data: '0' * 64):
+            native = scope()
+        with self.backend(lambda data: '0' * 64, library='3'):
+            other_library = scope()
+        with self.backend(lambda data: '0' * 64, adapter='4'):
+            other_adapter = scope()
+        self.assertEqual(len({baseline, native, other_library, other_adapter}), 4)
+        self.assertEqual(scope(), baseline)
+
+    def test_invalid_backend_identity_refuses_before_scope(self):
+        for digest, library, adapter in ((None, '1' * 64, '2' * 64),
+                                         (lambda data: '0' * 64, 'bad', '2' * 64),
+                                         (lambda data: '0' * 64, '1' * 64, None)):
+            with self.subTest(library=library, adapter=adapter), self.assertRaises(brain.BrainError):
+                with brain.using_fingerprint_backend(digest, library_sha256=library, adapter_sha256=adapter):
+                    self.fail('invalid backend was admitted')
+        self.assertIsNone(brain.fingerprint_backend_identity())
 
 
 class CitationDigestCacheTest(unittest.TestCase):
@@ -14672,6 +16763,20 @@ class RecentFilesExcerptRoomTest(unittest.TestCase):
         self.assertGreater(grown(without), context_cli.RECENT_FILES_LINE_LIMIT)
         self.assertEqual(context_cli.RECENT_FILES_LINE_LIMIT + 1, grown(without) - grown(beside))
 
+    def test_the_ticket_line_is_reserved_whole_too(self) -> None:
+        excerpts = {"docs/ledger.md": self.excerpt("a" * 290, 300), "docs/refund.md": self.excerpt("b" * 190, 200)}
+        capsule = {"semantic": [{"path": "docs/ledger.md"}, {"path": "docs/refund.md"}], "episodic": [],
+                   "recent_files": ["src/Export.php"]}
+
+        def grown(limits: dict[str, int]) -> int:
+            return sum(limit - excerpts[path].limit for path, limit in limits.items())
+
+        without = context_cli._excerpt_growth(capsule, excerpts)
+        beside = context_cli._excerpt_growth(
+            {**capsule, "ticket_files": {"tickets": ["CMS-741"], "paths": ["src/Ledger.php"]}}, excerpts)
+        self.assertGreater(grown(without), context_cli.RECENT_FILES_LINE_LIMIT)
+        self.assertEqual(context_cli.RECENT_FILES_LINE_LIMIT + 1, grown(without) - grown(beside))
+
 
 class RecentProjectFilesTest(RuntimeHarness):
     """The project's recently read and changed files, from the host transcript
@@ -14797,6 +16902,48 @@ class RecentProjectFilesTest(RuntimeHarness):
         self.assertEqual(3, self.turn(transcript)["recent_files"])
         self.assertEqual("recent files: src/Guard.php, src/Refund.php, src/Ledger.php", self.recent_line())
 
+    def test_codex_exec_cells_name_their_files(self) -> None:
+        # Codex 0.162 and later run every tool from one JavaScript cell, the
+        # custom tool `exec`; its shell commands and patches are string
+        # literals in that program, and none of their files was recorded.
+        def item(payload: dict) -> dict:
+            return {"type": "response_item", "payload": payload}
+
+        def cell(code: str) -> dict:
+            return item({"type": "custom_tool_call", "name": "exec", "call_id": "c", "input": code})
+
+        repository = json.dumps(str(self.repository))
+        transcript = Path(self.temporary.name) / "exec-rollout.jsonl"
+        records = [
+            item({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix the refund"}]}),
+            cell("const r = await tools.exec_command({cmd: \"sed -n '1,40p' \\\"src/Refund.php\\\" && "
+                 "rg -n settle src/Ledger.php\", workdir: " + repository + ", max_output_tokens: 4000});\ntext(r);"),
+            cell("const base = " + repository + ";\n"
+                 "await tools.exec_command({max_output_tokens: 2000, cmd: 'cat src/Export.php', workdir: base});\n"
+                 "await tools.exec_command({cmd: `head -5 ${base}/src/Reader.php`});\n"
+                 "const command = 'cat src/Writer.php';\nawait tools.exec_command({cmd: command});"),
+            cell("await tools.apply_patch(\"*** Begin Patch\\n*** Update File: src/Guard.php\\n@@\\n-a\\n+b\\n"
+                 "*** End Patch\\n\");\n"
+                 "await tools.apply_patch(String.raw`*** Begin Patch\n*** Add File: src/Query.php\n+<?php\n"
+                 "*** End Patch`);"),
+        ]
+        transcript.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        # A command from a variable or a `${}` template names nothing knowable.
+        self.assertEqual(5, self.turn(transcript)["recent_files"])
+        self.assertEqual("recent files: src/Guard.php, src/Query.php, src/Refund.php, src/Ledger.php, src/Export.php",
+                         self.recent_line())
+
+    def test_claude_powershell_tool_calls_name_their_files(self) -> None:
+        # On Windows Claude Code runs shell commands through its PowerShell
+        # tool by default; only the Bash tool was read.
+        transcript = self.claude(
+            self.prompt("fix the refund"),
+            self.call("PowerShell", {"command": "Get-Content src/Refund.php | Select-String total; "
+                                                "Set-Content src/Guard.php '<?php'"}),
+        )
+        self.assertEqual(2, self.turn(transcript)["recent_files"])
+        self.assertEqual("recent files: src/Guard.php, src/Refund.php", self.recent_line())
+
     def test_codex_powershell_calls_name_their_files(self) -> None:
         transcript = Path(self.temporary.name) / "windows-rollout.jsonl"
         records = [
@@ -14837,6 +16984,67 @@ class RecentProjectFilesTest(RuntimeHarness):
             self.call("Bash", {"command": "cat src/Export.php"}),
         )
         self.assertEqual(2, self.turn(transcript)["recent_files"])
+
+    def codex_user(self, *parts: str) -> dict:
+        return {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": part} for part in parts]}}
+
+    def codex_shell(self, command: str) -> dict:
+        return {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+                "arguments": json.dumps({"cmd": command, "workdir": str(self.repository)})}}
+
+    def codex_turn_files(self, *records: dict) -> list[str]:
+        transcript = Path(self.temporary.name) / "codex-rollout.jsonl"
+        transcript.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        return context_cli.transcript_turn_files(str(transcript), self.repository)
+
+    def test_what_codex_writes_into_the_user_role_starts_no_turn(self) -> None:
+        # Codex writes its own context as user messages: its plugins and
+        # instructions, an app page, a skill's text, a Stop hook's
+        # continuation, a subagent's report, the answer to its question, a
+        # stopped turn's note. Each was taken for a prompt, and the calls
+        # before it fell out of the turn: 229 of 6,298 turns lost calls on
+        # the rollouts of the maintainer machine.
+        user, shell = self.codex_user, self.codex_shell
+        for context in (
+            user("<recommended_plugins>\n- github\n</recommended_plugins>",
+                 f"# AGENTS.md instructions for {self.repository}\n\n<INSTRUCTIONS>\nBe brief.\n</INSTRUCTIONS>",
+                 "<environment_context>\n  <shell>bash</shell>\n</environment_context>"),
+            user("<external_codex_apps_open_page>\nhttps://docs.example.test/refunds\n</external_codex_apps_open_page>"),
+            user("<skill>\n<name>coder</name>\n<path>/skills/coder/SKILL.md</path>\n</skill>"),
+            user('<hook_prompt hook_run_id="stop:1">Save this answer\'s result.</hook_prompt>'),
+            user('<subagent_notification>\n{"agent_id": "a1", "status": "completed"}\n</subagent_notification>'),
+            user("<send_user_message_question_reply>Yes, both.</send_user_message_question_reply>"),
+            user("<turn_aborted>\nThe user interrupted the turn.\n</turn_aborted>"),
+        ):
+            with self.subTest(context=context["payload"]["content"][0]["text"][:24]):
+                self.assertEqual(["src/Refund.php", "src/Ledger.php"], self.codex_turn_files(
+                    user("fix the refund"), shell("cat src/Refund.php"), context, shell("cat src/Ledger.php")))
+        # Context around the person's own request is a prompt, and so is a
+        # turn Codex starts itself.
+        for prompt in (
+            "# In app browser:\n- url: http://localhost:8000/refunds\n\n## My request for Codex:\nfix the export",
+            "# Files mentioned by the user:\n\n## CMS-1.odt: /home/me/CMS-1.odt\n\n## My request:\nfix the export",
+            '<in-app-browser-context source="page">\nurl: http://localhost:8000\n</in-app-browser-context>\n\nfix it',
+            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
+            "<heartbeat>\n<automation_id>nightly</automation_id>\n</heartbeat>",
+        ):
+            with self.subTest(prompt=prompt[:24]):
+                self.assertEqual(["src/Export.php"], self.codex_turn_files(
+                    user("fix the refund"), shell("cat src/Refund.php"), user(prompt), shell("cat src/Export.php")))
+
+    def test_a_codex_turn_begins_where_its_rollout_says(self) -> None:
+        # A message the person sends while a Codex turn runs joins that turn,
+        # as do kinds of context no list names yet: the turn begins at the
+        # rollout's own `task_started`.
+        user, shell = self.codex_user, self.codex_shell
+        started = {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t"}}
+        self.assertEqual(["src/Refund.php", "src/Ledger.php", "src/Guard.php"], self.codex_turn_files(
+            started, user("look at the writer"), shell("cat src/Writer.php"),
+            started, user("fix the refund"), shell("cat src/Refund.php"),
+            user("and check the ledger"), shell("cat src/Ledger.php"),
+            user("<future_codex_context>\nnotes\n</future_codex_context>"), shell("cat src/Guard.php"),
+        ))
 
     def test_task_files_the_recent_files_push_out_are_counted(self) -> None:
         # Ten files the latest turn read fill the line, and the task's own
@@ -14920,6 +17128,128 @@ class RecentProjectFilesTest(RuntimeHarness):
         capsule = json.loads(self.run_cli("refresh", "--task-id", "TASK-RECENT", "--query", "export",
                                           "--json").stdout)
         self.assertNotIn("recent_files", capsule)
+
+
+class TicketFilesTest(RuntimeHarness):
+    """The files of the commits for the request's or the task's ticket, beside
+    the recent files, while the experiment is switched on."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "Initial import")
+        self.commit("CMS-741: start the export", "src/Export.php", "src/Ledger.php")
+        self.commit("Refactor the guard", "src/Guard.php")
+        self.commit("cms-741 follow-up: refunds", "src/Refund.php", "docs/refunds.md")
+        self.commit("CMS-7410: other work", "src/Writer.php")
+        self.commit("CMS-741: a file removed since", "src/Gone.php")
+        (self.repository / "src/Gone.php").unlink()
+
+    def git(self, *arguments: str) -> None:
+        subprocess.run(["git", "-C", str(self.repository), "-c", "user.email=t@example.invalid",
+                        "-c", "user.name=t", *arguments], check=True, capture_output=True)
+
+    def commit(self, subject: str, *paths: str) -> None:
+        for path in paths:
+            target = self.repository / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"<?php // {subject}\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-qm", subject)
+
+    def switch_on(self, **settings: object) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"mode": "governed", "ticket_files": True, **settings}), encoding="utf-8")
+
+    def capsule_lines(self, query: str, *options: str, task_id: str = "TASK-TICKET",
+                      env: dict[str, str] | None = None) -> list[str]:
+        rendered = self.run_cli(*options, "refresh", "--task-id", task_id, "--query", query,
+                                "--session-id", "ticket-session", "--ephemeral", env=env)
+        self.assertIn(rendered.returncode, (0, 1), rendered.stderr)
+        return rendered.stdout.splitlines()
+
+    def ticket_line(self, query: str, *options: str, **keywords: object) -> Optional[str]:
+        return next((line for line in self.capsule_lines(query, *options, **keywords)
+                     if line.startswith("ticket files")), None)
+
+    def test_the_line_is_off_until_switched_on(self) -> None:
+        self.assertIsNone(self.ticket_line("continue CMS-741 export rounding"))
+        self.switch_on()
+        # Newest commit first; a removed file, a document, the commits of
+        # CMS-7410 and those naming no ticket are left out.
+        self.assertEqual("ticket files (CMS-741): src/Refund.php, src/Export.php, src/Ledger.php",
+                         self.ticket_line("continue CMS-741 export rounding"))
+
+    def test_the_environment_switches_it_for_a_run(self) -> None:
+        self.assertIsNotNone(self.ticket_line("continue CMS-741", env={**os.environ, "CONTEXT_TICKET_FILES": "1"}))
+        self.switch_on()
+        self.assertIsNone(self.ticket_line("continue CMS-741", env={**os.environ, "CONTEXT_TICKET_FILES": "0"}))
+
+    def test_every_profile_and_lightweight_mode_carry_it(self) -> None:
+        for profile in ("full", "navigation", "recall"):
+            with self.subTest(profile=profile):
+                self.switch_on(capsule_profile=profile)
+                self.assertIsNotNone(self.ticket_line("continue CMS-741"))
+        self.switch_on()
+        self.assertIsNotNone(self.ticket_line("continue CMS-741", "--mode", "lightweight"))
+
+    def test_the_task_names_the_ticket_when_the_request_does_not(self) -> None:
+        # A branch keeps its ticket in lower case as often as not.
+        self.switch_on()
+        self.assertIsNone(self.ticket_line("continue the rounding"))
+        self.assertEqual("ticket files (CMS-741): src/Refund.php, src/Export.php, src/Ledger.php",
+                         self.ticket_line("continue the rounding", task_id="feature/cms-741-export"))
+
+    def test_files_the_request_names_or_the_recent_files_show_are_left_out(self) -> None:
+        self.switch_on()
+        self.assertEqual("ticket files (CMS-741): src/Refund.php, src/Export.php",
+                         self.ticket_line("fix CMS-741 in Ledger.php"))
+        transcript = Path(self.temporary.name) / "transcript.jsonl"
+        transcript.write_text("".join(json.dumps(record) + "\n" for record in (
+            {"type": "user", "cwd": str(self.repository), "message": {"role": "user", "content": "refunds"}},
+            {"type": "assistant", "cwd": str(self.repository), "message": {"id": "m", "content": [
+                {"type": "tool_use", "id": "t", "name": "Read",
+                 "input": {"file_path": str(self.repository / "src/Refund.php")}}]}},
+        )), encoding="utf-8")
+        turn = self.run_cli("turn", "--task-id", "TASK-TICKET", "--transcript", str(transcript), "--json")
+        self.assertEqual(0, turn.returncode, turn.stderr)
+        lines = self.capsule_lines("continue CMS-741")
+        recent = lines.index("recent files: src/Refund.php")
+        self.assertEqual("ticket files (CMS-741): src/Export.php, src/Ledger.php", lines[recent + 1])
+
+    def test_ten_whole_paths_within_the_recent_line_width(self) -> None:
+        names = [f"src/Module{index:02d}/{'Long' * 10}Handler{index:02d}.php" for index in range(15)]
+        self.commit("CMS-900: the handlers", *names)
+        self.switch_on()
+        line = self.ticket_line("continue CMS-900")
+        shown = line[len("ticket files (CMS-900): "):].split(", ")
+        self.assertLessEqual(len(line), context_cli.RECENT_FILES_LINE_LIMIT)
+        self.assertLessEqual(len(shown), context_cli.RECENT_FILES_LIMIT)
+        self.assertTrue(set(shown) <= set(names))
+
+    def test_what_is_no_ticket_is_never_searched(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        self.assertEqual(["CMS-741", "ABC-12"], context_cli.capsule_tickets(
+            connection, "Encode it as UTF-8 per PSR-4 for CMS-741", "feature/abc-12-export"))
+        self.assertEqual([], context_cli.capsule_tickets(connection, "Encode it as UTF-8 per PSR-4", "main"))
+        with mock.patch.object(context_cli.subprocess, "run") as run:
+            self.assertEqual([], context_cli.ticket_files(self.repository, [], "", []))
+        run.assert_not_called()
+
+    def test_a_git_failure_is_no_list(self) -> None:
+        timeout = subprocess.TimeoutExpired("git", context_cli.TICKET_FILES_SECONDS)
+        with mock.patch.object(context_cli.subprocess, "run", side_effect=timeout):
+            self.assertEqual([], context_cli.ticket_files(self.repository, ["CMS-741"], "", []))
+        outside = tempfile.TemporaryDirectory(prefix="no-repository-")
+        self.addCleanup(outside.cleanup)
+        self.assertEqual([], context_cli.ticket_files(Path(outside.name), ["CMS-741"], "", []))
+
+    def test_the_capsule_shape_counts_them(self) -> None:
+        capsule = {"ticket_files": {"tickets": ["CMS-741"], "paths": ["src/Export.php", "src/Ledger.php"]}}
+        self.assertEqual(2, context_cli.capsule_shape(self.repository, capsule, None)["ticket_files"])
+        self.assertEqual(0, context_cli.capsule_shape(self.repository, {}, None)["ticket_files"])
 
 
 class TicketShapeRetrievalTest(BankFixture):
@@ -15280,21 +17610,39 @@ class AnchorSpecificityTest(unittest.TestCase):
 
 class CapsuleProfileTest(BankFixture):
     """`capsule_profile: navigation` keeps the automatic capsule to working
-    state and recent files; the default and explicit retrieval are unchanged."""
+    state and recent files, `recall` adds the task's own saves; the default
+    and explicit retrieval are unchanged."""
+
+    LEARNING = {
+        "type": "finding",
+        "title": "Cerulean rollout waits for the cobalt authority",
+        "consequence": "The cerulean rollout ships only once the cobalt authority rule allows it.",
+        "sources": ["specs/authority.md"],
+    }
 
     def configure(self, **values: object) -> None:
         config = self.repository / "project-brain/config/runtime.json"
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(json.dumps({"mode": "governed", **values}), encoding="utf-8")
 
-    def refresh_text(self, env: Optional[dict] = None) -> str:
+    def refresh_text(self, env: Optional[dict] = None, task_id: str = "TASK-1") -> str:
         result = subprocess.run(
             [sys.executable, str(CONTEXT_SCRIPT), "--root", str(self.repository), "refresh",
-             "--query", "cerulean rollout", "--task-id", "TASK-1", "--ephemeral", "--json"],
+             "--query", "cerulean rollout", "--task-id", task_id, "--ephemeral", "--json"],
             text=True, capture_output=True, env={**os.environ, **(env or {})},
         )
         self.assertEqual(0, result.returncode, result.stderr)
         return json.loads(result.stdout)["capsule_text"]
+
+    def save(self, task_id: str = "TASK-1", result_id: str = "run-1", **learning: object) -> None:
+        """What a session's result save writes: the learning, then its chunk."""
+        request = self.repository / f"{result_id}.json"
+        request.write_text(json.dumps({"learnings": [{**self.LEARNING, **learning}], "verified": True}),
+                           encoding="utf-8")
+        result = self.run_cli("record-result", "--task-id", task_id, "--result-id", result_id,
+                              "--revision", "auto", "--input", str(request), "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["created"], [item["state"] for item in json.loads(result.stdout)["records"]])
 
     def test_the_default_capsule_carries_the_matching_chunk(self) -> None:
         self.start()
@@ -15306,6 +17654,50 @@ class CapsuleProfileTest(BankFixture):
         text = self.refresh_text()
         self.assertNotIn("MEM-20260101-aaaaaaaa", text)
         self.assertTrue(text.startswith("working: TASK-1"), text)
+
+    def test_navigation_and_empty_recall_withhold_ineligible_working_state(self) -> None:
+        self.start('TASK-POLICY')
+        path,task,body=brain.find_task(self.repository,'TASK-POLICY')
+        task['privacy']='restricted'
+        brain._write_record(self.repository,task,path)
+        for profile in ('navigation','recall'):
+            result=self.run_cli('refresh','--query','cobalt','--task-id','TASK-POLICY',
+                '--capsule-profile',profile,'--ephemeral','--json')
+            self.assertEqual(0,result.returncode,result.stderr);capsule=json.loads(result.stdout)
+            with self.subTest(profile=profile):
+                self.assertIsNone(capsule['capsule']['working']);self.assertIsNone(capsule['capsule']['task_record'])
+                self.assertNotIn(task['goal'],capsule['capsule_text'])
+
+    def test_navigation_withholds_working_state_when_a_citation_is_missing(self) -> None:
+        self.start('TASK-MISSING')
+        (self.repository/'specs/authority.md').unlink()
+        for profile in ('navigation','recall'):
+            result=self.run_cli('refresh','--query','cobalt','--task-id','TASK-MISSING',
+                '--capsule-profile',profile,'--ephemeral','--json')
+            self.assertEqual(0,result.returncode,result.stderr)
+            with self.subTest(profile=profile):self.assertIsNone(json.loads(result.stdout)['capsule']['working'])
+
+    def test_navigation_rechecks_the_working_image_after_packing(self) -> None:
+        self.start('TASK-PACKING')
+        path,task,body=brain.find_task(self.repository,'TASK-PACKING')
+        pack=context_cli.enforce_governed_capsule_contract
+        for profile in ('navigation','recall'):
+            brain._write_record(self.repository,task,path)
+            changed=[]
+            def race(capsule):
+                packed=pack(capsule)
+                if not changed:
+                    private={**task,'privacy':'restricted'}
+                    brain._write_record(self.repository,private,path);changed.append(True)
+                return packed
+            with mock.patch.object(context_cli,'enforce_governed_capsule_contract',side_effect=race):
+                code,stdout,stderr=self.run_main('refresh','--query','cobalt','--task-id','TASK-PACKING',
+                    '--capsule-profile',profile,'--ephemeral','--json')
+            self.assertEqual(0,code,stderr);result=json.loads(stdout)
+            with self.subTest(profile=profile):
+                self.assertIsNone(result['capsule']['working'])
+                self.assertNotIn(task['goal'],result['capsule_text'])
+                self.assertIsNone(result['capsule']['task_record'])
 
     def test_the_environment_overrides_the_configured_profile(self) -> None:
         self.start()
@@ -15327,24 +17719,695 @@ class CapsuleProfileTest(BankFixture):
 
     def test_an_explicit_retrieval_still_searches(self) -> None:
         self.start()
-        self.configure(capsule_profile="navigation")
-        result = self.run_cli("retrieve", "cerulean rollout", "--task-id", "TASK-1", "--ephemeral", "--json")
-        self.assertEqual(0, result.returncode, result.stderr)
-        paths = [item["path"] for item in json.loads(result.stdout)["semantic"]]
-        self.assertTrue(any("MEM-20260101-aaaaaaaa" in path for path in paths), paths)
+        for profile in ("navigation", "recall"):
+            with self.subTest(profile=profile):
+                self.configure(capsule_profile=profile)
+                result = self.run_cli("retrieve", "cerulean rollout", "--task-id", "TASK-1",
+                                      "--ephemeral", "--json")
+                self.assertEqual(0, result.returncode, result.stderr)
+                paths = [item["path"] for item in json.loads(result.stdout)["semantic"]]
+                self.assertTrue(any("MEM-20260101-aaaaaaaa" in path for path in paths), paths)
 
-    def test_an_unknown_profile_is_refused_without_failing_the_turn(self) -> None:
-        # The prompt hook never fails a turn: a bad profile leaves the turn
-        # without a capsule and says why, as a bad index does.
+    def test_recall_keeps_the_tasks_saved_result_and_drops_the_rest(self) -> None:
+        # The next session asks about what this task saved: the navigation
+        # capsule had dropped it with the rest of the document layers.
+        self.start()
+        self.configure(capsule_profile="recall", automatic_promotion=True)
+        self.save()
+        text = self.refresh_text()
+        self.assertIn("Cerulean rollout waits for the cobalt authority", text)
+        self.assertNotIn("MEM-20260101-aaaaaaaa", text)
+        self.assertTrue(text.startswith("working: TASK-1"), text)
+        full = self.refresh_text({"CONTEXT_CAPSULE_PROFILE": "full"})
+        self.assertIn("MEM-20260101-aaaaaaaa", full)
+        self.assertIn("Cerulean rollout waits for the cobalt authority", full)
+        self.assertNotIn("Cerulean rollout waits for the cobalt authority",
+                         self.refresh_text({"CONTEXT_CAPSULE_PROFILE": "navigation"}))
+
+    def test_recall_leaves_another_tasks_save_out_and_is_navigation_without_its_own(self) -> None:
+        self.start()
+        self.start("TASK-2")
+        self.configure(capsule_profile="recall", automatic_promotion=True)
+        self.save(task_id="TASK-2")
+        text = self.refresh_text()
+        self.assertNotIn("Cerulean rollout waits for the cobalt authority", text)
+        self.assertNotIn("MEM-20260101-aaaaaaaa", text)
+        self.assertTrue(text.startswith("working: TASK-1"), text)
+        self.assertFalse(list((self.repository / "memory-bank/local/retrieval-manifests").glob("*.json")))
+        self.assertIn("Cerulean rollout waits for the cobalt authority", self.refresh_text(task_id="TASK-2"))
+
+    def test_recall_keeps_records_filed_under_the_task_or_its_ticket(self) -> None:
+        # Agents file findings under the ticket the branch names, and a
+        # Harness draft names a learning after its task; a longer ticket
+        # number is another ticket.
+        task = "feature/CMS-739-embedded"
+        self.start(task)
+        self.configure(capsule_profile="recall")
+        for external in ("CMS-739-review-1", f"{task}-finding-0a1b2c3d", "CMS-7391-review-1"):
+            created = self.run_cli("brain-create", "finding", "--external-id", external,
+                                   "--title", f"Cerulean rollout note {external}",
+                                   "--source", "specs/authority.md", "--json")
+            self.assertEqual(0, created.returncode, created.stderr)
+        text = self.refresh_text(task_id=task)
+        self.assertIn("Cerulean rollout note CMS-739-review-1", text)
+        self.assertIn(f"Cerulean rollout note {task}-finding-0a1b2c3d", text)
+        self.assertNotIn("CMS-7391-review-1", text)
+        self.assertNotIn("MEM-20260101-aaaaaaaa", text)
+
+    def test_recall_follows_a_promoted_save_into_the_archive(self) -> None:
+        # Compaction moves the resolved record and repoints the chunk's
+        # citation; the chunk is still this task's.
+        self.start()
+        self.configure(capsule_profile="recall", automatic_promotion=True)
+        self.save()
+        compacted = self.run_cli("compact", "--json")
+        self.assertEqual(0, compacted.returncode, compacted.stderr)
+        self.assertTrue(list((self.repository / "project-brain/archive/finding").glob("*.md")))
+        self.assertIn("Cerulean rollout waits for the cobalt authority", self.refresh_text())
+
+    def test_the_refresh_flag_selects_recall(self) -> None:
+        self.start()
+        self.configure(automatic_promotion=True)
+        self.save()
+        result = self.run_cli("refresh", "--query", "cerulean rollout", "--task-id", "TASK-1",
+                              "--ephemeral", "--json", "--capsule-profile", "recall")
+        self.assertEqual(0, result.returncode, result.stderr)
+        text = json.loads(result.stdout)["capsule_text"]
+        self.assertIn("Cerulean rollout waits for the cobalt authority", text)
+        self.assertNotIn("MEM-20260101-aaaaaaaa", text)
+
+    def test_an_unknown_configured_profile_delivers_the_full_capsule_and_says_why(self) -> None:
+        # A setting a newer runtime wrote, read by an older one: on 2026-10-30
+        # a refusal here left four projects without a capsule on every prompt.
         self.start()
         self.configure(capsule_profile="documents-only")
         result = self.run_cli("refresh", "--query", "cerulean rollout", "--task-id", "TASK-1",
                               "--ephemeral", "--json")
         self.assertEqual(0, result.returncode, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertIsNone(payload["capsule"])
-        self.assertTrue(any("Capsule profile must be full or navigation" in warning
-                            for warning in payload["warnings"]), payload["warnings"])
+        self.assertIsNotNone(payload["capsule"])
+        self.assertIn("working: TASK-1", payload["capsule_text"])
+        unknown = ("capsule_profile 'documents-only' is unknown to this runtime (full, navigation, recall): "
+                   "full capsule delivered")
+        self.assertIn(unknown, payload["warnings"])
+        self.assertIn(unknown, payload["capsule_text"])
+        # Named by the caller, a bad profile is still refused.
+        named = self.run_cli("refresh", "--query", "cerulean rollout", "--task-id", "TASK-1",
+                             "--ephemeral", "--json", "--capsule-profile", "documents-only")
+        self.assertNotEqual(0, named.returncode)
+
+
+class PromotionPublicationRecoveryTest(RuntimeHarness):
+    """Real process death leaves exact, bounded publication custody."""
+
+    CHILD = r'''
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import brain_runtime as brain
+import memory_results
+root=Path(sys.argv[2]);cut=sys.argv[3]
+request=json.loads((root/'publication-request.json').read_text())
+old=root/request['old_chunk'];original=brain.atomic_write;rolling=[]
+def interrupted(destination,text):
+    result=original(destination,text);destination=Path(destination)
+    if cut=='rollback' and destination==root/'memory-bank/INDEX.md' and not rolling:
+        rolling.append(True)
+        raise OSError('Enter owned rollback after the forward INDEX write')
+    selected=((cut=='successor' and destination.parent==old.parent and destination!=old)
+        or (cut=='predecessor' and destination==old)
+        or (cut=='index' and destination==root/'memory-bank/INDEX.md')
+        or (cut=='rollback' and rolling and destination==old and '"status": "active"' in text))
+    if selected:
+        marker=json.dumps({'cut':cut,'destination':str(destination.relative_to(root))}).encode()
+        fd=os.open(root/'publication-cut.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        os.write(fd,marker);os.fsync(fd);os.close(fd)
+        os._exit(73)
+    return result
+brain.atomic_write=interrupted
+original_json=brain.atomic_json
+def after_intent(destination,value):
+    result=original_json(destination,value)
+    if cut=='intent' and isinstance(value,dict) and 'publication' in value:
+        fd=os.open(root/'publication-cut.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        os.write(fd,json.dumps({'cut':cut,'destination':str(Path(destination).relative_to(root))}).encode())
+        os.fsync(fd);os.close(fd);os._exit(73)
+    return result
+brain.atomic_json=after_intent
+memory_results.record_result(root,request['task_id'],'publication-recheck',request['revision'],request['data'],
+    owner='local',reason='Checked publication recovery source')
+raise AssertionError('The requested process-death cut was not reached')
+'''
+
+    def setUp(self) -> None:
+        super().setUp()
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(('GIT_', 'CONTEXT_', 'ACCELERATOR_', 'PROJECT_BRAIN_'))}
+        environment['PYTHONDONTWRITEBYTECODE'] = '1'
+        patched = mock.patch.dict(os.environ, environment, clear=True)
+        patched.start(); self.addCleanup(patched.stop)
+        config = self.repository / 'project-brain/config/runtime.json'
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({'mode': 'governed', 'automatic_promotion': True}))
+        shutil.copytree(EDITION / 'project-brain/schemas', self.repository / 'project-brain/schemas')
+        self.source = self.repository / 'specs/authority.md'
+        self.source.write_text('# Authority\nThe cobalt authority requires one owner.\n')
+        self.learning = {'type': 'finding', 'title': 'Cobalt publication rule',
+                         'consequence': 'The cobalt authority requires exactly one owner.',
+                         'sources': ['specs/authority.md']}
+        first = brain.create_task(self.repository, 'publication/seed', 'Inspect cobalt', [], [], owner='local')
+        saved = memory_results.record_result(self.repository, first['id'], 'publication-seed', 1,
+            {'learnings': [self.learning], 'verified': True}, owner='local', reason='Checked cobalt source')
+        self.record_id = saved['records'][0]['id']
+        old_id = saved['promotion']['promoted'][0]['memory_id']
+        self.old_chunk = next((self.repository / 'memory-bank/chunks').glob(old_id + '-*.md'))
+        self.old_body = brain._parse_chunk(self.old_chunk)[1]
+        self.original_chunk = self.old_chunk.read_bytes()
+        task = brain.create_task(self.repository, 'publication/recheck', 'Recheck cobalt', [], [], owner='local')
+        self.source.write_text(self.source.read_text() + 'A separate method was added.\n')
+        record = brain.get_record(self.repository, self.record_id)
+        self.request = {'task_id': task['id'], 'revision': task['revision'],
+                        'old_chunk': self.old_chunk.relative_to(self.repository).as_posix(),
+                        'data': {'progress': 'Checked the existing cobalt rule.', 'verified': True,
+                            'learnings': [{**self.learning, 'record_id': record['id'],
+                                'expected_revision': record['revision'],
+                                'source_fingerprints': memory_results.checked_fingerprints(
+                                    self.repository, self.learning['sources'])}]}}
+        (self.repository / 'publication-request.json').write_text(json.dumps(self.request))
+
+    def crash(self, cut):
+        child = subprocess.run([sys.executable, '-B', '-c', self.CHILD, str(SCRIPTS),
+                                str(self.repository), cut], cwd=self.repository,
+                               capture_output=True, text=True, timeout=10)
+        self.assertEqual(73, child.returncode, child.stderr)
+        self.assertEqual(cut, json.loads((self.repository / 'publication-cut.json').read_text())['cut'])
+
+    def save(self):
+        return memory_results.record_result(self.repository, self.request['task_id'], 'publication-recheck',
+            self.request['revision'], self.request['data'], owner='local', reason='Checked publication recovery source')
+
+    def pending(self):
+        return next((self.repository / 'project-brain/control/promotions' / (identifier + '.json'), proposal)
+                    for identifier, proposal in brain.iter_promotions(self.repository) if 'publication' in proposal)
+
+    def images(self):
+        folders = ('memory-bank/chunks', 'project-brain/dynamic', 'project-brain/control/promotions')
+        entries = [self.repository / 'memory-bank/INDEX.md']
+        for folder in folders:
+            entries.extend(item for item in (self.repository / folder).rglob('*') if item.is_file())
+        return {str(item.relative_to(self.repository)): item.read_bytes() for item in entries}
+
+    def assert_converges(self, cut):
+        self.crash(cut)
+        revision = brain.get_record(self.repository, self.record_id)['revision']
+        task_revision = brain.get_task(self.repository, self.request['task_id'])['revision']
+        result = self.save(); again = self.save()
+        self.assertTrue(result['replayed']); self.assertTrue(again['replayed'])
+        self.assertEqual(1, len(result['promotion']['promoted']))
+        self.assertEqual([], again['promotion']['promoted'])
+        self.assertEqual(revision, brain.get_record(self.repository, self.record_id)['revision'])
+        self.assertEqual(task_revision, brain.get_task(self.repository, self.request['task_id'])['revision'])
+        chunks = [brain._parse_chunk(item) for item in (self.repository / 'memory-bank/chunks').glob('*.md')]
+        self.assertEqual(2, len(chunks)); self.assertEqual(1, sum(row['status'] == 'active' for row, _ in chunks))
+        self.assertEqual([], brain.validate_bank(self.repository / 'memory-bank'))
+        self.assertEqual(self.old_body, brain._parse_chunk(self.old_chunk)[1])
+        self.assertTrue(all(row['status'] == 'applied' and 'publication' not in row
+                            for _, row in brain.iter_promotions(self.repository)))
+
+    def test_successor_process_death_converges_once(self):
+        self.assert_converges('successor')
+
+    def test_predecessor_process_death_converges_once(self):
+        self.assert_converges('predecessor')
+
+    def test_index_process_death_converges_once(self):
+        self.assert_converges('index')
+
+    def test_intent_process_death_converges_once(self):
+        self.assert_converges('intent')
+
+    def test_process_death_during_rollback_keeps_custody(self):
+        self.assert_converges('rollback')
+
+    def test_foreign_chunk_edit_is_held_without_authoritative_writes(self):
+        self.crash('successor')
+        _, proposal = self.pending()
+        destination = self.repository / proposal['publication']['destination']['path']
+        destination.write_bytes(destination.read_bytes() + b'\nA team member edited this chunk.\n')
+        before = self.images(); result = self.save()
+        self.assertTrue(result['promotion']['failed']); self.assertEqual(before, self.images())
+
+    def test_corrupt_plan_is_held_without_authoritative_writes(self):
+        self.crash('successor')
+        location, proposal = self.pending(); proposal['publication']['sha256'] = '0' * 64
+        brain.atomic_json(location, proposal)
+        before = self.images(); result = self.save()
+        self.assertTrue(result['promotion']['failed']); self.assertEqual(before, self.images())
+
+    def test_named_malformed_metadata_does_not_echo_untrusted_keys(self):
+        self.crash('intent')
+        location, proposal = self.pending()
+        proposal['UNTRUSTED_METADATA_MARKER'] = 'Synthetic public diagnostic control.'
+        brain.atomic_json(location, proposal)
+        before = self.images()
+        with self.assertRaises(brain.BrainError) as caught:
+            brain.apply_promotion(self.repository, proposal['id'])
+        self.assertEqual('Promotion metadata is unavailable or invalid', str(caught.exception))
+        self.assertNotIn('UNTRUSTED_METADATA_MARKER', str(caught.exception))
+        self.assertEqual(before, self.images())
+
+    def test_invalid_checkpoint_json_cannot_disappear_from_admission(self):
+        self.crash('successor')
+        location, _ = self.pending(); location.write_text('{damaged checkpoint JSON')
+        before = self.images()
+        # Read-only inspection keeps its previous graceful degradation.
+        self.assertEqual(1, len(list(brain.iter_promotions(self.repository))))
+        with self.assertRaises(brain.BrainError): self.save()
+        self.assertEqual(before, self.images())
+
+    def test_linked_checkpoint_is_refused_without_writing_foreign_proposal(self):
+        self.crash('successor')
+        location, _ = self.pending()
+        foreign = self.repository / 'foreign-promotion.json'; foreign.write_bytes(location.read_bytes())
+        location.unlink(); location.symlink_to(foreign)
+        before = self.images()
+        with self.assertRaises(brain.BrainError): self.save()
+        self.assertTrue(location.is_symlink())
+        self.assertEqual(before, self.images())
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo') and hasattr(os, 'O_NONBLOCK'), 'POSIX FIFO race')
+    def test_leaf_replaced_by_fifo_before_open_is_bounded(self):
+        leaf = self.repository / 'fifo-leaf.txt'; leaf.write_text('Original regular image.\n')
+        code = r'''
+import os,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+import brain_runtime as brain
+root=Path(sys.argv[2]);leaf=root/'fifo-leaf.txt';original=os.open;changed=[]
+def swapped(destination,flags,*args,**kwargs):
+    if Path(destination).name==leaf.name and not changed:
+        leaf.unlink();os.mkfifo(leaf);changed.append(True)
+    return original(destination,flags,*args,**kwargs)
+os.open=swapped
+try:brain._publication_read(root,'fifo-leaf.txt')
+except brain.BrainError:
+    assert changed
+    print('refused without blocking')
+else:raise AssertionError('A replaced FIFO must not be read')
+'''
+        result = subprocess.run([sys.executable, '-B', '-c', code, str(SCRIPTS), str(self.repository)],
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('refused without blocking', result.stdout)
+
+    def test_symlink_chunk_is_refused_without_touching_foreign_target(self):
+        self.crash('successor')
+        _, proposal = self.pending()
+        destination = self.repository / proposal['publication']['destination']['path']
+        foreign = self.repository / 'foreign.txt'; foreign.write_text('Keep this external image.\n')
+        destination.unlink(); destination.symlink_to(foreign)
+        result = self.save()
+        self.assertTrue(result['promotion']['failed']); self.assertTrue(destination.is_symlink())
+        self.assertEqual('Keep this external image.\n', foreign.read_text())
+
+    def test_source_edit_after_death_keeps_original_checked_digests(self):
+        self.crash('successor')
+        original = brain.get_record(self.repository, self.record_id)
+        self.source.write_text(self.source.read_text() + 'A later uninspected source edit.\n')
+        result = self.save()
+        self.assertEqual(1, len(result['promotion']['promoted']))
+        self.assertEqual(original, brain.get_record(self.repository, self.record_id))
+        self.assertTrue(brain.audit_bank(self.repository)['source_changed'])
+
+    def test_deleted_source_rolls_back_owned_publication(self):
+        self.crash('predecessor'); self.source.unlink()
+        result = self.save()
+        self.assertTrue(result['promotion']['failed']); self.assertFalse(self.source.exists())
+        self.assertEqual(self.original_chunk, self.old_chunk.read_bytes())
+        self.assertEqual(1, len(list((self.repository / 'memory-bank/chunks').glob('*.md'))))
+        self.assertTrue(all('publication' not in row for _, row in brain.iter_promotions(self.repository)))
+
+    def test_later_record_revision_is_preserved_and_owned_effects_cleaned(self):
+        self.crash('predecessor')
+        record = brain.get_record(self.repository, self.record_id)
+        changed = brain.update_record(self.repository, record['id'], expected_revision=record['revision'],
+            progress='The cobalt authority now needs a reviewed exception.', next_steps=[], files=[], sources=[],
+            actor='local', reason='A person corrected the claim', reverify=True, attestation='person')
+        result = self.save()
+        self.assertEqual(changed, brain.get_record(self.repository, self.record_id))
+        self.assertTrue(result['promotion']['closed'])
+        self.assertEqual([], brain.validate_bank(self.repository / 'memory-bank'))
+
+    def test_unversioned_record_edit_keeps_custody_and_is_not_overwritten(self):
+        self.crash('successor')
+        location, record, _ = brain.find_record(self.repository, self.record_id)
+        record['progress'] = 'A team member made an unversioned claim edit.'
+        brain._write_record(self.repository, record, location)
+        before = self.images()
+        for _ in range(2):
+            self.assertTrue(self.save()['promotion']['failed'])
+            self.assertEqual(before, self.images())
+            self.assertTrue(self.pending()[1]['publication'])
+
+    def test_rollback_replay_does_not_launder_unversioned_source_pins(self):
+        self.crash('rollback')
+        self.source.write_text(self.source.read_text() + 'A later uninspected canonical edit.\n')
+        location, record, _ = brain.find_record(self.repository, self.record_id)
+        record['source_fingerprints'] = brain.source_fingerprints(self.repository, record['sources'])
+        brain._write_record(self.repository, record, location)
+        before = self.images()
+        for _ in range(2):
+            self.assertTrue(self.save()['promotion']['failed'])
+            self.assertEqual(before, self.images())
+            self.assertEqual('rollback', self.pending()[1]['publication']['phase'])
+
+    def test_task_changes_and_midnight_do_not_rewrite_frozen_publication(self):
+        self.crash('successor')
+        _, proposal = self.pending(); frozen_id = brain._publication_parts(proposal)['metadata']['id']
+        task = brain.get_task(self.repository, self.request['task_id'])
+        changed = brain.update_record(self.repository, task['id'], expected_revision=task['revision'],
+            progress='An unrelated task update.', next_steps=[], files=[], sources=[], actor='local')
+        real = datetime
+        class Tomorrow(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real.now(tz) + timedelta(days=1)
+        with mock.patch.object(brain, 'datetime', Tomorrow):
+            result = self.save()
+        self.assertEqual(changed, brain.get_task(self.repository, task['id']))
+        self.assertEqual(frozen_id, result['promotion']['promoted'][0]['memory_id'])
+
+    def test_index_rollback_failure_retains_plan_until_repaired(self):
+        (self.repository / 'memory-bank/INDEX.md').write_text('# Damaged derived INDEX\n')
+        original = brain.os.replace
+        def denied(source, destination, **kwargs):
+            if Path(destination).name == 'INDEX.md':
+                raise PermissionError('INDEX remains unavailable')
+            return original(source, destination, **kwargs)
+        with mock.patch.object(brain.os, 'replace', side_effect=denied):
+            with self.assertRaises(PermissionError): self.save()
+        _, proposal = self.pending(); self.assertEqual('rollback', proposal['publication']['phase'])
+        self.assertEqual(self.original_chunk, self.old_chunk.read_bytes())
+        self.assertEqual(1, len(self.save()['promotion']['promoted']))
+        self.assertEqual([], brain.validate_bank(self.repository / 'memory-bank'))
+
+    def test_error_after_applied_ledger_commit_does_not_undo_bank(self):
+        original = brain.atomic_json
+        def committed(destination, value):
+            result = original(destination, value)
+            if Path(destination).parent.name == 'promotions' and value.get('status') == 'applied':
+                raise OSError('The ledger committed before the helper failed')
+            return result
+        with mock.patch.object(brain, 'atomic_json', side_effect=committed):
+            with self.assertRaises(OSError): self.save()
+        before = self.images()
+        self.assertEqual([], brain.validate_bank(self.repository / 'memory-bank'))
+        self.assertEqual([], self.save()['promotion']['promoted'])
+        self.assertEqual(before, self.images())
+
+    def test_missing_legacy_plan_does_not_adopt_existing_destination(self):
+        self.crash('successor')
+        location, proposal = self.pending(); proposal.pop('publication'); brain.atomic_json(location, proposal)
+        before = self.images(); result = self.save()
+        self.assertTrue(result['promotion']['failed']); self.assertEqual(before, self.images())
+
+    def test_missing_legacy_plan_does_not_adopt_inactive_predecessor(self):
+        self.crash('predecessor')
+        location, proposal = self.pending(); proposal.pop('publication'); brain.atomic_json(location, proposal)
+        before = self.images(); result = self.save()
+        self.assertTrue(result['promotion']['failed']); self.assertEqual(before, self.images())
+
+    def test_publication_images_are_bounded_before_decode(self):
+        self.crash('successor')
+        location, proposal = self.pending()
+        proposal['publication']['destination']['after']['data'] = 'a' * (2 * brain.PUBLICATION_IMAGE_LIMIT)
+        brain._publication_seal(proposal['publication']); brain.atomic_json(location, proposal)
+        before = self.images(); result = self.save()
+        self.assertTrue(result['promotion']['failed']); self.assertEqual(before, self.images())
+
+    def test_rehashed_plan_cannot_freshen_unchecked_canonical_bytes(self):
+        self.crash('intent')
+        location, proposal = self.pending()
+        self.source.write_text(self.source.read_text() + 'An uninspected later change.\n')
+        parts = brain._publication_parts(proposal)
+        metadata, body = brain._publication_metadata(parts['destination'][1])
+        current = brain.fingerprint(self.repository, 'specs/authority.md')['sha256']
+        for row in metadata['source_digests']:
+            if row['path'] == 'specs/authority.md': row['sha256'] = current
+        raw = brain._render_chunk(metadata, body).encode('utf-8')
+        proposal['publication']['destination']['after'] = brain._publication_blob(raw)
+        brain._publication_seal(proposal['publication']); brain.atomic_json(location, proposal)
+        before = self.images(); result = self.save()
+        self.assertTrue(result['promotion']['failed']); self.assertEqual(before, self.images())
+
+    def test_direct_resume_rechecks_later_human_winner(self):
+        self.crash('intent')
+        location, planned = self.pending(); record = brain.get_record(self.repository, self.record_id)
+        other = brain.create_promotion(self.repository, [record['id']], self.learning['title'],
+            brain.promotion_content(record), proposer='operator')
+        brain.review_promotion(self.repository, other['id'], 'reviewer', True)
+        real = datetime
+        class Yesterday(datetime):
+            @classmethod
+            def now(cls, tz=None): return real.now(tz) - timedelta(days=1)
+        with mock.patch.object(brain, 'datetime', Yesterday):
+            brain.apply_promotion(self.repository, other['id'])
+        before = {item.name: item.read_bytes() for item in (self.repository / 'memory-bank/chunks').glob('*.md')}
+        with self.assertRaisesRegex(brain.BrainError, 'already promoted'):
+            brain.apply_promotion(self.repository, planned['id'])
+        self.assertEqual(before, {item.name: item.read_bytes() for item in (self.repository / 'memory-bank/chunks').glob('*.md')})
+        self.assertNotIn('publication', json.loads(location.read_text()))
+
+    def test_direct_resume_rechecks_unrelated_new_duplicate(self):
+        self.crash('intent')
+        _, planned = self.pending()
+        other = brain.create_record(self.repository, 'finding', 'independent-duplicate', self.learning['title'],
+            [], self.learning['sources'], owner='local', goal=self.learning['consequence'])
+        other = brain.update_record(self.repository, other['id'], expected_revision=other['revision'],
+            progress=self.learning['consequence'], next_steps=[], files=[], sources=[], actor='local',
+            authority='verified', attestation='agent', transition_to='resolved')
+        approved = brain.create_promotion(self.repository, [other['id']], self.learning['title'],
+            brain.promotion_content(other), proposer='operator')
+        brain.review_promotion(self.repository, approved['id'], 'reviewer', True)
+        brain.apply_promotion(self.repository, approved['id'])
+        before = {item.name: item.read_bytes() for item in (self.repository / 'memory-bank/chunks').glob('*.md')}
+        with self.assertRaisesRegex(brain.BrainError, 'near-duplicate'):
+            brain.apply_promotion(self.repository, planned['id'])
+        self.assertEqual(before, {item.name: item.read_bytes() for item in (self.repository / 'memory-bank/chunks').glob('*.md')})
+
+    def test_rehashed_plan_cannot_move_the_frozen_verification_date(self):
+        self.crash('intent')
+        location, proposal = self.pending(); plan = proposal['publication']
+        parts = brain._publication_parts(proposal)
+        metadata, body = brain._publication_metadata(parts['destination'][1])
+        tomorrow = brain.date.fromisoformat(metadata['created']) + timedelta(days=1)
+        memory_id = 'MEM-' + tomorrow.strftime('%Y%m%d') + '-' + metadata['id'].rsplit('-', 1)[1]
+        old_id = metadata['id']
+        metadata.update(id=memory_id, created=tomorrow.isoformat(), last_verified=tomorrow.isoformat(),
+                        valid_from=tomorrow.isoformat(), review_after=(tomorrow + timedelta(days=365)).isoformat())
+        plan['destination']['path'] = plan['destination']['path'].replace(old_id, memory_id)
+        plan['destination']['after'] = brain._publication_blob(brain._render_chunk(metadata, body).encode())
+        predecessor, predecessor_body = brain._publication_metadata(brain._publication_decode(plan['predecessor']['after']))
+        predecessor.update(superseded_by=memory_id, valid_to=tomorrow.isoformat())
+        plan['predecessor']['after'] = brain._publication_blob(brain._render_chunk(predecessor, predecessor_body).encode())
+        brain._publication_seal(plan); brain.atomic_json(location, proposal)
+        before = self.images()
+        self.assertTrue(self.save()['promotion']['failed'])
+        self.assertEqual(before, self.images())
+
+    def test_owned_rollback_restores_original_proposal_timestamp(self):
+        self.crash('predecessor')
+        location, proposal = self.pending(); original = proposal['publication']['original_updated_at']
+        with brain.mutation_lock(self.repository), brain._publication_scope(self.repository):
+            restored = brain._rollback_publication(self.repository, proposal, location)
+        self.assertNotIn('publication', restored)
+        self.assertEqual(original, restored['updated_at'])
+        self.assertEqual(restored, json.loads(location.read_text()))
+        self.assertEqual(self.original_chunk, self.old_chunk.read_bytes())
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX directory replacement race')
+    def test_successor_parent_swap_cannot_write_into_foreign_directory(self):
+        self.crash('intent')
+        _, proposal = self.pending(); relative = proposal['publication']['destination']['path']
+        chunks = self.old_chunk.parent; owned = chunks.with_name('owned-chunks')
+        foreign = self.repository / 'foreign-chunks'; foreign.mkdir(); marker = foreign / 'foreign.txt'
+        marker.write_text('Foreign directory is preserved.\n')
+        original = brain.atomic_write; changed = []
+        def swapped(destination, text):
+            if Path(destination) == self.repository / relative and not changed:
+                chunks.rename(owned); chunks.symlink_to(foreign, target_is_directory=True); changed.append(True)
+            return original(destination, text)
+        with mock.patch.object(brain, 'atomic_write', side_effect=swapped):
+            with self.assertRaises(brain.BrainError): brain.apply_promotion(self.repository, proposal['id'])
+        self.assertTrue(changed)
+        self.assertEqual(['foreign.txt'], sorted(item.name for item in foreign.iterdir()))
+        self.assertEqual('Foreign directory is preserved.\n', marker.read_text())
+        chunks.unlink(); owned.rename(chunks)
+        self.assertEqual(1, len(self.save()['promotion']['promoted']))
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX directory replacement race')
+    def test_rollback_parent_swap_cannot_remove_foreign_destination(self):
+        self.crash('predecessor')
+        _, proposal = self.pending(); relative = proposal['publication']['destination']['path']
+        chunks = self.old_chunk.parent; owned = chunks.with_name('owned-chunks')
+        foreign = self.repository / 'foreign-chunks'; foreign.mkdir()
+        foreign_leaf = foreign / Path(relative).name; foreign_leaf.write_text('External replacement.\n')
+        original = brain._PublicationFiles.unlink; changed = []
+        def swapped(files, name, expected):
+            if name == relative and not changed:
+                chunks.rename(owned); chunks.symlink_to(foreign, target_is_directory=True); changed.append(True)
+            return original(files, name, expected)
+        with mock.patch.object(brain._PublicationFiles, 'unlink', new=swapped):
+            with self.assertRaises(brain.BrainError):
+                brain.withdraw_promotion(self.repository, proposal['id'], 'Cancel interrupted publication')
+        self.assertTrue(changed); self.assertEqual('External replacement.\n', foreign_leaf.read_text())
+        chunks.unlink(); owned.rename(chunks)
+        self.assertEqual('rollback', self.pending()[1]['publication']['phase'])
+        self.assertEqual(1, len(self.save()['promotion']['promoted']))
+
+    def test_rollback_rechecks_predecessor_after_phase_checkpoint(self):
+        self.crash('predecessor')
+        _, proposal = self.pending(); original = brain.atomic_json; edited = []
+        foreign = self.old_chunk.read_bytes() + b'\nAn external correction during rollback.\n'
+        def after_phase(destination, value):
+            result = original(destination, value)
+            if isinstance(value, dict) and value.get('publication', {}).get('phase') == 'rollback' and not edited:
+                self.old_chunk.write_bytes(foreign); edited.append(True)
+            return result
+        with mock.patch.object(brain, 'atomic_json', side_effect=after_phase):
+            with self.assertRaises(brain.BrainError):
+                brain.withdraw_promotion(self.repository, proposal['id'], 'Cancel interrupted publication')
+        self.assertEqual(foreign, self.old_chunk.read_bytes())
+        self.assertTrue((self.repository / proposal['publication']['destination']['path']).is_file())
+        self.assertEqual('rollback', self.pending()[1]['publication']['phase'])
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX no-clobber publication primitive')
+    def test_destination_appearing_at_atomic_publication_is_preserved(self):
+        self.crash('intent')
+        _, proposal = self.pending(); relative = proposal['publication']['destination']['path']
+        destination = self.repository / relative; foreign = b'Foreign bytes arriving at the last effect boundary.\n'
+        original = brain._PublicationFiles.publish_absent; changed = []
+        def appeared(files, parent, source, target):
+            if Path(target).name == destination.name and not changed:
+                destination.write_bytes(foreign); changed.append(True)
+            return original(files, parent, source, target)
+        with mock.patch.object(brain._PublicationFiles, 'publish_absent', new=appeared):
+            with self.assertRaises(brain.BrainError): brain.apply_promotion(self.repository, proposal['id'])
+        self.assertTrue(changed); self.assertEqual(foreign, destination.read_bytes())
+        self.assertEqual(self.original_chunk, self.old_chunk.read_bytes())
+        self.assertTrue(self.pending()[1]['publication'])
+
+    def test_direct_resume_honors_later_multisource_human_synthesis(self):
+        self.crash('intent')
+        location, pending = self.pending()
+        other = brain.create_record(self.repository, 'finding', 'synthesis-source', 'Separate source',
+            [], self.learning['sources'], owner='local', goal='A separate checked rule for a human synthesis.')
+        other = brain.update_record(self.repository, other['id'], expected_revision=other['revision'],
+            progress='A separate checked rule for a human synthesis.', next_steps=[], files=[], sources=[],
+            actor='local', authority='verified', attestation='agent', transition_to='resolved')
+        approved = brain.create_promotion(self.repository, [other['id'], self.record_id], 'Human synthesis',
+            'An operator combined both checked records into a separate synthesis.', proposer='operator')
+        brain.review_promotion(self.repository, approved['id'], 'reviewer', True)
+        brain.apply_promotion(self.repository, approved['id'])
+        before = {item.name: item.read_bytes() for item in self.old_chunk.parent.glob('*.md')}
+        with self.assertRaisesRegex(brain.BrainError, 'held by a human'):
+            brain.apply_promotion(self.repository, pending['id'])
+        self.assertEqual(before, {item.name: item.read_bytes() for item in self.old_chunk.parent.glob('*.md')})
+        self.assertNotIn('publication', json.loads(location.read_text()))
+        self.assertTrue(self.save()['promotion']['closed'])
+
+    def test_human_review_retains_explicit_same_revision_duplicate_permission(self):
+        # Fixture preparation changed the file for the later recheck. Bring
+        # it back to the seed's checked image for this legacy manual case.
+        self.source.write_text('# Authority\nThe cobalt authority requires one owner.\n')
+        record = brain.get_record(self.repository, self.record_id)
+        approved = brain.create_promotion(self.repository, [record['id']], self.learning['title'],
+            brain.promotion_content(record), proposer='operator')
+        brain.review_promotion(self.repository, approved['id'], 'reviewer', True)
+        real = datetime
+        class Yesterday(datetime):
+            @classmethod
+            def now(cls, tz=None): return real.now(tz) - timedelta(days=1)
+        with mock.patch.object(brain, 'datetime', Yesterday):
+            applied = brain.apply_promotion(self.repository, approved['id'])
+        self.assertEqual('applied', applied['status'])
+        self.assertEqual(2, len(list(self.old_chunk.parent.glob('*.md'))))
+        self.assertEqual([], brain.validate_bank(self.repository / 'memory-bank'))
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux atomic no-clobber capability')
+    def test_unavailable_atomic_publication_refuses_without_bank_effects(self):
+        import ctypes
+        self.crash('intent'); _, proposal = self.pending()
+        before = {item.name: item.read_bytes() for item in self.old_chunk.parent.glob('*.md')}
+        index = (self.repository / 'memory-bank/INDEX.md').read_bytes()
+        with mock.patch.object(ctypes, 'CDLL', return_value=object()):
+            with self.assertRaisesRegex(brain.BrainError, 'Atomic no-clobber.*unavailable'):
+                brain.apply_promotion(self.repository, proposal['id'])
+        self.assertEqual(before, {item.name: item.read_bytes() for item in self.old_chunk.parent.glob('*.md')})
+        self.assertEqual(index, (self.repository / 'memory-bank/INDEX.md').read_bytes())
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux descriptor leak probe')
+    def test_temporary_identity_failure_closes_descriptor_without_publishing(self):
+        original = brain.os.fstat; failed = []
+        def unavailable(descriptor):
+            target = os.readlink('/proc/self/fd/' + str(descriptor))
+            if target.endswith('.tmp') and not failed:
+                failed.append(descriptor)
+                raise OSError('Temporary file metadata is unavailable')
+            return original(descriptor)
+        with brain._publication_scope(self.repository) as files:
+            with mock.patch.object(brain.os, 'fstat', side_effect=unavailable):
+                with self.assertRaisesRegex(OSError, 'metadata is unavailable'):
+                    files.write('memory-bank/chunks/fd-check.txt', b'Bounded payload.', None)
+        self.assertTrue(failed)
+        with self.assertRaises(OSError): original(failed[0])
+        self.assertFalse((self.old_chunk.parent / 'fd-check.txt').exists())
+
+    def test_darwin_atomic_dispatch_is_exclusive_and_has_no_unsafe_fallback(self):
+        import ctypes
+        import errno
+        files = object.__new__(brain._PublicationFiles)
+        for failure in (None, errno.EEXIST, errno.ENOTSUP, errno.ENOSYS):
+            calls = []
+            def rename(*args):
+                calls.append(args)
+                return 0 if failure is None else -1
+            library = type('DarwinLibc', (), {})()
+            library.renameatx_np = rename
+            with self.subTest(failure=failure), mock.patch.object(sys, 'platform', 'darwin'), \
+                    mock.patch.object(brain.os, 'name', 'posix'), \
+                    mock.patch.object(ctypes, 'CDLL', return_value=library), \
+                    mock.patch.object(ctypes, 'get_errno', return_value=failure), \
+                    mock.patch.object(os, 'replace', side_effect=AssertionError('Unsafe replacement fallback')), \
+                    mock.patch.object(os, 'link', side_effect=AssertionError('Unsafe hard-link fallback')):
+                if failure is None:
+                    files.publish_absent(71, 'owned.tmp', 'published.md')
+                elif failure == errno.EEXIST:
+                    with self.assertRaises(FileExistsError):
+                        files.publish_absent(71, 'owned.tmp', 'published.md')
+                else:
+                    with self.assertRaisesRegex(brain.BrainError, 'Atomic no-clobber.*unavailable'):
+                        files.publish_absent(71, 'owned.tmp', 'published.md')
+                self.assertEqual([(71, b'owned.tmp', 71, b'published.md', 4)], calls)
+                self.assertEqual(5, len(rename.argtypes)); self.assertIs(ctypes.c_int, rename.restype)
+        with mock.patch.object(sys, 'platform', 'darwin'), mock.patch.object(brain.os, 'name', 'posix'), \
+                mock.patch.object(ctypes, 'CDLL', return_value=object()):
+            with self.assertRaisesRegex(brain.BrainError, 'Atomic no-clobber.*unavailable'):
+                files.publish_absent(71, 'owned.tmp', 'published.md')
+
+    def test_harness_inspection_omits_internal_publication_images(self):
+        import ast
+        source = EDITION.parent / 'harness/src/harness/knowledge.py'
+        if not source.is_file(): self.skipTest('Harness is only shipped in the monorepo')
+        tree = ast.parse(source.read_text())
+        code = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == 'BRAIN_INSPECT' for target in node.targets))
+        self.crash('successor')
+        result = subprocess.run([sys.executable, '-B', '-c', code, str(self.repository), '{}', str(SCRIPTS)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(self.pending()[1]['publication'])
+        self.assertTrue(all('publication' not in row for row in json.loads(result.stdout)['promotions']))
 
 
 if __name__ == "__main__":

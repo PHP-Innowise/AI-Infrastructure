@@ -1,0 +1,5 @@
+#!/bin/sh
+# Native source-checkout entrypoint. Build the release binary explicitly:
+# cargo build --release --locked --manifest-path runtime-rust/Cargo.toml --bin infra-engine
+# INFRA_ENGINE_BINARY may name an explicitly selected native executable.
+exec "${INFRA_ENGINE_BINARY:-"$(dirname -- "$0")/runtime-rust/target/release/infra-engine"}" "$@"

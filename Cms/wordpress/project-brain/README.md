@@ -126,17 +126,18 @@ handoffs, retrieval manifests, and promotions. Templates are examples of the
 required shape; supported CLI commands should perform mutations whenever
 available.
 
-## `scripts/`
+## Native runtime
 
-| File | Purpose |
-| --- | --- |
-| `scripts/validate.py` | Runs dependency-free validation for active records, archived records, control files, indexes, and configuration. |
-
-Operational mutations are exposed through:
+`memory-bank/bin/infra-engine memory validate` validates active and archived
+records, control files, indexes and configuration. Operational mutations use
+the same native executable:
 
 ```text
-memory-bank/scripts/context.py
+memory-bank/bin/infra-engine memory OP
 ```
+
+Use `memory-bank/bin/infra-engine.exe` on Windows. The installed runtime and
+its versioned resources are delivered together; no interpreter is required.
 
 ## `tests/`
 

@@ -1,4 +1,6 @@
-# Definition of Done - Infrastructure-Creator
+# Definition of Done
+
+Explicit implementation phase gates take precedence: during a source-first runtime migration, keep builds, formatting, tests, checks, dependency fetches and provider calls deferred until production implementation is complete. Report deferred work separately from passes. - Infrastructure-Creator
 
 This is the tiered verification checklist for the generator's *own* work (scanning a target and generating its accelerator). It is not the DOD of the accelerator that gets generated - that one is produced by `policy-forge` for the target.
 
@@ -75,12 +77,12 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
   `SKILL FLOW.md`, `flow-feature`, and `flow-review` match the canonical flow
   contract exactly, including required code-review/checkpoint stages.
 - [ ] Every generated hook script passes `bash -n` and carries the executable bit; the per-edition hook set is complete (four enforcement + working-memory pair + `context-continuity.sh`; Cursor's `working-memory-read.sh` runs on `beforeSubmitPrompt` and renders the working-memory rule), `context-continuity.sh` is wired without an argument on its session-start, prompt and end-of-turn events, and every wiring file references only existing executable scripts.
-- [ ] The seeded `memory-bank/` passes its validator and matches section 12 (same count, concepts, and sources); the context-brain runtime (`context.py`, `context_handoff.py`, `context_continuity.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py`) and the `project-brain/` skeleton were copied verbatim with `runtime.json` substituted (`context.py status`/`validate` exit 0 in the target); the six memory-continuity skills were also generated and wrapped; any drift was reported.
-- [ ] `context.py status --json` reports task-identity and Git readiness
+- [ ] The seeded `memory-bank/` passes its validator and matches section 12 (same count, concepts, and sources); the selected native engine, trusted runtime resources and `project-brain/` skeleton were copied with the framework and canonical edition materialized in `runtime.json` (`memory-bank/bin/infra-engine memory status`/`validate` exit 0 in the target); the six memory-continuity skills were also generated and wrapped; any drift was reported.
+- [ ] `memory-bank/bin/infra-engine memory status --json` reports task-identity and Git readiness
   truthfully as active, retrieval-only, or degraded. Explicit task identity
   outside Git is never reported as checkpoint-capable; all degraded hooks remain
   non-blocking and provide bounded remediation.
-- [ ] No template placeholders (e.g. `{skill-name}`, `TODO`, `YYYY-MM-DD` left literal) remain in any manifest-owned text file. The only approved verbatim-asset declarations are the exact manifest-relative path-plus-regex pairs `memory-bank/templates/chunk.md` + `\bYYYY-MM-DD\b` and `memory-bank/scripts/validate.py` + `\bYYYY-MM-DD\b`; each exempts only matching occurrences, never the whole file. Every other placeholder in those files and the same token at every other path remains blocking. Unmanifested team files were not opened by placeholder or structural validation.
+- [ ] No template placeholders (e.g. `{skill-name}`, `TODO`, `YYYY-MM-DD` left literal) remain in any manifest-owned text file. The only approved verbatim-asset declaration is the exact manifest-relative path-plus-regex pair `memory-bank/templates/chunk.md` + `\bYYYY-MM-DD\b`; it exempts only matching occurrences, never the whole file. Every other placeholder in those files and the same token at every other path remains blocking. Unmanifested team files were not opened by placeholder or structural validation.
 - [ ] The complete bundle was built under task-scoped staging and passed
   evidence, semantic, routing, structural, runtime, and manifest checks before
   publication. The explicit publication plan and manifest write plan were used;

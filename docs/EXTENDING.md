@@ -1,5 +1,13 @@
 # Extending the Accelerator
 
+> Rust migration, 2026-11-03: Python test and demo invocations below are
+> retained pre-Rust behavior specifications and historical evidence. They are
+> not verification commands for the migrated checkout. Run the registered native
+> suites from the repository root with
+> `cargo test --manifest-path runtime-rust/Cargo.toml --workspace --all-targets --locked --offline`.
+> Current coverage is defined by those Rust assertions; historical passes are
+> not transferred to the port.
+
 This guide is for contributors who add or change accelerator behavior. It
 covers the three maintained accelerators and the generator:
 
@@ -78,7 +86,7 @@ Each maintained accelerator has shared policy plus tool-native editions:
 
 For shared skill parity, `.agents/skills/` is canonical. This is declared by
 `project-brain/config/runtime.json` as `"canonical_edition": ".agents"` and is
-what `context.py parity` uses when detecting mirror drift. A complete change
+what `memory-bank/bin/infra-engine memory parity` uses when detecting mirror drift. A complete change
 must leave supported copies semantically aligned and byte-identical where the
 repository's DOD requires it.
 
@@ -107,11 +115,11 @@ Tool wrappers are adapters, not alternate implementations:
 5. Validate every changed skill directory:
 
    ```bash
-   python3 .agents/skills/skill-creator/scripts/quick_validate.py \
+   infra-engine skill-tools quick-validate \
      .agents/skills/<skill-name>
-   python3 .claude/skills/skill-creator/scripts/quick_validate.py \
+   infra-engine skill-tools quick-validate \
      .claude/skills/<skill-name>
-   python3 .cursor/skills/skill-creator/scripts/quick_validate.py \
+   infra-engine skill-tools quick-validate \
      .cursor/skills/<skill-name>
    ```
 
@@ -120,7 +128,7 @@ Tool wrappers are adapters, not alternate implementations:
    structural requirement.
 7. Run parity and the active DOD checks before reporting completion.
 
-`quick_validate.py` checks basic skill structure and frontmatter. It does not
+`infra-engine skill-tools quick-validate` checks basic skill structure and frontmatter. It does not
 prove workflow quality, wrapper correctness, reference resolution, hook
 safety, or cross-edition parity; those require the relevant tests and DOD.
 
@@ -169,14 +177,14 @@ documents and its skill trees to be byte-identical where specified.
 When changing hooks:
 
 1. edit the canonical hook/runtime source identified by
-   `scripts/build_mirrors.py` rather than a generated `.cursor/` or other
+   `infra-engine repo mirrors` rather than a generated `.cursor/` or other
    mirror; for shared runtime templates this may require the byte-identical
    canonical file in each maintained edition;
 2. update native wiring (`settings.json`, `hooks.json`, or `config.toml`);
 3. preserve executable bits and run `bash -n` on shell scripts;
 4. test allowed, warned, blocked, missing-key, crash, and timeout paths;
 5. update the edition's hook README;
-6. regenerate mirrors with `python3 scripts/build_mirrors.py --write`, review
+6. regenerate mirrors with `infra-engine repo mirrors --write`, review
    the generated diff, and verify it with `--check`;
 7. verify that session banners remain metadata-only.
 
@@ -196,8 +204,8 @@ Review together:
 - `project-brain/PROTOCOL.md`;
 - `project-brain/config/runtime.json`, `providers.json`, and `telemetry.json`;
 - strict schemas and templates;
-- `memory-bank/scripts/context.py`, `brain_runtime.py`, and
-  `context_retrieval.py`;
+- the selected `memory-bank/bin/infra-engine` and its native lifecycle,
+  Brain and retrieval services in `runtime-rust/crates/infra-core/src/`;
 - Project Brain and Memory Bank tests;
 - [`CONTEXT-MODES.md`](CONTEXT-MODES.md).
 
@@ -206,9 +214,14 @@ and WordPress unless a file is explicitly framework-specific. Runtime configurat
 contains the framework label and allowed policy differences. Validate:
 
 ```bash
-python3 memory-bank/scripts/context.py validate
-python3 memory-bank/scripts/context.py parity
-python3 memory-bank/scripts/validate.py
+memory-bank/bin/infra-engine memory validate
+memory-bank/bin/infra-engine memory parity
+memory-bank/bin/infra-engine bank validate
+```
+
+Historical pre-Rust invocations (reference only):
+
+```text
 python3 -m unittest discover project-brain/tests
 python3 -m unittest discover memory-bank/tests
 ```
@@ -221,7 +234,7 @@ list on the failure path. A file only one mirror carries, or one missing from a
 mirror, counts as drift too.
 
 Two things are exempt, both declared explicitly in
-`memory-bank/scripts/context_retrieval.py`:
+`runtime-rust/crates/infra-core/src/retrieval.rs`:
 
 - `SKILL FLOW.md`, the per-edition orchestration catalog.
 - Skills listed in `EDITION_OWNED_SKILLS`, whose body documents the host tool
@@ -260,8 +273,7 @@ to silence drift you do not want to fix.
 For generated targets, run Infrastructure-Creator's bundled structural gate:
 
 ```bash
-python3 \
-  Infrastructure-Creator/.agents/skills/bootstrap-verifier/scripts/validate_generated.py \
+infra-engine creator validate-generated \
   --target /path/to/target \
   --editions claude,cursor,codex
 ```
@@ -299,7 +311,7 @@ A pull request that edits any `description:`, or that adds or removes an agent
 or a skill, must attach the delta to that edition's routing baseline:
 
 ```bash
-python3 scripts/routing_eval.py --edition Symfony --runs 5 --write-baseline
+infra-engine routing-eval --edition Symfony --runs 5 --write-baseline
 ```
 
 This invokes a model, costs money and takes minutes, so it is deliberately
@@ -318,7 +330,7 @@ overlaps that neighbour. They are repaired in opposite directions, which is
 why the runner never collapses them into one failure count.
 
 The cheap check that needs no model is
-`python3 -m unittest tests.test_check_stabilization tests.test_policy_lock`
+`./infra-engine repo stabilization` and `./infra-engine repo policy-lock --check`
 plus the per-edition skill-routing floor in
 `project-brain/tests/fixtures/skill-routing-golden.json`, which asserts an
 acceptable skill still reaches the capsule's two procedural slots at least as

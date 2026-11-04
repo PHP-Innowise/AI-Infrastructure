@@ -100,7 +100,7 @@ If the task exists, the agent resumes it. Otherwise, it starts a new task.
 The agent internally runs:
 
 ```bash
-python3 memory-bank/scripts/context.py start \
+memory-bank/bin/infra-engine memory start \
   --task-id TASK-123 \
   --goal "Add two-factor authentication" \
   --source specs/two-factor-auth.md
@@ -130,7 +130,7 @@ SQLite stores only the local binding between `TASK-123` and the Project Brain UU
 The agent refreshes the local index:
 
 ```bash
-python3 memory-bank/scripts/context.py index --json
+memory-bank/bin/infra-engine memory index --json
 ```
 
 The Local Context Engine indexes eligible:
@@ -148,7 +148,7 @@ Before reading or indexing content, it excludes ignored, sensitive, unauthorized
 The agent runs:
 
 ```bash
-python3 memory-bank/scripts/context.py retrieve \
+memory-bank/bin/infra-engine memory retrieve \
   "two-factor authentication requirements and security rules" \
   --task-id TASK-123
 ```
@@ -200,7 +200,7 @@ Project Brain manages task continuity; it does not replace implementation, archi
 After a meaningful milestone, the agent runs:
 
 ```bash
-python3 memory-bank/scripts/context.py update \
+memory-bank/bin/infra-engine memory update \
   --task-id TASK-123 \
   --revision 1 \
   --progress "TOTP enrollment and verification implemented" \
@@ -272,7 +272,7 @@ If verification fails, the task remains active, blocked, or verifying. It is not
 After successful verification:
 
 ```bash
-python3 memory-bank/scripts/context.py complete \
+memory-bank/bin/infra-engine memory complete \
   --task-id TASK-123 \
   --revision 3 \
   --outcome "Two-factor authentication implemented" \
@@ -313,7 +313,7 @@ The Memory Bank index and counter are updated together. If validation fails, all
 Later, the agent can compact Project Brain:
 
 ```bash
-python3 memory-bank/scripts/context.py compact
+memory-bank/bin/infra-engine memory compact
 ```
 
 Completed or superseded records and related handoffs move to the archive. They are not deleted.

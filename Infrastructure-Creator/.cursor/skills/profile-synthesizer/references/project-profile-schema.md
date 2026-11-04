@@ -1,5 +1,9 @@
 # Project Profile Schema
 
+Native commands below use `"$GENERATOR_NATIVE"`: set `GENERATOR_NATIVE` to the
+selected generator's absolute `memory-bank/bin/infra-engine` path
+(`infra-engine.exe` on Windows), as required by the owning generator skill.
+
 The profile and its machine-readable skill plan are the hand-off artifacts between Phase 1 (scan) and Phase 2 (generate). `profile-synthesizer` writes both; every forge reads them after re-validating evidence against current target files.
 
 - Human review: `tasks/TASK-{N}/infra-scan-project-profile.md`
@@ -396,7 +400,7 @@ succeeds outright when the contract declares a nonzero exit
 update legitimately can, since the runtime exists by then - may not say what the
 contract does not declare (`RUNTIME_BASELINE_CONTRADICTED`).
 Measured on five real runs before release: 2 of 23 runtime checks fire, both of
-them skills promising `context.py validate` exits zero, which the contract
+them skills promising `memory-bank/bin/infra-engine memory validate` exits zero, which the contract
 declares it does not whenever an index is stale.
 
 `mode` is `command` or `manual`; command checks require a concrete command,
@@ -640,7 +644,7 @@ They may have empty `evidence_ids`/`source_paths` during synthesis because
 their necessity comes from those runtime files rather than from target
 evidence. Their `necessity_rationale` and `writes` must name that dependency.
 The authored skills must refer to those future files by target-relative paths
-such as `memory-bank/scripts/context.py`, never by generator task/staging
+such as `memory-bank/bin/infra-engine`, never by generator task/staging
 paths.
 
 Emptiness propagates consistently: every member that cites evidence -
@@ -656,7 +660,7 @@ specificity is a bar it cannot meet by construction. It is held to two
 verifiable bars instead:
 
 - **Runtime accuracy.** Every path it names under `memory-bank/` or
-  `project-brain/`, and every `python3 memory-bank/scripts/*.py` command form
+  `project-brain/`, and every `memory-bank/bin/infra-engine capabilities --json` command form
   it names, must exist in `memory-seed/assets/runtime-contract.json`
   (`path_contracts.required_skeleton`, `path_contracts.creatable`,
   `commands`). Forbidden invented paths, unlisted paths, unlisted
@@ -681,7 +685,7 @@ its nouns removed, or whether the command it prescribes really does what the pla
 says. Those need a reader - one who did not write the plan.
 
 The reader's answers go in `tasks/TASK-{NNN}/skill-plan-quality-report.json`,
-which `validate_plan_review.py` holds against the plan:
+which `"$GENERATOR_NATIVE" creator validate-plan-review` holds against the plan:
 
 ```json
 {
@@ -715,9 +719,49 @@ preserved run, a skill's broken verification was found only by the judge that
 executed it, and missed by the judge that read it. A command the review judged
 from the page is `REVIEW_VERIFICATION_NOT_EXECUTED`.
 
+## Reviewed native hook selection
+
+Before asking the user to review the Project Profile, include one complete machine-readable native hook selection in that same report, between these exact comment markers:
+
+````markdown
+<!-- infra-hook-policy-selection-v1 -->
+```json
+{
+  "schema_version": 1,
+  "framework": "symfony",
+  "approved_tools": ["console"],
+  "project_command_prefixes": [
+    {
+      "tool": "console",
+      "argv": ["php", "bin/console"],
+      "options_with_values": ["--env", "-e"],
+      "short_options_with_values": "e"
+    }
+  ],
+  "deny_rules": [
+    {
+      "id": "doctrine-database-drop",
+      "tool": "console",
+      "command": ["doctrine:database:drop"],
+      "matching": "console",
+      "condition": {"kind": "always"},
+      "reason": "destructive_command"
+    }
+  ]
+}
+```
+<!-- /infra-hook-policy-selection-v1 -->
+````
+
+This Symfony example illustrates the schema; it is never a default for another target. Emit the actual complete selection from confirmed profile evidence. No detected tool means empty tool/prefix/rule arrays, never an invented PHP or framework tool. Every declared tool has an evidenced literal command prefix; each rule names an approved tool. Explain each chosen tool and denial against the report's confirmed sections 2, 5 and 6 so the user reviews the actual guard behavior, not only a prose summary.
+
+The selection contains only these fields: `schema_version`, `framework`, `approved_tools`, `project_command_prefixes` and `deny_rules`. Do not include a self-hash or approval field. Tool/rule IDs are unique lowercase slugs of at most 64 bytes. Use at most 64 tools, 128 prefixes and 256 rules; prefix argv has 1–8 bounded literal values. Prefix option names and short option letters are explicit data. Rules use bounded literal command parts, `exact` or `console` matching, and only `always`, `any_option`, `no_option`, `first_argument` or `argument_contains` conditions. Conditional patterns are bounded globs. Reasons are `destructive_command`, `secret_exposure` or `verification_bypass`. No shell, evaluation, environment expansion, executable policy or guessed command is allowed; the native schema is the final shape/size authority.
+
+Use the explicit generator engine's `creator inspect-hook-policy-profile --profile REPORT --profile-path tasks/TASK-N/infra-scan-project-profile.md --json` before review. It reports the actual complete selection and profile/selection digests; it does not grant approval. Record the digest of the exact report the user approved with that approval. A newly computed matching digest alone is not evidence of review. Any subsequent report/selection change requires refreshing that review before generation. Legacy reports without this block cannot silently fall back to a full ready-edition command policy.
+
 ## Required Structure
 
-```markdown
+````markdown
 # Project Profile: [target_name]
 
 ## 0. Metadata
@@ -786,6 +830,16 @@ Each line is a scannable, generalized signal (never named after a specific frame
 - CI/CD: [provider + config files] (confidence) | none
 - IaC: [Terraform/etc + files] (confidence) | none
 - Deployment target: [...] (confidence) | unknown
+
+### 5.1 Native Hook Selection (review the complete block)
+
+<!-- infra-hook-policy-selection-v1 -->
+```json
+{"schema_version":1,"framework":"generic","approved_tools":[],"project_command_prefixes":[],"deny_rules":[]}
+```
+<!-- /infra-hook-policy-selection-v1 -->
+
+Replace this shape with the complete actual evidence-bound selection before review. Empty arrays mean no tools were detected; they are not a shortcut around discovered risks. Use the same confirmed framework slug that memory-seed writes.
 
 ## 6. Security & Compliance
 - Auth pattern: [session | token | OAuth | SAML | none-detected] (confidence)
@@ -870,7 +924,7 @@ Inventory is evidence-gated across all categories. There are no fixed category c
 
 ## 12. Memory Bank Preview
 
-One shared memory layer will be created at the target root, spanning two roots: `memory-bank/` (`README.md`, `INDEX.md`, `.memory-counter`, `templates/chunk.md`, `local/.gitkeep`, `chunks/`, and the dependency-free context-brain runtime `scripts/context.py` + `scripts/context_handoff.py` + `scripts/context_continuity.py` + `scripts/brain_runtime.py` + `scripts/context_retrieval.py` + `scripts/validate.py`) and the governed `project-brain/` control plane skeleton (`PROTOCOL.md`, schemas, record/control templates, config with the target's framework slug in `runtime.json`, empty indexes, and `.gitkeep`-held record directories). The automatic working-memory hooks `hook-forge` generates call this runtime; the six memory-continuity skills (`memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save`, `context-load`) operate it. `context-save` may embed a user-requested visible transcript only in its explicit task artifact; it never sends one to Project Brain, Memory Bank, SQLite, hooks, or automatic retrieval. `memory-seed` seeds one chunk per **cohesive durable concept** below, composed only from `confirmed` facts - never an `inferred` or `unknown` one. A chunk may group tightly related facts (for example, one invoice-lifecycle concept containing its confirmed statuses, transitions, guards, and audit consequence) instead of producing one tiny chunk per line. It MUST link to canonical sources rather than copying full specs, schemas, permission matrices, test inventories, or incident reports. This table is the authoritative seed plan: `memory-seed` MUST produce this same set of chunks (same count, same concepts, same sources) at generation time; any difference is drift and must be flagged.
+One shared memory layer will be created at the target root, spanning two roots: `memory-bank/` (`README.md`, `INDEX.md`, `templates/chunk.md`, `local/.gitkeep`, `chunks/`, the platform's native `bin/infra-engine` artifact, and its declared configuration resources) and the governed `project-brain/` control plane skeleton (`PROTOCOL.md`, schemas, record/control templates, config with the target's framework slug in `runtime.json`, empty indexes, and `.gitkeep`-held record directories). The automatic working-memory hooks `hook-forge` generates call this runtime; the six memory-continuity skills (`memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save`, `context-load`) operate it. `context-save` may embed a user-requested visible transcript only in its explicit task artifact; it never sends one to Project Brain, Memory Bank, SQLite, hooks, or automatic retrieval. `memory-seed` seeds one chunk per **cohesive durable concept** below, composed only from `confirmed` facts - never an `inferred` or `unknown` one. A chunk may group tightly related facts (for example, one invoice-lifecycle concept containing its confirmed statuses, transitions, guards, and audit consequence) instead of producing one tiny chunk per line. It MUST link to canonical sources rather than copying full specs, schemas, permission matrices, test inventories, or incident reports. This table is the authoritative seed plan: `memory-seed` MUST produce this same set of chunks (same count, same concepts, same sources) at generation time; any difference is drift and must be flagged.
 
 | Planned ID | Title | Type | Source |
 | --- | --- | --- | --- |
@@ -881,18 +935,19 @@ One shared memory layer will be created at the target root, spanning two roots: 
 
 ## Confidence Summary
 [X confirmed, Y inferred, Z unknown]
-```
+````
 
 ## Consumption Contract (what each forge reads)
 
 - `policy-forge`: sections 1, 2, 3, 6, 7, and confirmed high-value rules from section 8 -> the target's `AGENTS.md`/`DOD.md`/`GOLDEN-PRINCIPLES.md`/`STABILIZATION.md`.
 - `skill-forge`: `skill-generation-plan.json` plus the exact profile/evidence slices referenced by each contract; it authors one skill or a small sibling group at a time.
 - `agent-forge`/`command-forge`: the final skill list from `skill-forge` + section 1 (which editions); section 11.2's counts are what the user was shown to expect.
-- `hook-forge`: sections 2, 4, 5, 6 + section 1 -> the four enforcement hooks tuned to real tooling/risks plus the two working-memory hooks calling `memory-bank/scripts/context.py`, for the selected editions only.
+- `hook-forge`: sections 2, 4, 5, 6 + section 1 -> the reviewed native selection, Rust hook role configurations and explicit native host wiring, for the selected editions only.
 - `memory-seed`: section 12 -> the authoritative, pre-reviewed list of cohesive concepts to seed, each already cited to canonical source files; plus section 2's confirmed framework -> the framework slug written into `project-brain/config/runtime.json` (`generic` when none is confirmed).
 
 ## Validation Rules (profile-synthesizer self-checks)
 
+- The native hook selection block MUST be present before human review, match confirmed tooling/risk evidence, and be frozen in the exact approved report digest. Self-hashing never supplies approval; a missing block requires refreshed review.
 - Section 1 MUST list at least one edition and MUST cite the interview as its source (never assumed).
 - Every line in sections 2-8 (including 3.1 and 3.2) MUST carry a confidence tag; every section 8 finding MUST also carry source type.
 - Section 8.5 MUST distinguish discovered statuses from evidenced transitions; section 8.6 MUST state permission-matrix completeness; section 8.8 MUST distinguish risk indicators from documented severity/approval.

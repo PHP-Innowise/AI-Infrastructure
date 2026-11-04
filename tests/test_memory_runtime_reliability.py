@@ -76,13 +76,45 @@ class MemoryRuntimeReliabilityTests(unittest.TestCase):
                     reason="Literal example [attestation:" + embedded + "]",
                 )
                 self.assertEqual(explicit, self.brain.record_attestation(verified))
+        for original, explicit, embedded in (
+            ("person", "person", "agent"),
+            ("agent", "agent", "person"),
+            ("agent", "person", "agent"),
+        ):
+            with self.subTest(original=original, reverified=explicit):
+                record = self.create(alias="LANTERN-RECHECK-" + original + "-" + explicit)
+                verified = self.brain.update_record(
+                    self.repository, record["id"], expected_revision=record["revision"],
+                    progress=None, next_steps=[], files=[], sources=[], actor="alice",
+                    authority="verified", attestation=original,
+                )
                 revised = self.brain.update_record(
                     self.repository, record["id"], expected_revision=verified["revision"],
-                    progress="The parcel boundary was checked again.", next_steps=[],
-                    files=[], sources=[], actor="alice", reverify=True, attestation=embedded,
-                    reason="Previous example [attestation:" + explicit + "]",
+                    progress=None, next_steps=[],
+                    files=[], sources=[], actor="alice", reverify=True, attestation=explicit,
+                    reason="Previous example [attestation:" + embedded + "]",
                 )
-                self.assertEqual(embedded, self.brain.record_attestation(revised))
+                self.assertEqual(explicit, self.brain.record_attestation(revised))
+
+    def test_agent_reverification_cannot_replace_a_persons_attestation(self):
+        record = self.create(alias="LANTERN-PROTECTED")
+        verified = self.brain.update_record(
+            self.repository, record["id"], expected_revision=record["revision"],
+            progress=None, next_steps=[], files=[], sources=[], actor="alice",
+            authority="verified", attestation="person",
+            reason="Literal example [attestation:agent]",
+        )
+        path, _, _ = self.brain.find_record(self.repository, record["id"])
+        before = path.read_bytes()
+        with self.assertRaisesRegex(self.brain.BrainError, "only a person"):
+            self.brain.update_record(
+                self.repository, record["id"], expected_revision=verified["revision"],
+                progress=None, next_steps=[], files=[], sources=[], actor="alice",
+                reverify=True, attestation="agent",
+                reason="Previous example [attestation:person]",
+            )
+        self.assertEqual(before, path.read_bytes())
+        self.assertEqual(verified, self.brain.find_record(self.repository, record["id"])[1])
 
     def documents(self):
         return self.retrieval._brain_documents(self.repository, self.brain.load_config(self.repository))

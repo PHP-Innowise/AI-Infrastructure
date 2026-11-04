@@ -35,11 +35,17 @@ finally:
 
 
 class PrefetchedCursor:
-    def __init__(self, row: object) -> None:
-        self.row = row
+    def __init__(self, rows: list[object]) -> None:
+        self.rows = rows
 
     def fetchone(self) -> object:
-        return self.row
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self) -> list[object]:
+        return self.rows
+
+    def __iter__(self):
+        return iter(self.rows)
 
 
 class SynchronizedConnection:
@@ -67,12 +73,12 @@ class SynchronizedConnection:
     ) -> object:
         cursor = self.connection.execute(statement, parameters)
         if " ".join(statement.split()).startswith(self.select_prefix):
-            row = cursor.fetchone()
+            rows = cursor.fetchall()
             try:
                 self.barrier.wait(timeout=1)
             except threading.BrokenBarrierError:
                 pass
-            return PrefetchedCursor(row)
+            return PrefetchedCursor(rows)
         return cursor
 
     def commit(self) -> None:
@@ -80,6 +86,10 @@ class SynchronizedConnection:
 
     def rollback(self) -> None:
         self.connection.rollback()
+
+    def __getattr__(self, name: str) -> object:
+        # executemany, in_transaction and the rest: the connection's own.
+        return getattr(self.connection, name)
 
 
 class ContextEngineTest(unittest.TestCase):
@@ -1346,6 +1356,38 @@ class ContextEngineTest(unittest.TestCase):
             ["First synchronized step.", "Second synchronized step."],
             sorted(task["next_steps"]),
         )
+
+    def test_two_refreshes_that_find_one_new_document_both_index_it(self) -> None:
+        # Two sessions' prompt hooks refresh at once after a document - most
+        # often the Brain record one of them just saved - appeared. Each read
+        # what the index held before the other wrote, and the second inserted
+        # the first one's new rows again: "UNIQUE constraint failed:
+        # document_metadata.path", its capsule out with the working state alone.
+        self.repository.joinpath("specs/billing.md").write_text(
+            "# Billing\n\nThe saffron ledger settles invoices.\n", encoding="utf-8"
+        )
+        connection = CONTEXT.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            CONTEXT.index_repository(connection, self.repository, incremental=True)
+        finally:
+            connection.close()
+        self.repository.joinpath("specs/refunds.md").write_text(
+            "# Refunds\n\nThe cobalt desk approves refunds.\n", encoding="utf-8"
+        )
+
+        def refresh(connection: SynchronizedConnection) -> object:
+            return CONTEXT.index_repository(connection, self.repository, incremental=True)
+
+        results = self.run_concurrently("SELECT path FROM documents", refresh)
+        self.assertTrue(all(isinstance(result, dict) for result in results), results)
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            rows = connection.execute(
+                "SELECT COUNT(*) FROM documents WHERE path = 'specs/refunds.md'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(1, rows)
 
     def test_concurrent_duplicate_starts_return_clean_already_exists_error(self) -> None:
         def start(connection: SynchronizedConnection) -> object:
@@ -2777,6 +2819,15 @@ class ContextEngineTest(unittest.TestCase):
         self.assertNotEqual(0, recorded.returncode)
         self.assertIn("Episode summary and outcome must not be empty", recorded.stderr)
 
+    @unittest.skipIf(sys.platform == "win32", "Windows arguments are Unicode")
+    def test_record_rejects_half_a_character(self) -> None:
+        # A byte of an argument that was not UTF-8 reads as a lone surrogate;
+        # SQLite refused it with a traceback.
+        recorded = self.run_context("record", "--summary", "caf\udce9 latin", "--outcome", "Done.", "--json")
+        self.assertNotEqual(0, recorded.returncode)
+        self.assertNotIn("Traceback", recorded.stderr)
+        self.assertIn("half of a character", recorded.stderr)
+
     def test_record_rejects_empty_optional_file(self) -> None:
         recorded = self.run_context(
             "record",
@@ -2829,6 +2880,23 @@ class ContextEngineTest(unittest.TestCase):
         progress = payload["working"]["progress"]
         self.assertTrue(progress.startswith("Manual narrative."), progress)
         self.assertIn("Since checkpoint: Auto-checkpoint:", progress)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "only Linux keeps a name that is not UTF-8")
+    def test_a_turn_buffers_a_file_whose_name_is_not_utf8(self) -> None:
+        # A tree unpacked from another system's archive names a file in
+        # Latin-1. Its name came back with lone surrogates, which SQLite
+        # refuses: every turn failed while such a file was changed or
+        # untracked, and the Stop hook's checkpoint with it.
+        self.run_context("start", "--task-id", "TASK-CKPT", "--goal", "Keep odd names.")
+        with open(os.path.join(os.fsencode(self.repository), b"caf\xe9.txt"), "wb") as handle:
+            handle.write(b"work\n")
+        result = self.run_context("turn", "--task-id", "TASK-CKPT", "--flush", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["flushed"])
+        task = json.loads(
+            self.run_context("get", "--task-id", "TASK-CKPT", "--json").stdout
+        )
+        self.assertIn("caf\\xe9.txt", task["files"])
 
     def test_working_table_written_before_checkpoints_is_migrated_in_place(
         self,

@@ -4,6 +4,7 @@ import copy, importlib, json, os
 from pathlib import Path
 import shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
+from tests.test_memory_result_replay import installed_mcp_exchange
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / 'PHP Core/memory-bank/scripts'
 PUBLIC = json.loads((ROOT/'tests/fixtures/memory_final_remediation_public.json').read_text(encoding='utf-8'))
@@ -217,14 +218,12 @@ class NativeResultFencingTests(unittest.TestCase):
             env=dict(os.environ,GIT_OPTIONAL_LOCKS='0'),capture_output=True,text=True,check=False)
         self.assertEqual(0,run.returncode,run.stderr);self.assertFalse(json.loads(run.stdout)['replayed'])
         self.r._receipt(self.root,self.task['id'],PUBLIC['result_id']).unlink();self.late_edit();before=self.images()
-        sys.path.insert(0,str(SCRIPTS))
-        try:
-            spec=importlib.util.spec_from_file_location('opal_installed_mcp',self.root/'memory-bank/scripts/mcp_server.py')
-            mcp=importlib.util.module_from_spec(spec);spec.loader.exec_module(mcp)
-        finally:sys.path.pop(0)
-        memory=mcp.Memory(self.root)
-        self.assertTrue(memory.call('memory_record_result',{'task_id':self.task['id'],'result_id':PUBLIC['result_id'],'revision':1,**self.data})['replayed'])
-        schema=next(item for item in mcp.TOOLS if item['name']=='memory_record_result')
+        reply=installed_mcp_exchange(self.root,'tools/call',{'name':'memory_record_result',
+            'arguments':{'task_id':self.task['id'],'result_id':PUBLIC['result_id'],'revision':1,**self.data}})
+        self.assertFalse(reply.get('isError'),reply)
+        self.assertTrue(reply['structuredContent']['replayed'])
+        tools=installed_mcp_exchange(self.root,'tools/list',{})['tools']
+        schema=next(item for item in tools if item['name']=='memory_record_result')
         self.assertIn('expected_revision',schema['inputSchema']['properties']['learnings']['items']['properties'])
         self.assertEqual(before,self.images())
 

@@ -31,7 +31,7 @@ orchestration to a sub-agent.
 
 **Setup.** Derive the task ID from the current Git branch (or
 `CONTEXT_TASK_ID`) and ensure the governed task exists:
-`python3 memory-bank/scripts/context.py start --task-id <ID> --goal "<sanitized goal>"`
+`memory-bank/bin/infra-engine memory start --task-id <ID> --goal "<sanitized goal>"`
 (an existing task is never overwritten). Derive the feature slug from the
 request; reuse the existing slug when continuing.
 
@@ -45,7 +45,7 @@ agent (objective; output format per SKILL FLOW.md; tool and source guidance
 including the artifact paths and the task ID; task boundaries; decisions and
 assumptions so far), keep it inside the 8,000-character Task Capsule bound,
 pass file paths rather than contents, then record the dispatch -
-`python3 memory-bank/scripts/context.py msg-dispatch --task-id <ID> --agent <name> --event spawn --capsule-file <file>` -
+`memory-bank/bin/infra-engine memory msg-dispatch --task-id <ID> --agent <name> --event spawn --capsule-file <file>` -
 before spawning with the Task tool. Spawn write-capable agents strictly one at
 a time; spawn the `parallel: true` stage's agents in one message. After each
 return, read the Context Summary, check the channel

@@ -21,7 +21,9 @@ checked here in a temporary copy of its hook layer:
   nearest directory holding `.codex/hooks.json`): a script missing there exits
   127, and a same-named script in an ancestor's `.codex/hooks/` never runs;
 - the generator's own wiring gate accepts each ready-made edition's complete
-  wiring, so editions and generated targets share one contract.
+  wiring, so editions and generated targets share one contract;
+- the same settings carry no permission rule Claude Code warns about at every
+  start of its terminal.
 
 Cursor is out of scope: it runs project hooks from the project root, so its
 bare `.cursor/hooks/<script>.sh` wiring is correct as is.
@@ -218,6 +220,19 @@ class HookWiringTest(unittest.TestCase):
                     path = ROOT / edition / script
                     self.assertTrue(path.is_file(), f"dead hook: {script}")
                     self.assertTrue(os.access(path, os.X_OK), f"not executable: {script}")
+
+    def test_no_permission_rule_claude_code_warns_about(self) -> None:
+        # Claude Code 2.1 matches file permissions with Edit(path) and
+        # Read(path) rules only: a Write, MultiEdit or NotebookEdit rule with a
+        # path, or a Glob one, matches nothing and is printed as a warning
+        # at every start of its terminal. Edit(...) and Read(...) cover them.
+        unmatched = re.compile(r"(?:Write|MultiEdit|NotebookEdit|Glob)\((?!.*:\*)")
+        for edition in EDITIONS:
+            settings = json.loads((ROOT / edition / ".claude/settings.json").read_text(encoding="utf-8"))
+            permissions = settings.get("permissions") or {}
+            for kind in ("allow", "deny", "ask"):
+                with self.subTest(edition=edition, kind=kind):
+                    self.assertEqual([rule for rule in permissions.get(kind) or [] if unmatched.match(rule)], [])
 
     def test_generator_gate_accepts_the_shipped_wiring(self) -> None:
         """Ready-made editions and generated targets share one wiring contract."""

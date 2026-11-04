@@ -1,937 +1,149 @@
-# Repository Scripts
+# Native repository tooling
 
-This directory contains repository-level build, installation, measurement, and
-CI utilities. None of these files is part of a ready-made edition's installed
-production payload. Runtime scripts that a consuming project needs live inside
-the edition, primarily under `memory-bank/scripts/` and
-`project-brain/scripts/`.
+Production executable logic lives in [the Rust workspace](../runtime-rust/README.md).
+The public entry point is `infra-engine`; `scripts/` keeps versioned data and
+historical source references rather than an alternate runtime. Installed memory
+uses `memory-bank/bin/infra-engine memory OP` (`.exe` on Windows).
 
-All Python utilities use only the Python standard library unless a section
-states an external command requirement. Run examples from the repository root.
+During the source-first migration, complete all production implementation before
+dependency fetches, builds, formatting, tests, checks or provider calls. The
+commands below document the subsequent maintenance phase and do not claim that
+validation has run.
 
-## Catalog
+## Repository and distribution operations
 
-### `ai_system.py` / `ai_system_lib.py` / `ai_system_execution.py` / `ai_system_providers.py`
+| Former helper | Native command |
+| --- | --- |
+| build_mirrors | `infra-engine repo mirrors` |
+| core_sync | `infra-engine repo core-sync` |
+| asset_parity | `infra-engine repo asset-parity` |
+| policy_lock | `infra-engine repo policy-lock` |
+| context_budget | `infra-engine repo budget` |
+| check_links | `infra-engine repo links` |
+| check_routes | `infra-engine repo routes` |
+| check_php_snippets | `infra-engine repo php-snippets` |
+| check_stabilization | `infra-engine repo stabilization` |
+| check_core_changelog | `infra-engine repo changelog --base REF` |
+| validate_registry | `infra-engine repo registry --check` |
+| install_accelerator | `infra-engine install` |
+| accelerator_attach | `infra-engine attach ACTION` |
+| collect_context | `infra-engine collect SCOPE` |
+| kit3 / install_open_source_kit | `infra-engine kit ACTION` |
+| categorize_commits | `infra-engine repo release-categorize` |
+| check | `infra-engine check` |
 
-**Purpose and status.** Optional stack-neutral system coordination companion;
-source-only and not part of installed editions. It accepts explicit service
-passports and produces a declared impact map, globally bounded source context,
-and a reviewable plan. Explicit execution launches sequential development
-workers, native Brain tasks and receipt-backed recovery.
+Use `--help` on the actual route for its arguments. There is no generic Python
+forwarder or script runner. Repository tooling discovers the clone from the
+native executable/current directory; `--source-root` selects it explicitly.
 
-```bash
-python3 scripts/ai_system.py validate --system docs/examples/ai-system/system.json
-python3 scripts/ai_system.py map --system docs/examples/ai-system/system.json
-python3 scripts/ai_system.py plan --system docs/examples/ai-system/system.json \
-  --task "Change cancellation behavior" --change-id chg-001 --service orders
-```
-
-- Commands: `init`, `validate`, `catalog`, `map`, `locate`, `plan`, `verify`,
-  `execute`, `resume`, `run-status`.
-- Dependencies: Python 3.9+ standard library on POSIX; optional Git provenance.
-  Execution uses the trusted checkout native runtime and a locally configured
-  Codex, Claude Code or Cursor Agent CLI, or an explicitly selected provider adapter.
-  Native adapters share stdlib Harness command/permission builders.
-- Writes: `init` creates a new system workspace; `plan --output` creates only a
-  new requested file. `execute`/`resume` write private journals and native tasks;
-  `--mode edit` enables scoped worker edits, and `execute --access all` lets every
-  worker read, and in edit mode change, all selected service folders (default
-  `service`: own service only). Declaration/query commands are read-only.
-- Access: external service roots require repeatable caller `--allow-root`;
-  passport metadata cannot authorize arbitrary filesystem access.
-- Tests: `python3 -m unittest tests.test_ai_system tests.test_ai_system_providers tests.test_ai_system_execution`, also in the dedicated CI job.
-- Full contract and sample: [System-level AI Coordination](../docs/AI-SYSTEM-ORCHESTRATION.md).
-
-### `check.py`
-
-**Purpose and status.** The local entry point for what CI runs; source-only
-and not installed. One group per job in `.github/workflows/*.yml`, each the
-job's `run:` steps in order.
+Installation inventories and collision decisions remain versioned contracts.
+Always inspect a dry-run before applying an installation or sync:
 
 ```bash
-python3 scripts/check.py                    # every group; exit 1 if anything failed
-python3 scripts/check.py --group lint --group links
-python3 scripts/check.py --list             # groups, commands, and what would skip here
-python3 scripts/check.py --fail-fast --jobs 4
-python3 scripts/check.py --strict           # a missing tool fails instead of skipping
+infra-engine install --edition "PHP Core" --target /path/to/project --dry-run --merge-existing
+infra-engine install --edition "PHP Core" --target /path/to/project --merge-existing
+infra-engine install --sync --target /path/to/project --dry-run
+infra-engine install --verify-inventories
 ```
 
-- **Options:** repeatable `--group`; `--list`; `--fail-fast`; `--jobs N`
-  (jobs or matrix legs at once; default half the CPUs, at least 2);
-  `--strict`; `--base REF` for the changelog group.
-- **Execution:** jobs run in parallel, and so do the legs of a matrix job,
-  which CI also runs as separate jobs; the steps of one job or leg run in
-  order (`--jobs 1` runs everything one after another). A step that needs a
-  shell runs as GitHub runs it (`bash --noprofile --norc -eo pipefail -c`),
-  so a loop stops at its first failure. `python3`/`python` inside every
-  command — and inside the processes tests spawn — is the interpreter running
-  `check.py`; the job CI pins to 3.9 runs under `python3.9`. The `tests` job's
-  file loop becomes one command per file, so a failure names its file.
-- **Outputs:** one PASS/FAIL/SKIP line per command with its duration, the last
-  60 lines of each failing command's output with the path of its full log, and
-  a per-group summary table with wall times. A job or leg that took longer
-  than CI's `timeout-minutes` is flagged, not failed. Exit 0 when nothing
-  failed, 1 on a failure, 2 on a usage error, 130 when interrupted. Ctrl-C,
-  SIGTERM and SIGHUP (`kill`, `timeout`, a closed terminal) all stop the run
-  the same way: each running command's process group is terminated and the
-  temporary directory removed.
-- **Skips:** a tool the CI runner provides but this machine lacks (shellcheck,
-  php, pwsh, bwrap, `python3.9`, `harness/.venv`) skips with the reason;
-  `--strict` fails it. So does a changelog base with no merge base here (no
-  `origin/main` and no local `main`); a `--base` that does not resolve fails
-  either way. An entry whose files are not in the checkout skips as "not
-  present" when its workflow has no such step; when the workflow runs it, the
-  skip says CI fails there and `--strict` fails it. Windows-only jobs are
-  listed and skip elsewhere; the runner itself supports Linux and macOS.
-  Runner provisioning (apt-get, sysctl, venv creation, pip install) is not
-  repeated.
-- **Writes:** nothing in the repository. Logs and interpreter shims go to a
-  temporary directory that is removed unless something failed.
-- **CI relationship:** `tests/test_check.py` reads the workflows and fails when
-  a CI command has no entry here, an entry here is no longer in CI, a
-  guarded entry hides a step CI runs, or a job's setup-python versions (leg by
-  leg) differ from the interpreters pinned here. Gates CI does not run yet are
-  marked `local_only` with the reason.
+Native install/generation materializes hook and MCP templates with the selected
+engine's final absolute path and final target root. Source templates must not be
+copied into a live host unchanged. Trust and user-global configuration remain
+explicit operations. Installed client projects do not need a Rust toolchain.
 
-### `build_mirrors.py`
+## Memory and experiments
 
-**Purpose and status.** Maintainer build tool; source-only and not installed.
-It verifies or regenerates the Claude Code, Cursor, and Codex mirrors from the
-canonical files declared by each edition's `MIRROR_RULES`.
+`infra-engine eval FAMILY [OP]` provides the native maintainer controllers:
+
+- `memory-eval run|report|install-status|realized|field-check|funnel`
+- `memory-outcome-ab seal|run|report|sample|recall-sources|recall-set`
+- `memory-native-ab plan|run|inspect`
+- `memory-graph-pilot`, `memory-rerank-pilot`, `memory-onnx-pilot`
+- `memory-selective-retrieve-pilot`, `memory-consolidation-pilot`
+- `memory-current-facts`, `memory-fact-consolidation`, `memory-freshness-plan`
+- `memory-rollout-rehearsal`, `memory-lifecycle-fuzz`, `memory-miss-audit`
+- `memory-throttle-oracle-v2`, `cost-attribution`
+
+Host benches use `infra-engine bench codex` or
+`infra-engine bench claude-code`. Semantic skill routing is
+`infra-engine routing-eval`, separate from the static `repo routes` gate.
+
+These commands preserve sealed protocols, exact artifact hashes, input custody,
+fixed denominators, explicit retries/refusals, legacy report interpretation,
+unknown cost, and versioned RNG behavior. A dry-run or retrieval result does not
+establish task benefit. Never regrade an old study under a new protocol without
+an explicit new artifact.
+
+Historical knowledge calendars are explicit controlled requests. Ordinary
+memory and hooks never import an evaluation clock from ambient environment
+variables. Offset calendars advance with elapsed time; proof and process
+deadlines stay real. A child path that cannot preserve the controlled calendar
+refuses the request.
+
+See [evaluation](../docs/MEMORY-EVAL.md),
+[response contracts](../docs/MEMORY-RESPONSE-CONTRACT.md), and
+[write-path experiments](../docs/MEMORY-WRITE-PATH.md).
+
+## Skill creator utilities
+
+`infra-engine skill-tools OP` supplies native implementations of
+`aggregate-benchmark`, `generate-report`, `improve-description`,
+`init-skill`, `package-skill`, `quick-validate`, `run-eval`,
+`run-loop`, `generate-review`, `eval-set-review`, `platform-cli`, and
+`utils`. Skill packages are real ZIP archives; validation uses YAML.
+
+Symfony's explicit native Codex/Cursor probe behavior remains separate from
+the Claude trigger protocol. Supply the original source path with
+`--script-path` or select `--platform` explicitly when the edition is
+ambiguous. Native probe failures are errors, not negative model observations.
+Optimization blinds held-out results from improvement prompts.
+
+Review pages run Rust/Wasm. Supply actual generated `infra_ui.js` and
+`infra_ui_bg.wasm` through `--ui-assets` or `INFRA_UI_ASSETS`; missing
+assets are an error. Static pages embed the generated ABI glue and Wasm.
+Native workbook parsing prepares spreadsheet previews. Vendored attribution
+is retained in
+[`infra-skill-tools/LICENSE.txt`](../runtime-rust/crates/infra-skill-tools/LICENSE.txt).
+
+## Generator, QA and optional pilots
+
+Infrastructure-Creator helpers use `infra-engine creator HYPHENATED-NAME`,
+including deterministic scan/content/plan/flow gates, ownership manifests,
+staged publication, native runtime seeding, and native hook policy. They keep
+the generator's approved-profile, staging and rollback boundaries.
+
+QA commands use `infra-engine qa COMMAND`: `run`, `validate`,
+`manifest`, `reconstruct-workbook`, `build-ledger`,
+`apply-decisions` and `migrate-catalog`. Workbook, schema and manifest
+processing is native; no QA virtualenv is needed.
+
+Optional explicit library pilots use `infra-engine pilot sqlite-vec probe|fuse`,
+`pilot onnx-score`, `pilot longmemeval-project`,
+`pilot completion-usage` and `pilot compare-incremental`.
+Optional model/extension files are selected explicitly. No interpreter fallback
+or automatic model download is part of the installed runtime.
+
+## Validation and canonical resources
+
+After the source implementation gate closes:
 
 ```bash
-python3 scripts/build_mirrors.py --check
-python3 scripts/build_mirrors.py --check --edition Symfony
-python3 scripts/build_mirrors.py --write
-python3 scripts/build_mirrors.py --write --edition Laravel \
-  --edition "PHP Core"
+cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine
+infra-engine check --list
+infra-engine check --strict --base origin/main
+infra-engine repo mirrors --write
+infra-engine repo core-sync --check
+infra-engine repo asset-parity --check
+infra-engine repo policy-lock --check
+infra-engine install --verify-inventories
 ```
 
-- **Principal options:** exactly one of `--check` or `--write`;
-  repeatable `--edition` for `Laravel`, `Symfony`, `PHP Core`, `WordPress`, or
-  `Infrastructure-Creator`. The default is all editions.
-- **Inputs:** canonical edition files and the edition-local mirror rules.
-  Laravel, Symfony, PHP Core, and WordPress load rules from
-  `memory-bank/scripts/context_retrieval.py`; Infrastructure-Creator loads
-  `mirror_rules.py`.
-- **Outputs:** `--check` prints drift, missing files, unaccounted mirror
-  files, and mirrors whose executable bit differs from canon
-  (`mode differs from canon`), and exits nonzero on findings. `--write` prints
-  each changed path; a mode-only repair is printed as `(mode +x)`/`(mode -x)`.
-- **Dependencies:** Python 3 standard library, Git, `file_modes.py`, and a
-  complete repository checkout.
-- **Writes:** `--check` never writes. `--write` creates/updates generated
-  mirror files, gives each the executable bit of its canonical file (also
-  when the bytes already match), and regenerates each selected edition's
-  `.gitattributes`. For a tracked mirror the bit is also recorded in the Git
-  index - the mode only, never the content - because a checkout without
-  filesystem modes (Windows, `core.fileMode=false`) has nowhere else to keep
-  it. An intent-to-add entry (`git add -N`) counts as untracked and is left
-  as it is: its index entry holds the empty blob, not the file.
-- **CI relationship:** the `mirrors` job runs `--check`. Edition parity jobs
-  also execute the same mirror contract through
-  `memory-bank/scripts/context.py parity`.
-
-#### Canon and transformations
-
-| File class | Canonical source | Generated mirrors | Transformation |
-| --- | --- | --- | --- |
-| Skills | `.agents/skills` | `.claude/skills`, `.cursor/skills` | Identity, subject to documented exceptions |
-| `SKILL FLOW.md` | `.claude/skills` | `.cursor/skills` | Identity; `.agents` is a tool-specific adaptation |
-| Hooks | `.claude/hooks` | `.cursor/hooks`, `.codex/hooks` | Ordered tool/event/path substitutions |
-| Commands | `.claude/commands` | `.cursor/commands` | Cursor frontmatter and path adaptation |
-| Agents | `.claude/agents` | `.cursor/agents` | Drops Claude-only frontmatter; preserves body |
-| Governance docs | `.claude` | `.cursor`, `.codex` | Tool-tree self-reference rewrites |
-
-Every transformation also carries the canonical file's executable bit: a
-mirror is executable exactly when its canon is. The canonical bit is read from
-the Git index, and from the filesystem only for a path the index does not
-know, so a Windows checkout reads the same answer as Linux. Cursor and Codex
-run the hook mirrors as direct commands; a mirror that lost the bit exits 126
-in every installed project while its bytes still match.
-
-Documented exceptions live in the rules data with justifications; they are not
-an invitation to hand-edit generated files. Notable exceptions include
-tool-owned `skill-creator` generations, tool-specific hook READMEs,
-Cursor-specific working-memory behavior and condensed wrappers, and
-Infrastructure-Creator documentation.
-
-The generated `.gitattributes` lists exactly the paths emitted by the rules as
-`-diff linguist-generated=true`. It is derived rather than globbed because the
-same tool directories also contain canonical settings, rules, config, and
-other files whose diffs must remain visible. Do not hand-edit it.
-
-When a consuming project already has a root `.gitattributes`,
-`install_accelerator.py --merge-existing` preserves project entries and adds
-missing accelerator directives in an installer-managed block. It does not
-blindly replace or merely refuse that supported root-file collision.
-
-### `install_accelerator.py`
-
-**Purpose and status.** Distribution entry point; repository-level and not
-copied into the installed payload. It verifies versioned inventories, performs
-collision preflight, and installs a selected ready-made edition.
-
-```bash
-python3 scripts/install_accelerator.py --verify-inventories
-python3 scripts/install_accelerator.py \
-  --edition Symfony \
-  --target "/path/to/project" \
-  --tool cursor \
-  --merge-existing \
-  --dry-run
-```
-
-- **Principal modes:** `--verify-inventories`, `--write-inventories`,
-  `--edition {Laravel,Symfony,PHP Core,WordPress}` with `--target`, or
-  `--sync` with `--target` (see below).
-- **Selection options:** repeatable `--tool {claude,cursor,codex}`; omission
-  selects all tools. `--source-root` points at an alternate source checkout.
-- **Sync options:** `--rewire-codex` also updates an untouched
-  `.codex/hooks.json` (approve it again in Codex `/hooks`);
-  `--update-tracked` also writes files the project's Git tracks, for a
-  person to review and commit. `--dry-run` reports without writing.
-- **Collision options:** `--dry-run`; conservative `--merge-existing`; and
-  destructive `--overwrite`, which is for explicit maintainer-controlled use,
-  not normal adoption.
-- **Inputs:** edition files, `VERSION`, inventories under
-  `install/inventories/`, selected tool set, and target filesystem state.
-  Inventories are the versioned production boundary: source exclusions and
-  production-specific selection are resolved there without requiring
-  documentation to depend on a particular future schema field name.
-- **Outputs:** tab-separated `VERIFIED`, `COLLISION`, `WOULD_*`, `COPY`,
-  `MERGE`, `COPY_AS`, `UNCHANGED`, `FIX_MODE`, and `COMPLETE` records;
-  meaningful nonzero exit status on inventory errors or refused collisions. A
-  `FIX_MODE\t<component>\t<path>\t<destination>` record (`WOULD_FIX_MODE`
-  with `--dry-run`) names a file already identical in the target that should
-  be executable and was not - typically a hook from an install made before
-  executable bits were enforced. Its content is left untouched and only the
-  bit is added, under every collision mode, since that destroys nothing. A
-  refused run changes nothing, modes included: an install from an earlier
-  release collides first on the files that release changed, and its modes
-  are repaired by the run that resolves those collisions (or by
-  `chmod +x <destination>`).
-- **Dependencies:** Python 3 standard library and Git. Inventory discovery for
-  verification/writing is `git ls-files --cached`, so the payload is exactly
-  what the index holds. Untracked working-tree content - a client application
-  under `Task/`, build caches, local databases, `.env` files - is invisible to
-  both modes: it cannot be written into an inventory and cannot fail
-  verification on a dirty tree. A new distribution file therefore has to be
-  staged (`git add`; no commit needed) before regeneration records it. Without
-  a Git checkout both modes fail with an explicit error rather than falling
-  back to a filesystem scan, because outside the index there is no way to tell
-  distribution files from client data.
-- **Writes:** verification and dry-run do not write. Installation creates
-  selected files in the target. `--write-inventories` regenerates repository
-  inventory JSON, or writes it to `--inventory-out DIR` instead, which lets a
-  caller regenerate and compare without touching the checkout under test. The
-  target path rejects symlink components.
-- **CI relationship:** the `installation` job verifies inventories and runs
-  installation and framework-semantics tests.
-
-Installed executables get mode `0755` regardless of the source working tree:
-every `*.sh` inside a `hooks/` directory, plus any file recorded `100755` in
-the source checkout's Git index (or, without a Git checkout, carrying the
-executable bit on disk). Every other file keeps normal copy semantics. The
-index is read, not the disk, because a source checkout made on Windows or with
-`core.fileMode=false` has no executable bit on disk and would otherwise
-install hooks that exit 126. The installer reads the index itself rather than
-through `file_modes.py`, because the Harness runs a standalone copy of it.
-
-Collision preflight is completed before normal copies begin. With
-`--merge-existing`, identical files remain `UNCHANGED` (or `FIX_MODE`, when
-only a required executable bit is missing); `.gitignore` and
-`.gitattributes` receive only missing directives in a marked block;
-`AGENTS.md` preserves project policy before one replaceable accelerator block;
-and an existing root `README.md` is preserved while accelerator documentation
-is written to `ACCELERATOR.md`. Every other differing selected path remains a
-collision. A malformed managed block, symlink, non-file obstruction, or
-conflicting `ACCELERATOR.md` is also refused; `--sync` keeps an untouched
-`ACCELERATOR.md` at the release, so adding a tool to a synced project later
-finds it unchanged.
-
-A file the install replaces - a merge into a project file, an `--overwrite`
-collision - and every MCP configuration it writes are written whole beside
-the file, flushed to disk and renamed over it, keeping the replaced file's
-mode: a full disk or an interrupted run leaves the old file as it was, never
-a truncated one a later merge cannot parse. An install that fails part way
-puts back, newest first, the files it had already replaced (`RESTORED` on
-stdout; `NOT_RESTORED` with the reason on stderr for a file someone changed
-after the install wrote it, which is left as it is) and exits nonzero. Files
-it created stay; they hold only the release, and the next run finds them
-identical.
-
-The install transcript is an action log, not a backup. Its
-`COMPLETE files=` value counts selected inventory entries, including
-`UNCHANGED` entries. Save the transcript with pipeline failure propagation
-and retain a pre-install VCS/backup recovery point.
-
-`--sync --target DIR` brings an installed project's untouched accelerator
-files and its runtime up to the clone and prints a JSON report; the Harness
-runs it when it opens a project. It never applies part of a release over
-what that release's files run: while a runtime file (`memory-bank/scripts`,
-`project-brain/scripts`, `project-brain/schemas`) stays at the project's
-version - the project's Git tracks it, or it cannot be written safely - the
-release's other files are held back too, because its skills, commands, hooks
-and memory server call that runtime; a tool's new hooks wait for its wiring
-(`.claude/settings.json`, `.cursor/hooks.json`, `.codex/hooks.json`), and the
-wiring waits for a new hook that cannot be written. Each held-back file is
-listed under `kept` with a reason starting `held back:`, and `partial` says
-the project is not at the release (it is `null` otherwise).
-
-The edition README that `--merge-existing` installed as `ACCELERATOR.md`
-beside a project's own `README.md` follows the release by the same rules:
-the sync records it in `memory-bank/local/accelerator-install.json`, updates
-it while it holds a README the edition shipped or what the last sync wrote,
-and keeps one the team edited, listed under `kept`. Syncs before this one
-did not record it; such a copy is recognised from the clone's Git history of
-the edition README, and without that history (a source from an archive) an
-older copy stays, reported as edited. The sync writes no `README.md` and
-adds no `ACCELERATOR.md`. After a sync, adding a tool with
-`--edition E --tool T --target DIR --merge-existing` finds `ACCELERATOR.md`
-unchanged; before, a release that changed the README made that install
-refuse it (`accelerator-readme-exists`) until the file was moved aside.
-
-A project that commits its accelerator takes a release through a commit:
-`--sync --update-tracked --target DIR` (`--dry-run` first) writes the files
-the project's Git tracks too, by the same rules - a file still holding a
-released version, the runtime (a local edit backed up under
-`memory-bank/local`), the managed blocks of `AGENTS.md` and
-`.claude/CLAUDE.md` - and leaves every edited file, the project's own
-`README.md` and `.gitignore`, its seeded state and the tools it did not
-install as they are. Add `--rewire-codex` when the project uses Codex and
-approve the hooks again in Codex `/hooks`. Then review the report and
-`git diff` and commit. Do not reinstall with `--overwrite` for this: it
-replaces the project's own `AGENTS.md`, `README.md` and `.gitignore` and its
-edited skills, and without the original `--tool` selection it adds every
-tool. Nothing unattended (the Harness included) passes `--update-tracked`.
-
-The sync never reads or writes through a symbolic link inside the project.
-Where Python offers descriptor-relative calls
-(`os.supports_dir_fd`: Linux, macOS), every read, write, backup and the sync's
-record walk the path by folder descriptors with `O_NOFOLLOW`, so a folder
-another process swaps for a link while the sync runs is not followed either;
-a folder swapped during a write leaves the file alone, and the path is
-reported under `kept`. Native Windows has no such calls in Python; there the
-walk takes the same steps by NT handles (`NtCreateFile` relative to the
-folder before, no reparse point followed, the temporary file renamed within
-the last folder's handle), so a junction or link swapped in is not followed
-there either. Where neither descriptors nor handles are available nothing is
-written - each file that would have been is reported under `kept` - because
-a write by path after a check would follow a folder swapped in between. The
-same calls carry the files an install replaces or merges.
-
-### `context_budget.py`
-
-**Purpose and status.** Maintainer measurement and regression gate; source-only
-and not installed. It measures edition startup surfaces and skill bodies.
-
-```bash
-python3 scripts/context_budget.py
-python3 scripts/context_budget.py --check
-python3 scripts/context_budget.py --headroom
-```
-
-- **Principal option:** `--check` compares all measured categories with
-  `token_budget.json`.
-- **Inputs:** each edition's `AGENTS.md`, canonical
-  `.agents/skills/*/SKILL.md`, Claude command/agent listings, and, in check
-  mode, `scripts/token_budget.json`.
-- **Outputs:** a human-readable byte/token-estimate report, or per-category
-  pass/fail lines. `--check` exits nonzero for budget excess, malformed/missing
-  ceilings, or edition drift.
-- **`--headroom`:** prints the bytes remaining under each ceiling,
-  tightest first, and always exits 0. It is what a rule author needs
-  before adding a paragraph to a gated file. No percentage warning is
-  printed: `token_budget.json` states a policy of observed value plus about
-  five per cent, but ceilings were raised inconsistently (some refit to
-  observed + 5 %, others by exactly one change's growth), so headroom runs
-  from a few bytes to just under 5 % of the ceiling. A 5 % warning would fire
-  on every category at once; the byte count is the number that matters.
-- **Dependencies:** Python 3 standard library.
-- **Writes:** none.
-- **CI relationship:** the `lint` job runs `--check`.
-
-It measures `agents_md_bytes`, rendered skill descriptor bytes, Claude command
-and agent listing bytes, full skill-frontmatter bytes, skill-body bytes, and
-skill count. Command/agent measurements use Claude's richest surface, so they
-slightly differ from Cursor and intentionally overstate Codex, which has no
-command or agent tree. Token figures are calibrated cl100k estimates by content
-class, not Anthropic token counts.
-
-### `cost_attribution.py`
-
-**Purpose and status.** Optional developer-local analysis; source-only, never
-installed, and not called by hooks, skills, or CI. It attributes billed Claude
-Code transcript usage in base-token equivalents (BTE).
-
-```bash
-python3 scripts/cost_attribution.py
-python3 scripts/cost_attribution.py --project AI-Infrastructure
-python3 scripts/cost_attribution.py --by skill --by agent --top 20
-python3 scripts/cost_attribution.py --root /path/to/projects --json
-```
-
-- **Principal options:** transcript `--root` (default
-  `~/.claude/projects`), substring `--project` filter, repeatable
-  `--by {agent,mcp,plugin,skill,tool}`, `--top`, and `--json`.
-- **Inputs:** local Claude Code JSONL transcripts. Duplicate content-block
-  records are collapsed by `message.id` so repeated `message.usage` is counted
-  once per billed call.
-- **Outputs:** weighted token tiers and BTE grouped by main/subagent stratum,
-  project, and selected attribution dimensions; or structured JSON.
-- **Dependencies:** Python 3 standard library; no network or exporter.
-- **Writes:** none.
-- **CI relationship:** none.
-
-The billing weights are constants in the script and must be reviewed if
-published pricing ratios change. Records that are unreadable or lack usable
-usage data are skipped; an absent transcript root or zero billed calls returns
-nonzero.
-
-### `memory_eval.py`
-
-**Purpose and status.** Optional maintainer measurement; source-only, never
-installed, and not run by CI (its tests are, in the `installation` job). It
-measures the prompt-time memory capsule on each project as it was when the
-prompt was written, so knowledge written after a prompt cannot be credited to
-it. See [Memory Evaluation Stand](../docs/MEMORY-EVAL.md).
-
-```bash
-python3 scripts/memory_eval.py run --set SET --judgments JUDGMENTS [--passages PASSAGES] \
-  --projects-root DIR --out RESULT [--edition auto|NAME] [--as-of prompt|now]
-python3 scripts/memory_eval.py report RESULT [--compare OTHER] [--show-unjudged]
-python3 scripts/memory_eval.py realized --project DIR [--since YYYY-MM-DD] [--json]
-```
-
-- **Inputs:** a prompt set, judgments and optional answer passages (client
-  data, kept outside the repository); the projects' Git history and working
-  trees, read-only; for `realized`, Claude Code transcripts and Codex rollouts.
-- **Outputs:** a result JSON of prompt ids, document paths and counts - never
-  prompt text, capsule text or document bodies; reports on stdout.
-- **Dependencies:** Python 3.9+ standard library and `git`; no network. It
-  imports `install_accelerator.py` (inventories, install rules) and
-  `accelerator_attach.py` (edition detection), and runs the edition's own
-  `memory-bank/scripts/context.py`.
-- **Writes:** only its cache (default under the system temporary directory;
-  refused inside the clone) and `--out`.
-- **CI relationship:** `tests/test_memory_eval.py` in the `installation` job.
-
-`run --diagnose-misses` adds judged-path stage counts and per-path passage
-presence to result JSON and `report`. It uses the actual refresh manifest and
-prompt-time clock, with recorded history searched separately from the main
-FTS query. Skills and project knowledge are reported apart. No flag means no
-new diagnostic fields.
-
-`memory_onnx.py`, `memory_onnx_pilot.py` and `stateful_pilot.py` provide an **off-by-default,
-maintainer-only** excerpt experiment, selected by `run --onnx-excerpts ASSETS
---onnx-python PYTHON`. The parent stays stdlib-only; the explicit isolated
-worker needs Python 3.12+ with the pinned `requirements-memory-onnx.txt` (NumPy's
-requirement; ONNX Runtime itself needs 3.11+). Assets are local
-and hash-locked, with no automatic installation or download. The separate
-versioned Jina profile requires the retained Python 3.14 and exact package/asset
-pins; schema-less MiniLM assets remain supported. Worker budgets are capped at
-five seconds, and a tighter invocation deadline prevails. Failure retains
-lexical excerpts; the pilot cannot change document eligibility/order or the
-paths retained by the ordinary packer. See the [optional experiment](../docs/MEMORY-EVAL.md#optional-onnx-excerpt-experiment)
-for asset format, limits and evaluation rules. These files are not installed
-into target projects.
-
-### `memory_fact_consolidation.py`
-
-**Purpose and status.** Optional, source-only deterministic fact resolver. It
-groups candidate facts by key and chooses the maximum explicit
-`serial`/`version`/`revision`, breaking an equal version on `updated_at`; a true
-tie is reported as ambiguous rather than arbitrated by path or ID. It implements
-the measured "extract candidates, then take a Python maximum" recipe at the
-consolidation boundary and is deliberately not part of prompt-time retrieval.
-
-```bash
-python3 scripts/memory_fact_consolidation.py --input facts.json --json
-```
-
-- **Inputs:** a JSON list, or `{ "facts": [...] }`, with `id`, `fact`, an
-  optional version field and an optional `updated_at`.
-- **Outputs:** winner, superseded IDs, candidates and an ambiguity flag per
-  fact group.
-- **Dependencies:** Python 3.9+ standard library.
-- **Writes:** none.
-- **CI relationship:** `tests/test_memory_fact_consolidation.py` and
-  `tests/fixtures/fact-consolidation.json`; see
-  [the write-path doc](../docs/MEMORY-WRITE-PATH.md).
-
-### `memory_outcome_ab.py`
-
-**Purpose and status.** A maintainer-only measurement of task outcomes. It
-answers whether the automatic capsule changes what an agent does, not whether
-the capsule's documents are relevant.
-
-For a real task — the first prompt of a recorded session that went on to change
-files — it does the following:
-- rebuilds the project as it was at that prompt, with the `memory_eval.py`
-  reconstruction and recent-files history seeded from the earlier sessions;
-- runs a headless Codex session on the prompt with no hooks and with the
-  memory prompt hook alone;
-- counts the tool calls before the agent first touches a file the original
-  session changed.
-
-Runs stop at that touch, so a pair costs the start of two sessions. It is never
-installed and never run by CI; it spends model calls through the
-maintainer's signed-in Codex CLI.
-
-```bash
-python3 scripts/memory_outcome_ab.py sample --projects next,scb --before 2026-10-07 \
-  --n 30 --seed 1 [--exclude-set TUNING_SET] --out OUTSIDE/set.json
-python3 scripts/memory_outcome_ab.py run --set OUTSIDE/set.json --out OUTSIDE/result.json \
-  [--arms off,capsule,navigation] [--repeat 2] [--cap 40] [--timeout 900] [--ids ID,...] \
-  [--events OUTSIDE/events]
-python3 scripts/memory_outcome_ab.py report OUTSIDE/result.json [--compare off,capsule] [--json]
-```
-
-- **Inputs:**
-  - Claude Code transcripts under `~/.claude/projects`;
-  - the projects under `--projects-root`;
-  - for `run`, a signed-in `codex` on PATH.
-- **Outputs:**
-  - `sample`: a set with prompts and gold paths;
-  - `run`: per-task counts, stop reasons and whether the hook delivered;
-  - `report`: paired differences, a bootstrap interval, a sign test and the
-    verdict rule documented in [MEMORY-EVAL.md](../docs/MEMORY-EVAL.md).
-- **Dependencies:** Python 3.9+ standard library, `memory_eval.py`,
-  `accelerator_attach.py` and the edition runtime's transcript parsers.
-- **Writes:**
-  - the set and the result, owner-only, refused inside the clone;
-  - disposable corpora under the cache.
-
-  Sessions are `--ephemeral`, so `~/.codex/sessions` keeps nothing.
-- **CI relationship:** `tests/test_memory_outcome_ab.py` covers path and event
-  parsing, stopping, hook flags, the statistics and sampling, without a model.
-
-### `memory_rerank_pilot.py`
-
-**Purpose and status.** Optional, source-only maintainer pilot. It compares the
-runtime's normal candidate order with a deterministic path/title feature
-reranker on a local `context.db` and judged queries. It never changes the
-runtime, index or CI.
-
-```bash
-python3 scripts/memory_rerank_pilot.py --database DB --queries QUERIES \
-  [--judgments JUDGMENTS] [--limit 3] [--runtime DIR] [--json]
-```
-
-- **Inputs:** a local context index, JSON queries and optional grades.
-- **Outputs:** per-query baseline/reranked useful paths and an aggregate.
-- **Dependencies:** Python 3.9+ standard library; the selected edition's
-  `context_retrieval.py`.
-- **Writes:** none; it opens the database read-only.
-- **CI relationship:** `tests/test_memory_rerank_pilot.py`; see
-  [the pilot doc](../docs/MEMORY-RERANK-PILOT.md).
-
-### `memory_sqlite_vec_pilot.py`
-
-**Purpose and status.** Optional, off-by-default maintainer probe for a local
-dense candidate pool using the sqlite-vec and sqlite-lembed loadable
-extensions. The runtime stays standard-library only: this file is never
-installed, imported by the runtime or run by CI.
-
-```bash
-python3 scripts/memory_sqlite_vec_pilot.py probe \
-  --vec-extension PATH --lembed-extension PATH --model PATH --json
-python3 scripts/memory_sqlite_vec_pilot.py fuse \
-  --lexical lexical.json --dense dense.json --json
-```
-
-- **Inputs:** local extension and GGUF paths (assets are never downloaded) or
-  two JSON lists of ranked paths.
-- **Outputs:** JSON availability/versions, or deterministic RRF rows.
-- **Dependencies:** Python 3.9+ standard library; the probe needs SQLite built
-  with extension loading and the supplied local assets.
-- **Writes:** none; it opens `:memory:` only.
-- **CI relationship:** `tests/test_memory_sqlite_vec_pilot.py` covers the
-  fail-closed paths and RRF; see
-  [the pilot doc](../docs/MEMORY-SQLITE-VEC-PILOT.md).
-
-### `collect_context.py`
-
-**Purpose and status.** Optional developer-local `code2prompt` wrapper;
-source-only and not installed. The root `./collect` wrapper and root Claude
-`/collect` command expose the same implementation.
-
-```bash
-./collect --list
-./collect skills --edition Laravel --dry-run
-./collect edition --edition Symfony --format xml
-./collect diff --base origin/main --stdout
-./collect custom --include "docs/**" --exclude "docs/archive/**"
-```
-
-- **Scopes:** `edition`, `skills`, `core`, `hooks`, `tooling`, `docs`,
-  `harness`, `diff`, and `custom`.
-- **Principal options:** `--edition` where required; repeatable `--include` and
-  `--exclude`; `--base` for `diff`; `--format`; `--encoding`; `--output`,
-  `--stdout`, or `--dry-run`; `--top`; explicit `--with-task` and
-  `--with-mirrors`.
-- **Inputs:** scoped repository files and, for `diff`, Git changes against the
-  merge base. `.git`, local databases/state, virtualenvs, credential-shaped
-  files, and caches are always excluded. Uppercase `Task/` client material and
-  generated mirrors are excluded by default.
-- **Outputs:** Markdown, XML, or JSON bundle plus a JSON manifest when written
-  to a file; stderr summary with file, byte, and tokenizer counts.
-- **Dependencies:** Python 3 standard library, `code2prompt` in the tested
-  range `>=4.2.0,<5.0.0`, and Git for `diff`. `CODE2PROMPT_BIN` can select the
-  binary.
-- **Writes:** list and help modes write nothing. Collection runs use an
-  isolated temporary config directory. Normal output defaults to ignored
-  `.c2p/` and writes a sibling manifest; `--stdout` and `--dry-run` do not
-  create bundle/manifest files.
-- **CI relationship:** no blocking CI job runs the external binary.
-  `tests/test_collect_context` enforces containment, argument, and exclusion
-  contracts in the `installation` job.
-
-Every run rejects an empty match and isolates `XDG_CONFIG_HOME` because
-`code2prompt` otherwise auto-loads ambient `.c2pconfig`. Its tokenizer count is
-an OpenAI BPE comparison unit, not a Claude billing prediction.
-
-### `check_links.py`
-
-**Purpose and status.** Repository documentation validator; source-only and
-not installed.
-
-```bash
-python3 scripts/check_links.py
-python3 scripts/check_links.py --root /path/to/installed-accelerator
-```
-
-- **Options:** `--root PATH` checks every Markdown file in a standalone
-  installed payload rather than the repository's tracked files.
-- **Inputs:** by default, Markdown files returned by `git ls-files` and
-  optional patterns from `check_links_ignore.txt`. Payload mode recursively
-  scans `PATH` and deliberately applies no repository allowlist.
-- **Outputs:** one diagnostic per unresolved relative target and exit 1 on
-  findings; a success message and exit 0 otherwise.
-- **Dependencies:** Python 3 standard library and Git.
-- **Writes:** none.
-- **CI relationship:** the `links` job runs it.
-
-The checker URL-decodes paths, resolves file/directory targets, rejects links
-that escape the selected root, and ignores external schemes, anchor-only
-links, fenced code, and inline code. It checks target existence, not
-heading-anchor validity. Tracked files deleted in the working tree are skipped.
-
-### `asset_parity.py`
-
-**Purpose and status.** Maintainer parity gate; source-only and not installed.
-It holds the `memory-seed` generator asset
-(`Infrastructure-Creator/.agents/skills/memory-seed/assets/`) to the canonical
-edition, so an engine fix reaches the projects the generator builds and not
-only the three ready-made editions.
-
-```bash
-python3 scripts/asset_parity.py --check
-python3 scripts/asset_parity.py --check --json
-python3 scripts/asset_parity.py --write
-```
-
-- **Options:** `--check` (default) reports and exits non-zero on drift;
-  `--write` copies the canonical bytes over drifted or missing asset files,
-  gives them the canonical executable bit (on disk and, for a tracked file,
-  in the Git index), and re-checks; `--json` prints a machine-readable report.
-  `--check` and `--write` are mutually exclusive.
-- **Inputs:** the asset tree and the first present edition of `Laravel`,
-  `Symfony`, `PHP Core`. Any of them will do, because
-  `context.py parity --cross-edition` already holds the three to each other -
-  that check is this one's prerequisite, not its duplicate.
-- **Outputs:** one line per finding and exit 1; a success message and exit 0
-  otherwise. Exit 2 on a missing asset tree.
-- **Dependencies:** Python 3 standard library, Git, and `file_modes.py`.
-- **Writes:** none under `--check`; only asset files (and their index modes)
-  under `--write`.
-- **CI relationship:** the `parity` job runs `--check` and
-  `tests/test_asset_parity.py` once, on the `Laravel` matrix leg.
-
-Five things are enforced: mapped asset files are byte-identical to their
-counterpart (`scripts/` against `memory-bank/scripts/`, `templates/` against
-`memory-bank/templates/`, `project-brain/` against itself) and carry the same
-executable bit, read from the Git index first; every canonical
-file the asset is supposed to seed exists in it, so a new core module cannot be
-forgotten; every asset file is either mapped or listed in `ASSET_ONLY` with a
-reason, so a new asset file cannot become silently unchecked;
-`runtime.json.template` cannot match byte-for-byte and is compared by JSON key
-set against the edition's `runtime.json`, so a new runtime setting reaches
-generated projects or fails here; and every `memory-bank/scripts/` path in
-`runtime-contract.json`'s `required_skeleton` is actually shipped.
-
-Deliberate one-sided files live in `ASSET_ONLY` (the runtime contract, the
-runtime template) and `EDITION_ONLY` (per-target prose, both Python test
-suites, installer bookkeeping, the materialized `runtime.json`). Record a new
-divergence there with its reason rather than widening a glob.
-
-### `core_sync.py`
-
-**Purpose and status.** Gives the memory core one source. A core change is
-made in `PHP Core/` only, and this tool writes it to the other editions. The
-file set is the runtime's own cross-edition manifest, read from `PHP Core`'s
-`context_retrieval.py`, so the writer and `context.py parity --cross-edition`
-cannot disagree.
-
-`--write` then runs `asset_parity.py --write` and `build_mirrors.py --write`,
-so one command carries a core change to the generator asset and the tool
-mirrors as well. The copies are marked `linguist-generated` in
-`.gitattributes`.
-
-```bash
-python3 scripts/core_sync.py --check
-python3 scripts/core_sync.py --write [--no-chain]
-```
-
-- **Inputs:** the repository's four editions.
-- **Outputs:** one `ADD`/`UPDATE`/`MODE`/`REMOVE` line per copy that
-  differs from `PHP Core/`. `--check` exits 1 when any copy differs.
-- **Dependencies:** Python 3.9+ standard library and `PHP Core`'s
-  `context_retrieval.py`.
-- **Writes:** only with `--write`:
-  - the core files of Laravel, Symfony and WordPress, with the executable
-    bit of the canonical file;
-  - a core file removed from `PHP Core/` is removed from the copies;
-  - the generator asset and the mirrors, through the two chained writers.
-- **CI relationship:** `tests/test_core_sync.py` in the `parity` job. It
-  covers the plan, the writer, the framework-shaped hooks it leaves alone and
-  the `.gitattributes` marking.
-
-### `file_modes.py`
-
-**Purpose and status.** Shared helper module, imported by `build_mirrors.py`
-and `asset_parity.py`; source-only, not installed, and not run directly.
-
-- **What it answers:** the executable bit Git commits for a path - the index
-  mode for a tracked path, the filesystem bit for an untracked one, and no
-  answer for an untracked path on a filesystem without a trustworthy bit
-  (Windows, `core.fileMode=false`), so callers skip the comparison rather than
-  invent drift.
-- **What it writes:** `set_executable` repairs the disk bit where the disk has
-  one and queues the index mode of a tracked path; `flush` records the queued
-  modes with `git update-index --index-info`, keeping the blob the index
-  already holds. `git update-index --chmod` is avoided on purpose: it also
-  stages the working-tree content.
-- **Dependencies:** Python 3 standard library and Git.
-- **Guard:** `tests/test_file_modes.py` (CI `mirrors` job) holds the
-  repository's own index to the rule: every tracked `hooks/*.sh`, every hook
-  script a tracked wiring file runs (whatever command form wraps it), and
-  every root launcher with a shebang is `100755`.
-
-### `policy_lock.py`
-
-**Purpose and status.** Release gate for content identity; the lock files it
-writes ARE installed, the script itself is not.
-
-```bash
-python3 scripts/policy_lock.py --check
-python3 scripts/policy_lock.py --write --edition Symfony
-python3 scripts/policy_lock.py --check --json
-```
-
-- **Options:** exactly one of `--check` (default) or `--write`; repeatable
-  `--edition`; `--json`.
-- **Inputs:** every tracked file of the model-facing surface — `AGENTS.md`,
-  `CLAUDE.md`, `.claude/{DOD,GOLDEN-PRINCIPLES,STABILIZATION}.md`, the whole
-  canonical `.agents/skills/` tree, the two `skill-creator` copies and
-  `SKILL FLOW.md` that are canon in their own right, `.claude/agents/*-agent.md`,
-  `.claude/commands/`, `.claude/settings.json`, `.cursor/rules/`,
-  `.cursor/hooks.json`, `.codex/{hooks.json,config.toml}`.
-- **Outputs:** `<edition>/.accelerator-policy-lock.json` — `schema_version`,
-  `edition`, `release`, `policy_digest`, `agent_models`, `files`. Exit 1 on
-  drift or a disallowed model.
-- **Dependencies:** Python 3 standard library and Git.
-- **CI relationship:** the `lint` job runs `--check` and its regression tests;
-  `check_core_changelog.sh` requires an edition changelog entry when the same
-  surface changes.
-
-Three decisions worth knowing:
-
-**Whole files, never projections.** Hashing only an agent's frontmatter would
-store a digest under a path key that is not `sha256(path)`, making every
-independent check a false positive. And an agent's *body* is its prompt: once
-mirrors are regenerated, a body edit passes `mirrors`, `context_budget` and
-`check_stabilization` alike. This gate is the only one that sees it.
-
-**Enumerated from Git, never from disk.** `.cursor/rules/` holds a
-runtime-rendered, gitignored `working-memory.mdc` that changes every turn; a
-filesystem glob would bake it in and `--check` would fail for ever.
-
-**The allowlist is enforced on `--write` too, and is per edition.** Validating
-only on `--check` would let a regeneration record `model: sonet` and then
-agree with itself. The three ready editions use haiku for four narrow agents;
-Infrastructure-Creator's own `agent-forge` skill requires opus or sonnet and
-it ships no haiku agent.
-
-`policy_digest` identifies the surface, not a release: a surface change does
-not require a `VERSION` bump, it requires the lock to be regenerated.
-
-### `check_routes.py`
-
-**Purpose and status.** Reference-integrity gate; source-only and not
-installed. Mirrors prove the copies agree with canon; this proves canon points
-at things that exist.
-
-```bash
-python3 scripts/check_routes.py
-python3 scripts/check_routes.py --edition Symfony --edition wordpress
-python3 scripts/check_routes.py --json
-```
-
-- **Options:** repeatable `--edition` (an edition path; `WordPress` and
-  `wordpress` are accepted for `Cms/wordpress`); `--json`; `--allowlist PATH`.
-- **Hook wiring:** every name under `(.claude|.cursor|.codex)/hooks/` in
-  `.claude/settings.json`, `.cursor/hooks.json` and `.codex/hooks.json`, and
-  the script name a Codex launcher passes as `$1` — matched on that tail, so
-  the command prefix (`"$CLAUDE_PROJECT_DIR"/...`, a
-  `git rev-parse --show-toplevel` form, bare relative) does not matter — must
-  be a `*.sh` script that exists, is tracked, and carries index mode `100755`;
-  a reference that drops `.sh` is an error, not a silent skip. A script under
-  a tool's `hooks/` that nothing wires is a warning.
-- **Routing:** Claude command `spawns`, `flow-next` and `flow-alternatives`;
-  `stages[].agents`, command-body `subagent_type` and prose spawns
-  ("spawn `x`", "Spawn the `x` agent", "Spawn `x` with", a line opening
-  "Spawn x agent"), which must equal an agent's frontmatter `name` exactly —
-  the host and `subagent-gate.sh` spawn by nothing else, so the file stem and
-  the `<name>-agent` alias that `spawns` accepts are errors there; command-body
-  "invoke the `x` skill" phrases, `` `/x` `` spans and `.<tool>/skills/<x>/`
-  paths (Claude and Cursor); agent `name` (present, unique, bare kebab-case),
-  Claude `invokes` and "invoke the `x` skill" phrases; every `SKILL FLOW.md`
-  (slash tokens, backticked names with or without arguments, Phase Map items,
-  and bare-name steps of fenced diagrams: a step at the line start, after a
-  leading `->`/`→` or a tree branch `├─`/`└─`, that ends the cell — end of
-  line, `(note)`, `<argument>`, or spaces before a box-drawing glyph — so
-  diagram prose is not read as a step); and `AGENTS.md` slash spans plus
-  "`x` skill/agent/command/hook" phrases. A `/x` resolves to a command or a
-  skill of the same tool (in Claude Code every skill is also `/<skill>`); in
-  the Codex flow (`.agents/skills/SKILL FLOW.md`) only a skill resolves,
-  because Codex has no command layer.
-- **Unreadable files:** a file that is not valid UTF-8 is an error finding
-  (exit 1, valid `--json`), still checked with the bad bytes replaced.
-- **Reachability:** every `.agents/skills/<x>` is named by some command,
-  agent or flow.
-- **Allowlist:** `scripts/check_routes_allowlist.json` — `unwired_hooks`,
-  `unreachable_skills`, `references`; every entry needs a `reason`, an unknown
-  edition is an error, a malformed entry is an error that silences nothing,
-  and an entry that matches nothing is a stale warning.
-- **Outputs:** findings grouped by edition with `file:line`; exit 1 on any
-  error, 0 otherwise (warnings allowed), 2 on a usage or Git failure or an
-  allowlist file that is not a UTF-8 JSON object (`--json` then prints
-  `{"error": ...}`).
-- **Dependencies:** Python 3.9+ standard library and Git (index modes).
-- **Writes:** none.
-- **CI relationship:** the `mirrors` job runs it and its regression tests.
-
-### `check_stabilization.py`
-
-**Purpose and status.** Policy structure gate; source-only and not installed.
-It validates the `### Rule:` blocks in each edition's
-`.claude/STABILIZATION.md` against the template that same file declares.
-
-```bash
-python3 scripts/check_stabilization.py
-python3 scripts/check_stabilization.py --json
-```
-
-- **Checks:** the required fields (`Trigger`, `Root cause`, `Rule`,
-  `Example`, `Enforcement`); that `Rule` states an obligation (MUST / MUST
-  NOT), because a rule the harness cannot check compliance against is advice;
-  that `Enforcement` names something; that `Added`/`Retired` are ISO dates;
-  that a rule carrying `Retired` sits under `## Retired rules` and one sitting
-  there carries a date; that `Superseded-by` names a rule in the same file;
-  and that `Evidence`, when present, is a UUID resolving to a Project Brain
-  record on disk.
-- **Optional by design:** `Added` and `Evidence`. Requiring them would
-  invalidate every rule written before they existed.
-- **Inputs:** `<edition>/.claude/STABILIZATION.md` and, for `Evidence`, that
-  edition's `project-brain/{dynamic,archive}/`.
-- **Outputs:** one line per finding and exit 1; a per-edition rule count and
-  exit 0 otherwise. An edition whose file carries no rule blocks is reported
-  as *skipped*, not as passed — Infrastructure-Creator writes the cycle as
-  prose, and silently approving a file nothing examined is the defect this
-  gate exists to prevent.
-- **Dependencies:** Python 3 standard library.
-- **Writes:** none.
-- **CI relationship:** the `lint` job runs it and its regression tests.
-
-What it deliberately does not check: any `Edge`/`Blame` failure-localization
-vocabulary. No such fields exist in any stabilization document in this
-repository, and inventing a component taxonomy is a design decision, not a
-validation one.
-
-### `check_core_changelog.sh`
-
-**Purpose and status.** Pull-request policy gate; source-only and not
-installed. It requires a root `CHANGELOG.md` change when the diff touches the
-shared memory/context core, Project Brain core, tool hooks, or repository
-`scripts/`.
-
-```bash
-bash scripts/check_core_changelog.sh
-bash scripts/check_core_changelog.sh origin/main
-```
-
-- **Input:** optional base ref, otherwise the PR base in GitHub Actions or
-  `origin/main` with local `main` fallback; changed names from merge base
-  through the current working tree.
-- **Output:** pass/fail/skip explanation; exit 1 only when shared core changed
-  without root changelog coverage.
-- **Dependencies:** Bash, Git, `grep`, and `sed`.
-- **Writes:** none.
-- **CI relationship:** the pull-request-only `core-changelog` job invokes it
-  with the PR base.
-
-If no merge base can be resolved, the check deliberately degrades to an
-explained exit-0 skip rather than answering from incomplete history.
-
-### `token_budget.json`
-
-**Purpose and status.** Versioned configuration for
-`context_budget.py --check`; source-only and not installed.
-
-- **Inputs/outputs:** no executable interface. It supplies per-edition ceilings
-  for every measured category.
-- **Dependencies:** valid JSON and exact edition/category alignment with
-  `context_budget.py`.
-- **Writes:** only maintainers edit it. Raise a ceiling only with a justified
-  growth change; after deliberate slimming, tighten it with appropriate
-  headroom.
-- **CI relationship:** consumed by the `lint` job's context-budget step and
-  also covered by the workflow's general JSON validation.
-
-### `check_links_ignore.txt`
-
-**Purpose and status.** Minimal allowlist configuration for `check_links.py`;
-source-only and not installed.
-
-- **Format:** one fnmatch-style pattern per line; blank lines and `#` comments
-  are ignored. A pattern can match the raw target or resolved repository path.
-- **Current rationale:** links into client-owned uppercase `Task/` material may
-  target companion inputs absent from this repository. The allowlist avoids
-  rewriting that client material.
-- **Dependencies and writes:** no direct dependencies or runtime writes.
-  Maintainers should prefer fixing repository-owned links over adding
-  exceptions.
-- **CI relationship:** read by the `links` job through `check_links.py`.
-
-## Maintainer Workflow
-
-When changing a canonical mirror source, edit only the canon, regenerate, and
-verify:
-
-```bash
-python3 scripts/build_mirrors.py --write
-python3 scripts/build_mirrors.py --check
-python3 scripts/context_budget.py --check
-python3 scripts/install_accelerator.py --verify-inventories
-python3 scripts/check_links.py
-```
-
-Before pushing, run everything CI runs in one go, `python3 scripts/check.py`,
-or the affected groups only (`--group mirrors --group parity`).
-
-Inventory regeneration is appropriate only when intentionally changing the
-production payload contract. Review source exclusions and production
-overrides semantically; do not equate “tracked in an edition” with “installed
-in a client project,” and do not hand-maintain exact payload counts in prose.
+[`install/check-catalog.json`](../install/check-catalog.json) is authoritative
+for local/CI check groups. Native `repo write-ci` emits workflows and
+`repo check-ci` compares them. Retained historical Python tests are not a
+working oracle after their implementation imports have been retired.
+
+Keep `token_budget.json`, `check_links_ignore.txt`,
+`check_routes_allowlist.json`, inventories and schema data versioned.
+Change payload identities only for reviewed canonical changes. Generated
+mirrors are regenerated, never hand-edited.

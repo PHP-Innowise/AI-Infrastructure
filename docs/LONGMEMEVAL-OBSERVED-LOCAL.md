@@ -1,13 +1,15 @@
 # Local observations for the LongMemEval text-projection pilot
 
-`harness/src/harness/longmemeval_observed.py` connects the standalone native FTS5
+`infra_pilots::longmemeval::registry::ObservedProjectionMemory` connects the standalone native FTS5
 projection to the fixed-horizon memory cost ledger. It does not register an
 official upstream backend, evaluate benchmark answers or launch models/services.
-Production memory remains automatic, Python 3.14/FTS5 remain defaults and ONNX
-remains optional/off. The official Python 3.11 environment stays separate.
+Production memory remains automatic and native Rust/FTS5; ONNX remains
+optional/off. The official upstream Python environment stays separate.
 
-Create an observer with a positive fixed `horizon`, call `open(private_project,
-trusted_native_module)` once, then insert public trajectory dictionaries. The
+Construct `ObservedProjectionMemory::new(root, runtime, params)` with a fresh
+private project root, a supplied `Box<dyn NativeRuntime>`, and validated
+`Params` containing a positive fixed horizon. Its constructor opens the owned
+backend once; then insert public trajectory JSON values. The
 first query closes insertion admission. Each attempted query, including input
 refusals and cancellation, consumes one ordinal. `query_receipt(ordinal)` returns
 an independent fixed metadata copy. `close()` attempts backend descriptor cleanup,

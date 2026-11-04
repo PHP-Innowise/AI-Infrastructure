@@ -304,9 +304,9 @@ flow-feature. Длительность одной сессии не опреде
 Детерминированные сценарии входят в тесты; проверки реального поведения модели
 проводятся отдельно на разрешённом пилоте с учётом стоимости.
 
-Точки расширения: [cost attribution](../../scripts/cost_attribution.py),
-[context budget](../../scripts/context_budget.py),
-[SDD runtime](../../harness/src/harness/sdd.py),
+Точки расширения: [cost attribution](https://github.com/PHP-Innowise/AI-Infrastructure/blob/6628d976d3fa1ca2d03ebb7d8714503a7b87b824/scripts/cost_attribution.py),
+[context budget](https://github.com/PHP-Innowise/AI-Infrastructure/blob/6628d976d3fa1ca2d03ebb7d8714503a7b87b824/scripts/context_budget.py),
+[SDD runtime](https://github.com/PHP-Innowise/AI-Infrastructure/blob/6628d976d3fa1ca2d03ebb7d8714503a7b87b824/harness/src/harness/sdd.py),
 [SDD tests](../../tests/test_harness_sdd.py),
 [правила эксплуатации](../OPERATIONS.md).
 При реализации соблюдаются правила канона, генерации зеркал, инвентарей,

@@ -1,8 +1,16 @@
 # Hindsight source-only recall pilot
 
+> Rust migration, 2026-11-03: Python test and demo invocations below are
+> retained pre-Rust behavior specifications and historical evidence. They are
+> not verification commands for the migrated checkout. Run the registered native
+> suites from the repository root with
+> `cargo test --manifest-path runtime-rust/Cargo.toml --workspace --all-targets --locked --offline`.
+> Current coverage is defined by those Rust assertions; historical passes are
+> not transferred to the port.
+
 ## Private ingestion ownership journal
 
-`harness.hindsight_journal` is an offline, programmatic component. It is not
+`infra_pilots::hindsight::journal` is an offline, programmatic component. It is not
 connected to Sessions, automatic memory or a service executor. Python/FTS5 and
 automatic local memory remain the defaults.
 
@@ -145,12 +153,12 @@ mutations; `actual_remote_noop` is always null.** This component executes zero
 transport calls; recorded admissions are not HTTP counts. Physical SQLite I/O,
 remote work, provider tokens and USD remain unmeasured.
 
-Offline checks: `python3 -m unittest tests.test_hindsight_journal
+Historical pre-Rust checks: `python3 -m unittest tests.test_hindsight_journal
 tests.test_hindsight_history_admission`.
 They exercise actual private SQLite files/connections and public supplied
 images, not a live service, model, process crash or power loss.
 
-`harness.hindsight_recall` is an experimental stdlib client. A programmatically
+`infra_pilots::hindsight::recall` is an experimental native client. A programmatically
 configured source-reference provider can now feed automatic TaskContext retrieval
 through native guards, packing, manifests and receipts. The default provider is
 `None`; FTS5 remains the ordinary backend. Native hooks and MCP do not call the
@@ -298,12 +306,30 @@ or wire observation; `transport_metadata_complete` describes only that schema.
 
 ## Public-source export and ingestion drafts
 
-`harness.hindsight_export` supplies an offline, programmatic integration point:
+`infra_pilots::hindsight::export` supplies an offline, programmatic integration point:
 
-```python
-approval = PublicApproval(registered_scope, "docs/rules.md", approved_raw_sha256)
-export = build_public_export(trusted_workspace, registered_scope, (approval,))
-plan = plan_public_ingestion(export, previous_owned=prior_owned_catalogue)
+```rust
+use infra_pilots::hindsight::{
+    export::{build_public_export, plan_public_ingestion, IngestionPlan, PublicApproval},
+    recall::{Catalogue, Scope},
+    screen::PublicPolicy,
+};
+
+fn approved_plan<P: PublicPolicy>(
+    workspace: &std::path::Path,
+    scope: Scope,
+    approved_raw_sha256: String,
+    previous: Option<&Catalogue>,
+    policy: &P,
+    active: &mut dyn FnMut() -> bool,
+) -> anyhow::Result<IngestionPlan> {
+    let approval = PublicApproval {
+        scope: scope.clone(), path: "docs/rules.md".into(),
+        source_sha256: approved_raw_sha256, classification: "public".into(),
+    };
+    let export = build_public_export(workspace, scope, &[approval], policy, active)?;
+    plan_public_ingestion(&export, previous, policy, active)
+}
 ```
 
 The operator approves exact raw bytes as public outside cloned configuration.
@@ -377,7 +403,7 @@ serialized draft/packet sizes from transport calls (zero in this component).
 Retain, extraction, embeddings, consolidation, storage, deletion,
 reconciliation, retries and provider token/USD costs remain unknown. Matching
 inputs and smaller bodies do not establish cost savings. The fresh offline
-suite is `python3 -m unittest tests.test_hindsight_public_export`; it uses new
+historical Python suite was `python3 -m unittest tests.test_hindsight_public_export`; it used new
 public source images and literal pre-implementation packet/request oracles,
 ordinary local temporary files and no service, credential or model.
 
@@ -385,7 +411,9 @@ ordinary local temporary files and no service, credential or model.
 
 Run the new public fixture suite with:
 
-```bash
+Historical pre-Rust invocation (reference only):
+
+```text
 python3 -m unittest tests.test_hindsight_recall
 ```
 
@@ -393,7 +421,8 @@ It uses synthetic responses and a literal-loopback HTTP server, never a public
 service, repository export, real credential or model. Source checks in this
 fixture are supplied checks, not complete native policy certification.
 
-The new native suite is `python3 -m unittest tests.test_hindsight_native_hints`.
+The historical Python suite is `python3 -m unittest tests.test_hindsight_native_hints`;
+its presence does not establish current Rust or native-client execution.
 It uses fresh public source images, copied memory runtimes and ordinary ROOT
 processes, with synthetic transports and no provider/model or network calls.
 It covers the actual TaskContext refresh/render/manifest/prompt path, not live

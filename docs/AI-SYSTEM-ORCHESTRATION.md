@@ -1,11 +1,19 @@
 # System-level AI coordination
 
+> Rust migration, 2026-11-03: Python test and demo invocations below are
+> retained pre-Rust behavior specifications and historical evidence. They are
+> not verification commands for the migrated checkout. Run the registered native
+> suites from the repository root with
+> `cargo test --manifest-path runtime-rust/Cargo.toml --workspace --all-targets --locked --offline`.
+> Current coverage is defined by those Rust assertions; historical passes are
+> not transferred to the port.
+
 The optional system coordinator coordinates **development work** across services of
 any stack. It supports separate repositories and service directories in a
 monorepo. Discovery/planning have no dependency on PHP, a model provider, the
 Harness server, LangGraph, or a deployed application. Execution uses a local
-provider CLI/adapter and the generic native Python Brain runtime. Python 3.9+
-on Linux, macOS or native Windows is required; Git is
+provider CLI/adapter and the native Rust Brain runtime. The platform's native
+engine is required on Linux, macOS or Windows; Git is
 optional and contributes commit provenance when available. On Windows, a worker
 CLI installed by npm starts through Node.js directly, never through its `.cmd`
 launcher, and each worker's process tree is ended with its Windows job. AI
@@ -29,14 +37,14 @@ and hashing it establishes source currency, not correctness or deployment state.
 Run from the AI-Infrastructure repository root:
 
 ```bash
-python3 scripts/ai_system.py validate --system docs/examples/ai-system/system.json
-python3 scripts/ai_system.py catalog --system docs/examples/ai-system/system.json
-python3 scripts/ai_system.py map --system docs/examples/ai-system/system.json
-python3 scripts/ai_system.py locate --system docs/examples/ai-system/system.json --task cancel-order
-python3 scripts/ai_system.py plan --system docs/examples/ai-system/system.json \
+infra-engine system validate --system docs/examples/ai-system/system.json
+infra-engine system catalog --system docs/examples/ai-system/system.json
+infra-engine system map --system docs/examples/ai-system/system.json
+infra-engine system locate --system docs/examples/ai-system/system.json --task cancel-order
+infra-engine system plan --system docs/examples/ai-system/system.json \
   --task "Define cancellation and refund behavior" --change-id chg-001 \
   --service orders --context-budget 8000 --output /tmp/ai-system-chg-001.json
-python3 scripts/ai_system.py verify --system docs/examples/ai-system/system.json \
+infra-engine system verify --system docs/examples/ai-system/system.json \
   --plan /tmp/ai-system-chg-001.json
 ```
 
@@ -64,7 +72,7 @@ event, RPC, GraphQL, or other contract format.
 Create a new workspace; the parent directory must already exist:
 
 ```bash
-python3 /path/to/AI-Infrastructure/scripts/ai_system.py init \
+infra-engine system init \
   --root /workspace/ai-system --name "Product system"
 ```
 
@@ -92,7 +100,7 @@ require caller authorization through `--allow-root`**, repeated for separate
 locations. A config cannot grant itself access to unrelated host directories.
 
 ```bash
-python3 /path/to/AI-Infrastructure/scripts/ai_system.py plan \
+infra-engine system plan \
   --system /workspace/ai-system/system.json --allow-root /workspace/orders \
   --allow-root /workspace/payments --task "Change cancellation behavior" \
   --change-id chg-002 --service orders
@@ -153,7 +161,7 @@ the scope checkpoint must narrow this using actual code/contracts.
 To limit the initial contract boundary:
 
 ```bash
-python3 scripts/ai_system.py plan --system docs/examples/ai-system/system.json \
+infra-engine system plan --system docs/examples/ai-system/system.json \
   --task "Change cancellation event" --change-id chg-003 \
   --contract orders:order.cancelled
 ```
@@ -266,7 +274,9 @@ validation or stale verification, `2` invalid input/refused operation. `validate
 checks declaration structure and accessible passports; it does not test services
 or verify capability claims. Commands never run passport-provided test commands.
 
-```bash
+Historical pre-Rust invocation (reference only):
+
+```text
 python3 -m unittest tests.test_ai_system
 ```
 
@@ -274,7 +284,7 @@ Coverage includes task routing, consumers, cycles/depth, monorepo identity,
 missing/denied sources, shared budgets, bounded source reading, dirty-file/commit
 freshness, strict JSON, filesystem boundaries, untrusted content, memory lifecycle
 and CLI no-clobber.
-The CI job runs the same suite on Python 3.9 and the current Python 3 release.
+The native check catalog defines repository validation. Real provider and sandbox acceptance require the corresponding environments.
 
 ## Execute a reviewed plan
 
@@ -284,14 +294,14 @@ fixture: use your own workspace for edits. Choose a new private run directory
 outside service source directories; its parent must already exist.
 
 ```bash
-python3 scripts/ai_system.py execute \
+infra-engine system execute \
   --system /workspace/ai-system/system.json --allow-root /workspace/services \
   --plan /workspace/plans/chg-001.json --run-dir /workspace/runs/chg-001 \
   --provider codex --mode edit --timeout 900
-python3 scripts/ai_system.py run-status \
+infra-engine system run-status \
   --system /workspace/ai-system/system.json --allow-root /workspace/services \
   --run-dir /workspace/runs/chg-001
-python3 scripts/ai_system.py resume \
+infra-engine system resume \
   --system /workspace/ai-system/system.json --allow-root /workspace/services \
   --run-dir /workspace/runs/chg-001
 ```
@@ -409,10 +419,9 @@ the journal and receipts do not change.
 
 ### Brain and Memory ownership
 
-Execution calls **this AI-Infrastructure checkout's trusted Python native
-runtime**, with `--root` pointing at each registered project and explicit
-governed mode. It never runs a service-supplied `context.py` or imports target
-Python code. The native store is stack-neutral; no PHP runtime or application
+Execution calls **this AI-Infrastructure checkout's trusted Rust native
+runtime** directly, bound to each registered project root and explicit governed
+mode. It never runs a service-supplied memory launcher or imports target code. The native store is stack-neutral; no PHP runtime or application
 edition is required. An existing native Brain is reused; otherwise the runtime
 creates task/handoff/index/local storage on first use. This does not install
 framework policy, hooks or local CLI wrappers. Native task UUIDs and revisions
@@ -454,7 +463,7 @@ success receipt** may already have edited files: repeating it requires naming
 that step explicitly:
 
 ```bash
-python3 scripts/ai_system.py resume \
+infra-engine system resume \
   --system /workspace/ai-system/system.json --allow-root /workspace/services \
   --run-dir /workspace/runs/chg-001 --retry-step service-orders
 # After inspecting partial source edits, also add --accept-source-changes.
@@ -486,7 +495,9 @@ error (the existing journal retains its state). `run-status` reads the journal
 without launching AI or mutating native tasks. It reports historical run state,
 not current deployment or new validation of a completed change.
 
-```bash
+Historical pre-Rust invocation (reference only):
+
+```text
 python3 -m unittest tests.test_ai_system tests.test_ai_system_execution
 ```
 
@@ -682,7 +693,9 @@ Local API surface (existing Host/Origin/CSRF boundaries apply):
 
 Run the HTTP/queue/native-runtime regression suite with:
 
-```bash
+Historical pre-Rust invocation (reference only):
+
+```text
 python3 -m unittest tests.test_harness_system_orchestration tests.test_harness_system_editor \
   tests.test_harness_system_discovery tests.test_harness_agent_activity
 ```

@@ -13,6 +13,7 @@ plus the phase-ordering guard on ``update``.
 
 from __future__ import annotations
 
+import errno
 import json
 import subprocess
 import sys
@@ -240,6 +241,100 @@ class ChannelTest(unittest.TestCase):
         broken = self.run_cli("validate")
         self.assertNotEqual(0, broken.returncode)
         self.assertIn("seq must increase", broken.stdout + broken.stderr)
+
+    def test_a_journal_left_in_a_merge_conflict_says_so(self) -> None:
+        # Two clones that both appended to the task's channel conflict at its
+        # end on pull; the reader called the journal corrupt.
+        self.assertEqual(0, self.send().returncode)
+        self.assertEqual(0, self.send(**{"--body": "Second finding in src/Repo.php"}).returncode)
+        path = self.journal_path()
+        first, second = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        path.write_text(first + "<<<<<<< HEAD\n" + second + "=======\n"
+                        + second.replace("Second", "Other") + ">>>>>>> 1234567 (theirs)\n", encoding="utf-8")
+        result = self.run_cli("msg-read", "--task-id", "task-1", "--json")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Message journal line 2 holds an unresolved Git merge conflict", result.stderr)
+        checked = self.run_cli("validate")
+        self.assertNotEqual(0, checked.returncode)
+        self.assertIn("line 2 holds an unresolved Git merge conflict", checked.stdout + checked.stderr)
+
+    @unittest.skipIf(sys.platform == "win32", "Windows has no file size limit to set")
+    def test_a_message_a_full_disk_cuts_short_is_taken_back(self) -> None:
+        # A full disk takes part of an append. The part left at the journal's
+        # end failed every later read and validation, and the next entry
+        # joined it on one line. A file size limit cuts the append as a full
+        # disk does.
+        import resource
+
+        self.assertEqual(0, self.send().returncode)
+        journal = self.journal_path()
+        before = journal.read_bytes()
+        limit = len(before) + 300
+
+        def limited() -> None:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+        cut = subprocess.run(
+            [sys.executable, str(SCRIPT), "--root", str(self.repository), "msg-send", "--task-id", "task-1",
+             "--from", "coder", "--to", "code-reviewer", "--type", "finding",
+             "--body", "Cut short " + "z" * 2000, "--json"],
+            text=True, capture_output=True, preexec_fn=limited,
+        )
+        self.assertNotEqual(0, cut.returncode)
+        self.assertIn(f"[Errno {errno.EFBIG}]", cut.stderr)
+        self.assertEqual(before, journal.read_bytes())
+        checked = self.run_cli("validate")
+        self.assertEqual(0, checked.returncode, checked.stdout + checked.stderr)
+        self.assertEqual(0, self.send(**{"--body": "After the disk was freed"}).returncode)
+        read = self.run_cli("msg-read", "--task-id", "task-1", "--json")
+        self.assertEqual(0, read.returncode, read.stderr)
+        self.assertEqual([1, 2], [entry["seq"] for entry in json.loads(read.stdout)])
+
+    def test_a_message_holding_a_unicode_line_separator_reads_back(self) -> None:
+        # JSON leaves U+2028, U+2029 and U+0085 unescaped, and str.splitlines
+        # splits a line at them: a message pasted with one broke every read
+        # of the channel and the project's validation.
+        body = "First line second third\x85fourth"
+        self.assertEqual(0, self.send(**{"--body": body}).returncode)
+        path = self.journal_path()
+        # Written escaped, for readers that still split there.
+        self.assertNotIn(" ", path.read_text(encoding="utf-8"))
+        for _ in ("as written", "as an earlier runtime wrote it"):
+            read = self.run_cli("msg-read", "--task-id", "task-1", "--json")
+            self.assertEqual(0, read.returncode, read.stderr)
+            self.assertEqual([body], [entry["body"] for entry in json.loads(read.stdout)])
+            checked = self.run_cli("validate")
+            self.assertEqual(0, checked.returncode, checked.stdout + checked.stderr)
+            text = path.read_text(encoding="utf-8")
+            path.write_text(text.replace("\\u2028", " ").replace("\\u2029", " ")
+                            .replace("\\u0085", "\x85"), encoding="utf-8")
+        self.assertEqual(0, self.send(**{"--body": "Next"}).returncode)
+        read = self.run_cli("msg-read", "--task-id", "task-1", "--json")
+        self.assertEqual([1, 2], [entry["seq"] for entry in json.loads(read.stdout)])
+
+    @unittest.skipIf(sys.platform == "win32", "Windows arguments are Unicode")
+    def test_a_message_holding_half_a_character_is_refused_by_name(self) -> None:
+        # A byte of an argument that was not UTF-8 reads as a lone surrogate,
+        # which failed on a traceback when the entry was written.
+        result = self.send(**{"--body": "caf\udce9 latin"})
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("half of a character", result.stderr)
+        self.assertEqual([], list((self.repository / "project-brain/control/messages").glob("*.jsonl")))
+
+    def test_a_line_an_earlier_append_cut_short_says_so(self) -> None:
+        # What a full disk left before appends were taken back: read, checked
+        # and appended to, it says where it is, and nothing joins it.
+        self.assertEqual(0, self.send().returncode)
+        path = self.journal_path()
+        with path.open("ab") as handle:
+            handle.write(b'{"body": "Cut sh')
+        for result in (self.send(**{"--body": "second"}),
+                       self.run_cli("msg-read", "--task-id", "task-1", "--json"),
+                       self.run_cli("validate")):
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("line 2 is cut short", result.stdout + result.stderr)
+        self.assertTrue(path.read_bytes().endswith(b'"Cut sh'))
 
     def test_validate_rejects_foreign_journal_name(self) -> None:
         messages = self.repository / "project-brain" / "control" / "messages"

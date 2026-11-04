@@ -75,7 +75,7 @@ Prerequisites:
 
 - authenticated `cursor-agent` CLI available on `PATH`, or a compatible executable configured through `SKILL_CREATOR_CURSOR_CLI`;
 - Python 3.10 or newer;
-- PyYAML for `scripts/quick_validate.py` and `scripts/package_skill.py`; trigger evaluation, optimization, benchmarking, and HTML review otherwise use the Python standard library.
+- The native engine provides YAML validation and ZIP packaging. Trigger evaluation and optimization use the selected native provider CLI; review pages require the verified Rust/Wasm asset image.
 
 Create an evaluation set with unique positive and negative queries:
 
@@ -89,11 +89,11 @@ Create an evaluation set with unique positive and negative queries:
 From `.cursor/skills/skill-creator/`, run:
 
 ```bash
-python3 -m scripts.run_eval \
+infra-engine skill-tools run-eval --platform cursor \
   --eval-set /path/to/evals.json \
   --skill-path ../target-skill
 
-python3 -m scripts.run_loop \
+infra-engine skill-tools run-loop --platform cursor \
   --eval-set /path/to/evals.json \
   --skill-path ../target-skill \
   --results-dir /path/to/results
@@ -104,8 +104,8 @@ The harness creates a unique probe skill in a temporary minimal workspace, invok
 For output-quality benchmarks, compare repeated `with_skill` and `without_skill` runs using the schemas in [references/schemas.md](references/schemas.md), then aggregate and review them:
 
 ```bash
-python3 scripts/aggregate_benchmark.py /path/to/benchmark
-python3 eval-viewer/generate_review.py /path/to/benchmark
+infra-engine skill-tools aggregate-benchmark /path/to/benchmark
+infra-engine skill-tools generate-review /path/to/benchmark
 ```
 
 Treat trigger rates as probabilistic evidence. Use multiple runs, balanced positive and negative queries, held-out cases, and a fixed model/configuration for comparisons. Never represent fake-CLI tests as model-quality evidence.

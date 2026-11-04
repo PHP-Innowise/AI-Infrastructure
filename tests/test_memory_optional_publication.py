@@ -39,16 +39,37 @@ class NativeOptionalPublicationTests(unittest.TestCase):
         self.uuid=task['task_uuid']
         self.call('index','--json')
         sys.path.insert(0,str(self.cli.parent))
-        runtime=('context','context_retrieval','brain_runtime','automatic_query','validate','memory_results','workspace_roots','context_handoff')
+        runtime={path.stem for path in self.cli.parent.glob('*.py')}
+        previous={name:sys.modules[name] for name in runtime if name in sys.modules}
+        def restore_runtime():
+            for name in runtime:sys.modules.pop(name,None)
+            sys.modules.update(previous)
+        # Register before importing, so even a failed setup restores the graph.
+        self.addCleanup(restore_runtime)
         try:
-            for name in runtime:
-                sys.modules.pop(name,None)
+            for name in runtime:sys.modules.pop(name,None)
             self.context=importlib.import_module('context');self.retrieval=importlib.import_module('context_retrieval')
         finally:sys.path.pop(0)
-        # These modules live in this test's temporary copy; a later test in the
-        # same process must not import them from a deleted directory.
-        self.addCleanup(lambda:[sys.modules.pop(name,None) for name in runtime])
         self.db=self.context.connect(self.root/'memory-bank/local/context.db');self.addCleanup(self.db.close)
+
+
+    def test_nested_fixture_restores_the_complete_runtime_module_graph(self):
+        runtime={path.stem for path in self.cli.parent.glob('*.py')}
+        previous={name:sys.modules[name] for name in runtime if name in sys.modules}
+        nested=NativeOptionalPublicationTests()
+        try:
+            nested.setUp()
+            native=importlib.import_module('native_results')
+            brain=importlib.import_module('brain_runtime')
+            results=importlib.import_module('memory_results')
+            self.assertIs(native.BrainError,brain.BrainError)
+            self.assertIs(native.record_result,results.record_result)
+            if 'native_results' in previous:
+                self.assertIsNot(previous['native_results'],native)
+        finally:nested.doCleanups()
+        for name in runtime:
+            if name in previous:self.assertIs(previous[name],sys.modules.get(name),name)
+            else:self.assertNotIn(name,sys.modules)
 
     def call(self,*args):
         result=subprocess.run([sys.executable,'-B',str(self.cli),'--root',str(self.root),*args],env=self.env,cwd=self.root,capture_output=True,timeout=12)
@@ -218,6 +239,15 @@ class InlineSourceAdmissionTests(unittest.TestCase):
         self.assertEqual({PUBLIC['source']:PUBLIC['digest']},self.accept())
         cap=dict(self.cap,semantic=[],selected=[]);proof=dict(self.proof,selected=[],capsule_sha256=self.digest(cap));self.assertEqual({},self.accept(cap,proof))
         with self.assertRaises(SessionError):self.accept(cap,{})
+
+    def test_no_document_and_no_proof_need_no_fingerprints(self):
+        # The navigation and recall profiles send no proof for a capsule that
+        # carries no document: there is nothing to fingerprint. A capsule with
+        # a document and no proof is still refused.
+        cap=dict(self.cap,semantic=[],selected=[])
+        for allow in (True,False):
+            with self.subTest(allow=allow):self.assertEqual({},TaskContext._source_hashes(Path('/unused-avocet'),cap,provenance=None,allow_local=allow))
+        with self.assertRaises(SessionError):TaskContext._source_hashes(Path('/unused-avocet'),self.cap,provenance=None,allow_local=True)
 
     def test_wrong_profile_scope_task_revision_frame_and_permission_refused(self):
         for changed in ({'profile':'foreign'},{'scope':'governed'},{'task_uuid':'foreign'},{'task_revision':True},{'capsule_sha256':'0'*64},{'extra':0}):

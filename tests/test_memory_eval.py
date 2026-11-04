@@ -23,6 +23,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -2272,7 +2273,7 @@ class RealizedUseTest(unittest.TestCase):
             self.claude / mangled / "session.jsonl",
             [
                 # An old turn, before --since.
-                hook("- memory docs/old.md — Old", "2026-08-01T09:00:00Z", project),
+                hook("working: not recorded yet\n- memory docs/old.md — Old", "2026-08-01T09:00:00Z", project),
                 says("old"),
                 human(self.PROMPT, "2026-09-02T10:00:00Z"),
                 hook(capsule, "2026-09-02T10:00:01Z", project),
@@ -2289,11 +2290,12 @@ class RealizedUseTest(unittest.TestCase):
         # A Claude Code worktree of the project, and another project sharing the name prefix.
         jsonl(
             self.claude / f"{mangled}--claude-worktrees-fix" / "w.jsonl",
-            [hook("- memory tasks/TASK-001/plan.md — Plan", "2026-09-03T10:00:00Z", f"{project}/.claude/worktrees/fix")],
+            [hook("working: fix — plan\n- memory tasks/TASK-001/plan.md — Plan", "2026-09-03T10:00:00Z",
+                  f"{project}/.claude/worktrees/fix")],
         )
         jsonl(
             self.claude / f"{mangled}-gen" / "other.jsonl",
-            [hook("- memory docs/x.md — X", "2026-09-03T10:00:00Z", f"{project}-gen")],
+            [hook("working: x — y\n- memory docs/x.md — X", "2026-09-03T10:00:00Z", f"{project}-gen")],
         )
         codex_capsule = (
             f"working: eval/p — goal\nmemory (retrieved for this request):\n"
@@ -2316,6 +2318,46 @@ class RealizedUseTest(unittest.TestCase):
             [
                 {"type": "session_meta", "payload": {"id": "y", "cwd": "/somewhere/else"}},
                 codex_message("developer", "working: x\n- memory docs/z.md — Z"),
+            ],
+        )
+        local = self.project / "memory-bank" / "local"
+
+        def step(at: str, host: Optional[str], stage: str, event: str, **fields: Any) -> Dict[str, Any]:
+            return {"at": "2026-09-02T" + at + "Z", "host": host, "stage": stage, "event": event, **fields}
+
+        jsonl(
+            local / "native-results.ndjson",
+            [
+                # Before --since.
+                {"at": "2026-08-01T09:00:00Z", "host": "claude", "stage": "prompt", "event": "armed"},
+                step("10:00:01", "claude", "prompt", "armed"),
+                step("10:01:00", "claude", "stop", "requested"),
+                step("10:01:00", "claude", "stop-hook", "exited", status=0),
+                step("10:02:00", "claude", "save", "refused", code="memory-result-v1:unverified"),
+                step("10:02:30", "claude", "save", "saved", learnings=2, promoted=1),
+                step("10:03:00", "claude", "stop", "skipped", code="recovery-saved"),
+                step("10:03:00", "claude", "stop-hook", "exited", status=0),
+                step("10:05:01", "claude", "prompt", "armed", code="previous-failed"),
+                # A code is a fixed word; anything else is counted, never printed.
+                step("10:06:00", "claude", "prompt", "skipped", code=self.PROMPT),
+                step("11:00:00", "codex", "prompt", "armed"),
+                step("11:01:00", "codex", "stop", "requested"),
+                step("11:01:00", "codex", "stop-hook", "exited", status=124),
+                step("11:01:30", "codex", "prompt", "continuation"),
+                step("11:02:00", "codex", "stop", "failed", code="unsaved"),
+                step("11:03:00", "codex", "save", "saved", code="late", learnings=1, promoted=0),
+                step("11:04:00", "codex", "save", "saved", code="repeat", learnings=0, promoted=0),
+                step("11:05:00", "cursor", "stop-hook", "skipped", code="capsule-delivered"),
+                step("11:06:00", None, "save", "refused", code="native-result:invalid-token"),
+            ],
+        )
+        jsonl(
+            local / "refresh-health.ndjson",
+            [
+                {"at": "2026-08-01T09:00:00Z", "hook_status": 0, "source": "hook"},
+                {"at": "2026-09-02T10:00:00Z", "hook_status": 0, "source": "hook"},
+                {"at": "2026-09-02T11:00:00Z", "hook_status": 124, "source": "hook"},
+                {"at": "2026-09-02T11:30:00Z", "source": "cli"},
             ],
         )
 
@@ -2364,6 +2406,768 @@ class RealizedUseTest(unittest.TestCase):
         self.assertIn("docs/billing.md", with_paths["paths"])
         self.assertNotIn(self.PROMPT, json.dumps(with_paths))
 
+    NATIVE = ("prompt_hook_runs", "armed", "armed_after_incomplete", "continuations",
+              "stop_hook_runs", "stop_hook_timeouts", "stop_hook_failures", "requested",
+              "saved", "held", "omitted", "failed", "refused", "errors",
+              "learnings_written", "chunks_promoted")
+
+    def test_native_result_funnel_per_host(self) -> None:
+        native = self.realized("--since", "2026-09-01")["native"]
+        self.assertEqual((native["journal"], native["lines"], native["prompt_hook_health_lines"]), (True, 18, 2))
+        hosts = native["hosts"]
+        expected = {
+            "claude": [3, 2, 1, 0, 2, 0, 0, 1, 1, 0, 0, 0, 1, 0, 2, 1],
+            "codex": [2, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0],
+            "cursor": [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "unknown": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+        }
+        for host, counts in expected.items():
+            with self.subTest(host=host):
+                self.assertEqual(counts, [hosts[host][key] for key in self.NATIVE])
+        self.assertEqual([5, 3, 1, 1, 4, 1, 0, 2, 2, 0, 0, 1, 2, 0, 3, 1],
+                         [native["total"][key] for key in self.NATIVE])
+        self.assertEqual(hosts["claude"]["reasons"], {
+            "prompt armed": {"previous-failed": 1}, "prompt skipped": {"other": 1},
+            "save refused": {"memory-result-v1:unverified": 1}, "stop skipped": {"recovery-saved": 1},
+            "stop-hook exited": {"0": 2}})
+        self.assertEqual(hosts["codex"]["reasons"], {
+            "save saved": {"late": 1, "repeat": 1}, "stop failed": {"unsaved": 1},
+            "stop-hook exited": {"124": 1}})
+        self.assertEqual(native["total"]["reasons"]["save refused"],
+                         {"memory-result-v1:unverified": 1, "native-result:invalid-token": 1})
+        everything = self.realized()["native"]
+        self.assertEqual((everything["lines"], everything["prompt_hook_health_lines"]), (19, 3))
+
+    def test_native_result_funnel_prints_counts_and_codes_only(self) -> None:
+        plain = main_output(*self.arguments(), "--since", "2026-09-01")
+        for row in ("prompt hook runs", "save requested", "saved", "refused saves",
+                    "learnings written", "chunks promoted", "memory-result-v1:unverified", "capsule-delivered"):
+            self.assertIn(row, plain)
+        self.assertNotIn(self.PROMPT, plain)
+        (self.project / "memory-bank" / "local" / "native-results.ndjson").unlink()
+        missing = main_output(*self.arguments())
+        self.assertIn("no native-results.ndjson", missing)
+        self.assertFalse(self.realized()["native"]["journal"])
+
+
+def zstd_bytes(data: bytes) -> Optional[bytes]:
+    """`data` compressed as Codex stores a finished rollout, or None without a coder."""
+    if memory_eval._zstd is not None:
+        return memory_eval._zstd.compress(data)
+    command = shutil.which("zstd")
+    if command:
+        return subprocess.run([command, "-q", "-c"], input=data, capture_output=True, check=True).stdout
+    return None
+
+
+class CompressedRolloutTest(RealizedUseTest):
+    """Codex keeps a finished rollout as `rollout-*.jsonl.zst`; it reads as the plain one."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        plain = self.codex / "2026" / "09" / "02" / "rollout-1.jsonl"
+        packed = zstd_bytes(plain.read_bytes())
+        if packed is None:
+            self.skipTest("no zstd coder: neither Python 3.14 nor the zstd command")
+        plain.with_name(plain.name + ".zst").write_bytes(packed)
+        plain.unlink()
+
+    def test_codex_rollout(self) -> None:
+        super().test_codex_rollout()
+        self.assertEqual(0, self.realized()["codex"]["compressed_unread"])
+
+    def test_the_zstd_command_reads_it_where_python_cannot(self) -> None:
+        if shutil.which("zstd") is None:
+            self.skipTest("no zstd command")
+        with mock.patch.object(memory_eval, "_zstd", None):
+            self.assertEqual(1, self.realized()["codex"]["transcripts"])
+            log = next((self.codex / "2026" / "09" / "02").glob("*.zst"))
+            lines = memory_eval.session_lines(log)
+            self.assertIn(b"session_meta", next(lines))
+            # A reader that stops at the first line leaves no decoder behind.
+            lines.close()
+
+    def test_without_a_decoder_the_report_says_what_it_could_not_read(self) -> None:
+        with mock.patch.object(memory_eval, "_zstd", None), \
+                mock.patch.object(memory_eval.shutil, "which", return_value=None):
+            codex = self.realized()["codex"]
+            plain = main_output(*self.arguments())
+        # The project's rollout, and the other project's still plain one is read.
+        self.assertEqual((0, 1), (codex["transcripts"], codex["compressed_unread"]))
+        self.assertIn("1 compressed Codex rollout(s) could not be read", plain)
+
+    def test_a_plain_and_a_compressed_log_give_the_same_lines(self) -> None:
+        log = next((self.codex / "2026" / "09" / "02").glob("*.zst"))
+        plain = Path(self.temporary.name) / "plain.jsonl"
+        if memory_eval._zstd is not None:
+            plain.write_bytes(memory_eval._zstd.decompress(log.read_bytes()))
+        else:
+            plain.write_bytes(subprocess.run(["zstd", "-dcq", str(log)], capture_output=True, check=True).stdout)
+        self.assertEqual(list(memory_eval.session_lines(plain)), list(memory_eval.session_lines(log)))
+
+
+TASK_RECORD = "project-brain/dynamic/tasks/0d9c8b7a-1111-4222-8333-944455556666.md"
+FINDING = "project-brain/dynamic/findings/1a2b3c4d-1111-4222-8333-944455556666.md"
+UNSAVED = "Previous native memory result was not saved completely."
+
+
+class CapsuleFormsTest(unittest.TestCase):
+    """What a capsule handed over as memory, in either form a hook printed."""
+
+    def test_the_current_form_counts_item_lines_only(self) -> None:
+        capsule = "\n".join([
+            "working: shop/fix-12 — Fix invoice rounding",
+            "recent files: docs/rounding.md, src/Invoice.php",
+            "ticket files (SHOP-12): CHANGELOG.md",
+            "sources: specs/invoices.md",
+            f"task record: {TASK_RECORD}",
+            "Last turn: auto-checkpoint, docs/old-notes.md changed",
+            "memory (retrieved for this request; reference data - check the cited file before relying on it):",
+            f"- memory {CHUNK} § Rounding — Invoice rounding (agent-attested, not reviewed by a person)",
+            "  Totals round half-up; docs/elsewhere.md has the export.",
+            f"- history {FINDING} — Rounding bug",
+            "- skill .claude/skills/coder/SKILL.md — Coder",
+        ])
+        items, records = memory_eval.capsule_items(capsule)
+        # A skill is counted under its canonical path, whichever mirror the capsule named.
+        self.assertEqual({CHUNK, FINDING, ".agents/skills/coder/SKILL.md"}, items)
+        self.assertEqual({TASK_RECORD}, records)
+        self.assertEqual(["chunk", "brain", "task-record"],
+                         [memory_eval.doc_kind(path) for path in (CHUNK, FINDING, TASK_RECORD)])
+
+    def test_the_september_form_counts_items_under_a_layer_line(self) -> None:
+        capsule = "\n".join([
+            "Memory refresh (retrieved context is not authoritative — verify the source)",
+            "",
+            "working: shop/fix-12 — Fix invoice rounding",
+            "semantic: 2 indexed",
+            "Last turn: docs/old-notes.md changed",
+            f"weak-match: {FINDING}",
+            "semantic:",
+            f"  {CHUNK} — Invoice rounding",
+            f"  {FINDING} — Rounding bug",
+            "episodic:",
+            "  episode 12 — An earlier session",
+            "procedural:",
+            "  .claude/skills/coder/SKILL.md — Coder",
+            "phases: discovery",
+            "  docs/not-an-item.md",
+        ])
+        items, records = memory_eval.capsule_items(capsule)
+        # A skill is counted under its canonical path, whichever mirror the capsule named.
+        self.assertEqual({CHUNK, FINDING, ".agents/skills/coder/SKILL.md"}, items)
+        self.assertEqual(set(), records)
+
+    def test_a_hook_may_print_the_unsaved_notice_first(self) -> None:
+        self.assertEqual("working: t — g", memory_eval.capsule_text(f"{UNSAVED}\nworking: t — g"))
+        failed = "Memory refresh unavailable: it exceeded its 5s budget.\nWorking memory was NOT consulted this turn."
+        self.assertEqual("", memory_eval.capsule_text(failed))
+        self.assertIsNone(memory_eval.capsule_text("Another hook said hello"))
+        self.assertIsNone(memory_eval.capsule_text(UNSAVED))
+        stdout = json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                                    "additionalContext": "working: t — g"}})
+        self.assertEqual("working: t — g", memory_eval.hook_capsule(stdout))
+
+    def test_a_refresh_that_assembled_no_capsule_is_no_capsule(self) -> None:
+        # Its own layer lines come first, which read as a capsule's start: on
+        # 2026-10-30 a sync left four projects printing this on every prompt.
+        refused = "\n".join([
+            "procedural: updated (85 documents)",
+            "semantic: updated (3 documents)",
+            "episodic: updated (0 documents)",
+            "phases: stat 54ms index 105ms retrieval 1ms",
+            "warning: Capsule unavailable: Capsule profile must be full or navigation. No task context was"
+            " assembled this turn; read the canonical sources directly.",
+        ])
+        self.assertEqual("", memory_eval.capsule_text(refused))
+        self.assertEqual("", memory_eval.capsule_text(f"{UNSAVED}\n{refused}"))
+        turns = memory_eval.claude_turns(self.transcript([hook(refused, "2026-10-31T09:00:00Z"),
+                                                          says("Read the code instead.")]))
+        stats = memory_eval.tally(turns)
+        self.assertEqual((1, 1, 0), (stats["hook_turns"], stats["turns_no_capsule_assembled"],
+                                     stats["turns_with_capsule"]))
+        working = memory_eval.tally(memory_eval.claude_turns(self.transcript([
+            hook("working: shop/fix-12 — Fix invoice rounding", "2026-10-31T09:05:00Z")])))
+        self.assertEqual((1, 0), (working["turns_with_capsule"], working["turns_no_capsule_assembled"]))
+
+    def transcript(self, records: List[Dict[str, Any]]) -> Path:
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / "session.jsonl"
+        jsonl(path, records)
+        return path
+
+    def test_a_retrieve_answer_in_json_names_its_items_and_record(self) -> None:
+        answer = json.dumps({"working": None, "task_record": TASK_RECORD,
+                             "semantic": [{"path": CHUNK, "title": "Invoice rounding"}],
+                             "episodic": [{"id": 3, "summary": "An earlier session"}], "procedural": []})
+        self.assertEqual(({CHUNK}, {TASK_RECORD}), memory_eval.retrieved(answer))
+        provenance = json.dumps({"response_profile": "x", "capsule": json.loads(answer)})
+        self.assertEqual(({CHUNK}, {TASK_RECORD}), memory_eval.retrieved(provenance))
+        # `start --json && retrieve --json` prints the task record first.
+        started = json.dumps({"id": "0d9c8b7a", "goal": "Fix rounding", "files": ["docs/billing.md"]})
+        self.assertEqual(({CHUNK}, {TASK_RECORD}), memory_eval.retrieved(started + "\n" + answer + "\n"))
+        self.assertEqual((set(), set()), memory_eval.retrieved(started))
+        wrapped = json.dumps({"output": f"working: t — g\n- memory {CHUNK} — T", "metadata": {"exit_code": 0}})
+        self.assertEqual(({CHUNK}, set()), memory_eval.retrieved(memory_eval.output_text(wrapped)))
+        # Codex's freeform shell heads the output with its own lines.
+        for head in ("Script completed\nWall time 0.4 seconds\nOutput:\n",
+                     "Script running with cell 3\nWall time 1.2 seconds\nOutput:\n"):
+            with self.subTest(head=head):
+                self.assertEqual(({CHUNK}, {TASK_RECORD}),
+                                 memory_eval.retrieved(memory_eval.output_text(head + answer)))
+        self.assertEqual("Script ran\nno output line", memory_eval.output_text("Script ran\nno output line"))
+        self.assertEqual("a\nb", memory_eval.output_text([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]))
+
+
+class ExplicitRetrieveTest(unittest.TestCase):
+    """What an agent's own retrieve returned and what the session opened
+    afterwards: the one memory path real sessions were seen using, read in
+    whole sessions, capsule turns or not."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        self.project = (base / "work" / "ledger").resolve()
+        self.project.mkdir(parents=True)
+        self.claude = base / "claude"
+        self.codex = base / "codex"
+        project = str(self.project)
+
+        def at(seconds: int) -> str:
+            return f"2026-09-02T11:00:{seconds:02d}Z"
+
+        def call(seconds: int, name: str, arguments: Any, identity: str) -> Dict[str, Any]:
+            return {"type": "response_item", "timestamp": at(seconds), "payload": {
+                "type": "function_call", "name": name, "arguments": json.dumps(arguments), "call_id": identity}}
+
+        def output(seconds: int, identity: str, text: str) -> Dict[str, Any]:
+            return {"type": "response_item", "timestamp": at(seconds), "payload": {
+                "type": "function_call_output", "call_id": identity,
+                "output": json.dumps({"output": text, "metadata": {"exit_code": 0}})}}
+
+        def developer(text: str, kind: str) -> Dict[str, Any]:
+            return {"type": "response_item", "timestamp": at(1), "payload": {
+                "type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}],
+                "internal_chat_message_metadata_passthrough": {"content_item_kinds": [kind]}}}
+
+        def shell(command: str) -> Dict[str, Any]:
+            return {"command": ["bash", "-lc", command]}
+
+        capsule = f"{UNSAVED}\nworking: shop/fix-12 — Fix\ntask record: {TASK_RECORD}\n- memory {CHUNK} — Invoice rounding"
+        answer = (f"working: shop/fix-12 — Fix\ntask record: {TASK_RECORD}\n"
+                  f"- memory {CHUNK} — Invoice rounding\n- memory {FINDING} — Rounding bug")
+        jsonl(self.codex / "2026" / "09" / "02" / "rollout-1.jsonl", [
+            {"timestamp": at(0), "type": "session_meta", "payload": {"id": "x", "cwd": project}},
+            codex_message("user", "Fix the rounding in the export"),
+            developer(capsule, "hooks.additional_context"),
+            # Codex's own instructions are no capsule, whatever their first word.
+            developer("warning: spawn subagents sparingly", "multi_agent.usage_hint"),
+            call(2, "shell", shell(f"sed -n 1,40p {project}/{TASK_RECORD}"), "c0"),
+            call(3, "shell", shell("python3 memory-bank/scripts/context.py retrieve 'invoice rounding'"), "c1"),
+            output(4, "c1", answer),
+            call(5, "shell", shell(f"cat {CHUNK}"), "c2"),
+            codex_message("assistant", "Done"),
+            # A new prompt the hook printed nothing for: what follows is in no capsule turn.
+            codex_message("user", "And the export?"),
+            call(6, "mcp__harness_memory__memory_retrieve", {"query": "export"}, "c3"),
+            output(7, "c3", "working: shop/fix-12 — Fix\n- memory docs/export.md — Export"),
+            call(8, "shell", shell("sed -n 1,20p docs/other.md"), "c4"),
+        ])
+        mangled = re.sub(r"[^A-Za-z0-9]", "-", project)
+        jsonl(self.claude / mangled / "session.jsonl", [
+            human("Where is rounding decided?", "2026-09-03T09:00:00Z"),
+            {"type": "assistant", "timestamp": "2026-09-03T09:00:05Z", "message": {"id": "m1", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash",
+                 "input": {"command": "python3 memory-bank/scripts/context.py retrieve --json rounding"}}]}},
+            {"type": "user", "timestamp": "2026-09-03T09:00:06Z", "toolUseResult": {"stdout": "{}"},
+             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": json.dumps(
+                 {"working": None, "task_record": TASK_RECORD, "semantic": [{"path": "docs/billing.md"}],
+                  "episodic": [], "procedural": []})}]}},
+            {"type": "assistant", "timestamp": "2026-09-03T09:00:09Z", "message": {"id": "m2", "content": [
+                {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": f"{project}/{TASK_RECORD}"}}]}},
+        ])
+
+    def realized(self, *extra: str) -> Dict[str, Any]:
+        return json.loads(main_output("realized", "--project", str(self.project), "--claude-root", str(self.claude),
+                                      "--codex-root", str(self.codex), "--json", *extra))
+
+    def test_a_capsule_after_the_unsaved_notice_is_one_turn_with_one_item(self) -> None:
+        codex = self.realized()["codex"]
+        keys = ("hook_turns", "turns_with_capsule", "delivered_items", "delivered_touched",
+                "record_pointers", "record_pointers_touched", "agent_retrieve_cli", "agent_retrieve_mcp")
+        self.assertEqual([1, 1, 1, 1, 1, 1, 1, 0], [codex[key] for key in keys])
+
+    def test_codex_retrieves_and_what_was_opened_afterwards(self) -> None:
+        retrieve = self.realized()["retrieve"]["codex"]
+        keys = ("sessions", "calls", "answers", "answers_naming", "items_returned", "items_opened",
+                "records_pointed", "records_opened")
+        # The task record was opened before the retrieve named it: not afterwards.
+        self.assertEqual([1, 2, 2, 2, 3, 1, 1, 0], [retrieve[key] for key in keys])
+        self.assertEqual({"returned": 1, "opened": 1, "otherwise": 0}, retrieve["by_kind"]["chunk"])
+        self.assertEqual({"returned": 1, "opened": 0, "otherwise": 0}, retrieve["by_kind"]["brain"])
+        self.assertEqual({"returned": 1, "opened": 0, "otherwise": 1}, retrieve["by_kind"]["spec-doc"])
+
+    def test_claude_retrieves_without_any_capsule(self) -> None:
+        report = self.realized()
+        self.assertEqual(0, report["claude"]["hook_turns"])
+        retrieve = report["retrieve"]["claude"]
+        self.assertEqual([1, 1, 1, 0, 1, 1], [retrieve[key] for key in (
+            "calls", "answers", "items_returned", "items_opened", "records_pointed", "records_opened")])
+        self.assertEqual(2, report["retrieve"]["total"]["sessions"])
+
+    def test_since_drops_earlier_calls(self) -> None:
+        retrieve = self.realized("--since", "2026-09-03")["retrieve"]
+        self.assertEqual((0, 1), (retrieve["codex"]["calls"], retrieve["claude"]["calls"]))
+
+    def test_the_text_report_counts_and_names_no_path(self) -> None:
+        plain = main_output("realized", "--project", str(self.project), "--claude-root", str(self.claude),
+                            "--codex-root", str(self.codex))
+        for row in ("Explicit retrieves in whole sessions", "task records pointed at", "task record pointers"):
+            self.assertIn(row, plain)
+        for path in (CHUNK, TASK_RECORD, "docs/export.md"):
+            self.assertNotIn(path, plain)
+
+
+class HookOutcomeTest(unittest.TestCase):
+    """Every Claude Code hook run, as its transcript records it: a hook whose
+    command was not found must show, not pass for a quiet one."""
+
+    def test_outcomes_are_counted_by_event(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        project = (base / "work" / "ledger").resolve()
+        project.mkdir(parents=True)
+        missing = ("Failed with non-blocking status code: /bin/sh: line 1: "
+                   ".claude/hooks/bash-validator.sh: No such file or directory")
+
+        def ran(kind: str, event: str, code: int, text: str = "") -> Dict[str, Any]:
+            return {"type": "attachment", "timestamp": "2026-09-02T10:00:00Z", "cwd": str(project) + "/src",
+                    "attachment": {"type": kind, "hookEvent": event, "exitCode": code, "stderr": text}}
+
+        jsonl(base / "claude" / re.sub(r"[^A-Za-z0-9]", "-", str(project)) / "s.jsonl", [
+            human("Fix it", "2026-09-02T09:59:00Z"),
+            ran("hook_success", "UserPromptSubmit", 0),
+            ran("hook_non_blocking_error", "PreToolUse", 127, missing),
+            ran("hook_non_blocking_error", "PreToolUse", 127, missing),
+            ran("hook_non_blocking_error", "Stop", 1),
+            ran("hook_blocking_error", "PreToolUse", 2),
+            ran("hook_additional_context", "SessionStart", 0),
+        ])
+        report = json.loads(main_output("realized", "--project", str(project), "--claude-root", str(base / "claude"),
+                                        "--codex-root", str(base / "codex"), "--json"))
+        self.assertEqual({
+            "PreToolUse": {"ok": 0, "error": 2, "not_found": 2, "blocked": 1},
+            "Stop": {"ok": 0, "error": 1, "not_found": 0, "blocked": 0},
+            "UserPromptSubmit": {"ok": 1, "error": 0, "not_found": 0, "blocked": 0},
+        }, report["claude"]["hooks"])
+        plain = main_output("realized", "--project", str(project), "--claude-root", str(base / "claude"),
+                            "--codex-root", str(base / "codex"))
+        self.assertIn("PreToolUse              0      2 (2)      1", plain)
+        self.assertNotIn("bash-validator", plain)
+
+
+class FieldCheckTest(unittest.TestCase):
+    """The sealed field check of the every-turn save, computed as written."""
+
+    setUp = ExplicitRetrieveTest.setUp
+
+    def check(self, *extra: str) -> Dict[str, Any]:
+        return json.loads(main_output("field-check", "--project", str(self.project), "--claude-root",
+                                      str(self.claude), "--codex-root", str(self.codex), "--json", *extra))
+
+    def test_the_counts_come_from_capsules_and_retrieves_together(self) -> None:
+        report = self.check("--min-turns", "1")
+        # Codex: the capsule's chunk opened in its turn, and the retrieve's
+        # chunk opened afterwards; its task record pointer opened in the turn.
+        self.assertEqual({"capsule_turns": 1, "knowledge_opened": 2, "task_records_opened": 1,
+                          "save_requests": 0, "save_share": None}, report["hosts"]["codex"])
+        # Claude Code: no capsule, a retrieve's task record opened afterwards.
+        self.assertEqual((0, 0, 1), tuple(report["hosts"]["claude"][key] for key in (
+            "capsule_turns", "knowledge_opened", "task_records_opened")))
+        self.assertEqual({"ready": False, "counted": ["codex"], "outcome": {"codex": "report as is"}}, report["rule"])
+        self.assertEqual({"ok": 0, "error": 0, "not_found": 0, "blocked": 0}, report["claude_hooks"])
+        self.assertEqual({"claude": 0, "codex": 0}, report["no_capsule_turns"])
+        self.assertFalse(self.check()["rule"]["counted"])
+        # A Codex session whose refresh refused the capsule: a turn the rule
+        # does not count, named beside it.
+        refused = ("procedural: updated (85 documents)\nwarning: Capsule unavailable: Capsule profile must be full"
+                   " or navigation. No task context was assembled this turn; read the canonical sources directly.")
+        jsonl(self.codex / "2026" / "09" / "03" / "rollout-2.jsonl", [
+            {"timestamp": "2026-09-03T09:00:00Z", "type": "session_meta",
+             "payload": {"id": "y", "cwd": str(self.project)}},
+            codex_message("user", "Fix the export"),
+            {"timestamp": "2026-09-03T09:00:01Z", "type": "response_item", "payload": {
+                "type": "message", "role": "developer", "content": [{"type": "input_text", "text": refused}],
+                "internal_chat_message_metadata_passthrough": {"content_item_kinds": ["hooks.additional_context"]}}},
+        ])
+        again = self.check("--min-turns", "1")
+        self.assertEqual({"claude": 0, "codex": 1}, again["no_capsule_turns"])
+        self.assertEqual(1, again["hosts"]["codex"]["capsule_turns"])
+        printed = main_output("field-check", "--project", str(self.project), "--claude-root",
+                              str(self.claude), "--codex-root", str(self.codex))
+        self.assertIn("not ready", printed)
+        self.assertIn("prompt-hook turns whose refresh assembled no capsule: claude 0, codex 1", printed)
+
+    def test_the_rule_as_sealed(self) -> None:
+        def host(turns: int, knowledge: int, records: int, share: Optional[float]) -> Dict[str, Any]:
+            return {"capsule_turns": turns, "knowledge_opened": knowledge, "task_records_opened": records,
+                    "save_requests": 10, "save_share": share}
+
+        ab = memory_eval.field_rule({"claude": host(60, 0, 3, 0.25), "codex": host(70, 0, 5, 0.1)}, 50)
+        self.assertEqual({"claude": "outcome A/B of the every-turn save on continuation tasks",
+                          "codex": "working-state path first"}, ab["outcome"])
+        self.assertTrue(ab["ready"])
+        # Knowledge opened on one host: no A/B, whatever the share.
+        mixed = memory_eval.field_rule({"claude": host(60, 1, 3, 0.4), "codex": host(70, 0, 0, 0.4)}, 50)
+        self.assertEqual({"claude": "report as is", "codex": "report as is"}, mixed["outcome"])
+        # A host below the threshold is left out of the rule.
+        short = memory_eval.field_rule({"claude": host(10, 2, 0, 0.4), "codex": host(70, 0, 0, 0.3)}, 50)
+        self.assertEqual((False, ["codex"]), (short["ready"], short["counted"]))
+        self.assertEqual({"codex": "outcome A/B of the every-turn save on continuation tasks"}, short["outcome"])
+
+
+class RenderTraceTest(unittest.TestCase):
+    """Which capsules the runtime rendered the transcripts show it handed
+    over: the runtime's own record against the host's."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        self.project = (base / "work" / "ledger").resolve()
+        self.project.mkdir(parents=True)
+        self.claude = base / "claude"
+        self.codex = base / "codex"
+        project = str(self.project)
+        handed = f"working: shop/fix-12 — Fix\n- memory {CHUNK} — Invoice rounding\n"
+        dropped = "working: shop/fix-12 — Fix\n- memory docs/billing.md — Billing\n"
+        answer = f"working: shop/fix-12 — Fix\n- memory {FINDING} — Rounding bug\n"
+        local = self.project / "memory-bank" / "local"
+
+        def trace(number: int, text: str, entry: str, created: str, items: List[str]) -> None:
+            identity = f"{number:08x}-1111-4222-8333-944455556666"
+            for folder in ("retrieval-traces", "retrieval-manifests"):
+                (local / folder).mkdir(parents=True, exist_ok=True)
+            (local / "retrieval-traces" / f"{identity}.json").write_text(json.dumps({
+                "id": identity, "created_at": created, "render": {
+                    "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "bytes": len(text),
+                    "form": "printed_capsule", "records": [{"path": path} for path in items]}}), encoding="utf-8")
+            (local / "retrieval-manifests" / f"{identity}.json").write_text(
+                json.dumps({"entry_point": entry}), encoding="utf-8")
+
+        trace(1, handed, "hook-context", "2026-09-02T10:00:01Z", [CHUNK])
+        # Rendered, then the hook's budget ran out: the host never got it.
+        trace(2, dropped, "refresh", "2026-09-02T10:30:00Z", ["docs/billing.md"])
+        trace(3, answer, "retrieve", "2026-09-02T10:02:00Z", [FINDING])
+        trace(4, "working: old — x\n", "refresh", "2026-08-01T00:00:00Z", [])
+        mangled = re.sub(r"[^A-Za-z0-9]", "-", project)
+        jsonl(self.claude / mangled / "session.jsonl", [
+            human("Fix the rounding", "2026-09-02T10:00:00Z"),
+            hook(f"{UNSAVED}\n{handed}", "2026-09-02T10:00:01Z", project),
+            {"type": "assistant", "timestamp": "2026-09-02T10:01:00Z", "message": {"id": "m1", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash",
+                 "input": {"command": "python3 memory-bank/scripts/context.py retrieve rounding"}}]}},
+            {"type": "user", "timestamp": "2026-09-02T10:02:00Z", "toolUseResult": {"stdout": answer},
+             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": answer}]}},
+            tool_use("Read", {"file_path": f"{project}/{CHUNK}"}),
+        ])
+
+    def realized(self, *extra: str) -> Dict[str, Any]:
+        return json.loads(main_output("realized", "--project", str(self.project), "--claude-root", str(self.claude),
+                                      "--codex-root", str(self.codex), "--json", *extra))
+
+    def test_renders_are_matched_to_what_the_host_recorded(self) -> None:
+        traces = self.realized("--since", "2026-09-01", "--traces")["traces"]
+        self.assertEqual(3, traces["traces"])
+        self.assertEqual({"handed": 1, "not_seen": 1}, traces["hook"])
+        self.assertEqual({"answered": 1, "not_seen": 0}, traces["retrieve"])
+        self.assertEqual({"capsules": 1, "with_trace": 1, "trace_items": 1, "trace_items_touched": 1},
+                         traces["hosts"]["claude"])
+        self.assertEqual(4, self.realized("--traces")["traces"]["traces"])
+        self.assertNotIn("traces", self.realized())
+
+    def test_the_text_report_names_no_path(self) -> None:
+        plain = main_output("realized", "--project", str(self.project), "--claude-root", str(self.claude),
+                            "--codex-root", str(self.codex), "--traces")
+        self.assertIn("hook renders never seen in a transcript: 2", plain)
+        for path in (CHUNK, FINDING, "docs/billing.md"):
+            self.assertNotIn(path, plain)
+
+
+class InstallStatusTest(unittest.TestCase):
+    """Whether memory can run in an installed project, from its own files.
+
+    Each check is a way memory went silent in the client projects."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.project = (Path(self.temporary.name) / "clients" / "ledger").resolve()
+
+    def write(self, relative: str, content: str) -> None:
+        path = self.project / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def healthy(self) -> None:
+        head = memory_eval.installer.source_commit(memory_eval.ROOT) or "0" * 40
+        self.write("memory-bank/local/accelerator-install.json", json.dumps(
+            {"edition": "Symfony", "release": "2.0.0", "source_commit": head, "synced_at": "2026-10-31T08:00:00+00:00"}))
+        self.write("project-brain/config/runtime.json", json.dumps({"capsule_profile": "recall"}))
+        self.write("memory-bank/scripts/brain_runtime.py",
+                   'CAPSULE_PROFILES = ("full", "navigation", "recall")\n\n\ndef automatic_capsule_profile():\n    pass\n')
+        self.write("CLAUDE.md", "# Ledger\n")
+        self.write(".claude/CLAUDE.md", "This project's policy lives in AGENTS.md.\n\n@../AGENTS.md\n")
+        self.write(".claude/settings.json", json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": '"${CLAUDE_PROJECT_DIR}"/.claude/hooks/working-memory-read.sh'}]}]}}))
+        self.write("AGENTS.md", "# Policy\n")
+        jsonl(self.project / "memory-bank/local/refresh-health.ndjson", [
+            {"at": "2026-10-31T09:00:00Z", "source": "hook", "hook_status": 0},
+            {"at": "2026-10-31T09:00:01Z", "source": "refresh", "host": "claude", "capsule": {"profile": "recall"}},
+        ])
+        jsonl(self.project / "memory-bank/local/native-results.ndjson", [
+            {"at": "2026-10-31T09:01:00Z", "host": "claude", "stage": "save", "event": "saved"}])
+
+    def status(self) -> Dict[str, Any]:
+        return memory_eval.project_install_status(self.project)
+
+    def test_a_project_where_memory_runs_shows_no_problem(self) -> None:
+        self.healthy()
+        status = self.status()
+        self.assertEqual([], status["problems"])
+        self.assertEqual(("this clone's commit", "built", "save:saved"),
+                         (status["clone"], status["last_capsule"], status["last_save_step"]))
+        self.assertEqual("own CLAUDE.md, AGENTS.md imported", status["claude_policy"])
+
+    def test_a_runtime_taken_back_that_refuses_the_profile_is_named(self) -> None:
+        # The Harness's sync of 2026-10-30: main's runtime, a recall profile.
+        self.healthy()
+        self.write("memory-bank/scripts/brain_runtime.py", 'CAPSULE_PROFILES = ("full", "navigation")\n')
+        jsonl(self.project / "memory-bank/local/refresh-health.ndjson", [
+            {"at": "2026-10-31T09:00:01Z", "source": "refresh", "host": "codex", "capsule": None}])
+        with mock.patch.object(memory_eval.installer, "installation_ahead", return_value="ahead"), \
+                mock.patch.object(memory_eval.installer, "source_commit", return_value="1" * 40):
+            status = self.status()
+        self.assertEqual("not in this clone (newer, or another line of work)", status["clone"])
+        self.assertIn("capsule_profile 'recall' is unknown to this project's runtime (full, navigation): "
+                      "every prompt goes without a capsule", status["problems"])
+        self.assertIn("the last prompt that asked for a capsule got none", status["problems"])
+        with mock.patch.object(memory_eval.installer, "installation_ahead", return_value=None), \
+                mock.patch.object(memory_eval.installer, "source_commit", return_value="1" * 40):
+            self.assertEqual("behind this clone", self.status()["clone"])
+
+    def test_claude_without_the_policy_and_hooks_found_only_from_the_root_are_named(self) -> None:
+        self.healthy()
+        self.write(".claude/CLAUDE.md", "# Team notes\n")
+        self.write(".claude/settings.json", json.dumps({"hooks": {"PreToolUse": [{"hooks": [
+            {"type": "command", "command": "bash .claude/hooks/bash-validator.sh"},
+            {"type": "command", "command": ".claude/hooks/loop-detection.sh"}]}]}}))
+        problems = self.status()["problems"]
+        self.assertTrue(any("no AGENTS.md" in problem for problem in problems), problems)
+        self.assertTrue(any(problem.startswith("2 Claude Code hook command(s)") for problem in problems), problems)
+
+    def test_the_command_exits_non_zero_on_a_problem_and_prints_no_record_text(self) -> None:
+        self.healthy()
+        self.write("project-brain/dynamic/findings/f.md", "invoice rounding for ACME\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, memory_eval.main(["install-status", "--project", str(self.project)]))
+        self.write("memory-bank/scripts/brain_runtime.py", 'CAPSULE_PROFILES = ("full", "navigation")\n')
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            code = memory_eval.main(["install-status", "--project", str(self.project), "--json"])
+        self.assertEqual(1, code)
+        self.assertNotIn("ACME", printed.getvalue())
+        self.assertIn("ledger", json.loads(printed.getvalue())["projects"])
+
+
+class FunnelTest(unittest.TestCase):
+    def test_capture_decisions_are_distinct_from_persistence_and_repeats(self):
+        counts = memory_eval.Counter(); reasons = {}
+        empty = {'stage': 'save', 'event': 'saved', 'learnings': 0, 'promoted': 0,
+                 'submitted': 0, 'existing': 0, 'held': 0}
+        selected = {**empty, 'capture_decision': 'selected', 'submitted': 1, 'learnings': 1}
+        for row in (selected, {**selected, 'event': 'held', 'learnings': 0, 'held': 1},
+                    {**selected, 'code': 'repeat'},
+                    {**empty, 'capture_decision': 'no_reusable_knowledge'},
+                    {**empty, 'capture_decision': 'insufficiently_checked'}, empty,
+                    {**empty, 'capture_decision': 'unexpected private text'},
+                    {**selected, 'capture_decision': 'no_reusable_knowledge'},
+                    {**selected, 'event': 'refused'}):
+            memory_eval.native_step(counts, reasons, row)
+        summary = memory_eval.native_summary(counts, reasons)
+        self.assertEqual((2, 1, 1, 3), tuple(summary[key] for key in (
+            'capture_selected', 'capture_no_reusable_knowledge', 'capture_insufficiently_checked', 'capture_unknown')))
+        self.assertEqual(1, summary['learnings_held'])
+        self.assertEqual(1, summary['refused'])
+        self.assertNotIn('private text', json.dumps(summary))
+
+    def test_selection_counters_keep_legacy_unknown_and_do_not_count_exact_replay_twice(self):
+        counts=memory_eval.Counter();reasons={}
+        for row in [
+            {'stage':'save','event':'saved','learnings':0,'promoted':0},
+            {'stage':'save','event':'saved','learnings':0,'promoted':0,'submitted':0,'existing':0,'held':0},
+            {'stage':'save','event':'saved','learnings':0,'promoted':0,'submitted':1,'existing':1,'held':0},
+            {'stage':'save','event':'saved','code':'repeat','submitted':1,'existing':1,'held':0},
+        ]:memory_eval.native_step(counts,reasons,row)
+        self.assertEqual((2,1),(counts['selection_observed'],counts['selection_unknown']))
+        self.assertEqual((1,1,0),(counts['learnings_submitted'],counts['learnings_existing'],counts['learnings_held']))
+
+    def test_impossible_selection_counts_remain_unknown(self):
+        counts=memory_eval.Counter()
+        for row in ({'submitted':0,'existing':3,'held':3,'learnings':0},
+                    {'submitted':1,'existing':0,'held':0,'learnings':False}):
+            memory_eval.native_step(counts,{},dict(stage='save',event='saved',**row))
+        self.assertEqual(2,counts['selection_unknown']);self.assertEqual(0,counts['selection_observed'])
+        self.assertEqual(0,counts['learnings_submitted']);self.assertEqual(0,counts['learnings_existing'])
+
+    """The memory funnel of several projects, from their journals alone."""
+
+    SECRET = "invoice rounding for ACME"
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        base = Path(self.temporary.name)
+        self.ledger = (base / "clients" / "ledger").resolve()
+        self.shop = (base / "clients" / "shop").resolve()
+
+        def shape(profile: Optional[str], working: bool, recent: int, documents: int, tokens: int,
+                  ticket: int = 0) -> Dict[str, Any]:
+            return {"profile": profile, "working": working, "recent_files": recent, "ticket_files": ticket,
+                    "documents": documents, "tokens": tokens}
+
+        jsonl(self.ledger / "memory-bank/local/refresh-health.ndjson", [
+            # Before --since.
+            {"at": "2026-09-30T10:00:00Z", "hook_status": 0, "source": "hook"},
+            {"at": "2026-10-02T10:00:00Z", "hook_status": 0, "source": "hook"},
+            {"at": "2026-10-02T10:00:01Z", "source": "refresh", "query": self.SECRET,
+             "capsule": shape("recall", True, 3, 2, 400)},
+            {"at": "2026-10-02T11:00:00Z", "hook_status": 124, "source": "hook"},
+            {"at": "2026-10-02T11:00:01Z", "source": "refresh",
+             "capsule": shape("recall", True, 0, 0, 200)},
+            {"at": "2026-10-02T12:00:00Z", "hook_status": 1, "source": "hook"},
+            # A runtime before the shape was recorded.
+            {"at": "2026-10-02T12:00:01Z", "source": "refresh"},
+        ])
+        jsonl(self.ledger / "memory-bank/local/native-results.ndjson", [
+            {"at": "2026-10-02T10:00:00Z", "host": "claude", "stage": "prompt", "event": "armed"},
+            {"at": "2026-10-02T10:01:00Z", "host": "claude", "stage": "stop", "event": "requested"},
+            {"at": "2026-10-02T10:01:30Z", "host": "claude", "stage": "save", "event": "saved",
+             "learnings": 2, "promoted": 1},
+            {"at": "2026-10-02T11:01:00Z", "host": "codex", "stage": "stop", "event": "requested"},
+            {"at": "2026-10-02T11:01:30Z", "host": "codex", "stage": "save", "event": "refused",
+             "code": "memory-result-v1:unverified"},
+        ])
+        for folder, names in (("project-brain/dynamic/tasks", ("a.md", "b.md")),
+                              ("project-brain/archive/finding", ("f.md",)),
+                              ("memory-bank/chunks", ("MEM-20261002-0a1b2c3d-rounding.md",))):
+            for name in names:
+                path = self.ledger / folder / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(self.SECRET + "\n", encoding="utf-8")
+        jsonl(self.shop / "memory-bank/local/refresh-health.ndjson", [
+            {"at": "2026-10-03T09:00:00Z", "hook_status": 0, "source": "hook"},
+            {"at": "2026-10-03T09:00:01Z", "source": "hook-context",
+             "capsule": shape("navigation", False, 5, 0, 300, ticket=2)},
+        ])
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def funnel(self, *extra: str) -> Dict[str, Any]:
+        return json.loads(main_output("funnel", "--project", str(self.ledger), "--project", str(self.shop),
+                                      "--since", "2026-10-01", "--json", *extra))
+
+    def test_the_median_capsule_size_counts_what_it_printed(self) -> None:
+        # The estimate counts documents only: a capsule of working state and
+        # recent files reads 0 tokens and printed them all the same.
+        printed = Path(self.temporary.name) / "clients" / "printed"
+
+        def line(minute: int, documents: int, tokens: int, size: int, host: str = "codex") -> Dict[str, Any]:
+            return {"at": f"2026-10-04T09:{minute:02d}:01Z", "source": "refresh", "host": host, "capsule": {
+                "profile": "recall", "working": True, "recent_files": 4, "ticket_files": 0,
+                "documents": documents, "tokens": tokens, "bytes": size}}
+
+        jsonl(printed / "memory-bank/local/refresh-health.ndjson",
+              [line(0, 0, 0, 610), line(5, 1, 300, 1730, "cli"), line(9, 0, 0, 650)])
+        project = json.loads(main_output("funnel", "--project", str(printed), "--json"))["projects"]["printed"]
+        self.assertEqual((0, 650), (project["median_tokens"], project["median_bytes"]))
+        # The host that asked; a line before the runtime said is unknown.
+        self.assertEqual({"claude": 0, "codex": 2, "cursor": 0, "cli": 1, "unknown": 0}, project["hosts"])
+        self.assertEqual(4, self.funnel()["total"]["hosts"]["unknown"])
+        self.assertNotIn("bytes", project)
+        self.assertIsNone(self.funnel()["total"]["median_bytes"])
+        plain = main_output("funnel", "--project", str(printed))
+        self.assertIn("median bytes printed", plain)
+        self.assertIn("capsules by host: claude 0, codex 2, cursor 0, cli 1, unknown 0", plain)
+
+    def test_each_stage_is_counted_per_project_and_in_total(self) -> None:
+        report = self.funnel()
+        self.assertEqual(["ledger", "shop"], list(report["projects"]))
+        ledger, shop, total = report["projects"]["ledger"], report["projects"]["shop"], report["total"]
+        self.assertEqual((3, 1, 1), (ledger["hook_runs"], ledger["hook_timeouts"], ledger["hook_failures"]))
+        self.assertEqual((3, 2, 2, 1, 1), (ledger["capsules"], ledger["shaped"], ledger["with_working"],
+                                           ledger["with_recent_files"], ledger["with_documents"]))
+        self.assertEqual(300, ledger["median_tokens"])
+        self.assertEqual({"full": 0, "navigation": 0, "recall": 2, "unknown": 1}, ledger["profiles"])
+        self.assertEqual((1, 2, 1, 1), (ledger["armed"], ledger["requested"], ledger["made"], ledger["refused"]))
+        self.assertEqual((2, 1), (ledger["learnings_written"], ledger["chunks_promoted"]))
+        self.assertEqual((2, 1, 1), (ledger["task_records"], ledger["findings_decisions"], ledger["bank_chunks"]))
+        self.assertEqual((1, 1, 0), (shop["capsules"], shop["with_recent_files"], shop["with_working"]))
+        self.assertEqual((0, 1), (ledger["with_ticket_files"], shop["with_ticket_files"]))
+        self.assertFalse(shop["save_journal"])
+        self.assertEqual(4, total["hook_runs"])
+        self.assertEqual(300, total["median_tokens"])
+        self.assertEqual({"full": 0, "navigation": 1, "recall": 2, "unknown": 1}, total["profiles"])
+        self.assertEqual({"save refused": {"memory-result-v1:unverified": 1}}, total["save_reasons"])
+
+    def test_a_capsule_asked_for_and_not_built_is_not_counted_as_one(self) -> None:
+        # Four projects went without a capsule on every prompt after a sync put
+        # them on a runtime that refused their profile; a runtime that writes
+        # no shape then made each turn read as a capsule built.
+        refused = Path(self.temporary.name) / "clients" / "refused"
+        jsonl(refused / "memory-bank/local/refresh-health.ndjson", [
+            {"at": "2026-10-31T09:00:00Z", "hook_status": 0, "source": "hook"},
+            {"at": "2026-10-31T09:00:01Z", "source": "refresh", "host": "claude", "capsule": None},
+            {"at": "2026-10-31T09:05:00Z", "hook_status": 0, "source": "hook"},
+            {"at": "2026-10-31T09:05:01Z", "source": "refresh", "host": "claude", "capsule": None},
+            # A runtime before the shape: still a capsule built, of unknown shape.
+            {"at": "2026-10-31T09:09:01Z", "source": "refresh"},
+        ])
+        project = json.loads(main_output("funnel", "--project", str(refused), "--json"))["projects"]["refused"]
+        self.assertEqual((2, 2, 1, 0), (project["hook_runs"], project["no_capsule"], project["capsules"],
+                                        project["shaped"]))
+        self.assertEqual(0, self.funnel()["total"]["no_capsule"])
+        self.assertIn("capsules asked for, none built", main_output("funnel", "--project", str(refused)))
+
+    def test_the_window_bounds_the_journals_not_what_the_project_keeps(self) -> None:
+        everything = json.loads(main_output("funnel", "--project", str(self.ledger), "--json"))
+        self.assertEqual(4, everything["projects"]["ledger"]["hook_runs"])
+        self.assertEqual(2, everything["projects"]["ledger"]["task_records"])
+        self.assertEqual(2, self.funnel()["projects"]["ledger"]["task_records"])
+
+    def test_no_path_query_or_record_text_leaves_the_machine(self) -> None:
+        for output in (main_output("funnel", "--project", str(self.ledger), "--project", str(self.shop)),
+                       json.dumps(self.funnel())):
+            self.assertNotIn(self.SECRET, output)
+            self.assertNotIn(str(self.ledger.parent), output)
+            self.assertNotIn("MEM-20261002", output)
+        plain = main_output("funnel", "--project", str(self.ledger), "--project", str(self.shop))
+        for row in ("prompt hook runs", "capsules built", "saves made", "bank chunks", "capsules by profile"):
+            self.assertIn(row, plain)
+        self.assertIn("no save journal", plain)
+
+    def test_two_folders_with_one_name_keep_two_columns(self) -> None:
+        twin = (Path(self.temporary.name) / "other" / "ledger").resolve()
+        twin.mkdir(parents=True)
+        report = json.loads(main_output("funnel", "--project", str(self.ledger), "--project", str(twin), "--json"))
+        self.assertEqual(["ledger", "ledger'"], list(report["projects"]))
+
+    def test_a_missing_folder_is_refused(self) -> None:
+        with self.assertRaises(AssertionError):
+            main_output("funnel", "--project", str(Path(self.temporary.name) / "absent"))
 
 
 class OptionalRuntimeDeadlineTests(unittest.TestCase):
@@ -2417,6 +3221,185 @@ class OptionalRuntimeDeadlineTests(unittest.TestCase):
         result = memory_eval.run_runtime(self.corpus, ["refresh", "--json"], self.env, 1)
         self.assertEqual(0, result["exit"])
         self.assertEqual(["refresh", "--json"], json.loads(result["stdout"]))
+
+
+class SaveContinuationCostTest(unittest.TestCase):
+    """What the Stop hook's save request after every answer costs, read from
+    the transcripts: the journal counts requests, only a transcript has the
+    time and the tokens."""
+
+    TOKEN = "INTERNAL_NATIVE_MEMORY_RESULT 0123456789abcdef0123456789abcdef"
+
+    def write_lines(self, records: List[Dict[str, Any]]) -> Path:
+        directory = tempfile.TemporaryDirectory(prefix="continuation-cost-")
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "session.jsonl"
+        path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        return path
+
+    @staticmethod
+    def at(seconds: int) -> str:
+        return f"2026-10-23T10:{seconds // 60:02d}:{seconds % 60:02d}.000Z"
+
+    def test_a_codex_request_costs_the_time_and_tokens_to_the_next_prompt(self) -> None:
+        def message(seconds: int, role: str, text: str) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "response_item",
+                    "payload": {"type": "message", "role": role, "content": [{"type": "input_text", "text": text}]}}
+
+        def tokens(seconds: int, output: int) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": {"output_tokens": output}}}}
+
+        path = self.write_lines([
+            tokens(0, 100), message(1, "user", "Where is the report cache cleared?"),
+            message(15, "assistant", "In ReportService."), tokens(20, 700),
+            message(21, "user", self.TOKEN + "\nThis is an internal continuation"),
+            message(25, "assistant", "Saved; the cache is cleared in ReportService."), tokens(31, 1100),
+            message(40, "user", "Next question"), message(45, "assistant", "Mentions " + self.TOKEN),
+            tokens(46, 1300),
+        ])
+        [cost] = memory_eval.continuation_costs(path, "codex")
+        self.assertEqual({"answer_seconds": 20.0, "answer_output_tokens": 600, "ending": "earlier",
+                          "save_seconds": 10.0, "save_output_tokens": 400}, cost)
+
+    def test_a_claude_request_counts_each_response_once(self) -> None:
+        def assistant(seconds: int, identifier: str, output: int) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "assistant",
+                    "message": {"id": identifier, "role": "assistant", "content": [{"type": "text", "text": "x"}],
+                                "usage": {"output_tokens": output}}}
+
+        path = self.write_lines([
+            {"timestamp": self.at(0), "type": "user", "message": {"role": "user", "content": "Explain the import"}},
+            assistant(10, "msg-1", 500), assistant(11, "msg-1", 500),
+            {"timestamp": self.at(12), "type": "attachment",
+             "attachment": {"type": "hook_blocking_error", "hookEvent": "Stop", "blockingError": self.TOKEN}},
+            assistant(18, "msg-2", 300), assistant(19, "msg-2", 300),
+            {"timestamp": self.at(30), "type": "user", "message": {"role": "user", "content": "Thanks"}},
+        ])
+        [cost] = memory_eval.continuation_costs(path, "claude")
+        self.assertEqual({"answer_seconds": 12.0, "answer_output_tokens": 500, "ending": "earlier",
+                          "save_seconds": 7.0, "save_output_tokens": 300}, cost)
+        summary = memory_eval.continuation_summary([cost])
+        self.assertEqual((1, 0.58), (summary["requests"], summary["time_share"]))
+        self.assertEqual({"requests": 0}, memory_eval.continuation_summary([]))
+        self.assertIn("1 request(s): +7.0 s and +300 output tokens",
+                      "\n".join(memory_eval.format_continuations({"claude": summary,
+                                                                   "codex": memory_eval.continuation_summary([])})))
+        self.assertNotIn("endings", summary)
+
+    def test_a_claude_request_sent_as_hook_feedback_counts_once(self) -> None:
+        # Claude Code records a Stop hook's additionalContext three times at
+        # one instant: the hook's stdout, the context it hands the model, and
+        # the summary a person sees. It is one request.
+        def assistant(seconds: int, identifier: str, output: int) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "assistant",
+                    "message": {"id": identifier, "role": "assistant", "content": [{"type": "text", "text": "x"}],
+                                "usage": {"output_tokens": output}}}
+
+        step = ("This is an internal continuation. The person has already read your answer above this "
+                "continuation: after a successful save or skip, do not repeat it.\n" + self.TOKEN)
+        stdout = json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": step}})
+        path = self.write_lines([
+            {"timestamp": self.at(0), "type": "user", "message": {"role": "user", "content": "Explain the import"}},
+            assistant(10, "msg-1", 500),
+            {"timestamp": self.at(11), "type": "attachment",
+             "attachment": {"type": "hook_success", "hookEvent": "Stop", "stdout": stdout, "exitCode": 0}},
+            {"timestamp": self.at(11), "type": "attachment",
+             "attachment": {"type": "hook_additional_context", "hookEvent": "Stop", "content": [step]}},
+            {"timestamp": self.at(11), "type": "system", "subtype": "stop_hook_summary", "hookErrors": [],
+             "hookAdditionalContext": [step]},
+            assistant(14, "msg-2", 60),
+            {"timestamp": self.at(30), "type": "user", "message": {"role": "user", "content": "Thanks"}},
+        ])
+        [cost] = memory_eval.continuation_costs(path, "claude")
+        self.assertEqual({"answer_seconds": 11.0, "answer_output_tokens": 500, "ending": "brief",
+                          "save_seconds": 3.0, "save_output_tokens": 60}, cost)
+
+    def test_requests_are_told_apart_by_how_they_ask_to_end(self) -> None:
+        def message(seconds: int, role: str, text: str) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "response_item",
+                    "payload": {"type": "message", "role": role, "content": [{"type": "input_text", "text": text}]}}
+
+        def tokens(seconds: int, output: int) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": {"output_tokens": output}}}}
+
+        repeat = " After a successful save or skip, return the substantive answer to the original user request"
+        brief = " The person has already read your answer above this continuation: after a successful save"
+        path = self.write_lines([
+            message(0, "user", "Where is the report cache cleared?"), message(10, "assistant", "In ReportService."),
+            tokens(10, 300), message(11, "user", self.TOKEN + repeat),
+            message(20, "assistant", "In ReportService, as said."), tokens(21, 700),
+            message(30, "user", "And the import cache?"), message(40, "assistant", "In ImportService."),
+            tokens(40, 1000), message(41, "user", self.TOKEN + brief), tokens(44, 1100),
+            message(50, "user", "Thanks"),
+        ])
+        costs = memory_eval.continuation_costs(path, "codex")
+        self.assertEqual([("repeat", 400), ("brief", 100)], [(cost["ending"], cost["save_output_tokens"]) for cost in costs])
+        summary = memory_eval.continuation_summary(costs)
+        self.assertEqual({"brief": 1, "repeat": 1}, {name: part["requests"] for name, part in summary["endings"].items()})
+        text = "\n".join(memory_eval.format_continuations({"codex": summary}))
+        self.assertIn("brief:    1 request(s): +3.0 s and +100 output tokens", text)
+        self.assertIn("repeat:   1 request(s): +10.0 s and +400 output tokens", text)
+        counts = memory_eval.Counter()
+        for answer in ("brief", "repeat", None):
+            memory_eval.native_step(counts, {}, {"stage": "stop", "event": "requested",
+                                                 **({"answer": answer} if answer else {})})
+        self.assertEqual((3, 1), (counts["requested"], counts["requested_brief"]))
+
+    def test_a_codex_save_reads_its_input_and_cached_tokens(self) -> None:
+        def message(seconds: int, role: str, text: str) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "response_item",
+                    "payload": {"type": "message", "role": role, "content": [{"type": "input_text", "text": text}]}}
+
+        def tokens(seconds: int, output: int, inputs: int, cached: int) -> Dict[str, Any]:
+            usage = {"input_tokens": inputs, "cached_input_tokens": cached, "output_tokens": output}
+            return {"timestamp": self.at(seconds), "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": usage}}}
+
+        path = self.write_lines([
+            tokens(0, 100, 1000, 0), message(1, "user", "Where is the report cache cleared?"),
+            message(15, "assistant", "In ReportService."), tokens(20, 700, 41000, 30000),
+            message(21, "user", self.TOKEN + "\nThis is an internal continuation"),
+            message(25, "assistant", "Saved."), tokens(31, 1100, 141000, 120000),
+            message(40, "user", "Next question"),
+        ])
+        [cost] = memory_eval.continuation_costs(path, "codex")
+        self.assertEqual((400, 100000, 90000, 40000, 30000), (
+            cost["save_output_tokens"], cost["save_input_tokens"], cost["save_cached_input_tokens"],
+            cost["answer_input_tokens"], cost["answer_cached_input_tokens"]))
+        text = "\n".join(memory_eval.format_continuations({"codex": memory_eval.continuation_summary([cost])}))
+        self.assertIn("+400 output tokens (input 100000, 90000 cached, on 1) after an answer of 20.0 s"
+                      " and 600 tokens (input 40000, 30000 cached)", text)
+
+    def test_a_claude_save_counts_cache_reads_and_writes_as_input(self) -> None:
+        def assistant(seconds: int, identifier: str, output: int, fresh: int, read: int, written: int) -> Dict[str, Any]:
+            usage = {"output_tokens": output, "input_tokens": fresh, "cache_read_input_tokens": read,
+                     "cache_creation_input_tokens": written}
+            return {"timestamp": self.at(seconds), "type": "assistant",
+                    "message": {"id": identifier, "role": "assistant", "content": [{"type": "text", "text": "x"}],
+                                "usage": usage}}
+
+        path = self.write_lines([
+            {"timestamp": self.at(0), "type": "user", "message": {"role": "user", "content": "Explain the import"}},
+            assistant(10, "msg-1", 500, 10, 20000, 3000), assistant(11, "msg-1", 500, 10, 20000, 3000),
+            {"timestamp": self.at(12), "type": "attachment",
+             "attachment": {"type": "hook_blocking_error", "hookEvent": "Stop", "blockingError": self.TOKEN}},
+            assistant(18, "msg-2", 300, 5, 23000, 200),
+            {"timestamp": self.at(30), "type": "user", "message": {"role": "user", "content": "Thanks"}},
+        ])
+        [cost] = memory_eval.continuation_costs(path, "claude")
+        self.assertEqual((23010, 20000, 23205, 23000), (
+            cost["answer_input_tokens"], cost["answer_cached_input_tokens"],
+            cost["save_input_tokens"], cost["save_cached_input_tokens"]))
+
+    def test_an_armed_prompt_that_printed_no_warning_is_not_after_an_unsaved_one(self):
+        # A request moved aside while its save was written, or one the runtime
+        # could not read, arms the next prompt without the unsaved warning.
+        counts = memory_eval.Counter()
+        for code in (None, "previous-failed", "previous-in-flight", "previous-unreadable"):
+            memory_eval.native_step(counts, {}, {"stage": "prompt", "event": "armed", **({"code": code} if code else {})})
+        self.assertEqual((4, 1), (counts["armed"], counts["armed_after_incomplete"]))
 
 if __name__ == "__main__":
     unittest.main()

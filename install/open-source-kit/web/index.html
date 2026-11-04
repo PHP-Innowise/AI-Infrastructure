@@ -7,21 +7,6 @@
   <meta name="description" content="Explore the Open Source Kit catalog of skills, agents, hooks, and MCP tools. Read the evidence and choose what your project needs.">
   <meta name="color-scheme" content="light dark">
   <title>Open Source Kit — Tools for your agents</title>
-  <script>
-    // Inside the Harness (same origin) its theme choice applies, live; elsewhere the system theme does.
-    (() => {
-      if (window.self !== window.top) document.documentElement.dataset.embedded = 'true';
-      const system = window.matchMedia('(prefers-color-scheme: dark)');
-      const apply = () => {
-        let saved = null;
-        try { saved = localStorage.getItem('harness.theme.v1'); } catch (_) { /* Storage may be disabled. */ }
-        document.documentElement.dataset.theme = saved === 'light' || saved === 'dark' ? saved : system.matches ? 'dark' : 'light';
-      };
-      apply();
-      system.addEventListener('change',apply);
-      window.addEventListener('storage',event => { if (event.key === null || event.key === 'harness.theme.v1') apply(); });
-    })();
-  </script>
   <style>
     /* Colors live only in these two token sets: a rule that needs a new color adds it to both. */
     :root { color-scheme:light; --paper:#fff; --soft:#fafafa; --ink:#171717; --ink-2:#4f4f4f; --muted:#646464; --faint:#8a8a8a; --line:#e8e8e8; --line-strong:#ddd; --field-line:#d8d8d8; --dot:#929292; --purple:#6841c6; --focus:#7c55d9; --terminal:#171717; --on-terminal:#fff; --terminal-line:#292929; --terminal-muted:#a7a7a7; --terminal-divider:#4a4a4a; --risk:#8a5300; --risk-dot:#b77a08; --question:#875906; --question-dot:#aa7c24; --clear:#22723d; --clear-dot:#32834d; --shadow:#00000012; font-family:var(--font-sans); color:var(--ink); background:var(--paper); }
@@ -163,90 +148,6 @@
   </main>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script id="kit3-data" type="application/json">__KIT3_DATA__</script>
-  <script>
-    'use strict';
-    const resources = JSON.parse(document.getElementById('kit3-data').textContent);
-    const $ = id => document.getElementById(id);
-    const categories = { skills:'Skills', subagents:'Subagents', mcp:'MCP servers', hooks:'Hooks', marketplace:'Marketplaces', 'cli-tool':'CLI tools', 'discovery-index':'Discovery lists' };
-    const clients = { codex:'Codex', cursor:'Cursor', 'claude-code':'Claude Code' };
-    const reviews = { unreviewed:'Not reviewed', known_risks:'Known risks', open_questions:'Open questions', clear:'Reviewed · Clear' };
-    const svg = path => { const icon = document.createElementNS('http://www.w3.org/2000/svg','svg'); icon.setAttribute('viewBox','0 0 24 24'); icon.setAttribute('fill','none'); icon.setAttribute('stroke','currentColor'); icon.setAttribute('stroke-width','1.5'); icon.setAttribute('aria-hidden','true'); const p = document.createElementNS(icon.namespaceURI,'path'); p.setAttribute('d',path); icon.append(p); return icon; };
-    const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
-    const status = item => item.review_status || 'unreviewed';
-    const reviewLabel = item => el('span',`review ${status(item)}`,reviews[status(item)]);
-    const categoryLabel = item => categories[item.category] || item.category;
-    const clientLabel = item => (item.tool_compatibility || []).map(x => clients[x] || x).join(' · ') || 'Discovery only';
-    let toastTimer;
-    function notify(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; },4000); }
-    function terminal(command) {
-      const block = el('div','terminal'); const code = el('code'); const prompt = el('span','prompt','$'); prompt.setAttribute('aria-hidden','true'); code.append(prompt,document.createTextNode(command));
-      const copy = el('button','copy'); copy.type = 'button'; copy.setAttribute('aria-label','Copy command'); const icon = svg('M9 9h12v12H9z M15 6V3H3v12h3'); icon.classList.add('icon'); copy.append(icon,el('span','','Copy'));
-      copy.addEventListener('click',async () => { try { await navigator.clipboard.writeText(command); notify('Command copied. Run it in your terminal.'); } catch (_) { const range = document.createRange(); range.selectNodeContents(code.lastChild); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); notify('Clipboard unavailable. Copy the selected command manually.'); } });
-      block.append(code,copy); return block;
-    }
-    const sample = resources.find(item => item.id === 'obra-superpowers' && item.skills_source) || resources.find(item => item.skills_source);
-    $('hero-command').append(terminal(sample ? sample.command : './kit3 find'));
-    $('how-command').append(terminal('./kit3 --help'));
-    for (const value of [...new Set(resources.map(item => item.category))].sort()) { const option = el('option','',categories[value] || value); option.value = value; $('category').append(option); }
-    for (const value of [...new Set(resources.flatMap(item => item.tool_compatibility || []))].sort()) { const option = el('option','',clients[value] || value); option.value = value; $('client').append(option); }
-    function renderResources() {
-      const query = $('search').value.trim().toLowerCase();
-      const visible = resources.filter(item => (!query || [item.id,item.name,item.description,item.url].join(' ').toLowerCase().includes(query)) && (!$('category').value || item.category === $('category').value) && (!$('client').value || (item.tool_compatibility || []).includes($('client').value)) && (!$('review').value || status(item) === $('review').value));
-      visible.sort((a,b) => Number(Boolean(b.skills_source)) - Number(Boolean(a.skills_source)));
-      $('resources').replaceChildren();
-      for (const item of visible) {
-        const row = el('a','resource-row'); row.href = `#resource/${encodeURIComponent(item.id)}`;
-        const info = el('div','resource-info'); info.append(el('h2','resource-title',item.name),el('p','resource-description',item.description));
-        const arrow = svg('m9 5 7 7-7 7'); arrow.classList.add('row-arrow');
-        row.append(info,el('span','category',categoryLabel(item)),el('span','clients',clientLabel(item)),reviewLabel(item),arrow); $('resources').append(row);
-      }
-      $('result-count').textContent = `${visible.length} ${visible.length === 1 ? 'resource' : 'resources'}${visible.length !== resources.length ? ` of ${resources.length}` : ''}`;
-      $('empty').hidden = visible.length > 0;
-      $('reset').hidden = !query && !$('category').value && !$('client').value && !$('review').value;
-    }
-    function clearFilters() { $('filters').reset(); renderResources(); $('search').focus(); }
-    $('filters').addEventListener('submit',event => event.preventDefault());
-    document.querySelector('.skip').addEventListener('click',event => { event.preventDefault(); $('main').focus(); });
-    $('filters').addEventListener('input',renderResources);
-    $('reset').addEventListener('click',clearFilters); $('empty-reset').addEventListener('click',clearFilters);
-    function fact(list,title,value) { const group = el('div'); group.append(el('dt','',title),el('dd','',value || 'Not recorded')); list.append(group); }
-    function renderDetail(item) {
-      const view = $('detail-view'); view.replaceChildren();
-      const back = el('a','back','← Back to catalog'); back.href = '#'; view.append(back);
-      if (!item) { view.append(el('h1','','Resource not found'),el('p','detail-intro','This link does not match a resource in the current catalog.')); return; }
-      view.append(el('h1','',item.name),el('p','detail-intro',item.description));
-      const meta = el('div','detail-meta'); const upstream = el('a','external','View upstream'); upstream.href = item.url; upstream.target = '_blank'; upstream.rel = 'noopener noreferrer'; const arrow = svg('M7 17 17 7 M7 7h10v10'); arrow.classList.add('icon'); upstream.append(arrow); meta.append(el('span','category',categoryLabel(item)),reviewLabel(item),upstream); view.append(meta);
-      const grid = el('div','detail-grid'); const content = el('div'); const aside = el('aside');
-      content.append(el('h2','',item.skills_source ? 'Install skills' : 'Open the installation guide'),terminal(item.command));
-      content.append(el('p','subtle',item.skills_source ? 'Run from your Kit 3 checkout. Add --target /path/to/project to choose the project; otherwise it uses the current directory. Use --agent cursor or --agent claude-code for another client. This path installs skills only, not the upstream plugin or hooks.' : 'This resource uses a manual installation path. The command opens its guide; it does not install the resource.'));
-      content.append(el('h3','','Upstream installation guidance'),el('pre','guidance',item.install_guidance));
-      const review = el('section','review-section'); review.append(el('h2','','Review & evidence'));
-      review.append(el('p','',item.dossier ? item.dossier.status_summary : 'No registry review is recorded for this resource. Its catalog description and compatibility are reference information, not an approval.'));
-      if (item.risk_notes) { review.append(el('h3','','Catalog notes'),el('p','',item.risk_notes)); }
-      if (item.dossier) {
-        for (const [name,gate] of Object.entries(item.dossier.binary_gates)) {
-          const details = el('details','gate'); const summary = el('summary','',name.replaceAll('_',' ')); summary.append(el('span','gate-status',gate.status === 'unknown' ? 'Open question' : gate.status === 'fail' ? 'Risk recorded' : 'Passed'));
-          details.append(summary,el('p','',gate.evidence)); if (gate.resolves_by) { details.append(el('h3','','What would resolve it'),el('p','',gate.resolves_by)); } review.append(details);
-        }
-      }
-      content.append(review);
-      aside.append(el('h2','','Resource details')); const facts = el('dl','facts');
-      fact(facts,'Supported clients',clientLabel(item)); fact(facts,'Install method',item.install_type); fact(facts,'License',item.license || 'Not confirmed — check upstream'); fact(facts,'Automation',item.automation_depth); fact(facts,'Context footprint',item.token_footprint); fact(facts,'Catalog reviewed',item.reviewed_date); fact(facts,'Command checked',item.command_verified_date);
-      if (item.dossier) { fact(facts,'Registry reviewed',item.dossier.reviewed_date); fact(facts,'Review scope',item.dossier.reviewed_by); }
-      aside.append(facts); grid.append(content,aside); view.append(grid);
-    }
-    function route(focus = true) {
-      const hash = window.location.hash.slice(1); const detail = hash.startsWith('resource/'); const how = hash === 'how-it-works';
-      $('catalog-view').hidden = detail || how; $('detail-view').hidden = !detail; $('how-view').hidden = !how;
-      $('catalog-nav').toggleAttribute('aria-current',!how); if (!how) $('catalog-nav').setAttribute('aria-current','page');
-      $('how-nav').toggleAttribute('aria-current',how); if (how) $('how-nav').setAttribute('aria-current','page');
-      let item;
-      if (detail) { let id; try { id = decodeURIComponent(hash.slice(9)); } catch (_) { id = ''; } item = resources.find(resource => resource.id === id); renderDetail(item); }
-      document.title = `${detail ? item ? item.name : 'Resource not found' : how ? 'How it works' : 'Tools for your agents'} — Open Source Kit`;
-      if (focus && hash !== 'main') { $('main').focus({preventScroll:true}); window.scrollTo({top:0,behavior:'instant'}); }
-    }
-    window.addEventListener('hashchange',() => route());
-    renderResources(); route(false);
-  </script>
+  <script type="module" src="/boot.js"></script>
 </body>
 </html>

@@ -8,8 +8,6 @@
     "allow": [
       "Read(**)",
       "Edit(**)",
-      "Write(**)",
-      "Glob(**)",
       "Grep(**)",
       "Bash(php:*)",
       "Bash(composer:*)",
@@ -23,9 +21,8 @@
       "Bash(vendor/bin/rector:*)",
       "Bash(vendor/bin/phpbench:*)",
       "Bash(git:*)",
-      "Bash(python3 memory-bank/scripts/context.py:*)",
-      "Bash(python memory-bank/scripts/context.py:*)",
-      "Bash(py -3 memory-bank/scripts/context.py:*)",
+      "Bash(memory-bank/bin/infra-engine memory:*)",
+      "Bash(memory-bank/bin/infra-engine.exe memory:*)",
       "Bash(gh:*)",
       "Bash(ls:*)",
       "Bash(mkdir:*)",
@@ -63,8 +60,6 @@
       "Read(.env.*)",
       "Edit(.env)",
       "Edit(.env.*)",
-      "Write(.env)",
-      "Write(.env.*)",
       "Read(./secrets/**)",
       "Bash(rm -rf:*)",
       "Bash(sudo:*)",
@@ -77,12 +72,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/local-context.sh",
+            "command": "memory-bank/bin/infra-engine hook claude local-context --root .",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/context-continuity.sh",
+            "command": "memory-bank/bin/infra-engine hook claude context-continuity --root .",
             "timeout": 8
           }
         ]
@@ -93,12 +88,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/working-memory-read.sh",
+            "command": "memory-bank/bin/infra-engine hook claude working-memory-read --root .",
             "timeout": 8
           },
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/context-continuity.sh",
+            "command": "memory-bank/bin/infra-engine hook claude context-continuity --root .",
             "timeout": 8
           }
         ]
@@ -109,12 +104,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/working-memory-write.sh",
+            "command": "memory-bank/bin/infra-engine hook claude working-memory-write --root .",
             "timeout": 8
           },
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/context-continuity.sh",
+            "command": "memory-bank/bin/infra-engine hook claude context-continuity --root .",
             "timeout": 8
           }
         ]
@@ -126,7 +121,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/subagent-gate.sh",
+            "command": "memory-bank/bin/infra-engine hook claude subagent-gate --root .",
             "timeout": 5
           }
         ]
@@ -136,7 +131,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/file-naming-validator.sh",
+            "command": "memory-bank/bin/infra-engine hook claude file-naming-validator --root .",
             "timeout": 5
           }
         ]
@@ -146,7 +141,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/bash-validator.sh",
+            "command": "memory-bank/bin/infra-engine hook claude bash-validator --root .",
             "timeout": 5
           }
         ]
@@ -158,7 +153,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/loop-detection.sh",
+            "command": "memory-bank/bin/infra-engine hook claude loop-detection --root .",
             "timeout": 5
           }
         ]
@@ -168,7 +163,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/subagent-dispatch.sh",
+            "command": "memory-bank/bin/infra-engine hook claude subagent-dispatch --root .",
             "timeout": 5
           }
         ]
@@ -179,7 +174,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/subagent-dispatch.sh",
+            "command": "memory-bank/bin/infra-engine hook claude subagent-dispatch --root .",
             "timeout": 8
           }
         ]
@@ -190,7 +185,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "case \"$(uname -s)\" in Darwin) osascript -e 'display notification \"Claude needs your attention\" with title \"Claude Code\"' 2>/dev/null || echo 'Claude Code notification';; Linux) notify-send 'Claude Code' 'Claude needs your attention' 2>/dev/null || echo 'Claude Code notification';; *) echo 'Claude Code notification';; esac",
+            "command": "memory-bank/bin/infra-engine hook claude notification --root .",
             "timeout": 5
           }
         ]

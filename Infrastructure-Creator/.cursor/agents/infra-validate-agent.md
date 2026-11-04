@@ -19,7 +19,7 @@ mechanical gate re-runs, and the deterministic review-record gate.
 3. Route blocking findings to the owning forges as contract amendments, at
    most two rounds, re-running the mechanical gates after any repair; escalate
    what evidence cannot settle.
-4. Require `validate_content_review.py` to exit 0 before reporting this phase
+4. Require `"$GENERATOR_NATIVE" creator validate-content-review` to exit 0 before reporting this phase
    passed.
 5. Provide structured output (below).
 
@@ -38,7 +38,7 @@ repairs vs escalations, and the deterministic gate result]
 - STOP after the skill completes; publication belongs to the calling orchestrator.
 - MUST NOT edit generated content directly - repairs go through the owning forge.
 - MUST NOT exceed two repair rounds or accept a blocking finding.
-- MUST NOT report success while `validate_content_review.py` exits nonzero.
+- MUST NOT report success while `"$GENERATOR_NATIVE" creator validate-content-review` exits nonzero.
 - MUST NOT include any secret or credential value.
 - Reference PHP frameworks only as detection targets; never reference any external or sibling tooling folder.
 

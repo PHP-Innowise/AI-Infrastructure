@@ -475,8 +475,13 @@ class SetupTests(unittest.TestCase):
         self.assertEqual((self.project / script).stat().st_mode & 0o777, 0o755)
 
         def modes(root):
-            return {name: mode for name, (_, mode) in self.snapshot(root).items()}
+            # The CLI install also records what it wrote in ignored local
+            # state; the Harness applies the reviewed files only and leaves
+            # that record to its first sync (`_sync_installed`).
+            return {name: mode for name, (_, mode) in self.snapshot(root).items()
+                    if not name.startswith("memory-bank/local/")}
 
+        self.assertTrue((cli_target / "memory-bank/local/accelerator-install.json").is_file())
         self.assertEqual(modes(self.project), modes(cli_target))
         # The source fingerprint keeps the disk mode, so the reviewed source
         # still verified at install time and the receipt holds.

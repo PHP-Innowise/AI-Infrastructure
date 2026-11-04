@@ -1,0 +1,12 @@
+You are optimizing a repository skill description for {platform.display_name}. The skill is called "{skill_name}". A skill uses progressive disclosure: the platform sees its name and description when deciding whether to select it, then loads SKILL.md and any referenced resources only after selection.
+
+The description is the primary discovery contract. Your goal is to trigger for relevant user intent without triggering for adjacent or unrelated work.
+
+Here's the current description:
+<current_description>
+"{current_description}"
+</current_description>
+
+Current scores ({scores_summary}):
+<scores_summary>
+

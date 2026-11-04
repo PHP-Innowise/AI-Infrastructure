@@ -1,8 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Shell(python3:memory-bank/scripts/context.py*)",
-      "Shell(python:memory-bank/scripts/context.py*)"
+      "Shell(memory-bank/bin/infra-engine:memory *)",
+      "Shell(./memory-bank/bin/infra-engine:memory *)",
+      "Shell(memory-bank/bin/infra-engine.exe:memory *)",
+      "Shell(./memory-bank/bin/infra-engine.exe:memory *)"
     ],
     "deny": []
   }

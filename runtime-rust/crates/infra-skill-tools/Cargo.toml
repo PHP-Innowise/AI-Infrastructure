@@ -1,0 +1,34 @@
+[package]
+name = "infra-skill-tools"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+license = "Apache-2.0"
+
+[features]
+default = ["onnx"]
+onnx = ["infra-eval/onnx"]
+
+[dependencies]
+infra-core = { path = "../infra-core" }
+infra-eval = { path = "../infra-eval", default-features = false }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["preserve_order"] }
+serde_yaml = "0.9"
+regex = "1"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+base64 = "0.22"
+chrono = "=0.4.45"
+uuid = { version = "=1.22.0", features = ["v4"] }
+libc = "=0.2.191"
+infra-qa = { path = "../infra-qa" }
+tiny_http = "0.12"
+xmltree = "0.11"
+
+infra-tooling = { path = "../infra-tooling" }
+
+ooxml-numfmt = { path = "../../vendor/ooxml-numfmt", version = "=0.2.3", default-features = false }
+
+[dev-dependencies]
+tempfile = "=3.27.0"

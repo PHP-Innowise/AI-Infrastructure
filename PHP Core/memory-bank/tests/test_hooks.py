@@ -967,8 +967,11 @@ class WorkingMemoryRuleTest(unittest.TestCase):
         for hook in self.RENDER_HOOKS:
             with self.subTest(hook=hook):
                 text = hook_path("cursor", hook).read_text(encoding="utf-8")
-                self.assertNotIn("date -u", text)
                 logical = text.replace("\\\n", " ")
+                # The one clock allowed stamps the Stop hook's line in the
+                # native result journal, a local file no rule is made from.
+                self.assertEqual([], [line for line in logical.splitlines()
+                                      if "date -u" in line and "native-results.ndjson" not in line])
                 capsule_calls = [
                     line
                     for line in logical.splitlines()
@@ -1295,8 +1298,9 @@ class PythonResolutionTest(unittest.TestCase):
                 self.stand_in(name, f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
         return {"OS": "Windows_NT", "PATH": str(self.bin) + os.pathsep + self.without_python()}
 
-    def run_hook(self, tool: str, name: str, env: dict, payload=None, runtime="context.py"):
-        """``name`` against a runtime stand-in that records its arguments."""
+    def run_hook(self, tool: str, name: str, env: dict, payload=None, runtime="context.py", status=None):
+        """``name`` against a runtime stand-in that records its arguments;
+        ``status`` is what its `status --json` answers."""
         project = self.root / tool
         hooks = project / MIRRORS[tool][0]
         hooks.mkdir(parents=True, exist_ok=True)
@@ -1308,7 +1312,7 @@ class PythonResolutionTest(unittest.TestCase):
             "import json, pathlib, sys\n"
             f"pathlib.Path({str(argv_file)!r}).write_text(json.dumps(sys.argv[1:]))\n"
             "if sys.argv[1:2] == ['status']:\n"
-            "    print(json.dumps({'mode': 'governed', 'working': 0, 'documents': 3, 'database': ''}))\n"
+            f"    print(json.dumps({status or {'mode': 'governed', 'working': 0, 'documents': 3, 'database': ''}!r}))\n"
             "else:\n"
             "    print('working: TASK-INPUT')\n",
             encoding="utf-8",
@@ -1360,6 +1364,46 @@ class PythonResolutionTest(unittest.TestCase):
         result, _ = self.run_hook("claude", "local-context.sh", self.windows(), {})
         self.assertIn("Context governance: unavailable - no Python 3.9+ found", result.stdout)
         self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_the_session_banner_reads_the_index_python_names_on_windows(self) -> None:
+        # Python on Windows ends a printed line with \r\n: the database path,
+        # the last field, kept the \r, named no file, and the banner read
+        # index=missing over an index that was there.
+        # The stream is set at the top of the program python runs, which -I
+        # leaves alone.
+        streams = ("import io, sys\n"
+                   "sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='cp1252', newline='\\r\\n')\n")
+        database = self.root / "context.db"
+        database.write_bytes(b"")
+        self.stand_in("python3", self.STORE_STUB)
+        self.stand_in("python", f"#!{sys.executable}\n"
+                                "import os, sys\n"
+                                "argv = sys.argv[1:]\n"
+                                "if '-c' in argv:\n"
+                                f"    argv[argv.index('-c') + 1] = {streams!r} + argv[argv.index('-c') + 1]\n"
+                                f"os.execv({sys.executable!r}, [{sys.executable!r}, *argv])\n")
+        env = {"OS": "Windows_NT", "TMPDIR": str(self.root),
+               "PATH": str(self.bin) + os.pathsep + self.without_python()}
+        result, _ = self.run_hook("claude", "local-context.sh", env, {},
+                                  status={"mode": "governed", "working": 0, "documents": 3,
+                                          "database": str(database)})
+        self.assertIn("Context governance: mode=governed, index=healthy/", result.stdout)
+
+    def test_the_memory_hooks_import_nothing_from_the_sessions_folder(self) -> None:
+        # Run in the session's folder, `python -c` put that folder first on
+        # sys.path: a project's own json.py ran in the prompt hook on every
+        # prompt, and in the Stop hook and the session banner.
+        for name, payload in (("working-memory-read.sh", None), ("working-memory-write.sh", {}),
+                              ("local-context.sh", {})):
+            with self.subTest(hook=name):
+                self.setUp()
+                marker = self.root / "imported"
+                (self.root / "claude").mkdir(parents=True, exist_ok=True)
+                (self.root / "claude" / "json.py").write_text(
+                    f"import pathlib\npathlib.Path({str(marker)!r}).write_text('ran')\n", encoding="utf-8")
+                result, _ = self.run_hook("claude", name, {}, payload)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertFalse(marker.exists(), f"{name} imported the project's json.py")
 
     def test_the_session_names_the_interpreter_where_python3_is_not_python(self) -> None:
         # The policy names the CLI as python3; the agent needs the name that
@@ -1436,6 +1480,49 @@ class PythonResolutionTest(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("git"), "Git")
+class ReadOnlyStateTest(unittest.TestCase):
+    """A state directory the hooks cannot write to costs its lines, silently.
+
+    The prompt hook appends a health line and the Stop hook a journal line
+    with `>> file 2>/dev/null`; bash opens redirections left to right, so a
+    file it could not open printed "Permission denied" before stderr went to
+    /dev/null - on every turn of a project whose memory-bank/local is
+    read-only."""
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes through read-only modes")
+    def test_the_memory_hooks_lose_their_lines_quietly(self) -> None:
+        for tool in ("claude", "codex", "cursor"):
+            for name in ("working-memory-read.sh", "working-memory-write.sh"):
+                with self.subTest(tool=tool, hook=name):
+                    temporary = tempfile.TemporaryDirectory(prefix="read-only-state-")
+                    self.addCleanup(temporary.cleanup)
+                    project = Path(temporary.name)
+                    hooks = project / MIRRORS[tool][0]
+                    hooks.mkdir(parents=True)
+                    shutil.copy(hook_path(tool, name), hooks)
+                    scripts = project / "memory-bank/scripts"
+                    scripts.mkdir(parents=True)
+                    (scripts / "context.py").write_text("print('working: TASK-RO')\n", encoding="utf-8")
+                    (scripts / "native_results.py").write_text("", encoding="utf-8")
+                    local = project / "memory-bank/local"
+                    local.mkdir()
+                    local.chmod(0o555)
+                    self.addCleanup(local.chmod, 0o755)
+                    payload = ({"conversation_id": "ro", "hook_event_name": "stop", "status": "completed"}
+                               if tool == "cursor" and name == "working-memory-write.sh"
+                               else {"session_id": "ro", "prompt": "cobalt allocation",
+                                     "hook_event_name": "Stop" if name == "working-memory-write.sh"
+                                     else "UserPromptSubmit"})
+                    result = subprocess.run(
+                        [BASH, str(hooks / name)], input=json.dumps(payload), capture_output=True, text=True,
+                        cwd=str(project), timeout=HOOK_TIMEOUT,
+                        env={**os.environ, "CONTEXT_TASK_ID": "TASK-RO", "CONTEXT_CAPSULE_DELIVERED": ""},
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertNotIn("Permission denied", result.stderr)
+                    self.assertEqual([], list(local.iterdir()))
+
+
 class RebaseIdentityTest(unittest.TestCase):
     """A rebase detaches HEAD on the commits it replays, and the branch being
     rebased is still the work in hand - often the conflict a turn asks about.
@@ -1461,7 +1548,9 @@ class RebaseIdentityTest(unittest.TestCase):
                               ("checkout", "-q", "--detach")):
                 subprocess.run(["git", "-C", directory, *arguments], env=env, check=True,
                                capture_output=True, timeout=HOOK_TIMEOUT)
-            if state is not None:
+            if state == "BISECT_START":
+                (root / ".git" / state).write_text("feature/rebased\n", encoding="utf-8")
+            elif state is not None:
                 (root / ".git" / state).mkdir()
                 (root / ".git" / state / "head-name").write_text("refs/heads/feature/rebased\n", encoding="utf-8")
             result = subprocess.run([BASH, str(hooks / "working-memory-read.sh")],
@@ -1478,6 +1567,16 @@ class RebaseIdentityTest(unittest.TestCase):
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertEqual("feature/rebased", argv[argv.index("--task-id") + 1])
                     self.assertEqual("feature/rebased", argv[argv.index("--expected-branch") + 1])
+
+    def test_a_bisect_reads_the_branch_it_started_from(self) -> None:
+        # A bisect tests commits on a detached HEAD: the capsule was empty
+        # and no save was asked until it was reset.
+        for tool in ("claude", "codex"):
+            with self.subTest(tool=tool):
+                result, argv = self.run_read_hook(tool, "BISECT_START")
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("feature/rebased", argv[argv.index("--task-id") + 1])
+                self.assertEqual("feature/rebased", argv[argv.index("--expected-branch") + 1])
 
     def test_any_other_detached_head_names_no_task(self) -> None:
         _, argv = self.run_read_hook("claude")
@@ -1517,7 +1616,9 @@ class RebaseIdentityTest(unittest.TestCase):
             else:
                 git("checkout", "-q", "--detach")
             git_dir = Path(git("rev-parse", "--absolute-git-dir").stdout.strip())
-            if state:
+            if state == "BISECT_START":
+                (git_dir / state).write_text(ref + "\n", encoding="utf-8")
+            elif state:
                 (git_dir / state).mkdir()
                 (git_dir / state / "head-name").write_text(ref + "\n", encoding="utf-8")
             if attached or linked:
@@ -1539,6 +1640,15 @@ class RebaseIdentityTest(unittest.TestCase):
                     self.assertEqual(1, len(calls))
                     self.assertEqual("feature/rebased", calls[0][calls[0].index("--task-id") + 1])
                     self.assertEqual("5", calls[0][calls[0].index("--flush-after") + 1])
+
+    def test_stop_checkpoints_the_branch_a_bisect_started_from(self):
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                calls = self.run_write_hook(tool, "BISECT_START", ref="feature/rebased")
+                self.assertEqual(1, len(calls))
+                self.assertEqual("feature/rebased", calls[0][calls[0].index("--task-id") + 1])
+                # Started on a detached HEAD, a bisect names a commit, not a task.
+                self.assertEqual([], self.run_write_hook(tool, "BISECT_START", ref="0123abcd" * 5))
 
     def test_stop_without_rebase_keeps_detached_head_unbound(self):
         for tool in MIRRORS:
@@ -1584,6 +1694,315 @@ class RebaseIdentityTest(unittest.TestCase):
         calls = self.run_write_hook("codex", "rebase-merge", linked=True)
         self.assertEqual(1, len(calls))
         self.assertEqual("feature/rebased", calls[0][calls[0].index("--task-id") + 1])
+
+
+@unittest.skipUnless(shutil.which("git"), "Git")
+class CodexWorktreeOwnerTest(unittest.TestCase):
+    """`codex --worktree` and a new worktree in the Codex app check the project
+    out on a detached HEAD, which stays detached until someone makes a branch
+    there, and record the thread that owns the checkout in codex-thread.json
+    of its Git directory - on one line from the CLI, one key a line from the
+    app. A detached HEAD named no task, so a session there, served by the main
+    checkout's hooks, got no capsule and no save request. The owning thread
+    names the task until a branch does; any other detached HEAD names none."""
+
+    OWNER = "01a1776d-b888-7ac2-8a1b-9557bdbd1dad"
+    TASK = "codex-thread/" + OWNER
+    CLI_RECORD = '{"version":1,"ownerThreadId":"%s"}' % OWNER
+    APP_RECORD = '{\n  "version": 1,\n  "ownerThreadId": "%s"\n}\n' % OWNER
+    # Records that name no owner, and what is wrong with each.
+    REFUSED = {
+        "another version": '{"version":2,"ownerThreadId":"%s"}' % OWNER,
+        "version 10": '{"version":10,"ownerThreadId":"%s"}' % OWNER,
+        "version as text": '{"version":"1","ownerThreadId":"%s"}' % OWNER,
+        "version true": '{"version":true,"ownerThreadId":"%s"}' % OWNER,
+        "no version": '{"ownerThreadId":"%s"}' % OWNER,
+        "no owner": '{"version":1}',
+        "capitals": '{"version":1,"ownerThreadId":"%s"}' % OWNER.upper(),
+        "not a UUID": '{"version":1,"ownerThreadId":"thread-1"}',
+        "more after the UUID": '{"version":1,"ownerThreadId":"%s $(touch owned)"}' % OWNER,
+        "a path": '{"version":1,"ownerThreadId":"../../%s"}' % OWNER,
+        "past 4096 bytes": '{"version":1,"ownerThreadId":"%s"%s}' % (OWNER, " " * 4096),
+        "empty": "",
+    }
+
+    def run_hooks(self, tool: str, record: str | None, *, branch: str | None = None,
+                  rebase: str | None = None, explicit: str | None = None, link: bool = False):
+        """Both memory hooks of `tool`, installed in the main checkout and run
+        for a worktree Codex made of it, in the layout the dispatcher gives
+        them; the runtime calls each made, by hook."""
+        directory = tempfile.TemporaryDirectory(prefix="codex worktree owner ")
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name)
+        root = base / "project"
+        root.mkdir()
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("GIT_", "CONTEXT_", "ACCELERATOR_"))}
+        env.update(HOME=str(base), TMPDIR=str(base), GIT_CONFIG_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0")
+
+        def git(where: Path, *args: str) -> str:
+            return subprocess.run(["git", "-C", str(where), *args], env=env, check=True, capture_output=True,
+                                  text=True, timeout=HOOK_TIMEOUT).stdout.strip()
+
+        git(root, "init", "-q", "-b", "main")
+        git(root, "-c", "user.email=o@example.invalid", "-c", "user.name=O", "commit", "-q", "--allow-empty",
+            "-m", "base")
+        worktree = base / "codex-home" / "worktrees" / "b3c4" / "project"
+        git(root, "worktree", "add", "-q", "--detach", str(worktree))
+        git_dir = Path(git(worktree, "rev-parse", "--absolute-git-dir"))
+        if record is not None:
+            if link:
+                (base / "elsewhere.json").write_bytes(record.encode("utf-8"))
+                (git_dir / "codex-thread.json").symlink_to(base / "elsewhere.json")
+            else:
+                (git_dir / "codex-thread.json").write_bytes(record.encode("utf-8"))
+        if branch:
+            git(worktree, "switch", "-q", "-c", branch)
+        if rebase:
+            (git_dir / "rebase-merge").mkdir()
+            (git_dir / "rebase-merge" / "head-name").write_text("refs/heads/" + rebase + "\n", encoding="utf-8")
+        hooks = root / MIRRORS[tool][0]
+        hooks.mkdir(parents=True)
+        for name in ("working-memory-read.sh", "working-memory-write.sh"):
+            shutil.copy(hook_path(tool, name), hooks)
+        scripts = root / "memory-bank/scripts"
+        scripts.mkdir(parents=True)
+        argv_file = base / "argv.ndjson"
+        (scripts / "context.py").write_text(
+            "import json, pathlib, sys\n"
+            f"with pathlib.Path({str(argv_file)!r}).open('a') as out:\n"
+            "    out.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "print('working: owner')\n", encoding="utf-8")
+        (scripts / "native_results.py").write_text("", encoding="utf-8")
+        env.update(ACCELERATOR_HOME=str(root), ACCELERATOR_STATE_DIR=str(root), ACCELERATOR_PROJECT_DIR=str(worktree))
+        if explicit:
+            env["CONTEXT_TASK_ID"] = explicit
+        payloads = {
+            "working-memory-read.sh": {"session_id": "owner", "prompt": "How are refunds numbered?",
+                                       "cwd": str(worktree), "hook_event_name": "UserPromptSubmit"},
+            "working-memory-write.sh": ({"conversation_id": "owner", "hook_event_name": "stop", "status": "completed"}
+                                        if tool == "cursor" else
+                                        {"session_id": "owner", "cwd": str(worktree), "hook_event_name": "Stop"}),
+        }
+        calls = {}
+        for name, payload in payloads.items():
+            result = subprocess.run([BASH, str(hooks / name)], input=json.dumps(payload), capture_output=True,
+                                    text=True, cwd=str(worktree), env=env, timeout=HOOK_TIMEOUT)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse((worktree / "owned").exists())
+            lines = argv_file.read_text(encoding="utf-8").splitlines() if argv_file.exists() else []
+            calls[name] = [json.loads(line) for line in lines]
+            if argv_file.exists():
+                argv_file.unlink()
+        return calls
+
+    @staticmethod
+    def tasks(calls, command: str) -> list:
+        return [args[args.index("--task-id") + 1] if "--task-id" in args else None
+                for args in calls if args and args[0] == command]
+
+    def test_the_owning_thread_names_the_task(self) -> None:
+        for tool in MIRRORS:
+            for source, record in (("cli", self.CLI_RECORD), ("app", self.APP_RECORD)):
+                with self.subTest(tool=tool, record=source):
+                    calls = self.run_hooks(tool, record)
+                    read, write = calls["working-memory-read.sh"], calls["working-memory-write.sh"]
+                    self.assertEqual([self.TASK], self.tasks(read, "refresh"))
+                    self.assertEqual([self.TASK], self.tasks(read, "native-prompt"))
+                    self.assertEqual([self.TASK], self.tasks(write, "turn"))
+                    self.assertEqual([self.TASK], self.tasks(write, "native-stop"))
+                    # Inferred like a branch: the runtime admits it before it
+                    # delivers - here, and in Cursor's rule after the turn.
+                    capsules = [args for args in read + write if args[0] in ("refresh", "hook-context")]
+                    self.assertEqual(2 if tool == "cursor" else 1, len(capsules))
+                    for args in capsules:
+                        self.assertEqual(self.TASK, args[args.index("--expected-branch") + 1])
+
+    def test_a_branch_a_rebase_or_an_explicit_task_comes_first(self) -> None:
+        for case, options, task, expected in (
+                ("branch", {"branch": "codex/refunds"}, "codex/refunds", "codex/refunds"),
+                ("rebase", {"rebase": "feature/refunds"}, "feature/refunds", "feature/refunds"),
+                ("explicit", {"explicit": "TASK-9"}, "TASK-9", None)):
+            with self.subTest(case=case):
+                calls = self.run_hooks("codex", self.CLI_RECORD, **options)
+                [refresh] = [args for args in calls["working-memory-read.sh"] if args[0] == "refresh"]
+                self.assertEqual(task, refresh[refresh.index("--task-id") + 1])
+                self.assertEqual(expected, refresh[refresh.index("--expected-branch") + 1]
+                                 if "--expected-branch" in refresh else None)
+                self.assertEqual([task], self.tasks(calls["working-memory-write.sh"], "turn"))
+
+    def test_any_other_detached_head_names_no_task(self) -> None:
+        cases = {"no record": (None, False), "a link to a record": (self.CLI_RECORD, True),
+                 **{label: (record, False) for label, record in self.REFUSED.items()}}
+        for label, (record, link) in cases.items():
+            with self.subTest(record=label):
+                calls = self.run_hooks("codex", record, link=link)
+                [refresh] = [args for args in calls["working-memory-read.sh"] if args[0] == "refresh"]
+                self.assertNotIn("--task-id", refresh)
+                self.assertEqual([], self.tasks(calls["working-memory-read.sh"], "native-prompt"))
+                self.assertEqual([], calls["working-memory-write.sh"])
+
+    def test_the_runtime_reads_the_record_as_the_hooks_do(self) -> None:
+        # The runtime admits - and `context.py status` reports - the task the
+        # hooks name, record for record.
+        source = hook_path("codex", "working-memory-read.sh").read_text(encoding="utf-8")
+        function = re.search(r"^codex_thread_task\(\) \{\n.*?^\}\n", source, re.S | re.M).group(0)
+        self.assertIn(function, hook_path("codex", "working-memory-write.sh").read_text(encoding="utf-8"))
+        sys.path.insert(0, str(EDITION_ROOT / "memory-bank" / "scripts"))
+        try:
+            import context
+        finally:
+            sys.path.pop(0)
+        directory = tempfile.TemporaryDirectory(prefix="owner record ")
+        self.addCleanup(directory.cleanup)
+        checkout = Path(directory.name)
+        subprocess.run(["git", "init", "-q", str(checkout)], check=True, capture_output=True, timeout=HOOK_TIMEOUT)
+        records = {"cli": self.CLI_RECORD, "app": self.APP_RECORD,
+                   "keys reversed": '{"ownerThreadId":"%s","version":1}' % self.OWNER,
+                   "another key": '{"version":1,"ownerThreadId":"%s","origin":"app"}' % self.OWNER,
+                   "tabs and CRLF": '{\r\n\t"version"\t:\t1 ,\r\n\t"ownerThreadId" : "%s"\r\n}' % self.OWNER,
+                   "4096 bytes": ('{"version":1,"ownerThreadId":"%s"' % self.OWNER).ljust(4095) + "}",
+                   **self.REFUSED}
+        for label, record in records.items():
+            with self.subTest(record=label):
+                (checkout / ".git" / "codex-thread.json").write_bytes(record.encode("utf-8"))
+                shell = subprocess.run([BASH, "-c", function + "codex_thread_task"], cwd=str(checkout),
+                                       env={**{key: value for key, value in os.environ.items()
+                                               if not key.startswith("GIT_")}, "PROJECT_DIR": str(checkout)},
+                                       capture_output=True, text=True, timeout=HOOK_TIMEOUT)
+                hooks = shell.stdout if shell.returncode == 0 else None
+                self.assertEqual(hooks, context._owner_thread_task(checkout))
+                self.assertEqual(label not in self.REFUSED, hooks == self.TASK)
+
+
+class OtherWorktreeTest(unittest.TestCase):
+    """A session after Claude Code's EnterWorktree runs the hooks installed in
+    the checkout it started from and names its own checkout in the input's
+    "cwd". A worktree that has none of this installation is served: its
+    branch's task, the worktree as the project. Anything else - a worktree
+    with an installation of its own, a Cursor session, whose capsule would be
+    a rule written into the worktree - gets none of this checkout's memory:
+    handed over, its task read as the other branch's state, and that
+    session's turns were recorded into this branch's task."""
+
+    PROMPT = "Why does the invoice total drift by a cent after the discount?"
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory(prefix="other worktree ")
+        self.addCleanup(directory.cleanup)
+        self.base = Path(directory.name)
+        self.project = self.base / "project"
+        self.project.mkdir()
+        self.calls = self.base / "argv.ndjson"
+        cli = self.project / "memory-bank/scripts/context.py"
+        cli.parent.mkdir(parents=True)
+        cli.write_text("import json, os, pathlib, sys\n"
+                       f"with pathlib.Path({str(self.calls)!r}).open('a') as out:\n"
+                       "    out.write(json.dumps(sys.argv[1:] + ['@' + os.environ.get('ACCELERATOR_PROJECT_DIR', '')])"
+                       " + '\\n')\n"
+                       "print('working: main-line')\n", encoding="utf-8")
+        for tool in MIRRORS:
+            hooks = self.project / MIRRORS[tool][0]
+            hooks.mkdir(parents=True)
+            for name in ("working-memory-read.sh", "working-memory-write.sh"):
+                shutil.copy(hook_path(tool, name), hooks)
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("GIT_", "CONTEXT_", "ACCELERATOR_"))}
+        self.env.update(GIT_CONFIG_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0", HOME=str(self.base))
+        self.git(self.project, "init", "-q", "-b", "main-line")
+        self.git(self.project, "-c", "user.email=w@example.invalid", "-c", "user.name=W",
+                 "commit", "-q", "--allow-empty", "-m", "base")
+        # Where the desktop app puts a session's worktree, and one beside the project.
+        self.nested = self.project / ".claude/worktrees/bright fox"
+        self.beside = self.base / "beside checkout"
+        self.git(self.project, "worktree", "add", "-q", "-b", "feature/nested", str(self.nested))
+        self.git(self.project, "worktree", "add", "-q", "-b", "feature/beside", str(self.beside))
+        (self.nested / "src").mkdir()
+        (self.project / "src").mkdir()
+        self.foreign = self.base / "another repository"
+        self.foreign.mkdir()
+        self.git(self.foreign, "init", "-q")
+
+    def git(self, directory: Path, *args: str) -> None:
+        subprocess.run(["git", "-C", str(directory), *args], env=self.env, check=True,
+                       capture_output=True, timeout=HOOK_TIMEOUT)
+
+    def hook(self, tool: str, name: str, cwd: Path | None):
+        self.calls.unlink(missing_ok=True)
+        payload: dict[str, object] = {"prompt": self.PROMPT, "session_id": "session-1"}
+        if cwd is not None:
+            payload["cwd"] = str(cwd)
+        if tool == "cursor":
+            payload.update(conversation_id="conversation-1", generation_id="generation-1", cursor_version="2.9.1")
+        directory = cwd if cwd is not None and cwd.is_dir() else self.project
+        result = subprocess.run([BASH, str(self.project / MIRRORS[tool][0] / name)], input=json.dumps(payload),
+                                capture_output=True, text=True, cwd=str(directory), env=self.env,
+                                timeout=HOOK_TIMEOUT)
+        self.assertEqual(0, result.returncode, result.stderr)
+        calls = [json.loads(line) for line in self.calls.read_text(encoding="utf-8").splitlines()] \
+            if self.calls.exists() else []
+        # The runtime's project, as the hook named it: last, after an "@".
+        self.projects = [call.pop()[1:] for call in calls]
+        return result.stdout, calls
+
+    def test_a_session_that_entered_a_worktree_is_served_for_its_branch(self) -> None:
+        # With the native result runtime there, Stop asks for the save too.
+        (self.project / "memory-bank/scripts/native_results.py").write_text("", encoding="utf-8")
+        for tool in ("claude", "codex"):
+            for cwd, folder, branch in ((self.nested, self.nested, "feature/nested"),
+                                        (self.nested / "src", self.nested, "feature/nested"),
+                                        (self.beside, self.beside, "feature/beside")):
+                with self.subTest(tool=tool, cwd=cwd.name):
+                    stdout, calls = self.hook(tool, "working-memory-read.sh", cwd)
+                    refresh = [args for args in calls if args and args[0] == "refresh"]
+                    self.assertEqual(1, len(refresh), calls)
+                    self.assertEqual(branch, refresh[0][refresh[0].index("--task-id") + 1])
+                    self.assertEqual(str(folder.resolve()), self.projects[calls.index(refresh[0])])
+                    self.assertNotIn("another worktree of the repository", stdout)
+                    _, calls = self.hook(tool, "working-memory-write.sh", cwd)
+                    turns = [args for args in calls if args and args[0] == "turn"]
+                    self.assertEqual(1, len(turns), calls)
+                    self.assertEqual(branch, turns[0][turns[0].index("--task-id") + 1])
+                    stops = [args for args in calls if args and args[0] == "native-stop"]
+                    self.assertEqual(1, len(stops), calls)
+                    self.assertIn("--entered", stops[0])
+
+    def test_a_worktree_of_its_own_or_a_cursor_session_gets_no_capsule_of_this_branch(self) -> None:
+        installed = self.base / "installed checkout"
+        self.git(self.project, "worktree", "add", "-q", "-b", "feature/installed", str(installed))
+        runtime = installed / "memory-bank/scripts/context.py"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        cases = [("claude", installed, "feature/installed"), ("codex", installed, "feature/installed")]
+        cases += [("cursor", cwd, branch) for cwd, branch in ((self.nested, "feature/nested"),
+                                                              (self.nested / "src", "feature/nested"),
+                                                              (self.beside, "feature/beside"))]
+        for tool, cwd, branch in cases:
+            with self.subTest(tool=tool, cwd=cwd.name):
+                stdout, calls = self.hook(tool, "working-memory-read.sh", cwd)
+                self.assertEqual([], calls)
+                if tool == "cursor":
+                    # Cursor reads only the JSON answer; the rule is left as it is.
+                    self.assertEqual('{"continue": true}\n', stdout)
+                else:
+                    self.assertIn(f"another worktree of the repository (branch {branch})", stdout)
+                    self.assertIn("Working memory was NOT consulted this turn.", stdout)
+                    self.assertNotIn("working: main-line", stdout)
+                _, calls = self.hook(tool, "working-memory-write.sh", cwd)
+                self.assertEqual([], [args for args in calls if args and args[0] == "turn"])
+
+    def test_this_checkout_its_subdirectories_and_other_repositories_keep_their_memory(self) -> None:
+        for tool in MIRRORS:
+            for cwd in (None, self.project, self.project / "src", self.foreign, self.base / "absent"):
+                with self.subTest(tool=tool, cwd=None if cwd is None else cwd.name):
+                    _, calls = self.hook(tool, "working-memory-read.sh", cwd)
+                    refresh = [args for args in calls if args and args[0] == "refresh"]
+                    self.assertEqual(1, len(refresh), calls)
+                    self.assertEqual("main-line", refresh[0][refresh[0].index("--task-id") + 1])
+                    _, calls = self.hook(tool, "working-memory-write.sh", cwd)
+                    turns = [args for args in calls if args and args[0] == "turn"]
+                    self.assertEqual(1, len(turns), calls)
+                    self.assertEqual("main-line", turns[0][turns[0].index("--task-id") + 1])
 
 
 @unittest.skipUnless(os.name == "posix", "Anchored Cursor custody requires POSIX")

@@ -32,10 +32,11 @@ External Client Team.
 
 ## Reconstruct the Historical Workbook
 
-After installing `requirements-qa.txt` in the documented QA environment:
+Use the verified native `infra-engine` release from the repository root.
+Workbook reconstruction runs in Rust and needs no QA virtualenv:
 
 ```bash
-scripts/qa/.venv/bin/python scripts/qa/reconstruct_workbook.py \
+infra-engine qa reconstruct-workbook \
   --output /tmp/Accelerator-TestCases.reconstructed.xlsx
 ```
 

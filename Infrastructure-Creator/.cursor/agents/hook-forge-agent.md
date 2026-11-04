@@ -10,7 +10,7 @@ Generate the target project's deterministic guardrail hooks and per-edition wiri
 
 ## Instructions
 1. Use the Skill tool to invoke the `hook-forge` skill, passing the approved profile and target-project-path.
-2. Execute the skill completely following its instructions (read the profile, author the four enforcement hooks with evidence-gated danger rules plus the two working-memory hooks calling memory-bank/scripts/context.py, wire each selected edition through its own mechanism, verify syntax and executable bits, log every hook and the evidence backing each danger rule).
+2. Execute the skill completely following its instructions (read the profile, emit trusted compatibility shims invoking memory-bank/bin/infra-engine hook HOST ROLE --root TOOLING_ROOT, with evidence-gated native policy data for the four enforcement roles and native working-memory roles, wire each selected edition through its own mechanism, verify syntax and executable bits, log every hook and the evidence backing each danger rule).
 3. STOP once the hooks and wiring are written - do not proceed to any other forge.
 4. Provide structured output (below).
 

@@ -1,4 +1,6 @@
-# Definition of Done - Symfony Layered Architecture
+# Definition of Done
+
+Explicit implementation phase gates take precedence: during a source-first runtime migration, keep builds, formatting, tests, checks, dependency fetches and provider calls deferred until production implementation is complete. Report deferred work separately from passes. - Symfony Layered Architecture
 
 Tiered checklist for Symfony work. Every item should be verified by command when tooling exists. If tooling is missing, report `N/A - tooling not configured` together with the probe command and its output that establish the absence (`ls vendor/bin/phpunit`, `composer run-script --list`, `test -f phpstan.neon`), and do not install it without user approval. An unprobed `N/A` is a claim, not a result: it is the cheapest way to close a check without doing it, and it must be as falsifiable as a passing command.
 
@@ -13,10 +15,10 @@ Use for documentation, planning, and small non-code tasks.
 - [ ] Context Summary provided with 2-3 sentences and Next Steps.
 - [ ] No `.env`, secrets, credentials, database dumps, or personal local settings were read or modified.
 - [ ] Relevant active memory chunks were verified against current sources; stale chunks were updated or reported.
-- [ ] Memory-bank structure passes `python3 memory-bank/scripts/validate.py` when `memory-bank/` exists.
+- [ ] Memory-bank structure passes `memory-bank/bin/infra-engine bank validate` when `memory-bank/` exists.
 - [ ] Governed mode was used by default, or explicit `--mode lightweight` use and its local-only limitation were reported.
 - [ ] Project Brain validation passes when `project-brain/` exists; active/archive links, revisions, handoffs, privacy, fingerprints, and deterministic indexes are coherent.
-- [ ] Any task-aware retrieval used only `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`, produced a manifest in governed mode, and cited canonical sources were verified.
+- [ ] Any task-aware retrieval used only `memory-bank/bin/infra-engine memory retrieve QUERY --task-id ID`, produced a manifest in governed mode, and cited canonical sources were verified.
 
 ## Standard
 

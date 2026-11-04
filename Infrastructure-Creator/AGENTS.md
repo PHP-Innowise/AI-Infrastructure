@@ -75,7 +75,7 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
   turned-down candidates, and rejecting a candidate the registry flags
   `escalates_on_rejection` MUST be escalated to the user through the
   disposition interview round and adversarially reviewed
-  (`validate_plan_review.py`'s `rejected` section) before the plan freezes -
+  (`creator validate-plan-review`'s `rejected` section) before the plan freezes -
   a consolidation must name its real absorbing owner, an evidence gap must
   show it was asked about (and why not even a narrow read-only variant), and
   a safety gap must carry the recorded human decision.
@@ -123,7 +123,7 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
   per-file human decision, and MUST NOT touch files the manifest does not list.
 - Generated output keeps chat snapshots for every selected client: one
   unargumented `context-continuity.sh` stores visible prompt/answer text in
-  ignored `.context-handoff/` via `memory-bank/scripts/context_continuity.py`,
+  ignored `.context-handoff/` via `memory-bank/bin/infra-engine hook HOST context-continuity`,
   and a session start receives only a merge prepared with `context-load merge`.
   It MUST NOT scrape private account/session storage, keep hidden reasoning, or
   write Project Brain, Memory Bank or SQLite. A `context-save full` transcript
@@ -179,7 +179,7 @@ Fan-out runs in parallel when the AI tool supports concurrent subagents/tool cal
 - MUST run `infra-validate` (the content review-and-repair phase: every
   staged file read for uniqueness, completeness, accuracy, and coherence,
   blocking findings repaired through the owning forges or escalated, recorded
-  in a review record `validate_content_review.py` accepts) against the
+  in a review record `"$GENERATOR_NATIVE" creator validate-content-review` accepts) against the
   complete staged bundle before manifest stamping or publication in
   `infra-generate` and `infra-update`.
 - MUST run `bootstrap-verifier` (evidence and per-skill contract conformance,

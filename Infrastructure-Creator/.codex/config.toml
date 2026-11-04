@@ -9,7 +9,7 @@ hooks = true
 # Codex ships built-in subagents (spawn_agent: default/worker/explorer
 # roles). This project delegates through its own skills only, so
 # multi-agent collaboration is off; both switches cover older and newer
-# CLI versions, and .codex/hooks/subagent-gate.sh backstops CLI/model
+# CLI versions, and the native subagent-gate hook backstops CLI/model
 # combinations that ignore these flags.
 multi_agent = false
 

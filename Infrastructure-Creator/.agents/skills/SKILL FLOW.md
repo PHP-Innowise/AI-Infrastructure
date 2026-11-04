@@ -1,5 +1,9 @@
 # SKILL FLOW - Infrastructure-Creator
 
+Native commands below use `"$GENERATOR_NATIVE"`: set `GENERATOR_NATIVE` to the
+selected generator's absolute `memory-bank/bin/infra-engine` path
+(`infra-engine.exe` on Windows), as required by the owning generator skill.
+
 How the generator's 25 skills fit together. This describes the generator itself, not what it produces.
 
 ## Main Flow
@@ -73,9 +77,9 @@ How the generator's 25 skills fit together. This describes the generator itself,
 ## Context Handoff
 
 - The scanners each write `tasks/TASK-{N}/<name>-findings.md`.
-- `profile-synthesizer` merges everything into `tasks/TASK-{N}/infra-scan-project-profile.md` - the single contract between phases - plus `infra-scan-rejection-report.md`, the bucketed account of every candidate deliberately not generated. When a draft rejection hits a registry candidate flagged `escalates_on_rejection`, `infra-scan` loops one bounded `clarifying-interview` disposition round before the plan freezes, and the adversarial review record must cover those rejections (`validate_plan_review.py --registry`).
+- `profile-synthesizer` merges everything into `tasks/TASK-{N}/infra-scan-project-profile.md` - the single contract between phases - plus `infra-scan-rejection-report.md`, the bucketed account of every candidate deliberately not generated. When a draft rejection hits a registry candidate flagged `escalates_on_rejection`, `infra-scan` loops one bounded `clarifying-interview` disposition round before the plan freezes, and the adversarial review record must cover those rejections (`"$GENERATOR_NATIVE" creator validate-plan-review --registry`).
 - `infra-generate` re-validates that profile against the target's current files, then the forges consume it. `skill-forge`'s log drives `agent-forge`, `command-forge`, and `skill-flow-composer`.
-- `infra-validate` runs after the wrappers and flows exist and before the manifest: parallel `content-reviewer` lanes read every staged file (and the run's own profile and plan), blocking findings are repaired through the owning forges within two rounds or escalated, and `validate_content_review.py` must accept the review record (`tasks/TASK-{N}/infra-validate-review.json`) before publication.
+- `infra-validate` runs after the wrappers and flows exist and before the manifest: parallel `content-reviewer` lanes read every staged file (and the run's own profile and plan), blocking findings are repaired through the owning forges within two rounds or escalated, and `"$GENERATOR_NATIVE" creator validate-content-review` must accept the review record (`tasks/TASK-{N}/infra-validate-review.json`) before publication.
 - `bootstrap-verifier` gates success; a failure means generation is not done.
 - `infra-generate` finishes by stamping the target's `AGENTS.md` and writing `.infra-manifest.json` (generator version from the root `VERSION` file, profile reference, sha256 per generated file). That manifest is the sole contract `infra-update` consumes later: untouched files are safely replaced, user-edited files become explicit human decisions, unlisted files are never touched, and the run ends with a rewritten manifest plus a fresh `bootstrap-verifier` pass.
 - `stack-adapter` writes its own run notes to `tasks/TASK-{N}/stack-adapter-report.md` and its deliverable to a sibling folder, `Infrastructure-Creator-[Stack]/` - never into the target project and never merged into this generator's own tree.

@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "classes": [
+    {
+      "name": "skills",
+      "canonical": ".agents/skills",
+      "mirrors": {
+        ".claude/skills": {
+          "transform": "copy"
+        },
+        ".cursor/skills": {
+          "transform": "copy"
+        }
+      }
+    },
+    {
+      "name": "hooks",
+      "canonical": ".claude/hooks",
+      "mirrors": {
+        ".cursor/hooks": {
+          "transform": "copy",
+          "replacements": [
+            [
+              " hook claude ",
+              " hook cursor "
+            ]
+          ]
+        },
+        ".codex/hooks": {
+          "transform": "copy",
+          "replacements": [
+            [
+              " hook claude ",
+              " hook codex "
+            ]
+          ]
+        }
+      },
+      "skip": [
+        "subagent-gate.sh"
+      ]
+    },
+    {
+      "name": "commands",
+      "canonical": ".claude/commands",
+      "mirrors": {
+        ".cursor/commands": {
+          "transform": "cursor-command",
+          "quote_description": false,
+          "description_overrides": {
+            "infra-adapt.md": "Build an independent generator with complete evidence contracts, semantic gates, fixtures, and fresh references for a confirmed non-PHP stack.",
+            "infra-build.md": "One-shot scan, contract compilation, staged semantic generation, and transactional publication with required ambiguity/collision checkpoints.",
+            "infra-generate.md": "Build an approved evidence-contracted accelerator in staging, validate semantics and routing, then publish selected editions with rollback.",
+            "infra-scan.md": "Scan a target PHP project read-only and compile a human Profile plus validated evidence and per-skill generation contracts.",
+            "infra-validate.md": "Review every generated file for uniqueness, completeness, accuracy, and coherence, repairing blocking findings through the owning forges.",
+            "infra-update.md": "Upgrade a previously generated accelerator to the current evidence/semantic quality contract through staging, manifest ownership, and rollback."
+          }
+        }
+      }
+    },
+    {
+      "name": "agents",
+      "canonical": ".claude/agents",
+      "mirrors": {
+        ".cursor/agents": {
+          "transform": "cursor-agent"
+        }
+      },
+      "skip": [
+        "README.md"
+      ]
+    },
+    {
+      "name": "governance-docs",
+      "canonical": ".claude",
+      "only": [
+        "DOD.md",
+        "GOLDEN-PRINCIPLES.md",
+        "STABILIZATION.md"
+      ],
+      "mirrors": {
+        ".cursor": {
+          "transform": "copy"
+        },
+        ".codex": {
+          "transform": "copy"
+        }
+      }
+    }
+  ]
+}
+

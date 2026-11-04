@@ -4,18 +4,14 @@
 
 Shared-core history for the PHP AI Accelerators monorepo. The shared
 core is what the `Laravel/`, `Symfony/` and `PHP Core/` editions have
-in common: the Python memory/context core (`memory-bank/scripts/`,
-`memory-bank/tests/`, `memory-bank/templates/`), Project Brain
-(`project-brain/` protocol, config, schemas, scripts, tests), the tool
-hooks (`.claude/hooks/` and their generated `.cursor`/`.codex`
-mirrors), the mirror machinery (`MIRROR_RULES` in
-`memory-bank/scripts/context_retrieval.py`, executed by
-`scripts/build_mirrors.py`), and the repository-level tooling in
-`scripts/`.
+in common: the native memory/context core (`runtime-rust/crates/infra-core/`),
+Project Brain protocol/config/schemas and historical behavior fixtures, native
+host hooks and their generated exec adapters, declarative mirror rules and
+the repository tooling in `runtime-rust/crates/infra-tooling/`.
 
 A change to a shared-core file must land together with an entry here;
 CI enforces this on pull requests via
-`scripts/check_core_changelog.sh`. Framework-specific history stays in
+`./infra-engine repo changelog`. Framework-specific history stays in
 each edition's own changelog (`Laravel/CHANGELOG.md`,
 `Symfony/CHANGELOG.md`, `PHP Core/CHANGELOG.md`;
 `Infrastructure-Creator/CHANGELOG.md` covers the generator). Each PHP
@@ -27,6 +23,3812 @@ changelogs when this file was introduced; entries that describe one
 edition's own files remain in that edition's changelog.
 
 ## Unreleased
+
+- Memory Bank retrieval now reads canonical `source_digests`, so editing a
+  cited file marks the saved knowledge as changed and shows the source-check
+  warning. Incremental indexing upgrades older cached metadata transactionally,
+  preserving unfinished turns, working tasks and bindings.
+- Linux nextest runs up to four end-to-end cases together and starts the long
+  generator lifecycle first. Windows and other platforms retain the two-case
+  limit; installation and executable-copy cases remain serial everywhere.
+  Native Linux cleanup failures include the captured process state and flags
+  so a running descendant can be distinguished from kernel exit teardown.
+- Windows CI compiles the workspace tests and their engine together before
+  running the catalog, avoiding a separate default-member bootstrap with a
+  narrower feature set. Its two longest generator cases start first without
+  increasing E2E concurrency or changing deadlines. Generated-tree validation
+  compiles its eight fixed placeholder expressions once instead of once per
+  file, retaining the same diagnostics and template exception.
+- Workspace tests run in parallel. The `rust` and `windows-native` groups run
+  them through `cargo nextest run`, each test in its own process and many at
+  once across all test binaries, where `cargo test` ran one binary after
+  another, about seven of the Windows job's eleven minutes.
+  `runtime-rust/.config/nextest.toml` keeps the dispatch custom-guard and
+  installation cases serial, as their binaries did, and lets at most two
+  end-to-end cases run together on Windows: with more, evaluation exceeded
+  their 120-second bound. Doc tests have their own `cargo test --doc` gate.
+  Generated jobs install nextest 0.9.149 through `taiki-e/install-action`
+  pinned by commit, with checksums and no source fallback. A process gate's
+  new `fallback` runs when one of its tools is unavailable, so a checkout
+  without nextest runs the same tests through `cargo test --tests`, and the
+  gate's reason names the missing tool.
+- Two Linux test helpers treat a process that exits mid-read as gone.
+  Reading `/proc/<pid>/stat` of a process that exits between opening and
+  reading the file fails with ESRCH rather than as a missing file, and the
+  native process test in infra-eval panicked with "No such process" in one
+  CI run; the ONNX cleanup test's helper had the same gap. Both now read
+  ESRCH as an exited process, as the host tests already did.
+- A Cursor plugin image can be materialized again on Windows. Repeating it
+  compared each file's planned Unix mode with the mode Windows keeps, only
+  read-only, reported as 0o444 or 0o644, and refused an unchanged image with
+  "Private Cursor plugin image was changed". The comparison now uses
+  `infra_core::bank::publication::kept_mode`, the rule publication commits and
+  Harness setup already applied, now shared by all three. On Windows the
+  replaced-state test checks that a held prepared state root cannot be moved
+  at all, since Windows refuses that move.
+- The hardlinked evaluation test compares its engine copy on Windows without
+  the change time. Windows moved that time by one to two seconds during the
+  evaluation while the copy's file, links, size, bytes and write time stayed
+  the same, and running the copy once beforehand did not settle it. The
+  other fields still show the image was neither replaced nor rewritten, the
+  way publication already compares a renamed image.
+- The Windows ONNX exit test names `cmd.exe` with backslashes. It built the
+  path as `System32/cmd.exe`, and `cmd.exe`, which parses its own command
+  line, took `/cmd.exe` for its `/C` switch and ran `md` with the rest, so
+  even a bare `exit 0` ended with code 1 and "The directory or file cannot be
+  created"; `exit /b` was never the cause. The test reports the worker's
+  stderr and observed status with a refusal, since "worker-exit" stands for a
+  failed write, a failed read and a nonzero exit alike.
+- A process that embeds the runtime names the engine that guards its
+  children. On Windows every child starts under a guardian that re-runs the
+  current executable as `internal-guard`; in a test binary that executable is
+  the test harness, which reads the command as a test filter and exits
+  without the cleanup receipt, so Creator copy and generator tests failed
+  with "Native guardian did not return a valid cleanup receipt (0 of 12
+  bytes)". `infra_host::process::use_guardian` names the engine instead; the
+  engine itself still guards its own children, and the generator tests name
+  the engine they test.
+- CI keeps compiled dependencies when a check fails. `actions/cache` saved
+  only after a successful job, so the Windows job, which had not yet passed,
+  started every run from an empty target directory and spent about eight of
+  its seventeen minutes compiling optimized dependencies. Generated jobs now
+  restore and save the cache in separate steps: the save also follows a
+  failed check, a missed key falls back to the job's newest entry for the same
+  compiler, and jobs build without incremental state, which only added writes
+  and cache weight. The key moved to `native-cargo-v2`, so no entry carrying
+  incremental state is restored.
+- Publication lists directories on Windows. Every listing reopened the
+  directory through the name `.` relative to its own handle, which NTFS
+  refuses as an invalid name (os error 123), so securing the private tree of
+  attached state, archive publication and trace listings failed there, as the
+  Harness update, Cursor overlay and retirement tests showed. The directory is
+  now reopened through an empty relative name, as `ReOpenFile` does.
+- QA reconstruction writes its workbook on Windows. It held the temporary
+  file open while the package write replaced it, which Windows refuses
+  ("Access is denied"); only the name is kept now, for removal on failure.
+- Windows child processes accept the environment Windows itself keeps. A
+  complete environment from `std::env::vars_os()` carries names such as `=C:`
+  (each drive's working directory) and `=ExitCode`, and the native runner
+  refused any name containing `=` with "Invalid native Windows process
+  request", so a process spawned from such an environment never started. A
+  leading `=` is now part of the name; a later one still refuses it. Every
+  refused Windows process request names its check, a missing guardian receipt
+  says how many bytes arrived, and debug builds name the component NT refused
+  as invalid (os error 123) and show where such an error arose.
+- Harness setup verifies modes as the platform keeps them. After installing,
+  it required each file to carry its planned Unix mode, but a Windows file
+  keeps only whether it is read-only, which publication reports as 0o444 or
+  0o644, so every Windows setup that installed the 0o755 engine stopped with
+  "Installed bytes or modes changed before Setup verification". The check
+  now compares the part of the planned mode the file can carry.
+- A partial Harness setup names what stopped it. The reply said only
+  "Installation stopped and may be partial" once a reviewed file had been
+  written, and dropped the installer's or the verification's own error; it
+  now includes that cause, which the Setup page already shows.
+- Tests that ran on Windows for the first time read paths the way the
+  runtime does. The Brain inventory fixture canonicalizes its temporary root
+  (Windows may name it by its short 8.3 form) and compares record messages
+  regardless of separators; the plain-checkout fast path tests run only on
+  Unix, the one platform where that path exists; and the Harness setup tests
+  print the install response when an install fails.
+- QA evidence records a command's working directory against the canonical
+  root it checked. It stripped the root as given instead, and a root spelled
+  differently from its canonical form, such as a Windows temporary directory
+  under its short 8.3 name (`C:\Users\RUNNER~1\…`) or a linked temporary
+  directory elsewhere, stopped the run with "prefix not found".
+- Canonical paths keep a spelling other programs read on Windows.
+  `std::fs::canonicalize` returns every Windows path as `\\?\C:\…`: Git
+  refuses it, `CreateProcess` rejects it as a working directory ("The
+  directory name is invalid"), and a relative name joined to it with `/` names
+  no file ("The filename, directory name, or volume label syntax is
+  incorrect"), which the first complete Windows test run showed across
+  installation, Harness updates, attach and evaluation. Every call now goes
+  through `infra_core::fs::canonicalize`, which drops the prefix from a drive
+  path whose plain spelling names the same file (shorter than `MAX_PATH`, no
+  reserved device name, no component Win32 rewrites); other forms stay
+  verbatim and Unix is unchanged. The QA crate includes the same file rather
+  than depending on infra-core. Python installations stored plain paths, so
+  native ones match them again. A refused relative distribution path is now
+  named in its error.
+- A failed CI job keeps its failed checks' complete output. `infra-engine
+  check --log-dir DIR` writes the failed logs to `DIR`; each generated job
+  passes a directory under the runner's temporary directory and uploads it as
+  the `check-logs-JOB` artifact when the job fails, since the printed excerpt
+  shows only the end of each stream. The Windows workspace tests run with
+  `--no-fail-fast`, so one run reports every failing test target there.
+- The native evaluation runtime tests give Git plain drive paths on Windows.
+  `fs::canonicalize` spells them `\\?\C:\…`, and with such a home and global
+  configuration `git init` stopped with "unknown error occurred while reading
+  the configuration files", the first failure of the newly running Windows
+  tests. The fixture now drops the verbatim prefix from drive paths.
+- The `native-windows` job tests the workspace. Each generated job ran
+  `infra-engine check` from the engine it had just built in the Cargo target
+  directory; the group's own `cargo test` rebuilds that engine in place, and
+  Windows refuses to remove a running executable, so every run ended in
+  "failed to remove file … infra-engine.exe: Access is denied" before a test
+  ran. Jobs now run the check from a copy in the runner's temporary directory.
+- The creator's probe tests carry their own executable. They copied
+  `/usr/bin/true` and `/usr/bin/false` and required each to be a native image
+  of at most 1 MiB; on the `ubuntu-26.04` runner, whose coreutils package now
+  installs uutils, `/usr/bin/false` failed that check, which stopped
+  `rust-contract` before the later test targets ran. The tests now write a
+  132-byte static image that only exits with the expected status, for x86-64
+  and AArch64 Linux.
+- A failed native check shows why it failed. `infra-engine check` kept a
+  failed gate's output only in a log under the runner's temporary directory
+  and printed its path, so the `rust-contract` and `native-windows` jobs failed
+  on GitHub without a reason. Each failed check now also prints, on stderr, the
+  last 150 lines (at most 48 KiB) of its stdout and of its stderr: a test
+  harness reports its failures on stdout, while Cargo names the failed target
+  on stderr. The JSON summary on stdout and the retained log are unchanged.
+- The write-agent lock test no longer depends on directory order. It aged the
+  first file in the lock folder whose name did not end in `.guard`, but the
+  folder also holds the guards' hidden `.drain-lock` files. tmpfs lists the
+  newest file first, so local runs, which keep `TMPDIR` there, passed; btrfs
+  lists files in creation order and failed every run, and an ext4 runner
+  orders them by name hash. The test now selects the host's lock file by its
+  name, as its lock reader already did.
+- Reuse warm tokenizer results without rebuilding SQLite, compile constant
+  hook/routing expressions once, and keep glob matchers within each repository
+  command. Brain lookup retains matching records while still admitting the
+  full inventory and preserving ambiguity and invalid-record errors. Brain
+  indexing parses and checks one admitted record image; full
+  refresh clears FTS rows in one pass when no relevant triggers are present,
+  and reuses SQL statements within its rollback-safe transaction. Session
+  and system lists reuse loaded rows, and session polling validates its record
+  once. Workbook previews share normalized worksheets and optimization reports
+  index results by query without changing their output contracts.
+- Core retrieval folds each token once, reuses fixed excerpt and memory-codec
+  expressions, and prepares frequency-count SQL once per call. Ordinary
+  worksheets skip shared-formula rewrite passes, and workbook embedding avoids
+  unused data-URI copies. Generator repetition checks compute longest blocks
+  once per exact owner set while preserving diagnostic order and ties.
+- CLI, evaluation and skill-tool builds forward the optional ONNX feature
+  explicitly. Default builds retain inference; `infra-cli --no-default-features`
+  excludes its heavy dependencies. An inference capability marker follows the
+  compiled dependency; full engines advertising it reject lean replacement
+  artifacts. Earlier engines without that marker cannot distinguish the two.
+- The Rust browser interface renders a page of session events once, keeps
+  completion notifications per event, updates its clock independently and
+  preserves unchanged session navigation nodes. Native CI jobs reuse Cargo
+  artifacts within compiler/platform/job scopes and align bootstrap debuginfo
+  with the test profile; Cargo still validates every restored build.
+- Partial index refresh maps obsolete paths to rowids inside its existing
+  transaction. Custom main or temporary triggers retain the original path
+  deletion sequence. Duplicate-memory checks reuse exact shingle sets without
+  retaining a second corpus, and Unix regular-file reads share one opened
+  metadata image while preserving fresh before/after identity checks.
+- Native Systems and Setup requests use bounded blocking workers whose
+  admission survives caller cancellation and drains before teardown. Setup
+  retains mutation busy responses and reviewed-plan rollback. Provider identity
+  discovery overlaps three independently guarded probes while keeping each
+  provider's candidate, version/help and result ordering.
+- Nonapplicable shell/naming/loop hooks skip context construction; applicable
+  requests reuse the parsed payload and retain the raw fail-closed shell
+  fallback. Permission projection reuses fixed grammars. Skill publication
+  avoids full-body copies while retaining its database admission barrier,
+  fresh file checks and publication order. Generator path contracts reuse
+  compiled glob components within one traversal and skips subtrees outside
+  already-tested literal prefixes.
+- Unix native output framing borrows complete packets and compacts each read
+  buffer once, preserving packet boundaries, byte limits and callback errors.
+- Evaluation validates its bounded job count before expansion and queues
+  borrowed item indices, preserving completion/error order. Review HTML
+  serializes borrowed values with the existing script escapes. The opt-in
+  `quick-release` Cargo profile disables LTO for shorter local rebuilds;
+  distribution builds use the release profile.
+- The generated workflows start on GitHub again. Each job named
+  `${{ runner.temp }}` in its job-level `env`, where GitHub provides no
+  `runner` context, so every workflow file was rejected before a job existed:
+  the native checks had never run in CI. A step now sets `CARGO_TARGET_DIR`
+  from `RUNNER_TEMP` (forward slashes, for Git Bash on Windows), and an
+  emitter test admits only the contexts job-level `env` provides.
+- The shell guard no longer lets a command through when its own context
+  fails. A `.git` file naming a missing repository in the project or in the
+  session directory, an unreadable state directory, a project root that no
+  longer exists or an unreadable `runtime.json` all made `rm -rf /` pass with
+  exit 0 or 1. The guard now checks the command from the bound root alone
+  (its generated policy, else the generic rules), and the CLI resolves the
+  fallback root only when `--root` is absent.
+- A memory hook's own failure passes the turn. A conflicted or invalid
+  `project-brain/config/runtime.json` made `context-continuity` exit 2, which
+  refused every prompt and every stop, also with `stop_hook_active`; hook input
+  over 4 MiB did the same. The configuration error now names the file.
+- Installed and generated hook and MCP wiring is portable on POSIX. The
+  installer wrote the installing machine's absolute engine and root into the
+  committed `.claude/settings.json`, `.codex/hooks.json`, `.cursor/hooks.json`,
+  `.mcp.json`, `.cursor/mcp.json` and `.codex/config.toml`, while the engine
+  itself is ignored by Git: in a teammate's clone no hook ran (exit 127, which
+  hosts treat as a non-blocking error, so the shell guard was off), their
+  install collided on the wiring and `--sync` refused the clone. The host now
+  names the checkout (`$CLAUDE_PROJECT_DIR`, Cursor's project root and
+  `${workspaceFolder}`, Git's top level for Codex through `sh -c`, whatever
+  the login shell) and the committed `.claude|.cursor|.codex/hooks/*.sh`
+  launchers run that checkout's engine, or the main checkout's in a linked
+  worktree. Without an engine the shell guard refuses with an install hint
+  and the memory roles pass the turn. A teammate's `install --merge-existing`
+  only adds the engine and leaves no diff. The dispatcher and the generator
+  gate accept the portable form, `repo hook-handler` returns it, and native
+  Windows installations keep the bound launch.
+- Memory hooks skip a session outside the project their (older, absolute)
+  wiring is bound to (for Claude Code, the directory the session started in;
+  otherwise `cwd` or Cursor's `workspace_roots`): a second clone or a copy on
+  the same machine read and recorded the original checkout's memory. They now
+  say so instead and record nothing; the shell guard still applies.
+- An upgraded or generated project no longer offers the engine for commit.
+  `install --sync` keeps a project-owned root `.gitignore` without a managed
+  block as it is, so after upgrading a Python-era installation the 47 MB
+  `memory-bank/bin/infra-engine` was untracked but not ignored and
+  `git add -A` staged it; a generated project's composed root `.gitignore`
+  never named it either. Every edition now ships `memory-bank/bin/.gitignore`
+  (core manifest and inventories), the generator seeds the same rules beside
+  the engine, and the root agent instructions drop the stale source-first
+  migration gate that deferred builds and tests.
+- Hooks answer several times faster than after the move to Rust and no slower
+  than the Python runtime did (medians on fresh copies of one installed
+  project, before → after, Python in brackets): prompt memory 305 → 34 ms
+  (129), stop memory 507 → 39 ms (187), context continuity 151 → 12 ms (67),
+  session start 285 → 50 ms (216), shell guard 40 → 7 ms (7). Each engine
+  process compiled the whole secret and privacy policy (about 137 ms of
+  `fancy_regex`) before its first check; a rule now compiles on first use and
+  is skipped for a text that lacks its necessary literals (the Python
+  runtime's mask prefilters, pinned to the exact expression and flags, plus
+  the private and query rules). The task-ID grammar unrolled `{0,199}` over
+  Unicode classes (about 55 ms per check, three checks per prompt), and query
+  tokenizing compiled 22 Russian alias expressions for every word; constant
+  grammars compile once per process. A command reuses a Git frame while the
+  checkout ancestry and administrative files are unchanged, child exits are
+  noticed within a twentieth of their run instead of a fixed 5 ms tick, the
+  guards no longer infer the task from the branch, the queue worker is
+  admitted only when commands are queued, and the launchers find their root
+  without `dirname`. Hook output is unchanged, except that a text the old
+  policy refused because a rule hit the backtracking limit is now answered
+  when that rule's literals are absent from it.
+- Hooks are faster again and the Rust test suite takes under 3 minutes
+  instead of about 17 (hook medians on settled copies of one installed
+  project, before → after): prompt memory 34 → 25 ms, stop memory 34 → 25 ms,
+  session start 50 → 27 ms, context continuity 11.5 → 9 ms; the shell guard
+  stays at 7 ms. Every prompt read the 252 skill copies of three mirrors and
+  serialized their bytes as JSON to fingerprint them (9.5 ms); the parity is
+  now kept beside an image of the copies' identities, sizes and change times
+  and reused while that image holds. Copies changed within the last 3 seconds
+  are always read, and the fingerprint is computed as before, so no index is
+  rebuilt. Each store open inspected and migrated the whole schema under the
+  write lock (about 1 ms per engine process); a store that this source
+  brought current, with no schema change since, skips that. Session start ran
+  the PHP version probe (17 ms), the cache key's Git queries, the status and
+  the branch query one after another; they now run together and their lines
+  keep their places. A turn resolves the default branch from the ref listing
+  it already made instead of up to four more Git processes, continuity no
+  longer asks Git whether the project's own directory is another worktree, a
+  child's exit is noticed when its output ends instead of at the next poll,
+  and children are spawned without forking the engine. Test builds optimize
+  dependencies (workspace code stays unoptimized): `native_generator` went
+  from 460–486 to 23–26 s and `native_install` from 264–289 to 17–19 s, which
+  keeps the 30-minute CI job within its limit.
+- Hooks start one shell fewer and ask Git less (medians on settled copies of
+  one installed project, before → after): shell guard 7.3 → 4.7 ms, context
+  continuity 9.8 → 7.2 ms, prompt memory 25.6 → 21.1 ms, stop memory
+  27.1 → 21.5 ms, session start 30.0 → 26.2 ms. Claude Code and Codex hook
+  commands now start the checkout's engine themselves and run the role's
+  launcher script only without it (a linked worktree, a fresh clone), which
+  spares the launcher's shell and subshell (about 1.3 ms). The launcher-only
+  commands of earlier installations are still recognized and a sync rewrites
+  them; Codex asks to trust the changed hooks again in `/hooks`. Cursor's
+  commands stay script paths. Every engine process found its checkout with
+  `git rev-parse` (about 1.1 ms); a checkout whose `.git` is a plain directory
+  this user owns, on the project's file system, with no configuration that can
+  move or remove the work tree, is now read without Git, with the same top,
+  prefix and administrative directory.
+- The Harness page shows its own updates again. Since the move to Rust the
+  Update button never appeared: the Wasm interface waited for an `available`
+  flag that `GET /api/app/update` does not send (it reports `state`), filled
+  the banner from keys the status lacks, asked for the first time ten minutes
+  after the page opened and ignored a refused update, so the outcome of an
+  update was visible only in a terminal. The button now shows while the
+  branch the clone follows has new commits, listed on hover, from the first
+  paint, which uses the status in `/api/bootstrap`; the page also checks when
+  it regains focus. The banner says why the clone has diverged, why an update
+  failed or what a restart still needs, with the commands it names set as
+  code, and a refused Update shows the server's message. A held restart
+  (`restart-required`) keeps the button, so Update can be pressed again after
+  the rebuild. After an update the page reloads once `/api/health` answers
+  from the restarted server, and says so if none answers within two minutes.
+- `install --sync` stops a project from going back only where it can tell.
+  A project last synced from a Git clone was refused by a packaged release
+  ("no Git identity"), by a shallow clone that lacks the recorded commit's
+  history, and whenever its record named no valid commit. As in the Python
+  installer, only a full clone that lacks the recorded commit now stops the
+  sync, and the refusal names both commits and `--allow-downgrade`.
+- `install --sync` brings a release's new ignore and attribute entries to
+  every install. An install's `.gitignore` or `.gitattributes` without the
+  managed block was kept whole, so no newer entry reached a clean or
+  Python-era install (the engine was offered to `git add -A` until
+  `memory-bank/bin/.gitignore` shipped). A copy that still holds a released
+  version now follows the release like any untouched file; one the project
+  edited keeps every line and receives the release's missing entries in the
+  managed block, as `--merge-existing` writes them.
+- `install --sync` no longer adds `ACCELERATOR.md` beside the `README.md` an
+  install wrote where the project had none, nor puts back a removed copy. The
+  edition README follows the release only where an install placed it beside
+  the project's own, and the project's `README.md` is never written.
+- The edit-loop guard counts the `path` a Cursor or Codex edit names, as the
+  Python hooks did, and Codex's repeat and edit-loop messages name the
+  `systematic-debugger` skill instead of a `/debugger` command Codex lacks.
+- A prompt during a rebase or a bisect reads its branch's memory again. The
+  hooks named the task by the branch being rebased (or the one a bisect
+  started from, or the Codex thread owning a detached worktree), but the
+  capsule was delivered only while `git symbolic-ref` named that branch, so
+  it was refused ("Working branch changed before delivery") exactly while a
+  conflict was being resolved. The hooks and the delivery check now read one
+  definition, `GitFrame::working_identity`.
+- Rust contract tests now pin what the retired Python suites pinned for
+  `install --sync` (new release, project edits, tracked files, Codex trust,
+  downgrades, links, ignore entries, the edition README), the guard hooks on
+  all three hosts, and one task's memory across sessions, a commit, branches
+  and a rebase for Claude Code, Codex and Cursor. The dispatcher guard tests
+  run one at a time: a case that forked while another wrote an engine copy
+  made starting it fail with "Text file busy". Every other test that starts
+  a copy of the engine now has `cp` write it (`tests/support/executable.rs`),
+  so no write descriptor is left in the test process for a child to inherit;
+  `portable_cli` failed that way in one run of three.
+- The Harness's Update restarts only on an engine and a browser interface built
+  from the sources the clone moved to. It fast-forwarded the clone and then
+  restarted on whatever engine `repo artifacts` had last assembled, checked
+  only against that engine's own checksum: a temporary clone updated across a
+  change to the engine and the interface came back on a pinned copy of the old
+  engine, without the new code, and served the Wasm built before the change.
+  `infra-cli/build.rs` now embeds the SHA-256 of the sources the engine
+  compiles (`Cargo.lock`, `.cargo/`, each package's `Cargo.toml`, `build.rs`
+  and `src/`, and every repository file they `include!`, `include_str!`,
+  `include_bytes!` or `#[path]`; not tests or documentation);
+  `capabilities --json` reports it as `source`, assembly copies it into
+  `runtime-capabilities.json`, and `repo build-ui` records its own sources as
+  `source_sha256` in `abi-manifest.json`. After the fast-forward the Harness
+  recomputes both from the clone. A pull that changes no compiled input
+  restarts as before; otherwise the server keeps running, new runs stay held,
+  and the update answers `restart-required` with the commands that rebuild
+  the engine and the interface. Update after the rebuild restarts on them. An
+  engine or interface built before this change records no sources and is not
+  restarted on.
+
+- Move executable project logic into the Rust workspace and one native
+  `infra-engine` CLI: memory/Project Brain/SQLite, hooks and MCP, installation
+  and repository tooling, Infrastructure-Creator, Harness and declarative
+  orchestration, evaluation/pilots, QA workbooks and skill tools. Compile
+  browser behavior to WebAssembly, with generated JavaScript bindings and an
+  exec-only compatibility launcher. Retire production Python and shell
+  implementations, materialize native hook/MCP commands against the final
+  target, and derive distribution inventories and checks from native
+  contracts. Preserve stored authority, frozen study attribution, explicit
+  source/process custody and reviewed publication boundaries. The early
+  primitive ABI remains a compatibility fixture; it is not the runtime.
+
+- Rebuild and validate imported Memory Bank catalogs before native A/B dispatch,
+  then refresh SQLite under the existing admission and timeout boundaries.
+  Add an opt-in EntryFetchThrottle oracle v2 with conflicting `include_path`
+  controls that verify the exact CLI-selected source. Frozen prior experiments
+  and their original verdicts remain unchanged.
+
+- Oracle v2 runs on Debian and Ubuntu, GitHub's runners among them: there
+  `/usr/bin/php` links through `/etc/alternatives`, which its namespace does
+  not mount, and `/lib64` leads to `usr/lib64`, where the namespace's Arch
+  layout found no loader - no PHP started, and the verifier refused the link
+  as a sealed root. It runs the file the link resolves to, or the PHP a
+  trusted case names with `--php`, and lays out `/bin`, `/lib` and `/lib64`
+  as the system does. CI's memory job may take 25 minutes: its 3.x leg took
+  14 of 15 before the runner's two steps joined it.
+
+- Promotion works on Windows again. The publication's directory check asks
+  `linked_reparse` about a stat the portable NT backend built from fields,
+  whose `st_file_attributes` is None, and `None & 0x400` raised a TypeError
+  in every promotion - a save's included, and the Stop hook recorded no
+  turn. Such a stat is no reparse point: that backend refuses every one
+  before it builds a stat. The native A/B pilot's `read_file` compares a
+  file's open and named images by `st_birthtime_ns` on Windows, where Python
+  3.12+ gives `st_ctime_ns` the last change from an open file and the
+  creation time from a path, so every file read as changed while read.
+
+- Wire public response-contract v2 into the opt-in task-complete stand: seal an
+  approved common citation snapshot and complete stdin prompt, expose citation
+  bytes read-only, retain bounded chronological answers, and run literal checks
+  in an independent network-isolated worker before the existing task oracle.
+  Legacy tasks, installed memory defaults and frozen studies remain unchanged.
+
+### Opt-in memory lifecycle extensions — 2026-11-01
+
+- Derive retirement fixture decision dates from their canonical publication
+  validity start so the existing lifecycle assertions remain stable across days.
+- Add future-only response-contract v2 with a complete public citation corpus
+  and pure supplied-byte range/quote checks; preserve v1 render bytes and
+  bindings, distinguish source drift from reader errors, and leave installed
+  defaults, existing callers and frozen study grades unchanged.
+- Add opt-in maintainer response contracts with shared rendering/checking, last
+  marked-answer selection and exact review bindings; preserve known failures,
+  unknowns and external-oracle/custody boundaries without enabling a runtime.
+- Restore complete runtime module graphs around publication fixtures so later
+  combined suites cannot inherit modules from deleted temporary projects.
+- Recheck native-save owner and complete scope before a read-only spool fallback;
+  retain unexpected failed drain attempts for bounded exact replay.
+- Require the final native turn for whole-task completion, count repeated tool
+  IDs per turn, and retain complete/partial multi-turn token observations.
+- Bind hidden oracle labels, empty directories and modes; reject blocking
+  special artifacts and ambiguous duplicate-key grading receipts.
+- Observe exact complete retrieval frame prefixes in batched native stdout,
+  distinguishing them from whole-output matches without changing old studies.
+- Preserve executable modes in lifecycle copies and their snapshot identity;
+  fence retirement source drift and use consistent UTF-8 evidence packet limits.
+- Resolve admitted canonical JSON above weaker fact summaries while retaining
+  explicit conflicts, unavailable evidence, complete history and scope boundaries.
+- Recognize observed literal native-save cat pipelines without a subshell and
+  double-quoted native-cwd root arguments. Preserve literal JSON, exact task/
+  session/receipt validation and original frozen experiment results; unsupported
+  shell encodings remain unknown rather than being executed.
+- Route bounded historical-state inquiries as well as past decisions in the
+  selective pilot; retain version-1 rules, compact ordinary requests and exact
+  original hook transport, including long prompts.
+- Add optional digest-bound capture decisions through canonical saves, prepared
+  requests, MCP and Harness, with separate selection and persistence counters.
+  Absent fields preserve legacy images; default capture prompts are unchanged.
+- Project explicit Brain/Bank fact selectors with source pins, project admission,
+  attestation, scope, time and conflict boundaries; keep the derived view offline.
+- Capture bounded source evidence and replay checked maintenance only on new
+  physical copies, requiring a currently applicable successor, renewing explicitly
+  confirmed overdue claims, preserving history and exposing partial effects.
+- Extend opt-in Bank-only maintenance to canonical archived agent-attested
+  findings: preserve immutable origins during unchanged renewal/no-op and guarded
+  retirement; hold source changes, revisions and legacy attestations without
+  changing decision lifecycles or installed defaults.
+- Compare supplied incremental memory acquisition and later-work costs without
+  charging ordinary task A; refuse inconsistent grading and preserve independent
+  unknown token, billing and timing coverage.
+- Keep retrieval/consolidation experiments opt-in pending their own sealed
+  held-out task-outcome evidence; fixture correctness does not establish benefit.
+
+### Memory reliability and evidence boundaries — 2026-10-31
+
+- Recheck working-state eligibility and final source custody for navigation and
+  empty recall, including policy/source changes during packing. Refresh full
+  native instructions when the effective capture policy changes.
+- Withdraw denied full-context task identities, task-derived links, ticket
+  preferences and recall scope before delivery receipts. Keep independent
+  prompt evidence and distinguish an eligible concurrent task rewrite.
+- Withdraw unavailable task-derived query terms in navigation and empty
+  recall, including deletion/corruption between query construction and
+  assembly; preserve checked public-topic continuation for warming tasks.
+- Bound and anchor optional last-turn report reads and writes, reject linked
+  parents and special files, and preserve cancellation through cleanup failures.
+  Check the complete advisory summary against the existing secret/privacy guard
+  before clipping; withhold sensitive diagnostics without failing the capsule.
+  Use a fixed notice above 4096 summary characters to bound regex work.
+- Preserve cancellation through public Cursor lock and directory cleanup,
+  including cancellation first raised during unlock. Drain owned resources
+  while retaining ordinary cleanup failures and the existing fallback.
+- Persist bounded promotion publication checkpoints before multi-file effects,
+  recover exact owned effects after process death, and refuse foreign images.
+  Use rooted directory operations and atomic exclusive first publication on
+  supported Linux, macOS and Windows filesystems; bootstrap first-save folders.
+- Checkpoint `bank-retire` before changing either side of a replacement link.
+  An unfinished operation rolls back on the next cooperative mutation; a
+  completed checkpoint removal commits it. Preserve foreign edits, bound
+  target reads, and cover real process death and repeated recovery failures.
+- Render recorded conflicts honestly without exposing withheld partners, and
+  refresh conversation novelty when a conflict warning changes.
+- Fence unfinished semantic publication against task revisions, refuse malformed
+  fingerprint containers, and preserve predecessors through repeated rollback
+  failures. Persist explicit verification identities for clock-independent
+  successor decisions; legacy equal-image metadata edits do not assert rechecks.
+- Keep event consolidation tied to the original checked source image, retain
+  events until their successor is available, and require real JSON booleans for
+  automatic lifecycle flags. Normalize offline fact timestamps to UTC and keep
+  digest mismatches stale across retiming.
+- Distinguish unique submitted/existing/held learnings from actual writes in
+  content-free native diagnostics; preserve unknown coverage for older rows.
+  Correct held-reference notices and exercise copied MCP runtimes in fresh
+  processes so cached canonical modules cannot hide missing dependencies.
+- Screen subscript credential assignments and structured authentication headers
+  before experimental snapshots enter Git, indexes or model inputs.
+
+### Independently verified memory proposals — 2026-10-31
+
+- Add an off-by-default review-verified mode: the working agent stages a
+  correction without publishing it. A trusted external controller exports full
+  admitted sources and original claims for a separately isolated reviewer.
+- Require complete clause/evidence and boundary-case coverage, immutable first
+  authorization, a finished primary result, and exact source/task/memory fences
+  before guarded publication. Reject or unresolved verdicts preserve knowledge;
+  canonical completed replay survives removed sources and expired sessions.
+- Keep agent attestation distinct from human review. JSON identities and hashes
+  ensure consistency only; host-enforced read-only knowledge and separate
+  reviewer/controller processes remain mandatory. No default is enabled.
+
+### Explicit pre-answer memory review stage — 2026-10-31
+
+- Add an off-by-default review mode and scoped memory-review CLI with explicit
+  confirm/correct/defer decisions before the final answer. Reuse guarded semantic
+  results and passive replay while leaving native closing saves unchanged.
+- Fence exact record/source images, actor/task/config/runtime/checkout and the
+  first accepted decision set. Keep plans/status local and bounded; deferral
+  does not verify or renew knowledge. Preserve root-aware commands and bounded
+  refusal of malformed metadata.
+
+
+### Experimental ordinary-session maintenance — 2026-10-31
+
+- Add an off-by-default, task/actor-scoped queue of up to three exact returned
+  semantic source images. Normal native saves can suggest explicit rechecks of
+  encountered agent-attested claims whose canonical sources changed.
+- Recheck current permissions and exact MEM-to-Brain provenance; omit unsafe,
+  expired or unseen changed records. Preserve ordinary saves, cached-short
+  instructions, source attestation boundaries and existing guarded replay.
+
+
+### Explicit existing-knowledge revalidation — 2026-10-31
+
+- Allow a checked learning to name its original record UUID, revision and
+  complete canonical source image across tasks. Preserve ordinary learning
+  identities and passive completed replay; hold protected, stale, mismatched
+  or missing references without creating orphan findings.
+- Pin the inspected source image, preserve person/agent attestation, and
+  promote explicitly rechecked evidence through successor chunks even when
+  the consequence text is unchanged. Keep predecessor bodies and reciprocal
+  supersession links; ordinary edits and reads do not verify knowledge.
+- Carry references through native, CLI, MCP and Harness saves, refuse their
+  legacy create-only fallback, and expose read-only CRLF-neutral citation
+  hashes without opening SQLite or provisioning a task.
+
+### Mandatory native experiment snapshot admission — 2026-10-31
+
+- Refuse known credential carriers, unsupported binary/encoding, unsafe paths
+  and incomplete or changed materialized inputs before launching a model.
+  Scan source and handoff data before creating Git/index copies; bind the
+  exact final file/directory inventory and modes after trusted preparation.
+- Pin canonical runtime bytes separately from user data, declare the origin
+  of fresh Git/index binaries and keep provider credentials on their external
+  read-only transport mount. No redaction, admission bypass or installed
+  runtime/default change is introduced.
+
+### Observed native save pipeline recognition — 2026-10-31
+
+- Recognize literal `cat` quoted-heredoc pipelines into the exact-corpus native
+  save wrapper without executing extracted text or weakening receipt/proof
+  checks. Progress-only saves remain distinct from new durable knowledge;
+  unsupported commands and nonliteral input stay unproven.
+
+### Reproducible native memory A-to-B experiment — 2026-10-31
+
+- Add a maintainer-only private plan/run/inspect controller with two fixed
+  attempted slots, mode-bound screened snapshots, canonical full hooks,
+  isolated native homes and persistent temporary queues. Failed source saves
+  block the served stage; retries require a new plan.
+- Verify native result/receipt/proof and new durable knowledge before handing
+  it to a fresh task; retain pending observations and raw bounded evidence.
+  Offline fixtures exercise actual hooks and storage without provider calls.
+  Immediate availability remains separate from delayed outcome efficacy.
+
+### Private delivery identity observations — 2026-10-31
+
+- Complete-task experiments now retain bounded pre-run-known document
+  identities/hashes, optional local render-trace associations and separately
+  labelled post-run citation hash checks. Missing evidence remains unknown;
+  local metadata never claims host receipt, semantic verification or model use.
+- Keep diagnostics additive and private: no query, snippets or raw record
+  bodies are exported; diagnostic failure does not change task completion or
+  correctness. Installed runtime schemas, profiles and defaults are unchanged.
+
+### Private outcome transport reliability — 2026-10-31
+
+- Preserve the system TLS trust bundle in the Linux read allowlist, allow
+  native reconnect events to recover within the original deadline, and keep
+  incomplete native/CLI failures unknown instead of grading them as wrong
+  project answers. Timeout/cap failures and the legacy endpoint are unchanged.
+
+### Offline memory lifecycle pilots and selective whole-task experiments — 2026-10-31
+
+- Added maintainer-only consolidation replay on physical copies, source-backed
+  scoped current-fact projections and read-only freshness review packets.
+  They preserve source provenance, explicit conflicts and verification boundaries;
+  installed memory configuration and both consolidation defaults stay unchanged.
+- Added sealed whole-task experimental arms for selective recall/full routing
+  through one original hook and frozen consolidation treatments. Reports reject
+  changed protocol membership and unplanned retries; incomplete cost/quality
+  evidence remains unknown. Public fixtures validate mechanics, not real-client
+  efficacy or complete provider savings.
+
+### Optional complete-task memory evaluation — 2026-10-31
+
+- Add a maintainer-only sealed `task-complete` endpoint beside the unchanged
+  first-touch default: independent answer/patch verification, fixed planned
+  slots, explicit incomplete outcomes and host-reported usage coverage.
+- Linux private runs require a proven bubblewrap read allowlist and prepared
+  public snapshot Git history. External oracle bytes and labels are bound to
+  the seal; patch drivers must return an explicit trusted completion receipt.
+- Distinguish authored replay saves from captured native receipts and compare
+  real source/served task UUIDs. Public fixtures establish mechanics only,
+  without model calls, a held-out efficacy result or runtime default changes.
+
+### Claude Code below the project root gets a long `AGENTS.md` whole — 2026-10-31
+
+- A session started below the project root gets `AGENTS.md` from the
+  dispatcher's `policy-N` entries, one hook output each, which Claude Code
+  keeps in the conversation only up to 10,000 characters. Four entries held
+  about 39,000, and the last took the rest whole, so Claude Code put that
+  entry into a file. bauherrenmappe's policy, 42,932 characters with the
+  project's own part first, lost its fourth entry that way - 17,360
+  characters holding every rule of the accelerator's: a session in `src/`
+  had the project's notes and none of the accelerator's rules. Six entries
+  now carry about 59,000, and a longer policy's last entry carries what fits
+  and names the line of `AGENTS.md` the rest begins at. `DISPATCH_VERSION`
+  is 5: the first session in the root of a project with this release puts
+  the new dispatcher and its two new entries into the person's settings.
+  Found by the policy check of `scripts/claude_code_bench.py --subfolder src`
+  on a synced copy of the project.
+
+### The Harness's project panel says why an installed project is not kept current — 2026-10-31
+
+- For a project with its own installed accelerator the **Project** chip's
+  panel said only that; the server's record of its last sync - an error,
+  such as a project synced from newer work than the server's clone, which
+  the sync now leaves alone, or a release held back in part - reached no
+  one. The panel now adds it (`installedSummary`).
+
+### `memory_eval.py install-status`: can memory run in a project at all — 2026-10-31
+
+- Per project, from its own files: the commit its accelerator was synced
+  from and whether this clone has it, the configured capsule profile against
+  the profiles the project's runtime knows, the last prompt hook run, whether
+  the last capsule asked for was built, the last save step, and which
+  instructions Claude Code loads. Each problem is a way memory went silent
+  in the client projects - a refused profile, a capsule not built, a
+  `CLAUDE.md` without the import, an `AGENTS.md` Codex cuts, hook commands
+  found only from the project root - and the command exits 1 on any. On the
+  four clients tonight it names the refused `recall` profile in each, after
+  the Harness's sync of 2026-10-30 at 17:01, and the cut policy in one.
+
+### `realized` no longer counts a refused capsule as a capsule turn — 2026-10-31
+
+- A prompt hook whose refresh assembled no capsule prints the refresh's layer
+  lines and "warning: Capsule unavailable: ...", and `realized` took the layer
+  lines for a capsule's start: each such turn counted as a turn with a
+  capsule. It is now a prompt-hook turn without one, counted apart ("the
+  refresh assembled no capsule"). Over the four client projects from
+  2026-09-01 that is 448 of 931 prompt-hook turns, all in September: 300 of
+  next's 440 Codex turns, 73 of scb's 147, 63 of bauherrenmappe's 216 and 12
+  of aea-partner's 128. Two refusals caused them: "Working task not found"
+  (276 messages; the prompt refresh serves an unrecorded task since
+  2026-10-06) and an automatic-continuation conflict (174) whose code is in
+  no branch of this repository. `docs/MEMORY-EVAL.md`'s "440 capsule turns"
+  for next's September is 140; the sealed field check counts `realized`'s
+  turns with a capsule, so a refused one no longer counts toward its 50.
+  `field-check` names them per host beside the rule, as it names the hooks
+  not found.
+
+### A capsule asked for and not built is recorded, and the funnel counts it apart — 2026-10-31
+
+- A `refresh` that was asked for a capsule (`--query`) and assembled none -
+  a task ID the runtime cannot read, a profile it refused - writes
+  `"capsule": null` in its `refresh-health.ndjson` line, and
+  `memory_eval.py funnel` counts such lines as "capsules asked for, none
+  built" instead of capsules built. Before, the line carried no shape, as an
+  old runtime's does, and read as a capsule of unknown profile: the four
+  clients' turns since the Harness's sync of 2026-10-30, every one without a
+  capsule, would have shown in the weekly funnel as capsules delivered.
+
+### Install and sync say when Codex would cut the project's policy — 2026-10-31
+
+- Codex reads at most `project_doc_max_bytes` of `AGENTS.md` (32 KiB by
+  default), and the installer appends the policy after the project's own
+  part. The editions' `.codex/config.toml` raises the limit to 128 KiB, but
+  a project's own configuration is kept by every sync: one client's 27 KB of
+  notes and a config without the key leave the policy past byte 32,768 out
+  of Codex (see the Codex bench entry below). `--sync` now reports it as
+  `codex_policy_cut`, with the line to add at the top of
+  `.codex/config.toml` - Codex 0.163 reads it from a trusted project, which
+  the bench showed: with it, the same copy gets the whole 43,260-byte
+  policy - and an install with Codex prints it on stderr
+  (`codex_policy_cut`).
+
+### Every Codex bench run checks the policy reached the model — 2026-10-31
+
+- `scripts/codex_bench.py` checks in every run what only `--worktree` checked:
+  every line of the project's `AGENTS.md` (the clone's, in the developer
+  instructions, attached) in what Codex sent, none of it in a truncated hook
+  output, and reports the policy's size (`policy_bytes`). An overflow note
+  fails it only beside policy text: Codex also cuts a long file the stand-in
+  prints, which on one client's copy failed a policy that had arrived whole.
+  On Codex 0.163 a fresh install passes. A synced copy of one client fails it: its
+  `AGENTS.md` is the team's 27 KB of notes with the edition's policy block
+  appended, 43,260 bytes, and Codex reads 32,768 by default
+  (`project_doc_max_bytes`), so the policy stops mid-line in Working Memory
+  and Subagents, Verification, Git Safety, Security, Memory Bank And Project
+  Brain and Definition Of Done never reach the model. That person's own
+  `~/.codex/config.toml` raises the limit to 64 KiB; nothing in the project
+  does.
+
+### The automatic capsule survives a profile the runtime does not know — 2026-10-31
+
+- A configured `capsule_profile` (or `CONTEXT_CAPSULE_PROFILE`) the runtime
+  does not know builds the `full` capsule, with the warning "capsule_profile
+  'X' is unknown to this runtime (full, navigation, recall): full capsule
+  delivered" (`automatic_capsule_profile`). Before, the automatic entry
+  points refused it, and every prompt went without a capsule: since the
+  Harness's sync of 2026-10-30 at 17:01, four client projects whose
+  `runtime.json` says `recall` run a runtime that knows only `full` and
+  `navigation`, and each prompt gets "Capsule unavailable" in place of its
+  working state. A profile the caller names (`--capsule-profile`) is still
+  refused, and the health record's `profile` is the one that built the
+  capsule.
+
+### Every Claude Code bench run checks the policy reached the model — 2026-10-30
+
+- `scripts/claude_code_bench.py` checks in every run - a fresh install,
+  `--target`, `--attached`, `--desktop`, plan mode - that every line of the
+  policy reached the model, HTML comments aside (Claude Code drops them), and
+  names each `AGENTS.md` the first question carried with its label
+  (`policy_heard`, `policy_files`). Only `--subfolder` and `--worktree`
+  checked it before, so a project's own `CLAUDE.md` keeping `AGENTS.md` out of
+  every client's Claude Code went unseen; the bench's project now keeps a
+  `CLAUDE.md` of its own, as client projects do. On Claude Code 2.1.278 the
+  edition's import loads the policy once, and without it the run fails. On
+  copies of the four clients the policy arrives once in each; as the Harness
+  left them the save shows as a hook error and nothing is saved, and synced
+  to this branch all four save.
+
+### A sync never takes a project back — 2026-10-30
+
+- `install_accelerator.py --sync`, and the Harness's sync of its registered
+  projects with it, writes nothing into a project last synced from a commit
+  the clone does not contain, and says so as the report's `error`
+  (`installation_ahead`). At 17:01 on 2026-10-30 the Harness started on a
+  clone at `main` (1cbdf9e7) and synced the four client projects that had
+  been synced from the memory stack that morning (adfeb5ab, then 8b20d5f1):
+  26-28 files each went back to `main` - runtime, hooks, the policy block -
+  with no backup. Their `runtime.json` keeps `capsule_profile: recall`,
+  which only the stack's runtime knows, so from then on every prompt there
+  gets "Capsule profile must be full or navigation" instead of a capsule,
+  and Claude Code's save step is the old `decision: block` form again. No
+  hook has run in those projects since. A commit the clone has never seen
+  stops the sync too, except in a shallow clone; `--allow-downgrade` is a
+  person going back on purpose.
+### Claude Code's usage numbers came from sessions without the memory policy — 2026-10-30
+
+- "Delivered documents go unused held for Claude Code alone" (below, from the
+  compressed rollouts) needs this beside it: no Claude Code session in the
+  four client projects loaded `AGENTS.md`. Each project keeps its own
+  `CLAUDE.md`, which keeps Claude Code from reading `AGENTS.md` by itself;
+  the edition's `.claude/CLAUDE.md` imports it since 2026-10-06 (4f1cf107).
+  It reached three clients on 2026-10-08 and `next` on 2026-10-18, after the
+  last Claude Code session in each, and none has run there since. Their
+  transcripts show the project's own `CLAUDE.md` loaded in 191 of 386 and
+  `AGENTS.md` in none.
+  `docs/MEMORY-EVAL.md` says so beside the numbers; the sealed field check
+  from 2026-10-31 is the first that reads Claude Code sessions told to
+  retrieve and save.
+
+### One scenario table holds the native save on Claude Code, Codex and Cursor — 2026-10-30
+
+- `tests/test_memory_native_capture.py` drives seven scenarios through the
+  native save on each host - a normal answer, a save the runtime refuses,
+  the agent declining, the host refusing the save command, a repeated Stop,
+  a turn cancelled during the save and a prompt sent while saving - and
+  holds the journal each leaves. Where the hosts differ the difference is
+  the expected value: only Claude Code's refusal is read, so Codex and
+  Cursor ask again on the next turn, and Cursor runs a Stop with status
+  aborted for a cancelled save, which settles nothing.
+
+### `realized` counts every Claude Code hook run, and the ones not found — 2026-10-30
+
+- Per event, the hook runs a Claude Code transcript records: succeeded,
+  failed (and of those, the command not found, exit 127) and blocked. In
+  September 2026 two client projects' hooks were wired as relative
+  `.claude/hooks/...` commands, and below the project root none was found:
+  3,309 times, the Bash validator among them, for a month, with nothing to
+  show it. Their wiring names `"${CLAUDE_PROJECT_DIR}"` since today's sync;
+  this count is how a break of that kind shows next time.
+
+### `memory_eval.py field-check` reads the sealed rule of the every-turn save — 2026-10-30
+
+- One command computes, over several projects' transcripts and per host,
+  what the sealed field check reads: capsule turns; K, the knowledge items a
+  later tool call opened, from capsules and explicit retrieves together; T,
+  the task records opened; S, the median save seconds over the median
+  answer's; and which branch of the rule each host meets, or that it is
+  still below 50 capsule turns; beside the rule, the Claude Code hook runs
+  recorded and how many were not found. `realized` and `field-check` share one
+  collector of a project's sessions. On the four client projects from
+  2026-09-01 (no save step then) it reads K = 0 on both hosts, T = 1 and 9:
+  the working-state path first.
+
+### The CLI answers the refusals agents met most — 2026-10-30
+
+- In the September 2026 sessions of the four client projects Codex ran
+  `context.py` 383 times; 79 of the calls failed on five refusals. Nine called
+  `brain-validate`, beside `brain-create`, `brain-update` and `brain-get`:
+  it is now an alias of `validate`. Fifteen passed an evidence level as a
+  status (`brain-update --transition verified`, or `observed`): the refusal
+  now says it is an evidence level and how it is set (`--authority
+  verified`; a record starts observed). Five passed
+  `complete --revision auto`; completion still pins the revision the caller
+  read, and the refusal now says `context.py get --task-id ID` shows it.
+  Fifteen ran `start` for the task already under way (the runtime of then
+  refused a retrieve before it); the refusal now names `get` to read it and
+  `update --revision auto` to record progress. Thirty-five met "Working task
+  not found" for a task not bound on that machine; it now says `start` (or
+  the first checkpoint) records one and `rebind` binds one recorded
+  elsewhere.
+
+### A verified record's citation that was never digested stays so — 2026-10-30
+
+- The fingerprint rule of the same day ("a verified record keeps the versions
+  that were checked") still took the file as it is now for an old citation
+  that had no fingerprint - a record from before fingerprints, three of them
+  in the client project next. Only a source the write itself cites for the
+  first time is fingerprinted now; an old citation never digested stays so,
+  and keeps the record from promotion as before.
+
+### A capsule's health line names the host that asked — 2026-10-30
+
+- `refresh` and `hook-context` write the `--host` they were given into their
+  `refresh-health.ndjson` line (`claude`, `codex`, `cursor`, or `cli` for an
+  explicit request), and `memory_eval.py funnel` counts capsules by host. A
+  report per host - capsules, saves, opens - is what the field measurement
+  needs, and the journals alone could not split capsules by client. The
+  shell's own line for a hook run still names none.
+
+### `realized --traces` sets the runtime's renders beside what the host recorded — 2026-10-30
+
+- The runtime keeps a trace of every capsule it rendered, with the digest of
+  the text it printed; `realized --traces` matches each hook turn's capsule
+  and each explicit retrieve's answer to the trace that digest names, each
+  trace once, and counts the hook renders a transcript shows were handed
+  over, those none shows (a refresh stopped at its budget after it printed,
+  a host that dropped the capsule, a transcript not on this machine), the
+  retrieve answers that match a render, and per host the items the matched
+  renders showed and how many the turn touched. Counts only. Checked against
+  a real `refresh` and `hook-context`: the printed text's digest is the
+  trace's.
+
+### A capsule's health line counts the bytes it printed — 2026-10-30
+
+- The capsule shape in `refresh-health.ndjson` gains `bytes`: the size of
+  the capsule as printed, by `refresh` and by a printing `hook-context`
+  (`None` for `--json`). Its `tokens` estimate counts documents only, so a
+  recall or navigation capsule of working state and recent files read 0
+  whatever it printed. Counts only, as before.
+- `memory_eval.py funnel` prints the median printed bytes beside the median
+  tokens, and `memory_outcome_ab.py` records each run's `capsule_bytes` and
+  prints their mean among the arm's costs: the sealed ticket run promises to
+  report what its capsules cost, and the document estimate cannot say.
+
+### Chat snapshots leave out the Codex context the turn reader leaves out — 2026-10-30
+
+- `context_continuity.py` kept as the person's words four envelopes Codex
+  writes into the user role that `context.py`'s turn reader takes for Codex's
+  own since 8b20d5f1: the plugins it recommends (`recommended_plugins`), the
+  user instructions beside AGENTS.md (`user_instructions`), an app's notice
+  that blocks edits (`external_codex_apps_writing_block_edits`) and a
+  subagent's report (`subagent_notification`). They came into every chat
+  snapshot that held them. A test now holds the two lists together and names
+  where they differ on purpose: the answer to the agent's question continues
+  a turn and is still the person's, and a notification starts a turn and is
+  not.
+
+### `realized` reads a retrieve's answer inside Codex's output wrapper — 2026-10-30
+
+- Codex heads what a command printed with its own lines ("Script completed"
+  or "Script running with cell ...", the wall time, "Output:"): every one of
+  the 75 retrieves in next's September sessions came back so, and a `--json`
+  answer then did not start with `{` and was not read. `realized` now reads
+  past those lines, and of several JSON documents one call printed (`start
+  --json` before the retrieve) takes the one with memory layers. The counts
+  of 2026-10-30 hold: the 17 JSON answers held one capsule.
+
+### A verified record keeps the versions that were checked, and says who checked — 2026-10-30
+
+- `update_record` took every source fingerprint anew on any write, so a
+  `brain-update --progress` that only tidied a verified finding's wording
+  moved its fingerprints to the current files: retrieval stopped marking it
+  "cited file changed", and a re-promotion carried the new digests into the
+  chunk, for a claim nobody had checked again. A verified finding, bug,
+  incident or decision now keeps the fingerprints taken when it was checked
+  through every write that checks nothing (progress, next steps, a lifecycle
+  move), and only a source cited for the first time is fingerprinted then.
+  An observed record follows its sources as before.
+- `brain-create --authority verified` and `brain-update --authority
+  verified` recorded nobody as the checker; the one real knowledge corpus in
+  a client project was written that way. They now record `agent` unless
+  `--attestation person` says otherwise. `brain-update --reverify` checks a
+  verified claim again: its fingerprints are taken anew and the ledger says
+  who checked. A record created verified writes its attestation into an
+  `observed` -> `verified` ledger entry, which every runtime's validator
+  accepts.
+- A person's verified claim is revised only with attestation `person`, as
+  `record-result` already held it: before, a `brain-update --progress` from
+  an agent rewrote it silently.
+- The Harness passes `--attestation=person` for what a person does on its
+  project and session pages, where the runtime declares
+  `BRAIN_ATTESTATION_FLAG` near the top of `context.py`; an older runtime is
+  not handed the flag.
+
+### The maintainer tools measure the retrieves agents make and what a save costs — 2026-10-30
+
+- `memory_eval.py realized` reads every explicit retrieve in the sessions it
+  reads - `context.py retrieve` through a shell and the Memory MCP's
+  `memory_retrieve`, in a capsule turn or not - pairs each call with its
+  answer by the host's call ID and counts, per host and kind, the documents
+  the answers named and how many a later tool call opened, the task records
+  they pointed at, and as a baseline the documents opened that no retrieve
+  named. In next's Codex sessions since 2026-09-01 (75 calls in 36 sessions)
+  the answers named 25 task records, 9 opened afterwards, and 4 findings and
+  chunks, none opened: the one memory path agents were seen using is the
+  working state, and no tool read it before.
+- A capsule's delivered documents are the items it lists as memory, in the
+  current form (`- memory|history|skill|policy <path> — <title>`) or the
+  September one (a `semantic:` line with the items indented under it, and
+  `weak-match:`). Paths on the other lines - recent and ticket files, the
+  task's sources, the last turn, an excerpt - were counted as delivered
+  (next, September: 65 items, now 54); the `task record:` pointer has its own
+  row, and a task's record is the kind `task-record`, apart from `brain`.
+- A Codex capsule after the prompt hook's "Previous native memory result was
+  not saved completely." was no turn at all; it is now, and so is one Codex
+  marks `hooks.additional_context`. A developer message Codex marks as
+  something else is no capsule whatever its first word, and "Memory refresh
+  unavailable" opens a turn without a capsule.
+- The native save cost line adds, where the host records them, the save's and
+  the answer's input tokens and how many came from the cache (Claude Code:
+  fresh, cache-written and cache-read). On the 43 saves of 2026-10-24 on
+  copies of two client projects the median save re-read 176,782 input tokens,
+  175,616 cached, beside its 662 output tokens and 17.1 s.
+- `memory_outcome_ab.py`: the `capsule` arm names `capsule_profile: full`. It
+  left the profile to the corpus, and since the editions ship `recall`
+  (2026-10-22) it would have measured recall under its old name. `report`
+  prints each arm's cost outside the verdict: mean seconds, on how many runs
+  Codex reported usage (never on a run stopped at the gold touch), the mean
+  tokens over those, and the documents' token estimate.
+- `docs/MEMORY-EVAL.md` says the stand counts calls to the first touch of a
+  changed file and does not see whether the task got done.
+
+### A ticket files line in the capsule, an experiment switched off — 2026-10-30
+
+- `ticket_files: true` in `runtime.json` (or `CONTEXT_TICKET_FILES=1`; `0`
+  turns a configured one off) adds `ticket files (CMS-741): ...` beside the
+  recent files: the files of the newest commits on any ref whose message names
+  a ticket of the request, or of the task's ID upper-cased, matched in any
+  case as a word of its own; present, kept as recent files are, not named in
+  the request and not already shown; ten at most within 720 characters. Off
+  by default: it changes what a capsule spends, so it waits for a task-outcome
+  measurement (`docs/MEMORY-EVAL.md`, "Accepting a retrieval change").
+- Why this one: on 155 cold starts of four client projects (before
+  2026-10-07) it was the most precise list - 9.4% of the files it showed were
+  changed by the turn, against 6.1% of the recent files - and found a changed
+  file in 14 tasks the recent files missed; with co-change of the files a
+  prompt names, 23 (55 to 78 tasks) at the width of twenty recent files (68).
+  Co-change of the recent files themselves did no better than ten more recent
+  files and is not built.
+- Cost: `git log --grep` adds 35 to 60 ms a prompt on repositories of 4,000
+  to 5,000 commits (the largest client clone's refresh, median 83 to 143 ms).
+  A Git failure or its two-second timeout leaves the line out.
+- The capsule shape in `refresh-health.ndjson` counts `ticket_files`, and
+  `memory_eval.py funnel` has "with ticket files".
+- `scripts/memory_outcome_ab.py`: arm `ticket` (recall plus the line); `sample
+  --require-ticket-commits` keeps the cold starts it can act on; a task records
+  its session's `branch`, and the corpus branch keeps that ticket
+  (`ab/<id>-CMS-741`); `report --compare recall,ticket` counts the pairs whose
+  capsule carried the line. The measurement is sealed before it runs (SHA-256
+  `ff43fdbad191b748feacfce2a2a087d3bfdabb71108804ed250d2fdca9cd1a6f`):
+  `recall` against `ticket` on the same projects' cold starts from
+  2026-10-31, drawn once at least 30 exist. On 8 corpora of the tuning set the
+  ticket arm's capsule showed the line and the recall arm's did not.
+
+### A Codex turn begins where its rollout says, not at Codex's own context — 2026-10-30
+
+- The Stop hook keeps the files of the transcript's latest turn, which began
+  after the last user message the runtime took for a prompt. Codex also
+  writes its own context in the user role - its `AGENTS.md` instructions and
+  recommended plugins, an app page, a skill's text, a Stop hook's
+  continuation, a subagent's report, the answer to its question, a stopped
+  turn's note - and each was taken for a prompt: on the 3,099 rollouts of
+  the maintainer machine, 229 of 6,298 Codex turns with calls lost the calls
+  made before one, 5,307 of 131,774. `_transcript_prompt` now leaves out a
+  message that is wholly such context (the instructions, or one of those
+  envelopes). Context around the person's own request (`# In app browser:`
+  or `# Files mentioned by the user:` above `## My request`,
+  `<in-app-browser-context>` with the request after it) and a turn Codex
+  starts itself (a notification, a heartbeat) still start a turn.
+- A Codex turn begins at the rollout's own `task_started`: the 29 turns the
+  prompt rule alone still cut were a message the person sent while the turn
+  ran, which Codex adds to that turn. Without the event in the window
+  (Claude Code, a turn longer than the window) the turn begins at its prompt
+  as before.
+- `scripts/memory_outcome_ab.py` had its own test for a Codex prompt, which
+  also dropped context around the person's request: 484 such prompts on the
+  maintainer machine. It now takes the runtime's and leaves out only a turn
+  Codex starts itself. Before 2026-10-07 the four clients give 268 Codex
+  recall sources (242 before) and still 38 Codex cold starts, 6 of them
+  different: the old test had passed over the session's first prompt.
+
+### The evaluation tools read Codex's compressed rollouts and draw Codex tasks — 2026-10-30
+
+- Codex keeps a finished rollout as `rollout-*.jsonl.zst`: 3,040 of the
+  3,099 on the maintainer machine, the four client projects' 1,837 Codex
+  sessions among them. `scripts/memory_eval.py` read only `*.jsonl`, so
+  `realized` reported those clients' Codex history as empty. It now reads
+  compressed rollouts through Python 3.14's `compression.zstd`, or else the
+  `zstd` command, and says how many it could not read without either.
+- With them, over the four clients: Claude Code, 386 sessions, 1 of 289
+  delivered documents opened, no `context.py` call by an agent; Codex, 1,837
+  sessions, 25 of 67 opened, 474 `context.py` calls (66 of them `retrieve`).
+  "Delivered documents go unused" held for Claude Code alone.
+- `scripts/memory_outcome_ab.py`: `sample --hosts claude,codex` and
+  `recall-sources --hosts` draw from Codex rollouts too, compressed ones
+  included; the default stays `claude`, so a sealed sample draws the same
+  tasks. Each task records `seed_hosts`, the sessions its recent files are
+  seeded from (`run --codex-root`); a task from before them seeds from
+  Claude Code alone.
+- A Codex prompt is what a person wrote: the stand reads a Codex message's
+  text, and a message Codex puts in the user role (`AGENTS.md`
+  instructions, recommended plugins, notifications, a hook's continuation
+  prompt) no longer starts a turn. 2,310 of the 3,099 rollouts began with
+  one; before the fix the four clients gave 15 Codex cold starts, after it
+  38 (37 with 1-10 gold files, none in an earlier sample), and 242 Codex
+  recall sources beside Claude Code's 105.
+
+### A memory funnel across projects, from their journals — 2026-10-30
+
+- `scripts/memory_eval.py funnel --project A --project B [--since DAY] [--json]`
+  adds up how far memory gets in several projects at once, from their
+  journals alone: the prompt hook's runs, timeouts and failures; the capsules
+  built, how many carried the working state, recent files or documents, by
+  profile, and their median tokens; the saves armed, requested, made, refused,
+  failed or omitted, with learnings written and chunks promoted; and the task
+  records, findings, decisions and bank chunks the project keeps. It reads no
+  transcript, path, query or record text and labels a project by its folder
+  name, so a teammate can send the result; `realized` stays the transcript
+  side.
+- A `refresh` or `hook-context` line in `refresh-health.ndjson` now carries
+  the capsule's shape as counts: `{"profile", "working", "recent_files",
+  "documents", "tokens"}`. A line from an older runtime has none and the
+  funnel counts it as `unknown`.
+- Run over the four client projects after syncing them to this stack on
+  2026-10-30: since 2026-09-01, 640 prompt hook runs (5 timed out), 663
+  capsules with no shape recorded, no save journal yet, 56 task records,
+  77 findings and decisions, 5 bank chunks.
+
+### Each turn mends a bank index that a stopped write left behind — 2026-10-30
+
+- Why: a promotion, a retire or a re-verify writes the chunk first and
+  `memory-bank/INDEX.md` second. Its snapshot restore covers an `Exception`
+  only. A host that stopped the write between the two, by Ctrl-C, a budget
+  or a kill, left a chunk the index did not name, or named as it had been.
+  The bank's `validate.py`, which a team may run in CI, then failed until
+  the next bank write. Found by a longer lifecycle campaign: 24 installed
+  seeds of 120 steps with stops and lock waits. The last save of seed
+  13018 was stopped by SIGINT between the two writes.
+- What changes: the turn checkpoint each Stop hook runs (`context.py
+  turn`) first compares the index's time with its newest chunk's. When a
+  chunk is newer, it writes the index again through `reindex_bank`, which
+  takes the lock the stopped write held and rewrites only what differs. An
+  index Git checked out after its chunks, as a pull does, is only marked as
+  current, so later turns read the chunks' times and nothing more.
+- Tests: `tests/test_memory_native_capture.py` drops a promoted chunk's row
+  from the index and makes the index older than the chunk. One turn
+  restores the row and the bank validates. Before, the row stayed missing.
+
+### A save the Memory MCP refuses names its code — 2026-10-30
+
+- Why: the Memory MCP answers a refused tool call with fixed text and,
+  as its comment says, with the typed code, the one thing an agent can act
+  on and never the submitted content. It found the code only when the error
+  message was itself a code. A refused save carries its code apart from
+  the message (`ResultRefused.code`), so every refusal of
+  `memory_record_result` read "Memory operation failed" with no reason. A
+  progress too long, a pasted log, a missing source and half a character all
+  looked the same. Found by calling the installed server with refused saves.
+- What changes: the server takes the code through `refusal_code`, as the
+  native save's journal does. The answer names it, for example
+  `(text_limit)`, and still never the submitted text.
+- Tests: `tests/test_memory_mcp.py` makes three refused saves and finds
+  each code, without the submitted text, in the answer. Before, none of
+  the three named its code.
+
+### A bisect keeps the branch it started from as the task — 2026-10-30
+
+- Why: a bisect tests commits on a detached HEAD. A detached HEAD names no
+  task except during a rebase and in a worktree Codex made. So during a
+  bisect, on Claude Code, Codex and Cursor alike, the prompt hook delivered
+  no capsule at all, not even the working state, and the Stop hook asked
+  for no save until `git bisect reset`. Yet what those turns find, such as
+  the commit that broke something, is about the branch the bisect started
+  from. Found by running whole turns through a bisect.
+- What changes: the hooks' `rebased_branch` and the runtime's
+  `_bisected_branch` read `BISECT_START`, which Git keeps in the worktree's
+  own Git directory until the reset. A branch name there is the task, and
+  the runtime admits it only while the bisect runs, as it admits a rebase's
+  branch. A commit ID there (a bisect started on a detached HEAD) names no
+  task. `status` reports the task with the source `git-bisect`. The
+  generator's hook fragment (`hook-forge`) carries the same lines, and a
+  test holds it to the editions' hooks. Those lines take the generator's
+  skill bodies to 307,171 bytes, past their 306,800-byte ceiling, so the
+  ceiling in `scripts/token_budget.json` rises to 307,300.
+- Tests:
+  - `tests/test_memory_git_reuse.py` refreshes the capsule and reads
+    `status` during a bisect. Before, the refresh failed with "Inferred task
+    branch changed or unavailable".
+  - `memory-bank/tests/test_hooks.py` runs the prompt and Stop hooks of
+    every host during a bisect. Before, they named no task.
+  - `tests/test_memory_prompt_generator.py` compares the documented
+    resolver with every edition's hooks.
+
+### The agent channel of a branch two task records claim is the one its capsule serves — 2026-10-30
+
+- Why: when two copies of a branch each start its task record and then
+  merge, the task ID names both records. The capsule, the turn checkpoint
+  and the native save already settle on one of them
+  (`served_task_record`). `msg-send`, `msg-read` and `msg-dispatch` still
+  asked for the task ID alone. In a clone without a binding (a fresh clone,
+  or one whose local index was rebuilt) they failed with "identifier is
+  ambiguous". An orchestrator could then read none of its subagents'
+  results, and the dispatch hook reported each completion lost, until a
+  person cancelled a twin. Found by a random sequence of memory commands
+  with pasted texts.
+- What changes: the channel commands take the record the capsule serves.
+  When there is none, they fall back as before to the binding, then to
+  the task ID, so a finished task's journal stays readable.
+- Tests: `project-brain/tests/test_runtime.py` sends, dispatches and reads
+  on a branch two records claim, from a clone without a binding. Before,
+  `msg-send` failed as ambiguous.
+
+### Text holding half of a character is refused by name — 2026-10-30
+
+- Why: a JSON `\ud83d` with no partner, such as an emoji cut in two by a
+  tool that truncates text, decodes to a lone surrogate. So does a byte
+  that is not UTF-8 in a command argument. No UTF-8 file or SQLite text
+  holds one, so a save failed on a `UnicodeEncodeError` traceback while
+  hashing the request. The journal recorded that as `unclassified`, and
+  `msg-send` and `record` failed the same way. Found by saving texts
+  that agents paste (Unicode line separators, conflict markers, fences,
+  control and bidi characters) and checking `validate`, the capsule and
+  search after each save. This was the only failure.
+- What changes: such text is refused before anything is written. A save
+  is refused with the new code `memory-result-v1:text_unicode` (listed in
+  `docs/MEMORY-INTEGRATION.md`). A Brain write or channel message is
+  refused through `guard_shared_text`, and a lightweight write through
+  `reject_secrets`. Each says the text "holds half of a character" and asks
+  for the whole character or none.
+- Tests: `tests/test_memory_native_capture.py` adds the case to its
+  refusal table (before: a traceback and no code).
+  `memory-bank/tests/test_channel.py` and `test_context.py` send a message
+  and record an episode with a byte that is not UTF-8 (POSIX only, since
+  Windows arguments are Unicode).
+
+### A channel message holding a Unicode line separator no longer breaks the channel — 2026-10-30
+
+- Why: JSON leaves U+2028, U+2029 and U+0085 unescaped inside a string,
+  and the agent channel's readers split the journal with `str.splitlines`,
+  which also splits a line at them. `msg-send` accepted such a message,
+  for example text pasted from a PDF or a web page. After that, every
+  `msg-read` failed on the journal and so did `validate`, for the whole
+  project and for good.
+- What changes: the journal is split at newlines alone (`journal_lines`),
+  in `msg-read`, `msg-send`'s sequence count and `validate`. The three
+  characters are written escaped (` `), so a runtime from before this
+  change, or a tool that splits the same way, reads new entries too.
+- Tests: `memory-bank/tests/test_channel.py` sends a message holding all
+  three and reads and validates it as written. It then does the same with
+  the characters written raw, as an earlier runtime wrote them. Before,
+  reading failed with "line 1 is not valid JSON".
+
+### A channel message a full disk cuts short is taken back — 2026-10-30
+
+- Why: a full disk takes part of an append. When `msg-send` failed that way,
+  the part it had written stayed at the end of the task's agent channel
+  (`project-brain/control/messages/<task>.jsonl`, tracked in Git). Once the
+  disk had room again, every `msg-read` called the journal corrupt and
+  `validate` failed on it ("Unterminated string"). The next message was
+  appended after the broken part, so the two shared one line for good. Found
+  by running the memory's commands and hooks on a nearly full tmpfs; the
+  hooks, saves, checkpoints and the index all failed cleanly there and
+  recovered.
+- What changes: an append that fails is truncated back to where the file
+  ended, under the mutation lock it already held. A line that an earlier
+  append left cut short is named, in `msg-read`, `validate` and `msg-send`,
+  as cut short by an append that stopped part-way, with the advice to
+  remove it; `msg-send` no longer appends after it. A last line that is whole
+  but lacks its newline gets one before the next entry. `validate` names a
+  merge conflict in a channel as `msg-read` does.
+- Tests: `memory-bank/tests/test_channel.py` cuts an append short with a
+  file size limit (`RLIMIT_FSIZE`, POSIX only). Before, the journal kept 300
+  bytes of it and failed validation; now it is unchanged. It also reads,
+  validates and appends to a journal left cut short, and validates one left
+  in a conflict.
+
+### A file named outside UTF-8 no longer stops every turn's checkpoint — 2026-10-30
+
+- Why: `git status` gives a file's name as bytes. A name that is not UTF-8,
+  such as one from a tree unpacked from another system's archive, came back
+  with lone surrogates, and SQLite refused them in the turn buffer. While
+  such a file was changed or untracked, every `context.py turn` failed. The
+  Stop hook's checkpoint runs `turn` and always exits 0, so no turn was
+  buffered or flushed, the capsule's recent files stopped, and nothing said
+  so.
+- What changes: such a name keeps its odd bytes as `\xNN` escapes
+  (`caf\xe9.php`), in the buffer and in the task's file list.
+- Tests: `memory-bank/tests/test_context.py` flushes a turn with an
+  untracked `caf\xe9.txt`. It runs on Linux only, because macOS and Windows
+  keep no such name. Before, the turn exited 1 with a `UnicodeEncodeError`.
+
+### An index, a chunk or a channel left in a merge conflict says so — 2026-10-30
+
+- Why: every promotion rewrites the generated `memory-bank/INDEX.md`, so two
+  clones of a branch that both promoted leave it in a merge conflict on pull.
+  The bank's `validate.py` read that as a duplicate row and every chunk
+  "missing from INDEX.md", and nothing said what had happened; a team that
+  runs it in CI saw a failure about all of its memory.
+- What changes: an index holding Git conflict markers is one error, saying
+  the index is generated from the chunks and that `context.py reindex-bank`
+  writes it again (any bank write does: a save that promotes, `reindex-bank`,
+  a retire); the per-chunk index checks wait for a readable index.
+- A chunk two clones both re-verified or retired conflicts in its
+  frontmatter; it read as "frontmatter is not valid JSON-compatible YAML".
+  It now says it holds an unresolved merge conflict, to keep one side or
+  merge both.
+- A task's agent channel (`project-brain/control/messages/<task>.jsonl`),
+  which two clones both appended to, conflicts at its end; `msg-read` and
+  `msg-dispatch` called it "corrupt". They now say the line holds an
+  unresolved merge conflict. The subagent gate's write lock never depended
+  on it: the dispatch hook releases the lock before it journals.
+- Tests: `memory-bank/tests/test_validate.py` conflicts an index row (one
+  error naming the conflict and `reindex-bank`; before, two that did not)
+  and a chunk's `last_verified` (the error names the conflict; before, the
+  JSON parser's position); `memory-bank/tests/test_channel.py` conflicts a
+  channel's last line (before: "corrupt").
+
+### A learning's citation is kept as the file is spelled — 2026-10-30
+
+- Why: a citation was stored as the agent wrote it. `src/a.php`,
+  `./src/a.php` and `src//a.php` were three keys for one file, and on a file
+  system that ignores case - macOS's, Windows' - `SRC/a.php` was found,
+  stored and committed, then failed validation in every clone on Linux (the
+  chunk left retrieval there). `src\a.php`, as an agent on Windows writes
+  it, was refused with "use project-relative source paths", which it is.
+- What changes: `memory_results.check_source` returns the path as it is
+  spelled on disk - each part the entry of that name, else the one entry
+  that differs only in case - and a result's sources are stored that way,
+  two spellings of one file once. A citation not found as written is
+  refused, or kept as written where the file is not required, as before. A
+  backslash is refused with the path written with forward slashes.
+- Tests: `tests/test_memory_native_capture.py` saves learnings citing
+  `./rules.md`, `.//rules.md` and `RULES.md` (stored `rules.md`) and refuses
+  `docs\rules.md` naming `docs/rules.md`; it fails on the check before.
+
+### A task record left in a merge conflict is not taken for no task — 2026-10-30
+
+- Why: two clones of a branch that both checkpointed its task conflict in
+  that record and its handoff when one pulls the other. A record that fails
+  to parse kept the identity it claims only while its frontmatter still
+  parsed, and with conflict markers it did not: a lookup by the branch said
+  "not found". A clone without a binding was told "working: not recorded
+  yet", and the save its Stop then asked for made a second task for the
+  branch beside the one being merged - a twin once the conflict was
+  resolved. Found with two clones on `main` that had synced, each saving,
+  then a pull.
+- What changes: a record's claimed identity is read from either side of an
+  unresolved Git merge conflict (`brain_runtime.merge_sides`), so a lookup
+  says the record is invalid, and the error says why: "unresolved Git merge
+  conflict". The capsule of a clone without a binding says so as the bound
+  clone's always did, leading with the file ("Unresolved Git merge conflict
+  in project-brain/dynamic/tasks/<uuid>.md: keep one side or merge both"),
+  and a native Stop asks no save until the file is repaired (`skipped`
+  `task-unreadable`, documented in `docs/MEMORY-INTEGRATION.md` with the
+  `interrupted` refusal).
+- Tests: `project-brain/tests/test_runtime.py` conflicts a task record: the
+  lookup is not "not found", the capsule names the conflict and the file,
+  and a checkpoint makes no second task. `tests/test_memory_native_capture.py`:
+  the Stop asks no save and makes no task. Both fail before.
+
+### A branch two task records claim is saved where its capsule says — 2026-10-30
+
+- Why: two copies of a branch - two people on `main`, a branch worked on
+  from two machines - each start the branch's task record before they
+  sync, and once they merge the task ID names both. The capsule already
+  settles on one (the clone's binding, else the earliest created active
+  record) and says so, but a native Stop and save asked for the task ID
+  alone and failed as ambiguous: the Stop hook journaled an unclassified
+  error and exited 1, and no save was asked on that branch, in any clone,
+  until a person cancelled a twin. Found by two clones on `main`, each
+  saving, then a third clone.
+- What changes: where the task ID is ambiguous, the native Stop and save
+  take the record `context.served_task_record` names - the one the capsule
+  serves and the turn checkpoint writes - by its UUID. Anything else that
+  makes the ID ambiguous (an unreadable record claiming it) keeps the
+  refusal.
+- Tests: `tests/test_memory_native_capture.py` adds a twin created before
+  the first record; a clone bound to the first saves into it, and a clone
+  without a binding saves into the earlier twin, which its capsule names.
+  Both fail on the native path before ("identifier is ambiguous").
+- The capsule's advice now names the same twin in every clone: never the
+  earliest created record, which a clone without a binding settles on.
+  Each clone named "the other" record before, so the clone bound to the
+  later twin and one bound to the earlier one cancelled one each - both -
+  and the branch was left with no active task. Cancelled, the later twin's
+  clone follows the earliest (its binding's successor).
+  `project-brain/tests/test_runtime.py` binds a clone to the later twin:
+  it is told to cancel its own, and then works with the earliest; on the
+  advice before, it was told to cancel the earliest.
+- Not changed: the conflicts a merge leaves in the derived
+  `project-brain/indexes/active.json` and `memory-bank/INDEX.md`.
+
+### A line cut inside a character no longer stops the refresh health series — 2026-10-29
+
+- Why: the prompt hook appends one line per refresh to
+  `memory-bank/local/refresh-health.ndjson` and trims it to its retention.
+  Both the trim and `context.py health` read the file as strict UTF-8, so
+  one line a full disk or a crash cut inside a character (a Cyrillic branch
+  name, say) made `health` fail with `UnicodeDecodeError` and stopped every
+  later trim: the series grew for good, and every prompt read it whole.
+- What changes: both read past such a line - it is one bad line, which the
+  reader skips as it skips one that is not JSON - and the trim replaces the
+  file whole (`atomic_write_bytes`) instead of rewriting it in place, which a
+  crash could leave empty.
+- Tests: `tests/test_memory_health_notices.py` reads a series with such a
+  line (two turns counted, `health` answers) and appends to one longer than
+  its retention (trimmed, valid UTF-8). Both fail on the reader before.
+
+### The lifecycle fuzzer runs hooks behind another session's lock — 2026-10-29
+
+- Why: the lost save fixed below needed a hook's own budget to run out
+  while the save waited on another session's lock. `--interrupt` stops a
+  hook at a random moment, never while it waits, and its 36 seeds found
+  nothing; the loss was found by reading the drain.
+- What changes: `scripts/memory_lifecycle_fuzz.py --contention SHARE` runs
+  that share of the turns outside a burst and not interrupted with their
+  prompt hook or the Stop after the save behind another session's hold on
+  the runtime's lock (1.2-2.5 s) and under a one-second hook budget. A save
+  a sandbox held whose Stop ran out of its budget must be made by the
+  session's next prompt hook. A hook out of its budget may say so, once
+  each: the Stop's journal line with `timeout`'s 124, a refresh reported
+  unavailable. A degraded refresh is counted under the fuzzer's lock: with
+  16 sessions in a burst, increments lost between threads read as refreshes
+  that failed (3 of 8 in one run).
+- Found: on the drains before the fix below, 8 of 12 seeds (60 steps,
+  `--contention 0.4`) lost a save a sandbox held; on the fix none did, and
+  12 such saves were made by the next prompt hook.
+- Tests: the `memory-lifecycles` job's interrupted seed is now 24 with
+  `--interrupt 0.3 --contention 0.3`: on the drains before the fix it loses
+  its held save.
+
+### A save or checkpoint a sandbox held survives a hook its budget stops — 2026-10-29
+
+- Why: a save the agent's sandbox could not write waits in the spool, and a
+  checkpoint (`update`, `turn --flush`) in the command queue, until a hook
+  outside the sandbox makes it. Both drains removed the file before the save
+  or the command ran ("one attempt each"). The hooks run them under
+  `timeout` with a 5 s budget, so one that waited on another session's
+  runtime lock - an index build, a long flush - was ended with its file
+  already gone: the save or checkpoint was lost, and nothing was journaled.
+  Reproduced with the lock held and a 1 s budget: 3 of 3 spooled saves and
+  2 of 2 queued checkpoints never made, by that hook or any later one.
+- What changes: a drain renames the file for its attempt and removes it
+  once the save or command has answered, whatever it said, so an attempt a
+  budget or a host cuts off leaves it to the next hook, which begins it
+  again. A save that had landed is only repeated - the request's token keys
+  it - and a waiting `update` is made once unless its hook was stopped after
+  the command finished and before the file went. After three beginnings the
+  save or command is given up as refused with code `interrupted`; a
+  command's refusal is named in the next capsule, as other refusals are.
+  While it works a drain holds a lock file beside the files, taken without
+  waiting and let go by the system however the drain ends: the queue is the
+  project's, so two sessions' Stops drain it at once, and the second took a
+  file the first was still making - waiting on the lock - for a stopped
+  drain's and made the command twice. Now the second leaves the queue to
+  the first. The lock file is made only when there is something to drain.
+- Tests: `tests/test_memory_native_capture.py` holds the runtime lock while
+  a Stop drains a spooled save, ends the Stop's process group as `timeout`
+  does, and has the next prompt hook make the save; a save three hooks
+  began is given up as `interrupted`. `project-brain/tests/test_runtime.py`
+  (`SandboxQueueTest`) does the same for a queued `update`, checks that the
+  refusal reaches the capsule, and has two Stops drain one queued `update`
+  at once while the lock is held: made once, one revision. Each fails on the
+  drains before (the last one on the drain without its lock).
+- Not covered: a drain whose hook runs Python without `timeout` (macOS
+  without coreutils) is in the hook's own process group; a host that kills
+  that group mid-drain is covered by the same rename, a machine that loses
+  power by nothing new.
+
+### The lifecycle fuzzer stops hooks and saves part-way — 2026-10-29
+
+- Why: a host stops a hook at its timeout (Claude Code gives the Stop hooks
+  8 s), when its window closes and at Ctrl+C, and a save, a turn buffer or
+  an index write can be cut anywhere. The fuzzer only ever let a hook finish.
+- What changes: `scripts/memory_lifecycle_fuzz.py --interrupt SHARE` stops
+  one step of that share of the turns outside a burst - the prompt hook,
+  the Stop hook, the save or the Stop after it - by SIGKILL to the hook's
+  process group, SIGTERM to its shell alone or SIGINT to the group, after up
+  to 0.3 s. A save stopped part-way may or may not land; a save a sandbox
+  held whose Stop was stopped must be made by the session's next prompt
+  hook. Off by default, so every other seed takes the steps it always took.
+- Found: nothing in the runtime. 36 seeds with a third of their turns
+  stopped (24 installed at 70 steps, 12 attached at 60): 1078 saves, 224
+  hooks and 55 saves stopped, no violation. The spool's drain removes a held
+  save's file before it makes the save, but the hooks run Python under
+  `timeout`, which leads a process group of its own, so a kill of the
+  hook's group does not reach it: across 36 kills 1.5 ms apart over the
+  drain, every save was made by that Stop or by the next prompt hook.
+  Without `timeout` (macOS without coreutils) the drain runs in the hook's
+  group, and a group kill between its two steps would lose that save.
+- Tests: `tests/test_memory_lifecycle_fuzz.py` runs seed 6 with
+  `--interrupt 0.3` in the `memory-lifecycles` job: a prompt hook, a Stop
+  hook, a save and the Stop after a save stopped, by each of the three
+  signals, most of them while they ran.
+
+### A commit in a worktree Codex made no longer refuses the save — 2026-10-29
+
+- Why: a native save is pinned when the Stop asks for it: to the branch,
+  and on a detached HEAD to the commit. A worktree Codex makes stays
+  detached, and the thread that owns it names the task
+  (`codex-thread/<thread>`), so a commit there - the person's, or another
+  session's - moved the pin and refused the save, learnings and all. The
+  lifecycle fuzzer found it once the two worktree stacks met: 2 of 96 seeds
+  at 80 steps, one of them a save the sandbox held that its Stop then could
+  not make.
+- What changes: on a detached HEAD whose Git directory holds a
+  `codex-thread.json` naming its owner, the save is pinned to that thread,
+  read by the patterns `context.py` reads it by and in the same `git
+  rev-parse` call. A worktree handed to another thread refuses the save, as
+  a branch made there does. A stopped rebase and any other detached HEAD
+  keep the commit, and their pin is the same value as before.
+- Tests: `tests/test_memory_native_capture.py` commits in such a worktree
+  while the save is written, and the save is made; on the old pin it is
+  refused as `scope-changed`. A worktree handed to another thread refuses
+  it; on the old pin that save was made. The two fuzzer seeds pass.
+
+### The lifecycle fuzzer holds saves in a sandbox, as Claude Code's does — 2026-10-28
+
+- Why: a save a sandbox cannot write waits in the spool, and the session's
+  next hook makes it. The benches drive that once per run; the fuzzer
+  never did, between other sessions' saves, commits and branch moves.
+- What changes: where `bwrap` is, `scripts/memory_lifecycle_fuzz.py` runs a
+  fifth of the saves outside a burst under bubblewrap, everything read-only
+  but the temporary folder, as Claude Code's sandbox on Linux. The save
+  must say `spooled`, and the Stop after it must make it under the branch's
+  task. Read-only memory folders alone are no stand-in for that sandbox:
+  the save opens the index, whose file they leave writable, before it
+  takes its lock, and fails on the database's journal. The CI job
+  `memory-lifecycles` installs bubblewrap and lifts the runner's AppArmor
+  restriction, as `system-orchestration` does; its test asserts a held
+  save where `bwrap` is. The draw is apart from the run's own random
+  stream, so the seeds keep their steps.
+- Tests: seeds 1 and 2 at 60 steps hold 7 and 9 saves, all made by the Stop
+  after them, with no violation; `tests.test_check` accepts the job's
+  setup lines.
+
+### The memory hooks' Python imports nothing from the project's folder — 2026-10-28
+
+- Why: the prompt hook, the Stop hook and the session banner run Python
+  snippets in the session's folder, and `python -c` puts that folder first
+  on `sys.path`. A project's own `json.py` was imported before the standard
+  one, on every prompt. Measured: a `json.py` in the project root wrote its
+  marker, and the hook went on as usual. Attached - the Harness lends the
+  edition to any folder it opens - that is code the person never trusted.
+- What changes: those snippets run with `-I`: no session folder, no
+  `PYTHON*` variables, no user site. The validators get the same in their
+  own change, from `main`. The runtime's CLI is untouched: run as a script,
+  it imports from its own folder.
+- Tests: `PythonResolutionTest` runs the three hooks with a `json.py` in the
+  session's folder. It is not imported, and without `-I` the test fails. The
+  Windows banner test now sets the stream at the top of the program
+  `python` runs, which `-I` leaves alone, where `PYTHONPATH` it ignores.
+
+### A session that entered a worktree keeps the root's permission rules, measured — 2026-10-28
+
+- Why: the worktree stack said, as a limit it had not measured, that after
+  EnterWorktree the root's permission rules decide by the root's paths, so
+  the worktree's `secrets/` and `.env` would go unguarded.
+- What changes: `scripts/claude_code_bench.py` takes `--enter-worktree` with
+  `--permissions`. A session in the root enters a worktree, tries the reads,
+  writes, commands and fetches of `--permissions` on the worktree's files,
+  and passes when each gets the decision it gets in the root. The report
+  carries what EnterWorktree answered. `docs/MEMORY-INTEGRATION.md` drops
+  the limit and says what was measured.
+- Tests: Claude Code 2.1.278 offline. EnterWorktree answered "The session is
+  now working in the worktree", and 19 of 19 decisions matched the root's:
+  the worktree's `.env`, `.env.local` and `secrets/` denied, `rm -rf`,
+  `sudo` and `chmod 777` denied, its own files read. Claude Code takes `./`
+  in a rule from the session's folder, which EnterWorktree moves.
+
+### The Codex bench passes a read-only turn that asks for no save — 2026-10-28
+
+- Why: `scripts/codex_bench.py --sandbox read-only` shows that the Stop skips
+  the save request where the turn can write nothing, but its verdict was
+  still "saved", so the run that showed the right thing exited 1.
+- What changes: under `--sandbox read-only` the run passes when the stand-in
+  got no save step and the journal says `stop:skipped:read-only-sandbox`.
+- Tests: on Codex 0.163 offline the run exits 0 with exactly those two
+  events; the workspace-write runs are unchanged.
+
+### The lifecycle fuzzer drives Codex in worktrees and held checkpoints — 2026-10-28
+
+- Why: the fuzzer drove Claude Code in worktrees, but Codex only in the root
+  and below it, never a worktree Codex makes, and never the explicit memory
+  commands. That is the stack carried onto the worktree stack the same day,
+  which its own tests covered one piece at a time.
+- What changes: `scripts/memory_lifecycle_fuzz.py` also runs Codex sessions
+  in worktrees, through the Codex dispatcher as a root Codex session sets it
+  up. It makes worktrees as Codex does: on a detached HEAD, the owning
+  thread in `codex-thread.json`, so the task is `codex-thread/<thread>`. And
+  it makes checkpoints as the checkpoint skill does, half of them under
+  read-only memory folders. A checkpoint a sandbox held must be made by the
+  session's Stop; one never made, or refused, is a violation.
+  `tests/test_memory_lifecycle_fuzz.py` asserts the new coverage on seeds 1
+  and 2, and its attached seed is 9 (4 no longer reached a Codex session in
+  the root; of 18 attached seeds none had a violation, 5 cover every path
+  the test names); `scripts/README.md` and `docs/CI.md` say what it drives.
+- Tests: seeds 1 to 3 at 60 steps, and a campaign of 24 seeds at 80 steps
+  over the four editions, a quarter attached: 936 saves, 29 Codex worktree
+  sessions, 23 worktrees Codex made, 23 checkpoints held and made, no
+  violation.
+
+### The session banner reads the index Windows names — 2026-10-28
+
+- Why: `local-context.sh` takes its status fields from Python's `print`,
+  which on Windows ends the line with `\r\n`. The last field, the index's
+  path, kept the `\r` and named no file, so the banner of every session on
+  Windows said `index=missing` over an index that was there.
+- What changes: the four editions' `local-context.sh` write the fields as
+  UTF-8 bytes, as the memory hooks' snippets do.
+- Tests: `PythonResolutionTest` runs the banner with `python` writing its
+  stream as on Windows (`sitecustomize`: cp1252, `\r\n`) and a status that
+  names an existing index; on the old hook it reads `index=missing`.
+
+### Codex in worktrees and the explicit memory commands, on the worktree stack — 2026-10-28
+
+- Why: two stacks grew apart from the same base. One served Codex started in
+  a worktree, and in a worktree Codex made on a detached HEAD, and had the
+  explicit memory commands work there (a write a sandbox refuses waits for
+  the next hook, the checkpoint names the hooks' task); the other served
+  Claude Code's `EnterWorktree`, saves another session or a commit overtook,
+  and attached sessions entering worktrees. Each was tested apart.
+- What changes: the first stack's fifteen commits are carried onto the second
+  (the commits both had are kept once). Where they met: a Codex save step in
+  the shared layout names the roots' variables before the command and the
+  worktree after `--root` (`--project`); the Stop hook takes the served
+  worktree first and then the task - the branch, a rebase's branch, the
+  thread that owns a worktree Codex made; `claude_code_bench.py` takes
+  `--enter-worktree` and `--cli checkpoint` both. A command the sandbox holds
+  for a worktree keeps the name (`--project=<worktree>` in what waits), so it
+  is made for the worktree it was asked for. `docs/MEMORY-INTEGRATION.md` no
+  longer says Codex started in a worktree runs no hooks.
+- The generator's skill bodies: each stack added to `hook-forge` within the
+  306,200-byte ceiling, together 306,727; the ceiling rises to 306,800.
+- Tests: `SharedWorktree` holds an update for an entered worktree under a
+  sandbox and makes it at the hook's turn there; without the name in what
+  waits it fails.
+
+### The lifecycle fuzzer runs as a CI job of its own — 2026-10-28
+
+- Why: as a step of the `memory` job it took about three minutes on a
+  hosted runner, and with it that job's Python 3.x leg ran into its
+  15-minute limit and was cancelled on two pull requests (15m7s and
+  15m16s; 9 to 11 minutes before the step).
+- What changes: `tests.test_memory_lifecycle_fuzz` runs in a job of its own,
+  `memory-lifecycles`, on the same two Pythons with a 10-minute limit, beside
+  `memory`; `scripts/check.py` has the group of the same name, and
+  `docs/CI.md` and `scripts/README.md` say where it runs.
+- Tests: `tests.test_check` (40 tests) holds `check.py` to the workflow.
+
+### The hooks read their input as bytes on Windows, and name the drive as Windows does — 2026-10-28
+
+- Why: the Windows CI job ran the tests of a session that entered a
+  worktree for the first time and failed them. The prompt and Stop hooks
+  hand their JSON input to Python, which writes back one field per line;
+  on Windows a text stream writes `\n` as `\r\n`, so every field bash cut
+  kept a `\r`. The session's folder was no folder (an entered worktree
+  was never seen), the transcript path no path (the transcript's recent
+  files were never read there), and the Stop hook's continuation flag read
+  `1\r`, so a save's continuation checkpointed the turn a second time.
+  Python also decoded the input by the ANSI code page. And the dispatcher
+  compared the session's folder with a listed root case-sensitively for an
+  entered worktree's allow: the list's `C:\` reads `/C/` there, the
+  folder `/c/`. With those fixed, the save step named the worktree
+  `c:\...` beside a root `C:\...`: the hooks and the dispatcher took
+  the drive letter from Git Bash's `/c/` as it was.
+- What changes: both snippets read their input as bytes and write their
+  fields as UTF-8 bytes; the dispatcher matches the root by a pattern, as
+  its other comparisons do (`nocasematch` on Windows). Where the hooks
+  and the dispatcher turn `/c/` into `C:`, the letter is upper case, as
+  Windows writes it (`claude_dispatch.py`'s `native_path` already said
+  so). Version 4 has not shipped: its fingerprint is recorded again.
+- Tests: the Windows CI job's `tests.test_memory_worktree_sessions` and
+  `tests.test_memory_claude_subfolders`, which failed (four failures, one
+  error), then one: the drive letter, and on the runner the first
+  refresh in the worktree, which builds its index, over the hooks'
+  5-second budget. The test gives the hooks 60 seconds, as
+  `tests.test_windows_memory_hooks` does. Not run on Windows locally.
+
+### A launched session keeps its memory in a worktree it enters, and its shell where it was — 2026-10-27
+
+- Why: a Claude Code session launched with the edition lent from the
+  clone (attached: the Harness's native launches, `accelerator_attach.py
+  run claude`) that called `EnterWorktree` read "Memory not consulted"
+  from then on: the hooks served an entered worktree only for an
+  installation in the root. Driving it showed a second fault in every
+  attached session: the save step's `cd <clone>` - the clone is a working
+  directory the launch adds - left Claude Code's shell in the clone, so
+  every command the agent ran after a save, for the rest of a session a
+  person drives, ran in the clone, and the Stop that settles the save no
+  longer saw an entered worktree.
+- What changes: the lent hooks serve a worktree an attached session
+  entered with the project's one state, which keeps the project and all
+  its worktrees: `ACCELERATOR_PROJECT_DIR` names the worktree, the home
+  and the state stay as launched. `context.py --project` takes, attached,
+  a checkout of the project's repository at the project's place in it
+  with no runtime of its own (`workspace_roots.attached_worktree`). A
+  save step asked in an entered worktree names it and pipes without
+  `--input -`, attached as installed. An attached Claude Code save step
+  that goes through ends by going back to the folder the session was in
+  (`&& cd <folder>`), and a refused one keeps its exit status; `cd -` is
+  refused in an entered worktree.
+- Benches: `scripts/claude_code_bench.py --attached --enter-worktree` (now
+  allowed together) has the stand-in enter a worktree and save there: on
+  Claude Code 2.1.278 in default, acceptEdits, auto, dontAsk and
+  bypassPermissions, and on 2.1.299 in the desktop app's mode, the save
+  landed under the worktree's branch in the project's state with no
+  permission prompt, the Stop after it saw it saved, and project and
+  worktree stayed clean; `--attached`, `--enter-worktree` and `--worktree`
+  still pass. Offline probes of the binary: after the step's `cd` into the
+  clone, `pwd` answered the clone; after `&& cd <folder>`, the folder.
+- Tests: `tests/test_memory_worktree_sessions.py` drives an attached
+  session that enters a worktree through two turns and the save step;
+  before the change its Stop asked for no save and its prompt read
+  "Memory not consulted". The lifecycle fuzzer lets attached sessions
+  enter worktrees: 24 seeds of 60 steps in each layout pass (attached: 699
+  saves, 29 worktrees entered); a first version that went back with `;`
+  hid refused saves behind the `cd`'s exit status, which it caught.
+  `tests/test_memory_lifecycle_fuzz.py` runs seed 4 attached, whose root
+  session enters a worktree.
+
+### Two refreshes that find one new document both index it — 2026-10-27
+
+- Why: a refresh read which documents the index held without the write
+  lock, and wrote its changes in a transaction begun later. When two
+  sessions' prompt hooks refreshed at once after a document appeared -
+  most often the Brain record one of them had just saved - the second
+  inserted the rows the first had committed meanwhile:
+  "UNIQUE constraint failed: document_metadata.path". Its capsule went out
+  with the working state alone (procedural, semantic and episodic
+  `failed`), and the hook's health line recorded exit 1. The lifecycle
+  fuzzer's new health check found it: 45 of 120 runs of 80 steps.
+- What changes: before it writes, `index_documents` takes the write lock
+  and reads again what the index holds, so the rows it drops and the rows
+  it writes are one transaction's. A refresh that finds nothing to change
+  still decides that without the lock, so a prompt is not held up behind
+  another session's write; one that another session's lock keeps past its
+  share of the hook's budget still falls back to the working state and
+  says so, as before.
+- `scripts/memory_lifecycle_fuzz.py` reads the prompt hook's health lines
+  and Cursor's rule: a refresh that exited non-zero without the degraded
+  capsule that says why, or timed out, fails the run; a degraded one is
+  counted (`refresh degraded`).
+- Tests: `memory-bank/tests/test_context.py` runs two incremental
+  refreshes that meet at that read; on the indexer before the change one
+  of them fails with the constraint, 3 times in 3.
+
+### A save survives another session's writes and a commit — 2026-10-26
+
+- Why: a native save is pinned when the Stop asks for it, and two things
+  that happen in the seconds the agent takes to write it refused it. The
+  task's revision moved - the other session's save, the turn checkpoint a
+  Stop hook writes every fifth turn of a checkout or, in a new project, the
+  other session creating the branch task - or a commit landed: the request
+  was pinned to the HEAD commit, so the person's commit, or another
+  session's on the branch, refused it as `native-result:scope-changed`.
+  Nothing of the save was written, its learnings included, and the agent
+  was told to report the held save to a person who had already read the
+  answer; a save a moment later replaced the other's progress all the same.
+  Neither was driven by any test: the new lifecycle fuzzer found both.
+- What changes: under the save's lock, where nothing else writes, a save
+  made within ten minutes of its request (`IN_FLIGHT_SECONDS`, the window
+  in which a prompt sent meanwhile treats it as still being written) takes
+  the task's current revision, as the Harness retries its own, and a task
+  created since the request takes it as well; the journal records it as
+  `saved` with code `rebased`. Its progress and next steps replace the
+  other session's, and its learnings are recorded as any are. A later
+  save - spooled until a hook long after - still yields to what was
+  written since, and a task replaced since the request (completed and
+  started again) still refuses it with `native-result:task-changed`. The
+  request is pinned to its branch; to its commit only on a detached HEAD,
+  as in the middle of a rebase, and a branch switched in between still
+  refuses it. `record-result` keeps its revision fence.
+  `docs/MEMORY-INTEGRATION.md` records the decision this replaces.
+- `scripts/memory_lifecycle_fuzz.py` (new) installs PHP Core into a
+  scratch project and drives random steps from a seed through the real
+  hooks: turns of Claude Code sessions in the root, below it and in
+  worktrees (through the dispatcher), a root session entering a worktree,
+  Codex and Cursor sessions, bursts of turns at once, saves made, skipped
+  and ignored, commits, branches made, renamed, detached and moved under a
+  pending save, a rebase stopped on a conflict and then continued or
+  aborted, worktrees added and removed. Every hook must exit 0 with no
+  error in the native journal, every save land in its branch's task (in a
+  stopped rebase, the branch being rebased), a sample of the saved
+  learnings be found by `search` from the root and from every worktree
+  left, no index of a removed worktree outlive the next turn checkpoint,
+  Project Brain and the Memory Bank validate and no worktree be written
+  into. `--edition` runs it on Laravel, Symfony or WordPress; `--attached`
+  launches every session as the Harness does, the edition lent from the
+  clone and the state apart, and neither the project nor the clone may be
+  written into. Bursts put two sessions in one folder too. On 24 seeds of
+  60 steps, installed and attached, nothing failed, nor on seed 1 of the
+  other editions; before the change, seeds lost saves to both refusals.
+- Tests: `tests/test_memory_native_capture.py` - two sessions saving in the
+  same seconds, a turn checkpoint in between, a task the other session
+  created and a commit made while the save is written, each failing
+  without the change, and a replaced task, a save delayed past ten minutes
+  and a moved detached HEAD still refused. `tests/test_memory_lifecycle_fuzz.py`
+  runs seeds 1 and 2, and seed 2 attached, in a step of its own in the
+  `memory` job (about two minutes); on the runtime before the change seed
+  1 fails by the first refusal and seed 2 by the second.
+
+### A session that entered a worktree keeps its memory there — 2026-10-26
+
+- Claude Code's `EnterWorktree` moves a session that started in the project
+  root into `.claude/worktrees/<name>`, on a branch of its own. The root's
+  own hooks keep running there - `CLAUDE_PROJECT_DIR` the root, the input's
+  `cwd` the worktree - and saw another checkout of the repository: from
+  that turn on the session got no capsule and saved nothing. They now serve
+  a worktree that has none of the installation as the dispatcher serves a
+  session started in it (shared layout, the worktree's branch, its banner
+  after `/clear` or a compaction); one with an installation of its own is
+  left to it, as before, and so is a Cursor session there, whose capsule
+  would be a rule written into the worktree.
+- On Windows the hooks hand the runtime the root and the worktree as
+  Windows spells them (`c:/...`), as the dispatcher does: Git Bash's `/c/...`
+  read as a folder on the current drive, and the runtime would have taken
+  the root's own layout and task.
+- The turn that enters the worktree was armed by its prompt in the root:
+  its Stop arms the request in the worktree (`native-stop --entered`), so
+  that turn's work - often all of it - is saved under the worktree's branch.
+- The save step names the worktree (`context.py --project <worktree>`, a
+  global option taken only for a worktree the installation serves), since
+  run from the root it shows none of it, and in a worktree pipes the
+  result without naming the descriptor: once a session has entered a
+  worktree, Claude Code refuses "a program fed a descriptor it names"
+  (`--input -`) in every permission mode. `native-result` reads stdin when
+  given neither `--input` nor `--skip`.
+- Claude Code asks before a command that leaves an entered worktree, as the
+  save step's `cd <root>` does. The dispatcher (version 4) gives the memory
+  CLI alone the allow it has in the root there; nothing else, and nothing
+  for a session in the root itself, whose every Bash call it now reads
+  without starting a process (1.7 ms a call, as with version 3).
+- `tests/test_memory_worktree_sessions.py` runs the hooks as Claude Code does
+  after `EnterWorktree`, for the entering turn and the next one, and the
+  save step from the worktree; `tests/test_memory_claude_subfolders.py` the
+  dispatcher's allow and what it refuses. `scripts/claude_code_bench.py
+  --enter-worktree` has the stand-in enter a worktree first: 2.1.278, and
+  2.1.299 in the desktop app's mode, saved under the worktree's branch with
+  no permission prompt and the worktree left clean. A first session's own
+  setting up of the dispatcher made 2.1.278 reread its settings in the
+  worktree, which has no hooks; the bench now enters after a first session.
+
+### An attached project's worktree keeps an index of its own — 2026-10-26
+
+- The Harness keeps one state for a project and all its checkouts, and the
+  runtime kept one index in it. The checkouts' documents differ, so a lookup
+  after one in the other checkout rebuilt the index: 580 ms against 250 ms a
+  lookup on 400 notes, at every switch between the project and a worktree.
+  An attached project's linked worktree now keeps its index in
+  `memory-bank/local/worktrees/<hash>/` of the state, as an installation's
+  worktree does in the installation, named and removed the same way; the
+  project's own checkout keeps the index where it was.
+  `workspace_roots.linked_worktree` recognises the worktree as the
+  dispatcher does. `tests/test_memory_worktree_sessions.py` (`AttachedWorktree`)
+  fails without the change.
+
+### Explicit memory commands in a worktree: writes a sandbox refuses wait, the checkpoint names the hooks' task — 2026-10-26
+
+- The memory commands an agent runs itself - the policy's stage-boundary
+  `update`, the `checkpoint` skill's `turn --flush` and `update` - failed in
+  a worktree the installation serves. With the CLI named by its path in the
+  root (entries below), three things still stood in the way. Codex's
+  workspace-write sandbox writes only the worktree, `/tmp` and `$TMPDIR`:
+  under Codex 0.164's own sandbox (`codex sandbox -P :workspace`) `update`
+  failed at the Brain's lock (`Read-only file system:
+  project-brain/local/runtime.lock`) and `turn --flush` at the index
+  (`attempt to write a readonly database`), and Claude Code's sandbox does
+  the same there. The skill stopped on a detached HEAD, where the hooks name
+  `codex-thread/<thread>` or a rebase's branch. And on a task with nothing
+  buffered yet - a new branch, a worktree's first answer, in the root too -
+  `turn --flush` made no task, so the `update` after it was refused
+  ("Working task not found").
+- **A write a sandbox refuses waits.** An `update` or a `turn --flush` that
+  cannot write the Brain's lock folder (governed) and the index's is checked
+  as far as nothing has to be written - the task ID, a changed field, the
+  secret and personal-data refusals - and waits, owner-only, in
+  `ai-accelerator-memory-queue-<uid>` in the first temporary folder the
+  sandbox writes (`$TMPDIR`, `/tmp`, Claude Code's `claude-<uid>`: the
+  save's spool folders, now `workspace_roots.spool_directories`). It answers
+  `queued` and exits 0. The next turn a hook records - this turn's Stop,
+  outside the sandbox - makes what waits for its project (the state it
+  writes and the checkout it reads), oldest first, after the turn and
+  before the Stop's save request. Each is journaled (`native-results.ndjson`,
+  stage `queue`); one refused is named in the next capsule's last-turn line.
+  Only these two commands, rebuilt from their own options, for this project,
+  younger than a day; a file naming anything else, or a link, is refused
+  unread, and a command a drain runs fails rather than waiting again. A
+  drain with nothing waiting costs 0.07 ms a turn.
+- **The checkpoint names the hooks' task.** Its step 1 takes
+  `CONTEXT_TASK_ID`, otherwise the branch, and on a detached HEAD the
+  `automatic_memory.task_identity.task_id` of `context.py status --json`,
+  which now names a rebase's branch too (source `git-rebase`) where it told
+  the person to set `CONTEXT_TASK_ID`. The lightweight checkpoint and the
+  generator's (`skill-forge/references/php-process-skills.md`) resolve it
+  the same way; the skill reports a `queued` command as made when the turn
+  ends. It and the `memory` skill took the mode from
+  `project-brain/config/runtime.json` under `git rev-parse --show-toplevel`,
+  which a worktree the installation serves, or a project an accelerator is
+  lent to, does not hold; both take the `mode` `status --json` reports now.
+- **An explicit flush makes the task**, as the memory MCP server's
+  checkpoint already did; the Stop hook never flushes explicitly, so
+  visiting a branch still mints nothing, and a completed task is not made
+  again.
+- Offline, scripted model, the same stand-in before and after
+  (`--cli checkpoint` in `scripts/claude_code_bench.py` and
+  `scripts/codex_bench.py`, `scripts/bench_checkpoint.py`): it makes a
+  checkpoint as the installed skill says - step 1, `turn --flush`,
+  `update` - with the memory CLI the session was told of, else the
+  policy's. Before (912a0bbf): in `.claude/worktrees/<name>` under Claude
+  Code 2.1.299 and in a worktree inside and beside the root under Codex
+  0.164, the flush failed (`can't open file
+  '<worktree>/memory-bank/scripts/context.py'`); in a worktree Codex made,
+  the skill stopped on the detached HEAD. The save after the answer worked
+  in all four. After: every checkpoint landed in the root's Project
+  Brain under the task of the checkout it ran in - the worktree's branch,
+  or `codex-thread/<thread>` - in those four, in Claude Code's desktop
+  mode (no permission prompt), with its sandbox on, under the Codex
+  app-server (no approval asked) and in the project root of a fresh
+  install of either host, where the `update` had been refused ("Working
+  task not found"). Under either sandbox both writes answered `queued`
+  and the Stop made both (journal `queue made` twice); the save after
+  the answer, the capsule, the policy and a clean worktree held in every
+  run.
+- `project-brain/tests/test_runtime.py` (`SandboxQueueTest`, read-only
+  folders standing in for the sandbox; an explicit flush on a new branch)
+  and `memory-bank/tests/test_checkpoint.py` (the prompt hook's `--task-id`
+  against the skill's step 1 for a branch, `CONTEXT_TASK_ID`, both rebase
+  backends, both owner records and a worktree Codex made);
+  `tests/test_host_benches.py` holds the stand-in. Each of twelve
+  pieces taken out fails a test: the rebase in `status`, the skill's step 1
+  and its `queued` line, the queue, the drain, the command allow-list, the
+  capsule line, the drain's no-wait guard, the queue-time refusals, the
+  explicit flush, and each skill's mode from `status`.
+- Not covered: the Codex app was not driven (the bench makes its worktree
+  as the app does); Cursor in a worktree still runs no hooks; `refresh`,
+  which the `memory` skill runs, reports its layers failed in such a sandbox
+  - the hooks refresh the index on every prompt.
+
+### A sandboxed lookup of a task publishes its manifest locally — 2026-10-26
+
+- A lookup that the sandbox keeps from the index (see the entry below) still
+  failed for a task that exists: `retrieve` publishes what it delivered to
+  `project-brain/control/retrieval-manifests` under the Project Brain's
+  lock, which the sandbox does not let it take. Claude Code 2.1.299 in the
+  desktop app's mode, with the sandbox on and started in `src/`, got
+  `[Errno 30] Read-only file system` on `project-brain/local/runtime.lock`.
+  Such a lookup is now `--ephemeral`: its manifest is the local one,
+  written when it can be. `tests/test_memory_worktree_sessions.py` repeats
+  it with a task and the state read-only, and fails without the change;
+  `claude_code_bench.py --subfolder src --cli --sandbox` passes on 2.1.278
+  and on 2.1.299 in the desktop app's mode.
+
+### A session below the root hears where the memory CLI is — 2026-10-26
+
+- A session started below the project root runs its commands in its own
+  folder, where the policy's `python3 memory-bank/scripts/context.py` names
+  nothing. `local-context.sh` now names the CLI by its path in the root
+  there too, as it does in a worktree. It reads the session's folder from
+  its input's `cwd`, since the dispatcher runs it in the root and Codex in
+  the session's folder. A session in the root hears nothing new, and where
+  its input names the root as the hook spells it, the hook starts no
+  process to compare them.
+- A worktree's banner also says that the `memory-bank/` and
+  `project-brain/` paths the policy and skills name are in the root: the
+  `checkpoint` skill, for one, reads `project-brain/config/runtime.json`
+  from the checkout it is in.
+- `tests/test_memory_worktree_sessions.py` runs the hook both ways - in the
+  session's folder, as Codex does, and in the root, as the dispatcher
+  does - and runs the command it names from `src/`. `claude_code_bench.py
+  --cli` now takes `--subfolder` alone: 2.1.278, and 2.1.299 in the desktop
+  app's mode, ran it from `src/` without a permission prompt for the
+  root's branch.
+
+### The memory CLI in a worktree finds the worktree by itself — 2026-10-26
+
+- The policy and the skills name the memory CLI as `python3
+  memory-bank/scripts/context.py`, which a worktree of an installation Git
+  does not track has none of. A worktree session's banner now names it by
+  its path in the root - bare, or in single quotes where the path needs
+  them, the form the dispatcher's allow for the memory CLI takes (a
+  double-quoted path was asked about, since bash expands inside it).
+- Run in the worktree without the dispatcher's variables - a Codex
+  command, the memory MCP server, a terminal - the root's runtime took the
+  installed layout: the main checkout's branch and index, and a citation of
+  a file only the worktree's branch has was refused ("Source is missing").
+  `workspace_roots.worktree_project` now finds the shared layout from where
+  the run is (`CLAUDE_PROJECT_DIR`, which Claude Code gives its hooks and
+  MCP servers, else the working directory), with the rules the dispatcher
+  applies: a `.git` file naming `<main>/.git/worktrees/<name>` that keeps
+  Git's back-reference, this installation inside `<main>`, and no runtime
+  of the worktree's own. A session in the main checkout keeps the root
+  after its shell moved into a worktree inside it.
+- The memory MCP server of a worktree inside the root started for the root
+  (and refused to start once the worktree was its project: it checked the
+  installation's own files there). It checks them under the installation
+  and gives the runtime it starts the worktree's layout, through Claude
+  Code's bootstrap and Codex's.
+- In a worktree, a learning citing the installation's own files - `specs/`,
+  `AGENTS.md`, skills - was refused, though retrieval reads them from the
+  main checkout; a citation is checked where `resolve` reads it
+  (`workspace_roots.citation_base`).
+- Under a sandbox that lets a command write only its own folder - Codex's
+  workspace-write in a worktree or below the root, Claude Code's - every
+  CLI command failed on the index, a lookup too: Codex 0.164 in a worktree
+  got `[Errno 30] Read-only file system`. A lookup (`status`, `retrieve`,
+  `context`, `search`) that cannot write the index where the hooks keep it
+  builds one of its own in the user's temporary folder
+  (`ai-accelerator-index-<uid>`); a write is still refused there.
+- `tests/test_memory_worktree_sessions.py` covers each piece (ten reverted
+  pieces each fail a test), a root whose path has a space included.
+  `scripts/claude_code_bench.py --worktree --cli` has the stand-in run the
+  CLI as the banner names it: 2.1.278, and 2.1.299 in the desktop app's
+  mode in the worktree and in `src/` of it, ran it without a permission
+  prompt for the worktree's task. The bench's desktop verdict no longer
+  drops a permission prompt in `--subfolder` and `--worktree` runs.
+
+### A worktree's state spelled another way is still its installation — 2026-10-26
+
+- The Windows memory job on #66 failed twice in
+  `tests/test_memory_worktree_sessions.py`. `local-context.sh` told an
+  attached project from a worktree by comparing ACCELERATOR_STATE_DIR with
+  its own root as text: Git Bash spells the root `/c/...`, the variable
+  spelled it `C:\...`, and the banner said "attached from" where the
+  worktree shares the installation's memory. The hook now compares where
+  the two lead (`pwd -P`, as it already did for ACCELERATOR_HOME) and, when
+  the state is this installation, uses the root's spelling; on Linux a
+  trailing separator showed the same mistake and is now part of the test.
+  The test's cleanup could not remove the worktree's index because the
+  test's own SQLite connections stayed open: `with sqlite3.connect(...)`
+  ends a transaction, not the connection, and on Windows an open database
+  cannot be deleted. They are closed with `contextlib.closing` now.
+
+### A worktree Codex made names its task by its owning thread — 2026-10-26
+
+- `codex --worktree` and `codex exec --worktree` (0.164) check the session's
+  `HEAD` out - committed work only - in `$CODEX_HOME/worktrees/<4 hex>/<repo>`
+  on a detached HEAD and write the thread that owns the checkout into
+  `codex-thread.json` of its Git directory (`{"version":1,"ownerThreadId":
+  "<UUID>"}`, the session's own ID). The Codex app makes its worktrees the
+  same way - `git worktree add --detach`, the record one key a line - and a
+  branch comes there only by an act: its "Create branch" (`codex/` and the
+  title's first words), the agent, told to name its branches `codex/...`, or
+  "Move to worktree"; "Hand off to local" moves the work to a branch in the
+  main checkout and detaches the worktree. A detached HEAD named no task, so
+  a session there, the root's hooks run for it by the dispatcher, got neither
+  capsule nor save (offline, real Codex 0.164: hooks ran, no journal line).
+- The hooks now name such a checkout's task `codex-thread/<UUID>`, after
+  `CONTEXT_TASK_ID`, the branch and a rebase's branch:
+  `[ -n "$TASK_ID" ] || TASK_ID=$(codex_thread_task)` follows the rebase
+  line in every copy of `working-memory-read.sh` and
+  `working-memory-write.sh`. Any other detached HEAD still names none. The
+  thread, not the folder: it is Codex's own link between thread and
+  checkout, unique, and the same for the checkout's life; the folder's four
+  hex digits, a name the person gives it and Git's name for the worktree
+  come back for other work once a worktree is removed. A branch made there
+  names the task from the next hook on; the thread's task is not carried
+  over, since the branch travels - to the main checkout at "Hand off to
+  local", to a pull request - and the record does not. The hooks pass the
+  thread's task as the inferred identity (`--expected-branch`), and the
+  runtime delivers its capsule only while `HEAD` stays detached and the
+  record still names that thread (`_admit_inferred_task_branch`), as it
+  admits a rebase's branch only while the rebase runs. `context.py status`
+  reports it (`automatic_memory.task_identity.source` `codex-thread`) where
+  it told the person to set `CONTEXT_TASK_ID`; the first capsule, before the
+  task is recorded, names it, since no branch does; its goal reads "Work of
+  the Codex thread that owns its worktree", where the thread's ID read as
+  words came apart at its hyphens. The runtime reads the record by the hooks'
+  two patterns, so the two never name different tasks.
+- Offline, real Codex 0.164, scripted model, isolated `CODEX_HOME`:
+  `scripts/codex_bench.py --worktree codex` (new: `codex exec --worktree`
+  makes the worktree) passed - capsule, every line of `AGENTS.md`, a save
+  through the spool under the measured session's own `codex-thread/<UUID>`,
+  of a learning citing a file only that worktree had, the worktree still
+  detached and clean - and so did `--subfolder src` and `--app-server`, where
+  the bench makes the worktree as the app does (no approval asked); with the
+  hook line taken out the same run got no capsule and no save.
+  `--worktree beside` still saves under its branch.
+  `memory-bank/tests/test_hooks.py` (`CodexWorktreeOwnerTest`: the CLI's and
+  the app's record for each host, the order, twelve refused records, the
+  hooks and the runtime reading the same records) and
+  `project-brain/tests/test_runtime.py` (`CodexThreadTaskTest`: admission,
+  refusal once a branch, another owner or no record, `status`, the capsule
+  and the goal) fail on each of eight reverted pieces. The generator's
+  memory hook contract (`validate_generated.py`), which the shipped hooks
+  must pass, admits the line right after the rebase one only, and hook-forge
+  documents the resolver (`tests/test_memory_prompt_generator.py`).
+- Not covered: the Codex app was not driven - its worktrees were read from
+  its code. When the app hands the record to another thread (it archives the
+  owner while another thread still works there), that thread's task starts
+  empty. The `checkpoint` skill still stops on a detached HEAD, and the
+  explicit `context.py` commands find no runtime in a worktree without the
+  installation, branch or not.
+
+### Codex started in a worktree of the project — 2026-10-26
+
+- Codex reads a project's `.codex/` - `hooks.json` and `config.toml` - and
+  `AGENTS.md` only in the folders between the session's folder and the
+  nearest `.git`, which in a linked worktree is the worktree's own, inside
+  the project too. A worktree of an installation Git does not track has none
+  of them: Codex 0.164 started in a worktree of an installed project, the
+  main checkout's hooks approved, ran none of them - no capsule, no save, no
+  guard. A Codex session in the root now sets up, in the background from the
+  Codex copy of `local-context.sh`, a dispatcher in the person's own Codex
+  folder (`memory-bank/scripts/codex_worktrees.py`, the scripts
+  `codex_dispatch.sh` and `.py` copied to `$CODEX_HOME/ai-accelerator/`):
+  one entry per hook of the project's `.codex/hooks.json` in
+  `$CODEX_HOME/hooks.json`, with its matcher, timeout and context limit, and
+  one named `policy`. The installer run in a terminal does it at once
+  (`CODEX worktrees <folder>`). The person's own entries keep their place -
+  Codex keys an approval by the file and the entry's position - and the
+  dispatcher's are written the same way every time, since Codex asks again
+  for a changed definition but not for an edited script. Nothing goes into
+  `config.toml`: Codex runs the entries only once the person trusts them in
+  its own review (the terminal's "Trust all and continue" at start, `/hooks`,
+  Settings > Hooks in the app; `codex exec` skips them silently). Nothing is
+  written either for hooks kept in `config.toml`, where Codex would warn at
+  every start that the layer has two forms, for a `hooks.json` that is not an
+  object, once `ai-accelerator/off` exists, for a hook another program
+  started, or on Windows.
+- The dispatcher serves only a session in a linked worktree of a listed
+  root, in the root's folder of it, without an installation of its own: it
+  runs the root's `.codex/hooks/<script>` there with `ACCELERATOR_HOME` and
+  `ACCELERATOR_STATE_DIR` naming the root and `ACCELERATOR_PROJECT_DIR` the
+  worktree, the shared layout Claude Code's dispatcher uses. In the root and
+  below it Codex runs the project's own hooks, so there - and in every other
+  project and in a launcher's attached session - it exits after a string
+  match. `policy` prints the root's `AGENTS.md` whole
+  (`additionalContextLimit` 32,768 tokens; Codex's default keeps 2,500) at a
+  new, cleared or compacted start, not on resume, whose history replays it,
+  and not where the worktree has an `AGENTS.md` of its own.
+- `native_results`: Codex has no file a hook can give the session's
+  commands variables through, so in the shared layout its save step names
+  the three roots in the command. Without them the save checked the main
+  checkout's files and refused a learning citing the branch's own file
+  (`stop:failed:unsaved`).
+- Offline with the real Codex 0.164 and a scripted model, an isolated
+  `CODEX_HOME`: the root session set up eleven entries and wrote no
+  approval; a worktree session before they were approved ran no hook; after
+  "Trust all" a session in `.claude/worktrees/<name>`, in
+  `$CODEX_HOME/worktrees/<id>/project` and in `src/` of one got the capsule
+  and every line of `AGENTS.md`, and its save went through the spool into the
+  root's Project Brain under the worktree's branch, with an index of its own
+  and the worktree left clean - through `codex exec` in all four editions,
+  and in PHP Core also through `codex app-server` as the desktop app drives
+  it (no approval asked) and the terminal with a question typed during the
+  save.
+  On synced copies of the four client installations the rollout rehearsal
+  (`--hosts codex --worktree`, which now rehearses Codex in a worktree too)
+  saved under the worktree's branch, recalled it and left the worktree clean
+  under both profiles, 8 of 8, and the real Codex passed the bench in a
+  worktree of two of them (inside and beside). Where the dispatcher does not
+  serve, an entry costs 2.3 ms, 1.2 ms more than an empty hook.
+  `scripts/codex_bench.py --worktree [inside|beside]` and `--app-server`
+  repeat it; `tests/test_memory_codex_worktrees.py` (28 cases, CI's memory
+  job) covers the setup, the dispatcher, the policy and the save step, and
+  each of nine reverted pieces fails it. The bench's stand-in now opens its
+  stream before it writes: Codex 0.164's terminal, after an earlier session
+  in the same `CODEX_HOME`, cut a response silent for 8 seconds.
+- Not covered: Codex's own `--worktree` starts on a detached HEAD, which
+  named no task (see the entry above); the desktop app's worktrees were not
+  run; Cursor in a worktree without the installation still runs no hooks.
+
+### Claude Code's sandbox below the root or in a worktree saves through the spool — 2026-10-26
+
+- Claude Code's Bash sandbox lets a command write only the folder its
+  session started in and claude-<uid> under its own temporary directory
+  (CLAUDE_CODE_TMPDIR, else the system's), which it gives the command as
+  TMPDIR. A save from a session below the project root or in a worktree
+  cannot write the project there, so it was spooled into that folder - and
+  the next hook, which runs outside the sandbox with the temporary
+  directory itself, never looked in it: the turn ended `stop` `failed`
+  `unsaved` (Claude Code 2.1.299, offline, with the sandbox on and the
+  project on disk). `native_results._spool_dirs` now looks in claude-<uid>
+  under each temporary directory too; the command still takes the first
+  folder it can write, its own TMPDIR. With it, both sessions saved
+  (`saved` `spooled`, then `recovery-saved`). A session in the root, which
+  the sandbox lets write the project, saves as before. The attached layout
+  - the Harness lending an edition, its state kept outside the project -
+  had the same loss under the sandbox, every answer, and saves through the
+  spool now too (`--sandbox --attached` fails without the change).
+  `tests/test_memory_native_capture.py` repeats it with the two TMPDIRs;
+  dropping the new folders fails it. `scripts/claude_code_bench.py
+  --sandbox` turns the sandbox on in the bench (the project on disk under
+  `/var/tmp`, Claude Code started without the namespace's capabilities):
+  on 2.1.278 and 2.1.299 the root saved as before, and below it, in a
+  worktree and in the desktop app's mode the save went through the spool.
+
+### Claude Code started in a worktree of the project — 2026-10-25
+
+- Git gives a linked worktree only what it tracks, and none of the four
+  real installations checked was tracked: Claude Code's own worktrees
+  (`claude --worktree`, the desktop app's `.claude/worktrees/<name>`)
+  copy `settings.local.json` and `.worktreeinclude` files, not the
+  installation. The real Claude Code 2.1.278 started in such a worktree
+  ran no project hook - no project context, no `AGENTS.md`, no capsule,
+  no save - and 12 of the person's 90 Claude Code sessions in October
+  started in one of its worktrees.
+- The dispatcher (`claude_dispatch.sh`, version 3) now serves a session
+  started in a linked worktree of a listed root's repository that has no
+  installation of its own: it finds the worktree by its `.git` file,
+  which names `<main checkout>/.git/worktrees/<name>`, a folder Git keeps
+  with a `gitdir` file, without starting a process; a project installed
+  in a folder of a monorepo is that folder of the worktree. It runs the
+  root's hooks in the worktree with `ACCELERATOR_HOME` and
+  `ACCELERATOR_STATE_DIR` naming the root and `ACCELERATOR_PROJECT_DIR`
+  the worktree; `environment` gives the session's commands the same
+  three variables, so the save step serves the worktree; `permissions`
+  decides for the worktree's files by the root's rules, a deny or ask
+  also covering the root's own files from there; the policy comes in
+  parts whatever Claude Code was told about imports. A forged `.git`
+  file, a submodule, a worktree of another repository or one with an
+  installation of its own is left alone, and so is a session a launcher
+  lends an accelerator to (`ACCELERATOR_HOME` set: the Harness opening a
+  worktree of an installed project, which has none of the installation,
+  would otherwise run every hook twice). A root the session's folder is
+  below, in its own checkout or one around it, comes first: an installed
+  worktree of an installed project is served as itself whatever the
+  lengths of the two roots - found by a test, before it shipped.
+- The dispatcher's permissions entry, which runs before every tool call
+  below the root or in a worktree, starts a third faster: `shutil`,
+  `subprocess` and `urllib.parse` are imported where they are used, and the
+  helper runs isolated and without site (`-I -S`), so a person's
+  `PYTHONPATH` cannot shadow the standard library either - 32 ms a call
+  before, 22 ms after. The guard, `bash-validator.sh`, now runs there as in
+  the root, without the helper, unless the command names `context.py`:
+  the helper only adds the allow the project's rules give the memory CLI,
+  and its Python start cost every other Bash call five times the guard's
+  own - 37 ms before, 7.5 ms after; a block is the guard's as before.
+- The runtime's shared layout (`workspace_roots.py`): the three variables
+  with the state root equal to the tooling root - an installation lent
+  to its own worktree. The Project Brain and Memory Bank are the root's,
+  keyed as there (`key_for`); the worktree is the project, whose branch
+  names the task; the index is the worktree's own,
+  `memory-bank/local/worktrees/<hash>/context.db` (`default_database`);
+  the accelerator's policy, skills, `specs/` and `tasks/` are indexed
+  from the root, where the worktree has no copy (`source_scan_plan`), and
+  a citation of them by the root's key resolves there (`resolve`). The
+  installed state keeps its permissions: no owner-only `umask`, no
+  `ensure_attached_state`. A file named `worktree` beside the index names
+  the worktree (`remember_worktree_index`), and a checkpoint removes the
+  index of a worktree that is gone (`prune_worktree_indexes`, beside the
+  consolidation and compaction it runs with).
+- The hooks tell a worktree from the root by `PROJECT_DIR`, not
+  `STATE_DIR`: `local-context.sh` describes the worktree, names the
+  installation whose memory it shares and the Memory Bank's files by
+  their full path, and `working-memory-read.sh` (with its mirrors' rule in
+  `context_retrieval.py`) gives the advice to build the index by hand only
+  in the root, where the command it names works.
+- Offline with the real Claude Code 2.1.278 and 2.1.299 (the version the
+  desktop app bundles; without the dispatcher a worktree session there got
+  nothing either), in `.claude/worktrees/<name>`
+  and in a folder of a worktree beside the project: project context,
+  policy, a capsule with the worktree's own task, and the save into the
+  root's Brain under the worktree's branch; 280 randomized permission
+  calls in seven rule sets decided in a worktree for its files as in the
+  root for the root's. `scripts/memory_rollout_rehearsal.py --worktree`
+  runs the hooks through the copy's dispatcher in a worktree of each copy,
+  the save with the `environment` entry's variables: on the four client
+  installations, under both profiles, every save landed under the
+  worktree's branch, was recalled, and left the worktree clean
+  (`tests/test_memory_rollout_rehearsal.py` covers it).
+  `scripts/claude_code_bench.py --desktop` drives a session as the
+  desktop app drives Claude Code (stream-json, the initialize request,
+  `--setting-sources user,project,local`, permission prompts over stdio,
+  each refused and listed) and fails on any prompt: in the root, below it
+  and in a worktree, 2.1.278 and 2.1.299 asked none; with the memory CLI's
+  allow taken out it lists the save's command. Left without a mode, 2.1.299
+  under those flags decides an ask in auto mode, which needs a classifier
+  no offline run has, so the bench names the mode as the app does.
+  `scripts/claude_code_bench.py --worktree` (and
+  `--worktree --subfolder src`) repeats the host run and passes only when
+  the save went to the worktree's branch, the worktree got its own index
+  and stayed clean. `tests/test_memory_claude_subfolders.py`
+  (`Worktrees`) and the new `tests/test_memory_worktree_sessions.py`, in
+  CI's memory job, cover both halves; mutating any of the changes fails
+  them.
+- Not covered: a session that enters a worktree after starting in the
+  root (`EnterWorktree`) keeps the root's hooks, which leave the memory
+  out there, as before; Codex and Cursor started in such a worktree run
+  no hooks; the memory MCP server, found by the nearest `.mcp.json`,
+  serves a worktree inside the root as the root. Documented in
+  `docs/MEMORY-INTEGRATION.md` ("Claude Code
+  started in a worktree"), `docs/TROUBLESHOOTING.md` item 11 and
+  `install/README.md`.
+
+### The spool's journal line, as it lands — 2026-10-25
+
+- Documentation: below the project root Codex's sandbox cannot write the
+  project's journal either, so the `save` `spooled` line of 2a31787a is
+  lost there and the record is the next hook's `saved` with code
+  `spooled` (`docs/MEMORY-INTEGRATION.md`, `docs/TROUBLESHOOTING.md`).
+  Found by the Codex bench started below the root.
+
+### Command rules below the project root reach as far as the root's — 2026-10-25
+
+- Why: a differential run - random deny rules in the project's
+  `settings.local.json`, random reads, writes and commands, tried in a root
+  session and in one started in `src/` of the real Claude Code 2.1.278 -
+  found commands the root refused that the dispatcher let through below it:
+  `env rm -rf x`, `... | xargs rm -rf`, `if true; then rm -rf x; fi`,
+  `{ rm -rf x; }`, `for ...; do rm -rf $d; done`. It also refused two the
+  root allows: `command -v sudo` and `xargs -I{} rm -rf {}`.
+- What changes: the dispatcher takes from Claude Code's own code what it
+  looks through - `time`, `nohup`, `timeout`, `nice`, `stdbuf`, `env`,
+  `command`, `builtin`, `noglob` and a bare `xargs` for any rule, `sudo`,
+  `doas`, `exec`, `setsid`, `ionice`, `pkexec`, `runuser` and `eval` too,
+  each named without a path, with their options, leading assignments and
+  the keywords `if`, `then`, `else`, `elif`, `do`, `while`, `until`, `!`,
+  `{` - and
+  matches each rule against every form of the command along the way, so
+  `Bash(sudo:*)` still refuses `timeout 5 sudo ls`. `command -v` and an
+  `xargs` with flags, `busybox`, `coproc` and a wrapper named by its path
+  are not looked through, as in the root.
+- Tests: the cases above and twenty more in
+  `tests/test_memory_claude_subfolders.py`; the differential runs (scratch,
+  not in CI) afterwards found no command refused in the root and let
+  through below it. Claude Code also reads the root's `settings.local.json`
+  in a session below it, resolving its paths from that session's folder:
+  stricter there, never looser (`docs/MEMORY-INTEGRATION.md`).
+
+### The Codex bench starts below the project root — 2026-10-25
+
+- `scripts/codex_bench.py --subfolder DIR` starts Codex in DIR below the
+  project root, in `codex exec` or, with `--queued`, in its terminal: the
+  save goes through the spool of 2a31787a and the run passes when the
+  journal says `saved` with code `spooled` and the recovery was seen. Its
+  work folder is on disk under `~/.cache/ai-infrastructure-benches/`:
+  Codex 0.163's bubblewrap sandbox mounts its own `/dev` and writes `/tmp`,
+  so a project in `/dev/shm` was invisible to a command started below its
+  root (`can't open file .../context.py`) and one in `/tmp` writable. The
+  stand-in reads its file from the folder Codex starts in.
+- Offline on Codex 0.163: from `src/` in `codex exec` and in the terminal
+  with a second question typed during the save (`previous-in-flight`), the
+  save landed through the spool; nothing said it was not saved.
+  `claude_code_bench.py`'s check of a queued save counts a spooled one as
+  landed. The sandbox below the root writes no journal either, so the
+  `save` `spooled` line is never there; the next hook's `saved` line is.
+
+### Below the project root on Windows too; the dispatcher keeps its newest copy — 2026-10-25
+
+- Why: Claude Code on Windows runs hook commands with Git Bash, and the
+  dispatcher for sessions started below a project's root stayed off there:
+  its list holds roots as Python writes them (`C:\Users\me\shop`) while
+  Git Bash shows the session's folder as `/c/Users/me/shop`, a bare `bash`
+  started from Python is WSL's launcher, `python3` is often missing or the
+  Store's stand-in, and Windows names ignore case. And one dispatcher
+  serves every project of the person: a session in the root of a project
+  with an older release put an older dispatcher back.
+- What changes: the dispatcher compares roots in Git Bash's form without
+  regard to case, walks up by length so that a difference in case cannot
+  keep the walk from ending, runs the project's hooks with the bash it runs
+  in, and finds Python as the hooks do (`python`, `py -3`, `python3`). Its
+  helper runs a hook with Git for Windows' bash, compares paths and rule
+  paths without regard to case and across drives, and looks the import
+  approval up under the key Claude Code uses there (forward slashes). The
+  setup names the dispatcher with forward slashes, locks with `msvcrt` and
+  skips the owner check Windows lacks; the installer sets it up there too.
+  `DISPATCH_VERSION` keeps a newer dispatcher in place, and a fingerprint
+  test makes any change to its scripts raise it. The policy parts come only
+  where the project's `CLAUDE.md` imports `AGENTS.md`.
+- Tests: `tests/test_memory_claude_subfolders.py` runs in the Windows CI
+  job too, with Git Bash, skipping there only what needs symbolic links,
+  file modes, a pseudo-terminal or a JSON reader for `bash-validator.sh`.
+  Its first run there found the setup rewriting its files at every start
+  (Windows has no file modes to match) and dropping a root when six
+  projects started together (the dispatcher's files were written outside
+  the lock, and Windows refuses to replace a file another process reads):
+  every write is now under the lock, compared by content alone there, and
+  tried again for a moment when Windows refuses it. Claude Code itself was
+  not run on Windows.
+
+### Below the project root Claude Code gets the project's permission rules and env — 2026-10-25
+
+- Why: the dispatcher of 9f854412 ran the project's hooks for a Claude Code
+  session started below the root, but Claude Code applies the project's
+  permission rules and `env` only to a session started in it. Offline on
+  2.1.278, a session in `src/` in `bypassPermissions` read and edited
+  `.env`, read `secrets/` and ran `rm -rf`, `sudo` and `chmod 777`, all of
+  which the root denies; in `default` it was asked about reads, writes, `php`
+  and a fetch the project allows; and its commands lacked `APP_ENV`. The
+  dispatcher was set up only by a first session in the root.
+- What changes: a `permissions` entry answers every tool call below a listed
+  root with the decision the project's `settings.json` and
+  `settings.local.json` make in the root - a deny or an ask wherever they
+  would, an allow only for a file inside the root or a single plain command,
+  and none against a deny or ask of the person's own or the managed
+  settings. Read and Edit paths match as Claude Code 2.1.278 matches them in
+  the root, probed with the real binary: gitignore patterns from the root,
+  where a trailing `/` or `/**` names a folder at any depth and a pattern
+  with another `/` is anchored. Bash rules count for every command of a
+  compound one, Agent rules by subagent type, WebFetch ones by domain. An
+  `environment` entry writes the project's `env`, but the `CLAUDE_` and
+  `ANTHROPIC_` variables, into the file Claude Code names in
+  `CLAUDE_ENV_FILE`. The installer, run from the command line in a terminal
+  (stdin and stderr a terminal, `| tee` included), sets the dispatcher up at
+  once and says so on stderr; a test, a bench, the Harness or a call into the
+  module never writes outside the project. Windows stays without it: its
+  hooks run through Git Bash, with paths, Python and `bash` this could not
+  be checked against here.
+- Tests: `tests/test_memory_claude_subfolders.py`, now 38 cases: the path
+  patterns as probed, the editions' rules decided below the root as in it,
+  local rules, the person's own rules, links, the dispatcher's answer, the
+  env export, and the install from a terminal, through `tee`, from a script,
+  as a module call and without a configuration folder. Mutations of the
+  matching fail them. `scripts/claude_code_bench.py --permissions` tries
+  nineteen tool calls in the root and in `src/`: the same decisions in
+  `default`, `acceptEdits` and `bypassPermissions` and in all four editions,
+  the same `printenv`; without the `permissions` entry ten differ.
+
+### No permission rule Claude Code warns about at every start — 2026-10-25
+
+- Why: Claude Code 2.1 checks file permissions with `Edit(path)` and
+  `Read(path)` rules only. The editions' `.claude/settings.json` also
+  carried `Write(**)` and `Glob(**)` in `allow` and `Write(.env)`,
+  `Write(.env.*)` (WordPress also `Write(wp-config*.php)`) in `deny`, which
+  match nothing, and its terminal printed four warnings about them at every
+  start - text the person was shown and had nothing to do about. The
+  attached launch (`scripts/accelerator_attach.py`) added a fifth,
+  `Write(<clone>/**)` beside `Edit(<clone>/**)`.
+- What changes: those rules are gone from the four editions and the
+  attached launch; Infrastructure-Creator's own settings deny the same
+  secret paths with `Edit(...)` rules (its `CHANGELOG.md`). `Edit(**)`,
+  `Read(**)`, `Edit(.env)` and the rest already covered every one, so
+  nothing allowed or denied changes. The editions' policy locks were
+  rewritten.
+- Tests: `tests/test_hook_wiring.py` refuses a `Write`, `MultiEdit`,
+  `NotebookEdit` or `Glob` rule with a path in any edition's or the
+  generator's settings, and fails on the old ones. Offline on Claude Code
+  2.1.278: the terminal of an installed project starts with no warning;
+  a `Write` to `.env` in `acceptEdits` mode is refused in an edition and in
+  the generator, before and after.
+
+### Claude Code started below the project root runs the project's hooks — 2026-10-25
+
+- Why: Claude Code reads `.claude/settings.json` - the hooks and the
+  permission rules - only from the folder a session starts in. Started in
+  `src/` of an installed project, it ran no capsule, no save and no guard,
+  and `.claude/CLAUDE.md`'s `@../AGENTS.md` became an import from outside
+  the working directory, which it asks about in a terminal (No by default)
+  and leaves out under `-p`. Nothing was to be asked of the person.
+- What changes: `local-context.sh`, in a session in the root, runs
+  `memory-bank/scripts/claude_subfolders.py` in the background. It copies
+  `claude_dispatch.sh` and `claude_dispatch.py` into the person's Claude
+  Code configuration folder (`~/.claude/ai-accelerator/`, or under
+  `$CLAUDE_CONFIG_DIR`), lists the project root there, and adds to their
+  `settings.json` one entry per project hook (same matcher and timeout) and
+  four session-start entries `policy-1` to `policy-4`, keeping everything
+  else. It writes only for the Claude Code whose transcript folder holds the
+  session, nothing when all is in place, never on Windows, and never once a
+  file named `off` is in that folder. The dispatcher runs a listed root's
+  hook for a session started below it in the same checkout, with
+  `CLAUDE_PROJECT_DIR` set to the root, and exits at once anywhere else.
+  For `bash-validator.sh` it adds the allow the project's rules give the
+  memory CLI in the root. The `policy-N` entries bring `AGENTS.md` in pieces
+  cut between sections, each under the 10,000 characters Claude Code 2.1
+  keeps in the conversation (a longer hook output goes to a file of which
+  the model sees 2,000), and nothing when Claude Code imports the file
+  itself - the dialog's Yes, filed under the repository's root. The
+  shared-core manifest now names `memory-bank/scripts/*.sh`, and the
+  generator's asset carries the shell dispatcher; its skill-body ceiling
+  in `scripts/token_budget.json` rises to 306,200 bytes for the two
+  instructions that seed it (Infrastructure-Creator `CHANGELOG.md`).
+- Tests: `tests/test_memory_claude_subfolders.py`, 27 cases: pieces of
+  every edition's policy and the parts' limit; the import approval under the
+  repository's key and under a linked worktree's main checkout; the memory
+  CLI recognised in five forms and 16 commands that are not; the setup once,
+  beside the person's own settings, through a linked `settings.json`, for six
+  projects starting together, dropping a removed project, and not for a
+  settings file it cannot read, a linked folder, another program's hook or
+  the `off` file; the dispatcher in the root, below an unlisted project, in a
+  nested repository, in a project installed inside a larger checkout,
+  outside Git and under an ASCII locale; the edition's real
+  `bash-validator.sh` (a save naming DROP TABLE allowed, `rm -rf /` blocked)
+  and the real `local-context.sh` setting it up. Mutations of the dispatcher
+  and of the list's lock fail them. In a folder of no listed project the
+  dispatcher costs 1.1 ms a hook, against 0.9 ms for `bash` doing nothing.
+  Offline, Claude Code 2.1.278 started in `src/` got the capsule, every line
+  of `AGENTS.md` and saved, in the four editions and in default,
+  `acceptEdits`, `dontAsk`, `bypassPermissions` and `auto` modes, after
+  `--resume` too; in its terminal, with No and with Yes to the import
+  dialog, the policy came once. `scripts/claude_code_bench.py --subfolder
+  src` runs it.
+
+### Codex started below the project saves through its next hook — 2026-10-25
+
+- Why: Codex started in a subdirectory of the project runs a workspace-write
+  sandbox that writes only below that subdirectory. The save after every
+  answer failed with "Read-only file system" at the runtime lock, and since
+  5695f5e8 it was not asked for at all (`outside-sandbox`): such a session
+  saved nothing, and the person was not to be asked to restart anywhere.
+- What changes: the Stop asks for the save whenever the sandbox writes a
+  temporary directory, as Codex's does (`/tmp`, `$TMPDIR`). The save
+  command, finding the project read-only (EROFS, EACCES or EPERM on the
+  Brain), checks the request and the result as a save does - a malformed
+  result is refused while the agent can still correct it - and leaves it
+  in a folder of this user's there (`ai-accelerator-native-spool-<uid>`,
+  owner-only, journal `save` `spooled`), answering `{"state": "spooled"}`.
+  The session's next hook - the continuation's Stop, or else the next
+  prompt - runs outside the sandbox, takes the file (one attempt each) and
+  saves it (`saved` with code `spooled`). Only a sandbox that writes
+  neither the Brain nor a temporary directory is skipped as
+  `outside-sandbox`. Codex's `tmpdir` entry is `$TMPDIR`, or on Windows,
+  where that is rarely set, the user's temporary folder (`TEMP`, `TMP`):
+  the Windows CI found the save not asked for there.
+- Tests: `test_a_save_the_sandbox_cannot_write_is_made_by_the_next_hook`
+  (the project made read-only; a malformed result refused at once, the
+  result spooled, then saved by the continuation's Stop and, in a second
+  case, by the next prompt), failing without the change, and a
+  temporary-directory case in the outside-sandbox test. On the real host,
+  Codex 0.163 started from `src`: `requested`, `saved` `spooled`,
+  `recovery-saved`.
+
+### The host benches type a question while the save is written — 2026-10-25
+
+- `scripts/claude_code_bench.py --queued SECONDS` and `scripts/codex_bench.py
+  --queued SECONDS` run the host in its terminal through a pseudo-terminal:
+  the stand-in takes SECONDS to write the save, and once it has begun a
+  second question is typed. The run passes when the save in flight still
+  lands and nothing says it was not saved. On the runtime before the
+  in-flight fix (afb80236) Claude Code's run fails with the save refused as
+  `request-unavailable`; on this branch both hosts pass. The Codex terminal
+  runs commands through the app-server daemon under `~/.codex/packages`,
+  which the isolated `CODEX_HOME` links to; `--queued` takes no `--attached`
+  there. A question the stand-in never received - the terminal of a large
+  project was not ready yet - is typed again, up to three times, and the
+  screen is kept in the work directory. On copies of next, scb,
+  bauherrenmappe and aea-partner (`--target ... --sync`) both hosts pass.
+  Codex's terminal leaves its app-server daemon (and, in code mode, its
+  host) running after the run, writing to the run's `CODEX_HOME`: the
+  Codex bench now stops every process whose `CODEX_HOME` is the run's and
+  reports how many (`helpers_stopped`); fifty-odd were left from earlier
+  runs on this machine.
+  Tests without the hosts: the stand-in waits over the first save only,
+  and what counts as passing.
+
+### The memory CLI may name SQL past bash-validator — 2026-10-25
+
+- Why: every shipped `bash-validator.sh` refused the accelerator's own
+  memory CLI whenever what it was handed named destructive SQL. A save
+  whose progress or learning said "the rollback runs DROP TABLE invoices"
+  was blocked as `destructive SQL - DROP TABLE/DATABASE/SCHEMA` - that
+  answer's native save was lost, in Claude Code's `echo -E '<JSON>' |`
+  form and in the `| (cd ROOT && ...)` form Codex and Cursor are given -
+  and so were `context.py retrieve --query 'rollback DROP TABLE'` and
+  `record-result` with such text. The SQL rules leave searches and git
+  alone; the text piped into the CLI was scanned as if it fed a SQL client.
+- What changes: a command that runs nothing but the memory CLI
+  (`python3`/`python`/`py -3` `memory-bank/scripts/context.py`, any
+  directory before either) and `cd`, `cat`, `echo` or `printf`, in any
+  pipe, group or heredoc, is left alone by the SQL rules: nothing in it can
+  run the text. Any other program in the command - a client the CLI's
+  output is piped into, one run beside it or in a substitution, Python that
+  is not the CLI - and the rules apply as before. Generic section,
+  byte-identical in the four editions and Infrastructure-Creator; mirrors
+  regenerated; the editions' `.claude/hooks/README.md` lists the exception.
+- Tests: eight corpus cases in `tests/fixtures/bash-validator-corpus.json`
+  (four allowed, four still refused) and the `memory-cli` decision.
+
+### A prompt sent while the save is written no longer cancels it — 2026-10-25
+
+- Why: offline in the terminals of Claude Code 2.1.278 and Codex 0.163,
+  with a scripted model that took 8 seconds to write the save, a second
+  question sent while it did went into the running turn, and the host ran
+  the prompt hook at once (Claude Code's transcript: `queue-operation`
+  `enqueue`, then `absorbed_mid_turn`; Codex's rollout: the message under
+  the same `turn_id`). The hook re-armed the session: the save in flight
+  was refused as `native-result:request-unavailable`, and the agent read
+  "Previous native memory result was not saved completely." in the middle
+  of saving it. With a real model the save takes seconds after every
+  visible answer, the time in which a person types the next question. The
+  Claude desktop app mostly runs the prompt hook only when a queued prompt
+  starts, after the turn: in 509 local desktop sessions 26 of 2,456 human
+  prompts (1.1 %) were sent while the agent still worked.
+- What changes: a prompt that finds the last request asked and unsettled,
+  less than ten minutes old, moves it aside to a second file of the same
+  session and journals `armed` `previous-in-flight` without a warning. The
+  save still lands there (`native-result` reads either file by its token),
+  the continuation's Stop settles it, and the prompt after reports it as
+  any other request: quiet when saved, the warning when not, "not asked
+  again for a day" when the person refused the save command. Codex's
+  continuation prompt is recognised by either request's token. An older
+  request is reported at once, as before. The queued prompt's own answer is
+  saved with the next answer's save. `memory_eval.py realized` does not
+  count `previous-in-flight` or `previous-unreadable` as armed after an
+  unsaved result. A save that lands after its request was moved aside is
+  journaled `saved` (or `omitted`) with code `in-flight`, so `realized`
+  counts how often the case comes up and how often the save still lands.
+- Tests: `test_a_prompt_sent_while_the_save_is_written_does_not_cancel_it`,
+  `test_a_request_moved_aside_is_reported_at_the_next_prompt_when_unsaved`,
+  `test_a_request_asked_long_ago_is_reported_at_once_and_codex_continues_one_moved_aside`,
+  `test_an_armed_prompt_that_printed_no_warning_is_not_after_an_unsaved_one`.
+
+### A save request this runtime cannot read is replaced at the next prompt — 2026-10-25
+
+- Why: a session's request file that this runtime refuses as
+  `native-result:invalid-state` - one another version of the runtime wrote
+  (an older one does not know the `refused` and `declined` phases), or one
+  cut short - refused every later prompt and Stop of that session. The
+  session saved nothing more, and only the journal said so.
+- What changes: the prompt replaces such a request with a new one and
+  journals `armed` `previous-unreadable`, without the "not saved
+  completely" warning, since whether it was saved is unknown. Storage that
+  is not a plain file stays `unsafe-storage` and is never replaced.
+- Tests: `test_a_state_this_runtime_cannot_read_is_replaced_at_the_next_prompt`
+  (another version's phase, a file cut short, a directory in its place),
+  failing without the change.
+
+### Claude Code started below the project root runs none of its hooks — 2026-10-25
+
+- Documentation only (`docs/TROUBLESHOOTING.md`, `docs/MEMORY-INTEGRATION.md`
+  known limits). Offline on Claude Code 2.1.278, started in `src/` of an
+  installed project (trusted, and with `src/` trusted too): no hook ran - no
+  capsule, no save, no `bash-validator.sh` - while skills, commands and
+  agents were found above. It reads `.claude/settings.json` only from the
+  folder it starts in, and `.claude/CLAUDE.md`'s `@../AGENTS.md` became an
+  external import: a dialog in a terminal (default "No"), left out under
+  `-p`. Codex 0.163 from a subdirectory runs the project's hooks. Claude
+  Code's own Bash sandbox (bubblewrap) started in the root let the save
+  write. The editions' `README.md`, installed as `ACCELERATOR.md`, opens
+  Quick Start with where to start the tools.
+
+### A Codex session that cannot write the Brain is not asked to save — 2026-10-24
+
+- Why: offline on Codex 0.163, a session started in a subdirectory of the
+  project (`codex exec -C project/src`) runs in a workspace-write sandbox
+  that writes only that subdirectory. The save after every answer failed
+  with "Read-only file system" on `project/project-brain`, journaled as
+  `failed` `unsaved`: two model calls for nothing each time.
+- What changes: the Stop reads the turn's `file_system_sandbox_policy` from
+  the rollout's `turn_context`, as it reads Plan mode and the sandbox type.
+  When the most specific entry over the Brain does not grant write, the save
+  is not asked for and the journal says `skipped` `outside-sandbox`. An
+  unrestricted policy, or none, asks as before; the attached launch's state
+  directory is an added writable root and saves. A policy that, read this
+  way, would not let the turn write its own working directory is in a form
+  the runtime does not know (a later Codex, another platform's paths), and
+  the save is asked for as before rather than dropped.
+- Tests: `test_a_codex_workspace_that_cannot_write_the_brain_is_not_asked_to_save`
+  (a subdirectory, a Brain carved out read-only, the project root, an added
+  root, a policy that denies the turn its own directory, no working
+  directory, the project and a subdirectory reached through a link),
+  failing without the change. On the real host, started from `src`:
+  `skipped` `outside-sandbox`; the bench's default and attached runs save,
+  and a read-only sandbox is still `read-only-sandbox`.
+
+### Cursor keeps the full save step on every answer — 2026-10-24
+
+- Why: a later save step points back to the full one while the transcript
+  holds it after its last compaction record. Cursor's transcript, when it
+  keeps one, and how it records a summarized conversation could not be
+  checked here, so nothing tells that a short step is safe there.
+- What changes: Cursor gets the full step every time, as before the short
+  step. Claude Code and Codex are unchanged. The known limits in
+  `docs/MEMORY-INTEGRATION.md` add that a save step after `/rewind` past
+  the conversation's first full step still points back to it.
+- Tests: `test_cursor_gets_the_full_step_every_time`, failing without the
+  change.
+
+### After a Codex compaction the save step is full again — 2026-10-24
+
+- Why: offline on Codex 0.163, with an automatic compaction before the third
+  turn, that turn's save step came short, pointing back to rules the model
+  no longer held. Codex's `compacted` record carries a `retained_context`
+  with the earlier steps in it, and the check found the full step's text
+  there, after the record's marker. The model's history after the
+  compaction (`replacement_history`) held no full step.
+- What changes: the full step counts only after the compaction record's own
+  line.
+- Tests: `test_the_full_step_comes_back_after_a_compaction_or_without_a_transcript`
+  carries a compaction record with the full step inside it, and fails without
+  the change. Offline, three turns around the compaction: Codex 2,522, then
+  1,619, then 2,522 characters again; Claude Code around a `/compact` 3,149,
+  2,246, 3,149. Every turn saved.
+
+### A capsule request cuts each section into sentences once — 2026-10-24
+
+- Why: after the masking cache, the next cost in `refresh` on a synced copy
+  of `next` was cutting sections into the sentences an excerpt window moves
+  by: 369 `_excerpt_units` calls per request, the same sections cut again on
+  each of the three excerpt passes.
+- What changes: the units of a section are held per its lines in a bounded
+  cache (2,048 sections); each caller gets its own list. They depend on the
+  lines alone.
+- Measured on the copy, 24 interleaved first prompts of fresh sessions per
+  side, with the masking cache in both: the prompt hook's median went from
+  280.5 to 238 ms (−42.5 ms, −15 %), every output byte for byte the same.
+  With the masking cache, a first prompt went from about 311 to 238 ms.
+
+### A capsule request masks each document image once — 2026-10-24
+
+- Why: profiling the prompt hook on a synced copy of `next` showed masking
+  secrets in about a fifth of `refresh`. One request cuts the capsule's
+  excerpts three times over (for the manifest, the text and the output), and
+  each pass screened every document image again: 127 `mask_secrets` calls
+  for about 30 distinct texts.
+- What changes: `mask_secrets` is held per text and secret policy in a
+  bounded cache (128 texts). The key carries `secret_policy_fingerprint()`,
+  so a pattern added since masks afresh, and a policy holding a scanner that
+  is no compiled pattern is not cached at all. A ValidationError is never
+  held.
+- Measured on the copy, 24 interleaved first prompts of fresh sessions per
+  side: the prompt hook's median went from 311.5 to 286.5 ms (−25 ms, −8 %),
+  every output byte for byte the same. Prompts whose items repeat do no
+  excerpt work and are unchanged.
+- Tests: `MaskSecretsTest.test_masking_is_held_per_text_and_secret_policy`;
+  the secret-policy delivery suites, which change the patterns between
+  calls, failed against a cache keyed on the text alone.
+
+### The policy asks for an explicit save only where no Stop request comes — 2026-10-24
+
+- Why: each edition's `AGENTS.md` said "MUST finish authorized work with
+  progress/next steps and source-backed reusable findings/decisions (Harness
+  `memory-draft`, `memory_record_result` MCP, or `context.py
+  record-result`)", and the Memory MCP server asked for
+  `memory_record_result` "before finishing authorized work". The Stop hook
+  asks for the `native-result` save after every answer, so an agent that
+  follows the policy saves each answer twice. On a synced copy of a client
+  project, gpt-6.1-sol on Codex 0.163 ran `context.py record-result` itself
+  in all 12 answers of a 12-answer plan (13 calls; the run's own count of 10
+  missed `Result already recorded`), and a closing `context.py update` in 7.
+  The native save then saved each answer again, with `learnings: []` every
+  time.
+- What changes: the save rule in `AGENTS.md` opens with what not to do:
+  MUST NOT save an answer's result yourself - no `record-result`,
+  `memory_record_result` or closing `update` - where Stop requests it. The
+  Stop bullet names where that is: governed Claude Code, Codex and Cursor
+  sessions running the hooks, outside the Harness, unless
+  `native_result_request` is `off`. The stage-boundary `update` rule leaves
+  out an answer's end that Stop's request saves. Where no request comes - a
+  Harness session's `memory-draft` block, lightweight mode,
+  `native_result_request: off`, a host without the hooks - the explicit save
+  is still required before finishing. Plan mode and a read-only sandbox get
+  no request and stay read-only scopes. "Report save failures; claim saves
+  only after success" stays. The Memory MCP server's instructions, the
+  `memory_record_result` description, `memory-bank/MCP.md` and the
+  generator's `policy-forge` say the same.
+- Measured live on copies of that project, same model and prompts, one
+  copy per session: under the old policy `record-result` ran in 12 of 12
+  answers and `update` in 7, and a same-day control answer saved explicitly
+  too. A first rewording that kept "MUST save" in front and made the
+  prohibition conditional did not change a session's first answer (1 of 1
+  still saved). The rule as shipped: `record-result` in 2 of 12 answers (one
+  a first answer, one beside the rule a person asked to keep), `update` in
+  0; all 12 native saves landed on the first try, and 5 of them carried
+  learnings, against 0 of 12 before.
+  Asked to keep a rule, the agent re-verified a chunk, created a finding or
+  edited `AGENTS.md`, as before. `native_result_request: off` is not visible
+  to an agent unless it reads `runtime.json`.
+- Budget: `AGENTS.md` grows 379 bytes in each edition, about 80 tokens per
+  session; the four `agents_md_bytes` ceilings rise by that much, and the
+  generator's `body_bytes` by 745 for `policy-forge`. The policy locks were
+  rewritten.
+- Tests: `NativeSaveRequestPolicyTest` in `tests/test_framework_semantics.py`
+  holds the rule in every edition whose Stop hook asks for the save, and in
+  the MCP server; `tests/fixtures/memory_native_roundtrip_public.json`
+  carries the server's new instructions.
+
+### A save step points back to the rules the conversation holds — 2026-10-24
+
+- Why: every answer carried the whole save step, about 2,600 characters, of
+  which the rules (the JSON fields, the schema example, what belongs in
+  learnings) were about 1,150. The conversation already held them from the
+  first step. Claude Code's terminal showed the whole step after every
+  answer.
+- What changes: the Stop reads the transcript's last 2 MiB. When a full step
+  is there after the last compaction record, the step carries its commands,
+  its ending, its refusal rules and a pointer back to the full step, 903
+  characters shorter. After a compaction, or without a readable transcript,
+  the full step comes back. `"native_result_instruction": "full"` (or
+  `CONTEXT_NATIVE_RESULT_INSTRUCTION=full`) sends it every time. The first
+  step of a conversation is byte for byte what it was.
+- Tests: `NativeInstructionTests` in `tests/test_memory_native_capture.py`,
+  failing without the change. Offline on Claude Code 2.1.278, three turns of
+  one session: 3,117 characters, then 2,214 twice, all three saved. On Codex
+  0.163, `exec` then `exec resume`: 2,516 then 1,613, both saved.
+
+### The Claude Code bench runs attached, as the Harness launches it — 2026-10-24
+
+- Why: the Harness lends an edition from the clone without copying it
+  (`accelerator_attach.py`): `--add-dir`, one `--settings` with the edition's
+  permissions and hooks, and the accelerator's state outside the project.
+  The bench only ran installed editions, so that launch, and whether its save
+  passes Claude Code's permission check, had never run offline.
+- What changes: `claude_code_bench.py --attached` runs a fresh project with
+  nothing installed and that overlay, leaving the project untrusted, and
+  reads the journal from the state directory. Offline on Claude Code 2.1.278
+  it saves, under `default` and `dontAsk` alike: permissions from
+  `--settings` count without the trust dialog, and the `cd` into the
+  added directory passes.
+- Tests: `AttachedTest` in `tests/test_host_benches.py`.
+- `codex_bench.py --attached` does the same for Codex: the edition's hooks and
+  instructions as `-c` options, the state as an added directory, and the
+  hooks trusted as `accelerator_attach.py trust-codex-hooks` records them.
+  Offline on Codex 0.163 it saves. `CodexAttachedTest` holds it.
+
+### The rollout rehearsal says when your Claude Code does not trust a target — 2026-10-24
+
+- Why: the rehearsal is the step before a rollout, and its copies run with a
+  HOME of their own. On `next` it passed while your own Claude Code had never
+  accepted the project's trust dialog, so `claude -p` there would refuse the
+  save after every answer.
+- What changes: with Claude Code among the hosts,
+  `memory_rollout_rehearsal.py` reports `claude_trust` per target, read as
+  the Claude Code bench reads it, and prints a line when the dialog was never
+  accepted. The exit status is unchanged.
+- Tests: `tests/test_memory_rollout_rehearsal.py` runs it against a Claude
+  Code configuration that never trusted the project.
+
+### The Claude Code bench says when your Claude Code does not trust the target — 2026-10-24
+
+- Why: the bench runs in a HOME of its own that trusts the copy, so it passed
+  on `next`, whose trust dialog your own Claude Code never accepted. There
+  `claude -p` refuses the save after every answer.
+- What changes: with `--target`, `claude_code_bench.py` reads your own Claude
+  Code configuration (`~/.claude.json`, or `$CLAUDE_CONFIG_DIR`) for that
+  project's `hasTrustDialogAccepted` and nothing else. When the dialog was
+  never accepted, it says so and how to fix it. The run's outcome is
+  unchanged.
+- Tests: `PersonTrustTest` in `tests/test_host_benches.py`.
+
+### A session whose host refused the save is not asked again for a day — 2026-10-24
+
+- Why: offline on Claude Code 2.1.278, `claude -p` in a project whose trust
+  dialog was never accepted ran the hooks but ignored the project's allow
+  rules. The save command was refused after every answer ("requires
+  approval"): two wasted model calls and a "not saved completely" warning on
+  each prompt. The same happens when a person keeps saying no or a rule or
+  auto mode denies the command. Of the four client projects, `next` has never
+  had its trust accepted.
+- What changes: the recovery Stop reads the transcript's last 512 KiB for
+  the save command's result. When Claude Code recorded a refusal there
+  (`toolDenialKind` `user-rejected`, `permission-rule` or `automode-blocked`;
+  not `interrupted`, `cancelled` or auto mode's classifier failing), the
+  journal says `failed` `host-refused`.
+  The next prompt prints the usual warning once, and the session is not
+  asked again for a day (`prompt` `skipped` `host-refused`). A new session is
+  asked again. A person who answers No in Claude Code's terminal dialog ends
+  the turn before any Stop runs (seen offline: the transcript records
+  `user-rejected`, no recovery Stop follows), so the next prompt reads the
+  refusal from the transcript and does the same. It also catches a refusal
+  the recovery Stop missed: Claude Code writes its transcript in batches, and
+  a denial made 10 ms before that Stop was not on disk yet.
+- Tests: three in `tests/test_memory_native_capture.py`. The two refusal
+  tests fail without the change; the third holds that an interrupted or
+  plain unsaved request stays `unsaved`. On the real host, a turn after the
+  refusal has no save step, after `claude -p` in an untrusted project and
+  after No in the terminal dialog alike.
+
+### The host benches run the WordPress edition — 2026-10-24
+
+- Why: `claude_code_bench.py` and `codex_bench.py` handed the installer the
+  edition's directory, `Cms/wordpress`, where it takes the name `WordPress`.
+  `--edition WordPress` failed before Claude Code or Codex started.
+- What changes: both benches hand the installer the edition's name.
+- Tests: `EditionTest` in `tests/test_host_benches.py` holds the name `main()`
+  hands on, failing on the old code, and installs WordPress through
+  `prepare()`. Offline, both benches pass on WordPress.
+
+### The Claude Code bench runs a permission mode, as your own uid — 2026-10-24
+
+- Why: inside `unshare -rn` the bench ran Claude Code as root, and Claude
+  Code refuses `bypassPermissions` to root ("cannot be used with root/sudo
+  privileges"). The bench also ran only the default mode, while the
+  Harness fleet worker runs `dontAsk`.
+- What changes: `scripts/claude_code_bench.py --mode` takes `default`,
+  `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions` or `plan`. The
+  namespace maps your own uid where `unshare` can (util-linux 2.38 and
+  later) and falls back to `unshare -rn`. In `plan` the run passes when no
+  save was asked for and the journal records `plan-mode`.
+- Tests: `NamespaceTest` in `tests/test_host_benches.py`. Offline on Claude
+  Code 2.1.278 every mode passes.
+
+### A save another session overtook says to report it — 2026-10-24
+
+- Why: two Claude Code sessions on one branch, driven offline at once with
+  different results: the first save moved the task's revision, and the
+  second was refused with the bare `memory-result-v1:prepared_stale_no_write`.
+  In a new project the second was refused with `native-result:task-changed`,
+  because the first save had created the branch task. Nothing was written
+  either way, as designed, but the agent read only a code.
+- What changes: on the `native-result` path both refusals say what happened
+  and what to do, for example "another session or a person saved the task
+  after this save was requested; nothing was written: report the held save,
+  do not retry it". The journal keeps the codes. `record-result`,
+  which the Harness reads by its exact text, is unchanged.
+- Tests: two in `tests/test_memory_native_capture.py`, one per refusal; both
+  fail without the change.
+
+### A raw newline in a save names the echo that made it — 2026-10-24
+
+- Why: driven offline on Claude Code 2.1.278 under zsh, a save piped with a
+  plain `echo` instead of the command's `echo -E` was refused with "inside a
+  string, write a newline as \n". The agent had written `\n`: zsh's `echo`
+  turned it into a line break. The hint pointed at the JSON, not at the pipe.
+- What changes: the hint adds "(a plain echo in zsh turns \n into a line
+  break: pipe with echo -E)". The journal code is unchanged.
+- Tests: `test_a_refused_input_says_what_to_correct` checks the whole hint.
+  Offline, a stand-in model that pipes with a plain `echo` first and retries
+  as told after the refusal saves on the second call.
+
+### A compaction after a new conversation's first turn hands its memory again — 2026-10-24
+
+- Why: Claude Code writes a new conversation's transcript only after its
+  first prompt hook has run (seen on 2.1.278: the file did not exist at
+  `SessionStart` or at the first `UserPromptSubmit`). That turn kept no
+  transcript position, so a `/compact` or an automatic compaction before the
+  second turn went unseen. The second turn's capsule left out what the first
+  had handed and said `memory: 1 item(s) handed earlier in this conversation
+  still apply`, while the conversation held only the summary.
+- What changes: a transcript not written yet is a position, its start. The
+  next turn reads the file from there and sees the compaction record. Codex
+  0.163 already has its rollout at `SessionStart`, so nothing changes for it.
+- Tests: `test_a_transcript_written_after_the_first_turn_still_shows_a_compaction`
+  in `project-brain/tests/test_runtime.py`, with and without a compaction. It
+  fails without the change. Offline on Claude Code 2.1.278: after a first turn
+  that handed a learning, `/compact` and a second turn, the capsule carries
+  the learning again.
+
+### The session banner counts the accelerator's own files apart — 2026-10-24
+
+- Why: the session-start banner printed `Branch: … (N uncommitted changes)`
+  from `git status --short`. In a project that neither commits nor ignores
+  the accelerator, that count included `.claude/`, `memory-bank/`,
+  `AGENTS.md` and the rest on every session:
+  - on `next`, 8 of 8 entries were the accelerator's;
+  - on `scb`, 14 of 19;
+  - on `bauherrenmappe`, 1 of 1.
+
+  The model was told about uncommitted work nobody had done.
+- `context.py status --json` reports `uncommitted` (the team's entries) and
+  `accelerator_uncommitted` (the accelerator's install as its install record
+  or the generator's manifest says it was written, and the memory the
+  runtime writes). Both come from one `git status`, with the filter
+  `changed_paths` already used, now shared as `accelerator_owned`. Outside
+  Git both fields are left out.
+- The four editions' `local-context.sh` print the branch line after the
+  status call: `Branch: … (0 uncommitted changes; 16 more are the
+  accelerator's own files)`. Without Python, or without the fields, it keeps
+  the plain Git count. The Codex and Cursor mirrors follow.
+- Test (`test_memory_lifecycle.py`): on a fresh install the banner reports 0
+  uncommitted changes and the accelerator's entries apart, and 1 after an
+  edit. It fails on the old hook.
+
+### A refused save says what to correct — 2026-10-23
+
+- Why: the agent gets one retry after a refused save, and two common
+  refusals did not say what to fix.
+  - An input that was not one JSON object came back as the bare code
+    `native-result:invalid-input`. This is what a shell's `echo` causes when it
+    turns a JSON string's `\n` into a real newline, and what any malformed or
+    doubled object causes.
+  - A learning with `verified` inside it got "Each learning needs type, title,
+    consequence and sources", which does not name the extra key.
+- The input refusal keeps its journal code, through the error's `code`, and
+  now says why:
+  - the JSON error with its line and column;
+  - for a control character, how to write a newline or a tab inside a string;
+  - "more than one JSON object", or the kind of value sent instead of an
+    object.
+- The learning refusal keeps its sentence and adds the missing and the
+  unexpected fields (at most five, each cut to 40 characters). It calls
+  `verified` a top-level boolean. The same validation serves `record-result`
+  and the MCP tool.
+- "Nothing to record" says what a result needs (a progress summary, next
+  steps or a checked learning), and the native save's bare
+  `native-result:nothing-to-record` adds that `--skip` is the way out.
+  Conflicting learnings name the title they share.
+- A missing or linked source is named in its refusal, without its `#`
+  anchor and cut to 200 characters, so an agent citing several files knows
+  which to fix.
+- Test (`NativeFunnelJournalTests`): four malformed inputs each journal
+  `native-result:invalid-input` and print their reason; `verified` inside a
+  learning and a missing `sources` are named. It fails on the old runtime.
+
+### The host benches are tested without the hosts — 2026-10-23
+
+- `scripts/claude_code_bench.py` and `scripts/codex_bench.py` run only where
+  Claude Code and Codex are installed, and CI has neither. A change to the
+  save step's wording could break their command search unnoticed.
+- `tests/test_host_benches.py`, in the `installation` job, covers:
+  - each bench finds the save command in the step the runtime writes for
+    Claude Code, Codex and Cursor;
+  - the Claude stand-in reads, answers, saves through `echo -E` and ends;
+  - the Codex stand-in reads Codex's XML-escaped `<hook_prompt>` unescaped,
+    and runs commands through code mode's `exec` script when there is no
+    tool list;
+  - a target the rollout rehearsal refuses is refused.
+
+### Codex's Plan mode and read-only sandbox are not asked to save — 2026-10-23
+
+- Why: Codex's hook `permission_mode` follows its approval policy only. The
+  offline Codex run (`scripts/codex_bench.py`) reported
+  `bypassPermissions` under both the workspace-write and the read-only
+  sandbox. In the read-only sandbox the save after every answer failed
+  (`stop failed unsaved`), and with approvals on request the agent could ask
+  the person to let it write. Codex's Plan collaboration mode, like Claude
+  Code's plan mode, is for no changes. Both show in the rollout's
+  `turn_context` record, as `collaboration_mode.mode` and
+  `sandbox_policy.type`.
+- For Codex the Stop reads the last 512 KiB of the rollout and takes the
+  `turn_context` whose `turn_id` is the Stop's. Plan mode is then skipped as
+  `plan-mode`, and a read-only sandbox as `read-only-sandbox`. Another
+  turn's context, one beyond the tail, or no rollout is unknown, and such a
+  turn is asked as before.
+- Tests (`NativeRequestSwitchTests`): plan mode and a read-only sandbox ask
+  nothing and journal their code, and a default turn is asked; another
+  turn's context, one beyond the tail and a missing rollout are asked.
+
+### A plan-mode turn is not asked to save — 2026-10-23
+
+- Why: in plan mode Claude Code tells the agent it "MUST NOT make any edits,
+  run any non-readonly tools … This supercedes any other instructions you
+  have received". The Stop hook still asked for a save after every answer,
+  so the agent either refused it, at the cost of a model call and a "not
+  saved completely" warning on the next prompt, or wrote memory against the
+  person's choice. The offline Claude Code run showed the save command
+  itself passes the permission check in plan mode, so only the agent's
+  compliance stood between plan mode and a write.
+- The Stop now skips the request when the hook input's `permission_mode` is
+  `plan`. Claude Code and Codex both send that field; Codex's hook schema
+  has the same five values. The journal records `stop` `skipped`
+  `plan-mode`. The prompt still arms, so a turn switched out of plan mode
+  before it ends is asked, and a save asked before the switch is settled as
+  before.
+- Test (`NativeRequestSwitchTests`): for both hosts, a plan-mode Stop asks
+  nothing and journals `plan-mode`, and the next default-mode answer is asked.
+
+### Codex on the real host, offline — 2026-10-23
+
+- Why: the Codex side of the save after every answer had been checked only
+  through simulated hooks. `scripts/codex_bench.py` drives the installed
+  Codex (0.163) the way `claude_code_bench.py` drives Claude Code: a network
+  namespace with loopback only, a scripted stand-in for the Responses API,
+  and an isolated `CODEX_HOME` that approves the project's hooks by hash.
+- What it showed:
+  - Codex adds the Stop hook's continuation to the same turn as a
+    `<hook_prompt>` item, XML-escaped, and runs no prompt hook for it.
+    `docs/MEMORY-INTEGRATION.md` said Codex sends it back through the prompt
+    hook, and is corrected; the prompt-hook guard and the silent `refresh` for
+    such a query stay as defence.
+  - The command's `&&` reaches the model as `&amp;&amp;`. In every real Codex
+    save in the transcripts, the model ran it as `&&`.
+  - A project that pins a gpt-5.6 model gets no tool list. The model then
+    runs commands through code mode's `exec` script.
+- Measured: a fresh PHP Core install and synced copies of the four client
+  projects (one pins gpt-5.6) save and recover in Codex's workspace-write
+  sandbox.
+
+### Claude Code saves without a prompt and without a hook error — 2026-10-23
+
+- Why: no Claude Code session had yet run the save after an answer, so the
+  real binary (2.1.278) was driven offline: a network namespace with
+  loopback only and a scripted stand-in for the Messages API, no model.
+  It found three defects:
+  - Claude Code asked before the save command after every answer, whatever
+    the allow rules say: a command holding a subshell or a `{ }` group always
+    asks, and the command was `(cd ROOT && python3 … --json)`. Under
+    `claude -p` the save was refused and the result lost.
+  - The Stop `decision: "block"` showed in the transcript as "Stop hook
+    error" and raised "Stop hook error occurred · ctrl+o to see" after every
+    answer.
+  - The model got the step twice: as "Stop hook feedback" and again as a
+    blocking-error message, about 2,600 characters a turn.
+- Claude Code's Stop now answers with `hookSpecificOutput.additionalContext`
+  (documented for Stop since 2.1.163). It continues the turn through the
+  same `stop_hook_active` and continuation cap, is labelled hook feedback,
+  and reaches the model once.
+- Its command is `cd ROOT && echo -E '<JSON>' | python3
+  memory-bank/scripts/context.py … --input - --json`, the JSON written in
+  place of `<JSON>`, and the skip has its own line. Offline the `cd`, `echo`
+  and the allowed CLI pass without a prompt. Rejected:
+  - a heredoc: Claude Code asks before one whose body holds braces and
+    quotes;
+  - `printf '%s'`: Claude Code asks before a `printf` operand holding `[`
+    with `$` or a backtick, as a JSON with code in it does;
+  - plain `echo`: Claude Code's Bash tool runs zsh unless `$SHELL` is bash,
+    and zsh's `echo` turned the JSON's `\n` into a newline, so the save was
+    refused. `-E` keeps it, in zsh as in bash.
+- Codex and Cursor get the same text, byte for byte, as before.
+- `memory_rollout_rehearsal.py` and the lifecycle test run either form.
+  `memory_eval.py` already finds the request in the new transcript shape;
+  a test now holds it.
+- Measured offline, one answered turn: the save ran and the second Stop saw
+  the recovery; the continuation fell from 5,250 to 3,141 characters in one
+  message; the stream raised no error notification.
+- Tests (`ClaudeSaveStepTests`): the Stop output per host; the command holds
+  no subshell, group, heredoc, `$`, backtick or `;` outside quotes; it keeps
+  a JSON with backticks, `$`, newlines, tabs, backslashes, quotes and
+  Cyrillic verbatim under bash and zsh from a subdirectory; the skip runs as
+  given. All four fail on the old runtime.
+- `scripts/claude_code_bench.py` repeats the offline run against the
+  installed Claude Code: one answered turn of an installed edition, the save
+  step followed as written with such a JSON, and a report of whether the
+  save ran, how many messages carried the step and whether the transcript
+  recorded a hook error. With `--target DIR --sync` it runs in a synced copy
+  of an installed project. On copies of the four client projects synced to
+  this change, all four saved without a prompt or a hook error. On `next` as
+  installed today, the save was refused. Linux only (user and network
+  namespaces). It is not a CI gate, as CI has no Claude Code; run it when
+  Claude Code updates and before a rollout.
+
+### Cursor's next request keeps the rule its last prompt wrote — 2026-10-23
+
+- Why: Cursor reads its rule before the prompt hook runs, so the rule a
+  prompt writes is what the next request carries. Its save continuation
+  comes back as a prompt, and the prompt hook rendered a capsule for the
+  instruction's words into the rule. On a project where the last real prompt
+  had retrieved the learning it asked about, the continuation replaced that
+  memory with `no-match`, and the person's next request carried that rule.
+- The prompt hook of every host now exits after arming when the prompt is
+  the save continuation, waiting for the background arm first: Cursor's rule
+  stays the last real prompt's, and Codex skips the refresh process
+  `refresh` would have spent saying nothing (the runtime's own check from
+  the previous entry stays, for a hook that still calls it). Claude Code's
+  continuation never arrives as a prompt. The block sits after the arm in the
+  canonical hook, so the Codex and Cursor mirrors carry it unchanged.
+- Test (`test_memory_lifecycle.py`): on a full PHP Core install, the rule
+  holding the learning the second prompt retrieved is unchanged, byte for
+  byte, after the continuation; it fails without the change.
+
+### A task followed across sessions, a commit and a branch, in CI — 2026-10-23
+
+- Why: the rollout rehearsal runs one turn and the next session's recall,
+  and the hook tests each cover one piece. A task lives longer: a learning,
+  then a progress and a next step, a commit, a new session, another branch
+  with its own task, and the way back. Run on copies of the four clients
+  through the installed hooks it held, so it is now a regression test.
+- `tests/test_memory_lifecycle.py` installs PHP Core into a small shop and
+  follows that life through Claude Code's hooks (a session a person reads)
+  and Codex's (the save continuation comes back through the prompt hook):
+  the second session sees the progress, the next step and the learning; the
+  new branch starts its own task; back on the first branch its own progress
+  returns and the other's does not; three saves journaled; `validate`
+  passes. With the continuation fix reverted the Codex case fails. It runs
+  in the step that holds the native roundtrip and capture suites.
+
+### Claude Code shows what the save step is, not its marker — 2026-10-23
+
+- Why: Claude Code shows the first lines of a Stop hook's reason under "Ran
+  N stop hooks" after every answer (up to five lines in 2.1.278), and the
+  save request opened with `INTERNAL_NATIVE_MEMORY_RESULT <token>`: the
+  first thing a person saw after each answer was an opaque marker.
+- For Claude Code the marker now closes the request, and its first line is
+  the instruction's own "This is an internal continuation: ...". Codex and
+  Cursor send the continuation back as a prompt and recognise it by the
+  marker that opens it, so theirs is unchanged. `memory_eval.py realized`
+  finds the marker anywhere in the record, as before.
+- Test (`NativeAnswerTests`): Claude's request opens with the instruction and
+  ends with the marker; Codex's and Cursor's open with the marker.
+
+### A Codex save continuation gets no second capsule — 2026-10-23
+
+- Why: Codex sends the Stop hook's save continuation back through
+  UserPromptSubmit as a new prompt, so the prompt hook built a capsule for
+  the instruction's own words. The turn's prompt had already brought the
+  capsule: on a copy of a client the continuation's hook took 169 ms and put
+  1.4 KB of repeated working state, recent files and last-turn telemetry
+  into the save step, and where the project has documents, the instruction's
+  words ("progress", "learnings", "sources") would search them too.
+- `refresh --host codex` (and `--host claude`, whose continuation never
+  arrives as a prompt) returns at once, silently, for a query opened by the
+  continuation's marker and challenge token (`NATIVE_CONTINUATION_PROMPT`);
+  the hook then stays silent, as for any refresh with nothing to say. The
+  arm still recognises the continuation and journals it. Cursor's rule is
+  left to its own refresh.
+- Test: the Codex prompt hook prints nothing for a real continuation and
+  the journal records it, while the same runtime still answers Cursor and a
+  real prompt; it fails without the change.
+
+### A promoted save's memory files are not the task's work — 2026-10-23
+
+- Why: `changed_paths` drops what the runtime writes itself, so that a task
+  does not record its own churn as the user's work, but it knew only the
+  Project Brain's runtime directories. A save with a learning promotes it:
+  the runtime writes a chunk under `memory-bank/chunks/` and rewrites
+  `memory-bank/INDEX.md`. In a project that commits its memory - the
+  arrangement the editions' documentation recommends - every such save left
+  both changed for the next turn: on a copy of a client with its memory
+  committed, one save wrote five chunks (the learning and four findings
+  promoted with it) and the next turn counted `memory-bank/chunks/` and
+  `memory-bank/INDEX.md` as its work. A turn that only saved then counted
+  toward a checkpoint, and the chunks became the task's newest files.
+- `TURN_RUNTIME_MEMORY` names `memory-bank/chunks/`, `memory-bank/INDEX.md`
+  and `memory-bank/local/`; `changed_paths` skips them as it skips the
+  Brain's directories, and a checkpoint flush drops them from turns buffered
+  before. The recent-files line read from transcripts already left out every
+  `.md` file, so it named none of them.
+- None of the four clients is affected today: two ignore their memory and two
+  neither commit nor ignore the accelerator, whose collapsed `memory-bank/`
+  the install record already leaves out.
+- Tests (`AutomaticWorkingMemoryTest`): a promoted save's chunk and index are
+  not a turn's work while a real change beside them is; a flush drops them
+  from a turn buffered before. Both fail without the change.
+
+### The prompt hook arms the save request beside the capsule's refresh — 2026-10-23
+
+- Why: the prompt hooks ran two Python processes one after the other:
+  `native-prompt`, which arms the save request, then `refresh`, which builds
+  the capsule. The first is a few milliseconds of work behind about 50 ms of
+  interpreter start and imports: 63 ms of a 182 ms hook on a copy of scb.
+- Claude Code's and Codex's hooks now run `native-prompt` in the background
+  beside `refresh`, its output in a private temporary file; the hook waits
+  for it when the refresh returns and prints its line before anything else,
+  as before. Without a temporary file the request is still armed and only
+  that line is lost. The Stop hook keeps its order: `native-stop` pins the
+  task revision a checkpoint flush in `turn` may have just moved.
+- The two shared one thing: on an unsaved previous result the arm wrote
+  `native_capture_incomplete` into the last-turn report, which the refresh
+  reads into the capsule. `native-prompt` now writes it for Cursor only.
+  Claude Code and Codex get the notice from the hook's own first line, as
+  they did; the capsule line that repeated it is gone instead of appearing
+  when the arm happened to finish first. Cursor's hook answers in JSON only,
+  so its notice is that capsule line: its mirror rule keeps the arm before
+  the refresh (`_WM_NATIVE_ARM_CURSOR` in `context_retrieval.py`).
+- The generator's hook contract (`native_capture_hook_contract` in
+  `validate_generated.py`) accepts the arm beside the refresh too, when its
+  PID is taken at once and awaited; generated hooks keep the sequential
+  form hook-forge describes.
+- Measured on synced copies of scb (prompt hook, ABBA, 30 rounds): 209 →
+  147 ms, paired median −62 ms [−63.6; −59.9]. The worst case of the hook is
+  one 5 s budget instead of two against Claude Code's 8 s timeout. The
+  rehearsal on the four clients saved and recalled 16 of 16.
+- Tests: each host gets the unsaved-result notice by one fixed path (Claude
+  Code and Codex: the hook's first line, no report flag, no temporary file
+  left; Cursor: the rule written in the same turn), failing without the
+  flag change; the generator contract refuses an arm in the background
+  without its PID or its `wait`.
+
+### A session a person reads is not asked to repeat its answer after the save — 2026-10-23
+
+- Why: after every answer in governed mode the Stop hook asks the agent to
+  save its result, and since 2026-10-21 to return its substantive answer
+  again afterwards. A headless run (`codex exec`, `claude -p`) needs that: its
+  caller gets only the final message. In a session a person reads as it goes,
+  the answer is already on screen above the continuation, and the repeat
+  doubled it: on the nine Codex runs that had the instruction, the message
+  after the save was 93 % of the answer's length (21 % on the twelve before
+  it), and the continuation cost +408 output tokens against +360.
+- `native_result_answer` in `runtime.json` (or `CONTEXT_NATIVE_RESULT_ANSWER`):
+  `auto`, the default, ends a session its host marks as attended with no
+  further text or one short line, and repeats everywhere else; `repeat`
+  always repeats; `brief` never does. An unknown value repeats and the
+  journal names it; the save is asked for either way.
+  - Claude Code: `CLAUDE_CODE_SESSION_ATTENDED=1` (Claude Code 2.1.278 sets it
+    for the processes of an attended session) and an entrypoint of `cli`,
+    `claude-vscode` or `claude-desktop`. A `claude -p` started from such a
+    session inherits the entrypoint, but it is a child session, which Claude
+    Code never marks attended.
+  - Codex: the rollout's first line names the session's source: `vscode`
+    (the app, the IDE extension and the terminal UI) or `cli` end briefly;
+    `exec` and subagents repeat.
+  - Cursor and anything unmarked repeat, as before.
+- The journal's `requested` line carries `answer` (`brief`/`repeat`).
+  `memory_eval.py realized` counts the brief requests in the funnel and
+  splits the transcripts' continuation costs by how each request asked to
+  end (`brief`, `repeat`, `earlier`), read from the request's own words, so
+  the change reads as a before and after on real sessions.
+- Tests (`NativeAnswerTests`): an attended Claude session in each of the
+  three interfaces ends briefly; a child of a desktop session, `claude -p`,
+  a Slack session and an unmarked one repeat; a Codex session ends briefly
+  only for a `vscode` or `cli` rollout (not `exec`, a subagent, a first line
+  past the bound or a missing rollout); the setting and its variable decide,
+  and an unknown value keeps the save. The native-capture fixture drops the
+  marks a suite run from a Claude Code session would inherit.
+
+### A citation check resolves its source once and the roots once a pass — 2026-10-23
+
+- Why: every prompt checks each Memory Bank chunk's citations again, and
+  each Brain record's, because a cited file can go away while the chunk
+  stays. Each check resolved the source, then `workspace_roots.contains`
+  resolved it a second time, resolved the project root again, and pathlib's
+  `relative_to` walked the path's parents. On a copy of a client grown to
+  1,200 chunks by 600 native saves, the prompt hook took 385 ms instead of
+  208. Profiled at 200 chunks, these checks were three quarters of the
+  eligibility pass.
+- `workspace_roots.within` answers `contains` for a path its caller has
+  already resolved, against `resolved_roots`. The bank validator's source
+  facts and the Brain's cited-file check resolve the roots once per pass,
+  in the memo they already keep for sources, and `source_fingerprints` once
+  per call. The spelling decides first, as in `key_for`; any other
+  spelling takes pathlib's answer, so a neighbour such as `<root>-old` is
+  still outside. `contains` keeps its contract for every other caller.
+- Measured on that copy (prompt hook, ABBA): at 650 chunks 373 → 326 ms,
+  paired median −41 ms [−42.9; −37.4]; at 1,200 chunks 396 → 336 ms,
+  −55 ms [−56.5; −52.0]. The capsules and the retrieved documents are
+  identical under `full` and `recall`; only the gate's diagnostic
+  `top_score` moves in its sixth digit, as it does between two runs of one
+  copy.
+- Tests (`test_memory_brain_scale.py`): a pass resolves the roots once
+  however many files its chunks cite; `within` answers as pathlib does,
+  neighbour included; a citation that leads out of the project by a link
+  still takes its chunk out. The two tests that counted citation checks
+  count `within` now.
+
+### The accelerator's block in .gitignore and .gitattributes follows the release — 2026-10-23
+
+- Why: `--sync` kept `.gitignore` and `.gitattributes` whole as the
+  project's own files, including the block between the accelerator's
+  `# BEGIN/END ACCELERATOR MANAGED ENTRIES` markers. A client installed
+  before the client `.gitattributes` override therefore kept the edition's
+  own block, which marks every skill and hook `-diff linguist-generated`. An
+  edited hook - a safety control - showed as "Binary files differ" in review,
+  and no sync, `--update-tracked` included, ever replaced it. The rehearsal
+  of the rollout found it on scb.
+- The sync now rebuilds that block from the release with the merge an
+  install uses (`merge_additive_file`): the project's own lines stay, and a
+  directive they already hold is not repeated. A tracked file waits for
+  `--update-tracked` as before, and a file without the block stays the
+  project's.
+- Test (`InstallSyncTest`): an old `-diff` block is replaced by the release's
+  `*.sh text eol=lf` while the project's line stays; a tracked file changes
+  only with `--update-tracked`; a file without the block is kept. It fails
+  without the change.
+
+### A memory line the hooks cannot write is lost quietly — 2026-10-23
+
+- Why: the prompt hook appends a health line and the Stop hook a journal line
+  with `>> file 2>/dev/null`. Bash opens redirections left to right, so in a
+  project whose `memory-bank/local` was read-only, every turn printed
+  "Permission denied" before stderr reached `/dev/null`. The rehearsal on a
+  copy of a client showed it; the hooks themselves still exited 0 and served.
+- Both lines now redirect stderr first. The Claude Code, Codex and Cursor
+  copies of `working-memory-read.sh` and `working-memory-write.sh` change in
+  every edition, through `scripts/core_sync.py --write` and the mirrors. The
+  generator's hook-forge fragment and the verifier line it is held to
+  (`validate_generated.py`) take the same order, so generated Stop hooks
+  stay quiet too; the generator's policy lock was rewritten.
+- Test (`ReadOnlyStateTest` in `test_hooks.py`): with a read-only
+  `memory-bank/local`, both hooks of each host exit 0, print no "Permission
+  denied" and write nothing. It fails without the change; it is skipped
+  under root.
+
+### The cost of the save after every answer, read from the transcripts — 2026-10-23
+
+- Why: the native journal counts the Stop hook's save requests, but whether
+  to keep `native_result_request: every-turn` turns on what each request
+  costs. Only the session transcript shows that, and nothing read it.
+- `scripts/memory_eval.py realized` also prints, per host, the save requests
+  in the project's Claude Code transcripts and Codex rollouts. As medians:
+  the seconds and output tokens from each request to the next human prompt,
+  and those of the answer before it.
+  - A request is found by its `INTERNAL_NATIVE_MEMORY_RESULT <token>` marker
+    wherever the host recorded it, never in the agent's own messages.
+  - Claude Code's tokens are each response's `usage`, counted once per
+    response; Codex's are the cumulative `token_count`.
+  - `--json` carries the same under `continuations`.
+  - On the 21 Codex runs of 16-19 October that made one request each: +9.9 s
+    and +383 output tokens after a 17.5 s answer of 701 tokens.
+- Tests (`SaveContinuationCostTest` in `tests/test_memory_eval.py`): a Codex
+  request and a Claude Code request cost exactly the time and the tokens to
+  the next prompt; a response split into several records counts once; a
+  mention of the marker in a later answer is not a request.
+
+### A generated project's manifest marks its accelerator files too — 2026-10-23
+
+- Why: a checkpoint leaves out the accelerator's own untracked files by the
+  install record, which only `install_accelerator.py` writes. A project the
+  generator built has no such record, so while its team had neither
+  committed nor ignored the result, `.claude/`, `AGENTS.md` and the rest -
+  and `.infra-manifest.json` itself - still counted as the task's work on
+  every turn.
+- Where there is no install record, `installed_footprint` reads the
+  generator's `.infra-manifest.json` (sha256 of every file it owns). A file
+  is the generator's while its sha256 still matches. The manifest itself
+  never counts.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset (so generated projects get it) and the mirrors by
+  `scripts/core_sync.py --write`; the generator's policy lock was rewritten.
+- Test (`AutomaticWorkingMemoryTest`): an untracked generated install
+  changes nothing, and an edited generated file is reported. It fails
+  without the change.
+
+### The save after every answer can be switched off — 2026-10-22
+
+- Why: in governed mode every answer ends with the Stop hook asking the agent
+  to save its result, and that continuation is another model call. On 21
+  Codex runs with one native save each (16-19 October), it cost a median of
+  10 seconds, 383 output and 59k mostly cached input tokens: about half of
+  the answer's own time and tokens. No client has worked under it yet, and a
+  team that finds it too slow or costly had no way out but lightweight mode,
+  which gives up governance altogether.
+- `native_result_request` in `project-brain/config/runtime.json` (or
+  `CONTEXT_NATIVE_RESULT_REQUEST`): `every-turn`, the default and what ran
+  before, or `off`. Off, no prompt is armed and no Stop asks, including a
+  Stop whose prompt was armed before the switch. Each such prompt and Stop
+  is journaled as `skipped` with the code `switched-off`, and results still
+  reach memory through `record-result`, the MCP tool or the Harness. Any
+  other value refuses the arming with `native-result:invalid-request-setting`.
+  No edition ships the key, and `--sync` never changes `runtime.json`.
+  `docs/TROUBLESHOOTING.md` ("The Agent Saves After Every Answer") explains
+  what the step is, its cost and the switch.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`; the
+  generator's policy lock was rewritten for its asset copies.
+- Tests (`NativeRequestSwitchTests` in `tests/test_memory_native_capture.py`):
+  - switched off, Codex, Claude Code and Cursor arm nothing and ask nothing,
+    with two `switched-off` lines each;
+  - a prompt armed before the switch asks nothing;
+  - the variable overrides the setting;
+  - an unknown value is refused and journaled.
+
+  Each fails without the change.
+
+### An install records what it wrote — 2026-10-22
+
+- Why: the record of the accelerator's own files
+  (`memory-bank/local/accelerator-install.json`) was written by `--sync`
+  only. Until a project's first sync, the memory runtime could not tell the
+  untracked install from the task's work. A fresh install's Cursor rule
+  opened with "warming: task checkpoint pending" on a project where nothing
+  had changed. The first sync also had to recognise untouched files from the
+  clone's history, and without that history (a source from an archive) an
+  untouched `ACCELERATOR.md` stayed behind as edited.
+- `install_accelerator.py` now writes the record after an install. It names
+  every file the install leaves holding the release byte for byte (copied,
+  already identical, or given its executable bit) and keeps the entries of a
+  record the project already has. A merge into the project's own file
+  (`AGENTS.md`, `.gitignore`, an MCP configuration) is not named. A dry run
+  writes nothing, and a record that cannot be read or written safely is left
+  to the next sync. The Harness applies only the reviewed files of its
+  staged install and leaves the record to its first sync.
+- Tests (`tests/test_installation.py`):
+  - an install records the runtime by its blob id and names neither its
+    merged `AGENTS.md` nor its merged `.mcp.json`; a dry run leaves the
+    record as it was;
+  - the first sync takes the recorded `ACCELERATOR.md` to the next release
+    without the clone's history. A copy from an install made before records
+    still stays as edited; that test now removes the record first.
+  - a dry-run sync leaves the install's record unchanged;
+  - `tests/test_harness_setup.py` compares the Harness's and the CLI's file
+    modes outside `memory-bank/local`, where only the CLI's record lies.
+
+### A client's sync rehearsed on a copy — 2026-10-22
+
+- Why: `--sync` updates an installed project in place, and whether the
+  memory hooks still saved and recalled afterwards showed only in the first
+  real session there. Rehearsing it on copies of the four client
+  installations by hand found that the sync leaves `runtime.json` - and so
+  the capsule profile - as it was, holds back Codex's new hook while
+  `.codex/hooks.json` waits for re-approval, and that a project whose
+  accelerator is untracked fed `.claude/`, `memory-bank/` and the rest into
+  its tasks' files.
+- `scripts/memory_rollout_rehearsal.py --target DIR` repeats that rehearsal.
+  It copies the project without dependency and worktree trees and syncs the
+  copy. Then, for each host (Claude Code, Codex; Cursor on request) and
+  capsule profile on a copy of its own, it runs the installed session-start,
+  prompt and Stop hooks, the save the Stop request names, the closing Stop
+  and a new session's prompt. It reports the
+  sync, the profile `runtime.json` selects, every hook's exit and time, the
+  save or its refusal code, the native journal and whether the next capsule
+  recalled the save. No model runs, HOME and TMPDIR stay in the work
+  directory, and the project is never written. A link out of the project is
+  left out of the copy, and a Git worktree or submodule is refused.
+- Tests (`tests/test_memory_rollout_rehearsal.py`, `installation` job; also
+  in `scripts/check.py`): on a fresh PHP Core install, Claude Code, Codex
+  and Cursor under `config` and `recall` each save and recall, the project is byte for
+  byte unchanged, the copy leaves out `node_modules` and a link out of the
+  project but keeps a link inside it, and this clone, a folder without an
+  install and a worktree are refused.
+
+### A checkpoint leaves out the accelerator's own untracked install — 2026-10-22
+
+- Why: a project that neither commits nor ignores the accelerator shows
+  `.claude/`, `.codex/`, `memory-bank/`, `specs/`, `AGENTS.md`, `VERSION` and
+  the rest as untracked in `git status` on every turn, and `changed_paths`
+  took them for the task's work. On copies of the four client installations
+  83 of the 223 files the tasks of one client recorded were those (8 of 60 on
+  another); its capsule offered `memory-bank/` as a recent file; and a turn
+  that changed nothing still buffered a turn delta, so read-only sessions
+  reached the five-turn checkpoint and showed a warming line.
+- `changed_paths` now drops what the install record
+  (`memory-bank/local/accelerator-install.json`, written by `--sync`) says the
+  accelerator wrote and nobody has touched since: an untracked directory it
+  installed into, and a file whose bytes still have the recorded Git blob id.
+  A file the team has edited differs from the record and stays a change;
+  without a record - attached, generated, or never synced - nothing changes.
+- A checkpoint flush applies the same test to the turns it consolidates:
+  turns buffered before the update still name the install, and the first
+  flush after it would otherwise have made them the task's newest files.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`; the
+  generator's policy lock was rewritten for its asset copies.
+- Tests (`AutomaticWorkingMemoryTest`): an untouched untracked install changes
+  nothing, an edited installed file and the project's own work stay, no record
+  keeps the old report; a turn in such a project buffers no delta and the
+  branch has no context; a flush leaves the install a buffered turn named
+  out of the task's files. Each fails without the change.
+
+### The automatic native save funnel, counted from disk — 2026-10-22
+
+- Why: why installed projects held no saved result had to be reconstructed
+  from transcripts, and once sessions run the disk still could not say how
+  far a save got. The challenge file is rewritten every turn and pruned to
+  128. A refused save's reason reached only the agent's tool output, and the
+  recovery Stop then marked it `failed` without one. `native_capture_incomplete`
+  lives one turn. The Stop hook left no trace when its save request failed
+  or was killed.
+- `native_results.py` appends one metadata line per prompt, Stop and save to
+  ignored `memory-bank/local/native-results.ndjson`: `at`, `host`, `stage`,
+  `event` and a fixed `code` - armed (with the phase the last request ended
+  in when the hook warns), continuation, requested or the reason a Stop asks
+  nothing (`not-governed`, `capsule-delivered`, `no-session-id`,
+  `not-stop-event`, `not-armed`, `task-completed`, `recovery-<phase>`, ...),
+  `failed` (`unsaved` or `incomplete`), held, saved/held with the learnings
+  written and chunks promoted, omitted, or `refused` with the refusal's code.
+  No payload, result, path, task or session. A call writes exactly one line;
+  an input refused before `save()` runs is journaled from `read_input`, so
+  `context.py` passes the request to it (two call lines).
+- `memory_results.py` refusals carry machine codes (`ResultRefused.code`,
+  `memory-result-v1:source_missing`, `:unverified`, `:learning_fields`,
+  `:schema`, `:nothing`, `:sensitive`, `:stale_revision`, ...) while the
+  message - the text the agent corrects and the Harness matches - is
+  unchanged; `refusal_code()` gives any refusal its code.
+- `working-memory-write.sh` appends the save request's exit status after it
+  runs (`stop-hook` `exited`, 124 when the budget killed it), or
+  `capsule-delivered` when a Harness turn skips it - written by the shell,
+  like the prompt hook's health line, because a killed runtime cannot.
+  Never through a linked journal file, nor through a link in an attached
+  state. The Codex and Cursor copies name their own host.
+- The journal keeps eight lines per `refresh_health_retention` record (a
+  fully exercised turn writes about six), trimmed in batches so an append
+  stays one write.
+- `scripts/memory_eval.py realized` prints the funnel per host - prompt hook
+  runs, armed, requested, saved, held, omitted, failed, refusals by code,
+  learnings written, chunks promoted - and the prompt hook's
+  `refresh-health.ndjson` lines for all hosts; `--state DIR` reads an
+  attached project's state.
+- The two Cursor guards that kept every clock out of the rule-rendering hooks
+  - `test_render_carries_no_per_turn_invalidator` and the lint job's textual
+  grep (`ci.yml`, `scripts/check.py`) - now admit the one on the journal
+  line, which stays on one physical line: it writes local metadata, and no
+  rule is made from it.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`; the
+  generator's policy lock was rewritten for its asset copies.
+- Generated projects write the Stop hook's line too: Infrastructure-Creator's
+  hook-forge documents this Stop block as a mandatory fragment, and
+  bootstrap-verifier requires it in a generated `working-memory-write.sh`
+  once the seeded runtime journals (see `Infrastructure-Creator/CHANGELOG.md`).
+  The generator's skill-body ceiling in `scripts/token_budget.json` rises by
+  the 3,133 bytes that text added, to 302,433.
+- Tests (`tests/test_memory_native_capture.py`, `NativeFunnelJournalTests`,
+  and `tests/test_memory_eval.py`): every prompt, Stop and save path writes
+  exactly one line with its code and no content; the Stop hook's line on
+  success, failure, timeout and a Harness skip for Claude, Codex and Cursor;
+  the bounded window; no write through a linked journal; the realized
+  funnel and its text report. Each fails without the change, except the two
+  link guards, which hold the implementation to its refusal.
+
+### A path written out under the project root is found — 2026-10-22
+
+- A prompt that names a file by its absolute path seeds the documents linked
+  to it (`prompt_path_seeds`). The path was found by one pattern for the whole
+  of it, which stopped at a space: under a root such as
+  `/Users/ann/My Projects/shop` every such path was lost, and
+  `test_prompt_paths_are_extracted_normalised_and_screened` fails whenever the
+  temporary directory holds a space. The root is known, so a path under it is
+  found by that prefix now; the character before the prefix is checked as the
+  old pattern did.
+- On Windows the root is also looked for as Windows writes it,
+  `C:\Users\...\shop\src\...`; only its slash form was. On other systems
+  the two forms are one and nothing changes.
+- `test_a_path_under_a_root_with_a_space_is_found` and
+  `test_a_windows_path_under_the_root_is_found` fail on `1b010289`.
+
+### A chunk written today is served west of UTC — 2026-10-22
+
+- The runtime writes chunk dates as UTC calendar dates - promotion,
+  re-verification and supersession do, and an ID is minted from today's UTC
+  date - but `validate.py` judged `last_verified` against the machine's local
+  date. West of UTC the UTC date is the local tomorrow every evening (in New
+  York from 20:00, in San Francisco from 17:00, summer time): every chunk
+  promoted or re-verified then was "in the future", failed validation and
+  left retrieval until local midnight. With the local calendar a day behind
+  UTC, 120 of the 722 tests in `project-brain/tests/test_runtime.py` failed;
+  now none does. A date is in the future only past today by both calendars
+  (`validate.latest_today`).
+- `bank-quarantine` dated its `valid_to` by the local calendar, unlike every
+  other date the runtime writes; east of UTC after midnight that was the UTC
+  tomorrow, and `test_quarantine_stops_serving_and_closes_validity` failed
+  there every night between local and UTC midnight (00:00-03:00 in EEST,
+  where the night check of this branch met it). It writes the UTC date
+  now, and the test runs with the local calendar a day ahead
+  (`calendar_shifted`, a 24-hour POSIX TZ offset), so it fails on a
+  regression at any hour on a POSIX runner.
+- `ChunkCalendarTest` and the quarantine test fail on `256c1c4b`.
+- Not changed: the overdue-review, past-`valid_to` and terminal-chunk
+  comparisons still read the local date. They move a boundary by hours once
+  in a chunk's life rather than hiding the day's new chunks.
+
+### A Windows session's PowerShell commands name their files — 2026-10-22
+
+- Claude Code can run shell commands through its `PowerShell` tool on
+  Windows (code.claude.com/docs/en/tools-reference): on by default without
+  Git Bash, and with Git Bash for claude.ai and Console accounts. Its input
+  has the Bash tool's `command`, but the transcript reader took only `Bash`,
+  so a session that used it recorded none of the files its commands read -
+  the main source of the `recent files` line. `PowerShell` calls are now read
+  with the PowerShell dialect the Codex Windows path already uses.
+- Where it applies: the editions' settings deny scoped `Bash(...)` rules, and
+  on Windows with Git Bash - which the hooks need - Claude Code then turns
+  the PowerShell tool off for the session unless
+  `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` or a `PowerShell(...)` rule turns it
+  on. This reaches the sessions that turn it on.
+- `test_claude_powershell_tool_calls_name_their_files` fails on `8caa2869`.
+- Not changed, needs a decision: `bash-validator.sh` is wired on `Bash` only,
+  while the documentation asks hooks that inspect shell commands to match
+  `Bash|PowerShell`, so a session with the PowerShell tool on passes around
+  it; and the memory CLI is allowed only as `Bash(...)` rules.
+
+### A Codex chat snapshot no longer carries the Stop hook's continuation — 2026-10-22
+
+- Codex 0.162 and later write a Stop hook's continuation into the
+  conversation as a `<hook_prompt hook_run_id="...">` user message.
+  `context_continuity.py` leaves the context Codex injects out of a snapshot,
+  and its comment names hook prompts among it, but the envelope list did not:
+  the native result's continuation - the request to save the turn, some 2,600
+  characters - went into every Codex snapshot taken where native capture ran.
+  On this machine's October rollouts (all in test and evaluation projects;
+  none in the Desktop projects) that was 21 of 21 snapshots, a median 69 % of
+  their text (53-80 %) and half of their user messages. `hook_prompt` is now
+  in `CODEX_INJECTED_ENVELOPES`, and `docs/CONTEXT-HANDOFF.md` names it among
+  the envelopes a projection drops.
+- `test_a_stop_hook_continuation_is_not_part_of_the_chat` fails on `7df1da52`.
+- Seen on the way, not changed: Codex 0.162.1 and 0.163.0 run no
+  `UserPromptSubmit` hook for that continuation (in those 19 projects, 22
+  user messages, 22 hook prompts and 21 read-hook health lines; a capsule
+  followed 21 of 36 real prompts and none of the 21 continuations), and 20 of
+  21 saves passed on a runtime that recognises only a bare continuation. The
+  comment in `native_results.begin` that Codex submits the Stop reason through
+  `UserPromptSubmit` describes earlier versions.
+
+### The miss audit names every exclusion the runtime writes — 2026-10-22
+
+- `scripts/memory_miss_audit.py` maps a manifest exclusion with reason
+  `ticket-mismatch`, `invalid` or `explicit-context-only` to
+  `runtime-exclusion`, and `path-link-limit` beside `file-link-limit` to
+  `automatic-link-limit`. They read as `unknown`: on the 327-prompt implicit
+  set, 43 of the 50 changelogs `main` withholds (the ticket filter: a changelog
+  naming only other tickets than the request's) showed as unexplained misses;
+  with the map they are runtime exclusions, the other 7 capsule losses.
+- `test_every_manifest_exclusion_the_runtime_writes_has_a_stage` fails on
+  `a54143b8`.
+
+### A Codex turn records its files again — 2026-10-22
+
+Codex 0.162 and later run every tool from one JavaScript cell, the custom
+tool `exec`: a shell command is `tools.exec_command({cmd: "...", workdir:
+"..."})`, a patch `tools.apply_patch("*** Begin Patch ...")`. The Stop hook's
+transcript reader knew Codex's `function_call`, `local_shell_call` and the
+`apply_patch` custom tool, none of which those versions write, so a Codex turn
+recorded none of its files and the next session's `recent files` line stayed
+empty. On this machine's 154 October rollouts (Codex Desktop and the TUI,
+0.162 and 0.163) the reader found 0 files in 650 turns.
+
+- `_transcript_calls` reads an `exec` cell's `tools.exec_command` and
+  `tools.apply_patch` calls: their string literals - double, single or
+  backtick quoted, `String.raw` included, JavaScript escapes decoded - go
+  through the same shell and patch readers as before, from the cell's
+  `workdir` when it is an absolute literal. A command built from a variable or
+  a `${}` substitution names nothing the text can show and is passed over.
+- On the same rollouts 42 turns record 90 files; most of those sessions worked
+  in other checkouts and in `~/.codex`, whose files are not the project's.
+- `test_codex_exec_cells_name_their_files` in
+  `project-brain/tests/test_runtime.py` fails on `f6876f7d`.
+
+### A session in another worktree is not served this checkout's memory — 2026-10-22
+
+A Claude Code desktop session in its own worktree - and any session after
+`EnterWorktree` - runs the hooks installed in the checkout it started from:
+`${CLAUDE_PROJECT_DIR}` stays there, and the session's own checkout arrives
+only in the input's `cwd` (code.claude.com/docs/en/worktrees, "What worktrees
+share with the main checkout"). The memory hooks took their project and branch
+from their own location, so such a session was handed the other branch's task
+as its state, its turns were recorded into that task (`turn`, `native-stop`),
+and its chats were captured as that branch's snapshots - a new worktree session
+could even claim the merge prepared for that branch's next task. In the client
+projects the accelerator is untracked, so a worktree holds no memory of its own.
+
+- `working-memory-read.sh` and `working-memory-write.sh` read `cwd` with their
+  other fields. When it is another worktree of the repository (another top
+  level, the same Git common directory), the read hook prints that memory was
+  not consulted, and the write hook records nothing; Cursor's read hook only
+  answers `{"continue": true}`. `context_continuity.py` makes the same check
+  and neither captures nor restores. A `cwd` equal to the project costs no Git
+  call; a subdirectory of the project or another repository changes nothing.
+- Tests: `OtherWorktreeTest` in `memory-bank/tests/test_hooks.py` (all three
+  hosts) and `test_a_session_in_another_worktree_neither_captures_nor_claims_a_merge`
+  fail on `a9277c8f`.
+- `hook-forge` describes the check for generated projects; the hooks README of
+  each edition names it. `scripts/token_budget.json` raises the
+  Infrastructure-Creator `body_bytes` ceiling from 299,300 to 300,000 for that
+  752-byte requirement: the skill bodies were 151 bytes under it.
+- Serving such a session with its own branch's task and files (`--checkout`
+  through the runtime's branch observations) is a separate change.
+
+### A person's refresh asks for the full capsule on Windows too — 2026-10-22
+
+- Harness read the `CAPSULE_PROFILE_FLAG` marker through `O_NOFOLLOW`, as it
+  reads the source-hint and provenance markers, and Windows has no
+  `O_NOFOLLOW`: there the marker counted as absent, and a person's knowledge
+  `refresh` ran under the shipped `recall` and searched only the task's own
+  saves. The marker only widens that refresh, so without `O_NOFOLLOW` it is
+  read from a regular file that is not a link.
+- `test_an_explicit_refresh_searches_everything_without_o_nofollow` fails on
+  `46db067e`.
+
+### The editions ship the recall capsule — 2026-10-22
+
+- The four editions' `project-brain/config/runtime.json` and the generator's
+  `runtime.json.template` set `capsule_profile: recall`: the automatic capsule
+  carries the working state, the recent files and what the task's own saves
+  recorded. The code's default stays `full`, so a project whose `runtime.json`
+  names no profile keeps the capsule it had. An explicit `retrieve`, MCP
+  `memory_retrieve`, Harness's explicit `refresh` and the LongMemEval bridge
+  still search everything.
+- The third task-outcome measurement sealed three conditions
+  (`docs/MEMORY-EVAL.md`). On recall sets `recall` was not worse than `full`;
+  on cold starts it was navigation byte for byte, and navigation had reached
+  the changed file in 2.92 fewer calls than `full` on 30 client tasks. The
+  third condition - every suite that saves a result and expects the next
+  capsule to carry it stays green with `recall` shipped - failed on the two
+  blockers the next two entries fix. Run again with `recall` shipped,
+  `check.py` passed every job it ran.
+- Tests that check a layer `recall` leaves out on purpose pin `full` in their
+  fixtures: the shared document in the Cursor rule, the document beside
+  broken UTF-8, Hindsight's source hints, the Git calls and the working
+  record re-read on the full search path, the membership index's full capsule
+  render, and Harness's first-message document, funnel diagnosis, ordinary
+  receipt and opened-memory report.
+- `AGENTS.md` in the four editions, `README_EN.md`, `README_RU.md`,
+  `harness/README.md` and `docs/CONTEXT-AND-MEMORY.md` say what the automatic
+  capsule carries.
+
+### Harness works under a capsule without documents — 2026-10-22
+
+Under the navigation and recall profiles a capsule may carry no document -
+recall's whenever none of the task's own saves matches - and Harness assumed
+one in three places.
+
+- **Automatic memory.** `3ea0b262` let a capsule with no document through
+  only off the local transport. On POSIX, where Harness asks the runtime for
+  a source proof and runs the turn ephemeral, such a capsule still went to
+  the proof check, and the runtime sends no proof when there is no document
+  to prove: every such turn failed `prepare` with "The local source
+  provenance is unavailable or invalid". A capsule with no document and no
+  proof needs no fingerprints on either path now; a proof that does arrive is
+  checked as before, and a document without one is still refused.
+- **A person's refresh.** The knowledge `refresh` action ran under the
+  project's automatic profile. It is an explicit request, like MCP
+  `memory_retrieve`, and passes `--capsule-profile full` when the runtime
+  takes it - `context.py` names that with a `CAPSULE_PROFILE_FLAG` marker, read
+  the way Harness reads the source-hint and provenance markers.
+- **The LongMemEval bridge** measures retrieval and asks `assemble_capsule`
+  for the full capsule when the runtime knows the profile.
+- `test_no_document_and_no_proof_need_no_fingerprints`,
+  `test_an_explicit_refresh_searches_whatever_the_automatic_capsule_carries`
+  and `test_the_bridge_measures_the_full_capsule_whatever_the_project_ships`
+  fail on `60be9fb8`.
+
+### A Memory Bank chunk is quoted by its rule, not its Sources footer — 2026-10-22
+
+- `excerpt_section` skipped a citation-only `## Sources` footer for linked
+  selections only. A chunk found by its own words - a request naming the
+  file it cites - was quoted by that footer: the paths without the rule.
+- The Harness recall suite showed it under the recall capsule: the corrected
+  learning reached the next message as a list of sources. Under `full` the
+  same chunk was quoted the same way, and the learning arrived only because
+  the cited file came along.
+- Every Memory Bank chunk is held to the linked selections' rule now; a
+  request about the sources still gets them, and a distinctive pointer still
+  carries no excerpt.
+- `test_a_chunk_found_by_its_own_words_quotes_its_rule_too` replaces
+  `test_lexical_selection_and_distinctive_pointer_are_unchanged`, which pinned
+  the old quote, and fails on `1d4f4af5`.
+- The 327-prompt stand under `full` does not move: the same documents, 217
+  useful, the same capsule characters on every prompt.
+
+### A recall capsule: navigation plus the task's own saves — 2026-10-22
+
+- `capsule_profile: recall` (also `CONTEXT_CAPSULE_PROFILE` and
+  `refresh --capsule-profile recall`) is the navigation capsule plus what the
+  task's own saves recorded, searched by the request among themselves. The
+  default stays `full`, and an explicit `retrieve` or MCP `memory_retrieve`
+  still searches everything.
+- What counts as the task's own:
+  - a finding or decision whose name is the one a result of this task gives
+    a learning (`record-result`, `native-result`, MCP
+    `memory_record_result`): the name is computed again from the task's UUID
+    and the record's type, title and sources;
+  - a finding or decision whose name starts with the task's external ID or a
+    ticket it names: a Harness draft (`<task>-finding-<hex>`), or findings an
+    agent filed as `CMS-739-review-4` while on `feature/CMS-739-…`;
+  - the Memory Bank chunk any of these was promoted to, found by the record
+    it cites, also after compaction archives the record. A saved finding is
+    resolved as it is written and no resolved finding is indexed, so for a
+    finding the chunk is what the capsule can deliver.
+- With none of them indexed the capsule is navigation's: no search and no
+  delivery record. Recorded history, path and file links, related knowledge
+  and source hints are left out; a conflict partner is still delivered.
+  Lightweight mode has no governed saves, so there `recall` is navigation.
+- `scripts/memory_outcome_ab.py`:
+  - a `recall` arm;
+  - recall sets: `recall-sources` lists first turns that answered from files
+    they read, `recall-set` checks the learning and the follow-up question
+    written for each against it, and `run` records the save on the corpus
+    branch's task through `record-result` before any arm;
+  - two regimes: the question a minute after the source turn (`next`), or at
+    the first later session whose recent files no longer show the files the
+    answer named (`later`);
+  - the recall metric: calls to the first touch of a file the save cites, or
+    to an answer naming one; `report --metric`;
+  - each run records whether the hook delivered the save;
+  - `--exclude-set` also takes a sample this tool made;
+  - `recall-set` refuses a learning that cites a file the corpus at the
+    question lacks - a file the source turn read before it was committed -
+    which `record-result` would refuse when the save is planted;
+  - a later question's task ID includes its source: several sources asked at
+    the same later session shared one ID, and `run`, which now refuses a set
+    with a repeated ID, kept only the last of their results.
+- The measurement, under a rule sealed before the run
+  (`docs/MEMORY-EVAL.md`, "The third measurement"):
+  - On 30 recall scenarios in two regimes, `recall` was as good as `full`:
+    - next: 0.00 calls [−0.26, +0.28];
+    - later: −0.21 [−0.42, −0.02], and −0.11 [−0.32, +0.11] with four
+      results recovered.
+  - The hook delivered the save in every pair.
+  - On 14 cold starts the `recall` capsule equals navigation's byte for byte.
+  - With `recall` shipped, the three runtime recall suites navigation breaks
+    pass. But the Harness recall suite fails: a promoted chunk is quoted by its
+    `Sources` footer, which `full` hides by delivering the cited file beside
+    it. The Harness's automatic memory also fails on a capsule without a
+    manifest. `recall` therefore stays opt-in and the default stays `full`.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`; the
+  generator's policy lock was regenerated.
+- Tests: a saved result reaches the next capsule under `recall` and the bank's
+  other matching chunk does not; another task's save does not, and without
+  its own the capsule is navigation's; records filed under the task or its
+  ticket count and a longer ticket number does not; a promoted save is still
+  found after compaction; the refresh flag selects `recall`; an explicit
+  retrieval still searches.
 
 ### A navigation-only capsule, behind an experiment switch — 2026-10-21
 
@@ -647,6 +4449,21 @@ change below has a test that fails on `a47e1eb8`.
 
 - Keep routine native memory capture silent and preserve the original substantive answer, source citations and requested format after successful or skipped capture. A save acknowledgement must not replace the task result consumed as the last agent message. Refused saves retain their warning alongside the answer.
 - Reproduced against an actual Codex Stop continuation; empty reusable learnings remain valid and do not create findings merely to pass a lifecycle probe.
+
+### A pause of a second no longer costs a query its memory — 2026-10-16
+
+- `refresh`, `retrieve`, `context`, `hook-context` and `index` ask Git for the
+  project's source frame before anything else when they have no branch to
+  admit - an explicit `CONTEXT_TASK_ID`, an agent's own `retrieve`, a detached
+  HEAD - and gave that one `git rev-parse` one second, half of what every
+  other Git source check has. A windows-latest runner in a burst of slowness
+  failed a refresh with "Git source context unavailable": that check was the
+  refresh's only Git process, and the whole test took 2.17 s, too short for
+  any two-second check to have run out. On 8 runners over 30 minutes the
+  check never took more than 535 ms in about 24,500 runs, but on three of
+  the machines a 5 ms sleep in the probe woke up to 963 ms late, and one
+  second left no margin. The check now has the same two seconds; a Git that
+  does not answer within them still ends the command with that error.
 
 ### Automatic promotion apply admission — 2026-10-16
 

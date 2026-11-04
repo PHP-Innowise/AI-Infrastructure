@@ -1,5 +1,13 @@
 # Merge Chats and Hand Context to Another Task
 
+> Rust migration, 2026-11-03: Python test and demo invocations below are
+> retained pre-Rust behavior specifications and historical evidence. They are
+> not verification commands for the migrated checkout. Run the registered native
+> suites from the repository root with
+> `cargo test --manifest-path runtime-rust/Cargo.toml --workspace --all-targets --locked --offline`.
+> Current coverage is defined by those Rust assertions; historical passes are
+> not transferred to the port.
+
 Carrying a branch's work into its next session is automatic and does not need
 anything on this page: the working-memory hooks give every prompt the Task
 Capsule - the task's progress, next steps, recent files and relevant project
@@ -66,8 +74,8 @@ succeeds); a malformed or missing selected source fails the whole operation.
 Agent-facing terminal forms (IDs come from `list`; never guess them):
 
 ```bash
-python3 memory-bank/scripts/context_continuity.py --host codex --event list
-python3 memory-bank/scripts/context_continuity.py --host codex --event merge --source-session codex:CHAT_A --source-session claude:CHAT_B
+memory-bank/bin/infra-engine continuity --host codex --event list
+memory-bank/bin/infra-engine continuity --host codex --event merge --source-session codex:CHAT_A --source-session claude:CHAT_B
 ```
 
 `--host` accepts `codex`, `claude`, or `cursor` and selects the destination.
@@ -90,8 +98,9 @@ the next newly opened task; it must not be reported as an already created task.
 SQLite, retrieval indexes, and publishing. The store writes its own
 `.gitignore` containing `*` when it is created (or on the next capture into a
 store that predates it), so snapshots stay out of Git even in a project whose
-`.gitignore` was never updated - an installer sync wires the hook but keeps the
-project's own `.gitignore`. An existing `.gitignore` there is left alone.
+`.gitignore` lacks the entry - an installer sync wires the hook, but a
+`.gitignore` the project's Git tracks keeps its content until a sync with
+`--update-tracked`. An existing `.gitignore` there is left alone.
 
 Capture keeps eight chats per branch and 64 per checkout, and at most 4 MiB of
 visible text per chat; when it trims older text, the snapshot marks the
@@ -123,8 +132,10 @@ visible `user` and `assistant` text; it discards system messages, hidden
 reasoning, tool calls, envelopes, and metadata. In a Codex rollout it also
 drops the context Codex records as user messages: the project's
 `# AGENTS.md instructions` block (with or without a project path), and known
-context envelopes such as `<environment_context>`, `<skill>` and
-`<task-notification>`. User HTML/Blade examples and `<pasted_content>` stay.
+context envelopes such as `<environment_context>`, `<skill>`,
+`<task-notification>` and a Stop hook's `<hook_prompt>` continuation (the
+native result's request to save the turn). User HTML/Blade examples and
+`<pasted_content>` stay.
 So a Codex chat's `list` preview opens with its first real prompt. A projected
 JSONL snapshot is explicitly partial, never a full transcript. The runtime never searches client
 account directories, private session stores, or internal history files.
@@ -227,12 +238,12 @@ are `goal`, `summary`, and nonempty `next_steps`; optional list fields are
 safe repository-relative `files`.
 
 ```bash
-python3 memory-bank/scripts/context.py context-save \
+memory-bank/bin/infra-engine memory context-save \
   --input /tmp/context-save-input.json \
   --output tasks/TASK-001/context-save-20260915T120000Z.md \
   --detail summary --source-client codex --json
 
-python3 memory-bank/scripts/context.py context-load \
+memory-bank/bin/infra-engine memory context-load \
   --input tasks/TASK-001/context-save-20260915T120000Z.md --json
 ```
 
@@ -256,7 +267,9 @@ refusal, safe paths, personal-data refusal (topic and task ID included), a
 CRLF checkout, a project outside Git and the attached layout. Run from an
 edition root:
 
-```bash
+Historical pre-Rust invocation (reference only):
+
+```text
 python3 memory-bank/tests/test_context_continuity.py
 python3 memory-bank/tests/test_context_handoff.py
 python3 memory-bank/tests/test_context_handoff_index.py

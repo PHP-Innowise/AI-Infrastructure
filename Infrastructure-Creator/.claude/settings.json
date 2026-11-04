@@ -17,19 +17,23 @@
       "Read(.env.*)",
       "Read(**/.env)",
       "Read(**/.env.*)",
-      "Write(.env)",
-      "Write(.env.*)",
-      "Write(**/.env)",
-      "Write(**/.env.*)",
+      "Edit(.env)",
+      "Edit(.env.*)",
+      "Edit(**/.env)",
+      "Edit(**/.env.*)",
       "Read(**/secrets/**)",
-      "Write(**/secrets/**)"
+      "Edit(**/secrets/**)"
     ]
   },
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/local-context.sh", "timeout": 10 }
+          {
+            "type": "command",
+            "command": "memory-bank/bin/infra-engine hook claude local-context --root .",
+            "timeout": 10
+          }
         ]
       }
     ],
@@ -37,19 +41,31 @@
       {
         "matcher": "Agent|Task",
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/subagent-gate.sh", "timeout": 5 }
+          {
+            "type": "command",
+            "command": "memory-bank/bin/infra-engine hook claude subagent-gate --root .",
+            "timeout": 5
+          }
         ]
       },
       {
         "matcher": "Write|Edit",
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/file-naming-validator.sh", "timeout": 5 }
+          {
+            "type": "command",
+            "command": "memory-bank/bin/infra-engine hook claude file-naming-validator --root .",
+            "timeout": 5
+          }
         ]
       },
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/bash-validator.sh", "timeout": 5 }
+          {
+            "type": "command",
+            "command": "memory-bank/bin/infra-engine hook claude bash-validator --root .",
+            "timeout": 5
+          }
         ]
       }
     ],
@@ -57,7 +73,11 @@
       {
         "matcher": "Edit",
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/loop-detection.sh", "timeout": 5 }
+          {
+            "type": "command",
+            "command": "memory-bank/bin/infra-engine hook claude loop-detection --root .",
+            "timeout": 5
+          }
         ]
       }
     ]

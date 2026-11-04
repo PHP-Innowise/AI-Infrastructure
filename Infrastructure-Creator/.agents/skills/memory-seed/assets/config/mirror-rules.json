@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "classes": [
+    {
+      "name": "skills",
+      "canonical": ".agents/skills",
+      "mirrors": {
+        ".claude/skills": {
+          "transform": "copy"
+        },
+        ".cursor/skills": {
+          "transform": "copy"
+        }
+      },
+      "skip": [
+        "skill-creator/",
+        "SKILL FLOW.md"
+      ]
+    },
+    {
+      "name": "skill-flow",
+      "canonical": ".claude/skills",
+      "only": [
+        "SKILL FLOW.md"
+      ],
+      "mirrors": {
+        ".cursor/skills": {
+          "transform": "copy"
+        }
+      }
+    },
+    {
+      "name": "hooks",
+      "canonical": ".claude/hooks",
+      "mirrors": {
+        ".cursor/hooks": {
+          "transform": "copy",
+          "replacements": [
+            [
+              " hook claude ",
+              " hook cursor "
+            ]
+          ]
+        },
+        ".codex/hooks": {
+          "transform": "copy",
+          "replacements": [
+            [
+              " hook claude ",
+              " hook codex "
+            ]
+          ]
+        }
+      },
+      "skip": [
+        "README.md",
+        "subagent-gate.sh"
+      ]
+    },
+    {
+      "name": "commands",
+      "canonical": ".claude/commands",
+      "mirrors": {
+        ".cursor/commands": {
+          "transform": "cursor-command",
+          "replacements": [
+            [
+              ".claude/skills/",
+              ".cursor/skills/"
+            ],
+            [
+              "If $ARGUMENTS is not empty",
+              "If `$ARGUMENTS` is not empty"
+            ]
+          ]
+        }
+      },
+      "skip": [
+        "codebase-mapper.md"
+      ],
+      "skip_by_framework": {
+        "symfony": [
+          "skill-creator.md"
+        ]
+      }
+    },
+    {
+      "name": "agents",
+      "canonical": ".claude/agents",
+      "mirrors": {
+        ".cursor/agents": {
+          "transform": "cursor-agent"
+        }
+      },
+      "skip": [
+        "memory-bank-agent.md",
+        "project-brain-agent.md"
+      ],
+      "skip_by_framework": {
+        "symfony": [
+          "skill-creator-agent.md"
+        ]
+      }
+    },
+    {
+      "name": "governance-docs",
+      "canonical": ".claude",
+      "only": [
+        "DOD.md",
+        "GOLDEN-PRINCIPLES.md",
+        "STABILIZATION.md"
+      ],
+      "mirrors": {
+        ".cursor": {
+          "transform": "copy",
+          "replacements": [
+            [
+              ".claude/",
+              ".cursor/"
+            ]
+          ]
+        },
+        ".codex": {
+          "transform": "copy",
+          "replacements": [
+            [
+              ".claude/skills/",
+              ".agents/skills/"
+            ],
+            [
+              ".claude/",
+              ".codex/"
+            ]
+          ]
+        }
+      }
+    }
+  ]
+}
+

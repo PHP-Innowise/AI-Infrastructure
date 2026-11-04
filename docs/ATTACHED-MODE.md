@@ -16,7 +16,7 @@ wants the accelerator's files in its own Git history.
 ```bash
 git clone <this repository> ~/ai-accelerator
 cd ~/ai-accelerator
-./harness-server start
+infra-engine serve start
 ```
 
 Open the printed address (`http://127.0.0.1:8766`). Started from the clone with
@@ -54,9 +54,9 @@ applications, and a click starts the server and opens this page; see
 From the project folder:
 
 ```bash
-python3 ~/ai-accelerator/scripts/accelerator_attach.py run claude
-python3 ~/ai-accelerator/scripts/accelerator_attach.py run codex
-python3 ~/ai-accelerator/scripts/accelerator_attach.py run cursor
+infra-engine attach run claude
+infra-engine attach run codex
+infra-engine attach run cursor
 ```
 
 Arguments after `--` go to the CLI unchanged
@@ -83,7 +83,7 @@ Every launch also exports `ACCELERATOR_HOME` (the edition in the clone),
 The preamble tells the agent that paths such as `.claude/skills/...`,
 `project-brain/templates/...` and `memory-bank/scripts/...` are relative to
 `ACCELERATOR_HOME`, and to run the context runtime as
-`python3 "$ACCELERATOR_HOME/memory-bank/scripts/context.py" ...` from the
+`memory-bank/bin/infra-engine memory ...` from the
 project.
 
 ### Codex hook approval
@@ -91,10 +91,11 @@ project.
 Codex runs a hook only after its definition was approved once; the approval is
 a hash under `hooks.state` in `~/.codex/config.toml`, the same record Codex's own
 `/hooks` review writes. A session-flag hook has no `/hooks` entry to review, so
-the Harness records the edition's seven hooks by itself, once per version of the
-clone, when Codex is available (`HARNESS_CODEX_HOOK_TRUST=0` turns that off);
-**Sessions › Project › Trust accelerator hooks in Codex** and
-`accelerator_attach.py trust-codex-hooks` record them on request.
+inspect pending definitions with `infra-engine attach hook-trust --project TARGET
+--edition EDITION --tool codex`. Approval is explicit: use Codex's supported
+review flow or `infra-engine attach trust-codex-hooks --project TARGET --edition
+EDITION --tool codex`. The Harness trust action invokes the same explicit
+native approval operation. Starting an attached session does not write trust.
 Moving the clone changes the commands and needs a new approval; a `git pull`
 that edits only hook scripts does not. Without the approval Codex still gets the
 policy and skills; only the hooks (session banner, automatic memory, command
@@ -110,6 +111,13 @@ chunks, the local index, retrieval manifests - is kept in
 project id is the one the Harness lists for the project. The runtime lays the
 directory out on first use from the edition's defaults; detaching keeps it, so
 attaching again picks the memory up.
+
+A session in a Git worktree of the project uses the project's state too:
+what it saves is the project's, under the worktree's branch. The index alone
+is the worktree's own, in `memory-bank/local/worktrees/<hash>/` of the state,
+because the checkouts' documents differ - with one index, a lookup after one
+in the other checkout rebuilt it (580 ms against 250 ms on 400 notes). A
+checkpoint after the worktree is removed removes its index.
 
 On Linux and macOS the state is its owner's alone - directories 0700, files
 0600 - whatever the umask: the launcher and the runtime create it that way, and
@@ -150,13 +158,15 @@ agent makes there.
   Harness launch carries it - Workspace, Plan, Review and SDD sessions, Clash
   participants and Fleet reviewers; Infrastructure Creator and System
   Orchestration runs have their own workspaces and do not use it.
-- **Windows.** Hook commands run through `bash`, as installed hooks already
-  require (Git Bash).
+- **Windows.** Claude uses native command/argv hooks. Cursor and Codex use an
+  explicit system PowerShell launcher for the native executable. Each client
+  must support the corresponding hook launch form; local Linux tests do not
+  establish native Windows compatibility.
 
 ## How it works (for maintainers)
 
 The runtime and hooks used to assume one root that held the tooling, the
-project and the state. [`workspace_roots.py`](../Laravel/memory-bank/scripts/workspace_roots.py)
+project and the state. [`workspace_roots.py`](https://github.com/PHP-Innowise/AI-Infrastructure/blob/6628d976d3fa1ca2d03ebb7d8714503a7b87b824/Laravel/memory-bank/scripts/workspace_roots.py)
 separates them:
 
 | Root | Installed | Attached |
@@ -174,10 +184,10 @@ project's own), `project-brain/...` and `memory-bank/...` are state, and every
 other key is a project path. Git always runs in the project. Hooks keep
 `ROOT_DIR` as the tooling root and add `PROJECT_DIR` and `STATE_DIR`.
 
-[`scripts/accelerator_attach.py`](../scripts/accelerator_attach.py) is the
+[`infra-tooling::attach`](../runtime-rust/crates/infra-tooling/src/attach.rs) is the
 shared contract: edition detection, the state directory, and the per-tool
 overlay. The Harness applies it in
-[`harness/src/harness/accelerators.py`](../harness/src/harness/accelerators.py).
+[`harness/src/harness/accelerators.py`](https://github.com/PHP-Innowise/AI-Infrastructure/blob/6628d976d3fa1ca2d03ebb7d8714503a7b87b824/harness/src/harness/accelerators.py).
 
 Tests: `memory-bank/tests/test_attached.py` in every edition (the three roots,
 hooks run from the clone), `tests/test_harness_accelerators.py` (registration,

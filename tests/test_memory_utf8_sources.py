@@ -17,6 +17,20 @@ ROOT = Path(__file__).resolve().parents[1]
 P = json.loads((ROOT/'tests/fixtures/memory_utf8_sources_public.json').read_text(encoding='utf-8'))
 
 
+def full_capsule(root):
+    """Pin the full automatic capsule in a fixture project.
+
+    The editions ship the recall capsule - working state, recent files and
+    the task's own saves. A test of a layer only the full capsule carries -
+    shared documents and what is built on them - pins `full`, which a
+    project can still choose.
+    """
+    config = Path(root) / 'project-brain/config/runtime.json'
+    data = json.loads(config.read_text(encoding='utf-8'))
+    data['capsule_profile'] = 'full'
+    config.write_text(json.dumps(data), encoding='utf-8')
+
+
 class Utf8SourceTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='juniper-utf8-')
@@ -108,6 +122,7 @@ class Utf8SourceTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'posix', 'Raw POSIX filename bytes unavailable')
     def test_bad_basename_native_refresh_keeps_unicode_neighbor(self):
+        full_capsule(self.root)  # the valid neighbour arrives in the full capsule
         self.bad_name()
         self.check_fact(self.refresh(), 'invalid-utf8-path', P['path_notice'])
         all_rows = [tuple(row) for row in self.db.execute('SELECT path,layer,kind,title,summary,content FROM documents')]
@@ -145,6 +160,7 @@ class Utf8SourceTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'posix', 'Raw POSIX filename bytes unavailable')
     def test_incremental_repeat_reports_and_repair_removes_path_notice(self):
+        full_capsule(self.root)  # the valid neighbour arrives in the full capsule
         self.bad_name()
         self.check_fact(self.refresh(), 'invalid-utf8-path', P['path_notice'])
         self.check_fact(self.refresh(), 'invalid-utf8-path', P['path_notice'])
@@ -166,6 +182,7 @@ class Utf8SourceTests(unittest.TestCase):
             self.assertEqual({P['valid']}, {row[0] for row in self.db.execute('SELECT path FROM '+table)})
 
     def test_invalid_body_notice_is_nonfatal_and_private(self):
+        full_capsule(self.root)  # the valid neighbour arrives in the full capsule
         self.bad_body()
         self.check_fact(self.refresh(), 'invalid-utf8', P['body_notice'])
 
@@ -197,6 +214,7 @@ class Utf8SourceTests(unittest.TestCase):
         self.assertEqual([], result['warnings'])
 
     def test_printed_refresh_stays_complete_with_notice(self):
+        full_capsule(self.root)  # the valid neighbour arrives in the full capsule
         # The prompt hook prints this form into the turn: the omitted
         # neighbour is counted, and the valid fact still arrives.
         self.bad_body()

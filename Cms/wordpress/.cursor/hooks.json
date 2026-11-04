@@ -3,62 +3,62 @@
   "hooks": {
     "sessionStart": [
       {
-        "command": ".cursor/hooks/local-context.sh",
+        "command": "memory-bank/bin/infra-engine hook cursor local-context --root .",
         "timeout": 15
       },
       {
-        "command": ".cursor/hooks/context-continuity.sh",
+        "command": "memory-bank/bin/infra-engine hook cursor context-continuity --root .",
         "timeout": 8
       }
     ],
     "beforeSubmitPrompt": [
       {
-        "command": ".cursor/hooks/working-memory-read.sh",
+        "command": "memory-bank/bin/infra-engine hook cursor working-memory-read --root .",
         "timeout": 10
       },
       {
-        "command": ".cursor/hooks/context-continuity.sh",
+        "command": "memory-bank/bin/infra-engine hook cursor context-continuity --root .",
         "timeout": 8
       }
     ],
     "subagentStart": [
       {
-        "command": ".cursor/hooks/subagent-gate.sh",
+        "command": "memory-bank/bin/infra-engine hook cursor subagent-gate --root .",
         "timeout": 5,
         "failClosed": true
       }
     ],
     "subagentStop": [
       {
-        "command": ".cursor/hooks/subagent-dispatch.sh",
+        "command": "memory-bank/bin/infra-engine hook cursor subagent-dispatch --root .",
         "timeout": 8
       }
     ],
     "beforeShellExecution": [
       {
-        "command": ".cursor/hooks/bash-validator.sh",
+        "command": "memory-bank/bin/infra-engine hook cursor bash-validator --root .",
         "timeout": 5
       }
     ],
     "afterFileEdit": [
       {
-        "command": ".cursor/hooks/file-naming-validator.sh",
+        "command": "memory-bank/bin/infra-engine hook cursor file-naming-validator --root .",
         "timeout": 5
       },
       {
-        "command": ".cursor/hooks/loop-detection.sh",
+        "command": "memory-bank/bin/infra-engine hook cursor loop-detection --root .",
         "timeout": 5
       }
     ],
     "afterAgentResponse": [
       {
-        "command": ".cursor/hooks/context-continuity.sh",
+        "command": "memory-bank/bin/infra-engine hook cursor context-continuity --root .",
         "timeout": 8
       }
     ],
     "stop": [
       {
-        "command": ".cursor/hooks/working-memory-write.sh",
+        "command": "memory-bank/bin/infra-engine hook cursor working-memory-write --root .",
         "timeout": 20,
         "loop_limit": 1
       }

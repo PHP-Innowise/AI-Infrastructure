@@ -1,9 +1,10 @@
 # Shared memory in Claude Code, Codex and Cursor
 
 Harness and direct clients use the consuming project's existing `project-brain/`
-and `memory-bank/`. Install the accelerator in the actual worktree. SQLite and
-local receipts are disposable; shared records/chunks remain authoritative.
-Memory MCP needs only Python 3.9+ and SQLite FTS5, with no external service or key.
+and `memory-bank/`. Install the accelerator in the actual worktree. SQLite's
+search index is rebuildable, while unfinished turn observations must be retained;
+shared records/chunks remain authoritative and receipt loss does not authorize a new save.
+Memory MCP uses the installed native engine with bundled SQLite FTS5, with no external service or key.
 
 ## Harness automatic sessions
 
@@ -25,24 +26,30 @@ use**; neither proves reading. Telemetry stores counts, not source bodies/path l
 
 The accelerator installer and generator register Memory MCP for each selected
 client. No separate `claude mcp add` command or manual config entry is needed.
-The installer checks Python 3.9+ and SQLite FTS5 on the client PATH, including
-`python` / `py -3` on native Windows, and preserves other servers/settings.
+The installer selects the verified native engine for the platform and preserves
+other servers and settings. SQLite FTS5 is part of the native runtime.
 
-- Claude Code: `.mcp.json` uses a Python launcher anchored by the server-process
-  `CLAUDE_PROJECT_DIR`, with a nearest-project-marker fallback.
-- Codex: `.codex/config.toml` carries one managed `mcp_servers.harness_memory`
-  table. The Python launcher finds the nearest declaring config from the
-  session directory, including nested directories and worktrees.
-- Cursor: `.cursor/mcp.json` uses `${workspaceFolder}`.
+- Claude Code: `.mcp.json` contains one managed memory server.
+- Codex: `.codex/config.toml` contains one managed `mcp_servers.harness_memory`
+  table, parsed and merged natively.
+- Cursor: `.cursor/mcp.json` contains one managed memory server.
 
-Launchers stop at their first project marker. Missing runtime there fails rather
-than using an ancestor project's memory. Paths are portable across clones and
-worktrees; registration never writes global client configuration.
+On POSIX each entry names no path of the installing machine: a small `sh -c`
+launcher finds this checkout's `memory-bank/bin/infra-engine` through
+`CLAUDE_PROJECT_DIR` (set by Claude Code in the server's environment),
+Cursor's `${workspaceFolder}` or Git's top level (Codex), and runs
+`mcp --root CHECKOUT --host HOST`; a linked worktree uses its main checkout's
+engine. Every clone works once its own engine is installed. On native Windows
+each entry invokes the absolute `memory-bank/bin/infra-engine.exe` with
+`mcp --root FINAL_PROJECT --host HOST`, and moving the installation requires
+native re-registration for its new root. Generation can stage elsewhere while
+registering the eventual delivery root. Source templates are materialized
+before use; there is no ancestor-project fallback or interpreter bootstrap.
+Registration writes only project configuration.
 
-A foreign server using the memory name, malformed configuration, symlinks and
-edited managed Codex blocks block registration rather than overwriting them.
-On Python 3.9/3.10, Codex merges validate a conservative TOML subset and refuse
-unsupported syntax. Run registration with Python 3.11+ for the full TOML parser.
+A foreign server using the managed memory name, malformed configuration,
+symlinks and edited managed Codex blocks block registration rather than
+overwriting them.
 Dry runs and collision preflight write no project files. Harness setup previews
 these merges while omitting other servers' configuration values.
 
@@ -50,22 +57,25 @@ For an already installed project after updating the runtime, the same helper can
 repair registration in one command (select only clients used by that project):
 
 ```bash
-python3 memory-bank/scripts/mcp_config.py --root . --tool claude --tool codex --tool cursor --dry-run
-python3 memory-bank/scripts/mcp_config.py --root . --tool claude --tool codex --tool cursor
+infra-engine repo mcp-config --root . --tool claude --tool codex --tool cursor --dry-run
+infra-engine repo mcp-config --root . --tool claude --tool codex --tool cursor
 ```
 
 Native clients still control workspace trust and MCP tool approval. Accept project
 MCP in Claude's `/mcp`, trust the Codex project, and enable the Cursor project MCP.
-Allow the four memory tools through the client's supported approval settings when
+Allow the five memory tools through the client's supported approval settings when
 automatic calls are desired. Configuration alone is not a grant of trust, and
 registration does not force the agent to use every retrieved claim.
 See [Claude MCP](https://code.claude.com/docs/en/mcp),
 [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), and
 [Cursor MCP](https://cursor.com/docs/mcp).
 
-## Four tools
+## Five tools
 
 - `memory_status`: check installed memory health.
+- `memory_source_fingerprints`: read the complete checked canonical file image
+  for 1–10 `sources`, without creating a task or attesting truth. Text hashes
+  normalize CRLF to LF. Use these pins only after checking the actual claim.
 - `memory_retrieve`: pass the current `task_id` and a concise module/class/ticket
   `query` before complex work, after compaction/scope changes and before uncovered
   decisions. Optional `paths` link canonical sources. Verify cited claims. The
@@ -78,12 +88,23 @@ See [Claude MCP](https://code.claude.com/docs/en/mcp),
   sanitized `progress`, up to three `next_steps`, and up to three reusable
   findings/decisions. Each learning needs `type`, `title`, `consequence` and
   1–10 canonical project `sources`. Set `verified: true` after checking claims.
+  To explicitly confirm/correct an existing claim, retain its exact type, title
+  and source set and supply all of `record_id` (Brain UUID), `expected_revision`
+  and the complete checked `source_fingerprints`. A protected/mismatched target
+  is held, never recreated. An identical checked image is a record no-op;
+  changed checked evidence versions the existing claim and its promoted chunk.
   Records explicitly say **agent-attested, not human-reviewed**: the verification's
   ledger entry carries `[attestation:agent]`, a chunk promoted from it is tagged
   `agent-attested`, and the capsule marks such knowledge where it delivers it.
   Empty learnings is valid; explicit `next_steps: []` clears finished steps.
+  Where the Stop hook asks for the `native-result` save - governed Claude Code,
+  Codex and Cursor sessions running the hooks, outside Harness sessions, unless
+  `native_result_request` is `off` - that save records the answer: do not
+  record the same result with this tool or `record-result` as well.
 
-Use `CONTEXT_TASK_ID`, otherwise the branch task. On detached HEAD, use an explicit
+Use `CONTEXT_TASK_ID`, otherwise the branch task; in a worktree Codex made, on a
+detached HEAD, `codex-thread/<thread ID>`, which the capsule names. On any other
+detached HEAD, use an explicit
 existing task ID. Do not create another task for the same work. Saving runs promotion
 under the existing setting. A learning's record is named by its content, so a retry,
 or a later result restating it, finds that record instead of writing a second one.
@@ -114,7 +135,7 @@ positive learning `expected_revision`; never invent one. A protected, archived,
 wrong-kind or conflicting learning is retained individually with revision/reason;
 independent progress, next steps and valid facts still save. Stale numeric task
 CAS, privacy, source and request-identity violations remain hard refusals.
-Without MCP: `python3 memory-bank/scripts/context.py record-result --task-id ID
+Without MCP: `memory-bank/bin/infra-engine memory record-result --task-id ID
 --result-id RID --revision auto --input result.json`. Harness captures
 the native task identity and original safe request automatically; generic stale
 errors never authorize rebasing an uncertain retry. Completion remains explicit.
@@ -126,8 +147,53 @@ or writes outside a read-only scope.
 
 ## Verify
 
-Confirm all four tools appear in each configured client. Retrieve for a fresh task,
+Confirm all five tools appear in each configured client. Retrieve for a fresh task,
 checkpoint with a goal, record a source-backed result, then replay the same ID/content
 and confirm no duplicates. Inspect Harness **Knowledge → Memory use**, run
-`context.py validate --json` and `memory-bank/scripts/validate.py`. Distinguish real
+`memory-bank/bin/infra-engine memory validate --json` and `memory-bank/bin/infra-engine bank validate`. Distinguish real
 client connections from isolated protocol tests.
+
+
+## Unicode case-folding data notice
+
+The native runtime includes default full case-folding mappings pinned to Unicode 16.0.0, derived from the Unicode Character Database CaseFolding.txt (https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt; SHA-256 6f1f9c588eb4a5c718d9e8f93b782685e5c7fec872cf05e8e6878053599e09bb). This preserves the canonical Python 3.14 semantic-key contract without depending on a compiler's Unicode version. The Unicode-data license is reproduced in full below and accompanies the native artifact's distributed memory-bank documentation.
+
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.

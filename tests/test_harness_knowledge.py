@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -297,6 +298,65 @@ class KnowledgeTests(unittest.TestCase):
         retried = self.run_action("retrieve", task_id="TASK-RETRIEVAL", query="cobalt allocation")
         self.assertEqual(retried["task_uuid"], started["task_uuid"])
         self.native.assert_not_called()
+
+    def test_an_explicit_refresh_searches_whatever_the_automatic_capsule_carries(self):
+        # A person's refresh is an explicit request; the project's automatic
+        # capsule may be set to carry no document at all.
+        self.install()
+        config = self.project / "project-brain/config/runtime.json"
+        settings = json.loads(config.read_text(encoding="utf-8"))
+        config.write_text(json.dumps({**settings, "capsule_profile": "navigation"}), encoding="utf-8")
+        self.run_action("start", task_id="TASK-RETRIEVAL", goal="Verify cobalt allocation",
+                        sources=["specs/authority.md"])
+        refreshed = self.run_action("refresh", task_id="TASK-RETRIEVAL", query="cobalt allocation")
+        self.assertIn("one owner", json.dumps(refreshed))
+
+    def test_an_explicit_refresh_searches_everything_without_o_nofollow(self):
+        # Windows has no O_NOFOLLOW. The marker only widens a person's refresh,
+        # so it is read there too, and the refresh still searches everything.
+        self.install()
+        config = self.project / "project-brain/config/runtime.json"
+        settings = json.loads(config.read_text(encoding="utf-8"))
+        config.write_text(json.dumps({**settings, "capsule_profile": "navigation"}), encoding="utf-8")
+        self.run_action("start", task_id="TASK-RETRIEVAL", goal="Verify cobalt allocation",
+                        sources=["specs/authority.md"])
+        windows = types.ModuleType("os")
+        windows.__dict__.update({name: value for name, value in vars(os).items()
+                                 if name not in ("O_NOFOLLOW", "O_NONBLOCK")})
+        with patch.object(knowledge, "os", windows):
+            refreshed = self.run_action("refresh", task_id="TASK-RETRIEVAL", query="cobalt allocation")
+        self.assertIn("one owner", json.dumps(refreshed))
+        # A link is not read, as O_NOFOLLOW would not open it.
+        scripts = self.project / "memory-bank/scripts"
+        shutil.copyfile(scripts / "context.py", self.root / "context-elsewhere.py")
+        (scripts / "context.py").unlink()
+        (scripts / "context.py").symlink_to(self.root / "context-elsewhere.py")
+        with patch.object(knowledge, "os", windows):
+            self.assertFalse(self.manager.supports_capsule_profile(
+                self.project_id, self.manager.info(self.project_id)))
+
+    def test_a_persons_verification_is_recorded_as_theirs_where_the_runtime_can(self):
+        self.install()
+
+        def create(external_id, **options):
+            response = self.manager.run(self.project_id, {
+                "action": "brain-create", "record_type": "finding", "external_id": external_id,
+                "title": "Cobalt guard", "sources": ["specs/authority.md"], "authority": "verified"}, **options)
+            self.assertTrue(response["ok"], response)
+            return response["result"]["transitions"][-1]["reason"]
+
+        self.assertTrue(self.manager.supports_brain_attestation(self.project_id, self.manager.info(self.project_id)))
+        self.assertTrue(create("FIND-PERSON", _attestation="person").endswith("[attestation:person]"))
+        # A call nobody vouches for is the runtime's default: an agent's.
+        self.assertTrue(create("FIND-AGENT").endswith("[attestation:agent]"))
+        # A runtime without the flag is never handed it.
+        script = self.project / "memory-bank/scripts/context.py"
+        script.write_text(script.read_text(encoding="utf-8").replace(
+            'BRAIN_ATTESTATION_FLAG = "brain-attestation-v1"', ""), encoding="utf-8")
+        self.assertFalse(self.manager.supports_brain_attestation(self.project_id, self.manager.info(self.project_id)))
+        self.assertTrue(create("FIND-OLDER", _attestation="person").endswith("[attestation:agent]"))
+        with self.assertRaisesRegex(sessions.SessionError, "Invalid internal attestation"):
+            self.manager.run(self.project_id, {"action": "search", "query": "cobalt"}, _attestation="robot")
 
     def test_durable_promotion_requires_eligible_sources_independent_review_and_pinned_revision(self):
         self.install()

@@ -19,6 +19,8 @@ Project-scoped hooks load only when the project is **trusted**.
 No `matcher` is set on any group: each script self-filters on its input before doing any real work — `bash-validator.sh` exits unless the payload carries a `command`/`cmd` key, and `file-naming-validator.sh` and `loop-detection.sh` exit unless `tool_name` is a file-editing tool (or is absent) — so it is safe to run on every tool call and returns `0` when not applicable.
 
 
+**In a worktree:** eligible linked worktrees without their own installation use the native dispatcher. `local-context.sh` requests registration in the matching root session; explicit setup is `memory-bank/bin/infra-engine dispatch-install codex --root <project-root>`. The user folder holds the copied engine, `native-dispatch.json`, served roots and managed `hooks.json` entries. The terminal install contract registers the selected host when stdin and stderr are terminals and its configuration directory already exists. These entries serve the root's memory with the worktree's project and task. Codex runs them only after the person's hook review (`/hooks` or its trust dialog); setup writes no approval or trust hash. Existing hooks in `config.toml` and `ai-accelerator/off` suppress registration. Global Codex dispatcher registration is currently Unix-only; project-local native hooks are separate. See `docs/MEMORY-INTEGRATION.md` in the accelerator repository.
+
 `subagent-dispatch.sh` exists here as a byte-identical mirror of the canonical hook but stays unregistered: multi-agent is disabled in this edition's `config.toml`, so there are no subagent stops to observe.
 ## Supported events (Codex)
 
@@ -36,13 +38,17 @@ No `matcher` is set on any group: each script self-filters on its input before d
 
 ## Wiring
 
-Every command in `.codex/hooks.json` is the same root-finding launcher; only the trailing script name changes:
+The installer writes every command in `.codex/hooks.json` in one form; only the role changes, and `<prefix>` is the project's path below Git's top level with a trailing slash (`apps/shop/`), empty when the project is the top:
 
 ```sh
-sh -c 'd=$(pwd); until [ -f "$d/.codex/hooks.json" ]; do [ -n "$d" ] || { echo "$1: no .codex/hooks.json at or above the working directory" >&2; exit 127; }; d=${d%/*}; done; exec "$d/.codex/hooks/$1"' sh bash-validator.sh
+sh -c 'r="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/<prefix>"; e="$r"memory-bank/bin/infra-engine; [ -x "$e" ] && exec "$e" hook codex bash-validator --root "$r"; exec "$r".codex/hooks/bash-validator.sh'
 ```
 
-Codex runs hooks in the session's working directory through the user's login shell (`$SHELL -lc`) and exports no project-root variable, so a bare `.codex/hooks/<script>.sh` exits 127 whenever Codex starts in a subdirectory - a non-blocking failure that silently disables the guard. The launcher walks from that directory towards `/` to the nearest directory holding `.codex/hooks.json` - the project that declared the hook - and runs only that project's `.codex/hooks/<script>.sh`, so it works from any subdirectory, without Git, and when the project sits inside a larger repository. It never looks past that project: a missing script exits 127 with the path it expected, instead of running a same-named script from an ancestor directory such as `~/.codex/hooks/` (Codex's own user-hook directory). Handing the walk to `sh` keeps it independent of the login shell (bash, zsh, fish). Codex trusts each hook by the hash of its definition: after an update that changes these commands, the changed hooks stay skipped until you review and trust them again in `/hooks`.
+Codex runs hooks in the session's working directory through the user's login shell (`$SHELL -lc`) and exports no project-root variable, so a bare `.codex/hooks/<role>.sh` exits 127 whenever Codex starts in a subdirectory - a non-blocking failure that silently disables the guard. The command finds the project from Git's top level instead, so it works from any subdirectory and when the project sits inside a larger repository; outside Git the session's directory stands in for the top level, so there Codex must start in the project root. Handing the command to `sh` keeps it independent of the login shell (bash, zsh, fish).
+
+The checkout's engine, `memory-bank/bin/infra-engine`, starts directly, and the role's launcher, `.codex/hooks/<role>.sh`, runs only when that engine is absent. A linked worktree has the committed hooks but no engine of its own, since Git ignores it: there the launcher runs the main checkout's engine. With no engine installed, `bash-validator.sh` refuses every command with an install hint, `local-context.sh` reports at session start that the hooks and memory are off, and the other hooks pass the turn. Native Windows installations bind the absolute engine and root of the machine that installed them instead.
+
+Codex trusts each hook by the hash of its definition: after an update that changes these commands, the changed hooks stay skipped until you review and trust them again in `/hooks`. A sync therefore leaves an installed `.codex/hooks.json` as it is unless given `--rewire-codex` (with `--update-tracked` once the file is committed); until then the commands of an earlier installation, which run the launcher alone, keep working.
 
 `working-memory-read.sh` and `working-memory-write.sh` are wired here to
 `UserPromptSubmit` and `Stop`, the same events they use under Claude Code.
@@ -68,8 +74,8 @@ never appears, check the payload keys before assuming the wiring is wrong.
 
 `context-continuity.sh` is wired on `SessionStart` (with
 `additionalContextLimit: 6000`), `UserPromptSubmit` and `Stop` through the same
-root-finding launcher as the other hooks; the payload's `hook_event_name`
-selects the action. A prompt (`prompt`) or a final answer
+command as the other hooks; the payload's `hook_event_name` selects the
+action. A prompt (`prompt`) or a final answer
 (`last_assistant_message`, or the visible transcript the hook names) is
 appended to a per-chat snapshot under the ignored `.context-handoff/` - in an
 attached session, under the launcher's state directory instead. At
@@ -95,6 +101,8 @@ limits of each client.
 
 ### Automatic structured result capture
 
-In governed native sessions the prompt hook arms a metadata-only challenge. At Stop, after the Git checkpoint, the same agent receives at most one internal continuation to submit progress, optional next steps and up to three checked source-backed learnings via `context.py native-result`. A clean research turn needs no Git delta or manual memory command. Empty learnings and an explicit skip are valid; no transcript or final prose is automatically adopted as knowledge. Task provisioning occurs only after a valid structured result; agent attestation never becomes person review or task completion.
+In governed native sessions the prompt hook arms a metadata-only challenge. At Stop, after the Git checkpoint, the same agent receives at most one internal continuation to submit progress, optional next steps and up to three checked source-backed learnings via `memory-bank/bin/infra-engine memory native-result`. A clean research turn needs no Git delta or manual memory command. Empty learnings and an explicit skip are valid; no transcript or final prose is automatically adopted as knowledge. Task provisioning occurs only after a valid structured result; agent attestation never becomes person review or task completion.
 
 Pending captures pin project, actor, session, task revision, checkout and runtime. Conflicts are held; repeated saves use the same result ID. Recovery does not checkpoint the user turn twice. A failed or uncertain save is reported in the next capsule. Harness/recovery and lightweight sessions do not arm this path. Local challenges expire for save after 24 hours and are bounded to 128 sessions; a new prompt always starts fresh. Cursor's Stop entry uses `loop_limit: 1`.
+
+Every prompt, Stop and save also appends one metadata line to ignored `memory-bank/local/native-results.ndjson` - the host, the step and a fixed code such as `memory-result-v1:unverified`, never content, paths or IDs - and the Stop hook adds its save request's exit status, 124 when the budget killed it. How many saves were requested, made or refused, and why, is then counted from disk. The journal keeps eight lines per `refresh_health_retention` record.

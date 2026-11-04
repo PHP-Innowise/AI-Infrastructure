@@ -8,8 +8,8 @@ the package checksum manifest, and fail before writing output if any source is
 missing or inconsistent:
 
 ```bash
-scripts/qa/.venv/bin/python scripts/qa/build_disposition_ledger.py
-scripts/qa/.venv/bin/python scripts/qa/reconstruct_workbook.py \
+infra-engine qa build-ledger
+infra-engine qa reconstruct-workbook \
   --output /tmp/Accelerator-TestCases.reconstructed.xlsx
 ```
 
@@ -19,21 +19,31 @@ the approved sanitized package from the Accelerator Team and place it at
 Verify its `SHA256SUMS.txt` before use. See
 [`SOURCE-EVIDENCE-HANDOFF.md`](SOURCE-EVIDENCE-HANDOFF.md).
 
-Install the workbook dependency in an isolated environment. Use this path:
-`python3 scripts/check.py` runs the `qa-tooling` job with
-`scripts/qa/.venv/bin/python`, and skips it (naming these two commands) when
-that venv is absent; Git ignores the folder.
+Use the verified native `infra-engine` release from the repository root.
+Workbook parsing, XML, checksums and schema validation run in Rust; no QA
+virtualenv is required. The current native check catalog is
+`install/check-catalog.json`; it has no `qa-tooling` group.
+
+The historical TC-AI catalog uses schema `1.0.0`. The native runner can list
+it, but refuses to execute its Python commands. Before running cases, review
+an explicit mapping for each `run_id/command_id` that needs a native argv,
+then migrate the active catalog while preserving the historical input:
 
 ```bash
-python3 -m venv scripts/qa/.venv
-scripts/qa/.venv/bin/python -m pip install -r requirements-qa.txt
+infra-engine qa migrate-catalog --input qa/tc-ai/cases.json \
+  --mappings /path/to/reviewed-native-commands.json \
+  --output qa/tc-ai/cases.json --legacy-output qa/tc-ai/cases.v1.json
 ```
 
-List or run the deterministic cases:
+The migration accepts only a legacy catalog, refuses unused mappings and Python
+commands, and emits schema `2.0.0`. It does not run or regrade historical cases.
+Keep original reports and checksums as historical evidence.
+
+List cases, or run the migrated native catalog:
 
 ```bash
-scripts/qa/.venv/bin/python scripts/qa/run_tc_ai.py --list
-scripts/qa/.venv/bin/python scripts/qa/run_tc_ai.py \
+infra-engine qa run --list
+infra-engine qa run \
   --run-id RUN-20260803-001
 ```
 
@@ -45,7 +55,7 @@ After a complete evidence run, apply the reviewed owner/disposition policy and
 bind reproduced Codex evidence into the working ledger:
 
 ```bash
-scripts/qa/.venv/bin/python scripts/qa/apply_disposition_decisions.py
+infra-engine qa apply-decisions
 ```
 
 The reproducible policy is recorded in `disposition-decisions.json`.
@@ -63,8 +73,8 @@ status replacement.
 Validate working artifacts:
 
 ```bash
-scripts/qa/.venv/bin/python scripts/qa/validate_qa_artifacts.py \
-  --skip-run-evidence
+infra-engine qa validate \
+  --workbook /tmp/Accelerator-TestCases.reconstructed.xlsx --skip-run-evidence
 ```
 
 For the release gate, obtain the approved private run evidence, pass its

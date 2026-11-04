@@ -130,6 +130,175 @@ class FinalSourceImageTests(unittest.TestCase):
         self.assertEqual(digest,self.receipts[0]['baseline']['signature']['paths'])
         self.observe('final-oracle',{'capsule':result,'manifest':manifest,'receipts':self.receipts})
 
+    def test_denied_full_task_clears_identity_turn_and_task_links_before_receipts(self):
+        task_file, record, body = self.task()
+        touched = 'src/wren-task-only.php'
+        self.write(touched, '<?php // Wren public source\n')
+        self.row('project-brain/dynamic/findings/wren-linked.md',
+                 '---\n' + json.dumps({'privacy': 'public', 'status': 'active', 'sources': [touched]})
+                 + '\n---\n# Wren linked\n\nWrenSignal386 auxiliary boundary.\n',
+                 kind='brain-finding', category='dynamic', sources=[touched])
+        # Force only the producer-owned touch link; ordinary query documents
+        # remain independent and must survive the task's denial.
+        original = self.r._automatic_link_candidates
+        linked = []
+        def links(*args, **kwargs):
+            rows, excluded = original(*args, **kwargs)
+            linked.extend(rows)
+            return rows, excluded
+        def pack(value):
+            value['last_turn'] = 'Wren task-only checkpoint report'
+            changed = dict(record); changed['privacy'] = 'restricted'
+            self.write(task_file.relative_to(self.root).as_posix(),
+                       '---\n' + json.dumps(changed) + '\n---\n' + body)
+            return value
+        original_receipts = self.r._commit_ordinary_receipts
+        def receipts(*args, **kwargs):
+            self.receipts.append(copy.deepcopy(kwargs)); return original_receipts(*args, **kwargs)
+        with mock.patch.object(self.r, '_automatic_link_candidates', side_effect=links), \
+                mock.patch.object(self.r, '_commit_ordinary_receipts', side_effect=receipts):
+            result = self.r.retrieve(self.db, self.root, PUBLIC['query'], record['id'],
+                requested_task_id=PUBLIC['task'], limit=8, gate_mode='off', manifest_scope='local',
+                automatic_seeds={'prompt': [], 'touched': [touched]}, pack=pack)
+        self.assertTrue(any(row.get('selection') == 'touch-link' for row in linked))
+        self.assertEqual(PUBLIC['task'], result['task_id'])
+        for key in ('task_uuid', 'task_revision', 'task_record', 'working', 'last_turn'):
+            self.assertIsNone(result[key], key)
+        self.assertNotIn('working_changed', result)
+        self.assertIn('Working task eligibility unavailable.', result['warnings'])
+        self.result_oracle(result, [PUBLIC['primary'], PUBLIC['survivor']])
+        manifest = json.loads((self.root/result['manifest']).read_text())
+        self.assertIsNone(manifest['task_id']); self.assertIsNone(manifest['task_revision'])
+        self.assertNotIn(record['id'], self.receipts[0]['baseline']['key'])
+        self.assertNotIn(touched, json.dumps(result))
+        self.assertNotIn('Wren task-only checkpoint report', json.dumps(result))
+
+    def test_actual_full_refresh_owner_denial_clears_resolved_task_metadata(self):
+        task_file, record, body = self.task()
+        record['privacy'] = 'restricted'
+        self.write(task_file.relative_to(self.root).as_posix(),
+                   '---\n' + json.dumps(record) + '\n---\n' + body)
+        config = json.loads((self.root/'project-brain/config/runtime.json').read_text())
+        config.update(owners=['other-owner'], allowed_privacy=['public', 'team', 'restricted'])
+        self.write('project-brain/config/runtime.json', json.dumps(config))
+        result = self.cli('refresh', '--query', PUBLIC['query'], '--task-id', PUBLIC['task'],
+                          '--capsule-profile', 'full', '--ephemeral', '--json')
+        capsule = result['capsule']
+        self.assertEqual(PUBLIC['task'], capsule['task_id'])
+        for key in ('task_uuid', 'task_revision', 'task_record', 'working', 'last_turn'):
+            self.assertIsNone(capsule[key], key)
+        self.assertNotIn(record['id'], json.dumps(capsule))
+        self.assertIn('Working task eligibility unavailable.', capsule['warnings'])
+        manifest = json.loads((self.root/capsule['manifest']).read_text())
+        self.assertIsNone(manifest['task_id']); self.assertIsNone(manifest['task_revision'])
+
+    def save_own_decision(self):
+        request = self.write('own-result.json', json.dumps({'verified': True, 'learnings': [{
+            'type': 'decision', 'title': 'WrenSignal386 ceramic vector decision',
+            'consequence': 'WrenSignal386 ceramic vector keeps the declared public source.',
+            'sources': [PUBLIC['source']]}]}))
+        self.cli('record-result', '--task-id', PUBLIC['task'], '--result-id', 'wren-own-result',
+                 '--revision', 'auto', '--input', str(request), '--json')
+
+    def test_actual_recall_does_not_scope_by_an_ineligible_task(self):
+        self.task(); self.save_own_decision()
+        before = self.cli('refresh', '--query', PUBLIC['query'], '--task-id', PUBLIC['task'],
+                          '--capsule-profile', 'recall', '--ephemeral', '--json')['capsule']
+        self.assertTrue(before['selected'])
+        task_file, record, body = self.r.find_task(self.root, PUBLIC['task'])
+        record['privacy'] = 'restricted'
+        self.write(task_file.relative_to(self.root).as_posix(),
+                   '---\n' + json.dumps(record) + '\n---\n' + body)
+        after = self.cli('refresh', '--query', PUBLIC['query'], '--task-id', PUBLIC['task'],
+                         '--capsule-profile', 'recall', '--ephemeral', '--json')['capsule']
+        self.assertEqual([], after['selected']); self.assertIsNone(after['manifest'])
+        self.assertEqual([], self.r.own_saved_documents(self.db, self.root, record['id']))
+        self.assertIsNone(after['task_uuid']); self.assertIsNone(after['working'])
+
+    def test_recall_late_denial_withdraws_scope_selected_documents(self):
+        self.task(); self.save_own_decision(); self.c.refresh_layers(self.db, self.root)
+        task_file, record, body = self.r.find_task(self.root, PUBLIC['task'])
+        packed = []; original = self.c.enforce_governed_capsule_contract
+        def deny(value):
+            packed.extend(value['selected'])
+            value = original(value)
+            record['privacy'] = 'restricted'
+            self.write(task_file.relative_to(self.root).as_posix(),
+                       '---\n' + json.dumps(record) + '\n---\n' + body)
+            return value
+        with mock.patch.object(self.c, 'enforce_governed_capsule_contract', side_effect=deny):
+            result = self.c.assemble_capsule(self.db, self.root, mode='governed', query=PUBLIC['query'],
+                task_id=PUBLIC['task'], limit=5, ephemeral=True, refresh_index=False,
+                capsule_profile='recall', entry_point='refresh', gate_mode='off')
+        self.assertTrue(packed)
+        for key in ('selected', 'procedural', 'semantic', 'episodic'):
+            self.assertEqual([], result[key], key)
+        self.assertIsNone(result['task_uuid']); self.assertIsNone(result['last_turn'])
+        manifest = json.loads((self.root/result['manifest']).read_text())
+        self.assertEqual([], manifest['selected']); self.assertIsNone(manifest['task_id'])
+
+    def test_private_task_goal_does_not_choose_a_history_ticket(self):
+        task_file, record, body = self.task()
+        for ticket in ('CER-517', 'CER-518'):
+            self.cli('brain-create', 'event', '--external-id', ticket + '-wren',
+                     '--title', ticket + ' ' + PUBLIC['query'], '--source', PUBLIC['source'], '--json')
+        record['privacy'] = 'restricted'
+        delivered = []
+        for goal in ('Work involving CER-517 only.', PUBLIC['goal']):
+            record['goal'] = goal
+            self.write(task_file.relative_to(self.root).as_posix(),
+                       '---\n' + json.dumps(record) + '\n---\n' + body)
+            result = self.cli('refresh', '--query', PUBLIC['query'], '--task-id', PUBLIC['task'],
+                              '--capsule-profile', 'full', '--ephemeral', '--json')['capsule']
+            paths = [item['path'] for item in result['episodic'] if 'path' in item]
+            self.assertTrue(paths)
+            delivered.append(paths)
+        self.assertEqual(delivered[0], delivered[1])
+
+    def run_unavailable_working_query_case(self, scenario, profile):
+        task_file, record, body = self.task()
+        marker = 'ObsidianWrenPrivateMarker'
+        record['goal'] = marker + ' acquisition boundary'
+        if scenario == 'initial_denied': record['privacy'] = 'restricted'
+        if scenario == 'late_denied': record['external_id'] = 'hidden-task-identifier-174'
+        def write_record():
+            self.write(task_file.relative_to(self.root).as_posix(),
+                       '---\n' + json.dumps(record) + '\n---\n' + body)
+        write_record()
+        config = json.loads((self.root/'project-brain/config/runtime.json').read_text())
+        config['capsule_profile'] = profile
+        self.write('project-brain/config/runtime.json', json.dumps(config))
+        if scenario == 'initial_denied':
+            result = self.cli('hook-context', '--task-id', PUBLIC['task'], '--json')
+        elif scenario == 'late_denied':
+            original = self.c.enforce_governed_capsule_contract
+            changed = []
+            def deny(value):
+                value = original(value)
+                if not changed:
+                    record['privacy'] = 'restricted'; write_record(); changed.append(True)
+                return value
+            with mock.patch.object(self.c, 'enforce_governed_capsule_contract', side_effect=deny):
+                result = self.c.assemble_hook_context(self.db, self.root, mode='governed',
+                    task_id=PUBLIC['task'], gate_mode='off')
+            self.assertTrue(changed)
+        else:
+            query, source = self.c.hook_capsule_query(self.root, PUBLIC['task'], record['id'])
+            self.assertIn(marker.casefold(), query.casefold())
+            if scenario == 'missing_before_assembly': task_file.unlink()
+            else: task_file.write_bytes(b'\xffinvalid task record')
+            result = self.c.assemble_capsule(self.db, self.root, mode='governed', query=query,
+                task_id=PUBLIC['task'], limit=3, ephemeral=True, query_source=source,
+                refresh_index=False, entry_point='refresh', allow_unprovisioned=True,
+                capsule_profile=profile, gate_mode='off')
+        serialized = json.dumps(result).casefold()
+        self.assertNotIn(marker.casefold(), serialized)
+        self.assertNotIn('hidden-task-identifier-174', serialized)
+        self.assertEqual(PUBLIC['task'], result['query'])
+        self.assertEqual('task-id', result['query_source'])
+        self.assertEqual(PUBLIC['task'], result['task_id'])
+        self.assertIsNone(result['working'])
+
     def run_case(self,case):
         primary=self.root/PUBLIC['primary']
         survivor=PUBLIC['survivor']
@@ -235,4 +404,10 @@ for _case in PUBLIC['matrix']:
     def _control(self,case=_case):self.run_case(case)
     _control.__name__='test_'+_case
     setattr(FinalSourceImageTests,_control.__name__,_control)
+for _scenario in ('initial_denied', 'late_denied', 'missing_before_assembly', 'unreadable_before_assembly'):
+    for _profile in ('full', 'navigation', 'recall'):
+        def _query_control(self, scenario=_scenario, profile=_profile):
+            self.run_unavailable_working_query_case(scenario, profile)
+        _query_control.__name__ = 'test_unavailable_query_' + _scenario + '_' + _profile
+        setattr(FinalSourceImageTests, _query_control.__name__, _query_control)
 if __name__=='__main__':unittest.main()

@@ -9,6 +9,8 @@ related: [stack-scanner, architecture-scanner, integration-scanner, infra-ops-sc
 
 # Infra Scan
 
+Native helper commands use the generator's explicit bundled executable. Set `GENERATOR_NATIVE` to the absolute path `<generator>/memory-bank/bin/infra-engine` (`infra-engine.exe` on Windows) before the commands below; this is the selected release artifact, with no interpreter, download or build fallback.
+
 ## Overview
 
 `infra-scan` turns a target PHP project into two reviewable handoff artifacts:
@@ -56,7 +58,7 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
    naming the evidence ids it came from and the scanners that made it, with
    every contradiction between them recorded rather than silently picked. Then
    run
-   `python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir tasks/TASK-{NNN}`.
+   `"$GENERATOR_NATIVE" creator validate-scan-coverage --target <target> --task-dir tasks/TASK-{NNN}`.
    A surface nobody dispositioned, coverage claimed with no evidence inside it,
    evidence cited from outside what a scanner says it read, two scanners
    disagreeing about a forbidden surface, or any claim to have read a secret is
@@ -123,7 +125,7 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
     why not even a narrow read-only variant is generatable, and an
     unresolved-safety entry carries the recorded human decision (an undecided
     one goes in `blockers` instead, which blocks). Then
-    `python3 bootstrap-verifier/scripts/validate_plan_review.py --plan tasks/TASK-{NNN}/skill-generation-plan.json --review tasks/TASK-{NNN}/skill-plan-quality-report.json --registry skill-forge/references/candidate-registry.json`.
+    `"$GENERATOR_NATIVE" creator validate-plan-review --plan tasks/TASK-{NNN}/skill-generation-plan.json --review tasks/TASK-{NNN}/skill-plan-quality-report.json --registry skill-forge/references/candidate-registry.json`.
 12. **Stop.** Do not proceed to generation automatically - the profile is a human checkpoint by design.
 
 ## Output Template
@@ -164,7 +166,7 @@ generated. Correct anything wrong, then run `infra-generate`.
 
 ## Guardrails
 
-- MUST NOT write anything into the target project - Phase 1 is read-only there. A baseline run of a verification command happens only in a throwaway copy of the target, and only for a command `analyze_commands.py --verification` reports safe (profile-synthesizer).
+- MUST NOT write anything into the target project - Phase 1 is read-only there. A baseline run of a verification command happens only in a throwaway copy of the target, and only for a command `"$GENERATOR_NATIVE" creator analyze-commands --verification` reports safe (profile-synthesizer).
 - MUST confirm PHP evidence before scanning; a non-PHP target with no recognizable stack at all is reported out of scope.
 - MUST NOT invoke `stack-adapter` without first asking the user - detecting a foreign stack is never itself consent to generate a sibling tool.
 - MUST NOT run the seven PHP scanners against a target that already failed the PHP-evidence check.

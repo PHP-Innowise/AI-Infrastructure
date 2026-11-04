@@ -125,6 +125,8 @@ composer install
 
 ## Quick Start
 
+Start Claude Code, Codex or Cursor in the project root, the folder that holds `.claude/`, `.codex/` and `.cursor/`, or in a folder below it. Claude Code reads a project's settings - its hooks, permission rules and `env` - only from the folder it starts in, so a small dispatcher in your own Claude Code configuration (entries in `~/.claude/settings.json`, scripts in `~/.claude/ai-accelerator/`) gives a session started below the root what the root has: the project's hooks, its permission rules, its `env` for commands and its `AGENTS.md`. A Git worktree of the project has only what Git tracks, so it serves a session started in a worktree without the installation the same way, for the worktree: the root's memory, the worktree's own task. Anywhere else it does nothing. The installer sets it up when you run it in a terminal, and so does the first Claude Code session in the root. On Windows it runs under the Git Bash Claude Code starts hooks with. A file named `off` in `~/.claude/ai-accelerator/` turns the dispatcher off for good. Codex started in a subfolder runs the hooks, and its save waits in a temporary folder for the next hook. Codex started in a Git worktree of the project that has none of the installation gets the root's hooks and `AGENTS.md` from a dispatcher in your own Codex hooks (entries in `~/.codex/hooks.json`, scripts in `~/.codex/ai-accelerator/`), which the first Codex session in the root and the installer in a terminal set up. Codex runs them once you trust them: "Trust all and continue" when its terminal starts, `/hooks`, or Settings > Hooks in the app. A file named `off` in `~/.codex/ai-accelerator/` turns it off for good.
+
 Use slash commands (Claude Code / Cursor) to move through the workflow:
 
 | Command | Purpose |
@@ -215,10 +217,10 @@ Governed Project Brain mode is the default for non-trivial work. `project-brain/
 Use the one public task-aware retrieval command:
 
 ```bash
-python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID
+memory-bank/bin/infra-engine memory retrieve QUERY --task-id ID
 ```
 
-Canonical policy, specs, current code, configuration, migrations, and tests always outrank Project Brain, memory, retrieval packets, and local indexes. Automatic delivery is bounded: Claude Code and Codex retrieve a fresh Task Capsule at prompt time, while Cursor uses an `alwaysApply` rule rendered at the previous turn boundary. Explicit `context.py retrieve` remains available for every tool. Use `--mode lightweight` only explicitly for machine-local work that does not need shared continuity or governed records.
+Canonical policy, specs, current code, configuration, migrations, and tests always outrank Project Brain, memory, retrieval packets, and local indexes. Automatic delivery is bounded: Claude Code and Codex retrieve a fresh Task Capsule at prompt time, while Cursor uses an `alwaysApply` rule rendered at the previous turn boundary. Explicit `memory-bank/bin/infra-engine memory retrieve` remains available for every tool. Use `--mode lightweight` only explicitly for machine-local work that does not need shared continuity or governed records.
 
 ### Task Capsule
 
@@ -237,7 +239,7 @@ research-to-planning, planning-to-implementation,
 implementation-to-independent-verification, and recovery after compaction.
 `memory`, `checkpoint`, and explicit `complete` keep their existing roles.
 
-New chunks use conflict-free names such as `memory-bank/chunks/MEM-YYYYMMDD-xxxxxxxx-short-slug.md`; legacy `MEM-NNNN` chunks keep their IDs. Rebuild the derived `INDEX.md` with `python3 memory-bank/scripts/context.py reindex-bank` instead of editing a shared counter. Automatic promotions are tagged `auto-promoted` and are explicitly unreviewed; disable `automatic_promotion` for the independent-review workflow. Session-start banners remain metadata-only even though separate prompt/turn hooks deliver bounded working context.
+New chunks use conflict-free names such as `memory-bank/chunks/MEM-YYYYMMDD-xxxxxxxx-short-slug.md`; legacy `MEM-NNNN` chunks keep their IDs. Rebuild the derived `INDEX.md` with `memory-bank/bin/infra-engine memory reindex-bank` instead of editing a shared counter. Automatic promotions are tagged `auto-promoted` and are explicitly unreviewed; disable `automatic_promotion` for the independent-review workflow. Session-start banners remain metadata-only even though separate prompt/turn hooks deliver bounded working context.
 
 ## Optional MCP Integrations
 

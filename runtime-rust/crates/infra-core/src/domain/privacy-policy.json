@@ -1,0 +1,194 @@
+{
+  "SECRET_PATTERNS": {
+    "private key": {
+      "pattern": "-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----",
+      "flags": 32
+    },
+    "GitHub token": {
+      "pattern": "\\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{22,})\\b",
+      "flags": 32
+    },
+    "GitLab token": {
+      "pattern": "\\bgl(?:pat|dt|rt|ptt|cbt|imt|oas|soat|ft|agent)-[A-Za-z0-9_-]{20,}",
+      "flags": 32
+    },
+    "Slack token": {
+      "pattern": "\\b(?:xox[abeoprs]|xapp)-(?=[A-Za-z0-9-]*\\d)[A-Za-z0-9-]{10,}",
+      "flags": 32
+    },
+    "Slack webhook": {
+      "pattern": "\\bhooks\\.slack\\.com/(?:services|workflows|triggers)/[A-Za-z0-9_/-]{16,}",
+      "flags": 34
+    },
+    "Discord webhook": {
+      "pattern": "\\bdiscord(?:app)?\\.com/api/webhooks/\\d+/[A-Za-z0-9_-]{30,}",
+      "flags": 34
+    },
+    "Telegram bot token": {
+      "pattern": "\\b\\d{8,10}:AA[A-Za-z0-9_-]{33}\\b",
+      "flags": 32
+    },
+    "AWS access key": {
+      "pattern": "\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b",
+      "flags": 32
+    },
+    "Google API key": {
+      "pattern": "\\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])",
+      "flags": 32
+    },
+    "Google OAuth token": {
+      "pattern": "\\bya29\\.[0-9A-Za-z_-]{20,}",
+      "flags": 32
+    },
+    "OpenAI-style token": {
+      "pattern": "\\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\\b",
+      "flags": 32
+    },
+    "Stripe secret key": {
+      "pattern": "\\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}\\b",
+      "flags": 32
+    },
+    "npm token": {
+      "pattern": "\\bnpm_[A-Za-z0-9]{36}\\b",
+      "flags": 32
+    },
+    "PyPI token": {
+      "pattern": "\\bpypi-AgE[A-Za-z0-9_-]{50,}",
+      "flags": 32
+    },
+    "Hugging Face token": {
+      "pattern": "\\bhf_[A-Za-z0-9]{34,}\\b",
+      "flags": 32
+    },
+    "SendGrid key": {
+      "pattern": "\\bSG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])",
+      "flags": 32
+    },
+    "Shopify token": {
+      "pattern": "\\bshp(?:at|ss|ca|pa)_[a-fA-F0-9]{32}\\b",
+      "flags": 32
+    },
+    "DigitalOcean token": {
+      "pattern": "\\bdo[opr]_v1_[a-f0-9]{64}\\b",
+      "flags": 32
+    },
+    "JWT": {
+      "pattern": "\\beyJ[A-Za-z0-9_-]+\\.eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\b",
+      "flags": 32
+    },
+    "Laravel application key": {
+      "pattern": "\\bAPP_KEY[ \\t]*=[ \\t]*['\\\"]?base64:[A-Za-z0-9+/]{20,}={0,2}",
+      "flags": 32
+    },
+    "credential in URL": {
+      "pattern": "\\b[a-z][a-z0-9+.-]*://[^\\s:/@]*:(?!(?:password|pass|secret|root|test|!?change[-_]?me!?|x{3,}|\\*+|\\.{2,})@|[<${%])[^\\s@/]{3,}@",
+      "flags": 34
+    },
+    "authorization header": {
+      "pattern": "\\b(?:proxy-)?authorization[ \\t]*[:=][ \\t]*['\\\"`]?(?:bearer|basic|token|digest)[ \\t]+(?![$%{<\\[(=]|(?:get)?env\\(|config\\(|secret\\(|process\\.env|os\\.environ|vault:|\\*{2,}|x{3,}|\\.{2,}|\\u2026|\\d+(?![^\\s'\\\"`,;])|[A-Za-z_\\\\][\\w\\\\.]*(?:::|->|\\()|[a-z_]\\w*\\.[a-z_][\\w.]*(?![^\\s'\\\"`,;])|(?:required|nullable|sometimes|confirmed|hashed|string|null|none|true|false|secret|password|passw(?:or)?d|pass|root|test|example|placeholder|redacted|!?change[-_]?me!?|your[-_ ][^\\s]*)(?![A-Za-z0-9]))(?=[A-Za-z0-9._~+/=-]*\\d)[A-Za-z0-9._~+/=-]{8,}",
+      "flags": 34
+    },
+    "basic credentials": {
+      "pattern": "\\b(?:proxy-)?authorization[ \\t]*[:=][ \\t]*['\\\"`]?basic[ \\t]+(?![$%{<\\[(=]|(?:get)?env\\(|config\\(|secret\\(|process\\.env|os\\.environ|vault:|\\*{2,}|x{3,}|\\.{2,}|\\u2026|\\d+(?![^\\s'\\\"`,;])|[A-Za-z_\\\\][\\w\\\\.]*(?:::|->|\\()|[a-z_]\\w*\\.[a-z_][\\w.]*(?![^\\s'\\\"`,;])|(?:required|nullable|sometimes|confirmed|hashed|string|null|none|true|false|secret|password|passw(?:or)?d|pass|root|test|example|placeholder|redacted|!?change[-_]?me!?|your[-_ ][^\\s]*)(?![A-Za-z0-9]))[A-Za-z0-9+/]{12,}={0,2}",
+      "flags": 34
+    },
+    "bearer token": {
+      "pattern": "\\bbearer[ \\t]+(?![$%{<\\[(=]|(?:get)?env\\(|config\\(|secret\\(|process\\.env|os\\.environ|vault:|\\*{2,}|x{3,}|\\.{2,}|\\u2026|\\d+(?![^\\s'\\\"`,;])|[A-Za-z_\\\\][\\w\\\\.]*(?:::|->|\\()|[a-z_]\\w*\\.[a-z_][\\w.]*(?![^\\s'\\\"`,;])|(?:required|nullable|sometimes|confirmed|hashed|string|null|none|true|false|secret|password|passw(?:or)?d|pass|root|test|example|placeholder|redacted|!?change[-_]?me!?|your[-_ ][^\\s]*)(?![A-Za-z0-9]))(?=[A-Za-z0-9._~+/-]*\\d)[A-Za-z0-9._~+/-]{20,}=*",
+      "flags": 34
+    },
+    "assigned credential": {
+      "pattern": "(?<![A-Za-z0-9])(?:[A-Za-z0-9]+_)*(?:password|passwd|secret(?:_access)?(?:_key|_token)?|api[_-]?key|access[_-]?(?:token|key)|auth[_-]?token|refresh[_-]?token|private[_-]?key|account[_-]?key|shared[_-]?access[_-]?key)[ \\t]*[:=][ \\t]*['\\\"`]?(?![$%{<\\[(=]|(?:get)?env\\(|config\\(|secret\\(|process\\.env|os\\.environ|vault:|\\*{2,}|x{3,}|\\.{2,}|\\u2026|\\d+(?![^\\s'\\\"`,;])|[A-Za-z_\\\\][\\w\\\\.]*(?:::|->|\\()|[a-z_]\\w*\\.[a-z_][\\w.]*(?![^\\s'\\\"`,;])|(?:required|nullable|sometimes|confirmed|hashed|string|null|none|true|false|secret|password|passw(?:or)?d|pass|root|test|example|placeholder|redacted|!?change[-_]?me!?|your[-_ ][^\\s]*)(?![A-Za-z0-9]))[^\\s'\\\"`]{4,}",
+      "flags": 34
+    }
+  },
+  "PRIVATE_PATTERNS": {
+    "email address": {
+      "pattern": "\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b",
+      "flags": 34
+    },
+    "phone number": {
+      "pattern": "(?<!\\w)(?:\\+\\d(?:[\\d ().-]{6,}\\d)|\\(?\\d{3}\\)?[ .-]\\d{3}[ .-]\\d{4})(?!\\w)",
+      "flags": 32
+    },
+    "customer identifier": {
+      "pattern": "\\b(?:(?:customer|patient)\\s+(?:name|address|id)|client\\s+(?:name|address))\\s*[:=]\\s*\\S+",
+      "flags": 34
+    },
+    "customer number": {
+      "pattern": "(?<!\\w)(?:(?:customer|patient|клиент\\w*|пациент\\w*)[\\s_(\\[-]*(?:identifier|id|number|no\\.?|nr\\.?|номер|№|#)|client[\\s_(\\[-]*(?:number|no\\.?|nr\\.?|#)|(?:id|номер|№)\\s+(?:клиента|пациента)|(?:customer|patient|клиент\\w*|пациент\\w*)(?=\\s*[#№]?\\s*\\d{3}))[\\s:=#№(\\[]*(?P<value>[A-Za-z]{0,5}-?\\d[\\w-]*)",
+      "flags": 34
+    }
+  },
+  "RAW_TEXT_PATTERN": {
+    "pattern": "^\\s*(?:user|assistant|system|developer|tool|prompt|response|reasoning|stdout|stderr|log)\\s*:",
+    "flags": 42
+  },
+  "QUOTED_CREDENTIAL": {
+    "pattern": "(?<![A-Za-z0-9])(?:[A-Za-z0-9]+_)*(?:password|passwd|secret(?:_access)?(?:_key|_token)?|api[_-]?key|access[_-]?(?:token|key)|auth[_-]?token|refresh[_-]?token|private[_-]?key|account[_-]?key|shared[_-]?access[_-]?key)[ \\t]*[:=][ \\t]*(['\\\"`])[^\\n]*?(?:\\1|$)",
+    "flags": 42
+  },
+  "PRIVATE_KEY_BLOCK": {
+    "pattern": "-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\\Z)",
+    "flags": 48
+  },
+  "CONTACT_WORDS": [
+    "a",
+    "an",
+    "and",
+    "at",
+    "by",
+    "for",
+    "from",
+    "in",
+    "is",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "with",
+    "please",
+    "thanks",
+    "customer",
+    "client",
+    "patient",
+    "user",
+    "person",
+    "email",
+    "e",
+    "mail",
+    "address",
+    "phone",
+    "number",
+    "mobile",
+    "telephone",
+    "tel",
+    "contact",
+    "call",
+    "reach",
+    "send",
+    "name",
+    "id",
+    "identifier",
+    "check",
+    "fix",
+    "review",
+    "inspect",
+    "look",
+    "клиент",
+    "клиента",
+    "пациент",
+    "пациента",
+    "пользователь",
+    "пользователя",
+    "имя",
+    "адрес",
+    "почта",
+    "телефон",
+    "номер",
+    "позвони",
+    "позвонить",
+    "связаться",
+    "пожалуйста"
+  ]
+}

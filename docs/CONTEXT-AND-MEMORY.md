@@ -1,5 +1,13 @@
 # Context and Memory
 
+Maintainer-only outcome and lifecycle pilots now exercise full task completion,
+cross-task recall, consolidation, current-fact projections and freshness review
+packets. They are described in [Memory Evaluation](MEMORY-EVAL.md) and
+[Memory Write Path](MEMORY-WRITE-PATH.md). Their reports are derived evidence;
+they do not change this authority hierarchy, install new providers, update
+client memory or enable consolidation by default. Facts without a supported
+explicit source stay unclassified, and a review packet is not verification.
+
 The accelerator separates current truth, active work, local retrieval, and
 durable learning so that continuity does not become a competing source of
 truth. This guide explains those boundaries and the reasoning behind them.
@@ -143,8 +151,8 @@ specification replacement, or durable knowledge base.
 
 ### Local Context Engine
 
-The Local Context Engine is the Python/SQLite retrieval runtime exposed through
-`memory-bank/scripts/context.py`. Its default database is the ignored
+The Local Context Engine is the Rust/SQLite retrieval runtime exposed through
+`memory-bank/bin/infra-engine`. Its default database is the ignored
 `memory-bank/local/context.db`.
 
 It provides:
@@ -171,12 +179,37 @@ with `rebind`, and the next automated turn flush performs the same restoration.
 Lightweight tasks and local episodes remain machine-local and cannot be
 reconstructed after deletion.
 
+So three kinds of state live in two places, and only one kind is authority:
+
+- **Project Brain and Memory Bank**: the records and chunks a team keeps.
+  They are the authority, and only as safe as their copies: in Git, every
+  clone holds one.
+- **Local session state**, in `context.db`: the turns buffered since the last
+  checkpoint (`turn_deltas`, fewer than `--flush-after` per task), the
+  project's recent files, the branch heads the buffer compares against, what
+  each conversation was already handed, and in lightweight mode the working
+  tasks and episodes themselves. None of it can be rebuilt. Losing it costs
+  the paths that became clean since the last checkpoint, delays the next
+  automatic checkpoint, empties the recent files until turns refill them, and
+  may hand a conversation an item again.
+- **The index**: documents, metadata, identifiers and links, rebuilt from the
+  repository whenever it is missing or stale.
+
+The runtime leaves local state behind in four cases: a governed database
+found damaged is quarantined and started afresh (the buffered turns stay in
+the quarantined file); a removed worktree's database is pruned; turns
+buffered after a task closed are dropped; and the buffer of a branch that
+gets no further turn is never flushed. A runtime update, a reindex and a
+process killed mid-checkpoint keep the buffer: the Brain is written before the
+buffer is cleared, and a replayed flush neither loses nor repeats a path. A
+turn killed that way may miss its own update of the recent files.
+
 The active provider is local `sqlite-fts5`: network access and embeddings are
 disabled. An external provider entry exists only as a disabled contract.
 Retrieval is not only on request: each edition's prompt hook injects a bounded
 Task Capsule into every request (Cursor reads it from the rendered
 `.cursor/rules/working-memory.mdc`), and the local memory MCP server
-(`memory-bank/scripts/mcp_server.py`, see `memory-bank/MCP.md`) offers the
+(`memory-bank/bin/infra-engine`, see `memory-bank/MCP.md`) offers the
 same runtime to the client as tools.
 
 ### Memory Bank
@@ -659,7 +692,7 @@ Maintainers can compare a committed runtime with the automatic working tree
 on identical synthetic prompt-time snapshots:
 
 ```bash
-python3 scripts/memory_graph_pilot.py --out-dir /tmp/source-link-comparison
+infra-engine eval memory-graph-pilot --out-dir /tmp/source-link-comparison
 ```
 
 The directory must be new and outside the clone. Baseline defaults to `HEAD`;
@@ -745,9 +778,9 @@ document should not outlive a change to it silently.
 
 #### Reaching it: `links` and `retrieve --path`
 
-    python3 memory-bank/scripts/context.py links --path specs/rounding.md
-    python3 memory-bank/scripts/context.py links --path specs --prefix
-    python3 memory-bank/scripts/context.py retrieve "..." --task-id T --path specs/rounding.md
+    memory-bank/bin/infra-engine memory links --path specs/rounding.md
+    memory-bank/bin/infra-engine memory links --path specs --prefix
+    memory-bank/bin/infra-engine memory retrieve "..." --task-id T --path specs/rounding.md
 
 `links` reports the citations; `retrieve --path` delivers them in the same
 capsule, budget and manifest as everything else. Both apply the full runtime
@@ -946,30 +979,70 @@ delivery hooks leave alone: rendering a withheld capsule would satisfy their
 
 What the automatic capsule carries is a separate setting:
 `CONTEXT_CAPSULE_PROFILE`, then `capsule_profile` in `runtime.json`, defaulting
-to `full`.
+to `full`. The four editions and the generator's template ship `recall`; a
+project whose `runtime.json` names no profile keeps `full`. A configured
+profile the runtime does not know - one a newer runtime wrote, or a typo -
+builds the `full` capsule, with a warning naming the value; before, it left
+every prompt without a capsule, as it did on 2026-10-30 when a sync from an
+older clone put four projects that say `recall` on a runtime without it.
+`--capsule-profile` with a bad value is still refused.
 
 - **`full`:** the established capsule — working state, recent files and the
   retrieved semantic and episodic documents.
 - **`navigation`:** the working state and the recent files only. It searches
   nothing and records no delivery.
+- **`recall`:** navigation plus what the task's own saves recorded, and
+  nothing else. The request is searched only among those documents; without
+  one of them indexed, the capsule is navigation's. The task's own saves are
+  the findings and decisions:
+  - whose name is the one a result of this task gives a learning
+    (`record-result`, `native-result`, MCP `memory_record_result`);
+  - or whose name starts with the task's external ID or a ticket it names
+    (a Harness draft `<task>-finding-<hex>`, a finding an agent filed as
+    `CMS-739-review-4` on `feature/CMS-739-…`).
+
+  A saved finding is resolved as it is written and no resolved finding is
+  indexed, so what the capsule finds is the Memory Bank chunk it was promoted
+  to: a chunk counts when a record it cites is one of these, before or after
+  compaction archives the record. An open finding or an accepted decision
+  counts itself. Recorded history, path and file links, related knowledge
+  and source hints are left out; a conflict partner is still delivered.
+  Lightweight mode has no governed saves, so there `recall` is navigation.
 
 The profile applies to the automatic entry points (`refresh`, which the Codex
 and Cursor hooks run, and Claude's `hook-context`). An explicit
-`context.py retrieve` always searches. Any other value leaves the turn without
+`memory-bank/bin/infra-engine memory retrieve` always searches. Any other value leaves the turn without
 a capsule and says why, as a broken index does.
 
-`navigation` is an opt-in profile, not the default. On 30 client tasks it
-reached the file a task changed in fewer calls than the full capsule
-(`docs/MEMORY-EVAL.md`, "Measuring task outcomes"). It also turns off
-everything the hook delivers through the document layers:
+`navigation` is an opt-in profile. On 30 client tasks it reached the file a
+task changed in fewer calls than the full capsule (`docs/MEMORY-EVAL.md`,
+"Measuring task outcomes"). It also turns off everything the hook delivers
+through the document layers:
 - a result saved in one session is no longer recalled by the next session's
   capsule;
 - source hints are not delivered;
 - the Cursor rule carries no documents.
 
-An agent can still pull all of these with `context.py retrieve` or the MCP
-`memory_retrieve` tool. The navigation measurement did not cover recall, so the
-default stays `full`.
+An agent can still pull all of these with `memory-bank/bin/infra-engine memory retrieve` or the MCP
+`memory_retrieve` tool. `recall` keeps the first of them - a session's saved
+result in the next session's capsule - and drops the other two.
+
+Measured against both (`docs/MEMORY-EVAL.md`, "Measuring task outcomes"):
+- on questions about a saved result, `recall` was as good as `full`;
+- on cold starts it is navigation, byte for byte.
+
+That is why the editions ship it. Two things held it back and are fixed:
+- the Harness's automatic memory required a manifest, which a capsule
+  without documents does not write; such a capsule now needs no source
+  fingerprints, and a proof that does arrive is checked as before;
+- a promoted chunk was quoted by its `Sources` footer, which `full` hid by
+  delivering the cited file beside it; the excerpt now skips a citation-only
+  footer whatever selected the chunk.
+
+The Harness's explicit `refresh` and the LongMemEval bridge ask for `full`,
+as MCP `memory_retrieve` does: they are requests for a search, not the
+automatic capsule. A team that wants the old capsule sets `capsule_profile`
+to `full`.
 
 `retrieval-report` keeps shadow `would_skip` distinct from context actually
 `withheld` in `enforce`. It slices gate results by `mode`, `query_source`,
@@ -1009,7 +1082,7 @@ useful one.
 Measurements like these are only honest on each project as it was when the
 prompt was written: an index of the project's current state lets knowledge
 written after the prompt, often about its own work, answer it. The
-[Memory Evaluation Stand](MEMORY-EVAL.md) (`scripts/memory_eval.py`) rebuilds
+[Memory Evaluation Stand](MEMORY-EVAL.md) (`infra-engine eval memory-eval`) rebuilds
 that state, overlays the runtime under test and scores the capsule against
 judged prompts.
 
@@ -1052,6 +1125,9 @@ thing while its id and content are. A host that compacts a conversation
 records it in the transcript the hook is given (`--transcript`): Claude Code
 writes a `compact_boundary` record, Codex a `compacted` one. After one, nothing
 counts as handed any more, because the conversation holds a summary of it.
+Claude Code writes a new conversation's transcript only after the first prompt
+hook, so a transcript not written yet counts from its start: a compaction
+before the second turn is seen too.
 Only what the capsule shows counts as handed: an item its rendered text had no
 room for is excluded from the manifest as `capsule-limit` and is handed on a
 later turn.
@@ -1148,6 +1224,43 @@ not require a task and does not create a manifest.
 `context` is a compatibility alias. New operational guidance should use
 `retrieve`.
 
+Immediately before delivery receipts, governed retrieval rechecks the working
+task and delivered source images. An unavailable or denied task loses its
+working text, resolved UUID/revision/path, last-turn report and links seeded
+only by its touched files or ticket preferences. Recall also withdraws its
+task-owned scope. The caller's original task label and independently requested
+public evidence can remain. An eligible concurrent rewrite is distinct: its
+old working text is withheld with `working_changed`, while its valid pointer
+and independent evidence remain. This final custody pass only removes content;
+it does not refill slots or rerank candidates.
+Navigation and empty recall also withdraw unavailable task-derived query terms
+and resolved labels, including when the task disappeared before assembly.
+A checked public Cursor topic for a genuinely unprovisioned task can still
+continue; it does not depend on a missing task's private working text.
+
+The optional `Last turn` hint reads at most 64 KiB from an ordinary, singly
+linked `memory-bank/local/last-turn-report.json`, through held native directory
+handles. Linked parents, special files, concurrent image changes and malformed
+reports quietly omit this hint. Report publication uses the same rooted I/O,
+syncs the temporary file before replacement, and accepts at most 1 MiB of local
+diagnostics; a report larger than the delivery limit remains local. Missing
+secure host primitives omit the hint rather than falling back to path-following
+I/O. A summary longer than 4096 characters yields a fixed too-large notice
+before regex screening; this bounds processing of punctuation-heavy diagnostics.
+Smaller complete summaries pass the existing secret/privacy guard before the
+600-character display limit. Sensitive text yields a fixed notice that diagnostics
+were withheld. Local diagnostics are not rewritten by either delivery guard. These
+best-effort operations preserve process cancellation, including when ordinary
+cleanup fails. This advisory report is not durable memory or verification of
+the preceding task's result.
+
+Cursor rule maintenance also preserves cancellation when releasing its shared
+lock or closing held directories. Cleanup uses the exception actually leaving
+the operation, including a new cancellation during unlock; an error already
+handled by the caller is not treated as pending. Owned unlock, descriptor close
+and process-lock release are attempted in order. An ordinary cleanup failure
+without a pending exception retains the existing incomplete/preserved fallback.
+
 In lightweight mode, `retrieve` and `context` build a simpler layered packet
 from the local task, document search, and local episodes. They do not run the
 governed manifest and eligibility pipeline.
@@ -1222,6 +1335,13 @@ A conflict partner can still be excluded for privacy, ownership, authority,
 lifecycle, or freshness. The runtime must not leak it merely to complete the
 pair.
 
+Delivered records say `recorded conflict; verify sources` when a conflict
+relationship exists, including an incoming one. The relation is historical
+evidence, not a claim that it remains unresolved or that both sides were
+delivered. Partner identifiers and paths appear only when that partner survives
+eligibility and final packing. Changing the warning changes conversation
+novelty even if the record body itself is unchanged.
+
 Supersession represents replacement, not disagreement. A superseded record is
 excluded from active retrieval and can be compacted. Relationships require a
 replacement backlink: the old record's `superseded_by` and the replacement's
@@ -1243,12 +1363,17 @@ successor took over, which the bank requires a link for, and `archived` when
 the knowledge simply ceased and nothing replaced it. The boolean model could
 not express that second case at all.
 
-Closing a period is an operation, not an editing convention: `context.py
+Closing a period is an operation, not an editing convention: `memory-bank/bin/infra-engine memory
 bank-retire --id MEM-... --valid-to YYYY-MM-DD [--superseded-by MEM-...]`
 writes the chunk, the other side of any replacement link, and the regenerated
-index under one lock, validates the bank, and restores every touched file if
-anything fails. Doing it by hand leaves the bank invalid between the first
-edit and the last.
+index under one lock and validates the bank. A bounded checkpoint records both
+chunk images before the first change. Before commit, ordinary failures restore
+them immediately; process death leaves recovery custody for the next mutation,
+which rolls back the exact chunks and rebuilds the index. Checkpoint removal
+is the commit point. Unknown edits stop recovery without being overwritten;
+unlocked readers can see pending state until that boundary. See
+[retirement recovery](OPERATIONS.md#bank-retire). Doing it by hand leaves the
+bank invalid between the first edit and the last.
 
 Every bank write — promotion, compaction, `bank-reverify`, `bank-retire` — is
 refused for what it introduces, judged against the bank as it stood before
@@ -1488,13 +1613,28 @@ event's outcome; the events stay recorded until a chunk carries that finding
 propose -> apply
 ```
 
-`context.py promote-auto` runs the same pass on demand. The boundary waits for
+`memory-bank/bin/infra-engine memory promote-auto` runs the same pass on demand. The boundary waits for
 `--flush-after` turns, and knowledge recorded deliberately — what a Harness run
 drafted, saved when the run completes or after a person confirmed each
 learning — has no reason to wait for a counter. A learning the Harness saved
 unattended is written as observed and raised to verified with the reason
 "agent-attested, not reviewed by a person", so its own ledger says who
 attested it before promotion tags the chunk `auto-promoted`.
+
+The commands an agent verifies with say who checked too. `brain-create
+--authority verified` and `brain-update --authority verified` (or
+`--reverify`, a verified claim checked again) record `agent` unless
+`--attestation person` says a person did; until 2026-10-30 they recorded
+nobody, and a record so verified carries no mark. The Harness passes `person`
+for what a person does on its pages, where the runtime takes the flag. A
+verified finding, bug, incident or decision keeps the source fingerprints
+taken when it was checked through every write that checks nothing - progress,
+next steps, a lifecycle move - and only a source cited for the first time is
+fingerprinted then; retrieval and promotion compare the checked version with
+the file now. Before, any such write took them anew, so an edit cleared
+"cited file changed" from a claim nobody checked again. A person's verified
+claim is revised only with `--attestation person`, as `record-result` holds
+it.
 
 There is no reviewer in the automatic mode, and the runtime refuses to pretend
 otherwise. `reviewer` stays null, `review_mode` is `automatic`, the outcome is
@@ -1551,7 +1691,7 @@ the write changed — the new chunk in full, and the bank for anything newly
 broken — and updates the proposal. These writes are snapshotted and rolled back
 together on failure. No shared counter is involved: the legacy
 `.memory-counter` file is neither read nor written, so concurrent promotions
-on different machines or branches cannot collide, and `context.py
+on different machines or branches cannot collide, and `memory-bank/bin/infra-engine memory
 reindex-bank` rebuilds the index after any merge.
 
 Promotion is appropriate for a reusable consequence, not:
@@ -1709,7 +1849,11 @@ chunk whose reviewed or automatic provenance is acceptable for the environment.
 
 Session-start hooks can report metadata such as:
 
-- branch and uncommitted-change count;
+- branch and uncommitted-change count. Changes that are the accelerator's own
+  files are counted apart: its install, untouched since the install record or
+  the generator's manifest, and the memory the runtime writes. Without that,
+  a project that neither commits nor ignores the accelerator reads as holding
+  uncommitted work in every session;
 - dependency/runtime markers;
 - selected context mode;
 - index existence and approximate staleness;
@@ -1899,8 +2043,31 @@ argument (`rg "a|b" x.php`), a redirection names its file however it is
 written, `cd` and `git -C` move the words after them, a here-document's body
 is data, and Codex's PowerShell and cmd commands on native Windows are read
 too. The turn starts at the last user message that is not a local command's
-output - a prompt, a slash command, pasted text or a task notification. A task
-file the line leaves out is counted in the compaction line. The transcript is
+output - a prompt, a slash command, pasted text or a task notification. A Codex
+turn starts at the rollout's own `task_started`, so a message the person sends
+while it runs joins it; where the window holds none, at the last user message
+that is not context Codex adds itself - its `AGENTS.md` instructions and
+recommended plugins, a skill's text, a Stop hook's continuation, a subagent's
+report, the answer to its question. A task file the line leaves out is counted
+in the compaction line.
+
+`ticket files (CMS-741): ...` is an experiment, off unless `ticket_files` is
+`true` in `runtime.json` or `CONTEXT_TICKET_FILES=1` (`0` turns a configured
+one off for a run). It names the files of the newest commits on any ref (200
+at most, no merges) whose message names a ticket of the request, as written,
+or of the task's ID, upper-cased - a branch keeps its ticket in lower case as
+often as not. A ticket is matched in any case as a word of its own (`CMS-74`
+is not `CMS-741`), and only the prefixes the project files its work under
+count when the index knows any. Files still present and kept as recent files
+are, not named in the request and not among the recent files already shown;
+ten at most, whole paths within 720 characters, newest commit first, right
+after the `recent files:` line. A Git failure or a two-second timeout leaves
+the line out; the turn goes on. The `git log` costs a prompt 35 to 60 ms on
+repositories of 4,000 to 5,000 commits. On 155 client cold starts it was the
+most precise list - 9.4% of the files it showed were files the turn went on to
+change, against 6.1% of the recent files - and it becomes a default only on
+the task-outcome measurement sealed for it (`docs/MEMORY-EVAL.md`, "The
+`ticket` arm"). The transcript is
 read after the turn is recorded, for a second at most; each checkout of an
 attached project keeps its own list; and excerpt growth leaves the line its
 720 characters.
@@ -1982,16 +2149,12 @@ context.
 
 ### CLI stream encoding and newlines
 
-At startup the memory CLI configures exact standard Python `TextIOWrapper`
-stdout/stderr instances for UTF-8, replacement encoding errors and untranslated
-LF. This applies to subsequent writes; it preserves explicit CR content and
-does not transcode bytes buffered before startup. Buffers and stream ownership
-are unchanged. Custom streams, including subclasses, retain the existing
-encoding/errors-only call, once per stream; their newline behavior is not
-certified. Unsupported configuration is best effort and cancellation propagates.
-Fresh controls use real supplied CRLF/CR/LF wrappers and an actual CLI error
-path. Native Windows, separate MCP/continuity entry points and live clients
-require their own evidence.
+The native CLI returns explicit stdout/stderr byte buffers. Text renderers emit
+UTF-8 and LF line endings; the launcher writes those bytes directly rather than
+configuring interpreter stream wrappers. Explicit CR bytes in supplied content
+remain content. Provider process streams use their own bounded byte transport.
+Native Windows console rendering, separate MCP/continuity transports and live
+clients require their own execution evidence.
 
 ### Generated read-hook identity
 
@@ -2042,10 +2205,10 @@ inside the project counts as present.
 Runtime metadata channels are batched before file hydration; optional unsafe or
 unindexed source hints abstain before policy admission. Raw search filters its
 bounded ranking pool (at most ten times the requested limit) before returning the
-limit; it does not promise arbitrary refill beyond that pool. Internal Python
-`search_documents` callers must supply `repository` for source-policy admission;
-all CLI/capsule runtime callers do so. A bare connection remains the legacy raw
-index helper and is not a runtime authority check.
+limit; it does not promise arbitrary refill beyond that pool. Native
+`infra_core::query::search` requires a `RuntimeContext` for source-policy
+admission. A bare SQLite connection remains an index access mechanism rather
+than a runtime authority check.
 
 Final admission prunes all delivered views of a document whose own path became
 ignored and recomputes signatures, usage and receipts, including episode-only
@@ -2099,7 +2262,7 @@ Current Memory Bank expiry is reapplied at delivery. Cached raw search checks th
 Cached delivery also reapplies the current secret-recognition grammar to full unhighlighted indexed title, summary and content, plus the returned path/title/snippet. A changed or refused masking result withholds the row; already-safe masked documents and template expressions retain their bytes. Raw search gets its checked image and snippet from the same SQL statement and preserves its five public fields. Governed retrieval retains the first admitted image through packing and rechecks it under the current grammar. Optional source hints enforce their cached-content byte bound before image hydration. Structured Brain/Memory Bank source records remain subject to strict whole-record checks, never masking metadata into authority. These checks do not establish an atomic prequote-to-prime database/filesystem epoch. Local manifest exclusion diagnostics may retain rejected identifiers; this is not a promise that every local artifact is free of such identifiers.
 
 
-Claude Code and Codex automatic prompt reads call `context.py refresh` directly, bounded by the hook's own `timeout` and its single `CONTEXT_HOOK_BUDGET` (default 5 seconds). Whatever budget the person sets is honoured, and the prompt reaches the CLI whole, whatever its length. A refresh stopped at the budget (status 124) delivers nothing - a cut capsule reads like a whole one - and the turn is told memory was not consulted. A refresh that fails names its cause with the CLI's own last stderr line; one that exits 1 after printing its layer report delivers that report. Cursor keeps its persistent-rule path. The hooks start the CLI through `memory-bank/scripts/context_cli.py`, which runs `context.py` as the same script from its cached bytecode: started directly, the 8,000-line module is compiled again on every prompt (about 30 ms); a runtime without the launcher falls back to `context.py`. The launcher writes that cache even when the caller asks Python for none - Claude Desktop starts Claude Code with `PYTHONDONTWRITEBYTECODE=1`, the hooks inherit it, and the Harness sets it - for the runtime's own directory only: `memory-bank/scripts/__pycache__/` is ignored wherever the runtime is installed, and nothing else the runtime imports is cached. A cold index too large for the budget still restarts on every prompt; this path does not implement resumable indexing, and in an installed project the budget message says to build the index once outside the hook (`python3 memory-bank/scripts/context.py index`).
+Claude Code and Codex automatic prompt reads call `memory-bank/bin/infra-engine memory refresh` directly, bounded by the hook's own `timeout` and its single `CONTEXT_HOOK_BUDGET` (default 5 seconds). Whatever budget the person sets is honoured, and the prompt reaches the CLI whole, whatever its length. A refresh stopped at the budget (status 124) delivers nothing - a cut capsule reads like a whole one - and the turn is told memory was not consulted. A refresh that fails names its cause with the CLI's own last stderr line; one that exits 1 after printing its layer report delivers that report. Cursor keeps its persistent-rule path. Hooks invoke the selected native engine directly with explicit runtime roots. The compiled runtime has no interpreter launcher, bytecode compilation or Python cache. A cold index too large for the budget still restarts on every prompt; this path does not implement resumable indexing, and in an installed project the budget message says to build the index once outside the hook (`memory-bank/bin/infra-engine memory index`).
 
 Candidate construction now holds the unhighlighted indexed image in the same SQL statement as its highlighted/plain quote. Missing rows and changed path/layer/kind/title identities remain unavailable rather than adopting a later cache image. Conflict/automatic-link rows capture the image with their body; path, hint and source-graph snippets reuse the already-admitted body, including the hint UTF-8 byte cap. This closes the quote-to-first-prime substitution gap.
 
