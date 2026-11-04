@@ -1554,6 +1554,11 @@ mod threaded_exit_tests {
                 );
                 pipes(worker, b"{}\n", deadline - Duration::from_millis(100))
             })();
+            // "worker-exit" covers a failed write, a failed read and a
+            // nonzero exit alike; the observed status tells them apart.
+            let status = owned
+                .as_mut()
+                .map(|worker| worker.child.try_wait().map_err(|error| error.to_string()));
             let retired = finish_worker(&mut owned, deadline);
             let recovered = if owned.is_some() {
                 finish_worker(&mut owned, Instant::now() + Duration::from_secs(2))
@@ -1565,7 +1570,11 @@ mod threaded_exit_tests {
                 "test worker cleanup must precede status assertions"
             );
             if code == 0 {
-                let raw = output.expect("zero exit with full input and EOF must succeed");
+                let raw = output.unwrap_or_else(|error| {
+                    panic!(
+                        "zero exit with full input and EOF must succeed: {error:?}, status {status:?}"
+                    )
+                });
                 let value = strict::decode(&raw, super::RESPONSE, 16, 4096).unwrap();
                 assert_eq!(value, serde_json::json!({"scores":[0.25]}));
             } else {

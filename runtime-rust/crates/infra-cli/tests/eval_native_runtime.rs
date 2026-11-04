@@ -250,6 +250,19 @@ fn public_memory_eval_accepts_hardlinked_selected_native_runtime_without_a_provi
     let selected_sha = digest(&selected);
     let original_sha = digest(original_engine);
     assert_eq!(selected_sha, original_sha);
+    // Windows records code-integrity state on a file the first time it runs
+    // as an image, which moves the file's change time. Let that happen before
+    // taking the identity the evaluation itself must leave alone.
+    let (code, _, stderr) = fixture.run(
+        &fixture.root,
+        vec![
+            selected.display().to_string(),
+            "capabilities".into(),
+            "--json".into(),
+        ],
+        60,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
     let mut selected_parent =
         infra_core::bank::publication::PublicationFiles::new(selected.parent().unwrap()).unwrap();
     let (_, selected_identity) = selected_parent
