@@ -24,6 +24,13 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- The write-agent lock test no longer depends on directory order. It aged the
+  first file in the lock folder whose name did not end in `.guard`, but the
+  folder also holds the guards' hidden `.drain-lock` files. tmpfs lists the
+  newest file first, so local runs, which keep `TMPDIR` there, passed; btrfs
+  lists files in creation order and failed every run, and an ext4 runner
+  orders them by name hash. The test now selects the host's lock file by its
+  name, as its lock reader already did.
 - Reuse warm tokenizer results without rebuilding SQLite, compile constant
   hook/routing expressions once, and keep glob matchers within each repository
   command. Brain lookup retains matching records while still admitting the

@@ -239,7 +239,9 @@ impl Fixture {
         self.raw(host, role, &serde_json::to_vec(payload).unwrap(), &[])
     }
 
-    fn lock(&self, host: &str) -> Option<String> {
+    /// The host's lock file. The folder also keeps the guards' hidden
+    /// `.drain-lock` files, and its listing order is the file system's own.
+    fn lock_path(&self, host: &str) -> Option<PathBuf> {
         let prefix = format!("{host}-write-agent-lock-");
         fs::read_dir(&self.locks)
             .unwrap()
@@ -249,6 +251,10 @@ impl Fixture {
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| name.starts_with(&prefix) && !name.ends_with(".guard"))
             })
+    }
+
+    fn lock(&self, host: &str) -> Option<String> {
+        self.lock_path(host)
             .and_then(|path| fs::read_to_string(path).ok())
     }
 
@@ -439,11 +445,7 @@ fn write_capable_agents_run_one_at_a_time() {
     // A lock older than its time to live is a holder that never finished.
     let output = fixture.hook("claude", "subagent-gate", &spawn("claude", first));
     assert_eq!(output.status.code(), Some(0), "{}", described(&output));
-    let held = fs::read_dir(&fixture.locks)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .find(|path| !path.to_string_lossy().ends_with(".guard"))
-        .unwrap();
+    let held = fixture.lock_path("claude").unwrap();
     fs::File::options()
         .write(true)
         .open(&held)
