@@ -264,6 +264,12 @@ edition's own files remain in that edition's changelog.
   that searched nothing (the navigation profile, or recall before the
   task's first save) has the retired shape again: no categories, and its
   token estimates by layer, not by category with the budget's limits.
+- A refresh that built no capsule (the `memory` skill's plain refresh, a
+  refused prompt, a checkout with no branch) carries the retired
+  "nothing to observe" funnel diagnosis and ordinary receipt again, in its
+  answer and in its `refresh-health` record. The native record carried
+  neither, so `memory health` counted every such refresh as one whose
+  diagnosis is missing, where the retired report counted it unavailable.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

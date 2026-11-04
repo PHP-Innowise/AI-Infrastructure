@@ -556,8 +556,19 @@ impl MemoryService {
                     result["ordinary_receipt"] = receipt;
                 }
             }
-        } else if request.capsule.is_some() {
-            health["capsule"] = Value::Null;
+        } else {
+            if request.capsule.is_some() {
+                health["capsule"] = Value::Null;
+            }
+            // No capsule, nothing to observe: the record says so, as the
+            // retired one did, instead of reading as one whose diagnosis is
+            // missing.
+            let diagnosis = crate::observability::unknown_funnel_diagnosis();
+            health["funnel_diagnosis"] = diagnosis.clone();
+            result["funnel_diagnosis"] = diagnosis;
+            let receipt = crate::observability::unknown_ordinary_receipt();
+            health["ordinary_receipt"] = receipt.clone();
+            result["ordinary_receipt"] = receipt;
         }
         if !source_notices.is_empty() {
             health["source_notices"] = object!(source_notices);

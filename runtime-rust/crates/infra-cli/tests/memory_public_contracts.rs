@@ -2892,3 +2892,28 @@ fn an_unsearched_capsule_and_the_layer_counts_keep_the_retired_shape() {
         "{report}"
     );
 }
+
+/// A refresh that built no capsule says there was nothing to observe, in its
+/// answer and its health record, as the retired refresh did: `health` then
+/// counts it unavailable, not as a record whose diagnosis is missing.
+#[test]
+fn a_refresh_without_a_capsule_records_nothing_to_observe() {
+    let fixture = Fixture::new(false);
+    let report = fixture.success(&["refresh", "--json"], None);
+    assert!(report["capsule"].is_null(), "{report}");
+    assert_eq!(
+        report["funnel_diagnosis"]["observation_state"], "unavailable",
+        "{report}"
+    );
+    assert_eq!(
+        report["ordinary_receipt"],
+        json!({"schema_version":1,"observation_state":"unavailable","plans_present":null,"returned_status":"unknown"}),
+        "{report}"
+    );
+    let health = fixture.success(&["health", "--json"], None);
+    assert_eq!(
+        health["funnel_diagnosis"]["availability"],
+        json!({"observed":0,"unavailable":1,"missing":0,"rejected":0}),
+        "{health}"
+    );
+}
