@@ -24,6 +24,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Harness setup verifies modes as the platform keeps them. After installing,
+  it required each file to carry its planned Unix mode, but a Windows file
+  keeps only whether it is read-only, which publication reports as 0o444 or
+  0o644, so every Windows setup that installed the 0o755 engine stopped with
+  "Installed bytes or modes changed before Setup verification". The check
+  now compares the part of the planned mode the file can carry.
 - A partial Harness setup names what stopped it. The reply said only
   "Installation stopped and may be partial" once a reviewed file had been
   written, and dropped the installer's or the verification's own error; it

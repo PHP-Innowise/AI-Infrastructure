@@ -155,6 +155,18 @@ impl Domain for SetupDomain {
         })
     }
 }
+/// The part of a planned mode a file keeps on this platform. Windows keeps
+/// only read-only, which publication writes from the owner's write bit and
+/// reads back as 0o444 or 0o644.
+fn carried_mode(mode: u32) -> u32 {
+    if cfg!(unix) {
+        mode
+    } else if mode & 0o200 == 0 {
+        0o444
+    } else {
+        0o644
+    }
+}
 fn installation_failure(
     error: &infra_core::RuntimeError,
     has_confirmed_effects: bool,
@@ -402,7 +414,7 @@ impl Setup {
                     HarnessError::conflict("A reviewed installed file is missing.")
                 })?;
                 let mode = rooted.read_mode(&item.path)?;
-                if store::sha(&bytes) != *expected || mode != Some(item.mode) {
+                if store::sha(&bytes) != *expected || mode != Some(carried_mode(item.mode)) {
                     return Err(HarnessError::conflict(
                         "Installed bytes or modes changed before Setup verification.",
                     ));
@@ -554,6 +566,20 @@ impl Domain for Setup {
 #[cfg(test)]
 mod installation_failure_tests {
     use super::*;
+
+    #[test]
+    fn planned_modes_compare_as_this_platform_keeps_them() {
+        for (planned, windows) in [
+            (0o755, 0o644),
+            (0o644, 0o644),
+            (0o600, 0o644),
+            (0o555, 0o444),
+            (0o444, 0o444),
+        ] {
+            let kept = if cfg!(unix) { planned } else { windows };
+            assert_eq!(carried_mode(planned), kept, "{planned:o}");
+        }
+    }
 
     #[test]
     fn unreceipted_publication_keeps_recovery_evidence_even_without_observed_effects() {
