@@ -912,7 +912,14 @@ mod cleanup_tests {
     fn image(pid: u32) -> io::Result<Option<Image>> {
         let text = match fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            // A process that exits between opening and reading its stat file
+            // reads as ESRCH rather than as an absent file.
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                return Ok(None);
+            }
             Err(error) => return Err(error),
         };
         let invalid = || io::Error::other("Cannot parse owned ONNX test process identity");

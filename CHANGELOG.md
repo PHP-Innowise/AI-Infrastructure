@@ -24,6 +24,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Two Linux test helpers treat a process that exits mid-read as gone.
+  Reading `/proc/<pid>/stat` of a process that exits between opening and
+  reading the file fails with ESRCH rather than as a missing file, and the
+  native process test in infra-eval panicked with "No such process" in one
+  CI run; the ONNX cleanup test's helper had the same gap. Both now read
+  ESRCH as an exited process, as the host tests already did.
 - A Cursor plugin image can be materialized again on Windows. Repeating it
   compared each file's planned Unix mode with the mode Windows keeps, only
   read-only, reported as 0o444 or 0o644, and refused an unchanged image with
