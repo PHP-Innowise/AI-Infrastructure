@@ -189,6 +189,13 @@ edition's own files remain in that edition's changelog.
   `, ` and `: `. The native runtime wrote compact lines in insertion
   order, so a migrated task's tracked journal mixed two line formats.
   Both read the same; only lines written from now on change.
+- An explicit `memory retrieve` (or `context`) request asks with its plain
+  words again, each once and at most 32, as the retired runtime asked, and
+  the capsule and its retrieval manifest record those words. The native
+  runtime searched every word of the request and recorded it verbatim: on
+  twin projects a 35-word request whose subject came after the 32nd word
+  retrieved two documents natively and none before. Recorded history is
+  still searched with the whole request.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

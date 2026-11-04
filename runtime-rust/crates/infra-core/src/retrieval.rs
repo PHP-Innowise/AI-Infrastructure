@@ -805,6 +805,13 @@ fn retrieve_inner(
         request.query = crate::domain::sanitize_automatic_query(&request.query)?;
     }
     guard_shared_text("Task Capsule request", &[request.query.clone()])?;
+    // The request asks with its plain words, each once and at most 32, as the
+    // retired runtime asked (`build_capsule_query`); recorded history is still
+    // searched with the whole request.
+    if request.history_text.is_none() {
+        request.history_text = Some(request.query.clone());
+    }
+    request.query = query::build_capsule_query(&request.query, None)?;
     let request = &request;
     let mut phase_seconds = request.phase_seconds.clone();
     if request.refresh_index && !store.read_only {

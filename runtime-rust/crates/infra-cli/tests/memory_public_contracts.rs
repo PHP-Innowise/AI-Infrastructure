@@ -2678,3 +2678,55 @@ fn the_message_journal_keeps_the_retired_line_format() {
     );
     assert_eq!(read[0]["body"], body, "{read}");
 }
+
+/// An explicit request asks with its plain words, each once and at most 32,
+/// as the retired runtime asked: a long request's tail beyond them is not
+/// searched, and the capsule records the words it searched with.
+#[test]
+fn an_explicit_request_asks_with_its_first_thirty_two_words() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-WORDS");
+    fixture.success(&["index", "--json"], None);
+    let asked = fixture.success(
+        &[
+            "retrieve",
+            "--task-id",
+            "TASK-WORDS",
+            "--json",
+            "Cobalt retries?",
+        ],
+        None,
+    );
+    assert_eq!(asked["query"], "Cobalt retries", "{asked}");
+    assert!(
+        asked["selected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "specs/source.md"),
+        "{asked}"
+    );
+    let filler = (0..32)
+        .map(|index| format!("zzfill{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let long = fixture.success(
+        &[
+            "retrieve",
+            "--task-id",
+            "TASK-WORDS",
+            "--json",
+            &format!("{filler} {filler} cobalt retries"),
+        ],
+        None,
+    );
+    assert_eq!(long["query"], filler, "{long}");
+    assert!(
+        !long["selected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "specs/source.md"),
+        "{long}"
+    );
+}
