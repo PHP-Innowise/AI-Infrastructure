@@ -1270,7 +1270,11 @@ impl ResultService {
             Value::Null
         } else {
             self.promotion_summary(
-                BankService::new(self.context.clone()).auto_promote(3, None, None)?,
+                BankService::new(self.context.clone()).auto_promote(
+                    crate::bank::promotion::AUTOMATIC_PROMOTION_LIMIT,
+                    None,
+                    None,
+                )?,
                 &allowed,
             )?
         };

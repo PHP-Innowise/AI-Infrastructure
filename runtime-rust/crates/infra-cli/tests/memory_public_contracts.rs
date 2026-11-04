@@ -817,6 +817,88 @@ fn resolving_verified_record_promotes_only_that_record_before_a_turn_boundary() 
     assert_eq!(fixture.chunks().len(), 1);
 }
 
+/// One automatic promotion run makes at most five new attempts, as every run
+/// of the retired runtime did; the rest waits for the next run.
+#[test]
+fn automatic_promotion_makes_five_attempts_a_run() {
+    let fixture = Fixture::new(false);
+    let topics = [
+        (
+            "Invoice numbers restart for each tenant",
+            "Numbering restarts per tenant ledger at year start.",
+        ),
+        (
+            "Refund dates follow the original invoice",
+            "Refund documents copy the invoice issue date verbatim.",
+        ),
+        (
+            "Credit notes reuse the refund rule",
+            "Credit memos inherit refund timing semantics unchanged.",
+        ),
+        (
+            "Tax reports group by calendar quarter",
+            "Quarterly VAT summaries aggregate lines by quarter boundaries.",
+        ),
+        (
+            "Currency rounding happens per line",
+            "Monetary amounts round half-up on each individual line item.",
+        ),
+        (
+            "Archived invoices stay immutable",
+            "Closed ledgers reject edits; corrections need cancellation documents.",
+        ),
+        (
+            "Discount codes expire at midnight UTC",
+            "Promotional vouchers lapse when the coordinated clock passes midnight.",
+        ),
+    ];
+    for (index, (title, progress)) in topics.iter().enumerate() {
+        let created = fixture.success(
+            &[
+                "brain-create",
+                "finding",
+                "--external-id",
+                &format!("FIVE-{index}"),
+                "--title",
+                title,
+                "--source",
+                "specs/source.md",
+                "--json",
+            ],
+            None,
+        );
+        let id = created["id"].as_str().unwrap();
+        fixture.verify(id);
+        fixture.success(
+            &[
+                "brain-update",
+                "--record-id",
+                id,
+                "--revision",
+                "auto",
+                "--progress",
+                progress,
+                "--transition",
+                "resolved",
+                "--reason",
+                "Resolved after verification",
+                "--json",
+            ],
+            None,
+        );
+    }
+    let config = fixture.project.join("project-brain/config/runtime.json");
+    let mut value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    value["automatic_promotion"] = json!(true);
+    fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    let first = fixture.success(&["promote-auto", "--json"], None);
+    assert_eq!(first["promoted"].as_array().unwrap().len(), 5, "{first}");
+    let second = fixture.success(&["promote-auto", "--json"], None);
+    assert_eq!(second["promoted"].as_array().unwrap().len(), 2, "{second}");
+    assert_eq!(fixture.chunks().len(), 7);
+}
+
 #[test]
 fn promotion_remains_optional_and_its_failure_does_not_undo_resolution() {
     let disabled = Fixture::new(false);

@@ -1165,7 +1165,11 @@ impl MemoryService {
                 !flag(&request, "reject"),
             ),
             "promote-apply" => bank.apply(required(&request, "promotion_id")?),
-            "promote-auto" => bank.auto_promote(10, None, None),
+            "promote-auto" => bank.auto_promote(
+                crate::bank::promotion::AUTOMATIC_PROMOTION_LIMIT,
+                None,
+                None,
+            ),
             "export" => bank.export(
                 Path::new(required(&request, "destination")?),
                 flag(&request, "include_archive"),
@@ -1587,11 +1591,15 @@ fn promote_on_resolution(bank: &BankService, record: &Value) -> Option<Value> {
     let id = record["id"].as_str()?.to_string();
     let only = [id.clone()];
     Some(
-        bank.auto_promote(10, None, Some(&only))
-            .unwrap_or_else(|error| {
-                object!({"enabled":true,"promoted":[],"blocked":[],"skipped":0,
+        bank.auto_promote(
+            crate::bank::promotion::AUTOMATIC_PROMOTION_LIMIT,
+            None,
+            Some(&only),
+        )
+        .unwrap_or_else(|error| {
+            object!({"enabled":true,"promoted":[],"blocked":[],"skipped":0,
             "failed":[{"record_id":id,"reason":error.to_string()}]})
-            }),
+        }),
     )
 }
 fn payload(request: &Value, input: &[u8]) -> Result<Value> {

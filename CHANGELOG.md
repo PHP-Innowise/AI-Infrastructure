@@ -110,6 +110,14 @@ edition's own files remain in that edition's changelog.
   instead of writing "query: from branch name only"), with one it gives the
   warming notice alone. An enforced gate's skip exits 4, so the host keeps
   its rule, and the capsule's manifest stays local, as before.
+- Automatic promotion makes at most five new attempts a run again, at a
+  turn boundary, after a saved result, for a resolved record and from
+  `promote-auto`, as the retired runtime did everywhere; the native runtime
+  made ten at a turn boundary and from `promote-auto` and three after a
+  saved result. On a copy of a client project `promote-auto` promoted ten
+  records natively where the retired runtime promoted five; the five it
+  promotes, the seven it blocks and the 53 it leaves for later runs are now
+  the retired runtime's own.
 - The session banner of a linked worktree the installation serves says it
   shares that installation's memory again, instead of calling it a project
   attached from elsewhere with nothing installed. The worktree is both

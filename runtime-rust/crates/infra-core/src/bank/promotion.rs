@@ -1608,6 +1608,11 @@ fn save_retry(
     )?;
     crate::fs::atomic_json(&service.context.roots.state.join(path), value)
 }
+/// New promotion attempts one automatic run makes: at a turn boundary, after
+/// a saved result, for a resolved record and from `promote-auto`. The retired
+/// runtime made five everywhere, the rate every measured run saw; the rest
+/// waits for the next boundary.
+pub const AUTOMATIC_PROMOTION_LIMIT: usize = 5;
 fn empty_auto() -> Value {
     object!({"enabled":false,"promoted":[],"failed":[],"blocked":[],"closed":[],"skipped":0})
 }

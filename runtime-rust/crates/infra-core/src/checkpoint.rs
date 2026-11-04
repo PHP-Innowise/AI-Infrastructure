@@ -669,7 +669,11 @@ pub fn run_turn(
     if context.mode == "governed" {
         if flushed.is_some() {
             consolidation = bank.auto_consolidate()?;
-            promotion = bank.auto_promote(10, None, None)?;
+            promotion = bank.auto_promote(
+                crate::bank::promotion::AUTOMATIC_PROMOTION_LIMIT,
+                None,
+                None,
+            )?;
             compaction = bank.auto_compact()?;
         } else {
             promotion = bank.retry_pending()?;
