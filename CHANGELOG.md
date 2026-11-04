@@ -68,6 +68,9 @@ edition's own files remain in that edition's changelog.
   are disabled in this project ... (invoke with /agent-name)", and a second
   write-capable agent with the retired one-line text. The native gate gave
   Cursor's person Claude Code's three-line text.
+- `memory health` and `memory retrieval-report` list a refresh's phases in
+  the order it runs them (`stat`, `index`, `retrieval`), as the retired
+  reports did; the native text followed the sorted keys of the JSON object.
 
 - Claude Code saves a turn's result without asking again: the Stop request
   names `cd <installation> && echo -E '<JSON>' | memory-bank/bin/infra-engine

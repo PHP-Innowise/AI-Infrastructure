@@ -1102,6 +1102,45 @@ fn hand_run_commands_report_what_they_did() {
     );
 }
 
+/// The operator reports list a refresh's phases in the order it runs them,
+/// as the retired reports did, not in the sorted order of a JSON object.
+#[test]
+fn health_and_retrieval_report_list_phases_in_pipeline_order() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-PHASES");
+    for extra in [&["--ephemeral"][..], &[][..]] {
+        let mut arguments = vec![
+            "refresh",
+            "--json",
+            "--task-id",
+            "TASK-PHASES",
+            "--host",
+            "codex",
+            "--gate",
+            "off",
+            "--query",
+            "cobalt metadata boundary",
+        ];
+        arguments.extend_from_slice(extra);
+        fixture.success(&arguments, None);
+    }
+    for operation in ["health", "retrieval-report"] {
+        let output = fixture.run(&[operation], None);
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(output.status.success(), "{text}");
+        let phases = text
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("phase "))
+            .map(|line| line.split(':').next().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            phases,
+            ["stat", "index", "retrieval"],
+            "{operation}: {text}"
+        );
+    }
+}
+
 /// A record whose cited file changed or went away is intact: validation lists
 /// it with what retrieval does about it, as the retired runtime did, and
 /// still passes.

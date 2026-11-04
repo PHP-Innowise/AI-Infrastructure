@@ -738,7 +738,7 @@ pub fn render(operation: &str, request: &Value, result: Value) -> Result<Output>
             } else if operation == "health" {
                 lines.push(format!("Refresh health ({turns} turn(s)):"));
                 if let Some(phases) = result["phase_seconds"].as_object() {
-                    for (name, band) in phases {
+                    for (name, band) in pipeline_order(phases) {
                         lines.push(format!(
                             "  phase {name}: p50 {} p95 {} max {} ({} sample(s))",
                             v(band, "p50"),
@@ -810,7 +810,7 @@ pub fn render(operation: &str, request: &Value, result: Value) -> Result<Output>
                     ));
                 }
                 if let Some(phases) = result["phase_seconds"].as_object() {
-                    for (name, band) in phases {
+                    for (name, band) in pipeline_order(phases) {
                         lines.push(format!(
                             "  phase {name}: p50 {} p95 {} ({} sample(s))",
                             v(band, "p50"),
@@ -903,4 +903,20 @@ fn execute_mode(arguments: Arguments, input: &[u8], controlled: bool) -> Result<
         output
     };
     Ok(output)
+}
+
+/// Phases in the order a refresh runs them, as the retired reports listed
+/// them; a JSON object holds its keys sorted, which put `stat` last.
+fn pipeline_order(phases: &serde_json::Map<String, Value>) -> Vec<(&String, &Value)> {
+    const PIPELINE: [&str; 3] = ["stat", "index", "retrieval"];
+    let mut ordered = PIPELINE
+        .iter()
+        .filter_map(|name| phases.get_key_value(*name))
+        .collect::<Vec<_>>();
+    ordered.extend(
+        phases
+            .iter()
+            .filter(|(name, _)| !PIPELINE.contains(&name.as_str())),
+    );
+    ordered
 }
