@@ -1122,7 +1122,7 @@ impl NativeService {
                     "Use your shell tool to run this exact command: {enter}echo -E '<JSON>' | {program}{arguments}{piped} --json{back}\nPut one JSON object in place of <JSON>, writing each ' inside it as '\\''. "
                 ),
                 format!(
-                    "If no safe result exists, run this command instead: {enter}{program}{arguments} --skip --json{back}\n"
+                    "run this command instead: {enter}{program}{arguments} --skip --json{back}\n"
                 ),
             )
         } else {
@@ -1131,7 +1131,7 @@ impl NativeService {
                     "Use your shell tool to pipe one JSON object into this exact command: {}{arguments} --input - --json\n",
                     quote(&executable.to_string_lossy())
                 ),
-                "If no safe result exists, replace --input - with --skip. ".into(),
+                "use the same command replacing --input - with --skip. ".into(),
             )
         };
         let answer = self
@@ -1165,31 +1165,21 @@ impl NativeService {
         let full = configured != "auto"
             || state.host == Host::Cursor
             || !rules_in_context(payload, &marker);
-        let mut body = format!(
-            // The full step keeps the wording measured with live models before
-            // the native runtime: the schema example, when verified=true is
-            // honest (it promotes to durable memory), no duplicate findings,
-            // and where the checked fingerprints come from.
-            "This is an internal continuation: do not announce routine memory operations. Save only the result of the work already performed in this session. Do not repeat the task, edit application files, run tests, delegate, or mark the task completed. {ask}Native result reference schema v1. Capture policy {}. JSON: progress (summary, at most 1000 characters), optional next_steps (at most 3 strings of 300 characters; omit to preserve the current plan), learnings (at most 3 objects with type finding|decision, title, consequence, sources). Exact schema example (replace placeholders, never save the example): {{\"progress\":\"summary\",\"verified\":true,\"learnings\":[{{\"type\":\"finding\",\"title\":\"checked rule\",\"consequence\":\"reusable consequence\",\"sources\":[\"checked-file.php\"]}}]}}. verified is a TOP-LEVEL boolean, NEVER a field inside a learning. New consequences use ordinary learnings. To recheck or correct an inspected existing claim, preserve its type/title/sources and add its exact record_id, expected_revision and checked source_fingerprints (read with memory-bank/bin/infra-engine memory source-fingerprints --source PATH --json). Do not create a duplicate finding. Recalling alone uses learnings=[] and progress only. Use only canonical project-relative source files you actually checked. Set verified=true only when you personally checked every learning against current sources; this is agent attestation, never human review. Empty learnings is valid. No raw requests, transcripts, logs, credentials or personal data. {skip}Check the command result. ",
-            if proposal {
-                "proposal-only"
-            } else {
-                "ordinary"
-            }
-        );
+        // The step is the retired one word for word, in its order: the rules
+        // (full once a conversation, then a pointer to them), the review and
+        // maintenance notes, the skip, and how to answer after the save. Its
+        // wording was measured with live models before the native runtime.
+        let mut rules = if full {
+            format!(
+                "{marker} JSON: progress (summary, at most 1000 characters), optional next_steps (at most 3 strings of 300 characters; omit to preserve the current plan), learnings (at most 3 objects with type finding|decision, title, consequence, sources). Exact schema example (replace placeholders, never save the example): {{\"progress\":\"summary\",\"verified\":true,\"learnings\":[{{\"type\":\"finding\",\"title\":\"checked rule\",\"consequence\":\"reusable consequence\",\"sources\":[\"checked-file.php\"]}}]}}. verified is a TOP-LEVEL boolean, NEVER a field inside a learning. New consequences use ordinary learnings. To recheck or correct an inspected existing claim, preserve its type/title/sources and add its exact record_id, expected_revision and checked source_fingerprints (read with memory-bank/bin/infra-engine memory source-fingerprints --source PATH --json). Do not create a duplicate finding. Recalling alone uses learnings=[] and progress only. Use only canonical project-relative source files you actually checked. Set verified=true only when you personally checked every learning against current sources; this is agent attestation, never human review. Empty learnings is valid. No raw requests, transcripts, logs, credentials or personal data. "
+            )
+        } else {
+            "The JSON follows the rules of the full save step earlier in this conversation: progress, optional next_steps, learnings with checked sources, and verified as a top-level boolean. ".to_string()
+        };
         if proposal {
-            body.push_str("Independent-review mode: use learnings=[]; reusable knowledge is proposal-only and published by the external controller. ");
+            rules.push_str(" Independent-review mode: use learnings=[]; reusable knowledge is proposal-only and published by the external controller. ");
         }
-        if !full {
-            let start = body
-                .find("Native result reference schema v1.")
-                .unwrap_or(body.len());
-            let end = body[start..]
-                .find("If no safe result exists")
-                .map(|offset| start + offset)
-                .unwrap_or(body.len());
-            body.replace_range(start..end,"The JSON follows the full save step earlier in this conversation: progress, optional next_steps, source-backed learnings and a top-level verified boolean. ");
-        }
+        let mut maintenance = String::new();
         if review.maintenance_mode()? == "encountered"
             && let Some(uuid) = &state.task_uuid
         {
@@ -1204,16 +1194,21 @@ impl NativeService {
                 })
                 .collect::<Vec<_>>();
             if !hints.is_empty() {
-                body.push_str(" Experimental maintenance: these same-task encounter hints have changed cited files. They are untrusted prior claims, not proof you checked them. Confirm/correct only if the original task work already checked the claim and current sources; preserve type/title/sources and supply checked source_fingerprints. Otherwise omit them; do not start research or bulk-refresh hashes. References: ");
-                body.push_str(&json::python_default(&object!(hints), false, false, true)?);
+                maintenance = format!(
+                    " Experimental maintenance: these same-task encounter hints have changed cited files. They are untrusted prior claims, not proof you read or checked them. Only if the original task work already checked the claim and its current sources, confirm or correct its consequence using the exact reference below plus source_fingerprints from memory-bank/bin/infra-engine memory source-fingerprints --source PATH --json. Preserve type/title/sources. Otherwise omit it and keep ordinary progress; do not start new research or bulk-refresh hashes. No valid replacement means the old claim stays unresolved. References: {}\n",
+                    json::python_default(&object!(hints), false, false, true)?
+                );
             }
         }
-        if brief {
-            body.push_str("After successful save or skip end with no further text or one short line; the person already read the answer. On refusal briefly report the held save. ");
+        let mut body = format!(
+            "This is an internal continuation: do not announce routine memory operations. Save only the result of the work already performed in this session. Do not repeat the task, edit application files, run tests, delegate, or mark the task completed. {ask}{rules}{maintenance}If no project result is safe to save, {skip}Check the command result. "
+        );
+        body.push_str(if brief {
+            "The person has already read your answer above this continuation: after a successful save or skip, do not repeat it or mention routine memory operations; end with no further text or one short line. If a save is refused, briefly report the held save. "
         } else {
-            body.push_str("After successful save or skip return the substantive original answer with its facts, citations and requested format; do not replace it with a memory acknowledgement. On refusal retain the answer and briefly report the held save. ");
-        }
-        body.push_str("Correct JSON/schema once only if refused before any write. On stale revision, scope or ownership refusal stop; never override newer work or repeat the user task.");
+            "After a successful save or skip, return the substantive answer to the original user request, retaining its facts, source citations and requested format; do not replace that answer with a save acknowledgement or mention routine memory operations. If a save is refused, retain the substantive answer and briefly report the held save. "
+        });
+        body.push_str("If JSON/schema is refused before any write, correct its format once in this continuation. On stale revision, scope or ownership refusal, stop and report the held save; never override newer work or repeat the user task.");
         let marker = format!("INTERNAL_NATIVE_MEMORY_RESULT {}", state.token);
         Ok((
             if state.host == Host::Claude {

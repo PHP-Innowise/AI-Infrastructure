@@ -247,6 +247,16 @@ edition's own files remain in that edition's changelog.
   One difference stays: a memory chunk citing a URL is not reported as
   citing a file that is gone; the URL is no file, and the chunk is
   retrieved.
+- The Stop hook's save step is the retired one word for word again. Its
+  rules were restored earlier, but the native step had rewritten the rest
+  without a measurement: "If no safe result exists" for "If no project
+  result is safe to save", a shortened account of how to answer after the
+  save ("return the substantive original answer ...", "On refusal retain
+  the answer ...", "Correct JSON/schema once only if refused ..."), a
+  different pointer to the rules on a conversation's later saves, and the
+  review and maintenance notes after the skip instead of before it. The
+  wording measured with live models is back in its order; only the memory
+  CLI's own name and the command's form differ.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
