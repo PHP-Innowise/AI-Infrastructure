@@ -110,6 +110,13 @@ edition's own files remain in that edition's changelog.
   instead of writing "query: from branch name only"), with one it gives the
   warming notice alone. An enforced gate's skip exits 4, so the host keeps
   its rule, and the capsule's manifest stays local, as before.
+- Project Brain records are read active first and archived after, each in
+  path order, as the retired runtime read them, so `memory validate` lists
+  the stale records an agent works with before the archived ones. The
+  native reader sorted both trees together and put `archive/` first. On a
+  copy of a client project `validate`, `status`, `health`, `bank-audit`,
+  `consolidate`, `promote-auto`, `compact` and the retrieval report now give
+  the retired runtime's output on its real records.
 - Automatic promotion makes at most five new attempts a run again, at a
   turn boundary, after a saved result, for a resolved record and from
   `promote-auto`, as the retired runtime did everywhere; the native runtime

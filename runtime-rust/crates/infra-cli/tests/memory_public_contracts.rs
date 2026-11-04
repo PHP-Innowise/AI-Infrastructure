@@ -817,6 +817,41 @@ fn resolving_verified_record_promotes_only_that_record_before_a_turn_boundary() 
     assert_eq!(fixture.chunks().len(), 1);
 }
 
+/// Records are read active first and archived after, as the retired runtime
+/// read them: validation names what an agent works with before the archive.
+#[test]
+fn brain_records_are_read_active_before_archived() {
+    let fixture = Fixture::new(false);
+    let archived = fixture.finding("ORDER-ARCHIVED", "Cobalt metadata boundary");
+    let archived = archived["id"].as_str().unwrap().to_owned();
+    fixture.verify(&archived);
+    fixture.resolve(&archived);
+    fixture.success(&["compact", "--json"], None);
+    fixture.finding("ORDER-ACTIVE", "Cobalt retry ceiling");
+    let inventory = fixture.brain().inventory(true).unwrap();
+    let paths = inventory
+        .records
+        .iter()
+        .map(|image| image.path.to_string_lossy().replace('\\', "/"))
+        .collect::<Vec<_>>();
+    let first_archived = paths
+        .iter()
+        .position(|path| path.contains("/project-brain/archive/"))
+        .expect("the resolved finding was archived");
+    assert!(
+        paths[..first_archived]
+            .iter()
+            .any(|path| path.contains("/project-brain/dynamic/")),
+        "{paths:?}"
+    );
+    assert!(
+        paths[first_archived..]
+            .iter()
+            .all(|path| path.contains("/project-brain/archive/")),
+        "{paths:?}"
+    );
+}
+
 /// One automatic promotion run makes at most five new attempts, as every run
 /// of the retired runtime did; the rest waits for the next run.
 #[test]

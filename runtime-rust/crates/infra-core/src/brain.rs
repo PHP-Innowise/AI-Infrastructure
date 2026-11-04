@@ -156,12 +156,18 @@ impl BrainRepository {
         if !fs::admit_directory(&anchor)? {
             return Ok((Vec::new(), Vec::new()));
         }
+        // Active records first and the archive after, each in path order, as
+        // the retired runtime read them: validation and its stale list name
+        // the records an agent works with before the archived ones.
         let mut candidates = Vec::new();
         collect_records(&anchor.join("dynamic"), &mut candidates)?;
-        if include_archive {
-            collect_records(&anchor.join("archive"), &mut candidates)?;
-        }
         candidates.sort();
+        if include_archive {
+            let mut archived = Vec::new();
+            collect_records(&anchor.join("archive"), &mut archived)?;
+            archived.sort();
+            candidates.extend(archived);
+        }
         let mut records = Vec::new();
         let mut problems = Vec::new();
         for path in candidates {
