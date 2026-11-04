@@ -914,7 +914,7 @@ fn retrieve_inner(
         if let Some(id) = &request.task_id {
             capsule.0["pending_turns"] = json!(store.pending_turns(id)?.len());
         }
-        let (capsule, _) = cap_working_custody(
+        let (mut capsule, _) = cap_working_custody(
             capsule,
             context,
             request,
@@ -922,6 +922,11 @@ fn retrieve_inner(
             task_path.as_deref(),
             task_image.as_deref(),
         )?;
+        // A capsule that searched nothing has the retired one's shape: no
+        // categories, and its token estimates by layer.
+        capsule.0["categories"] = json!({});
+        capsule.0["token_estimates"] =
+            json!({"procedural":0,"semantic":0,"episodic":0,"local_episodes":0,"total":0});
         return capsule::pack(capsule, request.delivery_profile);
     }
     let (mut candidates, diagnostics) = query::rank_candidates_observed(

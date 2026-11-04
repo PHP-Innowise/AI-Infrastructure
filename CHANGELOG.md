@@ -257,6 +257,13 @@ edition's own files remain in that edition's changelog.
   review and maintenance notes after the skip instead of before it. The
   wording measured with live models is back in its order; only the memory
   CLI's own name and the command's form differ.
+- The index reports every layer, an empty one as zero, as the retired index
+  did: `refresh --json` (Memory MCP's `memory_retrieve` answer) and `index
+  --json` lacked `episodic` on a project with no episodic documents, and
+  the `/memory` report printed its line without "(0 documents)". A capsule
+  that searched nothing (the navigation profile, or recall before the
+  task's first save) has the retired shape again: no categories, and its
+  token estimates by layer, not by category with the budget's limits.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

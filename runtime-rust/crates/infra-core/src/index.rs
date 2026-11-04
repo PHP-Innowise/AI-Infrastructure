@@ -1235,7 +1235,11 @@ pub fn refresh_index(
             return Err(error);
         }
     }
-    let mut layers = BTreeMap::new();
+    // Every layer is reported, an empty one as zero, as the retired index did.
+    let mut layers = ["procedural", "semantic", "episodic"]
+        .into_iter()
+        .map(|layer| (layer.to_string(), 0))
+        .collect::<BTreeMap<_, _>>();
     let mut statement = store
         .conn
         .prepare("SELECT layer,COUNT(*) FROM documents GROUP BY layer")?;

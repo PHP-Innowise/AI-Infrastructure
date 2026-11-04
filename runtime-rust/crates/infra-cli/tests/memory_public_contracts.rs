@@ -2862,3 +2862,33 @@ fn a_tasks_file_edges_are_screened_and_checked_against_the_index() {
         ["src/Staged.php", "src/Tracked.php", "src/Untracked.php"]
     );
 }
+
+/// The refresh report names every layer, an empty one as zero, and a capsule
+/// that searched nothing has the retired shape: no categories, its token
+/// estimates by layer.
+#[test]
+fn an_unsearched_capsule_and_the_layer_counts_keep_the_retired_shape() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-SHAPE");
+    let report = fixture.success(
+        &[
+            "refresh",
+            "--json",
+            "--task-id",
+            "TASK-SHAPE",
+            "--capsule-profile",
+            "navigation",
+            "--query",
+            "cobalt retries",
+        ],
+        None,
+    );
+    assert_eq!(report["counts"]["episodic"], 0, "{report}");
+    let capsule = &report["capsule"];
+    assert_eq!(capsule["categories"], json!({}), "{report}");
+    assert_eq!(
+        capsule["token_estimates"],
+        json!({"procedural":0,"semantic":0,"episodic":0,"local_episodes":0,"total":0}),
+        "{report}"
+    );
+}
