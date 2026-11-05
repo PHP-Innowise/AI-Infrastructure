@@ -351,7 +351,7 @@ edition's own files remain in that edition's changelog.
   retirement and re-verification read as before. The native validator
   printed one generic sentence per rule ("Missing or unexpected memory
   metadata keys", "Memory verification dates are invalid or overdue"),
-  nothing for warnings and no rename. On twin projects 60 banks, 58 of them
+  nothing for warnings and no rename. On twin projects 55 banks, 53 of them
   broken, now draw the retired report and exit code; only the
   index-conflict hint differs, naming
   `memory-bank/bin/infra-engine memory reindex-bank`.
