@@ -233,3 +233,17 @@ fn a_chunk_id_that_names_no_chunk_is_refused_as_before() {
         .unwrap_err();
     assert_eq!(retired.message, "valid_to must be an ISO date (YYYY-MM-DD)");
 }
+
+#[test]
+fn a_promotion_that_cannot_be_read_is_named_as_before() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.root.join("project-brain/control/promotions")).unwrap();
+    for id in ["00000000-0000-4000-8000-000000000000", "nope"] {
+        let refused = fixture.bank.apply(id).unwrap_err();
+        assert_eq!(
+            refused.message,
+            format!("Promotion not found or invalid: {id}"),
+            "{id}"
+        );
+    }
+}
