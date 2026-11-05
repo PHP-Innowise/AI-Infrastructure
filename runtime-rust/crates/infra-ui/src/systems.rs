@@ -174,6 +174,41 @@ pub async fn load() {
         _ => {}
     }
 }
+/// The run's status and what stopped it: the stopped dispatch's receipt says
+/// that best (the agent's own reason, failed checks, the CLI's message); the
+/// journal's error is the fallback, a code read as words.
+fn run_status(v: &V) -> String {
+    let status = m::label(v["status"].as_str().unwrap_or(""));
+    let stopped = m::array(&v["execution"]["steps"])
+        .into_iter()
+        .find(|step| matches!(step["status"].as_str(), Some("blocked" | "interrupted")));
+    let receipt = stopped.as_ref().and_then(|step| {
+        m::array(&v["receipts"])
+            .into_iter()
+            .find(|receipt| receipt["phase"] == step["id"] && receipt["attempt"] == step["attempt"])
+    });
+    let reason = match (&stopped, &receipt) {
+        (Some(step), Some(receipt)) if receipt["error"] != "interrupted" => Some(format!(
+            "{}: {}",
+            m::text(step, "id"),
+            receipt_outcome(receipt)
+        )),
+        _ => v["execution"]["error"].as_str().map(|error| {
+            // A journal code reads as words; a sentence is shown as written.
+            if error.contains(' ') {
+                error.to_owned()
+            } else {
+                m::label(error)
+            }
+        }),
+    };
+    match reason {
+        Some(reason) if !m::yes(&v["active"]) && reason != status => {
+            format!("{status} · {reason}")
+        }
+        _ => status,
+    }
+}
 /// How a change reads in the change list.
 fn run_label(run: &V) -> String {
     format!(
@@ -914,25 +949,7 @@ fn render_run() {
         "system-run-title",
         &format!("{} · {}", m::text(&v, "change_id"), m::text(&v, "system")),
     );
-    dom::text(
-        "system-run-status",
-        &format!(
-            "{}{}",
-            m::label(v["status"].as_str().unwrap_or("")),
-            v["execution"]["error"]
-                .as_str()
-                // A journal code reads as words; a sentence is shown as written.
-                .map(|s| format!(
-                    " · {}",
-                    if s.contains(' ') {
-                        s.to_owned()
-                    } else {
-                        m::label(s)
-                    }
-                ))
-                .unwrap_or_default()
-        ),
-    );
+    dom::text("system-run-status", &run_status(&v));
     dom::pretty("system-plan-json", &v["plan"]);
     dom::clear("system-plan-summary");
     for (term, value) in [
@@ -2674,6 +2691,42 @@ mod display_tests {
         assert_eq!(unrun_checks(&earlier, &honest), None);
         let service = json!({"id":"service-orders","attempt":2,"status":"blocked"});
         assert_eq!(unrun_checks(&service, &honest), None);
+    }
+    #[test]
+    fn a_stopped_run_says_what_stopped_it() {
+        let run = |error: V, receipts: V| {
+            json!({"status":"blocked","active":false,
+                "execution":{"error":error,"steps":[
+                    {"id":"contracts","status":"blocked","attempt":2}]},
+                "receipts":receipts})
+        };
+        let agent = run(
+            json!("worker_blocked_or_verification_incomplete"),
+            json!([{"phase":"contracts","attempt":2,"ok":false,
+                "error":"worker_blocked_or_verification_incomplete",
+                "report":{"status":"blocked","summary":"The refund owner is undecided","checks":[]}}]),
+        );
+        assert_eq!(
+            run_status(&agent),
+            "blocked · contracts: blocked by the agent: The refund owner is undecided"
+        );
+        // Without a receipt of the stopped attempt the journal's error is shown.
+        let stale = run(
+            json!("worker_blocked_or_verification_incomplete"),
+            json!([{"phase":"contracts","attempt":1,"ok":false,"error":"interrupted","report":null}]),
+        );
+        assert_eq!(
+            run_status(&stale),
+            "blocked · worker blocked or verification incomplete"
+        );
+        let sentence = run(
+            json!("Sources changed between dispatches; prepare new plan"),
+            json!([]),
+        );
+        assert_eq!(
+            run_status(&sentence),
+            "blocked · Sources changed between dispatches; prepare new plan"
+        );
     }
     #[test]
     fn lists_read_as_text() {

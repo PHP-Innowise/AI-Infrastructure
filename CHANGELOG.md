@@ -157,6 +157,9 @@ edition's own files remain in that edition's changelog.
     expired and could not be refreshed` instead of `worker exit failure`;
     **Fill with AI** names the cause the same way instead of `Discovery
     provider exited with code 1`.
+  - A stopped run's status line says what stopped it from the stopped
+    dispatch's receipt (`blocked · contracts: blocked by the agent: …`)
+    instead of `worker blocked or verification incomplete`.
   - A prepared plan joins the change list and is selected there (the list
     kept showing the previous change until a reload), and the selected entry
     follows its run's status. The plan form chooses which contract consumers
