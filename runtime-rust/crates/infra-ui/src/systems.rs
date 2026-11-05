@@ -265,9 +265,24 @@ fn controls() {
             }
         }
     }
+    // A plan is computed from the saved system files, so a draft or an AI scan
+    // in the editor holds planning and launching until it is saved or discarded.
+    let scanning = m::yes(&m::data("discovery-active"));
+    let held = dirty || scanning;
+    let notice = if scanning {
+        "An AI scan is filling the system editor on Services. Planning and launching wait until it ends."
+    } else if dirty {
+        "The system editor on Services has unsaved changes. Save or discard them to plan or launch a change."
+    } else {
+        ""
+    };
+    dom::text("system-editor-lock", notice);
+    dom::hidden("system-editor-lock", notice.is_empty());
+    dom::disabled("system-prepare", pending || held);
     dom::disabled(
         "system-execute",
         pending
+            || held
             || active
             || v["session_id"].is_string()
             || v["plan"]["status"] != "needs_review"
@@ -1051,6 +1066,8 @@ async fn mutate(action: &str, extra: V) {
 }
 async fn plan() {
     if !sync_editor_target()
+        || m::yes(&m::data("editor-dirty"))
+        || m::yes(&m::data("discovery-active"))
         || m::yes(&m::data("system-pending"))
         || m::data("system-catalog").is_null()
         || !dom::validity("system-plan-form")

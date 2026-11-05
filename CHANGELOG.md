@@ -95,7 +95,11 @@ edition's own files remain in that edition's changelog.
     sentences, list fields read as lists, provider choices use product names,
     a change list shows `needs selection` for a plan that has no services,
     recovery preselects the retry a dispatch without a successful receipt
-    needs, and error sentences are no longer mangled into labels.
+    needs, and error sentences are no longer mangled into labels. A receipt
+    names what stopped its dispatch (failed checks, unrun verification checks,
+    files a read-only worker wrote). The Changes tab again says when unsaved
+    editor changes or an AI scan hold planning and launching, and holds them:
+    a plan is computed from the saved files, not the draft.
 
 - Keep repository leases and inbox available when an unrelated Linux mount
   has a deleted bind source root or an empty source field. Read only mounts
