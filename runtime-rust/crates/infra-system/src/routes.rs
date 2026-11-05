@@ -197,6 +197,13 @@ pub async fn execute_async(
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| fail("Invalid output filename"))?;
+        // A plan may already be under review, so a file is never replaced.
+        if std::fs::symlink_metadata(&path).is_ok() {
+            return Err(fail(format!(
+                "Plan output {} already exists; a saved plan is never replaced, so write a new file",
+                path.display()
+            )));
+        }
         let bytes = string(&output["_cli"]["stdout"]).as_bytes();
         let mut files = infra_core::bank::publication::PublicationFiles::new(parent)?;
         files.write_expected_limit(name, bytes, None, MAX_BYTES)?;

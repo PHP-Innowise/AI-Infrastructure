@@ -758,3 +758,33 @@ fn an_edited_system_file_still_needs_a_new_plan() {
         "{text}"
     );
 }
+
+#[test]
+fn a_saved_plan_is_never_replaced_and_the_refusal_says_so() {
+    let root = Root::new();
+    let config = system(&root.0);
+    let services = root.0.join("services");
+    let plan = root.0.join("plan.json");
+    let args = [
+        "plan",
+        "--system",
+        config.to_str().unwrap(),
+        "--allow-root",
+        services.to_str().unwrap(),
+        "--task",
+        "Bill every placed order",
+        "--change-id",
+        "bill-orders",
+        "--service",
+        "orders",
+        "--output",
+        plan.to_str().unwrap(),
+    ];
+    let (code, _, text) = cli(&root.0, &args);
+    assert_eq!(code, 0, "{text}");
+    let saved = fs::read(&plan).unwrap();
+    let (code, _, text) = cli(&root.0, &args);
+    assert_eq!(code, 2, "{text}");
+    assert!(text.contains("already exists"), "{text}");
+    assert_eq!(fs::read(&plan).unwrap(), saved);
+}
