@@ -329,6 +329,10 @@ edition's own files remain in that edition's changelog.
   emoji, is withheld rather than refused. On twin projects 13 unusual
   prompts now draw the retired hook output on Claude Code, Codex and
   Cursor, and no stored file holds the private text on either runtime.
+- `context-load --include-transcript` prints a saved transcript as it was
+  saved, as the retired command did; the native output added a blank line
+  after it. Saved and loaded handoffs otherwise match the retired ones on
+  twin projects, files included.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

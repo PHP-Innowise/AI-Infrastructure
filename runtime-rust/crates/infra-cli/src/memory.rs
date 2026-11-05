@@ -641,7 +641,12 @@ pub fn render(operation: &str, request: &Value, result: Value) -> Result<Output>
             }
             lines.push(infra_core::handoff::render_body(&result["context"])?);
             if let Some(transcript) = result["transcript"].as_str() {
-                lines.extend(["## Visible transcript\n".into(), transcript.into()]);
+                // Written as it was saved, as the retired command wrote it:
+                // the line break that ends it is its own.
+                lines.extend([
+                    "## Visible transcript\n".into(),
+                    transcript.strip_suffix('\n').unwrap_or(transcript).into(),
+                ]);
             }
         }
         "msg-send" => lines.push(format!(
