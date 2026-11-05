@@ -476,6 +476,15 @@ edition's own files remain in that edition's changelog.
   that ask for the save serve it there and the retired runtime accepted it.
   The save was refused with `--project names neither this project nor a
   worktree this installation serves`.
+- `install --sync` names what holds a host's wiring. A hook the project
+  edited keeps the whole host on its current wiring, so that no team change
+  is overwritten or unwired, and every file kept back said only "held back by
+  unchanged host wiring". Each now says which file holds it and the way out:
+  "held back by unchanged host wiring (.claude/settings.json):
+  .claude/hooks/bash-validator.sh is edited in the project: move it aside or
+  merge your change into the release, then sync again" (or `--update-tracked`
+  for a tracked file, `--rewire-codex` for Codex's trust-bound wiring).
+  `bench --sync` shows the same in its refusal.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
