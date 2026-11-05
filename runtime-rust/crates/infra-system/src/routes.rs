@@ -65,6 +65,13 @@ fn read_document(path: &Path) -> Result<Value> {
 pub fn initialize(root: &Path, name: &str) -> Result<Value> {
     text(&object!(name), "system name", 200)?;
     let root = absolute(root)?;
+    // A system workspace is created new, never over an existing folder.
+    if std::fs::symlink_metadata(&root).is_ok() {
+        return Err(fail(format!(
+            "{} already exists; init creates a new system folder, so choose another path",
+            root.display()
+        )));
+    }
     crate::manager::create_private(&root)?;
     create_new(
         &root,

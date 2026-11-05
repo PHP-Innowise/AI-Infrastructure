@@ -217,7 +217,8 @@ edition's own files remain in that edition's changelog.
   - `plan --output` onto an existing file says that a saved plan is never
     replaced instead of `Publication effect changed before write`, and a plan
     launched after the services' contracts changed says to prepare a new plan
-    instead of `Plan relationships differ from current catalog`.
+    instead of `Plan relationships differ from current catalog`; `system init`
+    over an existing folder says so instead of `File exists (os error 17)`.
 
 - Keep repository leases and inbox available when an unrelated Linux mount
   has a deleted bind source root or an empty source field. Read only mounts

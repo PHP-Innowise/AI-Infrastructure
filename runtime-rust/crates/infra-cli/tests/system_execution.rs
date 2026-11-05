@@ -1069,3 +1069,26 @@ fn a_changed_contract_may_be_named_by_its_id_alone() {
         "{text}"
     );
 }
+
+#[test]
+fn init_creates_a_new_system_folder_and_says_so_when_one_exists() {
+    let root = Root::new();
+    let folder = root.0.join("new-system");
+    let args = [
+        "init",
+        "--root",
+        folder.to_str().unwrap(),
+        "--name",
+        "New system",
+    ];
+    let (code, value, text) = cli(&root.0, &args);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(value["services"], 0);
+    assert!(folder.join("system.json").is_file());
+    let (code, _, text) = cli(&root.0, &args);
+    assert_eq!(code, 2, "{text}");
+    assert!(
+        text.contains("already exists; init creates a new system folder"),
+        "{text}"
+    );
+}
