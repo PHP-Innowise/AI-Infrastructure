@@ -444,6 +444,9 @@ fn a_service_worker_echoing_the_agreed_order_keeps_its_work() {
 
 /// Runs the plan with an adapter script whose body sees the prompt as `$input`.
 fn run_script(root: &Path, body: &str, mode: &str) -> (i32, Value, PathBuf) {
+    run_script_access(root, body, mode, "service")
+}
+fn run_script_access(root: &Path, body: &str, mode: &str, access: &str) -> (i32, Value, PathBuf) {
     let config = system(root);
     let config = config.to_str().unwrap();
     let services = root.join("services");
@@ -494,6 +497,8 @@ fn run_script(root: &Path, body: &str, mode: &str) -> (i32, Value, PathBuf) {
             "command",
             "--executable",
             script.to_str().unwrap(),
+            "--access",
+            access,
             "--mode",
             mode,
             "--timeout",
@@ -886,5 +891,47 @@ fn a_worker_that_exits_with_an_error_says_why_in_its_receipt_and_the_run() {
     assert_eq!(
         journal["error"],
         "The command CLI exited with code 1: Not signed in: run the CLI login first"
+    );
+}
+
+#[test]
+fn in_the_all_scope_a_worker_may_edit_another_selected_service_it_reports() {
+    let root = Root::new();
+    let (code, summary, directory) = run_script_access(
+        &root.0,
+        r#"case "$input" in
+  *'"phase":"contracts","previous_receipts"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"service":"billing","task"'*) printf 'billed\n' > ../orders/src/work.txt; printf 'after\n' > src/work.txt; report billed '["orders/src/work.txt","billing/src/work.txt"]' '[]' ;;
+  *) report checked '[]' '[]' ;;
+esac"#,
+        "edit",
+        "all",
+    );
+    assert_eq!(code, 0, "{summary:#}");
+    assert_completed(&summary, &directory);
+    assert_eq!(
+        fs::read_to_string(root.0.join("services/orders/src/work.txt")).unwrap(),
+        "billed\n"
+    );
+    // An unreported edit in another service still stops the run in this scope.
+    let other = Root::new();
+    let (code, summary, _) = run_script_access(
+        &other.0,
+        r#"case "$input" in
+  *'"phase":"contracts","previous_receipts"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"service":"billing","task"'*) printf 'billed\n' > ../orders/src/work.txt; report billed '[]' '[]' ;;
+  *) report checked '[]' '[]' ;;
+esac"#,
+        "edit",
+        "all",
+    );
+    assert_eq!(code, 2, "{summary:#}");
+    let journal: Value =
+        serde_json::from_slice(&fs::read(other.0.join("run/run.json")).unwrap()).unwrap();
+    assert!(
+        journal["error"].as_str().unwrap().contains(
+            "orders/src/work.txt changed (content changed) without being reported in changed_files"
+        ),
+        "{journal:#}"
     );
 }
