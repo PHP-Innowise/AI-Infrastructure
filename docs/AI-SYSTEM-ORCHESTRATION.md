@@ -736,6 +736,9 @@ remains a separate review through the owning runtime. No commit, push, merge or
 deployment is performed by this execution flow.
 
 Use **Cancel run** for active work and **Resume saved run** for unfinished runs.
+**Plan again** opens the plan form filled from the selected change (task,
+starting services, consumers, budget and the next change ID), so a decision a
+blocked agreement asked for can be added to the task and planned again.
 **Remove from list** hides a change that is not running from the change list;
 its plan, receipts and the services' native tasks are kept.
 The run's status line names what stopped it, from the stopped dispatch's

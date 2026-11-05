@@ -244,6 +244,59 @@ fn sentence(text: &str) -> String {
         format!("{text}.")
     }
 }
+/// The next change ID of a revised plan: `cancel-v3` → `cancel-v4`,
+/// `cancel` → `cancel-2`.
+fn next_change_id(id: &str) -> String {
+    let digits = id.chars().rev().take_while(char::is_ascii_digit).count();
+    let (stem, number) = id.split_at(id.len() - digits);
+    match number.parse::<u64>() {
+        Ok(number) if !stem.is_empty() => format!("{stem}{}", number + 1),
+        _ => format!("{id}-2"),
+    }
+}
+/// Opens the plan form filled from a change: a blocked agreement asks for a
+/// decision, and the next plan states it, so only the task needs editing.
+fn replan(v: &V) {
+    let plan = &v["plan"];
+    let impact = m::array(&plan["impact"]);
+    let starting = impact
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry["reason"].as_str(),
+                Some("selected" | "contract_provider")
+            )
+        })
+        .map(|entry| m::text(entry, "service"))
+        .collect::<Vec<_>>();
+    for e in dom::all("#system-plan-services input[type=checkbox]") {
+        if let Some(input) = e.dyn_ref::<web_sys::HtmlInputElement>() {
+            if !input.disabled() {
+                input.set_checked(starting.contains(&input.value()));
+            }
+        }
+    }
+    let downstream = impact
+        .iter()
+        .any(|entry| entry["reason"] == "potential_consumer");
+    dom::set_value("system-depth", if downstream { "32" } else { "0" });
+    dom::set_value("system-task", &m::text(&plan["context"], "task"));
+    dom::set_value("system-contracts", "");
+    if let Some(budget) = plan["context_budget_chars"].as_u64() {
+        dom::set_value("system-budget", &budget.to_string());
+    }
+    dom::set_value(
+        "system-change-id",
+        &next_change_id(&m::text(v, "change_id")),
+    );
+    dom::hidden("system-plan-form", false);
+    dom::hidden("system-runs-empty", true);
+    if let Some(task) =
+        dom::get("system-task").and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = task.focus();
+    }
+}
 /// How a change reads in the change list.
 fn run_label(run: &V) -> String {
     format!(
@@ -395,6 +448,7 @@ fn controls() {
     dom::hidden("system-launch", v["session_id"].is_string());
     dom::hidden("system-cancel", !active);
     dom::hidden("system-archive", !v.is_object() || active);
+    dom::hidden("system-replan", !v.is_object() || active);
     dom::disabled("system-archive", pending || active);
     let editor = m::data("editor");
     dom::disabled("system-edit", pending || locked);
@@ -2505,6 +2559,16 @@ pub async fn event(
             // The form is the next step; "no changes yet" would only repeat it.
             dom::hidden("system-runs-empty", true);
         }
+        "system-replan" => {
+            let v = m::data("system-run");
+            if !v.is_object() || m::yes(&v["active"]) {
+                return true;
+            }
+            if m::data("system-catalog").is_null() {
+                catalog_load().await;
+            }
+            replan(&v);
+        }
         "system-plan-cancel" => {
             dom::hidden("system-plan-form", true);
             dom::hidden("system-runs-empty", !dom::value("system-runs").is_empty());
@@ -2910,6 +2974,19 @@ mod display_tests {
             "Failed to authenticate."
         );
         assert_eq!(sentence("Scan ended. "), "Scan ended.");
+    }
+    #[test]
+    fn a_revised_plan_gets_the_next_change_id() {
+        assert_eq!(
+            next_change_id("cancel-after-capture-v3"),
+            "cancel-after-capture-v4"
+        );
+        assert_eq!(
+            next_change_id("payments-missing-customer"),
+            "payments-missing-customer-2"
+        );
+        assert_eq!(next_change_id("change-001"), "change-2");
+        assert_eq!(next_change_id("7"), "7-2");
     }
     #[test]
     fn lists_read_as_text() {

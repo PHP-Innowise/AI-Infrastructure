@@ -183,6 +183,10 @@ edition's own files remain in that edition's changelog.
   - Opening **Services** shows the project's system when its file exists,
     instead of an empty state until **Load system** on every visit; a project
     without one keeps the empty state.
+  - **Plan again** opens the plan form filled from a change (task, starting
+    services, consumers, budget and the next change ID): a blocked agreement
+    asks for a decision the next plan has to state, which happened in both
+    real edit runs, and the form used to start empty.
   - **Remove from list** hides a stopped change from the change list (every
     plan attempt used to stay there for good); its plan, receipts and the
     services' native tasks are kept, and it can still be read by its ID.
