@@ -3126,3 +3126,56 @@ fn a_conflicted_task_record_leaves_the_turn_its_memory() {
         "{report}"
     );
 }
+
+/// A prompt that carries an address, a phone number, a password or a key
+/// keeps its memory, as it did: the automatic path cleans the prompt first and
+/// guards, searches and records the cleaned text. A reply with nothing to
+/// search ("?") is withheld, not refused.
+#[test]
+fn a_prompt_with_private_data_keeps_its_memory() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-PRIVATE");
+    fixture.success(&["index", "--json"], None);
+    let refresh = |prompt: &str| {
+        fixture.success(
+            &[
+                "refresh",
+                "--json",
+                "--task-id",
+                "TASK-PRIVATE",
+                "--sanitize",
+                "--capsule-profile",
+                "full",
+                "--query",
+                prompt,
+            ],
+            None,
+        )
+    };
+    for prompt in [
+        "Email jane.doe@example.com about the cobalt retries",
+        "Use AKIAABCDEFGHIJKLMNOP for the cobalt retries",
+        "password=hunter2 cobalt retries",
+        "Call +1 (555) 123-4567 about the cobalt retries",
+    ] {
+        let report = refresh(prompt);
+        assert!(
+            report["capsule"]["selected"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["path"] == "specs/source.md")),
+            "{prompt}: {report}"
+        );
+        let shown = report.to_string();
+        for private in [
+            "jane.doe@example.com",
+            "AKIAABCDEFGHIJKLMNOP",
+            "hunter2",
+            "123-4567",
+        ] {
+            assert!(!shown.contains(private), "{prompt}: {report}");
+        }
+    }
+    let report = refresh("?");
+    assert!(report["capsule"].is_null(), "{report}");
+    assert!(report.get("error").is_none(), "{report}");
+}

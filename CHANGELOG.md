@@ -317,6 +317,18 @@ edition's own files remain in that edition's changelog.
   command with --skip, and a result with nothing in it asks for "a progress
   summary, next steps or a checked learning". The native refusals were the
   bare codes, which left the agent to guess.
+- A prompt that carries an e-mail address, a phone number, a password or a
+  key keeps its memory again. As the retired refresh did, the automatic path
+  cleans the prompt first and then guards, searches and searches history
+  with the cleaned text; the native refresh guarded the raw prompt before
+  cleaning it, so such a turn lost its whole capsule (Claude Code and Codex
+  printed the operator's layer report and "Capsule unavailable: Task
+  Capsule contains a possible AWS access key ..." into the prompt, Cursor's
+  rule said "working: unavailable"), and recorded history was searched
+  with the raw prompt. A reply with nothing to search, such as "?" or an
+  emoji, is withheld rather than refused. On twin projects 13 unusual
+  prompts now draw the retired hook output on Claude Code, Codex and
+  Cursor, and no stored file holds the private text on either runtime.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

@@ -357,12 +357,21 @@ impl MemoryService {
             r.phase_seconds = phases.clone();
             r.history_text = Some(raw.clone());
             let attempt = (|| -> Result<Option<Capsule>> {
-                domain::guard_shared_text("Task Capsule", std::slice::from_ref(&raw))?;
+                // An automatic path cleans the prompt first, as the retired
+                // refresh replaced the prompt with its cleaned form: what is
+                // then guarded, searched and searched in history is the
+                // cleaned text. A prompt with an address, a number or a key
+                // in it keeps its memory; an explicit request is guarded as
+                // it was given.
                 if r.sanitize {
                     r.query = domain::sanitize_automatic_query(&raw)?;
                     r.sanitize = false;
+                    r.history_text = Some(r.query.clone());
                 }
-                if r.query.trim().is_empty() {
+                domain::guard_shared_text("Task Capsule", std::slice::from_ref(&r.query))?;
+                // Nothing left a search can use - a reply of "?" or an emoji -
+                // is withheld, not turned into a refusal in the prompt.
+                if !r.query.chars().any(|c| c.is_alphanumeric() || c == '_') {
                     withheld = true;
                     return Ok(None);
                 }
