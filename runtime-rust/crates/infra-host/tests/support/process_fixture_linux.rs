@@ -934,6 +934,72 @@ fn leaf(args: &[String]) -> Result<i32> {
     }
     Ok(0)
 }
+/// The Linux AI discovery preflight as Harness runs it: the boundary request, the
+/// bubblewrap profile and the native process guardian, with this fixture as the
+/// trusted helper that answers `internal-discovery-probe` inside the sandbox.
+/// Nothing here pre-creates sandbox scratch folders: the profile must.
+async fn discovery_boundary(root: &Path) -> Result<()> {
+    let control = root.join("control");
+    let workspace = control.join("agent");
+    let evidence = workspace.join("evidence");
+    let source = root.join("services/orders");
+    for path in [root, &control, &workspace, &evidence, &source] {
+        infra_host::util::private_directory(path)?;
+    }
+    fs::create_dir_all(source.join("src"))?;
+    fs::write(source.join("src/order.rs"), b"ORIGINAL SOURCE")?;
+    fs::write(evidence.join("000000.txt"), b"safe evidence")?;
+    let spec = infra_host::sandbox::Spec {
+        workspace: workspace.clone(),
+        target: workspace.clone(),
+        protected: vec![source],
+        readable: vec![],
+        accounts: vec![],
+        runtime: vec![],
+        codex: None,
+        evidence: Some(evidence),
+    };
+    let boundary = infra_host::sandbox::boundary_request(&spec)?;
+    let output = process::run_monitored(
+        &boundary.command,
+        &workspace,
+        &BTreeMap::new(),
+        &[],
+        b"",
+        Limits {
+            seconds: Some(120),
+            output: 1024 * 1024,
+            line: 1024 * 1024,
+        },
+        Arc::new(AtomicBool::new(false)),
+        None,
+        None,
+        |_| Ok(()),
+    )
+    .await?;
+    let lines = output
+        .bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .collect::<Vec<_>>();
+    std::io::stdout().write_all(&output.bytes)?;
+    require(
+        output.code == 0,
+        &format!(
+            "discovery probe refused the boundary: {}",
+            String::from_utf8_lossy(&output.bytes)
+        ),
+    )?;
+    require(
+        lines.len() == 1
+            && lines[0]["ok"] == true
+            && lines[0]["denied"].as_u64() == Some(boundary.denied as u64)
+            && lines[0]["allowed"].as_u64() == Some(boundary.allowed as u64)
+            && lines[0]["evidence_read_only"] == true
+            && lines[0]["workspace_writable"] == true,
+        "discovery probe receipt does not attest the requested boundary",
+    )
+}
 pub fn entry() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let (action, rest) = args
@@ -941,8 +1007,9 @@ pub fn entry() -> Result<()> {
         .ok_or_else(|| fail("native process fixture action missing"))?;
     match action.as_str() {
         "internal-guard" => std::process::exit(process::guard_entry(rest)?),
+        "internal-discovery-probe" => std::process::exit(infra_host::sandbox::probe_entry(rest)?),
         "process-leaf" => std::process::exit(leaf(rest)?),
-        "process-case" | "process-owner" => {}
+        "process-case" | "process-owner" | "discovery-boundary" => {}
         _ => return Err(fail("unknown native Linux fixture entrypoint")),
     }
     subreaper()?;
@@ -951,6 +1018,9 @@ pub fn entry() -> Result<()> {
         .build()?;
     if action == "process-owner" {
         return runtime.block_on(owner(&path(rest, 0)?));
+    }
+    if action == "discovery-boundary" {
+        return runtime.block_on(discovery_boundary(&path(rest, 0)?));
     }
     let name = rest
         .first()

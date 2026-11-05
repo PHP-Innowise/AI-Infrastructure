@@ -162,13 +162,22 @@ impl Brain {
                     require_write: true,
                 },
             )?;
-            store.bind(
-                &id,
-                string(&record["id"]),
-                record["revision"]
-                    .as_u64()
-                    .ok_or_else(|| fail("Native task missing revision"))?,
-            )?;
+            let revision = record["revision"]
+                .as_u64()
+                .ok_or_else(|| fail("Native task missing revision"))?;
+            // Every dispatch re-ensures its task: an existing binding to this same
+            // record follows its revision; one to another record is never repointed.
+            match store.binding(&id)? {
+                Some(binding) if binding.task_uuid == string(&record["id"]) => {
+                    store.refresh_binding(&id, revision)?
+                }
+                Some(_) => {
+                    return Err(RuntimeError::conflict(
+                        "Native task binding points at another record; repair it with rebind",
+                    ));
+                }
+                None => store.bind(&id, string(&record["id"]), revision)?,
+            }
         }
         Ok(record)
     }
@@ -339,6 +348,16 @@ pub fn validate_report(
                 "Contract worker must order every selected service exactly once",
             ));
         }
+    } else if step["id"] == "contracts" {
+        // A blocked agreement may still propose an order; it is kept as evidence
+        // and never applied, but it must name selected services once each.
+        if order.len() != order.iter().collect::<BTreeSet<_>>().len()
+            || order.iter().any(|sid| !selected.contains(sid))
+        {
+            return Err(fail(
+                "A proposed service order may name each selected service once",
+            ));
+        }
     } else if !order.is_empty() {
         return Err(fail("Only contract worker can choose service order"));
     }
@@ -382,8 +401,14 @@ pub fn dispatch_receipt(directory: &Path, state: &Value, step: &Value) -> Result
             "ok",
             "report",
         ],
-        &[],
+        &["rejection"],
     )?;
+    if receipt
+        .get("rejection")
+        .is_some_and(|rejection| !rejection.is_string() || receipt["ok"] == true)
+    {
+        return Err(fail("Invalid receipt rejection"));
+    }
     if receipt["dispatch_id"] != step["dispatch_id"]
         || receipt["input_sha256"] != step["input_sha256"]
         || receipt["phase"] != step["id"]

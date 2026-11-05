@@ -8,7 +8,23 @@ use std::{
     time::Duration,
 };
 
+/// Prefixes a validation error with where in the passport it was found, so a
+/// form of many services says which field to correct.
+fn located(place: &str) -> impl Fn(RuntimeError) -> RuntimeError + '_ {
+    move |mut error| {
+        error.message = format!("{place}: {}", error.message);
+        error
+    }
+}
 pub fn manifest(value: &Value, sid: &str) -> Result<()> {
+    let subject = if sid == "draft" {
+        "Service".to_string()
+    } else {
+        format!("Service {sid}")
+    };
+    manifest_fields(value, sid).map_err(located(&subject))
+}
+fn manifest_fields(value: &Value, sid: &str) -> Result<()> {
     fields(
         value,
         &[
@@ -36,64 +52,101 @@ pub fn manifest(value: &Value, sid: &str) -> Result<()> {
     }
     let mut all_sources = BTreeSet::new();
     let mut seen = BTreeSet::new();
-    for capability in items(&value["capabilities"], MAX_ITEMS)? {
-        fields(
-            capability,
-            &["id", "description", "status", "sources"],
-            &["keywords"],
-        )?;
-        let id = identifier(string(&capability["id"]))?;
-        if !seen.insert(id) {
-            return Err(fail("Duplicate capability"));
-        }
-        text(&capability["description"], "capability description", 2000)?;
-        choice(
-            &capability["status"],
-            &["implemented", "partial", "planned", "unknown"],
-            "capability status",
-        )?;
-        for path in items(&capability["sources"], MAX_ITEMS)? {
-            all_sources.insert(relative(string(path))?);
-        }
-        if let Some(keywords) = capability.get("keywords") {
-            for keyword in items(keywords, MAX_ITEMS)? {
-                text(keyword, "keyword", 200)?;
+    for (index, capability) in items(&value["capabilities"], MAX_ITEMS)
+        .map_err(located("capabilities"))?
+        .iter()
+        .enumerate()
+    {
+        let place = format!("capability {}", index + 1);
+        (|| -> Result<()> {
+            fields(
+                capability,
+                &["id", "description", "status", "sources"],
+                &["keywords"],
+            )?;
+            let id = identifier(string(&capability["id"]))?;
+            if !seen.insert(id.clone()) {
+                return Err(fail(format!("Duplicate capability {id}")));
             }
-        }
+            text(&capability["description"], "capability description", 2000)?;
+            choice(
+                &capability["status"],
+                &["implemented", "partial", "planned", "unknown"],
+                "capability status",
+            )?;
+            for path in items(&capability["sources"], MAX_ITEMS)? {
+                all_sources.insert(relative(string(path))?);
+            }
+            if let Some(keywords) = capability.get("keywords") {
+                for keyword in items(keywords, MAX_ITEMS)? {
+                    text(keyword, "keyword", 200)?;
+                }
+            }
+            Ok(())
+        })()
+        .map_err(located(&place))?;
     }
     seen.clear();
-    for provided in items(&value["provides"], MAX_ITEMS)? {
-        fields(provided, &["id", "kind", "version", "sources"], &[])?;
-        if !seen.insert(identifier(string(&provided["id"]))?) {
-            return Err(fail("Duplicate provided contract"));
-        }
-        choice(
-            &provided["kind"],
-            &["http", "event", "rpc", "graphql", "other"],
-            "contract kind",
-        )?;
-        text(&provided["version"], "contract version", 100)?;
-        for path in items(&provided["sources"], MAX_ITEMS)? {
-            all_sources.insert(relative(string(path))?);
-        }
+    for (index, provided) in items(&value["provides"], MAX_ITEMS)
+        .map_err(located("provided contracts"))?
+        .iter()
+        .enumerate()
+    {
+        let place = format!("provided contract {}", index + 1);
+        (|| -> Result<()> {
+            fields(provided, &["id", "kind", "version", "sources"], &[])?;
+            let id = identifier(string(&provided["id"]))?;
+            if !seen.insert(id.clone()) {
+                return Err(fail(format!("Duplicate provided contract {id}")));
+            }
+            choice(
+                &provided["kind"],
+                &["http", "event", "rpc", "graphql", "other"],
+                "contract kind",
+            )?;
+            text(&provided["version"], "contract version", 100)?;
+            for path in items(&provided["sources"], MAX_ITEMS)? {
+                all_sources.insert(relative(string(path))?);
+            }
+            Ok(())
+        })()
+        .map_err(located(&place))?;
     }
     let mut consumes = BTreeSet::new();
-    for consumed in items(&value["consumes"], MAX_ITEMS)? {
-        fields(consumed, &["service", "contract", "version"], &[])?;
-        if !consumes.insert((
-            identifier(string(&consumed["service"]))?,
-            identifier(string(&consumed["contract"]))?,
-        )) {
-            return Err(fail("Duplicate consumed contract"));
-        }
-        text(&consumed["version"], "contract version", 100)?;
+    for (index, consumed) in items(&value["consumes"], MAX_ITEMS)
+        .map_err(located("consumed contracts"))?
+        .iter()
+        .enumerate()
+    {
+        let place = format!("consumed contract {}", index + 1);
+        (|| -> Result<()> {
+            fields(consumed, &["service", "contract", "version"], &[])?;
+            let key = (
+                identifier(string(&consumed["service"]))?,
+                identifier(string(&consumed["contract"]))?,
+            );
+            if consumes.contains(&key) {
+                return Err(fail(format!(
+                    "Duplicate consumed contract {}:{}",
+                    key.0, key.1
+                )));
+            }
+            consumes.insert(key);
+            text(&consumed["version"], "contract version", 100)?;
+            Ok(())
+        })()
+        .map_err(located(&place))?;
     }
     seen.clear();
-    for entry in items(&value["sources"], MAX_ITEMS)? {
-        source(entry)?;
+    for (index, entry) in items(&value["sources"], MAX_ITEMS)
+        .map_err(located("sources of context"))?
+        .iter()
+        .enumerate()
+    {
+        source(entry).map_err(located(&format!("source {}", index + 1)))?;
         let path = string(&entry["path"]).to_string();
         if !seen.insert(path.clone()) {
-            return Err(fail("Duplicate source"));
+            return Err(fail(format!("Duplicate source {path}")));
         }
         all_sources.insert(path);
     }
@@ -269,7 +322,12 @@ impl System {
                 let provider = system
                     .services
                     .get(provider_id)
-                    .ok_or_else(|| fail("Contract references an unregistered service"))?;
+                    .ok_or_else(|| {
+                        fail(format!(
+                            "{sid} consumes {} from {provider_id}, which is not registered in this system",
+                            string(&consume["contract"])
+                        ))
+                    })?;
                 let provided = provider
                     .manifest
                     .as_ref()
@@ -281,9 +339,10 @@ impl System {
                     })
                     .cloned();
                 if provider.manifest.is_some() && provided.is_none() {
-                    return Err(fail(
-                        "Consumer references contract provider does not declare",
-                    ));
+                    return Err(fail(format!(
+                        "{sid} consumes {} from {provider_id}, which does not declare it",
+                        string(&consume["contract"])
+                    )));
                 }
                 if provided.is_none() {
                     system.warn(&sid, "provider_contract_unavailable", None);
@@ -438,9 +497,21 @@ impl System {
                 }
             }
             if !matches.is_empty() {
-                candidates.push(object!({"service":sid,"matches":matches,"provenance":"inferred"}));
+                let score = matches
+                    .iter()
+                    .flat_map(|matched| texts(&matched["terms"]))
+                    .collect::<BTreeSet<_>>()
+                    .len();
+                candidates.push(object!({"service":sid,"matches":matches,"score":score,"provenance":"inferred"}));
             }
         }
+        // Best-supported candidates first: the most distinct task terms matched.
+        candidates.sort_by(|a, b| {
+            b["score"]
+                .as_u64()
+                .cmp(&a["score"].as_u64())
+                .then_with(|| string(&a["service"]).cmp(string(&b["service"])))
+        });
         let selection = if candidates.len() == 1 {
             "suggested"
         } else {
@@ -678,16 +749,221 @@ impl System {
         }
     }
 }
+/// Function words carry no routing signal: every description written in prose
+/// contains them, so matching on them makes every service a candidate.
+const STOP_WORDS: &[&str] = &[
+    "about",
+    "above",
+    "across",
+    "after",
+    "again",
+    "against",
+    "all",
+    "also",
+    "among",
+    "and",
+    "another",
+    "any",
+    "are",
+    "been",
+    "before",
+    "being",
+    "below",
+    "between",
+    "both",
+    "but",
+    "can",
+    "cannot",
+    "could",
+    "did",
+    "does",
+    "doing",
+    "done",
+    "during",
+    "each",
+    "either",
+    "every",
+    "few",
+    "for",
+    "from",
+    "further",
+    "had",
+    "has",
+    "have",
+    "having",
+    "her",
+    "here",
+    "hers",
+    "him",
+    "his",
+    "how",
+    "into",
+    "its",
+    "itself",
+    "just",
+    "least",
+    "less",
+    "may",
+    "might",
+    "more",
+    "most",
+    "much",
+    "must",
+    "neither",
+    "nor",
+    "not",
+    "off",
+    "once",
+    "only",
+    "onto",
+    "other",
+    "our",
+    "ours",
+    "out",
+    "over",
+    "own",
+    "per",
+    "same",
+    "shall",
+    "she",
+    "should",
+    "since",
+    "some",
+    "such",
+    "than",
+    "that",
+    "the",
+    "their",
+    "theirs",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "through",
+    "too",
+    "under",
+    "unless",
+    "until",
+    "upon",
+    "very",
+    "via",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "whether",
+    "which",
+    "while",
+    "who",
+    "whom",
+    "whose",
+    "why",
+    "will",
+    "with",
+    "within",
+    "without",
+    "would",
+    "yet",
+    "you",
+    "your",
+    "yours",
+    "без",
+    "был",
+    "была",
+    "были",
+    "было",
+    "быть",
+    "весь",
+    "все",
+    "всё",
+    "где",
+    "для",
+    "его",
+    "если",
+    "есть",
+    "ещё",
+    "еще",
+    "или",
+    "как",
+    "когда",
+    "который",
+    "которая",
+    "которые",
+    "кто",
+    "между",
+    "может",
+    "можно",
+    "над",
+    "надо",
+    "нет",
+    "них",
+    "она",
+    "они",
+    "оно",
+    "перед",
+    "под",
+    "после",
+    "при",
+    "так",
+    "также",
+    "там",
+    "тоже",
+    "только",
+    "уже",
+    "чем",
+    "через",
+    "что",
+    "чтобы",
+    "это",
+    "этот",
+    "эта",
+    "эти",
+];
+/// Lowercase Unicode words of three or more characters, without function words,
+/// with English plurals folded (`orders` matches `order`, `policies` `policy`),
+/// applied alike to the task and to every capability.
 fn words_for(value: &str) -> BTreeSet<String> {
     regex::Regex::new(r"[^\W_]{3,}")
         .map(|pattern| {
             pattern
                 .find_iter(&value.to_lowercase())
-                .map(|word| word.as_str().to_string())
+                .map(|word| word.as_str())
+                .filter(|word| !STOP_WORDS.contains(word))
+                .map(|word| {
+                    if let Some(stem) = word.strip_suffix("ies").filter(|stem| stem.len() >= 2) {
+                        format!("{stem}y")
+                    } else if word.len() > 3
+                        && word.ends_with('s')
+                        && !word.ends_with("ss")
+                        && !word.ends_with("us")
+                    {
+                        word[..word.len() - 1].to_string()
+                    } else {
+                        word.to_string()
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default()
 }
 fn words(value: &str) -> BTreeSet<String> {
     words_for(value)
+}
+/// Routing words of text that may name code: `CancelOrder.php` reads as
+/// `cancel order php`, so file names share terms with the task that names them.
+pub fn terms(value: &str) -> BTreeSet<String> {
+    let mut spaced = String::with_capacity(value.len() + 8);
+    let mut previous_lower = false;
+    for character in value.chars() {
+        if character.is_uppercase() && previous_lower {
+            spaced.push(' ');
+        }
+        previous_lower = character.is_lowercase();
+        spaced.push(character);
+    }
+    words_for(&spaced)
 }

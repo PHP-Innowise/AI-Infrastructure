@@ -107,7 +107,10 @@ pub fn identifier(value: &str) -> Result<String> {
     let pattern = regex::Regex::new(r"^[a-z][a-z0-9._-]{0,79}$")
         .map_err(|_| fail("Invalid identifier expression"))?;
     if !pattern.is_match(value) {
-        return Err(fail("Invalid identifier"));
+        let shown = value.chars().take(80).collect::<String>();
+        return Err(fail(format!(
+            "Invalid identifier {shown:?}: use lowercase letters, digits, '.', '_' or '-', starting with a letter, at most 80 characters"
+        )));
     }
     Ok(value.to_string())
 }
@@ -121,12 +124,28 @@ pub fn fields(value: &Value, required: &[&str], optional: &[&str]) -> Result<()>
     let object = value
         .as_object()
         .ok_or_else(|| fail("Invalid object fields"))?;
-    if required.iter().any(|key| !object.contains_key(*key))
-        || object
-            .keys()
-            .any(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
-    {
-        return Err(fail("Invalid object fields (missing or unknown keys)"));
+    let missing = required
+        .iter()
+        .filter(|key| !object.contains_key(**key))
+        .copied()
+        .collect::<Vec<_>>();
+    let unknown = object
+        .keys()
+        .filter(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
+        .map(|key| key.chars().take(40).collect::<String>())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() || !unknown.is_empty() {
+        let mut parts = vec![];
+        if !missing.is_empty() {
+            parts.push(format!("missing {}", missing.join(", ")));
+        }
+        if !unknown.is_empty() {
+            parts.push(format!("unknown {}", unknown.join(", ")));
+        }
+        return Err(fail(format!(
+            "Invalid object fields (missing or unknown keys): {}",
+            parts.join("; ")
+        )));
     }
     Ok(())
 }
@@ -139,7 +158,11 @@ pub fn items(value: &Value, limit: usize) -> Result<&Vec<Value>> {
 pub fn choice(value: &Value, allowed: &[&str], label: &str) -> Result<String> {
     let value = string(value);
     if !allowed.contains(&value) {
-        return Err(fail(format!("Invalid {label}")));
+        return Err(fail(format!(
+            "Invalid {label} {:?}: choose {}",
+            value.chars().take(40).collect::<String>(),
+            allowed.join(", ")
+        )));
     }
     Ok(value.to_string())
 }
@@ -176,7 +199,10 @@ pub fn relative(value: &str) -> Result<String> {
                 && ["local", "archive", "dynamic", "control"].contains(&parts[1])
         })
     {
-        return Err(fail("Refused source path"));
+        return Err(fail(format!(
+            "Refused source path {:?}: use a relative path to a non-secret file outside dependency, VCS and local runtime folders",
+            value.chars().take(200).collect::<String>()
+        )));
     }
     let name = parts.last().copied().unwrap_or("").to_lowercase();
     let suffix = Path::new(&name)
@@ -186,7 +212,10 @@ pub fn relative(value: &str) -> Result<String> {
     if ["pem", "key", "p12", "pfx", "sqlite", "db"].contains(&suffix)
         || ["credentials", "credentials.json", "id_rsa", "id_ed25519"].contains(&name.as_str())
     {
-        return Err(fail("Refused source path"));
+        return Err(fail(format!(
+            "Refused source path {:?}: keys, certificates, credentials and databases are never context",
+            value.chars().take(200).collect::<String>()
+        )));
     }
     Ok(value.into())
 }

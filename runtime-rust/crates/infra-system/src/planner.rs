@@ -45,6 +45,9 @@ impl System {
             ));
         }
         let mut groups = BTreeMap::<String, VecDeque<(std::path::PathBuf, Value)>>::new();
+        // What each source is cited for (capability and contract text), so a
+        // source the task is about outranks an unrelated one of the same kind.
+        let mut cited = BTreeMap::<(String, String), String>::new();
         if !selected.is_empty() {
             for entry in items(&self.config_data["shared_sources"], MAX_ITEMS)? {
                 groups
@@ -67,7 +70,16 @@ impl System {
                 declared.insert(string(&entry["path"]).to_string(), entry.clone());
             }
             for capability in items(&manifest["capabilities"], MAX_ITEMS)? {
+                let about = format!(
+                    "{} {} {}",
+                    string(&capability["id"]),
+                    string(&capability["description"]),
+                    texts(&capability["keywords"]).join(" ")
+                );
                 for path in texts(&capability["sources"]) {
+                    let text = cited.entry((sid.to_string(), path.clone())).or_default();
+                    text.push(' ');
+                    text.push_str(&about);
                     declared.entry(path.clone()).or_insert(
                         object!({"path":path,"kind":if is_memory(&path){"memory"}else{"code"}}),
                     );
@@ -75,6 +87,9 @@ impl System {
             }
             for contract in items(&manifest["provides"], MAX_ITEMS)? {
                 for path in texts(&contract["sources"]) {
+                    let text = cited.entry((sid.to_string(), path.clone())).or_default();
+                    text.push(' ');
+                    text.push_str(string(&contract["id"]));
                     declared.entry(path.clone()).or_insert(
                         object!({"path":path,"kind":if is_memory(&path){"memory"}else{"contract"}}),
                     );
@@ -93,10 +108,36 @@ impl System {
                 .position(|kind| *kind == string(&value["kind"]))
                 .unwrap_or(6)
         }
-        for group in groups.values_mut() {
-            let mut entries = group.drain(..).collect::<Vec<_>>();
-            entries.sort_by_key(|(_, entry)| (priority(entry), string(&entry["path"]).to_string()));
-            group.extend(entries);
+        // Policies lead; then sources sharing the most task terms through their
+        // path or what cites them; then kind and path as before.
+        let task_terms = crate::catalog::terms(query);
+        for (sid, group) in groups.iter_mut() {
+            let mut entries = group
+                .drain(..)
+                .map(|(root, entry)| {
+                    let path = string(&entry["path"]).to_string();
+                    let about = format!(
+                        "{} {}",
+                        path.replace(['/', '.', '-', '_'], " "),
+                        cited
+                            .get(&(sid.clone(), path.clone()))
+                            .map_or("", String::as_str)
+                    );
+                    let relevance = crate::catalog::terms(&about)
+                        .intersection(&task_terms)
+                        .count();
+                    (root, entry, relevance)
+                })
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|(_, entry, relevance)| {
+                (
+                    usize::from(entry["kind"] != "policy"),
+                    std::cmp::Reverse(*relevance),
+                    priority(entry),
+                    string(&entry["path"]).to_string(),
+                )
+            });
+            group.extend(entries.into_iter().map(|(root, entry, _)| (root, entry)));
         }
         let mut queue = groups.keys().cloned().collect::<VecDeque<_>>();
         let mut omissions = vec![];

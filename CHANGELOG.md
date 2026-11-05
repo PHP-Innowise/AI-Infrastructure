@@ -24,6 +24,47 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- System Orchestration, found by running it on an eight-service, five-repository
+  microservice system with real Codex workers:
+  - Executing a reviewed plan no longer stops at its first dispatch with
+    `Local SQLite operation failed`. Every dispatch re-ensures its native task,
+    and the second binding of the same task was an insert into a unique key; an
+    existing binding to the same record now follows its revision, and one to a
+    different record is refused instead of repointed.
+  - `infra-engine system execute` no longer overflows its worker thread's stack
+    in debug builds: the whole sequential run is one future, and the thread is
+    sized for it.
+  - **Fill with AI** works on Linux again. The boundary probe proves the
+    workspace is writable inside its private `.harness-tmp`, which only the
+    Windows and macOS profiles created; the bubblewrap profile now creates it
+    too. The probe reports any refusal as a JSON line, so the editor names the
+    cause (a readable original path, an unwritable workspace, or a sandbox that
+    could not start) instead of `boundary probe failed`, and a scan that stops
+    without a proposal shows its last error.
+  - Capability routing ignores English and Russian function words and folds
+    English plurals, so a task written as a sentence no longer makes every
+    service with a prose description a candidate; candidates are ranked by
+    matched terms. A plan that still needs a selection keeps the form open with
+    the candidates ticked and says what each matched.
+  - The context capsule keeps policies first and then the sources the task is
+    about: within a service, sources are ranked by task terms shared with their
+    path (`CancelOrder.php` reads as `cancel order`) and with the capabilities
+    and contracts that cite them, before kind and path.
+  - The Wasm editor regained the service card layout its stylesheet expects
+    (head with actions, two-column fields, inline dependency checkbox, row
+    heads with named Remove buttons, `(one per line)` hints); cards before an
+    ID is entered are named by folder. The folder browser opens where the next
+    service usually is (beside the last one added) with a title naming what the
+    folder becomes, and keeps a path typed while it loads. The empty state hides
+    while the editor is open; the page is titled System Orchestration.
+  - The map draws each link between the facing sides of its two boxes, arcs a
+    link that skips boxes in its row, and separates a pair linked both ways.
+    Relationship, step and receipt rows have titles, catalog warnings read as
+    sentences, list fields read as lists, provider choices use product names,
+    a change list shows `needs selection` for a plan that has no services,
+    recovery preselects the retry a dispatch without a successful receipt
+    needs, and error sentences are no longer mangled into labels.
+
 - Keep repository leases and inbox available when an unrelated Linux mount
   has a deleted bind source root or an empty source field. Read only mounts
   covering or nested inside declared Git trees, deciding that from the mount

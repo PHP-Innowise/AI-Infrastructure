@@ -146,8 +146,13 @@ independent of language or framework.
 ## Routing and impact
 
 `locate` matches Unicode words in capability IDs, descriptions and keywords.
-It is a deterministic discovery aid, not an LLM semantic classifier. Supply
-domain terms in the languages used by your team.
+It is a deterministic discovery aid, not an LLM semantic classifier. Words of
+fewer than three characters and English and Russian function words (`and`,
+`the`, `must`, `для`, `что`…) are ignored, and English plurals are folded
+(`orders` matches `order`, `policies` `policy`), so a task written as a sentence
+matches services on its domain terms only. Candidates are ranked by `score`, the
+number of distinct task terms they match. Supply domain terms in the languages
+used by your team.
 
 A unique matching service can seed a plan with `selection_provenance: inferred`.
 Multiple candidates or no match produce `needs_selection`, no service work and
@@ -183,8 +188,11 @@ It measures the entire compact serialized `context` object, including the task,
 selected IDs, source metadata and excerpts. Plan/snapshot metadata lives outside
 this capsule; a model integration must account for its own total input budget.
 
-Sources are ordered by kind and path within each service and selected round-robin
-across the system/shared group and service groups. Each excerpt is at most 2,000
+Within each service (and the shared group), policies come first; the other
+sources are ranked by how many task terms they share through their path (a file
+name such as `CancelOrder.php` reads as `cancel order`) and through the
+capabilities and contracts that cite them, then by kind and path. Sources are
+selected round-robin across the system/shared group and service groups. Each excerpt is at most 2,000
 characters with an explicit truncation marker. Entries that do not fit are
 omitted as whole entries with `reason: budget`. No service receives a separate
 copy of the global budget.
@@ -530,8 +538,10 @@ a system entirely in the application:
    and becomes the working project in every view. A folder that is already
    registered can be chosen in the sidebar instead.
 2. **Create or edit system**, enter the system name, then **Add service folder**
-   for each existing service repository or monorepo subdirectory. Choosing a
-   folder registers it automatically; an existing passport is loaded into fields.
+   for each existing service repository or monorepo subdirectory. The folder
+   browser opens in the system folder for the first service and beside the last
+   added service after that. Choosing a folder registers it automatically; an
+   existing passport is loaded into fields.
 3. Select an installed/authenticated **Codex, Claude Code or Cursor Agent** and
    click **Fill with AI**. AI inspects copied code, interfaces, documentation,
    project policy, tests and eligible Memory Bank chunks, then fills the system
@@ -751,6 +761,8 @@ journal keeps its generic code (for example `worker_exit_failure`).
 | --- | --- | --- |
 | `… is not signed in or its login expired` | The native CLI cannot authenticate. A stored login can expire even while a status command still lists it. | Sign in again in a terminal with `claude auth login`, `codex login` or `cursor-agent login`, then retry. |
 | `The AI discovery sandbox cannot start` / `could not start` | The host does not allow the unprivileged user namespaces that bubblewrap needs. | See [Allow bubblewrap](#allow-bubblewrap-on-ubuntu-2310-and-later). |
+| `The AI discovery sandbox did not keep the original folders unreadable` | Before the scan, a probe inside the sandbox could open an original service file or folder; the message names it. | Move that path out of the service folder, or check which sandbox grant exposes it. |
+| `The AI discovery sandbox check failed: …` | The probe itself refused, for example because the private workspace was not writable; the rest of the message is the probe's reason. | Fix the named condition and retry; a stale build of Harness may lack the Linux scratch folder fix. |
 | `AI discovery on Windows needs the Codex CLI` | Codex is missing, too old for permission profiles, or its elevated sandbox is not set up. | Install Codex, complete its elevated sandbox setup once in native Codex, then reload the page. |
 | `The Codex sandbox could not start the check` | Codex's elevated sandbox did not start, usually because its setup is incomplete. | Complete the elevated sandbox setup once in native Codex; the message shows Codex's own error. |
 | `The Codex sandbox did not keep the original folders unreadable` | The probe before the scan could read an original file or folder, usually one with its own Windows permission entry. | Remove the file's own allow entry (for example `icacls FILE /reset`), or move it out of the service folder. The message names one such path. |

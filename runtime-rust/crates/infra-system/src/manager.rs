@@ -117,10 +117,18 @@ impl SystemManager {
             .map(|session| session["status"].clone())
             .unwrap_or(Value::Null);
         result["active"] = is_active.into();
+        // Before any launch a change is in its plan's state: a plan that could
+        // not choose its services needs selection, not review.
         result["status"] = session
             .as_ref()
             .map(|session| session["status"].clone())
-            .unwrap_or(object!("needs_review"));
+            .unwrap_or_else(|| {
+                record
+                    .get("plan_status")
+                    .filter(|status| status.is_string())
+                    .cloned()
+                    .unwrap_or(object!("needs_review"))
+            });
         result["access"] = record
             .get("access")
             .cloned()
@@ -159,7 +167,7 @@ impl SystemManager {
                     if step["attempt"].as_u64().unwrap_or(0) > 0
                         && let Some(receipt) = read(&receipt_name(step))?
                     {
-                        receipts.push(object!({"phase":step["id"],"service":step["service"],"attempt":step["attempt"],"ok":receipt["ok"],"error":receipt["error"],"report":receipt["report"]}));
+                        receipts.push(object!({"phase":step["id"],"service":step["service"],"attempt":step["attempt"],"ok":receipt["ok"],"error":receipt["error"],"rejection":receipt.get("rejection").cloned().unwrap_or(Value::Null),"report":receipt["report"]}));
                     }
                 }
                 result["receipts"] = object!(receipts);
@@ -198,14 +206,18 @@ impl SystemManager {
                     .collect::<Result<Vec<_>>>()?
             );
             result["providers"] = object!(
-                ["codex", "claude", "cursor"]
-                    .into_iter()
-                    .map(|id| self
-                        .state
-                        .host
-                        .provider(id)
-                        .map(|exe| object!({"id":id,"name":id,"available":exe.is_some()})))
-                    .collect::<Result<Vec<_>>>()?
+                [
+                    ("codex", "Codex"),
+                    ("claude", "Claude Code"),
+                    ("cursor", "Cursor Agent")
+                ]
+                .into_iter()
+                .map(|(id, name)| self
+                    .state
+                    .host
+                    .provider(id)
+                    .map(|exe| object!({"id":id,"name":name,"available":exe.is_some()})))
+                .collect::<Result<Vec<_>>>()?
             );
             result["codex_available"] = self.state.host.provider("codex")?.is_some().into();
         }
@@ -243,7 +255,7 @@ impl SystemManager {
         let directory = self.state.state.join("ai-system").join(&rid);
         create_private(&directory)?;
         create_new(&directory, "approved-plan.json", &plan)?;
-        let record = object!({"id":rid,"revision":0,"created_at":now(),"project_id":data["project_id"],"config_path":data["config_path"],"system":plan["system"],"change_id":plan["change_id"],"session_id":null,"provider":null,"mode":null,"timeout":null});
+        let record = object!({"id":rid,"revision":0,"created_at":now(),"project_id":data["project_id"],"config_path":data["config_path"],"system":plan["system"],"change_id":plan["change_id"],"plan_status":plan["status"],"session_id":null,"provider":null,"mode":null,"timeout":null});
         self.save(&record)?;
         self.view(&record, true)
     }

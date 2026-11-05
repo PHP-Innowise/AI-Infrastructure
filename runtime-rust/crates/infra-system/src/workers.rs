@@ -193,6 +193,26 @@ async fn run_system_context(
         }
     }
 }
+/// Names why the in-sandbox boundary check refused the scan. The probe writes its
+/// refusal as one JSON line on stdout; no line at all means the sandbox itself could
+/// not start the probe.
+pub fn probe_failure(stdout: &[u8], code: i32) -> String {
+    let reason = stdout
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .filter(|value| value["ok"] == false)
+        .filter_map(|value| value["error"].as_str().map(str::to_string))
+        .next_back();
+    match reason {
+        Some(reason) if reason.starts_with("The sandbox could read an original") => format!(
+            "The AI discovery sandbox did not keep the original folders unreadable. {reason}"
+        ),
+        Some(reason) => format!("The AI discovery sandbox check failed: {reason}"),
+        None => format!(
+            "The AI discovery sandbox could not start its boundary check (exit code {code}). On Linux, bubblewrap must be able to create user namespaces."
+        ),
+    }
+}
 fn runtime_profile(
     executable: &Path,
     original: &[PathBuf],
@@ -411,9 +431,7 @@ async fn run_discovery_context(
     )
     .await?;
     if probe.code != 0 {
-        return Err(fail(
-            "Discovery sandbox boundary probe failed; original folders must be unreadable",
-        ));
+        return Err(fail(probe_failure(&probe.bytes, probe.code)));
     }
     let attestation = parse_json(&probe.bytes, MAX_BYTES)?;
     fields(

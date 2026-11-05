@@ -195,20 +195,26 @@ pub async fn execute_async(
 pub fn execute(operation: &str, request: &Value) -> Result<Value> {
     let operation = operation.to_string();
     let request = request.clone();
-    let result = std::thread::spawn(move || -> Result<Value> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| RuntimeError::unavailable(error.to_string()))?;
-        runtime.block_on(execute_async(
-            &operation,
-            &request,
-            Arc::new(AtomicBool::new(false)),
-            &mut |_| Ok(()),
-        ))
-    })
-    .join()
-    .map_err(|_| RuntimeError::unavailable("Native system worker panicked"))?;
+    // The whole sequential run is one future polled on this thread; its state
+    // outgrows the default 2 MiB thread stack, so the stack is sized for it.
+    let result = std::thread::Builder::new()
+        .name("infra-system".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || -> Result<Value> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| RuntimeError::unavailable(error.to_string()))?;
+            runtime.block_on(execute_async(
+                &operation,
+                &request,
+                Arc::new(AtomicBool::new(false)),
+                &mut |_| Ok(()),
+            ))
+        })
+        .map_err(|error| RuntimeError::unavailable(error.to_string()))?
+        .join()
+        .map_err(|_| RuntimeError::unavailable("Native system worker panicked"))?;
     match result {
         Ok(value) => Ok(value),
         Err(error) => Ok(cli(
