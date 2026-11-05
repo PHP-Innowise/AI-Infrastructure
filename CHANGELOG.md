@@ -120,6 +120,11 @@ edition's own files remain in that edition's changelog.
     and `project-brain/local/runtime.lock` showed as untracked files. Each
     `local/` folder the run's storage uses now gets a `.gitignore` that hides
     it; the Brain's task and handoff records stay visible for review.
+  - Each launch of a system run is titled in Sessions by its change and launch
+    number (`System change <id> · launch 3 retries service-orders: …`): a
+    session is titled by its prompt's first 80 characters, so the nine launches
+    of one real run all read `System orchestration: Allow customers to cancel
+    a CONFIRMED order within 30 minu`. The runner footer says `1 active slot`.
 
 - Keep repository leases and inbox available when an unrelated Linux mount
   has a deleted bind source root or an empty source field. Read only mounts

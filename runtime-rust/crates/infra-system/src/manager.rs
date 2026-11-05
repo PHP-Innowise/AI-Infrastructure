@@ -408,7 +408,8 @@ impl SystemManager {
         record["revision"] = (record["revision"].as_u64().unwrap_or(0) + 1).into();
         self.save(&record)?;
         let internal = object!({"run_id":rid,"nonce":nonce});
-        let session=self.state.host.launch(&object!({"project_id":record["project_id"],"provider":provider,"workflow":"native","mode":if mode=="edit"{"edit"}else{"plan"},"prompt":format!("System orchestration: {}",string(&plan["context"]["task"])),"project_context":false,"agents_enabled":false,"budgets":{"seconds":null,"tokens":null,"usd":null}}),Some(&internal),None)?;
+        let prompt = launch_title(&record, &plan, data["retry_step"].as_str());
+        let session=self.state.host.launch(&object!({"project_id":record["project_id"],"provider":provider,"workflow":"native","mode":if mode=="edit"{"edit"}else{"plan"},"prompt":prompt,"project_context":false,"agents_enabled":false,"budgets":{"seconds":null,"tokens":null,"usd":null}}),Some(&internal),None)?;
         let sid = string(&session["id"]);
         if sid.is_empty() {
             return Err(fail("Queue returned no session identity"));
@@ -531,4 +532,53 @@ pub fn create_private(path: &std::path::Path) -> Result<()> {
     custody.create_directory(name)?;
     native::private_directory(&path)?;
     custody.check()
+}
+/// A session is titled by the first 80 characters of its prompt, so the
+/// change and the launch lead: every launch of one run used to read the same.
+fn launch_title(record: &Value, plan: &Value, retry: Option<&str>) -> String {
+    let launches = texts(&record["launches"]);
+    let previous = if launches.is_empty() {
+        usize::from(record["session_id"].is_string())
+    } else {
+        launches.len()
+    };
+    let change = string(&plan["change_id"]);
+    let task = string(&plan["context"]["task"]);
+    match (previous, retry) {
+        (0, _) => format!("System change {change}: {task}"),
+        (_, Some(step)) => format!(
+            "System change {change} · launch {} retries {step}: {task}",
+            previous + 1
+        ),
+        _ => format!(
+            "System change {change} · launch {} resumes: {task}",
+            previous + 1
+        ),
+    }
+}
+#[cfg(test)]
+mod launch_title_tests {
+    use super::*;
+    #[test]
+    fn each_launch_of_a_run_is_titled_by_its_change_and_number() {
+        let plan = object!({"change_id":"cancel-v3","context":{"task":"Allow cancellation"}});
+        assert_eq!(
+            launch_title(&object!({}), &plan, None),
+            "System change cancel-v3: Allow cancellation"
+        );
+        let record = object!({"launches":["a","b"],"session_id":"b"});
+        assert_eq!(
+            launch_title(&record, &plan, None),
+            "System change cancel-v3 · launch 3 resumes: Allow cancellation"
+        );
+        assert_eq!(
+            launch_title(&record, &plan, Some("service-orders")),
+            "System change cancel-v3 · launch 3 retries service-orders: Allow cancellation"
+        );
+        // A record from before launches were listed names only its session.
+        assert_eq!(
+            launch_title(&object!({"session_id":"a"}), &plan, None),
+            "System change cancel-v3 · launch 2 resumes: Allow cancellation"
+        );
+    }
 }

@@ -752,7 +752,11 @@ says, its reasoning summaries and plans, and each tool call with its target — 
 file path (shown as `service · path`), command, search pattern or URL location —
 and whether it finished or failed. **Follow the active agent** keeps the running
 agent selected. A resumed run lists each launch separately; the newest launch
-uses the journal as the authority for step state. The AI scan in the editor shows
+uses the journal as the authority for step state. In **Sessions** each launch is
+titled by its change and number (`System change cancel-v3 · launch 2 retries
+service-orders: …`). A dispatch whose attempt saved a successful receipt before
+its run stopped reads **Reported complete**; resuming records that receipt
+without running the agent again. The AI scan in the editor shows
 the same panel for its discovery agent, with copied evidence files mapped back
 to their original service paths.
 

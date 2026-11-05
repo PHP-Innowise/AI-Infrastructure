@@ -229,11 +229,12 @@ pub fn populate() {
             .unwrap_or(40)
             .to_string(),
     );
+    let slots = boot["runtime"]["max_active"].as_u64().unwrap_or(1);
     dom::text(
         "runtime-label",
         &format!(
-            "Local runner · {} active slots",
-            boot["runtime"]["max_active"].as_u64().unwrap_or(1)
+            "Local runner · {slots} active slot{}",
+            if slots == 1 { "" } else { "s" }
         ),
     );
     for prefix in ["", "clash-", "routing-plan-", "routing-edit-"] {
