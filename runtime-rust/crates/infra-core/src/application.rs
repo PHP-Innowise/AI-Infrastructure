@@ -1248,7 +1248,9 @@ impl MemoryService {
                 text(&request, "type")
             )?)),
             "context-save" => HandoffService::new(self.context.clone()).save(crate::SaveHandoff {
-                input: payload(&request, input)?,
+                input: payload(&request, input).map_err(|_| {
+                    RuntimeError::invalid("handoff input must contain one JSON object")
+                })?,
                 output: PathBuf::from(required(&request, "output")?),
                 detail: required(&request, "detail")?.into(),
                 topic: text(&request, "topic").map(String::from),

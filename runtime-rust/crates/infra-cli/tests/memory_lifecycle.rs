@@ -1268,6 +1268,82 @@ fn start_after_complete_begins_again_and_an_empty_update_is_refused() {
     assert!(archived.is_file(), "{}", archived.display());
 }
 
+/// A refused `context-save` names what to correct in the retired words:
+/// which fields are unexpected or missing, which flag the detail needs,
+/// which cited path is refused and why, and the output that already exists.
+#[test]
+fn a_refused_handoff_names_the_field_the_flag_or_the_path() {
+    let project = Project::new();
+    let engine = project.path.join("memory-bank/bin/infra-engine");
+    let input = project.root.join("tmp/handoff.json");
+    let output = project.path.join("tasks/handoff-refused.md");
+    let save = |curated: Value, extra: &[&str]| {
+        fs::write(&input, serde_json::to_vec(&curated).unwrap()).unwrap();
+        let refused = project
+            .command(&engine)
+            .args(["memory", "context-save", "--input"])
+            .arg(&input)
+            .arg("--output")
+            .arg(&output)
+            .args(["--source-client", "claude"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(!refused.status.success(), "{}", described(&refused));
+        String::from_utf8_lossy(&refused.stderr).into_owned()
+    };
+    let good = json!({"goal": "Fix refunds", "summary": "Refunds keep the invoice date.",
+        "next_steps": ["Add the test"]});
+    let mut unexpected = good.clone();
+    unexpected["mood"] = "fine".into();
+    unexpected["layer"] = "x".into();
+    let mut sensitive = good.clone();
+    sensitive["files"] = json!([".env"]);
+    let mut escaping = good.clone();
+    escaping["files"] = json!(["../outside.php"]);
+    for (curated, extra, refusal) in [
+        (
+            unexpected,
+            &["--detail", "summary"][..],
+            "input has unexpected fields: layer, mood",
+        ),
+        (
+            json!({"goal": "Fix refunds"}),
+            &["--detail", "summary"][..],
+            "input is missing required fields: next_steps, summary",
+        ),
+        (
+            good.clone(),
+            &["--detail", "topic"][..],
+            "--topic is required when --detail topic",
+        ),
+        (
+            sensitive,
+            &["--detail", "summary"][..],
+            "file path is sensitive or invalid: .env",
+        ),
+        (
+            escaping,
+            &["--detail", "summary"][..],
+            "file path escapes the repository: ../outside.php",
+        ),
+    ] {
+        let stderr = save(curated, extra);
+        assert!(stderr.contains(refusal), "{refusal:?} in {stderr}");
+    }
+    fs::create_dir_all(output.parent().unwrap()).unwrap();
+    fs::write(&output, "kept\n").unwrap();
+    let stderr = save(good, &["--detail", "summary"]);
+    assert!(
+        stderr.contains(&format!(
+            "handoff output already exists: {}",
+            output.display()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(fs::read_to_string(&output).unwrap(), "kept\n");
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(

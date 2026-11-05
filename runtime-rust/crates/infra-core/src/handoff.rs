@@ -37,6 +37,18 @@ pub struct SaveHandoff {
     pub source_client: String,
     pub transcript: Option<PathBuf>,
 }
+/// Curated text carries neither secrets nor personal data, the policy the
+/// memory runtime applies to everything an agent authors for later tasks;
+/// refused in the retired words.
+fn reject_sensitive(label: &str, text: &str) -> Result<()> {
+    match domain::sensitive_label(text)? {
+        Some(found) => Err(RuntimeError::policy(format!(
+            "{found} detected; {label} not stored"
+        ))),
+        None => Ok(()),
+    }
+}
+
 #[derive(Clone)]
 pub struct HandoffService {
     pub context: RuntimeContext,
@@ -50,19 +62,36 @@ impl HandoffService {
             "summary" => 8000,
             "topic" => 16000,
             "full" => 64000,
-            _ => return Err(RuntimeError::invalid("Invalid handoff detail")),
+            _ => {
+                return Err(RuntimeError::invalid(
+                    "detail must be one of: summary, topic, full",
+                ));
+            }
         };
         let map = value
             .as_object()
-            .ok_or_else(|| RuntimeError::invalid("Handoff input must be one object"))?;
-        if map.keys().any(|key| !FIELDS[..9].contains(&key.as_str()))
-            || ["goal", "summary", "next_steps"]
-                .iter()
-                .any(|key| !map.contains_key(*key))
-        {
-            return Err(RuntimeError::invalid(
-                "Handoff contains missing or unknown curated fields",
-            ));
+            .ok_or_else(|| RuntimeError::invalid("--input must be one JSON object"))?;
+        let joined = |keys: BTreeSet<&str>| keys.into_iter().collect::<Vec<_>>().join(", ");
+        let unexpected = map
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !FIELDS[..9].contains(key))
+            .collect::<BTreeSet<_>>();
+        if !unexpected.is_empty() {
+            return Err(RuntimeError::invalid(format!(
+                "input has unexpected fields: {}",
+                joined(unexpected)
+            )));
+        }
+        let missing = ["goal", "summary", "next_steps"]
+            .into_iter()
+            .filter(|key| !map.contains_key(*key))
+            .collect::<BTreeSet<_>>();
+        if !missing.is_empty() {
+            return Err(RuntimeError::invalid(format!(
+                "input is missing required fields: {}",
+                joined(missing)
+            )));
         }
         let mut output = object!({});
         let mut authored = Vec::new();
@@ -71,7 +100,9 @@ impl HandoffService {
                 let text = value[key]
                     .as_str()
                     .filter(|text| !results::clean(text).is_empty())
-                    .ok_or_else(|| RuntimeError::invalid(format!("{key} must be nonempty text")))?;
+                    .ok_or_else(|| {
+                        RuntimeError::invalid(format!("{key} must be a non-empty string"))
+                    })?;
                 let text = results::clean(text);
                 output[key] = text.clone().into();
                 authored.push(text);
@@ -82,7 +113,9 @@ impl HandoffService {
                     .cloned()
                     .unwrap_or_default();
                 if map.contains_key(*key) && !value[key].is_array() {
-                    return Err(RuntimeError::invalid(format!("{key} must be a list")));
+                    return Err(RuntimeError::invalid(format!(
+                        "{key} must be a list of non-empty strings"
+                    )));
                 }
                 let rows = rows
                     .iter()
@@ -93,7 +126,7 @@ impl HandoffService {
                             .map(String::from)
                             .ok_or_else(|| {
                                 RuntimeError::invalid(format!(
-                                    "{key} must contain nonempty strings"
+                                    "{key} must be a list of non-empty strings"
                                 ))
                             })
                     })
@@ -112,50 +145,67 @@ impl HandoffService {
         }
         let authored = authored.join("\n");
         if authored.chars().count() > limit {
-            return Err(RuntimeError::invalid(
-                "Curated context exceeds its detail limit",
-            ));
+            return Err(RuntimeError::invalid(format!(
+                "curated context exceeds the {detail} limit of {limit} characters"
+            )));
         }
-        domain::guard_shared_text("curated context", std::slice::from_ref(&authored))?;
+        reject_sensitive("curated context", &authored)?;
         let transcript=regex::Regex::new(r"(?im)^\s*(?:user|assistant|system|developer|tool|prompt|response|reasoning|stdout|stderr|log)\s*:").map_err(|_|RuntimeError::invalid("Invalid handoff policy expression"))?;
         if transcript.is_match(&authored) {
             return Err(RuntimeError::policy(
-                "Curated context contains raw transcript-like data",
+                "curated context contains raw transcript-like data; replace it with a summary",
             ));
         }
         Ok(output)
     }
+    /// A cited file as the handoff stores it, repository-relative; the
+    /// directories above the repository are this machine's and never leave it.
     fn safe_relative(&self, value: &str) -> Result<(String, PathBuf)> {
-        let head = value;
-        if Path::new(head).is_absolute()
-            || head.contains('\\')
-            || head.contains('\0')
-            || head.contains(':')
-            || head.split('/').any(|part| part == "..")
+        if value.is_empty()
+            || value != value.trim()
+            || value.contains('\\')
+            || value.chars().any(|character| (character as u32) < 32)
         {
-            return Err(RuntimeError::policy(
-                "Handoff file paths must be project-relative",
+            return Err(RuntimeError::invalid(
+                "file path must be a non-empty, trimmed repository-relative path",
             ));
         }
-        let relative = head
+        let parts = value
             .split('/')
             .filter(|part| !part.is_empty() && *part != ".")
-            .collect::<Vec<_>>()
-            .join("/");
-        if relative.is_empty() {
-            return Err(RuntimeError::invalid("Empty handoff file path"));
+            .collect::<Vec<_>>();
+        if value.starts_with('/')
+            || value.starts_with("./")
+            || parts.contains(&"..")
+            || parts.first().is_some_and(|first| first.contains(':'))
+        {
+            return Err(RuntimeError::policy(format!(
+                "file path escapes the repository: {value}"
+            )));
         }
-        for component in relative.split('/') {
-            let lower = component.to_lowercase();
-            if matches!(
-                lower.as_str(),
-                ".git" | "secret" | "secrets" | "credentials"
-            ) || lower.starts_with(".env")
-                || lower.starts_with("id_")
-                || ["pem", "key", "p12", "pfx", "jks", "keystore"]
-                    .contains(&lower.rsplit('.').next().unwrap_or(""))
-            {
-                return Err(RuntimeError::policy("Sensitive handoff file path"));
+        static SENSITIVE: std::sync::OnceLock<std::result::Result<regex::Regex, regex::Error>> =
+            std::sync::OnceLock::new();
+        let sensitive = SENSITIVE
+            .get_or_init(|| {
+                regex::Regex::new(
+                    r"(?i)^(?:\.git|\.env(?:\..*)?|secrets?|credentials?|id_[a-z0-9]+|[^/]+\.(?:pem|key|p12|pfx|jks|keystore))$",
+                )
+            })
+            .as_ref()
+            .map_err(|_| RuntimeError::invalid("Invalid handoff path expression"))?;
+        if parts.is_empty() || parts.iter().any(|part| sensitive.is_match(part)) {
+            return Err(RuntimeError::policy(format!(
+                "file path is sensitive or invalid: {value}"
+            )));
+        }
+        let relative = parts.join("/");
+        let mut current = self.context.roots.project.clone();
+        for part in &parts {
+            current.push(part);
+            if std::fs::symlink_metadata(&current).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                return Err(RuntimeError::policy(format!(
+                    "file path contains a symlink: {value}"
+                )));
             }
         }
         let path = self.context.roots.project.join(&relative);
@@ -165,7 +215,7 @@ impl HandoffService {
     pub fn fingerprint_files(&self, values: &[String]) -> Result<Vec<Value>> {
         if values.len() > 256 {
             return Err(RuntimeError::invalid(
-                "At most 256 source files may be referenced",
+                "at most 256 source files may be referenced",
             ));
         }
         let frame = git::GitFrame::discover(&self.context.roots.project)?;
@@ -174,19 +224,23 @@ impl HandoffService {
         for value in values {
             let (relative, path) = self.safe_relative(value)?;
             if !seen.insert(relative.clone()) {
-                return Err(RuntimeError::invalid("Handoff file paths must be unique"));
+                return Err(RuntimeError::invalid(format!(
+                    "file paths must be unique: {relative}"
+                )));
             }
             if let Some(frame) = &frame
                 && !frame.ignored(std::slice::from_ref(&relative))?.is_empty()
             {
-                return Err(RuntimeError::policy(
-                    "Ignored handoff files cannot be included",
-                ));
+                return Err(RuntimeError::policy(format!(
+                    "file path is ignored and cannot be included: {relative}"
+                )));
             }
             let checksum = match std::fs::File::open(&path) {
                 Ok(mut handle) => {
                     if !handle.metadata()?.is_file() {
-                        return Err(RuntimeError::policy("Handoff source is not a regular file"));
+                        return Err(RuntimeError::policy(format!(
+                            "file path is not a regular file: {relative}"
+                        )));
                     }
                     use sha2::{Digest, Sha256};
                     let mut checksum = Sha256::new();
@@ -264,27 +318,47 @@ impl HandoffService {
     }
     pub fn save(&self, input: SaveHandoff) -> Result<Value> {
         if !["codex", "claude", "cursor", "other"].contains(&input.source_client.as_str()) {
-            return Err(RuntimeError::invalid("Invalid source client"));
-        }
-        if (input.detail == "topic")
-            != input
-                .topic
-                .as_ref()
-                .is_some_and(|topic| !results::clean(topic).is_empty())
-            || (input.detail == "full") != input.transcript.is_some()
-        {
             return Err(RuntimeError::invalid(
-                "Topic/transcript fields do not match handoff detail",
+                "source client must be one of: claude, codex, cursor, other",
             ));
         }
-        domain::guard_shared_text(
+        let topic = input
+            .topic
+            .as_ref()
+            .is_some_and(|topic| !results::clean(topic).is_empty());
+        for (wrong, message) in [
+            (
+                input.detail == "topic" && !topic,
+                "--topic is required when --detail topic",
+            ),
+            (
+                input.detail != "topic" && input.topic.is_some(),
+                "--topic is valid only when --detail topic",
+            ),
+            (
+                input.detail == "full" && input.transcript.is_none(),
+                "--transcript is required when --detail full",
+            ),
+            (
+                input.detail != "full" && input.transcript.is_some(),
+                "--transcript is valid only when --detail full",
+            ),
+        ] {
+            if wrong {
+                return Err(RuntimeError::invalid(message));
+            }
+        }
+        // The labels go into the same tracked file as the curated fields and
+        // follow the same policy: no secrets, no personal data.
+        reject_sensitive(
             "topic and task ID",
             &input
                 .topic
                 .iter()
                 .chain(input.task_id.iter())
                 .cloned()
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
+                .join("\n"),
         )?;
         let context = self.validate_curated(&input.input, &input.detail)?;
         let files = values(&context["files"])?;
@@ -293,8 +367,14 @@ impl HandoffService {
         let output = fs::absolute(&input.output)?;
         if output.extension().and_then(|value| value.to_str()) != Some("md") {
             return Err(RuntimeError::invalid(
-                "Handoff output must use a .md extension",
+                "handoff output must use a .md extension",
             ));
+        }
+        if std::fs::symlink_metadata(&output).is_ok() {
+            return Err(RuntimeError::conflict(format!(
+                "handoff output already exists: {}",
+                output.display()
+            )));
         }
         if let Ok(relative) = output.strip_prefix(&self.context.roots.project)
             && relative
@@ -316,12 +396,12 @@ impl HandoffService {
                 })
         {
             return Err(RuntimeError::policy(
-                "Handoff must be a standalone task artifact",
+                "handoff output must be a standalone task artifact, outside memory and policy stores",
             ));
         }
         if self.context.roots.attached() && output.starts_with(&self.context.roots.state) {
             return Err(RuntimeError::policy(
-                "Handoff must lie outside accelerator state",
+                "handoff output must be a standalone task artifact, outside the accelerator state",
             ));
         }
         let transcript = input
@@ -351,18 +431,18 @@ impl HandoffService {
         }
         if body.len() > HANDOFF_LIMIT - INPUT_LIMIT {
             return Err(RuntimeError::invalid(
-                "Encoded handoff exceeds its size limit",
+                "encoded handoff exceeds the size limit",
             ));
         }
         let metadata = object!({"schema_version":if encoded{2}else{1},"type":"context-handoff","created_at":clock::now().to_rfc3339(),"detail":input.detail,"topic":input.topic.map(|value|results::clean(&value)),"source_client":input.source_client,"task_id":input.task_id.map(|value|results::clean(&value)).filter(|value|!value.is_empty()),"repository":{"branch":self.git_value(&["branch","--show-current"]),"commit":self.git_value(&["rev-parse","HEAD"])},"files":fingerprints,"context":context,"body_sha256":result_store::sha(&body),"transcript":transcript.as_ref().map(|raw|object!({"sha256":result_store::sha(raw),"bytes":raw.len()}))});
-        if domain::secret_label(&format!(
-            "{}{}",
+        if let Some(label) = domain::secret_label(&format!(
+            "{}\n{}",
             json::python_default(&metadata, false, false, true)?,
             String::from_utf8_lossy(&body)
-        ))?
-        .is_some()
-        {
-            return Err(RuntimeError::policy("Handoff contains a credential"));
+        ))? {
+            return Err(RuntimeError::policy(format!(
+                "possible {label} detected; handoff not stored"
+            )));
         }
         let parent = output
             .parent()
@@ -378,7 +458,16 @@ impl HandoffService {
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
-        let mut handle = options.open(&output)?;
+        let mut handle = options.open(&output).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                RuntimeError::conflict(format!(
+                    "handoff output already exists: {}",
+                    output.display()
+                ))
+            } else {
+                error.into()
+            }
+        })?;
         handle.write_all(b"---\n")?;
         handle.write_all(json::python_default(&metadata, true, false, true)?.as_bytes())?;
         handle.write_all(b"\n---\n")?;

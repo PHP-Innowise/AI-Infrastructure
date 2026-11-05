@@ -395,6 +395,16 @@ edition's own files remain in that edition's changelog.
   empty"). The native commands accepted both outside the hook queue: an
   empty update consumed a revision, and an empty progress erased the
   task's. An empty `msg-send` body is refused in the retired words.
+- A refused `context-save` names what to correct again, as the retired
+  command did: the unexpected or missing input fields, the flag a detail
+  needs (`--topic is required when --detail topic`), the length limit of the
+  chosen detail, a cited path that escapes the repository or is sensitive,
+  and the output that already exists. The native command said "Handoff
+  contains missing or unknown curated fields", "Topic/transcript fields do
+  not match handoff detail" or "Filesystem operation failed: File exists".
+  Cited paths follow the retired rules: `./src/x.php` and an untrimmed path
+  are refused, `.envrc` and `id_rsa.pub` are not. On twin projects 20
+  refused saves read as the retired ones.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
