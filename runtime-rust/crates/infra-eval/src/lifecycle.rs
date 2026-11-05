@@ -38,9 +38,48 @@ struct Fuzz {
     contention: f64,
     verbose: bool,
     clone_before: String,
+    expected: Vec<String>,
+    min_saves: Option<u64>,
 }
 fn inc(map: &mut BTreeMap<String, u64>, key: &str) {
     *map.entry(key.into()).or_default() += 1;
+}
+/// The session kinds and events a run is pinned to reach: every `--expect`
+/// value, split at its commas.
+fn expectations(value: &Value) -> Vec<String> {
+    let values = match value {
+        Value::String(text) => vec![text.as_str()],
+        Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+        _ => vec![],
+    };
+    values
+        .into_iter()
+        .flat_map(|text| text.split(','))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(String::from)
+        .collect()
+}
+/// What a pinned run fell short of: each expected session kind or event it
+/// never counted, and fewer saves than its floor. A change to what the fuzzer
+/// draws can move a seed off what it was chosen to drive; the run then says
+/// so instead of passing on less.
+fn unmet(
+    sessions: &BTreeMap<String, u64>,
+    events: &BTreeMap<String, u64>,
+    saves: usize,
+    expected: &[String],
+    min_saves: Option<u64>,
+) -> Vec<String> {
+    let mut unmet = expected
+        .iter()
+        .filter(|name| !sessions.contains_key(*name) && !events.contains_key(*name))
+        .map(|name| format!("never reached: {name}"))
+        .collect::<Vec<_>>();
+    if let Some(floor) = min_saves.filter(|floor| (saves as u64) < *floor) {
+        unmet.push(format!("{saves} saves, fewer than {floor}"));
+    }
+    unmet
 }
 fn tail(s: &str, n: usize) -> String {
     s.chars()
@@ -467,10 +506,12 @@ fn turn(
             let _ = git(&cwd, &["checkout", "-q", "-b", &new]);
             moved = true;
         } else if !burst && roll < 0.2 {
-            let name = format!("src/Commit{marker}.php");
-            std::fs::write(cwd.join(&name), "<?php\n")?;
-            let _ = git(&cwd, &["add", "src"]);
-            let _ = git(&cwd, &["commit", "-qm", &format!("Commit {marker}")]);
+            // The person commits in the checkout while the agent writes the
+            // save. A session below the checkout's root runs in src/ itself.
+            let folder = &checkouts[&s.checkout];
+            std::fs::write(folder.join(format!("src/Commit{marker}.php")), "<?php\n")?;
+            let _ = git(folder, &["add", "src"]);
+            let _ = git(folder, &["commit", "-qm", &format!("Commit {marker}")]);
             inc(&mut out.events, "commit during a save");
         }
     }
@@ -984,6 +1025,7 @@ impl Fuzz {
             .is_ok()
             {
                 self.removed.insert(name);
+                inc(&mut self.events, "worktree removed");
             }
             return Ok(());
         }
@@ -1407,7 +1449,7 @@ impl Fuzz {
             ));
         }
         Ok(
-            json!({"seed":artifact::strict(self.seed.as_bytes())?,"rng_profile":"cpython-mt19937-integer-text-sha512-float53-v2","edition":self.h.edition,"attached":self.h.attached,"sessions":self.counts,"events":self.events,"saves":self.saved.len(),"save_lines":saves,"worktrees":self.checkouts.len().saturating_sub(1),"removed":self.removed.len(),"violations":self.violations,"log_tail":if self.violations.is_empty(){vec![]}else{self.log.iter().rev().take(15).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>()},"interrupted":crate::cancel::interrupted()}),
+            json!({"seed":artifact::strict(self.seed.as_bytes())?,"rng_profile":"cpython-mt19937-integer-text-sha512-float53-v2","edition":self.h.edition,"attached":self.h.attached,"sessions":self.counts,"events":self.events,"saves":self.saved.len(),"save_lines":saves,"worktrees":self.checkouts.len().saturating_sub(1),"removed":self.removed.len(),"violations":self.violations,"unmet":unmet(&self.counts,&self.events,self.saved.len(),&self.expected,self.min_saves),"log_tail":if self.violations.is_empty(){vec![]}else{self.log.iter().rev().take(15).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>()},"interrupted":crate::cancel::interrupted()}),
         )
     }
 }
@@ -1436,6 +1478,28 @@ pub fn run(source: &Path, runtime: &Path, v: &Value) -> Result<Value> {
     let contention = share("contention")?;
     let edition = v["edition"].as_str().unwrap_or("PHP Core");
     let attached = v["attached"] == true;
+    let expected = expectations(&v["expect"]);
+    let min_saves = match &v["min_saves"] {
+        Value::Null => None,
+        value => Some(
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+                .ok_or_else(|| artifact::invalid("--min-saves must be a whole number"))?,
+        ),
+    };
+    // Attached, the hooks run this executable, and the save a Stop hook asks
+    // for names it: the fuzz finds that command by the engine's own name, so
+    // under another name every save would be "request without exact command".
+    if attached
+        && std::env::current_exe()?
+            .file_stem()
+            .is_none_or(|stem| stem != std::ffi::OsStr::new("infra-engine"))
+    {
+        return Err(artifact::invalid(
+            "an attached lifecycle fuzz runs from an engine named infra-engine",
+        ));
+    }
     let (work, temporary) = if let Some(work) = v["work"].as_str() {
         let work = artifact::ordinary(Path::new(work))?;
         if work.exists() && (!work.is_dir() || std::fs::read_dir(&work)?.next().is_some()) {
@@ -1496,12 +1560,17 @@ pub fn run(source: &Path, runtime: &Path, v: &Value) -> Result<Value> {
         contention,
         verbose: v["verbose"] == true,
         clone_before,
+        expected,
+        min_saves,
     };
     fuzz.run(steps)?;
     let summary = fuzz.check()?;
     let code = if crate::cancel::interrupted() {
         128 + crate::cancel::signal()
-    } else if summary["violations"].as_array().is_some_and(Vec::is_empty) {
+    } else if ["violations", "unmet"]
+        .iter()
+        .all(|key| summary[*key].as_array().is_some_and(Vec::is_empty))
+    {
         0
     } else {
         1
@@ -1512,4 +1581,30 @@ pub fn run(source: &Path, runtime: &Path, v: &Value) -> Result<Value> {
     );
     drop(temporary);
     Ok(json!({"_cli":{"code":code,"stdout":stdout,"stderr":""},"result":summary}))
+}
+
+#[cfg(test)]
+mod expectation_tests {
+    use super::*;
+
+    #[test]
+    fn a_pinned_run_names_what_it_no_longer_reaches() {
+        let expected = expectations(&json!(["cursor root, burst", "cursor worktree", " "]));
+        assert_eq!(expected, ["cursor root", "burst", "cursor worktree"]);
+        assert_eq!(expectations(&json!("rebase stopped")), ["rebase stopped"]);
+        assert!(expectations(&Value::Null).is_empty());
+        // Session kinds and events count alike; a name neither counted is
+        // reported, and so are saves below the floor.
+        let sessions = BTreeMap::from([("cursor root".to_string(), 1)]);
+        let events = BTreeMap::from([("burst".to_string(), 2)]);
+        assert_eq!(
+            unmet(&sessions, &events, 12, &expected, Some(10)),
+            ["never reached: cursor worktree"]
+        );
+        assert_eq!(
+            unmet(&sessions, &events, 9, &expected[..2], Some(10)),
+            ["9 saves, fewer than 10"]
+        );
+        assert!(unmet(&sessions, &events, 0, &[], None).is_empty());
+    }
 }

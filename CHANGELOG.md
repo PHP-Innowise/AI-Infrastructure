@@ -24,6 +24,38 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- CI runs the memory lifecycle fuzzer again. No job had run it since the
+  native engine replaced the retired script, and
+  `tests/test_memory_lifecycle_fuzz.py`, which still drove that script, ran
+  nowhere; it is removed. The new `memory-lifecycles` group of
+  `install/check-catalog.json` (job `memory-lifecycles` in `rust.yml`, Linux,
+  also in a local `infra-engine check`) runs `eval memory-lifecycle-fuzz` on
+  five fixed seeds: installed seeds 1 and 2, installed seed 24 with a third of
+  its turns stopped part-way and a third behind another session's lock, and
+  attached seeds 2 and 9, which between them launch Claude Code, Codex and
+  Cursor in the project and in worktrees and remove worktrees under them. As
+  the retired test asserted what its seeds covered, each gate names the session
+  kinds and events its seed was chosen for and a floor of saves: the fuzzer
+  takes `--expect NAME[,NAME...]` (a session kind or event its summary counts)
+  and `--min-saves N`, lists what a run fell short of under `unmet` and exits 1,
+  as it does on a violation. A removed worktree is now counted as the event
+  `worktree removed`. With the debug engine a generated job builds, the five
+  seeds took 8 minutes on four cores of a workstation, without bubblewrap, as
+  on the runner, where no save is therefore held in a sandbox; the job allows
+  40 minutes, its build included.
+  - Fixed in the fuzzer: when a person's commit was drawn while the agent wrote
+    a save, a session running in `src/` wrote the commit's file to `src/src/`,
+    and the missing folder ended the whole run with "No such file or
+    directory" - since the native port; the retired script committed in the
+    checkout, as the fuzzer now does. Installed seed 24, the seed the retired
+    test pinned for stopped hooks and held locks, could not run at all.
+  - Each generated job now copies the engine to `infra-check/infra-engine` in
+    the runner's temporary directory instead of `infra-check-engine`: an
+    attached Stop hook asks for the save with the engine's own path, and the
+    fuzzer finds that command by the engine's name, so under the old name an
+    attached seed would have reported every save as "request without exact
+    command". An attached fuzz started from an engine under another name now
+    stops at once and says why.
 - `eval memory-lifecycle-fuzz --attached` launches Cursor too, in the project
   and in its worktrees, as the Harness does. Its attached sessions were Claude
   Code and Codex only, a choice carried over from the retired fuzzer, which

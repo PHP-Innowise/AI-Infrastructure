@@ -203,6 +203,147 @@
       ]
     },
     {
+      "name": "memory-lifecycles",
+      "workflow": "rust.yml",
+      "job": "memory-lifecycles",
+      "platform": "linux",
+      "timeout_minutes": 40,
+      "default": true,
+      "gates": [
+        {
+          "kind": "process",
+          "name": "Installed lifecycles, seed 1",
+          "program": "{engine}",
+          "arguments": [
+            "eval",
+            "memory-lifecycle-fuzz",
+            "--tooling-root",
+            "{root}",
+            "--seed",
+            "1",
+            "--min-saves",
+            "10",
+            "--expect",
+            "cursor root, claude worktree, claude sub, codex sub, burst, worktree entered",
+            "--verbose"
+          ],
+          "cwd": ".",
+          "tools": [
+            "bash",
+            "git"
+          ],
+          "timeout_seconds": 900,
+          "oracle": false
+        },
+        {
+          "kind": "process",
+          "name": "Installed lifecycles, seed 2",
+          "program": "{engine}",
+          "arguments": [
+            "eval",
+            "memory-lifecycle-fuzz",
+            "--tooling-root",
+            "{root}",
+            "--seed",
+            "2",
+            "--min-saves",
+            "10",
+            "--expect",
+            "codex worktree, codex worktree made, checkpoint held, rebase stopped, rebase continued, rebase aborted",
+            "--verbose"
+          ],
+          "cwd": ".",
+          "tools": [
+            "bash",
+            "git"
+          ],
+          "timeout_seconds": 900,
+          "oracle": false
+        },
+        {
+          "kind": "process",
+          "name": "Stopped hooks and held locks, seed 24",
+          "program": "{engine}",
+          "arguments": [
+            "eval",
+            "memory-lifecycle-fuzz",
+            "--tooling-root",
+            "{root}",
+            "--seed",
+            "24",
+            "--interrupt",
+            "0.3",
+            "--contention",
+            "0.3",
+            "--min-saves",
+            "10",
+            "--expect",
+            "commit during a save, prompt hook stopped, Stop hook stopped, save stopped, Stop after the save stopped, stopped by kill, stopped by term, stopped by int, stopped while running, prompt waited on a lock, stop after the save waited on a lock",
+            "--verbose"
+          ],
+          "cwd": ".",
+          "tools": [
+            "bash",
+            "git"
+          ],
+          "timeout_seconds": 900,
+          "oracle": false
+        },
+        {
+          "kind": "process",
+          "name": "Attached lifecycles, seed 2",
+          "program": "{engine}",
+          "arguments": [
+            "eval",
+            "memory-lifecycle-fuzz",
+            "--tooling-root",
+            "{root}",
+            "--attached",
+            "--seed",
+            "2",
+            "--min-saves",
+            "10",
+            "--expect",
+            "cursor root, cursor worktree, codex root, codex worktree, burst, worktree removed",
+            "--verbose"
+          ],
+          "cwd": ".",
+          "tools": [
+            "bash",
+            "git"
+          ],
+          "timeout_seconds": 900,
+          "oracle": false
+        },
+        {
+          "kind": "process",
+          "name": "Attached lifecycles, seed 9",
+          "program": "{engine}",
+          "arguments": [
+            "eval",
+            "memory-lifecycle-fuzz",
+            "--tooling-root",
+            "{root}",
+            "--attached",
+            "--seed",
+            "9",
+            "--min-saves",
+            "10",
+            "--expect",
+            "claude root, claude worktree, worktree entered",
+            "--verbose"
+          ],
+          "cwd": ".",
+          "tools": [
+            "bash",
+            "git"
+          ],
+          "timeout_seconds": 900,
+          "oracle": false
+        }
+      ]
+    },
+    {
       "name": "parity",
       "workflow": "ci.yml",
       "job": "parity",

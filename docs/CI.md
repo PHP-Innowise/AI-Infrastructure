@@ -46,6 +46,9 @@ Each generated job checks out source, provisions Rust, builds `infra-engine`,
 then runs `infra-engine check --group GROUP --strict --base origin/main` from a
 copy of it in the runner's temporary directory: the group's own Cargo builds
 replace the engine in the target directory, which Windows refuses while it runs.
+The copy keeps its name, `infra-check/infra-engine`: what the engine writes for
+a host names its own executable, and the lifecycle fuzzer finds the save
+command an attached Stop hook asks for by that name.
 A missing required tool or input fails a strict run. Skipped work is reported
 separately from passes. Failed command logs are retained, and each failed check
 also prints the last lines of its stdout and stderr on stderr; interrupted
@@ -80,9 +83,23 @@ of failing or skipping: a checkout without `cargo-nextest` runs the same tests
 through `cargo test --tests`, one binary at a time, and the gate's reason names
 the missing tool.
 
+The `memory-lifecycles` group runs `infra-engine eval memory-lifecycle-fuzz`
+on fixed seeds, one gate each: installed seeds 1 and 2; installed seed 24 with
+a third of its turns stopped part-way and a third waiting behind another
+session's lock (`--interrupt 0.3 --contention 0.3`); attached seeds 2 and 9,
+which between them launch Claude Code, Codex and Cursor in the project and in
+worktrees and remove worktrees under them. A gate fails on any violation, on
+fewer than ten saves (`--min-saves 10`), and when its seed no longer reaches the
+session kinds and events it was chosen for (`--expect`): a change to what the
+fuzzer draws moves seeds, and the gate then names what its seed stopped
+driving instead of passing on less. The group runs on Linux only, offline,
+with no provider; the runner has no bubblewrap, so no save is held in a
+sandbox there.
+
 | Group | Actual validation |
 | --- | --- |
 | `rust` | Workspace Rust tests in parallel, doc tests, rustfmt and Clippy. |
+| `memory-lifecycles` | Seeded session and Git lifecycles through the memory hooks, installed and attached, on five fixed seeds (Linux). |
 | `parity` | Canonical shared-resource parity and generator assets. |
 | `mirrors` | Native mirror generation compared with canonical resources for every edition. |
 | `installation` | Native inventory contracts for Laravel, Symfony, PHP Core and WordPress. |
@@ -131,9 +148,11 @@ permanent increase updates the ceiling alongside its source change.
 
 Maintainer experiments are explicit commands under `infra-engine eval`,
 `infra-engine bench`, `infra-engine pilot` and `infra-engine routing-eval`.
-They are not default CI gates. Provider runs may cost money and must be invoked
-deliberately. Offline dry-runs describe their synthetic inputs and do not prove
-routing quality, task benefit, native-save success, or real provider behavior.
+They are not default CI gates; the fixed seeds of the offline lifecycle fuzzer
+in the `memory-lifecycles` group are the one exception. Provider runs may cost
+money and must be invoked deliberately. Offline dry-runs describe their
+synthetic inputs and do not prove routing quality, task benefit, native-save
+success, or real provider behavior.
 
 Preserve sealed study artifacts, exact hashes, acquisition identities, fixed
 denominators, no-retry rules and unknown usage. Keep proof/deadline clocks real;

@@ -883,7 +883,10 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
         output.push('\n');
         // The group's own Cargo builds rewrite this engine in the target
         // directory, and Windows cannot replace a running executable: the
-        // catalog runs from a copy outside it.
+        // catalog runs from a copy outside it. The copy keeps the engine's
+        // name, in a directory of its own: what the engine writes for a host
+        // names its own executable, and the lifecycle fuzzer finds the save
+        // command an attached Stop hook asks for by that name.
         output.push_str("      - name: Build the native engine\n        run: ");
         if platform == "windows" && uses_nextest {
             // CLI integration tests build their real engine too. Compile once
@@ -895,7 +898,7 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
                 "cargo build --manifest-path runtime-rust/Cargo.toml --locked --bin infra-engine",
             );
         }
-        output.push_str("\n      - name: Run the catalog group\n        run: |\n          suffix=''\n          if [ \"$RUNNER_OS\" = 'Windows' ]; then suffix='.exe'; fi\n          engine=\"${RUNNER_TEMP//\\\\//}/infra-check-engine$suffix\"\n          cp \"$CARGO_TARGET_DIR/debug/infra-engine$suffix\" \"$engine\"\n          \"$engine\" check --group \"$NATIVE_CHECK_GROUP\" --strict --base origin/main --log-dir \"${RUNNER_TEMP//\\\\//}/infra-check-logs\"");
+        output.push_str("\n      - name: Run the catalog group\n        run: |\n          suffix=''\n          if [ \"$RUNNER_OS\" = 'Windows' ]; then suffix='.exe'; fi\n          engine=\"${RUNNER_TEMP//\\\\//}/infra-check/infra-engine$suffix\"\n          mkdir -p \"${engine%/*}\"\n          cp \"$CARGO_TARGET_DIR/debug/infra-engine$suffix\" \"$engine\"\n          \"$engine\" check --group \"$NATIVE_CHECK_GROUP\" --strict --base origin/main --log-dir \"${RUNNER_TEMP//\\\\//}/infra-check-logs\"");
         if oracle {
             output.push_str(" --include-oracles");
         }
@@ -1183,10 +1186,15 @@ mod compiler_workflow_tests {
                     .find("          \"$engine\" check --group \"$NATIVE_CHECK_GROUP\"")
                     .unwrap();
                 assert!(copy < run, "{name}");
-                assert!(
-                    job[check..]
-                        .contains("engine=\"${RUNNER_TEMP//\\\\//}/infra-check-engine$suffix\"\n")
-                );
+                // The copy keeps the engine's name, in a directory of its own:
+                // a request the engine writes names its own executable.
+                let named = job[check..]
+                    .find(concat!(
+                        "          engine=\"${RUNNER_TEMP//\\\\//}/infra-check/infra-engine$suffix\"\n",
+                        "          mkdir -p \"${engine%/*}\"\n",
+                    ))
+                    .unwrap_or_else(|| panic!("{name}: the copy is not named as the engine"));
+                assert!(named < copy, "{name}");
                 // Failed logs go where the job's last step collects them.
                 assert!(
                     job[check..].contains(" --log-dir \"${RUNNER_TEMP//\\\\//}/infra-check-logs\""),
