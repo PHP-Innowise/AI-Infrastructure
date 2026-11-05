@@ -426,7 +426,9 @@ impl System {
             .cloned()
             .collect::<Vec<_>>();
         if current && plan["relationships"] != object!(relationships) {
-            return Err(fail("Plan relationships differ from current catalog"));
+            return Err(fail(
+                "The services' declared contracts changed after this plan was prepared; prepare a new plan",
+            ));
         }
         let budget = plan["context_budget_chars"]
             .as_u64()
