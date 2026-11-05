@@ -478,6 +478,25 @@ edition's own files remain in that edition's changelog.
   that ask for the save serve it there and the retired runtime accepted it.
   The save was refused with `--project names neither this project nor a
   worktree this installation serves`.
+- An attached project's state no longer keeps every Cursor plugin image it
+  was ever given. A Cursor launch hands the session a private copy of the
+  edition's plugin, `launch/cursor-plugin-<digest>/` (about 1 MB and 179
+  files for PHP Core), named for its content. The content names the launch
+  folder, so the root and each worktree, and each change to the edition's
+  Cursor files, got an image of its own, and nothing removed one. Every
+  launch of the project, whatever its host, walks them all to keep the state
+  private: with 21 images a Claude launch took 30 s and a Cursor launch 32 s,
+  against 0.2 s and 0.6 s with one. A Cursor launch now removes, under
+  `accelerator-attach.lock`, the image of a folder, an engine or a clone that
+  is gone, an image left without its manifest, and an image its own launcher
+  no longer hands that folder once no launch was handed it for a day: a
+  Cursor session reads its plugin for as long as it runs. Each launch records
+  when it was handed its image, in `launch/cursor-plugins.json`, before it
+  hands it; an image the record does not name is kept a day from when a
+  launch first sees it. The launch's own image, and the image it would hand
+  another folder, stay. A launch looks at 16 images at most, going on where
+  the last one stopped; an image it cannot read or remove stays, and the
+  sweep never stops a launch.
 - `install --sync` names what holds a host's wiring. A hook the project
   edited keeps the whole host on its current wiring, so that no team change
   is overwritten or unwired, and every file kept back said only "held back by

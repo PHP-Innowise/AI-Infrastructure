@@ -86,6 +86,15 @@ The preamble tells the agent that paths such as `.claude/skills/...`,
 `memory-bank/bin/infra-engine memory ...` from the
 project.
 
+Cursor Agent is given a private copy of the edition's plugin in the state,
+`launch/cursor-plugin-<digest>/`, whose hooks and memory server are bound to
+this machine's engine and to the folder the session was launched from. Each
+such folder - the project and each worktree - and each version of the
+edition's Cursor files has a copy of its own. A Cursor launch removes the
+copies of folders, engines and clones that are gone, and a copy its launcher
+no longer hands a folder once no launch was handed it for a day, as recorded
+in `launch/cursor-plugins.json`; it looks at 16 copies at most per launch.
+
 ### Codex hook approval
 
 Codex runs a hook only after its definition was approved once; the approval is
