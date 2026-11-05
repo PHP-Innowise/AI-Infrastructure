@@ -380,6 +380,21 @@ edition's own files remain in that edition's changelog.
   person's check. The native refusals had dropped every value and hint
   ("Stale record revision", "Illegal lifecycle transition"). On twin
   projects nine such refusals now read as the retired ones.
+- `start` of a task ID whose task was completed or cancelled begins a new
+  task again: the finished record is archived first, as the retired start
+  did. The native start refused it as "Project Brain record already
+  exists", so a finished branch task could not be started again by hand.
+  `start` of a task under way names the record and says what to run
+  instead (`get --task-id ID` reads it, `update --task-id ID --revision
+  auto` records progress), a hint the retired runtime added after agents
+  ran start at the top of every session. `complete` without a numeric
+  revision says where the number is.
+- `update` that changes nothing, or passes an empty `--progress`, and
+  `brain-update` that changes nothing are refused again ("Working task
+  update requires a changed field", "Working task progress must not be
+  empty"). The native commands accepted both outside the hook queue: an
+  empty update consumed a revision, and an empty progress erased the
+  task's. An empty `msg-send` body is refused in the retired words.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

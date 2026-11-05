@@ -1164,6 +1164,110 @@ fn a_refused_update_names_what_it_found_and_what_to_pass() {
     );
 }
 
+/// `start` of a task under way says how to read and update it; after the
+/// task is completed, `start` of the same ID archives the finished record
+/// and begins a new task, as the retired start did. An update that changes
+/// nothing, or blanks the progress, is refused and leaves the record alone.
+#[test]
+fn start_after_complete_begins_again_and_an_empty_update_is_refused() {
+    let project = Project::new();
+    let engine = project.path.join("memory-bank/bin/infra-engine");
+    let memory = |args: &[&str]| {
+        let output = project
+            .command(&engine)
+            .arg("memory")
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let task = |id: &str| {
+        let output = project
+            .command(&engine)
+            .args(["memory", "get", "--task-id", id, "--json"])
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&output.stdout).unwrap_or(Value::Null)
+    };
+    assert!(memory(&["start", "--task-id", "SHOP-7", "--goal", "Fix refunds"]).0);
+    let (started, refusal) = memory(&["start", "--task-id", "SHOP-7", "--goal", "Fix refunds"]);
+    assert!(
+        !started
+            && refusal.contains("Project Brain record already exists: SHOP-7; it is the task under way: memory-bank/bin/infra-engine memory get --task-id SHOP-7 reads it, and update --task-id SHOP-7 --revision auto records progress"),
+        "{refusal}"
+    );
+    for (args, refusal) in [
+        (
+            &["update", "--task-id", "SHOP-7", "--revision", "auto"][..],
+            "Working task update requires a changed field",
+        ),
+        (
+            &[
+                "update",
+                "--task-id",
+                "SHOP-7",
+                "--revision",
+                "auto",
+                "--progress",
+                " ",
+            ][..],
+            "Working task progress must not be empty",
+        ),
+        (
+            &["brain-update", "--record-id", "SHOP-7", "--revision", "1"][..],
+            "Brain record update requires a changed field",
+        ),
+        (
+            &[
+                "complete",
+                "--task-id",
+                "SHOP-7",
+                "--revision",
+                "auto",
+                "--outcome",
+                "Done",
+            ][..],
+            "Governed completion requires the current numeric --revision; memory-bank/bin/infra-engine memory get --task-id SHOP-7 shows it",
+        ),
+    ] {
+        let (done, stderr) = memory(args);
+        assert!(!done && stderr.contains(refusal), "{args:?}: {stderr}");
+    }
+    let first = task("SHOP-7");
+    assert_eq!(first["revision"], 1, "{first}");
+    assert!(
+        memory(&[
+            "complete",
+            "--task-id",
+            "SHOP-7",
+            "--revision",
+            "1",
+            "--outcome",
+            "Done"
+        ])
+        .0
+    );
+    let (restarted, stderr) = memory(&[
+        "start",
+        "--task-id",
+        "SHOP-7",
+        "--goal",
+        "Fix refunds again",
+    ]);
+    assert!(restarted, "{stderr}");
+    let second = task("SHOP-7");
+    assert_eq!(second["goal"], "Fix refunds again", "{second}");
+    assert_ne!(second["task_uuid"], first["task_uuid"], "{second}");
+    let archived = project.path.join(format!(
+        "project-brain/archive/task/{}.md",
+        first["task_uuid"].as_str().unwrap()
+    ));
+    assert!(archived.is_file(), "{}", archived.display());
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(

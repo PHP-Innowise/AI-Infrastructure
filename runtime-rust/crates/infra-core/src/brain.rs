@@ -372,9 +372,10 @@ impl BrainRepository {
             Err(error) if error.kind == ErrorKind::NotFound => {}
             Err(error) => return Err(error),
             Ok(_) => {
-                return Err(RuntimeError::conflict(
-                    "Project Brain record already exists",
-                ));
+                return Err(RuntimeError::conflict(format!(
+                    "Project Brain record already exists: {}",
+                    input.external_id
+                )));
             }
         }
         let owner = if input.owner.is_empty() {

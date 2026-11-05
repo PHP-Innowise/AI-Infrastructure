@@ -553,12 +553,14 @@ impl Store {
                 "Working task update requires a changed field",
             ));
         }
-        for prose in [&request.progress, &request.auto_checkpoint]
-            .into_iter()
-            .flatten()
-        {
-            if prose.trim().is_empty() {
-                return Err(RuntimeError::invalid("Working task text must not be empty"));
+        for (prose, name) in [
+            (&request.progress, "progress"),
+            (&request.auto_checkpoint, "auto checkpoint"),
+        ] {
+            if prose.as_ref().is_some_and(|prose| prose.trim().is_empty()) {
+                return Err(RuntimeError::invalid(format!(
+                    "Working task {name} must not be empty"
+                )));
             }
         }
         validate_values(&request.files)?;

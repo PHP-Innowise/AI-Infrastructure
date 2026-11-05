@@ -837,13 +837,37 @@ impl MemoryService {
                     })?)?)
                 } else {
                     let _guard = brain.lock()?;
-                    let record = brain.create_task(
+                    let files = list(&request, "files", "file")?;
+                    let sources = list(&request, "sources", "source")?;
+                    let record = match brain.create_task(
                         id,
                         goal,
-                        list(&request, "files", "file")?,
-                        list(&request, "sources", "source")?,
+                        files.clone(),
+                        sources.clone(),
                         "team",
-                    )?;
+                    ) {
+                        // A finished task keeps its ID in dynamic/ until
+                        // compaction archives it; that record, and no other,
+                        // is archived now, as the retired start did.
+                        Err(error)
+                            if error
+                                .message
+                                .starts_with("Project Brain record already exists") =>
+                        {
+                            if !finished_records_only(&brain, id)? {
+                                // Agents ran start at the top of every
+                                // session, and the refusal said nothing of
+                                // what to run instead.
+                                return Err(RuntimeError::conflict(format!(
+                                    "{}; it is the task under way: memory-bank/bin/infra-engine memory get --task-id {id} reads it, and update --task-id {id} --revision auto records progress",
+                                    error.message
+                                )));
+                            }
+                            bank.compact(Some(id))?;
+                            brain.create_task(id, goal, files, sources, "team")?
+                        }
+                        created => created?,
+                    };
                     if let Err(error) = store.bind(
                         id,
                         record["id"].as_str().unwrap_or(""),
@@ -1077,6 +1101,25 @@ impl MemoryService {
                 })
             }
             "brain-update" => {
+                let progress = text(&request, "progress").map(str::trim);
+                if progress == Some("") {
+                    return Err(RuntimeError::invalid("Record progress must not be empty"));
+                }
+                if progress.is_none()
+                    && list(&request, "next_steps", "next_step")?.is_empty()
+                    && list(&request, "files", "file")?.is_empty()
+                    && list(&request, "sources", "source")?.is_empty()
+                    && list(&request, "conflicts", "conflict")?.is_empty()
+                    && ["transition", "phase", "authority"]
+                        .iter()
+                        .all(|key| text(&request, key).is_none())
+                    && !flag(&request, "reverify")
+                    && !flag(&request, "replace_next_steps")
+                {
+                    return Err(RuntimeError::invalid(
+                        "Brain record update requires a changed field",
+                    ));
+                }
                 let record = brain.get(id()?)?;
                 let verifying =
                     text(&request, "authority") == Some("verified") || flag(&request, "reverify");
@@ -1185,7 +1228,14 @@ impl MemoryService {
                         from_actor: required(&request, "from_actor")?.into(),
                         to_actor: required(&request, "to_actor")?.into(),
                         message_type: required(&request, "type")?.into(),
-                        body: required(&request, "body")?.into(),
+                        body: text(&request, "body")
+                            .filter(|body| !body.trim().is_empty())
+                            .ok_or_else(|| {
+                                RuntimeError::invalid(
+                                    "Message body must not be empty (--body or --body-file)",
+                                )
+                            })?
+                            .into(),
                         refs: list(&request, "refs", "ref")?,
                         capsule_digest: text(&request, "capsule_digest").map(String::from),
                     },
@@ -1236,9 +1286,29 @@ impl MemoryService {
     }
     fn update(&self, request: &Value) -> Result<Value> {
         let id = required(request, "task_id")?;
+        // An update that changes nothing, or blanks the progress, is refused
+        // as the retired command refused it: it consumed a revision, and an
+        // empty progress erased the task's.
+        let progress = text(request, "progress");
+        if progress.is_none()
+            && list(request, "next_steps", "next_step")?.is_empty()
+            && list(request, "files", "file")?.is_empty()
+            && list(request, "sources", "source")?.is_empty()
+            && text(request, "phase").is_none()
+            && !flag(request, "replace_next_steps")
+        {
+            return Err(RuntimeError::invalid(
+                "Working task update requires a changed field",
+            ));
+        }
+        if progress.is_some_and(|progress| progress.trim().is_empty()) {
+            return Err(RuntimeError::invalid(
+                "Working task progress must not be empty",
+            ));
+        }
         let update = storage::UpdateTask {
             task_id: id.into(),
-            progress: text(request, "progress").map(String::from),
+            progress: progress.map(|progress| progress.trim().to_string()),
             next_steps: list(request, "next_steps", "next_step")?,
             files: list(request, "files", "file")?,
             sources: list(request, "sources", "source")?,
@@ -1312,7 +1382,11 @@ impl MemoryService {
             .as_u64()
             .filter(|revision| *revision > 0)
             .ok_or_else(|| {
-                RuntimeError::invalid("Governed completion requires the current numeric --revision")
+                // Ending a task pins the revision a person or agent read;
+                // agents passed `auto`, so say where the number is.
+                RuntimeError::invalid(format!(
+                    "Governed completion requires the current numeric --revision; memory-bank/bin/infra-engine memory get --task-id {id} shows it"
+                ))
             })?;
         let binding = store.binding(id)?.ok_or_else(|| unbound(id))?;
         let brain = BrainRepository::new(self.context.clone())?;
@@ -1577,6 +1651,27 @@ fn update_expected(request: &Value, record: &Value) -> Result<Option<u64>> {
     } else {
         expected(request, record)
     }
+}
+/// Whether every record naming `task_id` is a finished task, so a new task
+/// of that name may move them to the archive. A record that cannot be read
+/// and claims the name keeps it.
+fn finished_records_only(brain: &BrainRepository, task_id: &str) -> Result<bool> {
+    let inventory = brain.inventory(false)?;
+    if inventory.problems.iter().any(|problem| {
+        problem.id.as_deref() == Some(task_id) || problem.external_id.as_deref() == Some(task_id)
+    }) {
+        return Ok(false);
+    }
+    let named = inventory
+        .records
+        .iter()
+        .filter(|image| image.record["id"] == task_id || image.record["external_id"] == task_id)
+        .collect::<Vec<_>>();
+    Ok(!named.is_empty()
+        && named.iter().all(|image| {
+            image.record["type"] == "task"
+                && domain::is_terminal("task", image.record["status"].as_str().unwrap_or(""))
+        }))
 }
 fn promote_on_resolution(bank: &BankService, record: &Value) -> Option<Value> {
     if record["authority"] != "verified"
