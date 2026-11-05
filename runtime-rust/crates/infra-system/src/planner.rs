@@ -466,8 +466,14 @@ impl System {
             entry["sha256"] = hash.clone().into();
             hashes.insert((sid, path), hash);
         }
+        // A worker may grow a file the plan quotes. Its new excerpt may take
+        // the room the approved context left free and is cut beyond that, so
+        // an accepted edit never stops a run that fit when it was approved.
+        let budget = updated["context_budget_chars"].as_u64().unwrap_or(0) as usize;
+        let mut room = budget.saturating_sub(encoded(&plan["context"])?.chars().count());
         let mut sources = vec![];
         for entry in items(&updated["context"]["sources"], MAX_SERVICES * MAX_ITEMS)? {
+            let before = encoded(entry)?.chars().count();
             let sid = string(&entry["service"]);
             let path = string(&entry["path"]);
             let root = if sid == "__system__" {
@@ -495,12 +501,14 @@ impl System {
             {
                 return Err(fail("Source changed while building canonical excerpts"));
             }
+            let content = fit_excerpt(content, before + room)?;
+            room = (room + before).saturating_sub(encoded(&content)?.chars().count());
             sources.push(content);
         }
         updated["context"]["sources"] = object!(sources);
         let size = encoded(&updated["context"])?.chars().count();
         updated["context_chars"] = object!(size);
-        if size > updated["context_budget_chars"].as_u64().unwrap_or(0) as usize {
+        if size > budget {
             return Err(fail("Updated context exceeds original budget"));
         }
         if System::new(&self.config, &self.allow_roots)?.verify(&updated)?["fresh"] != true {
@@ -508,4 +516,32 @@ impl System {
         }
         Ok(updated)
     }
+}
+/// Keeps the longest start of a source excerpt whose entry fits `limit`
+/// characters in canonical form, marking it truncated. Escaped characters
+/// encode longer, so the cut is searched rather than counted.
+fn fit_excerpt(mut content: Value, limit: usize) -> Result<Value> {
+    if encoded(&content)?.chars().count() <= limit {
+        return Ok(content);
+    }
+    let excerpt = string(&content["excerpt"]).chars().collect::<Vec<_>>();
+    content["truncated"] = true.into();
+    let fits = |content: &mut Value, keep: usize| -> Result<bool> {
+        content["excerpt"] = excerpt[..keep].iter().collect::<String>().into();
+        Ok(encoded(content)?.chars().count() <= limit)
+    };
+    // The whole excerpt did not fit, so at least one character goes.
+    let (mut low, mut high) = (0, excerpt.len().saturating_sub(1));
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if fits(&mut content, middle)? {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    if !fits(&mut content, low)? {
+        return Err(fail("Updated context exceeds original budget"));
+    }
+    Ok(content)
 }
