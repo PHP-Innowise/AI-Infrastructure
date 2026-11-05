@@ -132,7 +132,10 @@ edition's own files remain in that edition's changelog.
     worker may write; a person's edit there made the run stale for good. A
     resume that accepts source changes now adopts a person's content edit to a
     system-folder source the plan fingerprints (never `system.json`, never
-    during a run), and the recovery panel says so.
+    during a run), and the recovery panel says so. A run stopped between
+    dispatches names the changed source instead of `Checkpoint sources
+    changed`, and an accepting resume adopts a person's system-folder edit
+    there too.
   - A completed verification whose only gaps are checks this environment
     cannot run can be accepted by a person on resume (`--accept-unrun-checks`,
     or the recovery checkbox that names them) instead of stopping the run for

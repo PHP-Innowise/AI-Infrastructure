@@ -935,3 +935,50 @@ esac"#,
         "{journal:#}"
     );
 }
+
+/// The journal a run leaves when it stops between dispatches (cancelled at a
+/// loop start, or a source changed before the next dispatch): a completed
+/// prefix and the next step pending.
+fn stopped_between_dispatches(root: &Path) -> PathBuf {
+    let (code, summary, directory) = run_script(root, REGISTRY_GATE, "read-only");
+    assert_eq!(code, 1, "{summary:#}");
+    let path = directory.join("run.json");
+    let mut journal: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for step in journal["steps"].as_array_mut().unwrap() {
+        if step["id"] == "verify" {
+            step["status"] = json!("pending");
+        }
+    }
+    fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+    directory
+}
+
+#[test]
+fn between_dispatches_a_persons_system_edit_needs_acceptance_and_others_a_new_plan() {
+    let root = Root::new();
+    let directory = stopped_between_dispatches(&root.0);
+    fs::write(
+        root.0.join("system/AGENTS.md"),
+        "Coordinate contract changes first.\nRegistry lists every consumer.\n",
+    )
+    .unwrap();
+    let (code, _, text) = resume(&root.0, &[]);
+    assert_eq!(code, 2, "{text}");
+    assert!(
+        text.contains("System folder AGENTS.md changed (content changed), and no worker may write the system folder"),
+        "{text}"
+    );
+    let (code, summary, text) = resume(&root.0, &["--accept-source-changes"]);
+    assert_eq!(code, 0, "{text}");
+    assert_completed(&summary, &directory);
+
+    let other = Root::new();
+    stopped_between_dispatches(&other.0);
+    fs::write(other.0.join("services/billing/src/work.txt"), "later\n").unwrap();
+    let (code, _, text) = resume(&other.0, &["--accept-source-changes"]);
+    assert_eq!(code, 2, "{text}");
+    assert!(
+        text.contains("billing/src/work.txt changed (content changed) while no worker was running; prepare a new plan"),
+        "{text}"
+    );
+}

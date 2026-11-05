@@ -101,7 +101,9 @@ pub fn check_changes(
                 "{place} changed ({reason}) outside the worker's scope; prepare a new plan"
             )));
         };
-        let why = if !writable.iter().any(|value| value == sid) {
+        let why = if step.is_none() {
+            Some("while no worker was running")
+        } else if !writable.iter().any(|value| value == sid) {
             Some("outside current worker scope")
         } else if change["reason"] != "content_changed" {
             Some("in a way a worker may not change it")
@@ -249,13 +251,15 @@ async fn execute_run_context(
  let index=step_index(&state,string(&step["id"]))?;state["steps"][index]["status"]="pending".into();}}
  else if retry.is_some(){return Err(fail("No unfinished dispatch matches the dispatch chosen for retry"));}
  else if accept.unrun_checks{return Err(fail("No stopped verification has checks to accept"));}
- if system.verify(&plan)?["fresh"]!=true{return Err(fail("Checkpoint sources changed; prepare new plan"));}plan=system.refresh_checkpoint(&plan,&BTreeSet::new())?;
+ // Between dispatches only a person's accepted system-folder edit is adopted;
+ // any other change is named and needs a new plan.
+ if system.verify(&plan)?["fresh"]!=true{plan=check_changes(system,&plan,None,None,&state,accept.source_changes)?;save(&directory,"checkpoint.json",&plan,false)?;}plan=system.refresh_checkpoint(&plan,&BTreeSet::new())?;
  let ids=brains.keys().cloned().collect::<Vec<_>>();for sid in &ids{let brain=brains.get(sid).ok_or_else(||fail("Missing Brain"))?;let record=brain.ensure(reference_mut(&mut state,sid)?)?;if record["status"]=="completed"&&!texts(&state["closed_tasks"]).contains(sid){if state["steps"].as_array().is_some_and(|steps|steps.iter().any(|step|step["status"]!="completed")){return Err(fail("Native task terminal before worker verification"));}let run=string(&state["run_id"]).to_string();brain.complete(reference_mut(&mut state,sid)?,&run)?;state["closed_tasks"].as_array_mut().ok_or_else(||fail("Closed tasks missing"))?.push(sid.clone().into());}save(&directory,"run.json",&state,false)?;}
  state["status"]="running".into();state["error"]=Value::Null;save(&directory,"run.json",&state,false)?;
  let steps=state["steps"].as_array().cloned().ok_or_else(||fail("Missing steps"))?;
  for step in steps{if step["status"]=="completed"{continue;}
  if cancel.load(Ordering::SeqCst){return Err(RuntimeError::coded(ErrorKind::Unavailable,"interrupted","interrupted"));}
- let mut current=System::new(&system.config,&system.allow_roots)?;if current.verify(&plan)?["fresh"]!=true{return Err(fail("Sources changed between dispatches; prepare new plan"));}
+ let mut current=System::new(&system.config,&system.allow_roots)?;if current.verify(&plan)?["fresh"]!=true{check_changes(&mut current,&plan,None,None,&state,false)?;return Err(fail("Sources changed between dispatches; prepare new plan"));}
  let prior=reports(&directory,&state)?;let attempt=step["attempt"].as_u64().filter(|attempt|*attempt<100).ok_or_else(||fail("Dispatch retry limit reached"))?+1;let mut preview=step.clone();preview["dispatch_id"]=id32().into();preview["status"]="running".into();preview["attempt"]=object!(attempt);
  let sid=string(&step["service"]).to_string();let provider=string(&state["provider"]).to_string();let executable=std::path::PathBuf::from(string(&state["executable"]));let scratch=native::read_only_scratch(&provider,&executable,string(&step["mode"]),&directory)?;
  let prompt=native::prompt_for(&state,&plan,&preview,&prior,&directory,scratch.as_deref())?;if prompt.chars().count()>128000{return Err(fail("Worker prompt exceeds 128000 characters; narrow plan"));}let access=dispatch_access(&state,&step);let root=std::path::PathBuf::from(string(&state["roots"][&sid]));let schema=execution::result_schema(&texts(&state["selected"]));
