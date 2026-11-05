@@ -144,6 +144,12 @@ edition's own files remain in that edition's changelog.
     complete if verification left such checks out. The step records
     `accepted_unrun_checks`; failed checks, blocked reports and writes are
     never accepted.
+  - A read-only run asks its agents to investigate: the contract agent
+    establishes facts and the order to investigate in, and reports decisions
+    a fix would need as findings instead of blocking on them; verification
+    checks findings, not changes. A real investigation's contract agent found
+    the planted `customer_id` defect and then blocked the run on how a fix
+    should look, so neither service was investigated.
   - A worker CLI that exits with an error says why: its receipt keeps the
     CLI's own message (`failure`: an expired sign-in, a usage limit, else its
     last plain line; withheld if it looks like a secret), and the run reads

@@ -29,6 +29,9 @@ task → service candidates → declared contract consumers → bounded source c
 Plans are read-only inputs. Explicit `execute` and `resume` commands launch
 sequential workers, bind native Brain tasks and save dispatch receipts. Execution
 defaults to read-only investigation; `--mode edit` authorizes scoped service edits.
+In a read-only run every agent is asked to investigate: the contract agent
+establishes the facts and the order to investigate in, and reports decisions a
+fix would need as findings instead of blocking on them.
 The coordinator does not commit, merge or deploy. Capability states and relationships are **declarations**; reading a file
 and hashing it establishes source currency, not correctness or deployment state.
 

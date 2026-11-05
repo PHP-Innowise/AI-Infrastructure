@@ -982,3 +982,24 @@ fn between_dispatches_a_persons_system_edit_needs_acceptance_and_others_a_new_pl
         "{text}"
     );
 }
+
+#[test]
+fn a_read_only_run_asks_each_dispatch_to_investigate_not_to_agree_a_fix() {
+    // Each dispatch completes only when its goal fits the run's mode.
+    let gate = r#"case "$input" in
+  *'"phase":"contracts","previous_receipts"'*)
+    case "$input" in *'This run only investigates'*) report agreed '[]' '["orders","billing"]' ;; *) printf '{"status":"blocked","summary":"wrong goal","checks":[],"changed_files":[],"service_order":[]}\n' ;; esac ;;
+  *'"phase":"verify","previous_receipts"'*)
+    case "$input" in *'This run only investigated'*) report verified '[]' '[]' ;; *) printf '{"status":"blocked","summary":"wrong goal","checks":[],"changed_files":[],"service_order":[]}\n' ;; esac ;;
+  *)
+    case "$input" in *'Investigate the request in this service without editing'*) report checked '[]' '[]' ;; *) printf '{"status":"blocked","summary":"wrong goal","checks":[],"changed_files":[],"service_order":[]}\n' ;; esac ;;
+esac"#;
+    let root = Root::new();
+    let (code, summary, directory) = run_script(&root.0, gate, "read-only");
+    assert_eq!(code, 0, "{summary:#}");
+    assert_completed(&summary, &directory);
+    // An edit run keeps the agreement that may block on missing decisions.
+    let edit = Root::new();
+    let (code, summary, _) = run_script(&edit.0, gate, "edit");
+    assert_eq!(code, 1, "{summary:#}");
+}

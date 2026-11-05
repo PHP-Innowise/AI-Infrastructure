@@ -374,15 +374,29 @@ pub fn prompt_for(
     directory: &Path,
     scratch: Option<&Path>,
 ) -> Result<String> {
-    let goal = match string(&step["id"]) {
-        "contracts" => {
+    // System dispatches are always read-only; the run's mode says whether
+    // the change is implemented or only investigated. A real contract agent
+    // of an investigation found the defect and then blocked the run on how a
+    // fix should look, so its services were never investigated.
+    let investigating = state["mode"] == "read-only";
+    let goal = match (string(&step["id"]), investigating) {
+        ("contracts", false) => {
             "Inspect policies and contracts; resolve invariants, compatibility and implementation order. Return service_order for every participant. Block if decisions or information needed for safe work are missing."
         }
-        "verify" => {
+        ("contracts", true) => {
+            "This run only investigates; nothing will be edited. Inspect policies and contracts; establish the facts, invariants and compatibility questions each service must answer. Return service_order for every participant, the order to investigate them in. Decisions a fix would need are findings for the summary, not reasons to block; block only if the investigation itself cannot proceed."
+        }
+        ("verify", false) => {
             "Independently inspect changes and worker claims, check producer/consumer compatibility and the end-to-end acceptance scenario. Run applicable checks. Report missing checks honestly; do not edit files."
         }
-        _ => {
-            "Implement only the requested change in this service (or investigate it in read-only mode). Inspect local policy, callers, failure paths and tests. Run applicable checks and report actual results."
+        ("verify", true) => {
+            "This run only investigated; nothing was edited. Independently check the reported findings and worker claims against canonical sources, and say which are confirmed, which are not and what remains open. Run applicable checks. Report missing checks honestly; do not edit files."
+        }
+        (_, false) => {
+            "Implement only the requested change in this service. Inspect local policy, callers, failure paths and tests. Run applicable checks and report actual results."
+        }
+        (_, true) => {
+            "Investigate the request in this service without editing anything. Inspect local policy, callers, failure paths and tests; run applicable checks; report findings and what a fix would need, with actual results."
         }
     };
     let receipts = state["steps"]
