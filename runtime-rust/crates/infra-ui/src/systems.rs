@@ -362,6 +362,8 @@ fn controls() {
     );
     dom::hidden("system-launch", v["session_id"].is_string());
     dom::hidden("system-cancel", !active);
+    dom::hidden("system-archive", !v.is_object() || active);
+    dom::disabled("system-archive", pending || active);
     let editor = m::data("editor");
     dom::disabled("system-edit", pending || locked);
     dom::disabled("system-editor-save", locked || !editor.is_object());
@@ -1183,7 +1185,7 @@ async fn mutate(action: &str, extra: V) {
             );
             render_run();
             // A launch is a new session in Sessions.
-            if action != "cancel" {
+            if matches!(action, "execute" | "resume") {
                 session::refresh().await;
             }
             if m::yes(&value["active"]) {
@@ -2411,6 +2413,12 @@ pub async fn event(
             }
         }
         "system-cancel" => mutate("cancel", json!({})).await,
+        "system-archive" => {
+            mutate("archive", json!({})).await;
+            if m::data("system-run")["archived"] == true {
+                load().await;
+            }
+        }
         "system-resume" => {
             let mut extra = json!({"accept_source_changes":dom::checked("system-accept-changes")});
             // Accepting the unrun checks completes verification; it is not retried.

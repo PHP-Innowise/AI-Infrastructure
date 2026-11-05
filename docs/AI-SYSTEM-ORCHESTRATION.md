@@ -725,6 +725,8 @@ remains a separate review through the owning runtime. No commit, push, merge or
 deployment is performed by this execution flow.
 
 Use **Cancel run** for active work and **Resume saved run** for unfinished runs.
+**Remove from list** hides a change that is not running from the change list;
+its plan, receipts and the services' native tasks are kept.
 The run's status line names what stopped it, from the stopped dispatch's
 receipt. Select the interrupted/blocked dispatch explicitly before retrying
 (recovery preselects it when it has no successful receipt). Inspect partial
@@ -758,9 +760,10 @@ Local API surface (existing Host/Origin/CSRF boundaries apply):
 - `POST /api/system-runs/<id>`: `action`, current integer `revision`; execute
   accepts optional `provider` (`codex`, `claude`, `cursor`; default `codex`),
   `mode`/`timeout` and `access` (`service` or `all`; default `service`; `all`
-  is refused for `cursor`); resume accepts `retry_step`/`accept_source_changes`
-  and keeps the saved access, and cancel has no extra options. Unknown fields
-  are rejected. Run details include `access`, `launches` (one session per
+  is refused for `cursor`); resume accepts `retry_step`, `accept_source_changes`
+  and `accept_unrun_checks` and keeps the saved access; cancel and `archive`
+  (which hides a stopped change from the list) have no extra options. Unknown
+  fields are rejected. Run details include `access`, `launches` (one session per
   execute/resume) and the latest runner-level `events`.
 - `GET /api/sessions/<session_id>?after=<event id>`: agent lifecycle (`agent`),
   activity (`agent_activity`) and per-agent `usage` events of one launch or AI

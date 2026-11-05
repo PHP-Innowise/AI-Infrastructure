@@ -59,7 +59,7 @@ impl SessionBridge for Bridge {
         )]))
     }
     fn provider(&self, _: &str) -> Result<Option<PathBuf>> {
-        unused()
+        Ok(None)
     }
     fn active(&self) -> Result<bool> {
         Ok(false)
@@ -260,4 +260,42 @@ fn malformed_stored_json_remains_an_error_for_list_and_startup() {
     drop(manager);
     assert!(SystemManager::new(root.0.clone(), root.0.join("state"), bridge.clone()).is_err());
     assert!(bridge.lookups.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_stopped_change_can_be_removed_from_the_list_and_still_read() {
+    let root = Root::new();
+    let bridge = Arc::new(Bridge::new(&root));
+    let manager = manager(&root, bridge);
+    for index in [1, 2] {
+        let mut value = record(index);
+        value["revision"] = json!(0);
+        value["config_path"] = json!("system.json");
+        manager
+            .state
+            .db
+            .put("system_runs", &id(index), &value)
+            .unwrap();
+        let directory = root.0.join("state/ai-system").join(id(index));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("approved-plan.json"), "{}").unwrap();
+    }
+    let act = |revision: u64| {
+        manager.execute(
+            "systems.act",
+            &json!({"params":{"id":id(1)},"body":{"action":"archive","revision":revision}}),
+        )
+    };
+    assert!(act(7).is_err(), "a stale revision is refused");
+    let archived = act(0).unwrap();
+    assert_eq!(archived["archived"], true);
+    let runs = list(&manager).unwrap()["runs"].as_array().unwrap().clone();
+    assert_eq!(
+        runs.iter().map(|run| run["id"].clone()).collect::<Vec<_>>(),
+        [json!(id(2))]
+    );
+    let read = manager
+        .execute("systems.get", &json!({"params":{"id":id(1)}}))
+        .unwrap();
+    assert_eq!(read["archived"], true);
 }

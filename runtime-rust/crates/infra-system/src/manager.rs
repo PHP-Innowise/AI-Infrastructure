@@ -291,7 +291,7 @@ impl SystemManager {
                 "accept_source_changes",
                 "accept_unrun_checks",
             ],
-            "cancel" => vec!["action", "revision"],
+            "cancel" | "archive" => vec!["action", "revision"],
             _ => return Err(fail("Invalid system run action")),
         };
         if data
@@ -307,6 +307,19 @@ impl SystemManager {
             if view["active"] == true {
                 self.state.host.cancel(string(&record["session_id"]))?;
             }
+            return self.view(&record, true);
+        }
+        // Removing a change from the list keeps its plan, receipts and the
+        // services' native tasks; only a stopped change can be removed.
+        if action == "archive" {
+            if view["active"] == true || record["pending_nonce"].is_string() {
+                return Err(RuntimeError::conflict(
+                    "Wait for this launch to stop before removing the change from the list",
+                ));
+            }
+            record["archived"] = true.into();
+            record["revision"] = (record["revision"].as_u64().unwrap_or(0) + 1).into();
+            self.save(&record)?;
             return self.view(&record, true);
         }
         if view["active"] == true {
@@ -470,7 +483,7 @@ impl SystemManager {
                     .ok_or_else(|| fail("Project identity required"))?;
                 self.state.project(project)?;
                 Ok(
-                    object!({"runs":self.state.db.all("system_runs",Some(project))?.into_iter().map(|(rid,record)|self.reconcile_record(&rid,record).and_then(|record|self.view(&record,false))).collect::<Result<Vec<_>>>()?}),
+                    object!({"runs":self.state.db.all("system_runs",Some(project))?.into_iter().filter(|(_,record)|record["archived"]!=true).map(|(rid,record)|self.reconcile_record(&rid,record).and_then(|record|self.view(&record,false))).collect::<Result<Vec<_>>>()?}),
                 )
             }
             "systems.get" => self.view(

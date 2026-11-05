@@ -159,6 +159,9 @@ edition's own files remain in that edition's changelog.
     expired and could not be refreshed` instead of `worker exit failure`;
     **Fill with AI** names the cause the same way instead of `Discovery
     provider exited with code 1`.
+  - **Remove from list** hides a stopped change from the change list (every
+    plan attempt used to stay there for good); its plan, receipts and the
+    services' native tasks are kept, and it can still be read by its ID.
   - A stopped run's status line says what stopped it from the stopped
     dispatch's receipt (`blocked · contracts: blocked by the agent: …`)
     instead of `worker blocked or verification incomplete`, and after a server
