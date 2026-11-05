@@ -164,6 +164,10 @@ edition's own files remain in that edition's changelog.
     expired and could not be refreshed` instead of `worker exit failure`;
     **Fill with AI** names the cause the same way instead of `Discovery
     provider exited with code 1`.
+  - **Fill with AI** on a system that already has passports says, per
+    service, what its proposal changes from the form it replaces (`changes
+    owner, capabilities 1 → 2` or `same as saved`): the proposal replaces the
+    whole form, so hand edits could be saved over unnoticed.
   - Opening **Services** shows the project's system when its file exists,
     instead of an empty state until **Load system** on every visit; a project
     without one keeps the empty state.

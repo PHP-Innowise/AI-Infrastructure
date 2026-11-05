@@ -1993,7 +1993,40 @@ async fn discovery_start() {
         _ => {}
     }
 }
-fn proposal(v: &V) {
+/// What a proposed passport changes from the one the form held before the
+/// scan: the proposal replaces the whole form, so a scan of a system whose
+/// passports were edited by hand says what Save would overwrite.
+fn passport_changes(before: &V, after: &V) -> String {
+    if !before.is_object() {
+        return "new passport".into();
+    }
+    let changed = [
+        "description",
+        "owner",
+        "relationships_complete",
+        "capabilities",
+        "provides",
+        "consumes",
+        "sources",
+    ]
+    .iter()
+    .filter(|key| before[**key] != after[**key])
+    .map(
+        |key| match (before[*key].as_array(), after[*key].as_array()) {
+            (Some(old), Some(new)) if old.len() != new.len() => {
+                format!("{} {} → {}", m::label(key), old.len(), new.len())
+            }
+            _ => m::label(key),
+        },
+    )
+    .collect::<Vec<_>>();
+    if changed.is_empty() {
+        "same as saved".into()
+    } else {
+        format!("changes {}", changed.join(", "))
+    }
+}
+fn proposal(v: &V, draft: &V) {
     if !editor_ready()
         || v["editor"]["project_id"] != dom::value("system-project")
         || v["editor"]["config_path"] != dom::value("system-config")
@@ -2015,13 +2048,19 @@ fn proposal(v: &V) {
         );
     }
     for report in m::array(&v["reports"]) {
+        let saved = m::array(&draft["services"])
+            .into_iter()
+            .find(|service| service["passport"]["id"] == report["id"])
+            .map(|service| service["passport"].clone())
+            .unwrap_or(V::Null);
         let d = dom::details(
             &format!(
-                "{} · {} capabilities · {} provided · {} consumed contracts",
+                "{} · {} capabilities · {} provided · {} consumed contracts · {}",
                 m::text(&report, "id"),
                 m::array(&report["passport"]["capabilities"]).len(),
                 m::array(&report["passport"]["provides"]).len(),
-                m::array(&report["passport"]["consumes"]).len()
+                m::array(&report["passport"]["consumes"]).len(),
+                passport_changes(&saved, &report["passport"])
             ),
             &serde_json::to_string_pretty(&report).unwrap_or_default(),
         );
@@ -2072,7 +2111,7 @@ async fn discovery_poll(epoch: u64) {
                 });
             } else {
                 if job["proposal"].is_object() {
-                    proposal(&job["proposal"]);
+                    proposal(&job["proposal"], &job["draft"]);
                     dom::text("system-editor-status","AI filled service details. Review sources and uncertainties, then Save system.");
                 } else {
                     dom::text(
@@ -2165,7 +2204,7 @@ async fn restore_discovery() {
                 render_editor();
                 discovery_poll(epoch).await;
             } else if job["proposal"].is_object() {
-                proposal(&job["proposal"]);
+                proposal(&job["proposal"], &job["draft"]);
             } else if same_target && draft["revision"] == m::data("editor")["revision"] {
                 m::set("editor", draft.clone());
                 changed();
@@ -2794,6 +2833,20 @@ mod display_tests {
             run_status(&sentence),
             "blocked · Sources changed between dispatches; prepare new plan"
         );
+    }
+    #[test]
+    fn a_proposal_says_what_it_changes_from_the_saved_passport() {
+        let saved = json!({"id":"orders","description":"Orders","owner":"@team",
+            "capabilities":[{"id":"a"}],"provides":[],"consumes":[],"sources":[]});
+        let mut proposed = saved.clone();
+        assert_eq!(passport_changes(&saved, &proposed), "same as saved");
+        proposed["owner"] = json!("unknown");
+        proposed["capabilities"] = json!([{"id":"a"},{"id":"b"}]);
+        assert_eq!(
+            passport_changes(&saved, &proposed),
+            "changes owner, capabilities 1 → 2"
+        );
+        assert_eq!(passport_changes(&V::Null, &proposed), "new passport");
     }
     #[test]
     fn lists_read_as_text() {
