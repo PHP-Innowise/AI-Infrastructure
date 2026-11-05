@@ -1068,6 +1068,102 @@ fn a_broken_brain_record_is_named_by_its_field_and_a_stored_key_fails() {
     );
 }
 
+/// A refused update says what it expected and what to do, as the retired
+/// runtime said it: the revision it found, the status it cannot reach, and
+/// for an evidence level passed as a status, the flag that sets one (agents
+/// pass `--transition verified` often enough to have measured it).
+#[test]
+fn a_refused_update_names_what_it_found_and_what_to_pass() {
+    let project = Project::new();
+    let engine = project.path.join("memory-bank/bin/infra-engine");
+    let memory = |args: &[&str]| {
+        let output = project
+            .command(&engine)
+            .arg("memory")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.stderr.is_empty() || output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    memory(&["start", "--task-id", "SHOP-7", "--goal", "Fix refunds"]);
+    for (args, refusal) in [
+        (
+            &[
+                "update",
+                "--task-id",
+                "SHOP-7",
+                "--revision",
+                "9",
+                "--progress",
+                "x",
+            ][..],
+            "Stale task revision: expected 9, current 1",
+        ),
+        (
+            &[
+                "brain-update",
+                "--record-id",
+                "SHOP-7",
+                "--revision",
+                "1",
+                "--transition",
+                "verified",
+            ][..],
+            "Illegal task transition: active -> verified; verified is an evidence level, not a task status: set it with brain-update --authority verified",
+        ),
+        (
+            &[
+                "brain-update",
+                "--record-id",
+                "SHOP-7",
+                "--revision",
+                "1",
+                "--transition",
+                "resolved",
+            ][..],
+            "Illegal task transition: active -> resolved",
+        ),
+        (
+            &[
+                "brain-update",
+                "--record-id",
+                "SHOP-7",
+                "--revision",
+                "1",
+                "--authority",
+                "inferred",
+            ][..],
+            "Illegal authority transition: observed -> inferred; only observed -> verified is allowed",
+        ),
+    ] {
+        let stderr = memory(args);
+        assert!(stderr.contains(refusal), "{args:?}: {stderr}");
+    }
+    memory(&[
+        "update",
+        "--task-id",
+        "SHOP-7",
+        "--revision",
+        "auto",
+        "--phase",
+        "verification",
+    ]);
+    let stderr = memory(&[
+        "update",
+        "--task-id",
+        "SHOP-7",
+        "--revision",
+        "auto",
+        "--phase",
+        "planning",
+    ]);
+    assert!(
+        stderr.contains("Phase may not move backward: verification -> planning; pass allow_phase_regression to state the regression is deliberate"),
+        "{stderr}"
+    );
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(

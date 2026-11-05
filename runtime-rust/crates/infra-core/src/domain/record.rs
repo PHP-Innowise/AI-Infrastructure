@@ -28,7 +28,10 @@ pub fn normalize_phase(phase: &str) -> Result<&str> {
         value => value,
     };
     if !PHASES.contains(&phase) {
-        return Err(RuntimeError::invalid("Invalid task phase"));
+        return Err(RuntimeError::invalid(format!(
+            "phase must be one of: {} (aliases: implementing->implementation, execution->implementation, review->verification, quality->verification)",
+            PHASES.join(", ")
+        )));
     }
     Ok(phase)
 }

@@ -2411,7 +2411,7 @@ fn governed_completion_requires_an_explicit_numeric_revision_and_preserves_refus
         None,
     );
     assert_eq!(stale.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&stale.stderr).contains("Stale record revision"));
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("Stale task revision: expected "));
     assert_eq!(fixture.brain().get_task(uuid).unwrap(), before);
     assert_eq!(completion_task_image(&fixture, id), local);
     assert_eq!(completion_episodes(&fixture), episodes);
@@ -2516,7 +2516,7 @@ fn concurrent_completion_cas_creates_one_episode_and_preserves_pending_and_other
     let loser = &outputs[1 - winner];
     let refusal = String::from_utf8_lossy(&loser.stderr);
     assert!(
-        refusal.contains("Stale record revision") || refusal.contains("Working task not found"),
+        refusal.contains("Stale task revision: expected ") || refusal.contains("Working task not found"),
         "{refusal}"
     );
     let result: Value = serde_json::from_slice(&outputs[winner].stdout).unwrap();

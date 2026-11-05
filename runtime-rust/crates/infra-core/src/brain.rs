@@ -447,11 +447,13 @@ impl BrainRepository {
         let revision = record["revision"]
             .as_u64()
             .ok_or_else(|| RuntimeError::invalid("Invalid record revision"))?;
-        if input
+        if let Some(expected) = input
             .expected_revision
-            .is_some_and(|expected| expected != revision)
+            .filter(|expected| *expected != revision)
         {
-            return Err(RuntimeError::conflict("Stale record revision"));
+            return Err(RuntimeError::conflict(format!(
+                "Stale {kind} revision: expected {expected}, current {revision}"
+            )));
         }
         if !strings(&record, "authorized_owners")?
             .iter()
@@ -459,7 +461,7 @@ impl BrainRepository {
         {
             return Err(RuntimeError::new(
                 ErrorKind::Unauthorized,
-                "Owner is not authorized to mutate record",
+                format!("Owner is not authorized to mutate record: {actor}"),
             ));
         }
         if kind == "event"
@@ -476,7 +478,7 @@ impl BrainRepository {
         }
         if input.auto_checkpoint.is_some() && kind != "task" {
             return Err(RuntimeError::invalid(
-                "Only tasks may record an auto checkpoint",
+                "only a task may record an auto checkpoint",
             ));
         }
         if input
@@ -484,7 +486,9 @@ impl BrainRepository {
             .as_deref()
             .is_some_and(|actor| !["agent", "person"].contains(&actor))
         {
-            return Err(RuntimeError::invalid("Attestation must be agent or person"));
+            return Err(RuntimeError::invalid(
+                "attestation must be one of: agent, person",
+            ));
         }
         let checked = ["finding", "bug", "incident", "decision"].contains(&kind.as_str())
             && record["authority"] == "verified";
@@ -494,7 +498,7 @@ impl BrainRepository {
             && record_attestation(&record) != "agent"
         {
             return Err(RuntimeError::policy(
-                "Only a person may revise a person or unknown actor's verified claim",
+                "A person or unknown actor verified this record's claim; only a person revises it (attestation person)",
             ));
         }
         let old_sources = strings(&record, "sources")?;
@@ -502,19 +506,6 @@ impl BrainRepository {
             .into_iter()
             .filter(|source| !old_sources.contains(source))
             .collect();
-        if checked
-            && (input
-                .progress
-                .as_deref()
-                .is_some_and(|progress| record["progress"].as_str() != Some(progress))
-                || !cited_now.is_empty())
-            && input.attestation.as_deref() != Some("person")
-            && record_attestation(&record) == "person"
-        {
-            return Err(RuntimeError::policy(
-                "Only a person may revise a person-verified claim",
-            ));
-        }
         let all_sources = unique_strings(old_sources.into_iter().chain(input.sources.clone()));
         if let Some(expected) = &input.checked_source_fingerprints {
             if !(input.reverify || input.authority.as_deref() == Some("verified"))
@@ -533,11 +524,27 @@ impl BrainRepository {
                 ));
             }
         }
+        // The next agent must not be free to overwrite a person's check;
+        // record-result holds the same revision.
+        if checked
+            && (input
+                .progress
+                .as_deref()
+                .is_some_and(|progress| record["progress"].as_str() != Some(progress))
+                || !cited_now.is_empty())
+            && input.attestation.as_deref() != Some("person")
+            && record_attestation(&record) == "person"
+        {
+            return Err(RuntimeError::policy(
+                "A person verified this record's claim; only a person revises it (attestation person), or record the new finding as a record of its own",
+            ));
+        }
         if let Some(authority) = &input.authority {
             if record["authority"] != "observed" || authority != "verified" {
-                return Err(RuntimeError::invalid(
-                    "Only observed -> verified authority transition is allowed",
-                ));
+                return Err(RuntimeError::invalid(format!(
+                    "Illegal authority transition: {} -> {authority}; only observed -> verified is allowed",
+                    record["authority"].as_str().unwrap_or("")
+                )));
             }
             let suffix = input
                 .attestation
@@ -550,19 +557,36 @@ impl BrainRepository {
         if input.reverify {
             if input.authority.is_some() || record["authority"] != "verified" {
                 return Err(RuntimeError::invalid(
-                    "Only an already verified record may be re-verified",
+                    "Only a verified record's revised claim is verified again",
                 ));
             }
-            let attestation = input
-                .attestation
-                .as_deref()
-                .ok_or_else(|| RuntimeError::invalid("Re-verification requires attestation"))?;
+            let attestation = input.attestation.as_deref().ok_or_else(|| {
+                RuntimeError::invalid(
+                    "Say who checked the revised claim: attestation agent or person",
+                )
+            })?;
             record["transitions"].as_array_mut().ok_or_else(|| RuntimeError::invalid("Invalid transitions"))?.push(json!({"from":"observed","to":"verified","at":utc_now(),"actor":actor,"reason":format!("{} [attestation:{attestation}]",input.reason)}));
         }
         if let Some(to) = &input.transition_to {
             let from = record["status"].as_str().unwrap_or("").to_string();
             if !transition_allowed(&kind, &from, to) {
-                return Err(RuntimeError::invalid("Illegal lifecycle transition"));
+                // Agents pass an evidence level for a status: 15 of the 383
+                // calls Codex made in one client project in September 2026
+                // were `--transition verified` or `observed`.
+                let hint = if !AUTHORITIES.contains(&to.as_str()) {
+                    String::new()
+                } else if to == "verified" {
+                    format!(
+                        "; {to} is an evidence level, not a {kind} status: set it with brain-update --authority verified"
+                    )
+                } else {
+                    format!(
+                        "; {to} is an evidence level, not a {kind} status: a record starts observed, and only brain-update --authority verified changes it"
+                    )
+                };
+                return Err(RuntimeError::invalid(format!(
+                    "Illegal {kind} transition: {from} -> {to}{hint}"
+                )));
             }
             record["transitions"]
                 .as_array_mut()
@@ -574,7 +598,7 @@ impl BrainRepository {
         }
         if let Some(phase) = &input.phase {
             if kind != "task" {
-                return Err(RuntimeError::invalid("Only a task may declare a phase"));
+                return Err(RuntimeError::invalid("only a task may declare a phase"));
             }
             let phase = normalize_phase(phase)?;
             if !input.allow_phase_regression {
@@ -582,13 +606,13 @@ impl BrainRepository {
                     .as_str()
                     .and_then(|current| PHASES.iter().position(|phase| *phase == current));
                 let next = PHASES.iter().position(|candidate| *candidate == phase);
-                if current
-                    .zip(next)
-                    .is_some_and(|(current, next)| next < current)
+                if let Some((current, next)) =
+                    current.zip(next).filter(|(current, next)| next < current)
                 {
-                    return Err(RuntimeError::policy(
-                        "Phase may not move backward without explicit regression",
-                    ));
+                    return Err(RuntimeError::policy(format!(
+                        "Phase may not move backward: {} -> {}; pass allow_phase_regression to state the regression is deliberate",
+                        PHASES[current], PHASES[next]
+                    )));
                 }
             }
             record["phase"] = phase.into();

@@ -370,6 +370,16 @@ edition's own files remain in that edition's changelog.
   twin projects 38 broken Brains draw the retired report and exit code; a
   handoff whose JSON is broken is named once, where the retired report
   named its path twice.
+- A refused `update`, `brain-update` or `complete` says again what it found
+  and what to pass: `Stale task revision: expected 9, current 1`,
+  `Illegal task transition: active -> verified; verified is an evidence
+  level, not a task status: set it with brain-update --authority verified`
+  (agents pass an evidence level as a status often enough that the retired
+  runtime measured it), the phase it would move back from and to, the
+  authority edge, the actor without ownership, and who must revise a
+  person's check. The native refusals had dropped every value and hint
+  ("Stale record revision", "Illegal lifecycle transition"). On twin
+  projects nine such refusals now read as the retired ones.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
