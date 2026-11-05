@@ -148,7 +148,9 @@ edition's own files remain in that edition's changelog.
     CLI's own message (`failure`: an expired sign-in, a usage limit, else its
     last plain line; withheld if it looks like a secret), and the run reads
     `The claude CLI exited with code 1: Failed to authenticate: OAuth session
-    expired and could not be refreshed` instead of `worker exit failure`.
+    expired and could not be refreshed` instead of `worker exit failure`;
+    **Fill with AI** names the cause the same way instead of `Discovery
+    provider exited with code 1`.
   - A prepared plan joins the change list and is selected there (the list
     kept showing the previous change until a reload), and the selected entry
     follows its run's status. The plan form chooses which contract consumers

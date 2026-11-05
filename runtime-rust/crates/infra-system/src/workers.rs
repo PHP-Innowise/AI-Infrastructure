@@ -503,10 +503,15 @@ async fn run_discovery_context(
             return Err(RuntimeError::unavailable("Discovery interrupted"));
         }
         if output.code != 0 {
-            return Err(fail(format!(
-                "Discovery provider exited with code {}",
-                output.code
-            )));
+            return Err(fail(
+                match native::worker_failure(&output.bytes, &provider) {
+                    Some(cause) => format!(
+                        "The {provider} CLI exited with code {}: {cause}",
+                        output.code
+                    ),
+                    None => format!("Discovery provider exited with code {}", output.code),
+                },
+            ));
         }
         let report = native::worker_result(&output.bytes, &provider)?;
         let proposal = discovery::validate_proposal(&report, &request)?;
