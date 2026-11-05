@@ -381,7 +381,7 @@ pub fn prompt_for(
     let investigating = state["mode"] == "read-only";
     let goal = match (string(&step["id"]), investigating) {
         ("contracts", false) => {
-            "Inspect policies and contracts; resolve invariants, compatibility and implementation order. Return service_order for every participant. Block if decisions or information needed for safe work are missing."
+            "Inspect policies and contracts; resolve invariants, compatibility and implementation order. Return service_order for every participant. Block if decisions or information needed for safe work are missing. Your checks record what the agreement rests on: a defect the change is meant to fix is a finding to describe, not a failed check."
         }
         ("contracts", true) => {
             "This run only investigates; nothing will be edited. Inspect policies and contracts; establish the facts, invariants and compatibility questions each service must answer. Return service_order for every participant, the order to investigate them in. Decisions a fix would need are findings for the summary, not reasons to block; block only if the investigation itself cannot proceed."

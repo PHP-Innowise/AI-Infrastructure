@@ -1092,3 +1092,16 @@ fn init_creates_a_new_system_folder_and_says_so_when_one_exists() {
         "{text}"
     );
 }
+
+#[test]
+fn a_completed_agreement_proceeds_though_a_check_confirms_the_defect_to_fix() {
+    // The contract agent agrees the fix and reports the defect it is for.
+    let gate = r#"case "$input" in
+  *'"phase":"contracts","previous_receipts"'*) printf '{"status":"completed","summary":"Agreed: reject missing identities","checks":[{"name":"current_handler","status":"failed","detail":"charges without an identity today"},{"name":"compatibility","status":"passed","detail":"v1 unchanged"}],"changed_files":[],"service_order":["orders","billing"]}\n' ;;
+  *) report checked '[]' '[]' ;;
+esac"#;
+    let root = Root::new();
+    let (code, summary, directory) = run_script(&root.0, gate, "edit");
+    assert_eq!(code, 0, "{summary:#}");
+    assert_completed(&summary, &directory);
+}

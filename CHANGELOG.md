@@ -146,6 +146,11 @@ edition's own files remain in that edition's changelog.
     complete if verification left such checks out. The step records
     `accepted_unrun_checks`; failed checks, blocked reports and writes are
     never accepted.
+  - A completed contract agreement proceeds whatever its checks say; it
+    blocks by its status. A real agent agreed the payments fix and reported
+    the defect the fix is for as a failed check, which stopped the edit run
+    before any implementation; the contract goal now says such a defect is a
+    finding, not a failed check.
   - A read-only run asks its agents to investigate: the contract agent
     establishes facts and the order to investigate in, and reports decisions
     a fix would need as findings instead of blocking on them; verification

@@ -439,6 +439,12 @@ pub fn success(receipt: &Value, step: &Value, investigating: bool) -> bool {
     if investigating {
         return step["id"] != "verify" || checks.iter().any(|check| check["status"] == "passed");
     }
+    // An agreement decides by its status: blocked when it cannot be reached.
+    // Its checks are what it rests on; a real contract agent agreed a fix and
+    // reported the defect the fix is for as a failed check, stopping the run.
+    if step["id"] == "contracts" {
+        return true;
+    }
     if checks.iter().any(|check| check["status"] == "failed") {
         return false;
     }
