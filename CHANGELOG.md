@@ -494,15 +494,16 @@ edition's own files remain in that edition's changelog.
   native runtime printed the path with backslashes on Windows, and a record
   outside the project by its absolute path, which names the machine's own
   directories; such a record is named by its file alone again.
-- Windows nextest runs the `eval_native_runtime` cases one at a time in their
-  own group, after every other case has started. The outcome seal's
-  provider-free preparation takes 102-104 s of its fixture's 120 s on the
-  Windows runner, always beside the other long evaluation case in the two
-  end-to-end slots, and once took 122 s and failed; on Linux it takes 13-17 s
-  with or without this branch. The cases and their deadlines are unchanged;
-  Linux scheduling is unchanged. Requiring both end-to-end slots per case
-  (`threads-required = 2`) instead left 26 cases unstarted in nextest 0.9.149
-  at four test threads.
+- On Windows the evaluation contracts give a command that installs an edition
+  into whole corpora 300 s instead of 120 s. The outcome seal's provider-free
+  preparation took 102-104 s of the 120 s on the Windows runner, 122 s on a
+  slower day, and 121.6 s running alone on a runner that needed 432 s for the
+  whole suite instead of about 250; on Linux it takes 13-17 s, with or without
+  this branch. Linux keeps 120 s, and the fixture's transport keeps its own
+  hard bound: 120 s, or the command's budget where that is longer. Two
+  scheduling attempts were withdrawn: both end-to-end slots per evaluation
+  case (`threads-required = 2`) left cases unstarted in nextest 0.9.149, and
+  running the cases one at a time after the rest still saw the 121.6 s.
 - The Linux native-process contracts no longer fail on a process the kernel
   is still tearing down. Their cleanup check accepted only a zombie or a
   vanished process, so a native process inside its own exit (`PF_EXITING`,
