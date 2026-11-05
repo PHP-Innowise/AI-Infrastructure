@@ -179,6 +179,10 @@ pub async fn load() {
 /// journal's error is the fallback, a code read as words.
 fn run_status(v: &V) -> String {
     let status = m::label(v["status"].as_str().unwrap_or(""));
+    // Launches share the Harness runner; one waits while another holds it.
+    if v["status"] == "queued" {
+        return "queued · waits for a free runner slot".into();
+    }
     let stopped = m::array(&v["execution"]["steps"])
         .into_iter()
         .find(|step| matches!(step["status"].as_str(), Some("blocked" | "interrupted")));
@@ -2819,6 +2823,13 @@ mod display_tests {
         assert_eq!(unrun_checks(&earlier, &honest), None);
         let service = json!({"id":"service-orders","attempt":2,"status":"blocked"});
         assert_eq!(unrun_checks(&service, &honest), None);
+    }
+    #[test]
+    fn a_queued_run_says_what_it_waits_for() {
+        assert_eq!(
+            run_status(&json!({"status":"queued","active":true})),
+            "queued · waits for a free runner slot"
+        );
     }
     #[test]
     fn a_stopped_run_says_what_stopped_it() {

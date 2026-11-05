@@ -189,7 +189,8 @@ edition's own files remain in that edition's changelog.
   - A stopped run's status line says what stopped it from the stopped
     dispatch's receipt (`blocked · contracts: blocked by the agent: …`)
     instead of `worker blocked or verification incomplete`, and after a server
-    restart names the dispatch that stopped before saving a receipt. A live
+    restart names the dispatch that stopped before saving a receipt; a queued
+    launch says it waits for a free runner slot. A live
     restart mid-dispatch killed the agent's whole process tree with the server
     and resumed with the preselected retry.
   - A prepared plan joins the change list and is selected there (the list
