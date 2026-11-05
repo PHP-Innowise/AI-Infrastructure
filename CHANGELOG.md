@@ -157,6 +157,11 @@ edition's own files remain in that edition's changelog.
     verification); verification still needs one passed check, and the
     receipt reads `completed; failed checks are findings: …`. A saved receipt
     is refused only when it claims a success its rules do not grant.
+  - Agents may read this run's saved receipts, which their prompt names: a
+    real verification agent was given the paths, read the scope rule as
+    forbidding them and reported the earlier claims unverified. A read-only
+    Claude dispatch is also granted the run's folder (plan mode keeps it
+    read-only); Codex reads it already.
   - A worker CLI that exits with an error says why: its receipt keeps the
     CLI's own message (`failure`: an expired sign-in, a usage limit, else its
     last plain line; withheld if it looks like a secret), and the run reads

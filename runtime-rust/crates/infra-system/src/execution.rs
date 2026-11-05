@@ -296,7 +296,21 @@ pub fn dispatch_access(state: &Value, step: &Value) -> Value {
     };
     object!({"scope":access_scope(state),"readable":readable,"writable":writable})
 }
-pub fn extra_directories(state: &Value, step: &Value) -> Vec<PathBuf> {
+/// Folders a dispatch is granted beyond its working folder. A read-only
+/// Claude dispatch (plan mode keeps them read-only) also gets the run's own
+/// folder, so the receipts its prompt names can be read: a real verification
+/// agent was given their paths and could not open them.
+pub fn extra_directories(state: &Value, step: &Value, run: &Path) -> Vec<PathBuf> {
+    let mut result = granted_directories(state, step);
+    if string(&state["provider"]) == "claude"
+        && step["mode"] == "read-only"
+        && !result.iter().any(|path| path == run)
+    {
+        result.push(run.to_path_buf());
+    }
+    result
+}
+fn granted_directories(state: &Value, step: &Value) -> Vec<PathBuf> {
     let provider = string(&state["provider"]);
     let access = dispatch_access(state, step);
     let wanted = if provider == "codex" {
