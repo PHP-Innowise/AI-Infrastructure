@@ -214,6 +214,22 @@ fn run_status(v: &V) -> String {
         _ => status,
     }
 }
+/// Why a scan ended without a proposal. Its status says it at once; the error
+/// event of a cancelled scan can arrive after the last poll.
+fn scan_end(job: &V) -> String {
+    match job["status"].as_str() {
+        Some("cancelled") => "AI scan cancelled.".into(),
+        Some("interrupted") => {
+            "AI scan stopped before it finished (Harness restarted or the agent was stopped)."
+                .into()
+        }
+        _ => sentence(
+            job["error"]
+                .as_str()
+                .unwrap_or("AI scan ended without a proposal."),
+        ),
+    }
+}
 /// A message that ends as a sentence, so another can follow it: a CLI's own
 /// message usually has no full stop.
 fn sentence(text: &str) -> String {
@@ -2132,14 +2148,7 @@ async fn discovery_poll(epoch: u64) {
                 } else {
                     dom::text(
                         "system-discovery-status",
-                        &format!(
-                            "{} Your original form is retained.",
-                            sentence(
-                                job["error"]
-                                    .as_str()
-                                    .unwrap_or("AI scan ended without a proposal.")
-                            )
-                        ),
+                        &format!("{} Your original form is retained.", scan_end(&job)),
                     );
                 }
                 session::refresh().await;
@@ -2865,6 +2874,23 @@ mod display_tests {
             "changes owner, capabilities 1 → 2"
         );
         assert_eq!(passport_changes(&V::Null, &proposed), "new passport");
+    }
+    #[test]
+    fn a_scan_that_ended_without_a_proposal_says_why() {
+        assert_eq!(
+            scan_end(&json!({"status":"cancelled","error":null})),
+            "AI scan cancelled."
+        );
+        assert_eq!(
+            scan_end(
+                &json!({"status":"failed","error":"The codex CLI exited with code 1: Not signed in"})
+            ),
+            "The codex CLI exited with code 1: Not signed in."
+        );
+        assert_eq!(
+            scan_end(&json!({"status":"failed"})),
+            "AI scan ended without a proposal."
+        );
     }
     #[test]
     fn a_message_followed_by_another_ends_as_a_sentence() {
