@@ -42,6 +42,19 @@ pub fn commands(settings: &Value, event: &str, host: &str) -> Vec<String> {
             .collect()
     }
 }
+/// The hook wiring Cursor loads from a plugin folder: the file the manifest's
+/// `hooks` field names, relative to that folder.
+fn plugin_hooks(plugin: &Path) -> Result<Value> {
+    let manifest = artifact::read_json(
+        &plugin.join(".cursor-plugin/plugin.json"),
+        artifact::MAX_FILE,
+    )?;
+    let named = manifest["hooks"]
+        .as_str()
+        .ok_or_else(|| artifact::invalid("Cursor plugin manifest names no hooks file"))?;
+    let path = artifact::relative(named.strip_prefix("./").unwrap_or(named))?;
+    artifact::read_json(&plugin.join(path), artifact::MAX_FILE)
+}
 pub fn run_command(
     argv: Vec<String>,
     cwd: &Path,
@@ -187,6 +200,18 @@ impl Harness {
         Ok(path)
     }
     pub fn hook_env(&self, host: &str, launch: &Path) -> Result<BTreeMap<String, String>> {
+        Ok(self.launch(host, launch)?.0)
+    }
+    /// The environment a host launched in `launch` gives its hooks and,
+    /// attached, the plugin folder the overlay hands it: for Cursor, the
+    /// private image `build_overlay` writes into the state, which the Harness
+    /// passes as `--plugin-dir`.
+    fn launch(
+        &self,
+        host: &str,
+        launch: &Path,
+    ) -> Result<(BTreeMap<String, String>, Option<PathBuf>)> {
+        let mut plugin = None;
         let mut env = self.env.clone();
         if self.attached {
             let overlay = infra_tooling::attach::build_overlay(
@@ -196,6 +221,12 @@ impl Harness {
                 &self.edition,
                 host,
             )?;
+            plugin = overlay
+                .arguments
+                .iter()
+                .position(|argument| argument == "--plugin-dir")
+                .and_then(|at| overlay.arguments.get(at + 1))
+                .map(PathBuf::from);
             env.extend(overlay.environment);
             for (k, v) in overlay.settings["env"].as_object().into_iter().flatten() {
                 if let Some(v) = v.as_str() {
@@ -206,7 +237,18 @@ impl Harness {
         if host == "claude" {
             env.insert("CLAUDE_PROJECT_DIR".into(), launch.to_string_lossy().into());
         }
-        Ok(env)
+        Ok((env, plugin))
+    }
+    /// The environment and the hook wiring of a host launched in `launch`.
+    /// An attached Cursor runs the hooks of the plugin image it was handed,
+    /// as Cursor loads them: the file the image's manifest names.
+    pub fn hooks(&self, host: &str, launch: &Path) -> Result<(BTreeMap<String, String>, Value)> {
+        let (env, plugin) = self.launch(host, launch)?;
+        let settings = match plugin {
+            Some(plugin) => plugin_hooks(&plugin)?,
+            None => self.settings(host)?,
+        };
+        Ok((env, settings))
     }
     pub fn settings(&self, host: &str) -> Result<Value> {
         if self.attached {
@@ -221,14 +263,16 @@ impl Harness {
             artifact::read_json(&self.project.join(wiring(host)?), artifact::MAX_FILE)
         }
     }
+    /// The hooks `settings` wires to `event`, as (label, argv).
     pub fn argv(
         &self,
+        settings: &Value,
         host: &str,
         event: &str,
         through: bool,
     ) -> Result<Vec<(String, Vec<String>)>> {
         let mut out = vec![];
-        let commands = commands(&self.settings(host)?, event, host);
+        let commands = commands(settings, event, host);
         let role_expression = regex::Regex::new(r"([\w.-]+\.sh)").ok();
         for command in commands {
             let role = role_expression
@@ -277,9 +321,9 @@ impl Harness {
         through: bool,
         timeout: Duration,
     ) -> Result<Vec<Value>> {
-        let env = self.hook_env(host, launch)?;
+        let (env, settings) = self.hooks(host, launch)?;
         let mut out = vec![];
-        for (label, argv) in self.argv(host, event, through && !self.attached)? {
+        for (label, argv) in self.argv(&settings, host, event, through && !self.attached)? {
             let mut result = run_command(argv, place, &env, serde_json::to_vec(payload)?, timeout)?;
             result["hook"] = label.into();
             out.push(result);
@@ -731,6 +775,39 @@ pub fn render(v: &Value) -> String {
         }
     }
     format!("{}\n", lines.join("\n"))
+}
+
+#[cfg(test)]
+mod plugin_hooks_tests {
+    use super::*;
+
+    #[test]
+    fn a_plugin_runs_the_hooks_its_manifest_names_inside_its_folder() {
+        let plugin = std::env::temp_dir().join(format!("plugin-hooks-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(plugin.join(".cursor-plugin")).unwrap();
+        std::fs::create_dir_all(plugin.join(".cursor")).unwrap();
+        let hooks = json!({"version":1,"hooks":{"stop":[{"command":"exec engine hook"}]}});
+        std::fs::write(plugin.join(".cursor/hooks.json"), hooks.to_string()).unwrap();
+        let manifest = |named: Value| {
+            std::fs::write(
+                plugin.join(".cursor-plugin/plugin.json"),
+                json!({"name":"fixture","hooks":named}).to_string(),
+            )
+            .unwrap();
+            plugin_hooks(&plugin)
+        };
+        for named in ["./.cursor/hooks.json", ".cursor/hooks.json"] {
+            assert_eq!(manifest(json!(named)).unwrap(), hooks, "{named}");
+        }
+        for named in [
+            json!("../hooks.json"),
+            json!("/etc/hooks.json"),
+            Value::Null,
+        ] {
+            assert!(manifest(named.clone()).is_err(), "{named}");
+        }
+        std::fs::remove_dir_all(&plugin).unwrap();
+    }
 }
 
 #[cfg(test)]

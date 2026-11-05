@@ -244,7 +244,7 @@ infra-engine bench codex --worktree codex          # one Codex makes, detached; 
 
 Then `--target DIR --sync` on a copy of each client project, and the rollout rehearsal.
 
-`infra-engine eval memory-lifecycle-fuzz --seed N` drives random lifecycles through a fresh installation's hooks - sessions of every host in the root, below it and in worktrees, a session entering a worktree, bursts of sessions answering at once, branches, commits and worktrees changing under them - and checks that every save lands in its branch's task and nothing is written into a worktree; `--attached` launches every session as the Harness does and checks that neither the project nor the clone is written into. CI runs fixed seeds of both.
+`infra-engine eval memory-lifecycle-fuzz --seed N` drives random lifecycles through a fresh installation's hooks - sessions of every host in the root, below it and in worktrees, a session entering a worktree, bursts of sessions answering at once, branches, commits and worktrees changing under them - and checks that every save lands in its branch's task and nothing is written into a worktree; `--attached` launches every session as the Harness does - Claude Code, Codex and Cursor in the project and in its worktrees, Cursor running the hooks of the plugin image its launch was handed - and checks that neither the project nor the clone is written into. No CI job has run either since the native engine replaced the retired script: run fixed seeds of both by hand.
 
 ## Automatic results in native sessions
 

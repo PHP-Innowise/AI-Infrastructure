@@ -24,6 +24,28 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- `eval memory-lifecycle-fuzz --attached` launches Cursor too, in the project
+  and in its worktrees, as the Harness does. Its attached sessions were Claude
+  Code and Codex only, a choice carried over from the retired fuzzer, which
+  had no lent form of Cursor's hooks to run: its Cursor overlay handed over
+  the clone's own edition folder, whose hooks were relative commands. So no
+  change to Cursor's attached launch was ever driven by it. Each event of a
+  Cursor session now has `build_overlay` write the private plugin image into
+  the state, for the root and for each worktree, including worktrees removed
+  later, and runs the hooks that image's manifest names, as Cursor loads them
+  from `--plugin-dir`. In a burst two Cursor sessions may share a folder, as
+  two Harness chats on a project do: attached, there is no rule file for them
+  to share, and they build one image at once. An attached Cursor's prompt hook
+  gives Cursor no capsule, so a refresh that degraded or outlived its budget
+  cannot say so; the status its hook records is counted (`refresh exited 1
+  without a capsule`, `refresh over its budget`) instead of being reported as
+  unexplained. Attached seeds 1-4 pass; seeds 1, 2 and 4 run Cursor sessions,
+  in the root and in worktrees. A seed now takes up to three times as long
+  (seed 1: 235 s, against 76 s): every Cursor event builds its image, and
+  every launch, whatever its host, walks the images in the state to keep them
+  private. docs/MEMORY-INTEGRATION.md no longer says CI runs fixed seeds of
+  the fuzzer: no job has run it since the native engine replaced the retired
+  script.
 - Compared step by step with the retired runtime on twin projects, the
   native memory CLI and hooks again match it where they had drifted:
   - `memory record` stores a standalone episode again (docs/OPERATIONS.md

@@ -209,6 +209,17 @@ fn lock(root: &Path, hold: Duration) -> Result<HeldLock> {
         thread: Some(thread),
     })
 }
+/// The exit status of every refresh a prompt hook ran, in the order the
+/// hooks recorded them.
+fn refreshes(h: &Harness) -> Vec<Value> {
+    std::fs::read_to_string(h.state.join("memory-bank/local/refresh-health.ndjson"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|s| artifact::strict(s.as_bytes()).ok())
+        .filter(|v| v["source"] == "hook")
+        .map(|v| v["hook_status"].clone())
+        .collect()
+}
 fn place(_h: &Harness, s: &Session, checkouts: &BTreeMap<String, PathBuf>) -> Option<PathBuf> {
     let folder = checkouts.get(&s.checkout)?.join(&s.sub);
     folder.is_dir().then_some(folder)
@@ -232,7 +243,7 @@ fn event(
     let payload = rehearsal::payload(&s.host, &s.id, names[stage], &place, fields);
     let through = (s.kind == "worktree" && s.host == "codex")
         || s.host == "claude" && ["worktree", "sub"].contains(&s.kind.as_str());
-    let mut env = h.hook_env(
+    let (mut env, settings) = h.hooks(
         &s.host,
         if h.attached {
             launch
@@ -246,7 +257,7 @@ fn event(
     if wait.is_some() {
         env.insert("CONTEXT_HOOK_BUDGET".into(), "1".into());
     }
-    let calls = h.argv(&s.host, names[stage], through && !h.attached)?;
+    let calls = h.argv(&settings, &s.host, names[stage], through && !h.attached)?;
     let chosen = stop.map(|s| (s.pick * calls.len() as f64) as usize);
     let mut out = vec![];
     for (index, (label, argv)) in calls.into_iter().enumerate() {
@@ -362,6 +373,11 @@ fn turn(
             }
         }
     };
+    // An attached Cursor's prompt hook gives Cursor no capsule - its rule
+    // would be written into the project - so a refresh that degraded or ran
+    // out of its budget cannot say so, and the status its hook records is
+    // all there is to count.
+    let unseen = (h.attached && s.host == "cursor").then(|| refreshes(&h).len());
     let prompt = event(
         &h,
         &s,
@@ -376,6 +392,15 @@ fn turn(
         (waits == Some(0)).then_some(hold),
     )?;
     absorb(&prompt, &mut out);
+    if let Some(before) = unseen {
+        let recorded = refreshes(&h).get(before..).unwrap_or_default().to_vec();
+        if recorded.contains(&json!(1)) {
+            inc(&mut out.events, "refresh exited 1 without a capsule");
+        }
+        if waits == Some(0) && recorded.contains(&json!(124)) {
+            inc(&mut out.events, "refresh over its budget");
+        }
+    }
     let said = rehearsal::capsule(&cwd, &s.host, &prompt);
     if said.contains("Memory refresh incomplete") {
         inc(&mut out.events, "refresh degraded");
@@ -688,10 +713,14 @@ impl Fuzz {
             } else {
                 ""
             };
-        let hosts = if kind == "root" && !self.h.attached {
+        // Installed, Cursor below the root was never checked, and in a
+        // worktree without an installation of its own it runs no hooks.
+        // Attached, the Harness launches Cursor in the project or in any of
+        // its worktrees, with a plugin image built for that folder.
+        let hosts = if kind == "root" {
             vec!["claude", "claude", "codex", "cursor"]
-        } else if kind == "root" {
-            vec!["claude", "claude", "codex"]
+        } else if self.h.attached {
+            vec!["claude", "codex", "cursor"]
         } else {
             vec!["claude", "codex"]
         };
@@ -763,12 +792,17 @@ impl Fuzz {
     fn burst(&mut self) -> Result<()> {
         let ids = self.sessions.keys().cloned().collect::<Vec<_>>();
         let picked = self.rng.sample(ids.len(), ids.len().min(3));
+        // Two Cursor sessions in one folder would share its rule file. An
+        // attached Cursor has none: two Harness chats on one folder build
+        // and are handed the same plugin image at once.
         let mut cursors = BTreeSet::new();
         let mut threads = vec![];
         for i in picked {
             let s = self.sessions[&ids[i]].clone();
             if place(&self.h, &s, &self.checkouts).is_none()
-                || s.host == "cursor" && !cursors.insert((s.checkout.clone(), s.sub.clone()))
+                || s.host == "cursor"
+                    && !self.h.attached
+                    && !cursors.insert((s.checkout.clone(), s.sub.clone()))
             {
                 continue;
             }
@@ -1335,15 +1369,7 @@ impl Fuzz {
                 );
             }
         }
-        let health =
-            std::fs::read_to_string(self.h.state.join("memory-bank/local/refresh-health.ndjson"))
-                .unwrap_or_default();
-        let hooks = health
-            .lines()
-            .filter_map(|s| artifact::strict(s.as_bytes()).ok())
-            .filter(|v| v["source"] == "hook")
-            .map(|v| v["hook_status"].clone())
-            .collect::<Vec<_>>();
+        let hooks = refreshes(&self.h);
         let mut over = self
             .events
             .get("refresh over its budget")
@@ -1360,8 +1386,14 @@ impl Fuzz {
             }
         }
         let degraded = self.events.get("refresh degraded").copied().unwrap_or(0);
+        let unseen = self
+            .events
+            .get("refresh exited 1 without a capsule")
+            .copied()
+            .unwrap_or(0);
         let unexplained = (hooks.iter().filter(|v| **v == 1).count() as u64).saturating_sub(
             degraded
+                + unseen
                 + over
                 + self
                     .violations
