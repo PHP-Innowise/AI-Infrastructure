@@ -309,6 +309,62 @@ fn replan(v: &V) {
         let _ = task.focus();
     }
 }
+/// Which of Plan, Review, Run and Receipts a change has reached, and how that
+/// stage stands: a change stops at Review until someone launches it. The
+/// stepper was drawn by the browser UI before the Wasm port and stayed empty.
+fn stages(v: &V) -> Vec<(&'static str, &'static str)> {
+    let active = m::yes(&v["active"]);
+    let status = m::text(v, "status");
+    let launched = v["session_id"].is_string();
+    let attention = !active
+        && (matches!(
+            status.as_str(),
+            "blocked" | "interrupted" | "failed" | "cancelled"
+        ) || (!launched && v["plan"]["status"] != "needs_review"));
+    let current = if !launched {
+        1
+    } else if status == "completed" && !active {
+        4
+    } else {
+        2
+    };
+    ["Plan", "Review", "Run", "Receipts"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let state = if index < current {
+                "done"
+            } else if index > current {
+                "upcoming"
+            } else if attention {
+                "attention"
+            } else if active {
+                "running"
+            } else {
+                "current"
+            };
+            (label, state)
+        })
+        .collect()
+}
+fn stepper(v: &V) {
+    dom::clear("system-stepper");
+    for (index, (label, state)) in stages(v).into_iter().enumerate() {
+        let item = dom::el("li", "step", "");
+        let _ = item.set_attribute("data-state", state);
+        if matches!(state, "current" | "running" | "attention") {
+            let _ = item.set_attribute("aria-current", "step");
+        }
+        let mark = if state == "done" {
+            "✓".to_owned()
+        } else {
+            (index + 1).to_string()
+        };
+        dom::add(&item, &dom::el("span", "step-mark", &mark));
+        dom::add(&item, &dom::el("span", "step-label", label));
+        dom::append("system-stepper", &item);
+    }
+}
 /// How a change reads in the change list.
 fn run_label(run: &V) -> String {
     format!(
@@ -1083,6 +1139,7 @@ fn render_run() {
         return;
     }
     dom::hidden("system-run", false);
+    stepper(&v);
     // The list entry follows the run's status as it changes.
     if let Some(option) = dom::get("system-runs")
         .and_then(|list| list.dyn_into::<web_sys::HtmlSelectElement>().ok())
@@ -2999,6 +3056,35 @@ mod display_tests {
         );
         assert_eq!(next_change_id("change-001"), "change-2");
         assert_eq!(next_change_id("7"), "7-2");
+    }
+    #[test]
+    fn the_stepper_shows_where_a_change_stands() {
+        let states = |v: V| {
+            stages(&v)
+                .into_iter()
+                .map(|(_, state)| state)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            states(json!({"status":"needs_review","plan":{"status":"needs_review"}})),
+            ["done", "current", "upcoming", "upcoming"]
+        );
+        assert_eq!(
+            states(json!({"status":"needs_selection","plan":{"status":"needs_selection"}})),
+            ["done", "attention", "upcoming", "upcoming"]
+        );
+        assert_eq!(
+            states(json!({"status":"running","active":true,"session_id":"s"})),
+            ["done", "done", "running", "upcoming"]
+        );
+        assert_eq!(
+            states(json!({"status":"blocked","session_id":"s"})),
+            ["done", "done", "attention", "upcoming"]
+        );
+        assert_eq!(
+            states(json!({"status":"completed","session_id":"s"})),
+            ["done", "done", "done", "done"]
+        );
     }
     #[test]
     fn lists_read_as_text() {
