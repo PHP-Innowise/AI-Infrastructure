@@ -1538,7 +1538,7 @@ impl MemoryService {
             })
             .ok();
         Ok(
-            object!({"episode_id":episode_id,"task_id":id,"task_uuid":task["id"],"revision":task["revision"],"event_id":event.and_then(|record|record["id"].as_str().map(String::from))}),
+            object!({"episode_id":episode_id,"task_id":id,"task_uuid":task["id"],"revision":task["revision"],"status":task["status"],"event_id":event.and_then(|record|record["id"].as_str().map(String::from))}),
         )
     }
     fn links(&self, request: &Value) -> Result<Value> {

@@ -419,6 +419,10 @@ edition's own files remain in that edition's changelog.
   <UUID> is completed; start new work under a new task id", or the binding
   it refuses to repoint. The native command said "Working task not found"
   or "Task is unavailable for rebind".
+- `complete --json` reports the task's `status` again, as the retired
+  command did. Run with every option on twin projects, `start`, `update`,
+  `get`, `brain-create`, `brain-update`, `brain-get`, `retrieve`, `search`,
+  `complete` and `health` now return what the retired commands returned.
 - A refused `context-save` names what to correct again, as the retired
   command did: the unexpected or missing input fields, the flag a detail
   needs (`--topic is required when --detail topic`), the length limit of the

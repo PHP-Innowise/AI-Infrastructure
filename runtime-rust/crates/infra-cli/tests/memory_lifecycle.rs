@@ -1610,6 +1610,37 @@ fn rebind_binds_the_record_it_names_or_says_why_not() {
     );
 }
 
+/// `complete --json` reports the task's status, as the retired command did.
+#[test]
+fn a_completed_task_reports_its_status() {
+    let project = Project::new();
+    let engine = project.path.join("memory-bank/bin/infra-engine");
+    let run = |args: &[&str]| {
+        let output = project
+            .command(&engine)
+            .arg("memory")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", described(&output));
+        output.stdout
+    };
+    run(&["start", "--task-id", "SHOP-7", "--goal", "Fix refunds"]);
+    let completed: Value = serde_json::from_slice(&run(&[
+        "complete",
+        "--task-id",
+        "SHOP-7",
+        "--revision",
+        "1",
+        "--outcome",
+        "Done",
+        "--json",
+    ]))
+    .unwrap();
+    assert_eq!(completed["status"], "completed", "{completed}");
+    assert_eq!(completed["revision"], 2, "{completed}");
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(
