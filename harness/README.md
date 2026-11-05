@@ -377,6 +377,138 @@ infra-engine serve start --port 8766 --timeout 900 \
 checks the CLI's identity and required Cursor flags; an unrelated command
 named `agent` is not accepted as Cursor. Cursor auto-update is disabled on
 all harness invocations so it cannot replace another tool's launcher.
+
+The default is one active session. `--session-concurrency 2` (range 1–4)
+opts into experimental scheduling across independent Git repositories; the
+same option is available with `app open` and is preserved by managed relaunch.
+Stop and start an existing server to change it. Only ordinary `native`
+sessions without additional agents or linked Brain participate. Jobs sharing
+a Git common directory (including linked worktrees), overlapping repository
+paths, physical directory aliases, or a session identity remain sequential. Linux
+also checks filesystem coordinates from mountinfo for nested bind aliases and
+mounted subtrees; unavailable or ambiguous mount data keeps a job exclusive.
+These leases coordinate declared repository trees, not arbitrary provider access
+to shared dependencies or paths outside them. Unverified/non-Git projects,
+Fleet, checks and specialized workflows run exclusively; their queue position
+prevents later jobs overtaking them. There are at most 16 waiting jobs across
+the input channel and scheduler backlog together. Commit/transfer, attach and
+updates retain their existing global idle requirements. This option makes no
+automatic restart/resume or efficacy claim.
+Unrelated Linux mounts, such as a replaced bind source (`//deleted` root) or a
+mount with an empty source, do not invalidate a project's scope;
+covering/nested mounts still require valid coordinates. Changing Unix
+directory permissions keeps the same lease identity; replacing a directory
+does not. Before an update, finish or cancel saved pending inbox messages:
+pending/assigned delivery keeps the runner held out of update even between turns.
+
+The native HTTP API also provides a durable **next-turn inbox**, independently
+of the concurrency setting. A client can queue one plain follow-up while an
+ordinary native turn is running, after its provider has reported a native
+session ID. The composer offers **Queue next message** for eligible running
+sessions and shows the five most recent receipts under **Next messages**.
+**Cancel queued message** cancels a pending input; an assigned turn uses the
+session's existing cancellation control. Settings and attachments remain
+locked while a turn is active. The `/messages` endpoint still requires
+the current turn to finish. The inbox does not inject instructions into a live
+provider process: after successful completion and confirmed cleanup, it starts
+another process with the same provider resume ID.
+
+| Request | Response |
+| --- | --- |
+| `POST /api/sessions/{session_id}/inbox` with exactly `{"request_id":"next-1","prompt":"Continue the investigation."}` | `202`, a durable receipt |
+| `GET /api/sessions/{session_id}/inbox` with optional positive `before` cursor | `200`, `{items, next_before}`, newest first, at most 100 receipts |
+| `POST /api/sessions/{session_id}/inbox/{request_id}/cancel` with `{}` | `200`, the receipt; an assigned turn requires session cancellation instead |
+
+POST requests require the existing `x-harness-token`, JSON content type and
+Content-Length. Request IDs contain 1–128 ASCII letters, digits, hyphens,
+underscores or dots (except `.` and `..`). Prompts are trimmed, limited to
+32000 UTF-8 bytes and cannot contain NUL or begin with a slash command. The
+HTTP JSON limit is 64 KiB. Attachments, settings and unknown fields are refused.
+The same `(session_id, request_id)` and normalized prompt returns its current
+receipt, including after completion; a changed prompt returns `409`.
+
+The browser saves the pending request identity and text locally before its
+first inbox POST. A matching receipt refresh confirms it automatically. If
+the response is lost or invalid and no matching receipt can be read, **Retry saving** confirms
+that same request, including after reload, reconnect or source completion; it
+does not send the message through ordinary follow-up. The runner returns a
+receipt already recorded for that identity before it checks the session, so a
+retry it refuses with `404` or `409` (or a refused body) proves nothing was
+saved: the identity is released and the text returns to the composer as a
+draft. A connection-token refusal (`401`/`403`), lost reply or server error
+keeps the identity for another retry. Saved state too large to read back is
+never written; unreadable state can be cleared from the composer, and the
+runner's receipts stay listed. New requests require secure browser random
+IDs and writable local storage. Drafts belong to their selected conversation;
+late responses cannot clear another conversation's composer. Receipt refresh
+continues across the short interval between completed source and queued next
+turn, including transient read failures.
+
+At most one pending message per session and 64 pending/assigned messages
+across the server are admitted. Receipts and their prompt text remain in the
+local state database; terminal receipts do not consume active capacity.
+`pending` means saved, `assigned` means one new local launch generation and
+user event were committed atomically, and `completed` means that turn returned
+success with matching native identity. These states do not establish model
+understanding, task correctness or exactly one external effect. `blocked`,
+`cancelled` and `uncertain` preserve input that did not safely reach a proved
+completion. Read the reason and review the session before sending any manual
+continuation through the normal message flow.
+
+Provider, project/workspace, mode, models, routing, agents, context and budgets
+are frozen when accepting a message; Git identity and physical scope are
+checked again at assignment and execution. Only ordinary `native` sessions
+without additional agents, Brain, SDD, Fleet, Clash or other specialized
+workflows qualify. A failed/cancelled source, missing or conflicting native
+identity, changed authority/scope or generation replacement prevents automatic
+continuation. Queue backpressure leaves the request pending. A server restart
+marks pending receipts `blocked` and assigned receipts `uncertain`; neither is
+replayed automatically. Each explicit follow-up retains the existing per-turn
+budget settings; this is not a shared budget for the entire conversation.
+
+### Offline scheduler and inbox qualification
+
+The `native_flow` integration tests run A1, its queued inbox continuation A2,
+and an independent session B through the real session scheduler, SQLite store,
+native process supervisor and launch receipts. A separate test fixture acts as
+the provider CLI; it uses no account, network or model.
+
+| Scenario | Checked behavior |
+| --- | --- |
+| Serial, concurrency 1 | A1, B and A2 never overlap; A2 resumes A's native ID in a new generation |
+| Independent Git repositories, concurrency 2 | A1 and B hold their scopes simultaneously; A2 waits for A1 cleanup |
+| Linked worktrees, concurrency 2 | Their shared Git common directory keeps provider entry sequential through cleanup |
+| Cancel A1 with pending A2 | A2 is cancelled without delivery; B continues |
+| Cancel assigned A2 | The receipt retains delivery uncertainty; B continues |
+| Conflicting native result identity | A1 fails, A2 is blocked without delivery; B continues |
+
+Provider gates hold a process alive after its terminal event. Scope locks,
+running-launch snapshots, native arguments, message counts and cleanup receipts
+are asserted together; elapsed time is only a failure deadline. Tests also check
+idempotent receipt replay, frozen session authority, runner custody and a clean
+state reopen. A failed integration test retains its private directory and prints
+the path for inspection.
+
+From the repository root:
+
+```bash
+cargo test --manifest-path runtime-rust/Cargo.toml -p infra-harness --test native_flow --locked --offline
+# Linux process-tree and guardian coverage, independently of the fake provider:
+cargo test --manifest-path runtime-rust/Cargo.toml -p infra-host --test native_process_linux --locked --offline
+```
+
+To retain a successful scenario's `result.json`, run the test-only
+`infra-harness-flow-fixture` binary with an empty private directory and one of
+`serial`, `parallel`, `shared`, `cancel-source`, `cancel-next`, `identity-failure`.
+The result labels task correctness and latency benefit `not_measured`.
+These deterministic scenarios establish coordination contracts for the fixture;
+real provider compatibility, Windows/macOS execution, task quality and performance
+require separate evidence.
+
+For a sealed, counterbalanced comparison with Rust artifact tasks and an external
+code oracle, see the [local A/B runner](../docs/HARNESS-SESSION-AB.md). Its current
+worker is offline-only and reports no model efficacy or latency benefit.
+
 Authenticate using each native CLI in a terminal before running browser
 tasks. Existing native credentials remain managed by that CLI. A detected
 executable does **not** prove that its account is logged in.
@@ -889,8 +1021,9 @@ permission systems are not identical. The web UI does not implement an
 interactive permission-approval relay or bypass native checks: a command
 requiring unavailable approval can fail and must be handled in the CLI.
 
-One run is active at a time, with a bounded queue of 16. This serializes
-writes across registered projects. A configured time budget stops a run at its
+By default one run is active at a time, with a bounded queue of 16. The
+experimental concurrency option above permits independent native sessions.
+A configured time budget stops a run at its
 deadline; a blank time field leaves it uncapped. **Cancel** still stops the run,
 and a watchdog stops the process group if the server dies. After a restart,
 unfinished sessions are marked interrupted and can be resumed if the

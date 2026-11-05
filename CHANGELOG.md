@@ -24,6 +24,62 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Keep repository leases and inbox available when an unrelated Linux mount
+  has a deleted bind source root or an empty source field. Read only mounts
+  covering or nested inside declared Git trees, deciding that from the mount
+  point before any other field, while retaining strict relevant-scope
+  validation. Ignore Unix permission bits in lease identity without weakening
+  inode/type checks. Refuse update holds while inbox delivery is still pending
+  or assigned, including the gap between native turns.
+
+- Add an offline scheduler/inbox A/B companion with sealed public Rust pilot
+  tasks, counterbalanced serial/parallel streams and independent artifact
+  verification. Pin the dataset-free oracle helper, compiler and resolved C
+  linker identities, retain interrupted/unknown members and invalidate grades
+  after input drift. The linker is resolved on the host and passed to rustc:
+  Debian-family `cc` points into `/etc/alternatives`, outside the sandbox, so
+  every Ubuntu compilation had failed, gold controls included. Negative
+  controls cover wrong/partial results, artifact violations, successful early
+  exit, a missing compiler or linker (unknown, never a failed artifact) and
+  cleanup-proved execution deadlines. Model efficacy, billing
+  and latency benefit remain unmeasured; no live worker is enabled.
+  Preserve the host's loader-directory layout and provision/probe Linux CI
+  oracle namespaces through the canonical native workflow emitter.
+
+- Qualify the native scheduler and durable inbox together with six offline
+  process scenarios: serial and independent scopes, linked worktrees, source
+  and assigned-turn cancellation, and conflicting native identity. Assert
+  cleanup before continuation, native resume and authority, observed attempts,
+  receipt replay and neighbor isolation. The fixture measures coordination;
+  task correctness and latency benefit remain unmeasured.
+
+- Connect the native next-turn inbox to the Harness composer: queue plain text
+  during eligible running sessions, show recent receipts and cancel pending
+  messages. Preserve per-conversation drafts and uncertain request identities
+  across reload/reconnect; retry confirms the same request even after source
+  completion. A retry the runner refuses after finding no record of its
+  identity releases it and returns the text to the composer, instead of
+  locking that conversation's composer for good; unreadable saved state can be
+  cleared and is never written. Fence stale responses and keep polling through
+  handoff/read failures. Active inbox input cannot change settings or attach
+  files. Align mobile navigation selectors with the Rust UI's open state.
+
+- Add a durable, prompt-only native Harness inbox API for the next turn of
+  a running session with a known provider session identity. Idempotent request
+  IDs, bounded admission and transactional assignment preserve the original
+  authority and Git scope. Only successful, identity-proved completion and
+  cleanup permit continuation; cancellation and restart retain explicit
+  cancelled, blocked or uncertain receipts without automatic replay. The
+  existing ordinary message endpoint retains its current behavior.
+
+- Add opt-in native Harness session scheduling with `--session-concurrency`
+  (1–4, default 1). Plain native tasks in independent Git repositories can
+  overlap, while shared Git/common-directory scopes and session generations
+  retain execution ownership through cleanup. Specialized workflows stay
+  exclusive, the waiting backlog remains bounded at 16, and uncertain cleanup
+  stops admission and cancels sibling work. Automatic recovery is unchanged;
+  real-task efficacy remains unmeasured.
+
 - Compared step by step with the retired runtime on twin projects, the
   native memory CLI and hooks again match it where they had drifted:
   - `memory record` stores a standalone episode again (docs/OPERATIONS.md

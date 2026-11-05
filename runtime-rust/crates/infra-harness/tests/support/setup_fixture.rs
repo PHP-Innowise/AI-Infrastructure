@@ -6,7 +6,7 @@ use infra_harness::{
     knowledge::KnowledgeDomain,
     provider::ProviderDomain,
     services::{CloseFuture, Domain, NativeServices, Payload, Reply, Services},
-    sessions::{BlackboardFactory, Event, RunReply, Sessions, SpecialWorkflow},
+    sessions::{BlackboardFactory, Event, RunReply, SessionLimits, Sessions, SpecialWorkflow},
     setup::{Setup, SetupDomain},
     store::SessionStore,
 };
@@ -138,7 +138,10 @@ impl Fixture {
             knowledge,
             Arc::new(NoNativeWork),
             special,
-            900,
+            SessionLimits {
+                seconds: 900,
+                concurrency: 1,
+            },
         )?;
         let accelerators = Arc::new(Accelerators::new(
             store.clone(),

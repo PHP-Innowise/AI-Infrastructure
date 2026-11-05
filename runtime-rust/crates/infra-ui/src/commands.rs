@@ -160,12 +160,17 @@ fn rank(items: Vec<V>, needle: &str) -> Vec<V> {
     out.sort_by_key(|(score, index, _)| (*score, *index));
     out.into_iter().map(|(_, _, v)| v).collect()
 }
-fn close() {
+pub(crate) fn close() {
+    m::next("composer");
     m::set("composer-open", json!(false));
     dom::hidden("skill-hints-panel", true);
     dom::attr("prompt", "aria-expanded", "false");
 }
 pub async fn update() {
+    if m::read(|s| m::active(&s.selected)) || crate::inbox::needs_confirmation() {
+        close();
+        return;
+    }
     let text = dom::value("prompt");
     let caret = dom::get("prompt")
         .and_then(|e| e.dyn_into::<web_sys::HtmlTextAreaElement>().ok())

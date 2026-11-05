@@ -156,16 +156,20 @@ impl SessionStore {
                 ))?;
             }
         }
+        crate::inbox::initialize(&db)?;
+        let restart = db.unchecked_transaction()?;
         let interrupted = {
             let mut q =
-                db.prepare("SELECT id FROM sessions WHERE status IN ('queued','running')")?;
+                restart.prepare("SELECT id FROM sessions WHERE status IN ('queued','running')")?;
             q.query_map([], |r| r.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?
         };
         for sid in interrupted {
-            db.execute("INSERT INTO events(session_id,data)VALUES(?1,?2)",params![sid,json!({"kind":"status","text":"Server restarted; the previous run was interrupted."}).to_string()])?;
+            restart.execute("INSERT INTO events(session_id,data)VALUES(?1,?2)",params![sid,json!({"kind":"status","text":"Server restarted; the previous run was interrupted."}).to_string()])?;
         }
-        db.execute("UPDATE sessions SET status='interrupted',updated_at=?1 WHERE status IN ('queued','running')",[now()])?;
+        restart.execute("UPDATE sessions SET status='interrupted',updated_at=?1 WHERE status IN ('queued','running')",[now()])?;
+        crate::inbox::recover(&restart)?;
+        restart.commit()?;
         Ok(Self {
             state,
             db: Arc::new(Mutex::new(db)),
@@ -404,6 +408,8 @@ impl SessionStore {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let session = get_session(&tx, sid)?;
         if !["queued", "running"].contains(&session["status"].as_str().unwrap_or("")) {
+            crate::inbox::cancel_session(&tx, sid)?;
+            tx.commit()?;
             return Ok(session);
         }
         if session["creator"]["phase"]
@@ -424,6 +430,7 @@ impl SessionStore {
             &json!({"kind":"status","text":"Cancellation requested."}),
         )?;
         tx.execute("UPDATE sessions SET status='cancelled',updated_at=?1 WHERE id=?2 AND status IN ('queued','running')", params![now(),sid])?;
+        crate::inbox::cancel_session(&tx, sid)?;
         tx.execute(
             "INSERT INTO events(session_id,data)VALUES(?1,?2)",
             params![sid, event],

@@ -11,6 +11,30 @@ path = "tests/support/setup_fixture.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "infra-harness-inbox-fixture"
+path = "tests/support/inbox_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "infra-harness-flow-fixture"
+path = "tests/support/flow_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "infra-harness-ab"
+path = "tools/session_ab/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "infra-harness-ab-oracle"
+path = "tools/session_ab/oracle_child.rs"
+test = false
+bench = false
+
 [dependencies]
 infra-host = { path = "../infra-host" }
 infra-core = { path = "../infra-core" }
