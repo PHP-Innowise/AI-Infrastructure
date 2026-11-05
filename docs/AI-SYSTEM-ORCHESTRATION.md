@@ -699,7 +699,11 @@ see [Service folder access](#service-folder-access)) and a timeout per agent,
 confirm that you reviewed the scope and context, then **Execute reviewed plan**. Cursor Agent offers only own-service access. System dispatches
 share the existing Harness queue, runner lock, cancellation and watchdog. They
 use the selected CLI's default model. The provider is fixed after launch and
-recovery keeps it. Ordinary session model/agent controls do not apply. No arbitrary executable can be passed by API.
+recovery keeps it. A dispatch whose CLI exits with an error shows that CLI's
+own message on the run and its receipt (for example `The claude CLI exited
+with code 1: Failed to authenticate: OAuth session expired and could not be
+refreshed`): sign that CLI in and retry the dispatch, or prepare a new change
+to use another provider. Ordinary session model/agent controls do not apply. No arbitrary executable can be passed by API.
 Access to external roots comes exclusively from registered Harness projects.
 
 The run view polls persisted dispatches and displays receipts, reported checks,
