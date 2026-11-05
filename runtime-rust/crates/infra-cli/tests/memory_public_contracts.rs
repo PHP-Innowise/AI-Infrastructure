@@ -2516,7 +2516,8 @@ fn concurrent_completion_cas_creates_one_episode_and_preserves_pending_and_other
     let loser = &outputs[1 - winner];
     let refusal = String::from_utf8_lossy(&loser.stderr);
     assert!(
-        refusal.contains("Stale task revision: expected ") || refusal.contains("Working task not found"),
+        refusal.contains("Stale task revision: expected ")
+            || refusal.contains("Working task not found"),
         "{refusal}"
     );
     let result: Value = serde_json::from_slice(&outputs[winner].stdout).unwrap();
