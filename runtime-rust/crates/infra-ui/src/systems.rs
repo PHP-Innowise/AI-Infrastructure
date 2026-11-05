@@ -402,6 +402,54 @@ fn edge_path(a: (usize, usize), b: (usize, usize)) -> String {
         format!("M{},{ay} L{},{}", ax + 110, bx + 110, by + 76)
     }
 }
+/// Why a dispatch receipt did or did not complete, naming what to inspect: the
+/// validator's rejection, the agent's own block, the checks that failed (or,
+/// for verification, did not run), or the files a read-only worker wrote.
+fn receipt_outcome(receipt: &V) -> String {
+    if m::yes(&receipt["ok"]) {
+        return "completed".into();
+    }
+    if let Some(rejection) = receipt["rejection"].as_str() {
+        return format!("rejected: {rejection}");
+    }
+    let report = &receipt["report"];
+    if report.is_object() {
+        if report["status"] == "blocked" {
+            return format!("blocked by the agent: {}", m::text(report, "summary"));
+        }
+        let checks = m::array(&report["checks"]);
+        let named = |status: &str| {
+            checks
+                .iter()
+                .filter(|check| check["status"] == status)
+                .map(|check| m::text(check, "name"))
+                .collect::<Vec<_>>()
+        };
+        let failed = named("failed");
+        if !failed.is_empty() {
+            return format!("failed checks: {}", failed.join(", "));
+        }
+        if receipt["error"] == "read_only_worker_reported_writes" {
+            return format!(
+                "read-only worker reported writes: {}",
+                joined(&report["changed_files"])
+            );
+        }
+        if receipt["phase"] == "verify" {
+            if checks.is_empty() {
+                return "verification reported no checks".into();
+            }
+            let unrun = named("not_run");
+            if !unrun.is_empty() {
+                return format!("checks not run: {}", unrun.join(", "));
+            }
+        }
+    }
+    match receipt["error"].as_str() {
+        Some(error) => format!("blocked: {}", m::label(error)),
+        None => "blocked".into(),
+    }
+}
 /// What to do when a plan could not choose its starting services itself.
 fn selection_hint(candidates: &[V]) -> String {
     if candidates.is_empty() {
@@ -882,22 +930,7 @@ fn render_run() {
             .iter()
             .map(|receipt| {
                 let mut receipt = receipt.clone();
-                let outcome = if m::yes(&receipt["ok"]) {
-                    "completed".to_owned()
-                } else if let Some(rejection) = receipt["rejection"].as_str() {
-                    // The validator's own reason says what to change in the worker's answer.
-                    format!("rejected: {rejection}")
-                } else if receipt["report"]["status"] == "blocked" {
-                    format!(
-                        "blocked by the agent: {}",
-                        m::text(&receipt["report"], "summary")
-                    )
-                } else {
-                    match receipt["error"].as_str() {
-                        Some(error) => format!("blocked: {}", m::label(error)),
-                        None => "blocked".to_owned(),
-                    }
-                };
+                let outcome = receipt_outcome(&receipt);
                 receipt["title"] = json!(format!(
                     "{} · attempt {} · {}",
                     m::text(&receipt, "phase"),
@@ -2420,6 +2453,49 @@ mod display_tests {
         assert!(hint.contains("orders (cancel, order)"), "{hint}");
         assert!(hint.contains("payments (refund)"), "{hint}");
         assert!(selection_hint(&[]).contains("matches no declared capability"));
+    }
+    #[test]
+    fn a_receipt_names_what_stopped_its_dispatch() {
+        assert_eq!(receipt_outcome(&json!({"ok":true})), "completed");
+        assert_eq!(
+            receipt_outcome(
+                &json!({"ok":false,"error":"invalid_or_sensitive_worker_result",
+                "rejection":"Read-only worker reported writes","report":null})
+            ),
+            "rejected: Read-only worker reported writes"
+        );
+        assert_eq!(
+            receipt_outcome(
+                &json!({"ok":false,"error":"worker_blocked_or_verification_incomplete",
+                "report":{"status":"blocked","summary":"Refund rule undecided","checks":[]}})
+            ),
+            "blocked by the agent: Refund rule undecided"
+        );
+        assert_eq!(
+            receipt_outcome(
+                &json!({"ok":false,"phase":"service-inventory","error":"worker_blocked_or_verification_incomplete",
+                "report":{"status":"completed","checks":[{"name":"tests","status":"passed"},{"name":"composer_metadata","status":"failed"}]}})
+            ),
+            "failed checks: composer_metadata"
+        );
+        assert_eq!(
+            receipt_outcome(
+                &json!({"ok":false,"phase":"verify","error":"worker_blocked_or_verification_incomplete",
+                "report":{"status":"completed","checks":[{"name":"go","status":"not_run"},{"name":"php","status":"passed"}]}})
+            ),
+            "checks not run: go"
+        );
+        assert_eq!(
+            receipt_outcome(
+                &json!({"ok":false,"phase":"contracts","error":"read_only_worker_reported_writes",
+                "report":{"status":"completed","checks":[],"changed_files":["billing/.tool/marker"]}})
+            ),
+            "read-only worker reported writes: billing/.tool/marker"
+        );
+        assert_eq!(
+            receipt_outcome(&json!({"ok":false,"error":"worker_exit_failure","report":null})),
+            "blocked: worker exit failure"
+        );
     }
     #[test]
     fn lists_read_as_text() {
