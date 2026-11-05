@@ -344,9 +344,14 @@ and executable digest are pinned in the journal; resume cannot switch providers.
 
 | Scope | Contract and verification workers | Service workers |
 | --- | --- | --- |
-| `service` (CLI default) | Granted every selected service, read-only. | Granted their own service root; they write only there, only in edit mode. |
-| `all` | Granted every selected service, read-only. | Granted every selected service; in edit mode they may write in any of them. |
+| `service` (CLI default) | Granted the system folder and every selected service, read-only. | Granted their own service root; they write only there, only in edit mode. |
+| `all` | Granted the system folder and every selected service, read-only. | Granted every selected service; in edit mode they may write in any of them. |
 
+Contract and verification workers run in the system folder, so its shared
+contracts, topic registry and decisions are part of what they read. A root's own
+build and test commands may also read the repository that contains it (for
+example the shared packages of a monorepo whose service folders are
+registered), but nothing outside the writable roots is edited.
 The system folder is never writable by a worker, and read-only dispatches never
 write. Grants add folders a CLI would otherwise lack; they do not remove access a
 CLI already has (Codex reads the whole disk in both sandboxes). Claude gets

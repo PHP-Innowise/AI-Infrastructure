@@ -471,6 +471,13 @@ fn render(root: &str) {
             let names = m::array(&a[field])
                 .iter()
                 .filter_map(V::as_str)
+                .map(|name| {
+                    if name == "__system__" {
+                        "system folder"
+                    } else {
+                        name
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             if !names.is_empty() {

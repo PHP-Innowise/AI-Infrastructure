@@ -41,6 +41,16 @@ edition's own files remain in that edition's changelog.
     cause (a readable original path, an unwritable workspace, or a sandbox that
     could not start) instead of `boundary probe failed`, and a scan that stops
     without a proposal shows its last error.
+  - Contract and verification workers run in the system folder and now have it
+    in `access.readable`: told to read only the services, a real contract agent
+    refused to check the topic registry, envelope schema and ADRs it was meant
+    to check. Workers are also told that a root's own build and test commands
+    may read the repository containing it, so monorepo services whose tests
+    load shared packages are tested instead of reported `not_run`.
+  - A blocked contract agreement may propose an order (kept as evidence, never
+    applied): such a report was discarded as an invalid result, losing the
+    decisions it asked for. A rejected answer keeps the validator's reason in
+    its receipt (`rejection`) and on the agent's card.
   - Capability routing ignores English and Russian function words and folds
     English plurals, so a task written as a sentence no longer makes every
     service with a prose description a candidate; candidates are ranked by

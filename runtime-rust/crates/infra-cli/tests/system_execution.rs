@@ -99,6 +99,10 @@ fn adapter(root: &Path) -> PathBuf {
 input=$(cat)
 report() { printf '{"status":"completed","summary":"%s","checks":[{"name":"%s","status":"passed","detail":"fixture"}],"changed_files":%s,"service_order":%s}\n' "$1" "$2" "$3" "$4"; }
 case "$input" in
+  *'"readable":["__system__","billing","orders"]'*'"phase":"contracts","previous_receipts"'*) ;;
+  *'"phase":"contracts","previous_receipts"'*) printf '{"status":"blocked","summary":"System folder not readable","checks":[],"changed_files":[],"service_order":[]}\n'; exit 0 ;;
+esac
+case "$input" in
   *'"phase":"contracts","previous_receipts"'*) report "Contracts agreed" "contracts" '[]' '["orders","billing"]' ;;
   *'"phase":"verify","previous_receipts"'*) report "Verified end to end" "end-to-end" '[]' '[]' ;;
   *'"mode":"edit"'*'"service":"billing","task"'*) printf 'after\n' > src/work.txt; report "Billing updated" "unit" '["src/work.txt"]' '[]' ;;

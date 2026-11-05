@@ -242,15 +242,25 @@ pub fn access_scope(state: &Value) -> &str {
 }
 pub fn dispatch_access(state: &Value, step: &Value) -> Value {
     let selected = texts(&state["selected"]);
-    let readable = if step["service"] == "__system__" || access_scope(state) == "all" {
+    let system = step["service"] == "__system__";
+    let readable = if system || access_scope(state) == "all" {
         selected
     } else {
         vec![string(&step["service"]).to_string()]
     };
-    let writable = if step["service"] != "__system__" && step["mode"] == "edit" {
+    let writable = if !system && step["mode"] == "edit" {
         readable.clone()
     } else {
         vec![]
+    };
+    // Coordination and verification run in the system folder: its shared
+    // contracts, registry and decisions are what they must check, read-only.
+    let readable = if system {
+        std::iter::once("__system__".to_string())
+            .chain(readable)
+            .collect()
+    } else {
+        readable
     };
     object!({"scope":access_scope(state),"readable":readable,"writable":writable})
 }
