@@ -817,6 +817,16 @@ impl Sessions {
             project_id: project.into(),
         }))
     }
+    /// The adapter of a system run, which dispatches into several registered
+    /// projects: each launch is adapted for the project its folder belongs to.
+    pub fn system_launch_adapter(&self) -> Result<Arc<dyn provider::LaunchAdapter>> {
+        let accelerators = lock(&self.accelerators)?.clone().ok_or_else(|| {
+            HarnessError::unavailable("Native accelerator launch services are not initialized.")
+        })?;
+        Ok(Arc::new(crate::accelerators::SystemLaunchAdapter {
+            accelerators,
+        }))
+    }
     pub fn shutdown_cancel(&self) -> Arc<AtomicBool> {
         self.stopping.clone()
     }

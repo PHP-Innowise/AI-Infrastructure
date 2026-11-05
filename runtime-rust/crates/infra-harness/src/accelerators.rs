@@ -483,6 +483,48 @@ impl infra_host::provider::LaunchAdapter for ProjectLaunchAdapter {
     }
 }
 
+/// Launches of a system run. One run dispatches into several registered projects
+/// (the system folder, then each service folder), so the project is the one each
+/// dispatch root belongs to, not the session's: a root that is a registered
+/// project is launched exactly as that project's sessions are; a root inside one
+/// (a monorepo service folder) gets no overlay. The run's roots were already
+/// admitted against registered projects when its catalog was read.
+pub struct SystemLaunchAdapter {
+    pub accelerators: Arc<Accelerators>,
+}
+impl infra_host::provider::LaunchAdapter for SystemLaunchAdapter {
+    fn adapt(
+        &self,
+        input: &infra_host::provider::Launch,
+        command: infra_host::provider::PreparedCommand,
+    ) -> Result<infra_host::provider::PreparedCommand> {
+        let requested = infra_core::fs::canonicalize(&input.project)?;
+        let mut inside = false;
+        for project in self.accelerators.store.projects()? {
+            let (Some(id), Some(path)) = (project["id"].as_str(), project["path"].as_str()) else {
+                continue;
+            };
+            let Ok(path) = infra_core::fs::canonicalize(path) else {
+                continue;
+            };
+            if path == requested {
+                return ProjectLaunchAdapter {
+                    accelerators: self.accelerators.clone(),
+                    project_id: id.into(),
+                }
+                .adapt(input, command);
+            }
+            inside |= requested.starts_with(&path);
+        }
+        if !inside {
+            return Err(HarnessError::forbidden(
+                "System dispatch folder is not inside a registered project.",
+            ));
+        }
+        Ok(command)
+    }
+}
+
 pub struct EvidenceLaunchAdapter {
     pub workspace: PathBuf,
 }
@@ -520,5 +562,77 @@ impl infra_host::provider::LaunchAdapter for EvidenceLaunchAdapter {
         }
         command.readable = vec![];
         Ok(command)
+    }
+}
+
+#[cfg(test)]
+mod system_launch_tests {
+    use super::*;
+    use infra_host::provider::{Launch, LaunchAdapter, PreparedCommand};
+    use std::{
+        collections::BTreeMap,
+        sync::{RwLock, Weak},
+    };
+    fn launch(project: &Path) -> Launch {
+        Launch {
+            provider: "codex".into(),
+            executable: PathBuf::from("/bin/true"),
+            project: project.into(),
+            prompt: "dispatch".into(),
+            mode: "plan".into(),
+            model: None,
+            session: None,
+            effort: None,
+            agents: false,
+            count: 1,
+            usd: None,
+            hook_events: false,
+        }
+    }
+    fn command() -> PreparedCommand {
+        PreparedCommand {
+            argv: vec!["codex".into(), "exec".into()],
+            environment: BTreeMap::new(),
+            input: vec![],
+            readable: vec![],
+            remove: vec![],
+        }
+    }
+    #[test]
+    fn a_system_run_launches_in_every_registered_service_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let system = root.path().join("system");
+        let payments = root.path().join("payments");
+        let monorepo = root.path().join("core");
+        let orders = monorepo.join("services/orders");
+        let outside = root.path().join("outside");
+        for folder in [&system, &payments, &orders, &outside] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        for folder in [&system, &payments, &monorepo] {
+            store.register(folder).unwrap();
+        }
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(RwLock::new(BTreeMap::new())),
+        });
+        let accelerators =
+            Arc::new(Accelerators::new(store, root.path().into(), providers, Weak::new()).unwrap());
+        let adapter = SystemLaunchAdapter { accelerators };
+        // The session belongs to the system folder, yet every dispatch folder of
+        // the run is launched: the system itself, a service that is a project of
+        // its own, and a service folder inside a registered monorepo.
+        for folder in [&system, &payments, &orders] {
+            let adapted = adapter.adapt(&launch(folder), command());
+            assert!(adapted.is_ok(), "{}: {:?}", folder.display(), adapted.err());
+            assert_eq!(adapted.unwrap().argv, ["codex", "exec"]);
+        }
+        let Err(refused) = adapter.adapt(&launch(&outside), command()) else {
+            panic!("a folder outside every registered project was launched");
+        };
+        assert_eq!(
+            refused.message,
+            "System dispatch folder is not inside a registered project."
+        );
     }
 }

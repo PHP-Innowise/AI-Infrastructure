@@ -31,6 +31,11 @@ edition's own files remain in that edition's changelog.
     and the second binding of the same task was an insert into a unique key; an
     existing binding to the same record now follows its revision, and one to a
     different record is refused instead of repointed.
+  - A Harness run no longer stops at its first service dispatch with `Session
+    workspace belongs to another project`: the launch adapter was the system
+    session's, which refuses any folder outside the system folder's checkout.
+    System runs adapt each launch for the registered project its folder is (or,
+    for a monorepo service folder, lies inside), and refuse any other folder.
   - `infra-engine system execute` no longer overflows its worker thread's stack
     in debug builds: the whole sequential run is one future, and the thread is
     sized for it.

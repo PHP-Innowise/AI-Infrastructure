@@ -352,7 +352,7 @@ impl SpecialWorkflow for SystemWorkflow {
                     workspace: directory.join("agent"),
                 })
             } else {
-                self.links.runner()?.launch_adapter(&session)?
+                self.links.runner()?.system_launch_adapter()?
             };
             let observer = Arc::new(WorkflowObserver {
                 store: self.store.clone(),
