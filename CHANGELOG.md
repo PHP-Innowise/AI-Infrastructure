@@ -26,10 +26,14 @@ edition's own files remain in that edition's changelog.
 
 - Add an offline scheduler/inbox A/B companion with sealed public Rust pilot
   tasks, counterbalanced serial/parallel streams and independent artifact
-  verification. Pin the dataset-free oracle helper and compiler identities,
-  retain interrupted/unknown members and invalidate grades after input drift.
-  Negative controls cover wrong/partial results, artifact violations, successful
-  early exit and cleanup-proved execution deadlines. Model efficacy, billing
+  verification. Pin the dataset-free oracle helper, compiler and resolved C
+  linker identities, retain interrupted/unknown members and invalidate grades
+  after input drift. The linker is resolved on the host and passed to rustc:
+  Debian-family `cc` points into `/etc/alternatives`, outside the sandbox, so
+  every Ubuntu compilation had failed, gold controls included. Negative
+  controls cover wrong/partial results, artifact violations, successful early
+  exit, a missing compiler or linker (unknown, never a failed artifact) and
+  cleanup-proved execution deadlines. Model efficacy, billing
   and latency benefit remain unmeasured; no live worker is enabled.
   Preserve the host's loader-directory layout and provision/probe Linux CI
   oracle namespaces through the canonical native workflow emitter.

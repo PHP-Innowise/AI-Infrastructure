@@ -7,20 +7,37 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 async fn execute(args: &[String]) -> Value {
-    let command = match args {
-        [mode, compiler] if mode == "compile" && Path::new(compiler).is_absolute() => vec![
-            compiler.clone(),
-            "--edition=2024".into(),
-            "/input/main.rs".into(),
-            "-o".into(),
-            "/work/candidate".into(),
-        ],
-        [mode] if mode == "execute" => vec!["/input/candidate".into()],
+    let (command, required) = match args {
+        [mode, compiler, linker]
+            if mode == "compile"
+                && Path::new(compiler).is_absolute()
+                && Path::new(linker).is_absolute() =>
+        {
+            (
+                vec![
+                    compiler.clone(),
+                    "--edition=2024".into(),
+                    format!("-Clinker={linker}"),
+                    "/input/main.rs".into(),
+                    "-o".into(),
+                    "/work/candidate".into(),
+                ],
+                vec![compiler.clone(), linker.clone()],
+            )
+        }
+        [mode] if mode == "execute" => (
+            vec!["/input/candidate".into()],
+            vec!["/input/candidate".into()],
+        ),
         _ => {
             return json!({"schema":"ab-oracle-child-v1","completed":false,"error_code":"invalid-command"});
         }
     };
-    if !std::fs::metadata(&command[0]).is_ok_and(|meta| meta.is_file()) {
+    // A toolchain that cannot start is an unavailable oracle, not a failed artifact.
+    if !required
+        .iter()
+        .all(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_file()))
+    {
         return json!({"schema":"ab-oracle-child-v1","completed":false,"error_code":"child-unavailable"});
     }
     match infra_host::process::run(

@@ -8,8 +8,8 @@ the built-in fixture worker; it cannot launch a live model.
 
 ## Run locally
 
-Linux, Git, an installed Rust toolchain and `/usr/bin/bwrap` with working user
-namespaces are required. No network, provider login or API key is needed.
+Linux, Git, an installed Rust toolchain, a C linker driver at `/usr/bin/cc` and
+`/usr/bin/bwrap` with working user namespaces are required. No network, provider login or API key is needed.
 Generated Linux workspace-test CI installs bubblewrap, enables user namespaces
 on its ephemeral runner when AppArmor restricts them, and probes the boundary.
 
@@ -75,13 +75,18 @@ provider text and a forged test-summary string are insufficient.
 Preflight proves baseline A/B fail, gold A/B pass, partial A, early exit and
 64 KiB binary output fail;
 it also exercises missing/protected/extra/oversized/linked artifacts and a
-missing compiler. Failed preflight leaves all four planned streams unattempted.
+missing compiler or linker; an unusable toolchain is an unknown oracle result,
+never a failed artifact. Failed preflight leaves all four planned streams
+unattempted.
 
 This finite, open corpus is **pilot qualification**. An implementation tailored
 to print its known expected outputs can pass it. It is not a hidden test set or
 a proof of arbitrary implementation semantics. Compiler executable/version,
-helper and bwrap are pinned; system/toolchain libraries are not fully sealed
-by content. Namespace isolation and deadlines are not a hostile-code resource
+the resolved C linker, helper and bwrap are pinned; system/toolchain libraries
+are not fully sealed by content. rustc links through `cc`, and Debian-family
+hosts resolve `/usr/bin/cc` through `/etc/alternatives`, which the sandbox does
+not mount, so the controller resolves it on the host, requires the result inside
+a mounted runtime directory and passes it with `-C linker`. Namespace isolation and deadlines are not a hostile-code resource
 containment certification.
 System runtime directories are bound from their actual host contents, including
 `/lib64`; the oracle does not assume one distribution's dynamic loader layout.

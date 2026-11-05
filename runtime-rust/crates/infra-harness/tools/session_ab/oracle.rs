@@ -6,7 +6,7 @@ use serde_json::{Value as V, json};
 use std::{
     collections::BTreeMap,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
     time::Instant,
 };
@@ -83,9 +83,24 @@ pub async fn tools() -> Result<V> {
         .into_iter()
         .filter(|name| Path::new(name).is_dir())
         .collect::<Vec<_>>();
+    let linker = linker(&runtime_roots)?;
     Ok(
-        json!({"oracle_helper":helper,"oracle_helper_sha256":digest(&executable_bytes(&helper)?),"sysroot":sysroot,"compiler":compiler,"compiler_sha256":digest(&executable_bytes(&compiler)?),"version":String::from_utf8_lossy(&version.bytes),"sandbox":"/usr/bin/bwrap","sandbox_sha256":digest(&executable_bytes(Path::new("/usr/bin/bwrap"))?),"runtime_roots":runtime_roots,"runtime_contract":"compiler executable/version pinned; actual system runtime directories and sysroot read-only, libraries not content-sealed"}),
+        json!({"oracle_helper":helper,"oracle_helper_sha256":digest(&executable_bytes(&helper)?),"sysroot":sysroot,"compiler":compiler,"compiler_sha256":digest(&executable_bytes(&compiler)?),"version":String::from_utf8_lossy(&version.bytes),"linker":linker,"linker_sha256":digest(&executable_bytes(&linker)?),"sandbox":"/usr/bin/bwrap","sandbox_sha256":digest(&executable_bytes(Path::new("/usr/bin/bwrap"))?),"runtime_roots":runtime_roots,"runtime_contract":"compiler executable/version and resolved C linker pinned; actual system runtime directories and sysroot read-only, libraries not content-sealed"}),
     )
+}
+/// rustc links Linux targets through `cc` on PATH, which is `/usr/bin` in the
+/// sandbox. Debian-family hosts resolve that name through `/etc/alternatives`,
+/// which the sandbox does not mount, so the oracle passes the host's resolved
+/// executable explicitly. It must lie inside a mounted runtime directory.
+fn linker(runtime_roots: &[&str]) -> Result<PathBuf> {
+    let linker = infra_core::fs::canonicalize("/usr/bin/cc").map_err(|_| {
+        HarnessError::unavailable("The default C linker /usr/bin/cc is unavailable.")
+    })?;
+    require(
+        runtime_roots.iter().any(|root| linker.starts_with(root)),
+        "The resolved C linker is outside the read-only runtime directories.",
+    )?;
+    Ok(linker)
 }
 fn sandbox(input: &Path, work: &Path, tools: &V, program: Vec<String>) -> Vec<String> {
     let mut argv = vec![tools["sandbox"].as_str().unwrap().into()];
@@ -217,6 +232,7 @@ pub async fn verify(project: &Path, out: &Path, kind: &str, tools: &V) -> V {
                         "/helper".into(),
                         "compile".into(),
                         tools["compiler"].as_str().unwrap().into(),
+                        tools["linker"].as_str().unwrap().into(),
                     ],
                 ),
                 out,
@@ -315,6 +331,7 @@ pub async fn controls(root: &Path, tools: &V) -> Result<V> {
         "linked-source",
         "hardlinked-source",
         "missing-compiler",
+        "missing-linker",
     ] {
         let project = root.join(name);
         fs::create_dir(&project)?;
@@ -337,6 +354,8 @@ pub async fn controls(root: &Path, tools: &V) -> Result<V> {
                 fs::hard_link(project.join("README.md"), project.join("source.rs"))?;
             }
             "missing-compiler" => selected_tools["compiler"] = "/unavailable/rustc".into(),
+            // An unusable toolchain is an unavailable oracle, never a failed candidate.
+            "missing-linker" => selected_tools["linker"] = "/unavailable/cc".into(),
             _ => unreachable!(),
         }
         let observed = verify(
@@ -346,7 +365,7 @@ pub async fn controls(root: &Path, tools: &V) -> Result<V> {
             &selected_tools,
         )
         .await;
-        let expected = if name == "missing-compiler" {
+        let expected = if ["missing-compiler", "missing-linker"].contains(&name) {
             V::Null
         } else {
             false.into()
