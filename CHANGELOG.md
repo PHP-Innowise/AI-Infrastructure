@@ -164,6 +164,9 @@ edition's own files remain in that edition's changelog.
     expired and could not be refreshed` instead of `worker exit failure`;
     **Fill with AI** names the cause the same way instead of `Discovery
     provider exited with code 1`.
+  - Opening **Services** shows the project's system when its file exists,
+    instead of an empty state until **Load system** on every visit; a project
+    without one keeps the empty state.
   - **Remove from list** hides a stopped change from the change list (every
     plan attempt used to stay there for good); its plan, receipts and the
     services' native tasks are kept, and it can still be read by its ID.

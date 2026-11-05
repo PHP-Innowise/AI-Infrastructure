@@ -870,6 +870,9 @@ pub async fn open_view(view: &str, record: bool) {
         "systems" | "system-changes" => {
             systems::adopt_sidebar_project(&previous_view);
             systems::load().await;
+            if view == "systems" {
+                systems::catalog_autoload().await;
+            }
         }
         "accelerators" => management::accelerators(),
         "kit3" => dom::attr("kit3-frame", "src", "/kit3/"),

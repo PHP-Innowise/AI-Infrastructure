@@ -388,6 +388,18 @@ fn layout() {
         shown("system-editor") || shown("system-catalog"),
     );
 }
+/// Opening Services shows the project's system when its file exists: the
+/// form already names it, so a Load system click on every visit added
+/// nothing. A project without the file keeps the empty state, quietly.
+pub async fn catalog_autoload() {
+    if !m::data("system-catalog").is_null()
+        || m::yes(&m::data("editor-dirty"))
+        || dom::value("system-project").is_empty()
+    {
+        return;
+    }
+    catalog_fetch(true).await;
+}
 async fn catalog_load() {
     if !sync_editor_target() {
         return;
@@ -397,6 +409,12 @@ async fn catalog_load() {
             "system-error",
             "Save or discard the current system draft before reloading.",
         );
+        return;
+    }
+    catalog_fetch(false).await;
+}
+async fn catalog_fetch(quiet_when_missing: bool) {
+    if !sync_editor_target() {
         return;
     }
     let project = dom::value("system-project");
@@ -418,7 +436,8 @@ async fn catalog_load() {
         }
         Err(error)
             if editor_current(&project, &config, generation)
-                && m::current("system-catalog-load", epoch) =>
+                && m::current("system-catalog-load", epoch)
+                && !(quiet_when_missing && error.status == 404) =>
         {
             dom::error("system-error", &error.message)
         }
