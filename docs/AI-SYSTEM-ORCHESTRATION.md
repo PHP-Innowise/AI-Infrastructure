@@ -728,7 +728,10 @@ Access to external roots comes exclusively from registered Harness projects.
 The run view polls persisted dispatches and displays receipts, reported checks,
 changed files and the handoff; native task UUIDs and the runner log sit behind
 toggles. A successful worker exit alone
-does not complete a run. Final verification needs at least one reported passed
+does not complete a run. A contract agreement proceeds when it reports
+`completed` and stops the run when it reports `blocked`; its checks, a
+confirmed defect the change is meant to fix included, are the evidence it
+rests on. Final verification needs at least one reported passed
 check and no missing/failed reported checks; when its only gaps are checks it
 could not run, the recovery panel offers a checkbox that names them, and
 resuming with it ticked completes verification without running it again. Durable knowledge publication
