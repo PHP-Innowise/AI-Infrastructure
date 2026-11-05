@@ -300,6 +300,14 @@ edition's own files remain in that edition's changelog.
   brain-update ..." where the retired one read "Keep one task per branch:
   context.py brain-update ...": the installed CLI's longer name would
   have cut the command at a warning's 160 characters.
+- A task record that cannot be read - most often one a merge left with
+  Git's conflict markers - no longer takes every turn's memory with it.
+  As the retired runtime did, the turn is served without the task's state
+  ("working: unavailable (the task's record cannot be read)"), with the
+  knowledge its request finds, and says which file to repair: "Unresolved
+  Git merge conflict in <file>: keep one side or merge both, without the
+  markers; checkpoints wait for it." The native prompt hook refused the
+  whole capsule on every turn until the file was repaired.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

@@ -791,6 +791,37 @@ pub fn retrieve(
 ) -> Result<Capsule> {
     retrieve_inner(store, context, request, None)
 }
+/// A lookup refused because a record claiming the task cannot be read.
+fn unreadable_record(error: &RuntimeError) -> bool {
+    error.kind == ErrorKind::InvalidInput
+        && error
+            .message
+            .starts_with("Project Brain record is invalid: ")
+}
+/// What a turn says when its task's record cannot be read, as the retired
+/// capsule said it; an unresolved merge conflict is named by its file first,
+/// since a warning is cut short.
+fn unreadable_notice(context: &RuntimeContext, error: &RuntimeError) -> String {
+    let path = error
+        .message
+        .trim_start_matches("Project Brain record is invalid: ")
+        .to_string();
+    let conflicted = std::fs::read_to_string(context.roots.state.join(&path)).is_ok_and(|text| {
+        text.lines().any(|line| line.starts_with("<<<<<<< "))
+            && text.lines().any(|line| line == "=======")
+            && text.lines().any(|line| line.starts_with(">>>>>>> "))
+    });
+    if conflicted {
+        format!(
+            "Unresolved Git merge conflict in {path}: keep one side or merge both, without the markers; checkpoints wait for it."
+        )
+    } else {
+        format!(
+            "The working task has no state this turn: {}. Repair or restore that file; checkpoints wait for it.",
+            error.message
+        )
+    }
+}
 /// Another active record claims the task's ID: say so and how to keep one, in
 /// two lines, as the retired capsule did. The records come earliest created
 /// first; a clone without a binding settles on the earliest, so every clone
@@ -903,6 +934,10 @@ fn retrieve_inner(
     // What a turn says about the binding of its task, after its other
     // warnings, as the retired capsule said it.
     let mut binding_notices = Vec::new();
+    // A record that claims the task but cannot be read - an unresolved merge
+    // conflict, say - is no reason for a turn to go without memory: it is
+    // served without the task's state and says how to repair the record.
+    let mut unreadable = false;
     if context.mode == "governed"
         && let Some(id) = &request.task_id
     {
@@ -920,10 +955,23 @@ fn retrieve_inner(
                 binding.task_uuid
             ));
         }
-        let served =
-            crate::checkpoint::served_uuid(Some(store), context, id)?.unwrap_or_else(|| id.clone());
-        match brain.find(&served, Some("task"), false) {
-            Ok(image) => {
+        let served = match crate::checkpoint::served_uuid(Some(store), context, id) {
+            Ok(served) => served.unwrap_or_else(|| id.clone()),
+            Err(error) if request.allow_unprovisioned && unreadable_record(&error) => {
+                binding_notices.push(unreadable_notice(context, &error));
+                unreadable = true;
+                String::new()
+            }
+            Err(error) => return Err(error),
+        };
+        let found = if unreadable {
+            None
+        } else {
+            Some(brain.find(&served, Some("task"), false))
+        };
+        match found {
+            None => {}
+            Some(Ok(image)) => {
                 task_refused =
                     index::record_eligibility(context, &config, &image.record)?.is_some();
                 task_image = Some(working_record_image(&image.record, &image.body)?);
@@ -937,8 +985,13 @@ fn retrieve_inner(
                 }
                 task = Some(image.record);
             }
-            Err(error) if error.kind == ErrorKind::NotFound && request.allow_unprovisioned => {}
-            Err(error) => return Err(error),
+            Some(Err(error))
+                if error.kind == ErrorKind::NotFound && request.allow_unprovisioned => {}
+            Some(Err(error)) if request.allow_unprovisioned && unreadable_record(&error) => {
+                binding_notices.push(unreadable_notice(context, &error));
+                unreadable = true;
+            }
+            Some(Err(error)) => return Err(error),
         }
     }
     let mut query = request.query.clone();
@@ -981,6 +1034,9 @@ fn retrieve_inner(
             task_path.as_deref(),
             task_image.as_deref(),
         )?;
+        if unreadable {
+            capsule.0["task_record_unreadable"] = true.into();
+        }
         // A capsule that searched nothing has the retired one's shape: no
         // categories, and its token estimates by layer.
         capsule.0["categories"] = json!({});
@@ -1508,6 +1564,9 @@ fn retrieve_inner(
         &warnings,
     )?;
     attach_local_working(store, context, request, &mut capsule)?;
+    if unreadable {
+        capsule.0["task_record_unreadable"] = true.into();
+    }
     capsule.0["no_match"] = json!(no_match);
     capsule.0["gate"] = gate.clone();
     capsule.0["repeated"] = json!(repeated);

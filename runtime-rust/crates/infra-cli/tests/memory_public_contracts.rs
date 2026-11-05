@@ -3060,3 +3060,62 @@ fn a_turn_says_when_its_task_record_is_gone_or_claimed_twice() {
         warnings(&fixture, "TASK-TWIN")
     );
 }
+
+/// A task record left with an unresolved merge conflict does not take the
+/// turn's memory with it: the turn is served without the task's state, with
+/// its knowledge, and says which file to repair, as the retired capsule did.
+#[test]
+fn a_conflicted_task_record_leaves_the_turn_its_memory() {
+    let fixture = Fixture::new(false);
+    let task = fixture.start("TASK-CONFLICT");
+    fixture.success(&["index", "--json"], None);
+    let relative = format!(
+        "project-brain/dynamic/tasks/{}.md",
+        task["task_uuid"].as_str().unwrap()
+    );
+    let record = fixture.project.join(&relative);
+    let text = fs::read_to_string(&record).unwrap();
+    fs::write(
+        &record,
+        format!(
+            "<<<<<<< HEAD\n{text}=======\n{}>>>>>>> theirs\n",
+            text.replace("Verify the cobalt boundary", "Verify the cobalt edge")
+        ),
+    )
+    .unwrap();
+    let report = fixture.success(
+        &[
+            "refresh",
+            "--json",
+            "--task-id",
+            "TASK-CONFLICT",
+            "--query",
+            "cobalt retries",
+        ],
+        None,
+    );
+    let capsule = &report["capsule"];
+    assert_eq!(capsule["task_record_unreadable"], true, "{report}");
+    assert!(
+        capsule["warnings"].as_array().unwrap().iter().any(|warning| warning
+            == &json!(format!(
+                "Unresolved Git merge conflict in {relative}: keep one side or merge both, without the markers; checkpoints wait for it."
+            ))),
+        "{report}"
+    );
+    assert!(
+        capsule["selected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "specs/source.md"),
+        "{report}"
+    );
+    assert!(
+        report["capsule_text"]
+            .as_str()
+            .unwrap()
+            .starts_with("working: unavailable (the task's record cannot be read)"),
+        "{report}"
+    );
+}
