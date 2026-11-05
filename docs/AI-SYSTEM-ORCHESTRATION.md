@@ -706,7 +706,12 @@ recovery keeps it. A dispatch whose CLI exits with an error shows that CLI's
 own message on the run and its receipt (for example `The claude CLI exited
 with code 1: Failed to authenticate: OAuth session expired and could not be
 refreshed`): sign that CLI in and retry the dispatch, or prepare a new change
-to use another provider. Ordinary session model/agent controls do not apply. No arbitrary executable can be passed by API.
+to use another provider. Dispatches run the CLI with your own configuration,
+so its plugins, hooks and global instructions apply: in a real run, Codex hooks
+wrote `.agentops/` and `.agentic-security/` into every service folder and a
+global instruction made agents add `tasks/todo.md` although the dispatch asks
+for no notes. Review such files with the change, or disable those plugins for
+system runs. Ordinary session model/agent controls do not apply. No arbitrary executable can be passed by API.
 Access to external roots comes exclusively from registered Harness projects.
 
 The run view polls persisted dispatches and displays receipts, reported checks,
