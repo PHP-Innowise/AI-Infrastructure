@@ -518,3 +518,123 @@ esac"#,
         "{journal:#}"
     );
 }
+
+#[test]
+fn an_executor_killed_mid_dispatch_resumes_only_with_an_explicit_retry() {
+    let root = Root::new();
+    let config = system(&root.0);
+    let config = config.to_str().unwrap().to_string();
+    let services = root.0.join("services");
+    let services = services.to_str().unwrap().to_string();
+    let plan = root.0.join("plan.json");
+    let (code, _, text) = cli(
+        &root.0,
+        &[
+            "plan",
+            "--system",
+            &config,
+            "--allow-root",
+            &services,
+            "--task",
+            "Bill every placed order",
+            "--change-id",
+            "bill-orders",
+            "--service",
+            "orders",
+            "--output",
+            plan.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{text}");
+    // The billing worker hangs the first time, as if the machine stopped under it.
+    let marker = root.0.join("billing-started");
+    let script = root.0.join("slow.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ninput=$(cat)\nreport() {{ printf '{{\"status\":\"completed\",\"summary\":\"%s\",\"checks\":[{{\"name\":\"unit\",\"status\":\"passed\",\"detail\":\"ok\"}}],\"changed_files\":[],\"service_order\":%s}}\\n' \"$1\" \"$2\"; }}\ncase \"$input\" in\n  *'\"phase\":\"contracts\",\"previous_receipts\"'*) report agreed '[\"orders\",\"billing\"]' ;;\n  *'\"service\":\"billing\",\"task\"'*) if [ ! -e '{marker}' ]; then : > '{marker}'; sleep 60; fi; report billed '[]' ;;\n  *) report checked '[]' ;;\nesac\n",
+            marker = marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let directory = root.0.join("run");
+    let mut executor = Command::new(engine())
+        .args([
+            "system",
+            "execute",
+            "--system",
+            &config,
+            "--allow-root",
+            &services,
+            "--plan",
+            plan.to_str().unwrap(),
+            "--run-dir",
+            directory.to_str().unwrap(),
+            "--provider",
+            "command",
+            "--executable",
+            script.to_str().unwrap(),
+            "--mode",
+            "read-only",
+            "--timeout",
+            "120",
+        ])
+        .current_dir(&root.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "billing never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    executor.kill().unwrap();
+    executor.wait().unwrap();
+    // Wait until the dispatch's guardian released the run lock.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let status_args = [
+        "run-status",
+        "--system",
+        &config,
+        "--allow-root",
+        &services,
+        "--run-dir",
+        directory.to_str().unwrap(),
+    ];
+    let (code, status, text) = cli(&root.0, &status_args);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(
+        status["status"], "interrupted",
+        "nothing executes this run any more: {status:#}"
+    );
+
+    let resume = |extra: &[&str]| {
+        let mut args = vec![
+            "resume",
+            "--system",
+            &config,
+            "--allow-root",
+            &services,
+            "--run-dir",
+            directory.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        cli(&root.0, &args)
+    };
+    let (code, _, text) = resume(&[]);
+    assert_eq!(code, 2, "{text}");
+    assert!(
+        text.contains("retry service-billing explicitly"),
+        "the refusal says which dispatch to retry: {text}"
+    );
+    let (code, summary, text) = resume(&["--retry-step", "service-billing"]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(summary["status"], "completed", "{summary:#}");
+}

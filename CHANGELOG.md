@@ -36,6 +36,9 @@ edition's own files remain in that edition's changelog.
     session's, which refuses any folder outside the system folder's checkout.
     System runs adapt each launch for the registered project its folder is (or,
     for a monorepo service folder, lies inside), and refuse any other folder.
+  - `infra-engine system run-status` reports a run whose executor is gone
+    (killed, crashed) as `interrupted` instead of `running` forever; a test
+    kills the executor mid-dispatch and resumes with an explicit retry.
   - `infra-engine system execute` no longer overflows its worker thread's stack
     in debug builds: the whole sequential run is one future, and the thread is
     sized for it.

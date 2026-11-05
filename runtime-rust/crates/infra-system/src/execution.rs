@@ -53,6 +53,12 @@ pub fn lock(root: &Path, name: &str) -> Result<Lock> {
     custody.check()?;
     Ok(Lock(file))
 }
+/// Whether an executor holds this run now. A free lock is taken for an instant
+/// to find out, so an executor starting at that very moment can see it busy
+/// and report a conflict; starting it again succeeds.
+pub fn executing(directory: &Path) -> bool {
+    directory.join(".run.lock").is_file() && lock(directory, ".run.lock").is_err()
+}
 pub fn workspace_locks(system: &System, selected: &[String]) -> Result<Vec<Lock>> {
     #[cfg(unix)]
     let user = unsafe { libc::getuid() }.to_string();

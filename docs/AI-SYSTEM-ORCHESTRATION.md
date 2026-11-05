@@ -523,7 +523,10 @@ use isolated checkout roots where hard write isolation is required.
 For execution, exit `0` means worker-reported completion, `1` means a saved
 blocked/interrupted run, and `2` means invalid/refused input or a reconciliation
 error (the existing journal retains its state). `run-status` reads the journal
-without launching AI or mutating native tasks. It reports historical run state,
+without launching AI or mutating native tasks; a journal left running by an
+executor that is gone (killed, crashed, machine stopped) is reported
+`interrupted`, with its unfinished dispatch, so `resume --retry-step` is the
+next step. It reports historical run state,
 not current deployment or new validation of a completed change.
 
 Historical pre-Rust invocation (reference only):

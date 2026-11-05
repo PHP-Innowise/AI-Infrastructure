@@ -151,7 +151,20 @@ pub async fn execute_async(
                     )
                     .await?
                 } else {
-                    native::validate_state_sync(&mut system, &directory, false)?
+                    let mut state = native::validate_state_sync(&mut system, &directory, false)?;
+                    // A journal left running by an executor that is gone (killed,
+                    // crashed, machine stopped) is reported as what it is now.
+                    if matches!(string(&state["status"]), "running" | "prepared")
+                        && !execution::executing(&directory)
+                    {
+                        state["status"] = "interrupted".into();
+                        for step in state["steps"].as_array_mut().into_iter().flatten() {
+                            if step["status"] == "running" {
+                                step["status"] = "interrupted".into();
+                            }
+                        }
+                    }
+                    state
                 };
                 let summary = execution::run_summary(&state, &directory);
                 return emit(
