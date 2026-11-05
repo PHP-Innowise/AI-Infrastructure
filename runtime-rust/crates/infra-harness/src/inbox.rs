@@ -621,6 +621,24 @@ mod tests {
             .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
             .unwrap()
     }
+    /// Under `cargo test`, sibling tests share this process: a child they fork
+    /// holds every descriptor, this store's runner lock included, until its
+    /// exec closes it. Wait out that brief custody; any other error still fails.
+    fn reopen(state: &std::path::Path) -> SessionStore {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match SessionStore::open(state) {
+                Ok(store) => return store,
+                Err(error)
+                    if error.message == "Another runner still owns this state directory."
+                        && std::time::Instant::now() < until =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("{}", error.message),
+            }
+        }
+    }
 
     #[test]
     fn actual_store_reopen_preserves_input_without_replaying_pending_or_assigned() {
@@ -637,7 +655,7 @@ mod tests {
             let last_generation = store.generation("s").unwrap();
             let events = event_count(&store);
             drop(store);
-            let reopened = SessionStore::open(&directory.path().join("state")).unwrap();
+            let reopened = reopen(&directory.path().join("state"));
             let receipt = &reopened.inbox_list("s", None).unwrap()["items"][0];
             assert_eq!(receipt["id"], accepted["id"]);
             assert_eq!(receipt["prompt"], "Continue the task.");
