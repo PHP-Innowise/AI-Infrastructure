@@ -71,8 +71,8 @@ after another. [`runtime-rust/.config/nextest.toml`](../runtime-rust/.config/nex
 keeps the conditions some tests were written for: the dispatch custom-guard and
 installation cases run one at a time. Linux admits four end-to-end cases and
 starts the long generator lifecycle first; Windows keeps two end-to-end cases,
-starts its two longest generator cases first and runs each evaluation case
-alone in both slots. Other platforms retain the two-case limit. Doc tests, which nextest does not run, have their own
+starts its two longest generator cases first and runs the evaluation cases
+one at a time after the rest. Other platforms retain the two-case limit. Doc tests, which nextest does not run, have their own
 `cargo test --doc` gate. Generated jobs install a pinned nextest release through
 `taiki-e/install-action`, with checksums and no source fallback. A process gate
 may name a `fallback` that runs when one of its `tools` is unavailable, instead

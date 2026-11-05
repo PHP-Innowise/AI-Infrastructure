@@ -12,6 +12,8 @@ installation = { max-threads = 1 }
 end-to-end = { max-threads = 2 }
 # Linux measurements admit four cases when the long lifecycle starts first.
 end-to-end-linux = { max-threads = 4 }
+# Windows runs the evaluation cases one at a time, after the rest.
+evaluation = { max-threads = 1 }
 
 [[profile.default.overrides]]
 platform = 'cfg(target_os = "linux")'
@@ -33,11 +35,16 @@ priority = 90
 # An evaluation case installs a whole edition into its corpora and runs about
 # fifty Git processes; its fixture allows 120 s. On Windows the outcome seal
 # took 102-104 s and once 122 s, every time beside the other long evaluation
-# case. There each takes both end-to-end slots, so no case runs beside it.
+# case in the two end-to-end slots. There they run one at a time in their own
+# group, starting after every other case, so neither runs beside the other or
+# beside the long generator cases. A case requiring both end-to-end slots
+# (`threads-required = 2`) stalled the group in nextest 0.9.149: at four test
+# threads 26 cases were never started.
 [[profile.default.overrides]]
 platform = 'cfg(windows)'
 filter = 'binary_id(infra-cli::eval_native_runtime)'
-threads-required = 2
+test-group = 'evaluation'
+priority = -100
 
 [[profile.default.overrides]]
 filter = 'binary_id(infra-cli::dispatch_custom_guards)'

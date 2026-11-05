@@ -50,8 +50,8 @@ Cargo unifies features across selected packages. Ordinary `cargo test
 binaries (`cargo install cargo-nextest --locked`). [`.config/nextest.toml`](.config/nextest.toml)
 keeps two binaries serial. Linux admits four end-to-end cases and starts the
 long generator lifecycle first; Windows keeps two end-to-end cases, starts
-its two longest generator cases first and runs each evaluation case alone in
-both slots. Other platforms retain the two-case limit. Doc tests still run through `cargo test --doc --workspace`.
+its two longest generator cases first and runs the evaluation cases one at a
+time after the rest. Other platforms retain the two-case limit. Doc tests still run through `cargo test --doc --workspace`.
 
 For faster local optimized builds, select the opt-in `quick-release` profile.
 It inherits the release settings, disables LTO and uses 16 codegen units. This
