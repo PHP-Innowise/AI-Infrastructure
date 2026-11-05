@@ -63,20 +63,41 @@ pub fn check_changes(
         MAX_SERVICES * MAX_ITEMS * 3 + MAX_ITEMS,
     )? {
         let sid = string(&change["service"]);
-        let Some(service) = system.services.get(sid) else {
-            return Err(fail("Sources changed outside worker scope"));
-        };
         let path = string(&change["path"]);
-        if !writable.iter().any(|value| value == sid)
-            || change["reason"] != "content_changed"
-            || path == service.manifest_path
-            || reported
-                .as_ref()
-                .is_some_and(|reported| !reported.contains(&service.root.join(path)))
+        let place = if sid == "__system__" {
+            format!(
+                "System folder {}",
+                if path.is_empty() { "head" } else { path }
+            )
+        } else if path.is_empty() {
+            format!("{sid} head")
+        } else {
+            format!("{sid}/{path}")
+        };
+        let reason = string(&change["reason"]).replace('_', " ");
+        let Some(service) = system.services.get(sid) else {
+            return Err(fail(format!(
+                "{place} changed ({reason}) outside the worker's scope; prepare a new plan"
+            )));
+        };
+        let why = if !writable.iter().any(|value| value == sid) {
+            Some("outside current worker scope")
+        } else if change["reason"] != "content_changed" {
+            Some("in a way a worker may not change it")
+        } else if path == service.manifest_path {
+            Some("as the service passport, which only Save system writes")
+        } else if reported
+            .as_ref()
+            .is_some_and(|reported| !reported.contains(&service.root.join(path)))
         {
-            return Err(fail(
-                "Sources changed outside current worker scope; prepare new plan",
-            ));
+            Some("without being reported in changed_files")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            return Err(fail(format!(
+                "{place} changed ({reason}) {why}; prepare a new plan"
+            )));
         }
         accepted.insert((sid.to_string(), path.to_string()));
     }

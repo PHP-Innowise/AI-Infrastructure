@@ -408,3 +408,113 @@ fn a_service_worker_echoing_the_agreed_order_keeps_its_work() {
         json!(["orders", "billing"])
     );
 }
+
+/// Runs the plan with an adapter script whose body sees the prompt as `$input`.
+fn run_script(root: &Path, body: &str, mode: &str) -> (i32, Value, PathBuf) {
+    let config = system(root);
+    let config = config.to_str().unwrap();
+    let services = root.join("services");
+    let services = services.to_str().unwrap();
+    let plan = root.join("plan.json");
+    let (code, _, text) = cli(
+        root,
+        &[
+            "plan",
+            "--system",
+            config,
+            "--allow-root",
+            services,
+            "--task",
+            "Bill every placed order",
+            "--change-id",
+            "bill-orders",
+            "--service",
+            "orders",
+            "--output",
+            plan.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{text}");
+    let script = root.join("script.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ninput=$(cat)\nreport() {{ printf '{{\"status\":\"completed\",\"summary\":\"%s\",\"checks\":[{{\"name\":\"unit\",\"status\":\"passed\",\"detail\":\"ok\"}}],\"changed_files\":%s,\"service_order\":%s}}\\n' \"$1\" \"$2\" \"$3\"; }}\n{body}\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let directory = root.join("run");
+    let (code, summary, _) = cli(
+        root,
+        &[
+            "execute",
+            "--system",
+            config,
+            "--allow-root",
+            services,
+            "--plan",
+            plan.to_str().unwrap(),
+            "--run-dir",
+            directory.to_str().unwrap(),
+            "--provider",
+            "command",
+            "--executable",
+            script.to_str().unwrap(),
+            "--mode",
+            mode,
+            "--timeout",
+            "60",
+        ],
+    );
+    (code, summary, directory)
+}
+
+#[test]
+fn a_service_worker_editing_another_service_stops_the_run() {
+    let root = Root::new();
+    let (code, summary, _) = run_script(
+        &root.0,
+        r#"case "$input" in
+  *'"phase":"contracts","previous_receipts"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"service":"billing","task"'*) printf 'tampered\n' > ../orders/src/work.txt; printf 'after\n' > src/work.txt; report billed '["src/work.txt"]' '[]' ;;
+  *) report checked '[]' '[]' ;;
+esac"#,
+        "edit",
+    );
+    assert_eq!(code, 2, "{summary:#}");
+    let journal: Value =
+        serde_json::from_slice(&fs::read(root.0.join("run/run.json")).unwrap()).unwrap();
+    assert_eq!(journal["status"], "blocked", "{journal:#}");
+    assert!(
+        journal["error"]
+            .as_str()
+            .unwrap()
+            .contains("orders/src/work.txt changed (content changed) outside current worker scope; prepare a new plan"),
+        "{journal:#}"
+    );
+}
+
+#[test]
+fn a_read_only_worker_changing_a_source_unreported_stops_the_run() {
+    let root = Root::new();
+    let (code, summary, _) = run_script(
+        &root.0,
+        r#"case "$input" in
+  *'"phase":"contracts","previous_receipts"'*) printf 'tampered\n' > ../services/billing/src/work.txt; report agreed '[]' '["orders","billing"]' ;;
+  *) report checked '[]' '[]' ;;
+esac"#,
+        "read-only",
+    );
+    assert_eq!(code, 2, "{summary:#}");
+    let journal: Value =
+        serde_json::from_slice(&fs::read(root.0.join("run/run.json")).unwrap()).unwrap();
+    assert_eq!(journal["status"], "blocked", "{journal:#}");
+    assert!(
+        journal["error"]
+            .as_str()
+            .unwrap()
+            .contains("billing/src/work.txt changed (content changed) outside current worker scope; prepare a new plan"),
+        "{journal:#}"
+    );
+}
