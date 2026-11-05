@@ -1344,6 +1344,75 @@ fn a_refused_handoff_names_the_field_the_flag_or_the_path() {
     assert_eq!(fs::read_to_string(&output).unwrap(), "kept\n");
 }
 
+/// A handoff edited after it was saved is refused on load by what no longer
+/// holds, in the retired words.
+#[test]
+fn an_edited_handoff_is_refused_by_what_no_longer_holds() {
+    let project = Project::new();
+    let engine = project.path.join("memory-bank/bin/infra-engine");
+    let input = project.root.join("tmp/handoff.json");
+    let output = project.path.join("tasks/handoff-edited.md");
+    fs::write(
+        &input,
+        r#"{"goal": "Fix refunds", "summary": "Refunds keep the invoice date.", "next_steps": ["Add the test"]}"#,
+    )
+    .unwrap();
+    let saved = project
+        .command(&engine)
+        .args(["memory", "context-save", "--input"])
+        .arg(&input)
+        .arg("--output")
+        .arg(&output)
+        .args(["--source-client", "claude", "--detail", "summary"])
+        .output()
+        .unwrap();
+    assert!(saved.status.success(), "{}", described(&saved));
+    let original = fs::read_to_string(&output).unwrap();
+    for (edited, refusal) in [
+        (
+            {
+                // The body alone, after the frontmatter.
+                let (head, body) = original[4..].split_once("\n---\n").unwrap();
+                format!(
+                    "---\n{head}\n---\n{}",
+                    body.replace(
+                        "Refunds keep the invoice date.",
+                        "Refunds keep the order date."
+                    )
+                )
+            },
+            "handoff body does not match its curated context",
+        ),
+        (
+            original.replacen("{\"body_sha256\"", "{\"layer\":\"x\",\"body_sha256\"", 1),
+            "handoff frontmatter has an unsupported schema",
+        ),
+        (
+            original.replacen(
+                "\"source_client\": \"claude\"",
+                "\"source_client\": \"vim\"",
+                1,
+            ),
+            "handoff source client is invalid",
+        ),
+    ] {
+        assert_ne!(edited, original, "{refusal}");
+        fs::write(&output, &edited).unwrap();
+        let loaded = project
+            .command(&engine)
+            .args(["memory", "context-load", "--input"])
+            .arg(&output)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&loaded.stderr);
+        assert!(
+            !loaded.status.success() && stderr.contains(refusal),
+            "{refusal:?}: {}",
+            described(&loaded)
+        );
+    }
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(

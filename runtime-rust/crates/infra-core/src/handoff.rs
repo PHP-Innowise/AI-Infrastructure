@@ -478,12 +478,25 @@ impl HandoffService {
             object!({"output":output,"detail":metadata["detail"],"files":fingerprints.len(),"transcript":transcript.is_some()}),
         )
     }
+    /// A handoff's metadata, curated context and transcript, refused in the
+    /// retired loader's words and order.
     fn decode(&self, raw: &[u8]) -> Result<(Value, Value, Option<Vec<u8>>)> {
-        let text =
-            std::str::from_utf8(raw).map_err(|_| RuntimeError::invalid("Handoff is not UTF-8"))?;
-        let split = memory_kernel_probe::split_frontmatter(text)
-            .map_err(|_| RuntimeError::invalid("Handoff is missing JSON frontmatter"))?;
-        let metadata = json::parse(split.metadata_text)?;
+        let invalid = |message: &str| RuntimeError::invalid(message.to_string());
+        let rest = raw
+            .strip_prefix(b"---\n")
+            .ok_or_else(|| invalid("handoff is missing JSON frontmatter"))?;
+        let split = rest
+            .windows(5)
+            .position(|window| window == b"\n---\n")
+            .ok_or_else(|| invalid("handoff has invalid JSON frontmatter"))?;
+        let body = &rest[split + 5..];
+        let metadata = std::str::from_utf8(&rest[..split])
+            .ok()
+            .and_then(|text| json::parse(text).ok())
+            .ok_or_else(|| invalid("handoff has invalid JSON frontmatter"))?;
+        if !metadata.is_object() {
+            return Err(invalid("handoff frontmatter must be an object"));
+        }
         let required = [
             "schema_version",
             "type",
@@ -498,111 +511,154 @@ impl HandoffService {
             "body_sha256",
             "transcript",
         ];
-        if !result_store::exact(&metadata, &required)
-            || !matches!(metadata["schema_version"].as_u64(), Some(1 | 2))
+        if !result_store::exact(&metadata, &required) {
+            return Err(invalid("handoff frontmatter has an unsupported schema"));
+        }
+        if !matches!(metadata["schema_version"].as_u64(), Some(1 | 2))
             || metadata["type"] != "context-handoff"
-            || !metadata["created_at"]
-                .as_str()
-                .is_some_and(domain::valid_datetime)
-            || !matches!(
-                metadata["source_client"].as_str(),
-                Some("codex" | "claude" | "cursor" | "other")
-            )
-            || (!metadata["task_id"].is_null() && !metadata["task_id"].is_string())
-            || !result_store::exact(&metadata["repository"], &["branch", "commit"])
         {
-            return Err(RuntimeError::invalid("Unsupported handoff metadata schema"));
+            return Err(invalid("handoff schema version or type is unsupported"));
         }
         let detail = metadata["detail"]
             .as_str()
-            .ok_or_else(|| RuntimeError::invalid("Invalid handoff detail"))?;
-        if (detail == "topic")
-            != metadata["topic"]
-                .as_str()
-                .is_some_and(|topic| !results::clean(topic).is_empty())
-            || detail != "topic" && !metadata["topic"].is_null()
+            .ok_or_else(|| invalid("handoff detail is invalid"))?;
+        let topic = &metadata["topic"];
+        if detail == "topic" && !topic.as_str().is_some_and(|text| !text.trim().is_empty())
+            || detail != "topic" && !topic.is_null()
         {
-            return Err(RuntimeError::invalid("Invalid handoff topic"));
+            return Err(invalid("handoff topic is invalid"));
         }
-        let context = self.validate_curated(&metadata["context"], detail)?;
+        if !metadata["created_at"]
+            .as_str()
+            .is_some_and(domain::valid_datetime)
+        {
+            return Err(invalid("handoff creation time is invalid"));
+        }
+        if !matches!(
+            metadata["source_client"].as_str(),
+            Some("codex" | "claude" | "cursor" | "other")
+        ) {
+            return Err(invalid("handoff source client is invalid"));
+        }
+        if !metadata["task_id"].is_null() && !metadata["task_id"].is_string() {
+            return Err(invalid("handoff task ID is invalid"));
+        }
+        reject_sensitive(
+            "topic and task ID",
+            &[&metadata["topic"], &metadata["task_id"]]
+                .into_iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )?;
+        let repository = &metadata["repository"];
+        if !result_store::exact(repository, &["branch", "commit"])
+            || ["branch", "commit"]
+                .iter()
+                .any(|key| !repository[*key].is_null() && !repository[*key].is_string())
+        {
+            return Err(invalid("handoff repository provenance is invalid"));
+        }
         let fingerprints = metadata["files"]
             .as_array()
-            .ok_or_else(|| RuntimeError::invalid("Invalid handoff file image"))?;
-        let file_names = values(&context["files"])?;
-        if fingerprints.len() != file_names.len() {
-            return Err(RuntimeError::invalid(
-                "Handoff fingerprints do not match file references",
+            .filter(|rows| {
+                rows.iter().all(|row| {
+                    result_store::exact(row, &["path", "sha256"])
+                        && row["path"].is_string()
+                        && (row["sha256"].is_null()
+                            || row["sha256"]
+                                .as_str()
+                                .is_some_and(|digest| result_store::hex(digest, 64)))
+                })
+            })
+            .ok_or_else(|| invalid("handoff file fingerprints are invalid"))?;
+        if !metadata["context"].is_object() {
+            return Err(invalid("handoff curated context is invalid"));
+        }
+        let context = self.validate_curated(&metadata["context"], detail)?;
+        // Paths compare as Python's PurePosixPath spells them.
+        let posix = |path: &str| {
+            let joined = path
+                .split('/')
+                .filter(|part| !part.is_empty() && *part != ".")
+                .collect::<Vec<_>>()
+                .join("/");
+            match (path.starts_with('/'), joined.is_empty()) {
+                (true, _) => format!("/{joined}"),
+                (false, true) => ".".to_string(),
+                (false, false) => joined,
+            }
+        };
+        let cited = values(&context["files"])?
+            .iter()
+            .map(|path| posix(path))
+            .collect::<Vec<_>>();
+        if fingerprints
+            .iter()
+            .map(|row| row["path"].as_str().unwrap_or(""))
+            .ne(cited.iter().map(String::as_str))
+        {
+            return Err(invalid(
+                "handoff fingerprints do not match its file references",
             ));
         }
-        for (row, name) in fingerprints.iter().zip(&file_names) {
-            let (relative, _) = self.safe_relative(name)?;
-            if !result_store::exact(row, &["path", "sha256"])
-                || row["path"] != relative
-                || !row["sha256"].is_null()
-                    && !result_store::hex(row["sha256"].as_str().unwrap_or(""), 64)
-            {
-                return Err(RuntimeError::invalid("Invalid handoff fingerprint"));
-            }
+        let stated = &metadata["transcript"];
+        if (detail == "full") != !stated.is_null() {
+            return Err(invalid("only a full handoff must contain a transcript"));
         }
-        let mut body = render_body(&context)?.into_bytes();
-        let transcript = if metadata["transcript"].is_null() {
-            if detail == "full" {
-                return Err(RuntimeError::invalid("Full handoff requires a transcript"));
-            }
+        let mut expected = render_body(&context)?.into_bytes();
+        let transcript = if stated.is_null() {
             None
-        } else {
-            if detail != "full"
-                || !result_store::exact(&metadata["transcript"], &["sha256", "bytes"])
-            {
-                return Err(RuntimeError::invalid(
-                    "Only a full handoff may contain a transcript",
-                ));
-            }
+        } else if result_store::exact(stated, &["sha256", "bytes"])
+            && stated["sha256"]
+                .as_str()
+                .is_some_and(|digest| result_store::hex(digest, 64))
+            && stated["bytes"]
+                .as_u64()
+                .is_some_and(|bytes| bytes > 0 && bytes as usize <= TRANSCRIPT_LIMIT)
+        {
             let encoded = metadata["schema_version"] == 2;
-            body.extend_from_slice(if encoded {
+            expected.extend_from_slice(if encoded {
                 ENCODED_MARKER.as_bytes()
             } else {
                 MARKER.as_bytes()
             });
-            let stored = split
-                .body
-                .as_bytes()
-                .strip_prefix(body.as_slice())
-                .ok_or_else(|| RuntimeError::invalid("Handoff transcript marker is missing"))?;
-            let raw = if encoded {
-                let decoded: Value = json::parse(
-                    std::str::from_utf8(stored)
-                        .map_err(|_| RuntimeError::invalid("Invalid transcript encoding"))?,
-                )?;
-                let text = decoded
-                    .as_str()
-                    .ok_or_else(|| RuntimeError::invalid("Invalid transcript encoding"))?;
-                if domain::secret_label(text)?.is_some() {
-                    return Err(RuntimeError::policy("Transcript contains a credential"));
+            let stored = body
+                .strip_prefix(expected.as_slice())
+                .ok_or_else(|| invalid("handoff transcript marker is missing"))?;
+            let transcript = if encoded {
+                let visible = std::str::from_utf8(stored)
+                    .ok()
+                    .and_then(|text| json::parse(text).ok())
+                    .and_then(|value| value.as_str().map(String::from))
+                    .ok_or_else(|| invalid("handoff transcript encoding is invalid"))?;
+                if let Some(label) = domain::secret_label(&visible)? {
+                    return Err(RuntimeError::policy(format!(
+                        "possible {label} detected; transcript not stored"
+                    )));
                 }
-                body.extend_from_slice(
-                    json::python_default(&decoded, false, false, true)?.as_bytes(),
+                expected.extend_from_slice(
+                    json::python_default(&object!(visible.clone()), false, false, true)?.as_bytes(),
                 );
-                text.as_bytes().to_vec()
+                visible.into_bytes()
             } else {
-                body.extend_from_slice(stored);
+                expected.extend_from_slice(stored);
                 stored.to_vec()
             };
-            if raw.is_empty()
-                || raw.len() > TRANSCRIPT_LIMIT
-                || metadata["transcript"]["bytes"].as_u64() != Some(raw.len() as u64)
-                || metadata["transcript"]["sha256"] != result_store::sha(&raw)
+            if stated["bytes"].as_u64() != Some(transcript.len() as u64)
+                || stated["sha256"] != result_store::sha(&transcript)
             {
-                return Err(RuntimeError::invalid(
-                    "Handoff transcript digest does not match",
-                ));
+                return Err(invalid("handoff transcript digest does not match"));
             }
-            Some(raw)
+            Some(transcript)
+        } else {
+            return Err(invalid("handoff transcript metadata is invalid"));
         };
-        if body != split.body.as_bytes() || metadata["body_sha256"] != result_store::sha(&body) {
-            return Err(RuntimeError::invalid(
-                "Handoff body does not match curated metadata",
-            ));
+        if expected != body {
+            return Err(invalid("handoff body does not match its curated context"));
+        }
+        if metadata["body_sha256"] != result_store::sha(body) {
+            return Err(invalid("handoff body digest does not match"));
         }
         Ok((metadata, context, transcript))
     }

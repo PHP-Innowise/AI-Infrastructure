@@ -405,6 +405,13 @@ edition's own files remain in that edition's changelog.
   Cited paths follow the retired rules: `./src/x.php` and an untrimmed path
   are refused, `.envrc` and `id_rsa.pub` are not. On twin projects 20
   refused saves read as the retired ones.
+- `context-load` of a handoff edited after it was saved says what no longer
+  holds again, in the retired loader's order: the frontmatter's schema, its
+  version, detail, topic, time, client or task ID, the file fingerprints,
+  the curated context, the transcript, the body or its digest. The native
+  loader folded most of them into "Unsupported handoff metadata schema" and
+  said "JSON key must be text" for broken frontmatter. On twin projects nine
+  edited handoffs are refused as the retired ones.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
