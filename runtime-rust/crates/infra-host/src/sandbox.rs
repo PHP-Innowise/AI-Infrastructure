@@ -445,6 +445,11 @@ fn readable(path: &Path) -> bool {
 /// line on stdout: the caller never sees this process's stderr, so a refusal must
 /// name its own reason there.
 pub fn probe_entry(arguments: &[String]) -> Result<i32> {
+    // A malformed invocation is a usage error (exit 2) like any internal
+    // command's; only a check that ran reports its refusal as a JSON line.
+    if arguments.len() != 3 {
+        return Err(HarnessError::invalid("Missing discovery probe paths."));
+    }
     match probe(arguments) {
         Ok(receipt) => {
             println!("{receipt}");
