@@ -503,6 +503,14 @@ edition's own files remain in that edition's changelog.
   Linux scheduling is unchanged. Requiring both end-to-end slots per case
   (`threads-required = 2`) instead left 26 cases unstarted in nextest 0.9.149
   at four test threads.
+- The Linux native-process contracts no longer fail on a process the kernel
+  is still tearing down. Their cleanup check accepted only a zombie or a
+  vanished process, so a native process inside its own exit (`PF_EXITING`,
+  still shown as running) failed the `rust` job now and then (CI:
+  `owner_death_retains_runner_exclusion_until_all_native_descendants_stop`,
+  flags 0x40040c). Such a process now gets up to 2 s to finish; one that is
+  not exiting still fails at once. With eight copies of the binary running
+  together, the old check failed 2 of 200 runs and the new one none of 400.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
