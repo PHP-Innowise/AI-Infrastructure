@@ -172,6 +172,52 @@ pub fn git_head(root: &Path) -> Option<String> {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
     .then_some(head)
 }
+/// The folder whose `.git` Git finds first from `root` (Git's own overrides
+/// are removed when it runs): services under it share one HEAD, and a root
+/// with none has no HEAD to ask Git for.
+fn checkout_top(root: &Path) -> Option<PathBuf> {
+    root.ancestors()
+        .find(|folder| std::fs::symlink_metadata(folder.join(".git")).is_ok())
+        .map(Path::to_path_buf)
+}
+/// HEADs of `roots`, in order: one Git process per checkout, up to eight at a
+/// time. Asked once per service, 200 services took a second on every catalog
+/// before any work began, and a monorepo asked once per service folder.
+pub fn git_heads(roots: &[PathBuf]) -> Vec<Option<String>> {
+    let tops = roots
+        .iter()
+        .map(|root| checkout_top(root))
+        .collect::<Vec<_>>();
+    let distinct = tops
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let share = distinct.len().div_ceil(distinct.len().clamp(1, 8)).max(1);
+    let heads = std::thread::scope(|scope| {
+        distinct
+            .chunks(share)
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .map(|top| (top.clone(), git_head(top)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap_or_default())
+            .collect::<BTreeMap<_, _>>()
+    });
+    tops.iter()
+        .map(|top| {
+            top.as_ref()
+                .and_then(|top| heads.get(top).cloned().flatten())
+        })
+        .collect()
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Service {
     pub id: String,
@@ -311,7 +357,23 @@ impl System {
                 .ok_or_else(|| fail("Service disappeared"))?;
             entry.manifest = Some(passport);
             entry.access = "available".into();
-            entry.head = git_head(&service.root);
+        }
+        let available = system
+            .services
+            .iter()
+            .filter(|(_, service)| service.access == "available")
+            .map(|(sid, service)| (sid.clone(), service.root.clone()))
+            .collect::<Vec<_>>();
+        let heads = git_heads(
+            &available
+                .iter()
+                .map(|(_, root)| root.clone())
+                .collect::<Vec<_>>(),
+        );
+        for ((sid, _), head) in available.into_iter().zip(heads) {
+            if let Some(service) = system.services.get_mut(&sid) {
+                service.head = head;
+            }
         }
         for (sid, service) in system.services.clone() {
             let Some(passport) = service.manifest else {
