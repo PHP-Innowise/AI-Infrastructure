@@ -122,6 +122,31 @@ pub fn guard_brain(root: &Path) -> Result<()> {
     }
     custody.check()
 }
+/// A rule that ignores its own folder, itself included (`*` matches it too).
+const LOCAL_IGNORE: &[u8] = b"# Local runtime state of this clone: never committed.\n*\n";
+/// The lock and the context database a run's native storage keeps exist only
+/// in this clone. An installed edition ignores them through its own rules; a
+/// service folder without one would offer them to `git add -A`, so each local
+/// folder gets a rule that hides it from Git.
+fn ignore_local_storage(root: &Path) -> Result<()> {
+    let mut files = PublicationFiles::new(root)?;
+    for directory in ["project-brain/local", "memory-bank/local"] {
+        if !std::fs::symlink_metadata(root.join(directory)).is_ok_and(|metadata| metadata.is_dir())
+        {
+            continue;
+        }
+        let rule = format!("{directory}/.gitignore");
+        if files.read(&rule, 4096)?.is_none() {
+            match files.write_expected_limit(&rule, LOCAL_IGNORE, None, 4096) {
+                Ok(()) => {}
+                // Another process wrote it first.
+                Err(_) if files.read(&rule, 4096)?.is_some() => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
 pub struct Brain {
     pub repository: BrainRepository,
 }
@@ -185,6 +210,7 @@ impl Brain {
                 None => store.bind(&id, string(&record["id"]), revision)?,
             }
         }
+        ignore_local_storage(&self.repository.context.roots.state)?;
         Ok(record)
     }
     pub fn progress(&self, reference: &mut Value, note: &str) -> Result<Value> {

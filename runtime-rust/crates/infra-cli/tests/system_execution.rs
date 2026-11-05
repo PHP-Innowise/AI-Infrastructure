@@ -228,6 +228,39 @@ fn a_read_only_run_completes_and_closes_every_native_task() {
 }
 
 #[test]
+fn a_run_keeps_the_native_storage_local_to_this_clone_out_of_git() {
+    let root = Root::new();
+    let folders = ["system", "services/orders", "services/billing"];
+    for folder in folders {
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .arg(root.0.join(folder))
+            .status()
+            .expect("run git init");
+        assert!(status.success());
+    }
+    let (summary, directory) = run(&root.0, "read-only");
+    assert_completed(&summary, &directory);
+    for folder in folders {
+        let folder = root.0.join(folder);
+        assert!(folder.join("memory-bank/local/context.db").is_file());
+        let output = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .current_dir(&folder)
+            .output()
+            .expect("run git status");
+        let listed = String::from_utf8_lossy(&output.stdout);
+        // Brain records stay visible for review; the clone's own state does not.
+        assert!(listed.contains("project-brain/dynamic/tasks/"), "{listed}");
+        assert!(
+            !listed.contains("memory-bank/") && !listed.contains("project-brain/local/"),
+            "{}: {listed}",
+            folder.display()
+        );
+    }
+}
+
+#[test]
 fn an_edit_run_adopts_the_reported_source_change_into_its_checkpoint() {
     let root = Root::new();
     let (summary, directory) = run(&root.0, "edit");

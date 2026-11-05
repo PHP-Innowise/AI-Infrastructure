@@ -454,8 +454,12 @@ Execution calls **this AI-Infrastructure checkout's trusted Rust native
 runtime** directly, bound to each registered project root and explicit governed
 mode. It never runs a service-supplied memory launcher or imports target code. The native store is stack-neutral; no PHP runtime or application
 edition is required. An existing native Brain is reused; otherwise the runtime
-creates task/handoff/index/local storage on first use. This does not install
-framework policy, hooks or local CLI wrappers. Native task UUIDs and revisions
+creates task/handoff/index/local storage on first use: `project-brain/` holds
+the task, handoff and index records to review and commit with the change, and
+`project-brain/local/` and `memory-bank/local/` hold this clone's lock and
+context database. Each `local/` folder gets a `.gitignore` that hides it from
+Git, so `git add -A` in a service folder without an installed edition does not
+commit them. This does not install framework policy, hooks or local CLI wrappers. Native task UUIDs and revisions
 remain authoritative; the execution journal stores references and dispatch
 position. Existing native storage must contain no symlinks, hard links or special
 files, and the full trusted checkout must remain available for recovery.

@@ -115,6 +115,11 @@ edition's own files remain in that edition's changelog.
     stopped reads `reported complete; resume to record it` in the run, the
     retry list and its agent card, instead of `interrupted` and `Stopped`, and
     a stopped agent's time ends at its last event instead of growing.
+  - A run no longer leaves its clone-only native storage for `git add -A`: in
+    a service folder without an installed edition, `memory-bank/local/context.db`
+    and `project-brain/local/runtime.lock` showed as untracked files. Each
+    `local/` folder the run's storage uses now gets a `.gitignore` that hides
+    it; the Brain's task and handoff records stay visible for review.
 
 - Keep repository leases and inbox available when an unrelated Linux mount
   has a deleted bind source root or an empty source field. Read only mounts
