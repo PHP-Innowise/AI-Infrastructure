@@ -238,10 +238,13 @@ fn memory_command(rest: &[String], controlled: bool) -> Result<Output> {
         return Ok(memory_help());
     }
     let operation = &arguments.operation;
+    // A skipped native result carries no data: its command runs without a
+    // pipe and must not wait on a standard input the host left open.
     let needs_input = matches!(
         operation.as_str(),
-        "native-prompt" | "native-stop" | "native-result" | "cursor-rule"
-    ) || arguments.value["input"] == "-"
+        "native-prompt" | "native-stop" | "cursor-rule"
+    ) || operation == "native-result" && arguments.value["skip"] != true
+        || arguments.value["input"] == "-"
         || operation == "capsule" && arguments.value["file"] == "-";
     let needed = needs_input
         && (!std::io::stdin().is_terminal()

@@ -717,7 +717,8 @@ pub fn build_overlay(
             "Attached state must lie outside the project",
         ));
     }
-    let (mut files, _) = prepare_state_custody(repository, &project, &state, edition)?;
+    // The lock stays held until the launch files below are written and checked.
+    let (mut files, _, _preparing) = prepare_state_custody(repository, &project, &state, edition)?;
     let engine = std::env::current_exe()?;
     let policy = safe::read_text(&home.join("AGENTS.md"))?;
     let prefix = preamble(&home, &project, &state, edition);
@@ -783,6 +784,10 @@ pub fn build_overlay(
                 )
                 .into(),
             );
+            // The save a Stop asks for runs the engine these hooks are bound
+            // to, which no edition rule names: Claude Code asked after every
+            // answer and refused the save under `claude -p`.
+            allow.push(format!("Bash({} memory:*)", project_text(&engine)?).into());
             settings["permissions"]["allow"] = json!(allow);
             settings["permissions"]["deny"] = json!(deny);
             settings["hooks"] = hooks(&home, "claude", &engine)?;
@@ -1519,14 +1524,18 @@ pub fn prepare_state(
     state: &Path,
     edition: &str,
 ) -> Result<Value> {
-    prepare_state_custody(repository, project, state, edition).map(|(_, record)| record)
+    prepare_state_custody(repository, project, state, edition).map(|(_, record, _)| record)
 }
+/// Held by whoever prepares an attached state, from admission until the
+/// launch files are written: one preparation at a time per state.
+const PREPARATION_LOCK: &str = "accelerator-attach.lock";
+/// The returned file holds the preparation lock until it is dropped.
 fn prepare_state_custody(
     repository: &Path,
     project: &Path,
     state: &Path,
     edition: &str,
-) -> Result<(PublicationFiles, Value)> {
+) -> Result<(PublicationFiles, Value, std::fs::File)> {
     let edition = common::edition(edition)?;
     if edition == "Infrastructure-Creator" {
         return Err(RuntimeError::invalid(
@@ -1544,6 +1553,12 @@ fn prepare_state_custody(
     // Admission precedes pathname-based chmod, mkdir, lock and seed effects.
     // Every effect below uses this same retained directory custody.
     let mut files = PublicationFiles::open_private_root(&state)?;
+    // Launches of one project can prepare its state at the same moment: fleet
+    // reviewers start together, and a root and a worktree session can start
+    // together. Each re-protects the same files and may rewrite the record and
+    // the launch files, so unserialized they refused each other's effects as a
+    // changed state file.
+    let preparing = files.acquire_private_lock(PREPARATION_LOCK)?;
     let roots = Roots {
         tooling: home,
         project: project.clone(),
@@ -1574,7 +1589,7 @@ fn prepare_state_custody(
         .ok_or_else(|| RuntimeError::conflict("Attached session record disappeared"))?;
     let value = serde_json::from_slice(&record)?;
     files.check()?;
-    Ok((files, value))
+    Ok((files, value, preparing))
 }
 
 const NATIVE_SCRIPT_ROLES: &[&str] = &[
@@ -1695,4 +1710,256 @@ pub fn classify_native_hook(
         }
     }
     Ok(None)
+}
+
+#[cfg(all(test, unix))]
+mod overlay_permission_tests {
+    use super::*;
+
+    /// The save a Stop asks an attached Claude Code session for runs the
+    /// engine its hooks are bound to, by its absolute path.
+    #[test]
+    fn claude_overlay_allows_the_memory_command_of_its_bound_engine() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .to_path_buf();
+        let scratch = std::env::temp_dir().join(format!(
+            "infra-attach-overlay-{}",
+            infra_core::domain::uuid4()
+        ));
+        std::fs::create_dir_all(scratch.join("project")).unwrap();
+        std::fs::write(
+            scratch.join("project/composer.json"),
+            br#"{"name":"fixture/project"}"#,
+        )
+        .unwrap();
+        let scratch = infra_core::fs::canonicalize(&scratch).unwrap();
+        let project = scratch.join("project");
+        let built = state_directory(&project, Some(&scratch.join("state")))
+            .and_then(|state| build_overlay(&repository, &project, &state, "PHP Core", "claude"));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let overlay = built.unwrap();
+        let rule = format!(
+            "Bash({} memory:*)",
+            std::env::current_exe().unwrap().display()
+        );
+        let allowed = overlay.settings["permissions"]["allow"].as_array().unwrap();
+        assert!(
+            allowed.iter().any(|value| value.as_str() == Some(&rule)),
+            "{rule} missing from {allowed:?}"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod concurrent_preparation_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    struct Fixture {
+        repository: PathBuf,
+        scratch: PathBuf,
+        project: PathBuf,
+        worktree: PathBuf,
+        state: PathBuf,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(3)
+                .unwrap()
+                .to_path_buf();
+            let scratch = std::env::temp_dir().join(format!(
+                "infra-attach-preparation-{}",
+                infra_core::domain::uuid4()
+            ));
+            for folder in ["project", "worktree"] {
+                std::fs::create_dir_all(scratch.join(folder)).unwrap();
+                std::fs::write(
+                    scratch.join(folder).join("composer.json"),
+                    br#"{"name":"fixture/project"}"#,
+                )
+                .unwrap();
+            }
+            let scratch = infra_core::fs::canonicalize(&scratch).unwrap();
+            let project = scratch.join("project");
+            let state = state_directory(&project, Some(&scratch.join("state"))).unwrap();
+            Self {
+                repository,
+                worktree: scratch.join("worktree"),
+                project,
+                state,
+                scratch,
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.scratch);
+        }
+    }
+
+    /// Launches of one project prepare its attached state at the same moment:
+    /// fleet reviewers start together, and a root and a worktree session can
+    /// start together. Every preparation re-protects the same private files,
+    /// and one from another folder rewrites the record and the launch files.
+    /// Unserialized, the others refused those effects as "Private state file
+    /// changed during protection" or "Private state lock custody changed".
+    #[test]
+    fn launches_of_one_project_prepare_its_state_at_the_same_moment() {
+        let fixture = Fixture::new();
+        build_overlay(
+            &fixture.repository,
+            &fixture.project,
+            &fixture.state,
+            "PHP Core",
+            "claude",
+        )
+        .unwrap();
+        let launches = [
+            (fixture.project.clone(), "claude"),
+            (fixture.worktree.clone(), "codex"),
+            (fixture.project.clone(), "codex"),
+            (fixture.worktree.clone(), "claude"),
+        ];
+        for round in 0..8 {
+            let start = Arc::new(Barrier::new(launches.len()));
+            let running = launches
+                .iter()
+                .cloned()
+                .map(|(folder, host)| {
+                    let start = start.clone();
+                    let repository = fixture.repository.clone();
+                    let state = fixture.state.clone();
+                    std::thread::spawn(move || {
+                        start.wait();
+                        build_overlay(&repository, &folder, &state, "PHP Core", host)
+                            .map(|_| ())
+                            .map_err(|error| format!("{host} in {}: {error}", folder.display()))
+                    })
+                })
+                .collect::<Vec<_>>();
+            for launch in running {
+                if let Err(error) = launch.join().unwrap() {
+                    panic!("round {round}: {error}");
+                }
+            }
+        }
+        let record = read_record(&fixture.state).unwrap().unwrap();
+        assert!(
+            [&fixture.project, &fixture.worktree]
+                .iter()
+                .any(|folder| record["project"] == json!(folder)),
+            "{record}"
+        );
+    }
+
+    /// The lock is what serializes them: a preparation waits while another
+    /// holds it, then completes.
+    #[test]
+    fn a_preparation_waits_for_the_one_in_progress() {
+        let fixture = Fixture::new();
+        build_overlay(
+            &fixture.repository,
+            &fixture.project,
+            &fixture.state,
+            "PHP Core",
+            "codex",
+        )
+        .unwrap();
+        let mut held = PublicationFiles::open_private_root(&fixture.state).unwrap();
+        let lock = held.acquire_private_lock(PREPARATION_LOCK).unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        let (repository, project, state) = (
+            fixture.repository.clone(),
+            fixture.project.clone(),
+            fixture.state.clone(),
+        );
+        let waiting = std::thread::spawn(move || {
+            let result = build_overlay(&repository, &project, &state, "PHP Core", "codex");
+            let _ = done.send(());
+            result.map(|_| ()).map_err(|error| error.to_string())
+        });
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "a preparation ran while another held the state"
+        );
+        drop(lock);
+        waiting.join().unwrap().unwrap();
+    }
+
+    /// A launch walks the whole state to keep it private while the project's
+    /// running sessions write it: SQLite journals appear and go, and records
+    /// and indexes are renamed into place. An entry gone or replaced between
+    /// the walk's looks stopped the launch with "No such file or directory",
+    /// "Private state file changed during admission" or "Private state
+    /// requires owned ordinary entries".
+    #[test]
+    fn a_launch_prepares_the_state_while_a_session_writes_it() {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let fixture = Fixture::new();
+        build_overlay(
+            &fixture.repository,
+            &fixture.project,
+            &fixture.state,
+            "PHP Core",
+            "claude",
+        )
+        .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (stop, state) = (stop.clone(), fixture.state.clone());
+            std::thread::spawn(move || {
+                let private = |path: &Path| {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(path)
+                        .map(drop)
+                };
+                let mut written = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    written += 1;
+                    for folder in ["memory-bank/chunks", "project-brain/dynamic/tasks"] {
+                        let folder = state.join(folder);
+                        let temporary = folder.join(format!(".record.md.{written}.tmp"));
+                        if private(&temporary).is_ok() {
+                            let _ = std::fs::rename(&temporary, folder.join("record.md"));
+                        }
+                    }
+                    let journal = state.join("memory-bank/local/context.db-journal");
+                    if private(&journal).is_ok() {
+                        let _ = std::fs::remove_file(&journal);
+                    }
+                }
+                written
+            })
+        };
+        let mut failures = vec![];
+        for _ in 0..60 {
+            if let Err(error) = build_overlay(
+                &fixture.repository,
+                &fixture.project,
+                &fixture.state,
+                "PHP Core",
+                "claude",
+            ) {
+                failures.push(error.to_string());
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        assert!(writer.join().unwrap() > 0, "the session wrote nothing");
+        assert!(
+            failures.is_empty(),
+            "{} of 60 launches failed: {failures:?}",
+            failures.len()
+        );
+    }
 }

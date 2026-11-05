@@ -251,6 +251,35 @@ pub fn strict_json(raw: &[u8]) -> Result<Value> {
 
 /// Strict command/protocol input. The duplicate-only legacy metadata reader
 /// above intentionally retains its established nonfinite-number policy.
+/// `repr(text)` as Python prints a string: single quotes unless the text
+/// holds one and no double quote, with escapes for the quote, backslash and
+/// control characters.
+pub(crate) fn python_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::from(quote);
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                out.push_str(&format!("\\x{:02x}", c as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
 pub fn strict_input(raw: &[u8]) -> Result<Value> {
     crate::strict_json::parse(raw, raw.len(), 128, 1_000_000)
         .map_err(|error| RuntimeError::invalid(error.message))
@@ -493,28 +522,44 @@ impl ResultService {
         let mut learnings = Vec::new();
         let mut identities = BTreeMap::new();
         for row in rows {
-            let keys = row
-                .as_object()
-                .ok_or_else(|| refused("learning_fields", "Each learning must be an object"))?;
-            if ["type", "title", "consequence", "sources"]
-                .iter()
-                .any(|key| !keys.contains_key(*key))
-                || keys.keys().any(|key| {
-                    ![
-                        "type",
-                        "title",
-                        "consequence",
-                        "sources",
-                        "expected_revision",
-                        "record_id",
-                        "source_fingerprints",
-                    ]
-                    .contains(&key.as_str())
-                })
-            {
+            const FIELDS: [&str; 4] = ["consequence", "sources", "title", "type"];
+            const OPTIONAL: [&str; 3] = ["expected_revision", "record_id", "source_fingerprints"];
+            let Some(keys) = row.as_object() else {
                 return Err(refused(
                     "learning_fields",
                     "Each learning needs type, title, consequence and sources",
+                ));
+            };
+            let missing = FIELDS
+                .iter()
+                .filter(|key| !keys.contains_key(**key))
+                .copied()
+                .collect::<Vec<_>>();
+            let mut extra = keys
+                .keys()
+                .filter(|key| !FIELDS.contains(&key.as_str()) && !OPTIONAL.contains(&key.as_str()))
+                .map(|key| key.chars().take(40).collect::<String>())
+                .collect::<Vec<_>>();
+            if !missing.is_empty() || !extra.is_empty() {
+                // Name what to correct, as the retired refusal did: `verified`
+                // inside a learning is the usual one.
+                extra.sort();
+                let mut detail = String::new();
+                if !missing.is_empty() {
+                    detail.push_str(&format!("; missing: {}", missing.join(", ")));
+                }
+                if !extra.is_empty() {
+                    detail.push_str(&format!(
+                        "; unexpected: {}",
+                        extra.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+                    ));
+                }
+                if extra.iter().any(|key| key == "verified") {
+                    detail.push_str(" (verified is a top-level boolean, never a learning field)");
+                }
+                return Err(refused(
+                    "learning_fields",
+                    format!("Each learning needs type, title, consequence and sources{detail}"),
                 ));
             }
             let kind = row["type"]
@@ -620,7 +665,11 @@ impl ResultService {
             {
                 return Err(refused(
                     "conflicting_learnings",
-                    "Conflicting learning identities in one result",
+                    format!(
+                        "Conflicting learning identities in one result: two {}s titled {} cite the same sources; merge them",
+                        learning.kind,
+                        python_repr(&learning.title.chars().take(80).collect::<String>())
+                    ),
                 ));
             }
             identities.insert(identity, wire);
@@ -629,7 +678,7 @@ impl ResultService {
         if !learnings.is_empty() && data["verified"] != true {
             return Err(refused(
                 "unverified",
-                "Attest checked learnings with verified=true",
+                "Attest that each learning was checked against its sources with verified=true",
             ));
         }
         let capture_decision = map
@@ -661,7 +710,7 @@ impl ResultService {
         if progress.is_none() && next_steps.is_none() && learnings.is_empty() {
             return Err(refused(
                 "nothing",
-                "Nothing to record: give progress, next steps or a checked learning",
+                "Nothing to record: give a progress summary, next steps or a checked learning",
             ));
         }
         Ok(NormalizedResult {
@@ -1270,7 +1319,11 @@ impl ResultService {
             Value::Null
         } else {
             self.promotion_summary(
-                BankService::new(self.context.clone()).auto_promote(3, None, None)?,
+                BankService::new(self.context.clone()).auto_promote(
+                    crate::bank::promotion::AUTOMATIC_PROMOTION_LIMIT,
+                    None,
+                    None,
+                )?,
                 &allowed,
             )?
         };

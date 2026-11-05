@@ -475,6 +475,39 @@ fn mcp_returns_canonical_status_and_refresh_without_bypassing_scope_guards() {
     assert_eq!(result["mode"], "governed");
     assert!(result["warnings"].is_array());
     assert!(result["phases"].is_object());
+    // The reply carries capsule_text to the model, so its render is recorded
+    // before the answer and the funnel is observed; with no session nothing
+    // was withheld as a repeat, which stays unobserved rather than zero.
+    // Only Unix finalizes a trace in place and checks its owner: elsewhere no
+    // render is recorded, printed or JSON, and the diagnosis stays
+    // unavailable until the trace store gains that support there.
+    let funnel = &result["funnel_diagnosis"];
+    if cfg!(unix) {
+        assert_eq!(funnel["observation_state"], "observed", "{funnel}");
+        assert_eq!(
+            funnel["boundaries"]["selected_post_pack"]["state"], "exact",
+            "{funnel}"
+        );
+        assert_eq!(
+            funnel["boundaries"]["repeat_withheld"]["state"], "unknown",
+            "{funnel}"
+        );
+        let manifest = result["capsule"]["manifest"].as_str().unwrap();
+        let trace_name = Path::new(manifest).file_name().unwrap();
+        let trace: Value = serde_json::from_slice(
+            &fs::read(
+                fixture
+                    .project
+                    .join("memory-bank/local/retrieval-traces")
+                    .join(trace_name),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(trace["render"]["form"], "capsule_text", "{trace}");
+    } else {
+        assert_eq!(funnel["observation_state"], "unavailable", "{funnel}");
+    }
     assert!(!result.to_string().contains("PRIVATE-SCOPE-CANARY"));
     for id in 4..=7 {
         assert_eq!(
@@ -483,6 +516,78 @@ fn mcp_returns_canonical_status_and_refresh_without_bypassing_scope_guards() {
         );
         assert!(!replies[&id].to_string().contains("PRIVATE-SCOPE-CANARY"));
     }
+}
+
+/// Memory MCP's checkpoint is the command line's `rebind` and `turn --flush`:
+/// the files changed since the last turn reach the task although no hook ever
+/// ran, and the reply carries the flush report, as the retired server's did.
+#[test]
+fn mcp_checkpoint_records_the_working_tree_as_a_flushed_turn() {
+    let fixture = Fixture::new(false);
+    completion_git_commit(&fixture, "Baseline");
+    fs::write(
+        fixture.project.join("specs/source.md"),
+        "# Cobalt metadata boundary\nCobalt retries stop after the fourth guarded write.\n",
+    )
+    .unwrap();
+    let replies = fixture.rpc(&[
+        (
+            "memory_checkpoint",
+            json!({"task_id":"TASK-MCP-CHECKPOINT","goal":"Checkpoint over MCP"}),
+        ),
+        (
+            "memory_checkpoint",
+            json!({"task_id":"TASK-MCP-CHECKPOINT"}),
+        ),
+        ("memory_checkpoint", json!({"task_id":"TASK-MCP-NO-GOAL"})),
+    ]);
+    // The server tells a client where the record of its work comes from: a
+    // Stop hook's native-result save, else memory_record_result.
+    let instructions = replies[&1]["result"]["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains(
+            "memory_record_result before finishing authorized work only where no Stop hook asks for the native-result save"
+        ),
+        "{instructions}"
+    );
+    let first = &replies[&2]["result"];
+    assert_eq!(first["isError"], false, "{first}");
+    let first = &first["structuredContent"];
+    let report = &first["checkpoint"];
+    assert_eq!(report["flushed"], true, "{first}");
+    assert_eq!(report["delta_id"], 1, "{first}");
+    assert!(
+        report["files"].as_u64().is_some_and(|files| files >= 1),
+        "{first}"
+    );
+    assert_eq!(report["pending"], 0, "{first}");
+    assert_eq!(first["revision"], 2, "{first}");
+    assert_eq!(report["revision"], first["revision"], "{first}");
+    let second = &replies[&3]["result"]["structuredContent"];
+    assert_eq!(second["checkpoint"]["flushed"], true, "{second}");
+    assert_eq!(second["revision"], 3, "{second}");
+    assert_eq!(
+        replies[&4]["result"]["isError"], true,
+        "a new task needs a goal"
+    );
+
+    let view = fixture.success(&["get", "--task-id", "TASK-MCP-CHECKPOINT", "--json"], None);
+    assert_eq!(view["revision"], 3, "{view}");
+    assert!(
+        view["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file == "specs/source.md"),
+        "{view}"
+    );
+    assert!(
+        view["auto_checkpoint"]
+            .as_str()
+            .unwrap()
+            .starts_with("Auto-checkpoint: 1 turn(s) since "),
+        "{view}"
+    );
 }
 
 #[test]
@@ -719,6 +824,123 @@ fn resolving_verified_record_promotes_only_that_record_before_a_turn_boundary() 
     assert_eq!(fixture.chunks().len(), 1);
 }
 
+/// Records are read active first and archived after, as the retired runtime
+/// read them: validation names what an agent works with before the archive.
+#[test]
+fn brain_records_are_read_active_before_archived() {
+    let fixture = Fixture::new(false);
+    let archived = fixture.finding("ORDER-ARCHIVED", "Cobalt metadata boundary");
+    let archived = archived["id"].as_str().unwrap().to_owned();
+    fixture.verify(&archived);
+    fixture.resolve(&archived);
+    fixture.success(&["compact", "--json"], None);
+    fixture.finding("ORDER-ACTIVE", "Cobalt retry ceiling");
+    let inventory = fixture.brain().inventory(true).unwrap();
+    let paths = inventory
+        .records
+        .iter()
+        .map(|image| image.path.to_string_lossy().replace('\\', "/"))
+        .collect::<Vec<_>>();
+    let first_archived = paths
+        .iter()
+        .position(|path| path.contains("/project-brain/archive/"))
+        .expect("the resolved finding was archived");
+    assert!(
+        paths[..first_archived]
+            .iter()
+            .any(|path| path.contains("/project-brain/dynamic/")),
+        "{paths:?}"
+    );
+    assert!(
+        paths[first_archived..]
+            .iter()
+            .all(|path| path.contains("/project-brain/archive/")),
+        "{paths:?}"
+    );
+}
+
+/// One automatic promotion run makes at most five new attempts, as every run
+/// of the retired runtime did; the rest waits for the next run.
+#[test]
+fn automatic_promotion_makes_five_attempts_a_run() {
+    let fixture = Fixture::new(false);
+    let topics = [
+        (
+            "Invoice numbers restart for each tenant",
+            "Numbering restarts per tenant ledger at year start.",
+        ),
+        (
+            "Refund dates follow the original invoice",
+            "Refund documents copy the invoice issue date verbatim.",
+        ),
+        (
+            "Credit notes reuse the refund rule",
+            "Credit memos inherit refund timing semantics unchanged.",
+        ),
+        (
+            "Tax reports group by calendar quarter",
+            "Quarterly VAT summaries aggregate lines by quarter boundaries.",
+        ),
+        (
+            "Currency rounding happens per line",
+            "Monetary amounts round half-up on each individual line item.",
+        ),
+        (
+            "Archived invoices stay immutable",
+            "Closed ledgers reject edits; corrections need cancellation documents.",
+        ),
+        (
+            "Discount codes expire at midnight UTC",
+            "Promotional vouchers lapse when the coordinated clock passes midnight.",
+        ),
+    ];
+    for (index, (title, progress)) in topics.iter().enumerate() {
+        let created = fixture.success(
+            &[
+                "brain-create",
+                "finding",
+                "--external-id",
+                &format!("FIVE-{index}"),
+                "--title",
+                title,
+                "--source",
+                "specs/source.md",
+                "--json",
+            ],
+            None,
+        );
+        let id = created["id"].as_str().unwrap();
+        fixture.verify(id);
+        fixture.success(
+            &[
+                "brain-update",
+                "--record-id",
+                id,
+                "--revision",
+                "auto",
+                "--progress",
+                progress,
+                "--transition",
+                "resolved",
+                "--reason",
+                "Resolved after verification",
+                "--json",
+            ],
+            None,
+        );
+    }
+    let config = fixture.project.join("project-brain/config/runtime.json");
+    let mut value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    value["automatic_promotion"] = json!(true);
+    fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    let first = fixture.success(&["promote-auto", "--json"], None);
+    assert_eq!(first["promoted"].as_array().unwrap().len(), 5, "{first}");
+    let second = fixture.success(&["promote-auto", "--json"], None);
+    assert_eq!(second["promoted"].as_array().unwrap().len(), 2, "{second}");
+    assert_eq!(fixture.chunks().len(), 7);
+}
+
 #[test]
 fn promotion_remains_optional_and_its_failure_does_not_undo_resolution() {
     let disabled = Fixture::new(false);
@@ -913,6 +1135,483 @@ fn promoted_memory_marks_changed_citations_in_retrieve_and_recall_refresh() {
     assert!(text.contains("third guarded write"), "{text}");
     assert!(
         text.contains("cited file changed: specs/source.md; check it before relying on this"),
+        "{text}"
+    );
+}
+
+/// Commands a person or an agent runs by hand report what they did, as the
+/// retired runtime's did: a standalone episode, a rebind of a bound task, a
+/// task view with its status and authority, an empty mailbox, and a
+/// lightweight task shown without a pending-checkpoint line.
+#[test]
+fn hand_run_commands_report_what_they_did() {
+    let fixture = Fixture::new(true);
+    let recorded = fixture.success(
+        &[
+            "record",
+            "--summary",
+            "Investigated the cobalt retries",
+            "--outcome",
+            "Retries stop after the third guarded write",
+            "--file",
+            "specs/source.md",
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        recorded["episode_id"].as_i64().is_some_and(|id| id > 0),
+        "{recorded}"
+    );
+    let found = fixture.success(
+        &["search", "cobalt retries", "--layer", "episodic", "--json"],
+        None,
+    );
+    assert!(
+        found["episodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|episode| episode["summary"] == "Investigated the cobalt retries"),
+        "{found}"
+    );
+
+    fixture.start("TASK-REBIND");
+    let view = fixture.success(&["get", "--task-id", "TASK-REBIND", "--json"], None);
+    assert_eq!(view["status"], "active", "{view}");
+    assert_eq!(view["authority"], "project-brain", "{view}");
+    assert!(view.get("phase").is_some_and(Value::is_null), "{view}");
+    // A task never checkpointed has no automatic summary yet, as before.
+    assert!(
+        view.get("auto_checkpoint").is_some_and(Value::is_null),
+        "{view}"
+    );
+    let output = fixture.run(&["rebind", "--task-id", "TASK-REBIND"], None);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && text.starts_with("Working task already bound: TASK-REBIND -> "),
+        "{text}"
+    );
+    let output = fixture.run(
+        &["msg-read", "--task-id", "TASK-REBIND", "--for", "planner"],
+        None,
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "No messages.\n");
+
+    fixture.success(
+        &[
+            "--mode",
+            "lightweight",
+            "start",
+            "--task-id",
+            "LOCAL-1",
+            "--goal",
+            "Local note",
+            "--json",
+        ],
+        None,
+    );
+    let output = fixture.run(
+        &[
+            "--mode",
+            "lightweight",
+            "retrieve",
+            "local note",
+            "--task-id",
+            "LOCAL-1",
+        ],
+        None,
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success()
+            && text.starts_with("working: LOCAL-1 — Local note")
+            && !text.contains("warming:"),
+        "{text}"
+    );
+}
+
+/// Cursor's rule is re-sent with every request, and its hook answers in JSON
+/// only. As in the retired runtime, a bare acknowledgement keeps the topic it
+/// answers instead of emptying the rule, and a previous result that was not
+/// saved reaches the agent through the rule's last-turn line.
+#[test]
+fn cursor_keeps_its_topic_and_hears_an_unsaved_result() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-CURSOR");
+    let refresh = |prompt: &str| {
+        fixture.success(
+            &[
+                "refresh",
+                "--json",
+                "--host",
+                "cursor",
+                "--delivery-profile",
+                "cursor-rule",
+                "--capsule-profile",
+                "full",
+                "--task-id",
+                "TASK-CURSOR",
+                "--ephemeral",
+                "--sanitize",
+                "--query",
+                prompt,
+            ],
+            None,
+        )
+    };
+    let text = |value: &Value| value["capsule_text"].as_str().unwrap_or("").to_owned();
+    let first = refresh("Where do cobalt retries stop at the metadata boundary?");
+    assert!(text(&first).contains("specs/source.md"), "{first}");
+    for reply in ["yes", "давай"] {
+        let value = refresh(reply);
+        assert!(text(&value).contains("specs/source.md"), "{reply}: {value}");
+        // The topic asks with the task's goal as it stands, undistilled.
+        assert_eq!(
+            value["capsule"]["query"], "Verify the cobalt boundary",
+            "{value}"
+        );
+        assert_eq!(value["capsule"]["query_source"], "task", "{value}");
+    }
+
+    let project = fixture.project.to_string_lossy().into_owned();
+    let prompt = |generation: &str| {
+        json!({"hook_event_name":"beforeSubmitPrompt","conversation_id":"cursor-contract",
+            "generation_id":generation,"prompt":"Inspect cobalt boundaries.","workspace_roots":[project]})
+    };
+    let native = |operation: &str, payload: &Value| {
+        fixture.success(
+            &[
+                operation,
+                "--task-id",
+                "TASK-CURSOR",
+                "--host",
+                "cursor",
+                "--json",
+            ],
+            Some(payload),
+        )
+    };
+    native("native-prompt", &prompt("g1"));
+    native(
+        "native-stop",
+        &json!({"hook_event_name":"stop","conversation_id":"cursor-contract","generation_id":"g1",
+            "status":"completed","loop_count":0,"workspace_roots":[project]}),
+    );
+    // The next prompt is the internal continuation the request asked for;
+    // the one after it finds the result still unsaved.
+    let continued = native("native-prompt", &prompt("g2"));
+    assert!(continued.get("warning").is_none(), "{continued}");
+    let warned = native("native-prompt", &prompt("g3"));
+    assert!(warned["warning"].is_string(), "{warned}");
+    let value = refresh("yes");
+    assert!(
+        text(&value).contains("Last turn: native memory result not saved completely"),
+        "{value}"
+    );
+}
+
+/// A hook without a prompt asks with the task's own words, as the retired
+/// hook did: a file adds its stem, never "src" or "php", and an
+/// auto-provisioned goal, the branch slug re-cased, adds nothing.
+#[test]
+fn a_hook_asks_with_the_tasks_words_and_file_stems() {
+    let fixture = Fixture::new(false);
+    fixture.success(
+        &[
+            "start",
+            "--task-id",
+            "TASK-STEMS",
+            "--goal",
+            "Cobalt retry boundary",
+            "--file",
+            "specs/source.md",
+            "--json",
+        ],
+        None,
+    );
+    let value = fixture.success(&["hook-context", "--task-id", "TASK-STEMS", "--json"], None);
+    assert_eq!(value["query_source"], "task", "{value}");
+    assert_eq!(
+        value["query"], "TASK STEMS Cobalt retry boundary source",
+        "{value}"
+    );
+
+    completion_git_commit(&fixture, "Baseline");
+    fs::write(fixture.project.join("specs/notes.md"), "# Notes\n").unwrap();
+    fixture.success(&["turn", "--task-id", "AUTO-7", "--flush", "--json"], None);
+    let task = fixture.success(&["get", "--task-id", "AUTO-7", "--json"], None);
+    assert!(
+        task["goal"].as_str().unwrap().contains("auto-provisioned"),
+        "{task}"
+    );
+    let value = fixture.success(&["hook-context", "--task-id", "AUTO-7", "--json"], None);
+    let query = value["query"].as_str().unwrap();
+    assert!(!query.contains("provisioned"), "{query}");
+    assert!(query.starts_with("AUTO 7"), "{query}");
+}
+
+/// A branch with no task yet is never searched by its name, as in the
+/// retired runtime: without a change hook-context has no context (exit 3, on
+/// which Cursor retires a stale rule), and with one it gives the warming
+/// notice alone.
+#[test]
+fn hook_context_without_a_task_never_searches_the_branch_name() {
+    let fixture = Fixture::new(false);
+    // An installation ignores its engine and local state, as here.
+    fs::write(
+        fixture.project.join(".gitignore"),
+        "/memory-bank/bin/\n/memory-bank/local/\n",
+    )
+    .unwrap();
+    fixture.git(&[
+        "add",
+        "--",
+        ".gitignore",
+        "memory-bank/README.md",
+        "memory-bank/INDEX.md",
+    ]);
+    completion_git_commit(&fixture, "Baseline");
+    let output = fixture.run(
+        &[
+            "hook-context",
+            "--task-id",
+            "TASK-NONE",
+            "--delivery-profile",
+            "cursor-rule",
+        ],
+        None,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+
+    fs::write(fixture.project.join("specs/notes.md"), "# Notes\n").unwrap();
+    let value = fixture.success(&["hook-context", "--task-id", "TASK-NONE", "--json"], None);
+    assert_eq!(value["kind"], "warming", "{value}");
+    assert_eq!(value["semantic"], json!([]), "{value}");
+    assert!(value.get("query").is_none(), "{value}");
+    assert_eq!(value["changed_files"], 1, "{value}");
+}
+
+/// The prepared-result path the Harness drives works from the command line
+/// too: a prepared save is recorded under its scope, and a replay names that
+/// scope, which the retired CLI required and the native one could not take.
+#[test]
+fn replay_result_takes_the_prepared_scope() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-PREPARED");
+    let input = fixture.root.join("prepared.json");
+    fs::write(
+        &input,
+        serde_json::to_vec(&json!({
+            "progress":"Read specs/source.md: cobalt retries stop after the third write.",
+            "verified":true,
+            "learnings":[]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let input = input.to_string_lossy().into_owned();
+    let common = [
+        "--task-id",
+        "TASK-PREPARED",
+        "--result-id",
+        "prepared-1",
+        "--revision",
+        "1",
+        "--input",
+        input.as_str(),
+        "--reason",
+        "Prepared by a test harness",
+    ];
+    let prepared = fixture.success(
+        &[&["prepare-result"][..], &common, &["--json"]].concat(),
+        None,
+    );
+    let scope = prepared["scope"]
+        .as_str()
+        .expect("a prepared scope")
+        .to_owned();
+    let with_scope = |operation: &'static str| {
+        [
+            &[operation][..],
+            &common,
+            &["--prepared-scope", scope.as_str(), "--json"],
+        ]
+        .concat()
+    };
+    let recorded = fixture.success(&with_scope("record-result"), None);
+    assert_eq!(recorded["replayed"], false, "{recorded}");
+    let replayed = fixture.success(&with_scope("replay-result"), None);
+    assert_eq!(replayed["replayed"], true, "{replayed}");
+    let missing = fixture.run(&[&["replay-result"][..], &common].concat(), None);
+    assert!(
+        !missing.status.success(),
+        "a replay without its scope is refused"
+    );
+}
+
+/// No handoff reaches a capsule, as in the retired runtime: another task's
+/// open handoff repeated that task's record, which is admitted on its own.
+#[test]
+fn another_tasks_handoff_is_not_admitted_to_a_capsule() {
+    let fixture = Fixture::new(false);
+    fixture.success(
+        &[
+            "start",
+            "--task-id",
+            "TASK-OTHER",
+            "--goal",
+            "Zirconium ledger reconciliation",
+            "--json",
+        ],
+        None,
+    );
+    fixture.start("TASK-WORK");
+    let handoffs = fixture.project.join("project-brain/control/handoffs");
+    assert!(
+        fs::read_dir(&handoffs).unwrap().count() >= 2,
+        "each task writes its handoff"
+    );
+    let value = fixture.success(
+        &[
+            "refresh",
+            "--json",
+            "--task-id",
+            "TASK-WORK",
+            "--host",
+            "codex",
+            "--gate",
+            "off",
+            "--ephemeral",
+            "--capsule-profile",
+            "full",
+            "--query",
+            "Zirconium ledger reconciliation",
+        ],
+        None,
+    );
+    let text = value["capsule_text"].as_str().unwrap();
+    assert!(text.contains("project-brain/dynamic/tasks/"), "{text}");
+    assert!(!text.contains("project-brain/control/handoffs/"), "{text}");
+    // An explicit search stays broad, as the retired one was: it lists the
+    // open handoff a capsule leaves out.
+    let found = fixture.success(
+        &["search", "Zirconium ledger reconciliation", "--json"],
+        None,
+    );
+    assert_eq!(found["query"], "Zirconium ledger reconciliation", "{found}");
+    assert!(
+        found["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|document| document["kind"] == "brain-handoff"),
+        "{found}"
+    );
+}
+
+/// The operator reports list a refresh's phases in the order it runs them,
+/// as the retired reports did, not in the sorted order of a JSON object.
+#[test]
+fn health_and_retrieval_report_list_phases_in_pipeline_order() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-PHASES");
+    for extra in [&["--ephemeral"][..], &[][..]] {
+        let mut arguments = vec![
+            "refresh",
+            "--json",
+            "--task-id",
+            "TASK-PHASES",
+            "--host",
+            "codex",
+            "--gate",
+            "off",
+            "--query",
+            "cobalt metadata boundary",
+        ];
+        arguments.extend_from_slice(extra);
+        fixture.success(&arguments, None);
+    }
+    for operation in ["health", "retrieval-report"] {
+        let output = fixture.run(&[operation], None);
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(output.status.success(), "{text}");
+        let phases = text
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("phase "))
+            .map(|line| line.split(':').next().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            phases,
+            ["stat", "index", "retrieval"],
+            "{operation}: {text}"
+        );
+    }
+}
+
+/// A record whose cited file changed or went away is intact: validation lists
+/// it with what retrieval does about it, as the retired runtime did, and
+/// still passes.
+#[test]
+fn validate_lists_records_whose_citations_moved_without_failing() {
+    let fixture = Fixture::new(true);
+    promoted_source_finding(&fixture);
+    let clean = fixture.success(&["validate", "--json"], None);
+    assert_eq!(clean["valid"], true, "{clean}");
+    assert_eq!(clean["stale"], json!([]), "{clean}");
+    let source = fixture.project.join("specs/source.md");
+    fs::write(
+        &source,
+        "# Cobalt metadata boundary\nCobalt retries now stop after the fifth guarded write.\n",
+    )
+    .unwrap();
+    let changed = fixture.success(&["validate", "--json"], None);
+    assert_eq!(changed["valid"], true, "{changed}");
+    let states = changed["stale_states"].as_array().unwrap();
+    assert!(
+        states.iter().all(|row| row["state"] == "changed")
+            && states.iter().any(|row| {
+                row["path"]
+                    .as_str()
+                    .unwrap()
+                    .replace('\\', "/")
+                    .contains("/project-brain/dynamic/findings/")
+            }),
+        "{changed}"
+    );
+    assert_eq!(changed["stale"].as_array().unwrap().len(), states.len());
+    let output = fixture.run(&["validate"], None);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.starts_with("Project Brain validation passed.\n")
+            && text.contains(": a cited source changed after the record was written; retrieval serves it marked for checking\n"),
+        "{text}"
+    );
+    // A deleted citation also breaks the durable chunk promoted from the
+    // finding, which validation reports as an error; the record is listed.
+    fs::remove_file(&source).unwrap();
+    let output = fixture.run(&["validate", "--json"], None);
+    let missing: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        missing["stale_states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["state"] == "source-missing"),
+        "{missing}"
+    );
+    let output = fixture.run(&["validate"], None);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(": a cited source no longer exists; retrieval leaves the record out\n"),
         "{text}"
     );
 }
@@ -1719,7 +2418,7 @@ fn governed_completion_requires_an_explicit_numeric_revision_and_preserves_refus
         None,
     );
     assert_eq!(stale.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&stale.stderr).contains("Stale record revision"));
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("Stale task revision: expected "));
     assert_eq!(fixture.brain().get_task(uuid).unwrap(), before);
     assert_eq!(completion_task_image(&fixture, id), local);
     assert_eq!(completion_episodes(&fixture), episodes);
@@ -1824,7 +2523,8 @@ fn concurrent_completion_cas_creates_one_episode_and_preserves_pending_and_other
     let loser = &outputs[1 - winner];
     let refusal = String::from_utf8_lossy(&loser.stderr);
     assert!(
-        refusal.contains("Stale record revision") || refusal.contains("Working task not found"),
+        refusal.contains("Stale task revision: expected ")
+            || refusal.contains("Working task not found"),
         "{refusal}"
     );
     let result: Value = serde_json::from_slice(&outputs[winner].stdout).unwrap();
@@ -1934,4 +2634,556 @@ fn completion_candidate_ignores_a_never_diverged_branch_even_after_checkout_to_m
     assert_eq!(completion_task_image(&fixture, id), local);
     assert_eq!(completion_episodes(&fixture), episodes);
     assert!(completion_source_image(&fixture) == sources);
+}
+
+#[test]
+fn the_message_journal_keeps_the_retired_line_format() {
+    let fixture = Fixture::new(false);
+    let task = fixture.start("TASK-MESSAGES");
+    let body = "Grüße\u{2028}aus Köln";
+    let sent = fixture.success(
+        &[
+            "msg-send",
+            "--task-id",
+            "TASK-MESSAGES",
+            "--from",
+            "planner",
+            "--to",
+            "implementer",
+            "--type",
+            "handoff",
+            "--body",
+            body,
+            "--json",
+        ],
+        None,
+    );
+    let journal = fs::read_to_string(fixture.project.join(format!(
+        "project-brain/control/messages/{}.jsonl",
+        task["task_uuid"].as_str().unwrap()
+    )))
+    .unwrap();
+    // `json.dumps(record, ensure_ascii=False, sort_keys=True)`, with the line
+    // separators escaped: a migrated task's journal keeps one format.
+    let expected = format!(
+        "{{\"body\": \"Grüße\\u2028aus Köln\", \"created_at\": \"{}\", \"from_actor\": \"planner\", \"id\": \"{}\", \"refs\": [], \"schema_version\": 1, \"seq\": 1, \"task_id\": \"{}\", \"task_revision\": {}, \"to_actor\": \"implementer\", \"type\": \"handoff\"}}\n",
+        sent["created_at"].as_str().unwrap(),
+        sent["id"].as_str().unwrap(),
+        task["task_uuid"].as_str().unwrap(),
+        sent["task_revision"],
+    );
+    assert_eq!(journal, expected);
+    let read = fixture.success(
+        &[
+            "msg-read",
+            "--task-id",
+            "TASK-MESSAGES",
+            "--for",
+            "implementer",
+            "--json",
+        ],
+        None,
+    );
+    assert_eq!(read[0]["body"], body, "{read}");
+}
+
+/// An explicit request asks with its plain words, each once and at most 32,
+/// as the retired runtime asked: a long request's tail beyond them is not
+/// searched, and the capsule records the words it searched with.
+#[test]
+fn an_explicit_request_asks_with_its_first_thirty_two_words() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-WORDS");
+    fixture.success(&["index", "--json"], None);
+    let asked = fixture.success(
+        &[
+            "retrieve",
+            "--task-id",
+            "TASK-WORDS",
+            "--json",
+            "Cobalt retries?",
+        ],
+        None,
+    );
+    assert_eq!(asked["query"], "Cobalt retries", "{asked}");
+    assert!(
+        asked["selected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "specs/source.md"),
+        "{asked}"
+    );
+    let filler = (0..32)
+        .map(|index| format!("zzfill{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let long = fixture.success(
+        &[
+            "retrieve",
+            "--task-id",
+            "TASK-WORDS",
+            "--json",
+            &format!("{filler} {filler} cobalt retries"),
+        ],
+        None,
+    );
+    assert_eq!(long["query"], filler, "{long}");
+    assert!(
+        !long["selected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "specs/source.md"),
+        "{long}"
+    );
+}
+
+/// A task's declared phase reaches its capsule, as it did before: the
+/// working state carries the phase and the record's times, and the render
+/// shows the phase under the task line.
+#[test]
+fn a_declared_phase_reaches_the_capsule() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-PHASE");
+    fixture.success(
+        &[
+            "update",
+            "--task-id",
+            "TASK-PHASE",
+            "--phase",
+            "implementation",
+            "--json",
+        ],
+        None,
+    );
+    fixture.success(&["index", "--json"], None);
+    let capsule = fixture.success(
+        &[
+            "retrieve",
+            "--task-id",
+            "TASK-PHASE",
+            "--json",
+            "cobalt retries",
+        ],
+        None,
+    );
+    let working = &capsule["working"];
+    assert_eq!(working["phase"], "implementation", "{capsule}");
+    assert!(
+        working["created_at"].is_string() && working["updated_at"].is_string(),
+        "{capsule}"
+    );
+    let output = fixture.run(
+        &["retrieve", "--task-id", "TASK-PHASE", "cobalt retries"],
+        None,
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines = text.lines().take(2).collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        [
+            "working: TASK-PHASE — Verify the cobalt boundary",
+            "phase: implementation"
+        ],
+        "{text}"
+    );
+}
+
+/// A task's files become file edges as the retired index made them: each is
+/// screened (no directory, build output, lockfile or runtime state) and the
+/// survivors are checked against Git's index at once, a staged file counting.
+/// A directory listed by a task used to link every tracked file under it.
+#[test]
+fn a_tasks_file_edges_are_screened_and_checked_against_the_index() {
+    let fixture = Fixture::new(false);
+    for (path, text) in [
+        ("src/Tracked.php", "<?php\n"),
+        ("src/Staged.php", "<?php\n"),
+        ("src/Untracked.php", "<?php\n"),
+        ("src/Nested/Inner.php", "<?php\n"),
+        ("vendor/acme/Lib.php", "<?php\n"),
+        ("composer.lock", "{}\n"),
+    ] {
+        let file = fixture.project.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, text).unwrap();
+    }
+    fixture.git(&[
+        "add",
+        "--",
+        "src/Tracked.php",
+        "src/Staged.php",
+        "src/Nested/Inner.php",
+        "vendor/acme/Lib.php",
+        "composer.lock",
+        "memory-bank/README.md",
+    ]);
+    let task = fixture.start("TASK-EDGES");
+    let mut arguments = vec!["update", "--task-id", "TASK-EDGES", "--json"];
+    for file in [
+        "src/",
+        "./src/Tracked.php",
+        "src/Staged.php",
+        "src/Untracked.php",
+        "vendor/acme/Lib.php",
+        "composer.lock",
+        "memory-bank/README.md",
+    ] {
+        arguments.extend(["--file", file]);
+    }
+    fixture.success(&arguments, None);
+    fixture.success(&["index", "--json"], None);
+    let record = format!(
+        "project-brain/dynamic/tasks/{}.md",
+        task["task_uuid"].as_str().unwrap()
+    );
+    let linked = || {
+        let store = public_fixture_store(&fixture);
+        let mut statement = store
+            .conn
+            .prepare("SELECT ref_path FROM document_links WHERE path=?1 AND ref_kind='file' ORDER BY ref_path")
+            .unwrap();
+        statement
+            .query_map([&record], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(linked(), ["src/Staged.php", "src/Tracked.php"]);
+    // A file Git starts tracking gains its edge at the next refresh, though
+    // no record changed: the incremental index compares the links too.
+    fixture.git(&["add", "--", "src/Untracked.php"]);
+    fixture.success(
+        &[
+            "refresh",
+            "--json",
+            "--task-id",
+            "TASK-EDGES",
+            "--query",
+            "cobalt retries",
+        ],
+        None,
+    );
+    assert_eq!(
+        linked(),
+        ["src/Staged.php", "src/Tracked.php", "src/Untracked.php"]
+    );
+}
+
+/// The refresh report names every layer, an empty one as zero, and a capsule
+/// that searched nothing has the retired shape: no categories, its token
+/// estimates by layer.
+#[test]
+fn an_unsearched_capsule_and_the_layer_counts_keep_the_retired_shape() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-SHAPE");
+    let report = fixture.success(
+        &[
+            "refresh",
+            "--json",
+            "--task-id",
+            "TASK-SHAPE",
+            "--capsule-profile",
+            "navigation",
+            "--query",
+            "cobalt retries",
+        ],
+        None,
+    );
+    assert_eq!(report["counts"]["episodic"], 0, "{report}");
+    let capsule = &report["capsule"];
+    assert_eq!(capsule["categories"], json!({}), "{report}");
+    assert_eq!(
+        capsule["token_estimates"],
+        json!({"procedural":0,"semantic":0,"episodic":0,"local_episodes":0,"total":0}),
+        "{report}"
+    );
+}
+
+/// A refresh that built no capsule says there was nothing to observe, in its
+/// answer and its health record, as the retired refresh did: `health` then
+/// counts it unavailable, not as a record whose diagnosis is missing.
+#[test]
+fn a_refresh_without_a_capsule_records_nothing_to_observe() {
+    let fixture = Fixture::new(false);
+    let report = fixture.success(&["refresh", "--json"], None);
+    assert!(report["capsule"].is_null(), "{report}");
+    assert_eq!(
+        report["funnel_diagnosis"]["observation_state"], "unavailable",
+        "{report}"
+    );
+    assert_eq!(
+        report["ordinary_receipt"],
+        json!({"schema_version":1,"observation_state":"unavailable","plans_present":null,"returned_status":"unknown"}),
+        "{report}"
+    );
+    let health = fixture.success(&["health", "--json"], None);
+    assert_eq!(
+        health["funnel_diagnosis"]["availability"],
+        json!({"observed":0,"unavailable":1,"missing":0,"rejected":0}),
+        "{health}"
+    );
+}
+
+/// A refused result says what to correct, as the retired refusals said it:
+/// the fields a learning lacks or must not have (`verified` belongs to the
+/// result), the attestation, the kind of data it must not carry, two learnings
+/// to merge, and text that is no JSON at all.
+#[test]
+fn a_refused_result_says_what_to_correct() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-REFUSED");
+    let refusal = |input: &[u8]| {
+        let output = fixture.execute(
+            "memory",
+            &[
+                "record-result",
+                "--task-id",
+                "TASK-REFUSED",
+                "--result-id",
+                "refused-1",
+                "--revision",
+                "auto",
+                "--input",
+                "-",
+                "--json",
+            ],
+            input,
+        );
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    let learning = json!({"type":"finding","title":"Cobalt retries","consequence":"Stop after three.","sources":["specs/source.md"]});
+    for (result, said) in [
+        (
+            json!({"progress":"p","learnings":[{"type":"finding","title":"t","consequence":"c","sources":["specs/source.md"],"verified":true}]}),
+            "Each learning needs type, title, consequence and sources; unexpected: verified (verified is a top-level boolean, never a learning field)",
+        ),
+        (
+            json!({"progress":"p","learnings":[{"title":"t","sources":["specs/source.md"]}]}),
+            "Each learning needs type, title, consequence and sources; missing: consequence, type",
+        ),
+        (
+            json!({"progress":"p","learnings":[learning]}),
+            "Attest that each learning was checked against its sources with verified=true",
+        ),
+        (
+            json!({"progress":"The key is AKIAABCDEFGHIJKLMNOP","verified":true,"learnings":[]}),
+            "progress contains a possible AWS access key; replace it with a sanitized summary - nothing was stored",
+        ),
+        (
+            json!({"progress":"p","verified":true,"learnings":[learning, {"type":"finding","title":"cobalt  RETRIES","consequence":"Another.","sources":["specs/source.md"]}]}),
+            "Conflicting learning identities in one result: two findings titled 'cobalt  RETRIES' cite the same sources; merge them",
+        ),
+    ] {
+        let stderr = refusal(&serde_json::to_vec(&result).unwrap());
+        assert!(stderr.contains(said), "{said:?} in {stderr}");
+    }
+    let stderr = refusal(br#"{"learnings": []}"#);
+    assert!(
+        stderr.contains(
+            "Nothing to record: give a progress summary, next steps or a checked learning"
+        ),
+        "{stderr}"
+    );
+    let stderr = refusal(b"{not json");
+    assert!(
+        stderr.contains("The result must be a JSON object"),
+        "{stderr}"
+    );
+}
+
+/// A turn says what happened to its task's binding, as the retired capsule
+/// did: a bound record that is gone (`git stash -u` or `git clean` removes an
+/// uncommitted task), and a second active record claiming the same task ID,
+/// with the whole command that keeps one.
+#[test]
+fn a_turn_says_when_its_task_record_is_gone_or_claimed_twice() {
+    let warnings = |fixture: &Fixture, id: &str| {
+        let report = fixture.success(
+            &[
+                "refresh",
+                "--json",
+                "--task-id",
+                id,
+                "--query",
+                "cobalt retries",
+            ],
+            None,
+        );
+        report["capsule"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect::<Vec<_>>()
+    };
+    let fixture = Fixture::new(false);
+    let task = fixture.start("TASK-GONE");
+    let uuid = task["task_uuid"].as_str().unwrap();
+    fs::remove_file(
+        fixture
+            .project
+            .join(format!("project-brain/dynamic/tasks/{uuid}.md")),
+    )
+    .unwrap();
+    assert!(
+        warnings(&fixture, "TASK-GONE").contains(&format!(
+            "The working task's record {uuid} is gone (git stash -u or git clean removes an uncommitted task); the next checkpoint records the task again."
+        )),
+        "{:?}",
+        warnings(&fixture, "TASK-GONE")
+    );
+
+    let task = fixture.start("TASK-TWIN");
+    let first = task["task_uuid"].as_str().unwrap().to_string();
+    let tasks = fixture.project.join("project-brain/dynamic/tasks");
+    let text = fs::read_to_string(tasks.join(format!("{first}.md"))).unwrap();
+    let second = infra_core::domain::uuid4();
+    fs::write(
+        tasks.join(format!("{second}.md")),
+        text.replace(&first, &second),
+    )
+    .unwrap();
+    let said = warnings(&fixture, "TASK-TWIN");
+    let keep = said
+        .iter()
+        .find_map(|warning| warning.strip_prefix("One task per branch: "))
+        .unwrap_or_else(|| panic!("{said:?}"));
+    assert!(
+        said.iter()
+            .any(|warning| warning.starts_with("Task record ")
+                && warning.contains(" also claims TASK-TWIN; this turn uses "))
+            && keep.starts_with("memory-bank/bin/infra-engine memory brain-update --record-id ")
+            && keep.ends_with(" --revision auto --transition cancelled")
+            && keep.len() + "One task per branch: ".len() <= 160,
+        "{said:?}"
+    );
+    let arguments = keep
+        .strip_prefix("memory-bank/bin/infra-engine memory ")
+        .unwrap()
+        .split(' ')
+        .collect::<Vec<_>>();
+    fixture.success(&[arguments.as_slice(), &["--json"]].concat(), None);
+    assert!(
+        !warnings(&fixture, "TASK-TWIN")
+            .iter()
+            .any(|warning| warning.contains("also claims")),
+        "{:?}",
+        warnings(&fixture, "TASK-TWIN")
+    );
+}
+
+/// A task record left with an unresolved merge conflict does not take the
+/// turn's memory with it: the turn is served without the task's state, with
+/// its knowledge, and says which file to repair, as the retired capsule did.
+#[test]
+fn a_conflicted_task_record_leaves_the_turn_its_memory() {
+    let fixture = Fixture::new(false);
+    let task = fixture.start("TASK-CONFLICT");
+    fixture.success(&["index", "--json"], None);
+    let relative = format!(
+        "project-brain/dynamic/tasks/{}.md",
+        task["task_uuid"].as_str().unwrap()
+    );
+    let record = fixture.project.join(&relative);
+    let text = fs::read_to_string(&record).unwrap();
+    fs::write(
+        &record,
+        format!(
+            "<<<<<<< HEAD\n{text}=======\n{}>>>>>>> theirs\n",
+            text.replace("Verify the cobalt boundary", "Verify the cobalt edge")
+        ),
+    )
+    .unwrap();
+    let report = fixture.success(
+        &[
+            "refresh",
+            "--json",
+            "--task-id",
+            "TASK-CONFLICT",
+            "--query",
+            "cobalt retries",
+        ],
+        None,
+    );
+    let capsule = &report["capsule"];
+    assert_eq!(capsule["task_record_unreadable"], true, "{report}");
+    assert!(
+        capsule["warnings"].as_array().unwrap().iter().any(|warning| warning
+            == &json!(format!(
+                "Unresolved Git merge conflict in {relative}: keep one side or merge both, without the markers; checkpoints wait for it."
+            ))),
+        "{report}"
+    );
+    assert!(
+        capsule["selected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "specs/source.md"),
+        "{report}"
+    );
+    assert!(
+        report["capsule_text"]
+            .as_str()
+            .unwrap()
+            .starts_with("working: unavailable (the task's record cannot be read)"),
+        "{report}"
+    );
+}
+
+/// A prompt that carries an address, a phone number, a password or a key
+/// keeps its memory, as it did: the automatic path cleans the prompt first and
+/// guards, searches and records the cleaned text. A reply with nothing to
+/// search ("?") is withheld, not refused.
+#[test]
+fn a_prompt_with_private_data_keeps_its_memory() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-PRIVATE");
+    fixture.success(&["index", "--json"], None);
+    let refresh = |prompt: &str| {
+        fixture.success(
+            &[
+                "refresh",
+                "--json",
+                "--task-id",
+                "TASK-PRIVATE",
+                "--sanitize",
+                "--capsule-profile",
+                "full",
+                "--query",
+                prompt,
+            ],
+            None,
+        )
+    };
+    for prompt in [
+        "Email jane.doe@example.com about the cobalt retries",
+        "Use AKIAABCDEFGHIJKLMNOP for the cobalt retries",
+        "password=hunter2 cobalt retries",
+        "Call +1 (555) 123-4567 about the cobalt retries",
+    ] {
+        let report = refresh(prompt);
+        assert!(
+            report["capsule"]["selected"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["path"] == "specs/source.md")),
+            "{prompt}: {report}"
+        );
+        let shown = report.to_string();
+        for private in [
+            "jane.doe@example.com",
+            "AKIAABCDEFGHIJKLMNOP",
+            "hunter2",
+            "123-4567",
+        ] {
+            assert!(!shown.contains(private), "{prompt}: {report}");
+        }
+    }
+    let report = refresh("?");
+    assert!(report["capsule"].is_null(), "{report}");
+    assert!(report.get("error").is_none(), "{report}");
 }

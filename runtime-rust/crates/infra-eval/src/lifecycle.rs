@@ -622,6 +622,23 @@ fn turn(
     Ok(out)
 }
 impl Fuzz {
+    /// The memory CLI as a session runs it: the installation's engine -
+    /// attached, the one its hooks are bound to, which the session's
+    /// variables point at the state - from the session's folder, naming no
+    /// root, so the runtime finds the root, the worktree it serves and the
+    /// task where the session is, as a person's command does.
+    fn memory_cli(&self) -> Vec<String> {
+        let engine = if self.h.attached {
+            self.h.runtime.clone()
+        } else {
+            self.h.project.join(if cfg!(windows) {
+                "memory-bank/bin/infra-engine.exe"
+            } else {
+                "memory-bank/bin/infra-engine"
+            })
+        };
+        vec![engine.to_string_lossy().into_owned(), "memory".into()]
+    }
     fn note(&mut self, s: String) {
         if self.verbose {
             eprintln!("{s}");
@@ -1021,15 +1038,13 @@ impl Fuzz {
             ["worktree", "sub"].contains(&s.kind.as_str()),
             TIMEOUT,
         )?;
-        let mut args = vec![
-            self.h.runtime.to_string_lossy().into(),
-            "--root".into(),
-            folder.to_string_lossy().into(),
+        let mut args = self.memory_cli();
+        args.extend([
             "get".into(),
             "--task-id".into(),
             task.clone(),
             "--json".into(),
-        ];
+        ]);
         if rehearsal::run_command(args.clone(), &folder, &env, vec![], TIMEOUT)?["exit"] != 0 {
             return Ok(());
         }
@@ -1049,7 +1064,7 @@ impl Fuzz {
         for p in &locked {
             artifact::chmod(p, 0o555)?;
         }
-        args.truncate(3);
+        args.truncate(2);
         args.extend([
             "update".into(),
             "--task-id".into(),
@@ -1243,20 +1258,9 @@ impl Fuzz {
                     continue;
                 }
                 let env = self.h.hook_env("claude", folder)?;
-                let result = rehearsal::run_command(
-                    vec![
-                        self.h.runtime.to_string_lossy().into(),
-                        "--root".into(),
-                        folder.to_string_lossy().into(),
-                        "search".into(),
-                        marker.clone(),
-                        "--json".into(),
-                    ],
-                    folder,
-                    &env,
-                    vec![],
-                    TIMEOUT,
-                )?;
+                let mut argv = self.memory_cli();
+                argv.extend(["search".into(), marker.clone(), "--json".into()]);
+                let result = rehearsal::run_command(argv, folder, &env, vec![], TIMEOUT)?;
                 if result["exit"] != 0
                     || !result["stdout"]
                         .as_str()
@@ -1271,14 +1275,8 @@ impl Fuzz {
         if !root_task.is_empty() {
             let env = self.h.hook_env("claude", &self.h.project)?;
             let cli = |flush: bool| {
-                let mut args = vec![
-                    self.h.runtime.to_string_lossy().into(),
-                    "--root".into(),
-                    self.h.project.to_string_lossy().into(),
-                    "turn".into(),
-                    "--task-id".into(),
-                    root_task.clone(),
-                ];
+                let mut args = self.memory_cli();
+                args.extend(["turn".into(), "--task-id".into(), root_task.clone()]);
                 if flush {
                     args.push("--flush".into());
                 }

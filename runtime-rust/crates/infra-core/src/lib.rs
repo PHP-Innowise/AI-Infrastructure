@@ -22,6 +22,7 @@ pub mod index;
 pub mod mcp;
 pub mod native;
 pub mod observability;
+pub mod python_json;
 pub mod query;
 pub mod queue;
 pub mod receipts;

@@ -112,19 +112,24 @@ fn argv(command: &QueuedCommand) -> Result<Vec<String>> {
             allow_phase_regression,
         } => {
             crate::storage::validate_task_id(&update.task_id)?;
+            if update.progress.is_none()
+                && update.next_steps.is_empty()
+                && update.files.is_empty()
+                && update.sources.is_empty()
+                && phase.is_none()
+                && !update.replace_next_steps
+            {
+                return Err(RuntimeError::invalid(
+                    "Working task update requires a changed field",
+                ));
+            }
             if update
                 .progress
                 .as_ref()
                 .is_some_and(|progress| progress.trim().is_empty())
-                || update.progress.is_none()
-                    && update.next_steps.is_empty()
-                    && update.files.is_empty()
-                    && update.sources.is_empty()
-                    && phase.is_none()
-                    && !update.replace_next_steps
             {
                 return Err(RuntimeError::invalid(
-                    "Working task update requires a changed field",
+                    "Working task progress must not be empty",
                 ));
             }
             let mut introduced = update.progress.iter().cloned().collect::<Vec<_>>();

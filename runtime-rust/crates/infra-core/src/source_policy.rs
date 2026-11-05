@@ -329,8 +329,17 @@ pub fn point_reason(
     item: &Candidate,
     policy_reason: Option<String>,
 ) -> Result<Option<String>> {
+    point_reason_for(context, config, item, policy_reason, false)
+}
+fn point_reason_for(
+    context: &RuntimeContext,
+    config: &RuntimeConfig,
+    item: &Candidate,
+    policy_reason: Option<String>,
+    open_handoffs: bool,
+) -> Result<Option<String>> {
     let document = &item.document;
-    if let Some(reason) = metadata_reason(config, document)? {
+    if let Some(reason) = metadata_reason_for(config, document, open_handoffs)? {
         return Ok(Some(reason));
     }
     if let Some(reason) = policy_reason {
@@ -393,8 +402,19 @@ pub fn unscoped_reason(
     config: &RuntimeConfig,
     item: &Candidate,
 ) -> Result<Option<String>> {
+    unscoped_reason_for(context, config, item, false)
+}
+/// `open_handoffs` admits a handoff that is not closed: `memory search`
+/// lists one, as the retired search did, while capsules and source links
+/// never carry a handoff.
+pub fn unscoped_reason_for(
+    context: &RuntimeContext,
+    config: &RuntimeConfig,
+    item: &Candidate,
+    open_handoffs: bool,
+) -> Result<Option<String>> {
     let document = &item.document;
-    if let Some(reason) = metadata_reason(config, document)? {
+    if let Some(reason) = metadata_reason_for(config, document, open_handoffs)? {
         return Ok(Some(reason));
     }
     if item
@@ -436,7 +456,7 @@ pub fn unscoped_reason(
         } else {
             None
         };
-    point_reason(context, config, item, reason)
+    point_reason_for(context, config, item, reason, open_handoffs)
 }
 pub fn filter_in_scope(
     context: &RuntimeContext,
@@ -498,6 +518,13 @@ pub fn filter_in_scope(
 }
 
 pub fn metadata_reason(config: &RuntimeConfig, document: &Document) -> Result<Option<String>> {
+    metadata_reason_for(config, document, false)
+}
+fn metadata_reason_for(
+    config: &RuntimeConfig,
+    document: &Document,
+    open_handoffs: bool,
+) -> Result<Option<String>> {
     if !config
         .strings("allowed_privacy")?
         .contains(&document.privacy)
@@ -518,11 +545,14 @@ pub fn metadata_reason(config: &RuntimeConfig, document: &Document) -> Result<Op
     {
         return Ok(Some("authority".into()));
     }
-    if document.kind == "brain-handoff" && document.lifecycle == "closed" {
-        return Ok(Some("lifecycle".into()));
+    // A handoff has no lifecycle of its own, so none is admitted, open or
+    // closed, as in the retired runtime whose capsules were measured: an open
+    // handoff repeats its task's record, and admitting it would be a retrieval
+    // change of its own to measure (docs/MEMORY-EVAL.md).
+    if document.kind == "brain-handoff" && open_handoffs {
+        return Ok((document.lifecycle == "closed").then(|| "lifecycle".into()));
     }
     if let Some(kind) = document.kind.strip_prefix("brain-")
-        && kind != "handoff"
         && (domain::lifecycle_states(kind).is_empty()
             || domain::is_terminal(kind, &document.lifecycle))
     {

@@ -658,15 +658,18 @@ fn first_secret(view: &View, p: &Policy) -> Result<Option<&'static str>> {
 pub fn secret_label(text: &str) -> Result<Option<&'static str>> {
     first_secret(&View::new(text), policy()?)
 }
-pub fn sensitive_label(text: &str) -> Result<Option<&'static str>> {
+/// What sensitive data `text` appears to carry, worded as the retired
+/// runtime named it in a refusal: "a possible <secret>" or "personal data
+/// (<kind>)". Never the matched value.
+pub fn sensitive_label(text: &str) -> Result<Option<String>> {
     let p = policy()?;
     let view = View::new(text);
     if let Some(label) = first_secret(&view, p)? {
-        return Ok(Some(label));
+        return Ok(Some(format!("a possible {label}")));
     }
     for rule in &p.private {
         if view.admits(rule) && rule.regex()?.is_match(text).map_err(|_| failure())? {
-            return Ok(Some(rule.label));
+            return Ok(Some(format!("personal data ({})", rule.label)));
         }
     }
     Ok(None)

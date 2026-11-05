@@ -131,7 +131,9 @@ pub fn export(
         .as_bytes(),
     )?;
     fs::atomic_write(&destination.join("README.md"), README.as_bytes())?;
+    // The folder written, wherever the command was given from.
+    let written = crate::fs::canonicalize(destination).unwrap_or_else(|_| destination.into());
     Ok(
-        object!({"destination":destination.to_string_lossy(),"brain_records":brain_count,"memory_chunks":chunk_count,"excluded":manifest["counts"]["excluded"],"auto_promoted_chunks":automatic}),
+        object!({"destination":written.to_string_lossy(),"brain_records":brain_count,"memory_chunks":chunk_count,"excluded":manifest["counts"]["excluded"],"auto_promoted_chunks":automatic}),
     )
 }

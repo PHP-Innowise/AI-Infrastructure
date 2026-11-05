@@ -72,18 +72,29 @@ impl<'a> TaskService<'a> {
             Err(error) => Err(error),
         }
     }
-    pub fn checkpoint(&mut self, id: &str, goal: Option<&str>) -> Result<Value> {
+    /// The task an explicit write names: the active record the actor may
+    /// write, or a new one when none exists and the request gives a goal.
+    /// Only an explicit write provisions, even when it brings no Git delta.
+    pub fn explicit(&self, id: &str, goal: Option<&str>) -> Result<Value> {
         let brain = self.brain()?;
         let _guard = brain.lock()?;
-        let task = match brain.get_task(id) {
-            Ok(task) => self.authorized(task, true)?,
+        match brain.get_task(id) {
+            Ok(task) => self.authorized(task, true),
             Err(error) if error.kind == ErrorKind::NotFound => {
                 let goal = goal.ok_or_else(|| RuntimeError::invalid("A new task needs a goal"))?;
                 guard_shared_text("Task goal", &[goal.into()])?;
-                brain.create_task(id, goal, vec![], vec![], "team")?
+                brain.create_task(id, goal, vec![], vec![], "team")
             }
-            Err(error) => return Err(error),
-        };
+            Err(error) => Err(error),
+        }
+    }
+    /// The Harness's admission of its task: the record exists, this checkout
+    /// is bound to it, and turns already buffered are flushed. It records no
+    /// Git delta of its own; Memory MCP's checkpoint does, as `turn --flush`.
+    pub fn checkpoint(&mut self, id: &str, goal: Option<&str>) -> Result<Value> {
+        let brain = self.brain()?;
+        let _guard = brain.lock()?;
+        let task = self.explicit(id, goal)?;
         let checkpoint = if let Some(store) = self.store.as_deref_mut() {
             if store.binding(id)?.is_none() {
                 store.bind(

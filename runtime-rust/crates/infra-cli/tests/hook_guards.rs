@@ -344,7 +344,13 @@ fn subagent_gate_admits_only_the_roster_on_each_host() {
     for builtin in ["explore", "shell", "bash", "browser", "generalPurpose"] {
         let decision = verdict(&fixture.hook("cursor", "subagent-gate", &spawn("cursor", builtin)));
         assert_eq!(decision["permission"], "deny", "{builtin}: {decision}");
-        assert!(decision["user_message"].is_string(), "{decision}");
+        assert_eq!(
+            decision["user_message"],
+            format!(
+                "Blocked subagent \"{builtin}\": built-in Cursor subagents are disabled in this project. Delegate via the project agents in .cursor/agents/ (invoke with /agent-name) or work in the main conversation."
+            ),
+            "{decision}"
+        );
     }
     for (name, _) in &cursor {
         let decision = verdict(&fixture.hook("cursor", "subagent-gate", &spawn("cursor", name)));

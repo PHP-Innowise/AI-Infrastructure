@@ -25,7 +25,7 @@ pub fn execute(
     stderr: &Path,
 ) -> Value {
     let milliseconds = u64::try_from(budget.timeout.as_millis()).unwrap();
-    assert!((1..=120_000).contains(&milliseconds));
+    assert!((1..=300_000).contains(&milliseconds));
     let packet = json!({
         "argv":spec.argv, "cwd":spec.cwd, "env":spec.env, "input":spec.input,
         "budget":{
@@ -68,9 +68,11 @@ pub fn execute(
             .unwrap();
         bytes
     });
-    // The original per-command 30s/120s production budget is in the packet.
-    // The fixture transport itself has a separate hard 120s wall bound.
-    let deadline = Instant::now() + Duration::from_secs(120);
+    // The per-command production budget (30 s, or a long command's 120 s and
+    // 300 s on Windows) is in the packet. The fixture transport itself has a
+    // separate hard wall bound: 120 s, or the budget where that is longer.
+    let bound = budget.timeout.max(Duration::from_secs(120));
+    let deadline = Instant::now() + bound;
     let (status, timed_out) = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break (status, false);
@@ -83,7 +85,11 @@ pub fn execute(
     };
     let output = output_thread.join().unwrap();
     let errors = error_thread.join().unwrap();
-    assert!(!timed_out, "explicit Eval process fixture exceeded 120s");
+    assert!(
+        !timed_out,
+        "explicit Eval process fixture exceeded {}s",
+        bound.as_secs()
+    );
     assert!(output.len() <= RECEIPT_LIMIT && errors.len() <= RECEIPT_LIMIT);
     assert!(errors.is_empty(), "{}", String::from_utf8_lossy(&errors));
     let receipt: Value = serde_json::from_slice(&output).expect("one bounded fixture receipt");

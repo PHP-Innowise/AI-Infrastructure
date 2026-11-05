@@ -4,7 +4,11 @@ use infra_core::{
     domain, index, query,
 };
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 struct Fixture {
     root: PathBuf,
@@ -93,24 +97,35 @@ fn inventory_find(
         })
         .collect();
     if matches.len() + claimants.len() > 1 {
-        return Err(RuntimeError::conflict(
-            "Project Brain record identifier is ambiguous",
-        ));
-    }
-    if let Some(problem) = claimants.first() {
-        return Err(RuntimeError::invalid(format!(
-            "Project Brain record is invalid: {}",
-            problem
-                .path
-                .strip_prefix(&brain.roots().state)
-                .unwrap_or(&problem.path)
-                .display()
+        return Err(RuntimeError::conflict(format!(
+            "Project Brain record identifier is ambiguous: {identifier}"
         )));
     }
-    matches
-        .into_iter()
-        .next()
-        .ok_or_else(|| RuntimeError::not_found("Project Brain record not found"))
+    if let Some(problem) = claimants.first() {
+        let shown = problem
+            .path
+            .strip_prefix(&brain.roots().state)
+            .ok()
+            .and_then(Path::to_str)
+            .map(|relative| relative.replace('\\', "/"))
+            .unwrap_or_else(|| {
+                problem
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        return Err(RuntimeError::invalid(format!(
+            "Project Brain record invalid: {shown}: {}",
+            problem.error
+        )));
+    }
+    matches.into_iter().next().ok_or_else(|| {
+        RuntimeError::not_found(format!(
+            "Project Brain {} not found: {identifier}",
+            record_type.unwrap_or("record")
+        ))
+    })
 }
 
 fn find_outcome(result: infra_core::Result<RecordImage>) -> Value {
@@ -207,10 +222,7 @@ fn inventory_preserves_archived_and_misplaced_handoff_classification() {
             .unwrap();
         assert_eq!(problem.external_id.as_deref(), Some(task_id));
         assert_eq!(problem.record_type, None);
-        assert_eq!(
-            problem.error,
-            "Unexpected or invalid archived handoff in authority path"
-        );
+        assert_eq!(problem.error, "unexpected handoff in authority path");
     }
     assert!(all.problems.iter().all(|problem| problem.path != archived));
 
@@ -477,13 +489,17 @@ fn find_keeps_wrong_kind_and_unknown_kind_invalid_claimants() {
     );
     assert_eq!(brain.get_task(alias).unwrap(), task);
     assert_eq!(brain.get(alias).unwrap_err().kind, ErrorKind::Conflict);
-    assert_eq!(
-        brain
-            .find(alias, Some("finding"), false)
-            .unwrap_err()
-            .message,
-        "Project Brain record is invalid: project-brain/dynamic/zz-claimants/wrong-kind.md"
-            .replace('/', std::path::MAIN_SEPARATOR_STR)
+    let refused = brain
+        .find(alias, Some("finding"), false)
+        .unwrap_err()
+        .message;
+    // Named from the project root with forward slashes on every system, as
+    // the retired runtime named it.
+    assert!(
+        refused.starts_with(
+            "Project Brain record invalid: project-brain/dynamic/zz-claimants/wrong-kind.md: "
+        ),
+        "{refused}"
     );
     assert_inventory_find_parity(&brain, &[alias, task_id]);
 
@@ -500,14 +516,11 @@ fn find_keeps_wrong_kind_and_unknown_kind_invalid_claimants() {
     fs::remove_file(brain.dynamic_path(&task).unwrap()).unwrap();
     let invalid = brain.get_task(task_id).unwrap_err();
     assert_eq!(invalid.kind, ErrorKind::InvalidInput);
-    // Separators follow how each side spelled the path, not the record.
     assert_eq!(
-        invalid.message.replace('\\', "/"),
+        invalid.message,
         format!(
-            "Project Brain record is invalid: {}",
-            unknown.strip_prefix(&fixture.root).unwrap().display()
+            "Project Brain record invalid: project-brain/dynamic/zz-claimants/{task_id}.md: invalid JSON frontmatter"
         )
-        .replace('\\', "/")
     );
     let second_unknown = fixture.root.join("project-brain/dynamic/zz-more");
     fs::create_dir_all(&second_unknown).unwrap();

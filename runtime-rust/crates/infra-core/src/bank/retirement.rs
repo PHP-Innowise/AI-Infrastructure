@@ -213,6 +213,16 @@ pub fn recover_pending_in(files: &mut PublicationFiles) -> Result<()> {
     rollback_in(files, &raw, &parts(&plan)?, IndexBefore::Regenerate)
 }
 
+/// A chunk ID a retirement may name, refused as the retired runtime refused
+/// one no chunk file can carry.
+fn retirement_identity(id: &str) -> Result<&str> {
+    if id.len() > 128 || codec::filename_id(&format!("{id}-x.md"))?.is_none() {
+        return Err(RuntimeError::invalid(
+            "Memory Bank retirement identity is invalid",
+        ));
+    }
+    Ok(id)
+}
 pub fn retire(
     service: &BankService,
     id: &str,
@@ -220,13 +230,14 @@ pub fn retire(
     successor: Option<&str>,
     reason: Option<&str>,
 ) -> Result<Value> {
-    let closing = codec::date(valid_to)?;
+    let closing = codec::date(valid_to)
+        .map_err(|_| RuntimeError::invalid("valid_to must be an ISO date (YYYY-MM-DD)"))?;
     if successor == Some(id) {
         return Err(RuntimeError::invalid("A chunk cannot supersede itself"));
     }
     let _guard = service.brain()?.lock()?;
     let mut files = PublicationFiles::new(&service.context.roots.state)?;
-    let target = codec::find(service, id, &mut files)?;
+    let target = codec::find(service, retirement_identity(id)?, &mut files)?;
     let mut metadata = target.metadata.clone();
     metadata["status"] = if successor.is_some() {
         "superseded"
@@ -241,7 +252,7 @@ pub fn retire(
     ];
     let mut attested = vec![target.path.clone()];
     if let Some(successor) = successor {
-        let next = codec::find(service, successor, &mut files)?;
+        let next = codec::find(service, retirement_identity(successor)?, &mut files)?;
         let mut m = next.metadata.clone();
         let mut supersedes = codec::strings(&m, "supersedes", true)?;
         if !supersedes.iter().any(|previous| previous == id) {
@@ -280,7 +291,7 @@ pub fn retire(
         let errors = validation::write_errors(service, &before_errors, &attested)?;
         if !errors.is_empty() {
             return Err(RuntimeError::invalid(format!(
-                "Memory retirement failed validation: {}",
+                "Memory Bank retire failed validation: {}",
                 errors.join("; ")
             )));
         }
@@ -345,7 +356,7 @@ pub fn reverify(service: &BankService, id: &str, review_after: Option<&str>) -> 
             validation::write_errors(service, &before_errors, std::slice::from_ref(&chunk.path))?;
         if !errors.is_empty() {
             return Err(RuntimeError::invalid(format!(
-                "Memory re-verification failed: {}",
+                "Memory Bank re-verify failed validation: {}",
                 errors.join("; ")
             )));
         }

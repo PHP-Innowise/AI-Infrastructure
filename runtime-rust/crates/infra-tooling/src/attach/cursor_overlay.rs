@@ -449,7 +449,7 @@ mod tests {
                 &self.state,
                 "PHP Core",
             )
-            .map(|(files, _)| files)
+            .map(|(files, _, _)| files)
         }
         fn materialize_prepared(&self, prepared: &mut PublicationFiles) -> Result<PathBuf> {
             materialize(

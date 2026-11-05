@@ -62,7 +62,20 @@ pub fn context(request: &Value) -> Result<RuntimeContext> {
         std::fs::metadata(project)?;
         let project = infra_core::fs::python_realpath(project)?;
         if project != roots.project {
-            if !roots.shared {
+            // The folder --project names is where this run is, as Claude
+            // Code's project directory or the working directory would be: a
+            // save for a session in a worktree runs from the installation's
+            // root, which alone does not show that worktree.
+            if !roots.shared && !roots.attached() && served_worktree(&roots.tooling, &project)? {
+                roots.shared = true;
+            }
+            // Attached, a launcher keeps one state for the project and all its
+            // worktrees. A session it started that entered another worktree is
+            // served there by its hooks, and the save they ask for names that
+            // worktree; state and clone stay where they are.
+            let entered =
+                !roots.shared && roots.attached() && served_worktree(&roots.project, &project)?;
+            if !roots.shared && !entered {
                 return Err(RuntimeError::policy(
                     "--project names neither this project nor a worktree this installation serves",
                 ));
@@ -86,6 +99,32 @@ pub fn context(request: &Value) -> Result<RuntimeContext> {
         .unwrap_or_else(|| "local".into());
     let mode = RuntimeConfig::load(&roots)?.mode(request["mode"].as_str())?;
     RuntimeContext::new(roots, actor, mode)
+}
+/// Whether `project` is the place, in a linked worktree of this installation's
+/// repository, where the installation lies in its main checkout, with no engine
+/// of its own: the worktree these hooks serve when a session works there.
+/// Attached, `tooling` is the attached project, the place the hooks serve from.
+fn served_worktree(tooling: &Path, project: &Path) -> Result<bool> {
+    let (Some(mine), Some(theirs)) = (
+        infra_core::git::GitFrame::discover(tooling)?,
+        infra_core::git::GitFrame::discover(project)?,
+    ) else {
+        return Ok(false);
+    };
+    if mine.top == theirs.top || mine.common_dir()? != theirs.common_dir()? {
+        return Ok(false);
+    }
+    let mine_top = infra_core::fs::python_realpath_spelling(tooling, mine.top.clone())?;
+    let Ok(suffix) = tooling.strip_prefix(&mine_top) else {
+        return Ok(false);
+    };
+    let theirs_top = infra_core::fs::python_realpath_spelling(project, theirs.top.clone())?;
+    let engine = if cfg!(windows) {
+        "memory-bank/bin/infra-engine.exe"
+    } else {
+        "memory-bank/bin/infra-engine"
+    };
+    Ok(theirs_top.join(suffix) == project && !project.join(engine).is_file())
 }
 fn value(value: &Value) -> String {
     match value {
@@ -403,8 +442,25 @@ pub fn render(operation: &str, request: &Value, result: Value) -> Result<Output>
             if rows(&result, "errors").is_empty() {
                 lines.push("Project Brain validation passed.".into());
             }
-            for warning in rows(&result, "stale") {
-                lines.push(format!("Warning: {}: a cited source changed after the record was written; retrieval serves it marked for checking",value(warning)));
+            for row in rows(&result, "stale_states") {
+                let path = v(row, "path");
+                let reading = match row["state"].as_str() {
+                    Some("source-missing") => {
+                        "a cited source no longer exists; retrieval leaves the record out"
+                    }
+                    Some("source-undigested") => {
+                        "a cited source has no stored digest; retrieval leaves the record out"
+                    }
+                    _ => {
+                        "a cited source changed after the record was written; retrieval serves it marked for checking"
+                    }
+                };
+                let archived = if path.replace('\\', "/").contains("/project-brain/archive/") {
+                    " (archived: never retrieved)"
+                } else {
+                    ""
+                };
+                lines.push(format!("Warning: {path}: {reading}{archived}"));
             }
         }
         "parity" => {
@@ -592,7 +648,12 @@ pub fn render(operation: &str, request: &Value, result: Value) -> Result<Output>
             }
             lines.push(infra_core::handoff::render_body(&result["context"])?);
             if let Some(transcript) = result["transcript"].as_str() {
-                lines.extend(["## Visible transcript\n".into(), transcript.into()]);
+                // Written as it was saved, as the retired command wrote it:
+                // the line break that ends it is its own.
+                lines.extend([
+                    "## Visible transcript\n".into(),
+                    transcript.strip_suffix('\n').unwrap_or(transcript).into(),
+                ]);
             }
         }
         "msg-send" => lines.push(format!(
@@ -612,6 +673,9 @@ pub fn render(operation: &str, request: &Value, result: Value) -> Result<Output>
                 .as_array()
                 .map(Vec::as_slice)
                 .unwrap_or_else(|| rows(&result, "messages"));
+            if messages.is_empty() {
+                lines.push("No messages.".into());
+            }
             for row in messages {
                 let body = v(row, "body")
                     .split_whitespace()
@@ -686,7 +750,7 @@ pub fn render(operation: &str, request: &Value, result: Value) -> Result<Output>
             } else if operation == "health" {
                 lines.push(format!("Refresh health ({turns} turn(s)):"));
                 if let Some(phases) = result["phase_seconds"].as_object() {
-                    for (name, band) in phases {
+                    for (name, band) in pipeline_order(phases) {
                         lines.push(format!(
                             "  phase {name}: p50 {} p95 {} max {} ({} sample(s))",
                             v(band, "p50"),
@@ -758,7 +822,7 @@ pub fn render(operation: &str, request: &Value, result: Value) -> Result<Output>
                     ));
                 }
                 if let Some(phases) = result["phase_seconds"].as_object() {
-                    for (name, band) in phases {
+                    for (name, band) in pipeline_order(phases) {
                         lines.push(format!(
                             "  phase {name}: p50 {} p95 {} ({} sample(s))",
                             v(band, "p50"),
@@ -851,4 +915,20 @@ fn execute_mode(arguments: Arguments, input: &[u8], controlled: bool) -> Result<
         output
     };
     Ok(output)
+}
+
+/// Phases in the order a refresh runs them, as the retired reports listed
+/// them; a JSON object holds its keys sorted, which put `stat` last.
+fn pipeline_order(phases: &serde_json::Map<String, Value>) -> Vec<(&String, &Value)> {
+    const PIPELINE: [&str; 3] = ["stat", "index", "retrieval"];
+    let mut ordered = PIPELINE
+        .iter()
+        .filter_map(|name| phases.get_key_value(*name))
+        .collect::<Vec<_>>();
+    ordered.extend(
+        phases
+            .iter()
+            .filter(|(name, _)| !PIPELINE.contains(&name.as_str())),
+    );
+    ordered
 }

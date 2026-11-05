@@ -379,6 +379,8 @@ pub fn merge(path: &str, previous: Option<&[u8]>, source: &[u8], root: &Path) ->
     }
     let text = std::str::from_utf8(previous.unwrap_or(source))
         .map_err(|_| RuntimeError::invalid("Codex configuration is not UTF-8"))?;
+    let retired = retire_legacy_codex(text);
+    let text = retired.as_str();
     if text.len() > LIMIT
         || text.matches(BEGIN).count() != text.matches(END).count()
         || text.matches(BEGIN).count() > 1
@@ -430,10 +432,95 @@ pub fn merge(path: &str, previous: Option<&[u8]>, source: &[u8], root: &Path) ->
             codex_block(root)?
         )
     };
-    result
+    let mut document = result
         .parse::<toml_edit::DocumentMut>()
         .map_err(|_| RuntimeError::invalid("Merged Codex configuration is invalid"))?;
+    // The editions let Codex read the whole AGENTS.md chain in the root. A
+    // configuration an older registration wrote has no limit of its own, and
+    // Codex cut a long policy at its 32 KiB default, past the memory rules at
+    // its end. The release's limit is added only where the project set none.
+    let limit = std::str::from_utf8(source)
+        .ok()
+        .and_then(|source| source.parse::<toml_edit::DocumentMut>().ok())
+        .and_then(|source| {
+            source
+                .get("project_doc_max_bytes")
+                .and_then(toml_edit::Item::as_integer)
+        });
+    if let Some(limit) = limit
+        && !document.contains_key("project_doc_max_bytes")
+    {
+        document["project_doc_max_bytes"] = toml_edit::value(limit);
+        let limited = document.to_string();
+        if limited.matches(BEGIN).count() != 1 || limited.matches(END).count() != 1 {
+            return Err(RuntimeError::conflict("Malformed managed memory MCP block"));
+        }
+        return Ok(limited.into_bytes());
+    }
     Ok(result.into_bytes())
+}
+/// A Codex registration from before the managed block: the Python bootstrap
+/// under `[mcp_servers.harness-memory]`, written into installed projects with
+/// either host's argument. A project brought to the native runtime retires the
+/// script it starts, so Codex reported the server failing in every session.
+/// The table is recognized by the bootstrap's signature, as the JSON
+/// registrations are, and only its own text is cut; a server of that name
+/// with any other command stays. Text that does not parse is left to the
+/// caller, which refuses it.
+fn retire_legacy_codex(text: &str) -> String {
+    let Ok(document) = toml_edit::ImDocument::parse(text) else {
+        return text.into();
+    };
+    let Some(table) = document
+        .get("mcp_servers")
+        .and_then(|servers| servers.get("harness-memory"))
+        .and_then(toml_edit::Item::as_table)
+    else {
+        return text.into();
+    };
+    let expected = if table.contains_key("enabled") { 3 } else { 2 };
+    if table.len() != expected
+        || table
+            .get("enabled")
+            .is_some_and(|enabled| enabled.as_bool() != Some(true))
+    {
+        return text.into();
+    }
+    let Some(command) = table.get("command").and_then(toml_edit::Item::as_str) else {
+        return text.into();
+    };
+    let Some(arguments) = table
+        .get("args")
+        .and_then(toml_edit::Item::as_array)
+        .and_then(|args| {
+            args.iter()
+                .map(|value| value.as_str().map(|value| json!(value)))
+                .collect::<Option<Vec<_>>>()
+        })
+    else {
+        return text.into();
+    };
+    if !["codex", "claude"]
+        .into_iter()
+        .any(|host| launcher(command, &arguments, host))
+    {
+        return text.into();
+    }
+    let Some(start) = table.span().map(|span| span.start) else {
+        return text.into();
+    };
+    let Some(end) = table
+        .iter()
+        .filter_map(|(key, _)| table.get_key_value(key))
+        .filter_map(|(_, item)| item.span().map(|span| span.end))
+        .max()
+    else {
+        return text.into();
+    };
+    let end = text[end..]
+        .find('\n')
+        .map_or(text.len(), |offset| end + offset + 1);
+    format!("{}{}", &text[..start], &text[end..])
 }
 pub fn long_path(path: &Path) -> Result<PathBuf> {
     #[cfg(not(windows))]
@@ -634,6 +721,62 @@ mod native_source_template_tests {
         }
         let conflict = b"[mcp_servers.harness_memory]\ncommand = \"client-owned\"\n";
         assert!(merge(".codex/config.toml", Some(conflict), b"", &root).is_err());
+    }
+
+    #[test]
+    fn a_legacy_python_bootstrap_registration_is_retired_from_codex() {
+        let root = std::env::temp_dir().join("infra-native-mcp-legacy-contract");
+        let bootstrap = "# Harness memory bootstrap v1\nimport os, sys, runpy\nfrom pathlib import Path\nhost = sys.argv[1]\nscript = root / 'memory-bank/scripts/mcp_server.py'\n";
+        for host in ["claude", "codex"] {
+            let legacy = format!(
+                "[features]\nhooks = true\n\n[mcp_servers.harness-memory]\ncommand = \"python3\"\nargs = [\n    \"-c\",\n    \"\"\"\n{bootstrap}\"\"\",\n    \"{host}\",\n]\n\n[mcp_servers.other]\ncommand = \"other\"\n"
+            );
+            assert!(legacy.parse::<toml_edit::DocumentMut>().is_ok(), "{legacy}");
+            let merged = merge(".codex/config.toml", Some(legacy.as_bytes()), b"", &root).unwrap();
+            let merged = String::from_utf8(merged).unwrap();
+            assert!(!merged.contains("harness-memory"), "{merged}");
+            assert!(!merged.contains("bootstrap"), "{merged}");
+            assert!(merged.contains("[features]\nhooks = true\n"), "{merged}");
+            assert!(
+                merged.contains("[mcp_servers.other]\ncommand = \"other\"\n"),
+                "{merged}"
+            );
+            assert!(merged.contains(&codex_block(&root).unwrap()), "{merged}");
+            let parsed = merged.parse::<toml_edit::DocumentMut>().unwrap();
+            assert!(parsed["mcp_servers"].get("harness-memory").is_none());
+        }
+        // The release's Codex document limit reaches a configuration written
+        // without one; a limit the project set stays.
+        let release = include_bytes!("../../../../PHP Core/.codex/config.toml");
+        let legacy = "[features]\nhooks = true\n";
+        let merged = merge(
+            ".codex/config.toml",
+            Some(legacy.as_bytes()),
+            release,
+            &root,
+        )
+        .unwrap();
+        let merged = String::from_utf8(merged).unwrap();
+        let parsed = merged.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            parsed["project_doc_max_bytes"].as_integer(),
+            Some(131072),
+            "{merged}"
+        );
+        assert_eq!(
+            parsed["features"]["hooks"].as_bool(),
+            Some(true),
+            "{merged}"
+        );
+        assert!(merged.contains(&codex_block(&root).unwrap()), "{merged}");
+        let own = "project_doc_max_bytes = 65536\n";
+        let merged = merge(".codex/config.toml", Some(own.as_bytes()), release, &root).unwrap();
+        assert!(String::from_utf8(merged).unwrap().starts_with(own));
+        // A server of that name with another command is the client's own.
+        let foreign =
+            "[mcp_servers.harness-memory]\ncommand = \"client-memory\"\nargs = [\"serve\"]\n";
+        let merged = merge(".codex/config.toml", Some(foreign.as_bytes()), b"", &root).unwrap();
+        assert!(String::from_utf8(merged).unwrap().starts_with(foreign));
     }
 
     #[test]

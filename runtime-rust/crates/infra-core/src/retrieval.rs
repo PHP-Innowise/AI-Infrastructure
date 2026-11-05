@@ -98,8 +98,27 @@ pub fn admit_document(
     config: &RuntimeConfig,
     document: &Document,
 ) -> Result<Option<String>> {
+    admit_for(context, config, document, false)
+}
+/// What `memory search` withholds: what retrieval withholds, except that an
+/// open handoff is listed, as the retired search listed it.
+pub fn admit_searchable(
+    context: &RuntimeContext,
+    config: &RuntimeConfig,
+    document: &Document,
+) -> Result<Option<String>> {
+    admit_for(context, config, document, true)
+}
+fn admit_for(
+    context: &RuntimeContext,
+    config: &RuntimeConfig,
+    document: &Document,
+    open_handoffs: bool,
+) -> Result<Option<String>> {
     let item = Candidate::linked(document.clone(), "");
-    if let Some(reason) = crate::source_policy::unscoped_reason(context, config, &item)? {
+    if let Some(reason) =
+        crate::source_policy::unscoped_reason_for(context, config, &item, open_handoffs)?
+    {
         return Ok(Some(reason));
     }
     let (_, missing) = source_changes(&context.roots, &document.source_fingerprints)?;
@@ -736,7 +755,14 @@ fn capsule_projection(
     } else {
         task.map(|task|json!({"task_id":task["external_id"],"goal":task["goal"],"progress":task["progress"],"auto_checkpoint":task.get("auto_checkpoint").cloned().unwrap_or(json!("")),"next_steps":task["next_steps"],"files":task["files"],"sources":task["sources"],"phase":task.get("phase").cloned().unwrap_or(Value::Null),"created_at":task["created_at"],"updated_at":task["updated_at"]}))
     };
-    let (working, omitted) = capsule::project_working(working, request.delivery_profile)?;
+    let (mut working, omitted) = capsule::project_working(working, request.delivery_profile)?;
+    // The task's declared phase and its times travel with the projected state,
+    // as the retired capsule carried them: the render shows the phase.
+    if let (Some(working), Some(task)) = (working.as_mut(), task) {
+        working["phase"] = task.get("phase").cloned().unwrap_or(Value::Null);
+        working["created_at"] = task["created_at"].clone();
+        working["updated_at"] = task["updated_at"].clone();
+    }
     let projection = grouped_projection(selected, episodes)?;
     let visible = selected
         .iter()
@@ -765,6 +791,70 @@ pub fn retrieve(
 ) -> Result<Capsule> {
     retrieve_inner(store, context, request, None)
 }
+/// A lookup refused because a record claiming the task cannot be read.
+fn unreadable_record(error: &RuntimeError) -> bool {
+    error.kind == ErrorKind::InvalidInput
+        && error.message.starts_with("Project Brain record invalid: ")
+}
+/// What a turn says when its task's record cannot be read, as the retired
+/// capsule said it; an unresolved merge conflict is named by its file first,
+/// since a warning is cut short.
+fn unreadable_notice(error: &RuntimeError) -> String {
+    let conflicted = error
+        .message
+        .strip_prefix("Project Brain record invalid: ")
+        .and_then(|rest| rest.split_once(": unresolved Git merge conflict"))
+        .map(|(path, _)| path)
+        .filter(|path| !path.is_empty() && !path.contains(char::is_whitespace));
+    if let Some(path) = conflicted {
+        format!(
+            "Unresolved Git merge conflict in {path}: keep one side or merge both, without the markers; checkpoints wait for it."
+        )
+    } else {
+        format!(
+            "The working task has no state this turn: {}. Repair or restore that file; checkpoints wait for it.",
+            error.message
+        )
+    }
+}
+/// Another active record claims the task's ID: say so and how to keep one, in
+/// two lines, as the retired capsule did. The records come earliest created
+/// first; a clone without a binding settles on the earliest, so every clone
+/// advises cancelling a later one.
+fn twin_notices(store: &Store, external_id: &str, served: &str) -> Result<Vec<String>> {
+    let twins = store
+        .state()?
+        .get("task-twins")
+        .and_then(|raw| crate::domain::json::parse(raw).ok())
+        .unwrap_or(json!({}));
+    let claimed = twins[external_id]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    if claimed.len() < 2 || !claimed.contains(&served) {
+        return Ok(vec![]);
+    }
+    let other = claimed
+        .iter()
+        .find(|id| **id != served)
+        .copied()
+        .unwrap_or_default();
+    let cancel = if served != claimed[0] { served } else { other };
+    Ok(vec![
+        format!("Task record {other} also claims {external_id}; this turn uses {served}."),
+        format!(
+            // The installed CLI's name is longer than the retired one's: the
+            // whole command still fits the 160 characters a warning keeps.
+            "One task per branch: memory-bank/bin/infra-engine memory brain-update --record-id {cancel} --revision auto --transition cancelled"
+        ),
+    ])
+}
+/// Seconds to the microsecond, as the retired manifests and gates rounded them.
+fn micro(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
 pub fn retrieve_with_preparer(
     store: &mut Store,
     context: &RuntimeContext,
@@ -779,20 +869,40 @@ fn retrieve_inner(
     request: &RetrievalRequest,
     preparer: Option<&mut dyn crate::excerpts::ExcerptPreparer>,
 ) -> Result<Capsule> {
-    let started = Instant::now();
     validate_request(request)?;
     let mut request = request.clone();
     if request.sanitize {
         request.query = crate::domain::sanitize_automatic_query(&request.query)?;
     }
     guard_shared_text("Task Capsule request", &[request.query.clone()])?;
+    // The request asks with its plain words, each once and at most 32, as the
+    // retired runtime asked (`build_capsule_query`); recorded history is still
+    // searched with the whole request.
+    if request.history_text.is_none() {
+        request.history_text = Some(request.query.clone());
+    }
+    request.query = query::build_capsule_query(&request.query, None)?;
     let request = &request;
     let mut phase_seconds = request.phase_seconds.clone();
     if request.refresh_index && !store.read_only {
+        // The index report's own phases, the filesystem walk (`stat`) apart
+        // from indexing, as the retired retrieval recorded them; the
+        // retrieval report counted no `stat` sample for an explicit retrieve.
         let index_started = Instant::now();
-        index::refresh_index(store, context, true)?;
-        phase_seconds.insert("index".into(), index_started.elapsed().as_secs_f64());
+        let report = index::refresh_index(store, context, true)?;
+        for (name, seconds) in &report.phase_seconds {
+            if seconds.is_finite() && *seconds >= 0.0 {
+                phase_seconds.insert(name.clone(), *seconds);
+            }
+        }
+        phase_seconds
+            .entry("index".into())
+            .or_insert_with(|| index_started.elapsed().as_secs_f64());
     }
+    // The body of retrieval, as the retired manifest timed it: after the
+    // index phases it reports beside it, and without packing the capsule.
+    let started = Instant::now();
+    let mut pack_seconds = 0.0_f64;
     let config = RuntimeConfig::load(&context.roots)?;
     let profile = config.capsule_profile(request.capsule_profile.as_deref())?;
     let mut trace = crate::observability::Trace::new(config.clone(), &request.trace_paths)?;
@@ -816,21 +926,67 @@ fn retrieve_inner(
     let mut task_path = None::<PathBuf>;
     let mut task_image = None::<String>;
     let mut task_refused = false;
+    // What a turn says about the binding of its task, after its other
+    // warnings, as the retired capsule said it.
+    let mut binding_notices = Vec::new();
+    // A record that claims the task but cannot be read - an unresolved merge
+    // conflict, say - is no reason for a turn to go without memory: it is
+    // served without the task's state and says how to repair the record.
+    let mut unreadable = false;
     if context.mode == "governed"
         && let Some(id) = &request.task_id
     {
-        let served =
-            crate::checkpoint::served_uuid(Some(store), context, id)?.unwrap_or_else(|| id.clone());
-        match brain.find(&served, Some("task"), false) {
-            Ok(image) => {
+        // The record of the bound task was removed with uncommitted files: the
+        // turn is served as for a task not recorded yet, knowledge included,
+        // and says so.
+        if request.allow_unprovisioned
+            && let Some(binding) = store.binding(id)?
+            && brain
+                .find(&binding.task_uuid, Some("task"), false)
+                .is_err_and(|error| error.kind == ErrorKind::NotFound)
+        {
+            binding_notices.push(format!(
+                "The working task's record {} is gone (git stash -u or git clean removes an uncommitted task); the next checkpoint records the task again.",
+                binding.task_uuid
+            ));
+        }
+        let served = match crate::checkpoint::served_uuid(Some(store), context, id) {
+            Ok(served) => served.unwrap_or_else(|| id.clone()),
+            Err(error) if request.allow_unprovisioned && unreadable_record(&error) => {
+                binding_notices.push(unreadable_notice(&error));
+                unreadable = true;
+                String::new()
+            }
+            Err(error) => return Err(error),
+        };
+        let found = if unreadable {
+            None
+        } else {
+            Some(brain.find(&served, Some("task"), false))
+        };
+        match found {
+            None => {}
+            Some(Ok(image)) => {
                 task_refused =
                     index::record_eligibility(context, &config, &image.record)?.is_some();
                 task_image = Some(working_record_image(&image.record, &image.body)?);
                 task_path = Some(image.path);
+                if request.allow_unprovisioned {
+                    binding_notices.extend(twin_notices(
+                        store,
+                        image.record["external_id"].as_str().unwrap_or(id),
+                        image.record["id"].as_str().unwrap_or(&served),
+                    )?);
+                }
                 task = Some(image.record);
             }
-            Err(error) if error.kind == ErrorKind::NotFound && request.allow_unprovisioned => {}
-            Err(error) => return Err(error),
+            Some(Err(error))
+                if error.kind == ErrorKind::NotFound && request.allow_unprovisioned => {}
+            Some(Err(error)) if request.allow_unprovisioned && unreadable_record(&error) => {
+                binding_notices.push(unreadable_notice(&error));
+                unreadable = true;
+            }
+            Some(Err(error)) => return Err(error),
         }
     }
     let mut query = request.query.clone();
@@ -850,6 +1006,7 @@ fn retrieve_inner(
         if store.read_only {
             warnings.push("Memory refresh incomplete: SQLite writes unavailable; retrieval was not consulted.".into());
         }
+        warnings.extend(binding_notices.iter().cloned());
         let mut capsule = capsule_projection(
             context,
             request,
@@ -864,7 +1021,7 @@ fn retrieve_inner(
         if let Some(id) = &request.task_id {
             capsule.0["pending_turns"] = json!(store.pending_turns(id)?.len());
         }
-        let (capsule, _) = cap_working_custody(
+        let (mut capsule, _) = cap_working_custody(
             capsule,
             context,
             request,
@@ -872,8 +1029,17 @@ fn retrieve_inner(
             task_path.as_deref(),
             task_image.as_deref(),
         )?;
+        if unreadable {
+            capsule.0["task_record_unreadable"] = true.into();
+        }
+        // A capsule that searched nothing has the retired one's shape: no
+        // categories, and its token estimates by layer.
+        capsule.0["categories"] = json!({});
+        capsule.0["token_estimates"] =
+            json!({"procedural":0,"semantic":0,"episodic":0,"local_episodes":0,"total":0});
         return capsule::pack(capsule, request.delivery_profile);
     }
+    warnings.extend(binding_notices);
     let (mut candidates, diagnostics) = query::rank_candidates_observed(
         &store.conn,
         &query,
@@ -1229,11 +1395,14 @@ fn retrieve_inner(
     let mut episodes = layers.episodes;
     let mut layer_excluded = layers.excluded;
     excluded.extend(layers.budget_excluded);
+    let terms =
+        (!selected.is_empty()).then(|| crate::excerpts::QueryTerms::read(&store.conn, &query));
     for item in &mut selected {
-        item.delivery_identity = Some(crate::excerpts::delivery_identity(
+        item.delivery_identity = Some(crate::excerpts::delivery_identity_with(
             &store.conn,
             item,
             &query,
+            terms.as_ref(),
         ));
     }
     trace.boundary("layer_pre_novelty", &selected);
@@ -1248,6 +1417,7 @@ fn retrieve_inner(
         &warnings,
     )?;
     attach_local_working(store, context, request, &mut proposals)?;
+    let selector_prepared = preparer.is_some();
     if let Some(preparer) = preparer {
         crate::excerpts::prepare_with(
             &store.conn,
@@ -1320,7 +1490,12 @@ fn retrieve_inner(
             !seen
         });
     }
-    trace.boundary("repeat_withheld", &repeated_items);
+    // Only a session's conversation withholds what it already holds: without
+    // one nothing was checked, and the boundary stays unobserved, as the
+    // retired runtime left it, rather than an exact zero.
+    if session.is_some() {
+        trace.boundary("repeat_withheld", &repeated_items);
+    }
     rebase_explicit_working(
         context,
         request,
@@ -1384,6 +1559,9 @@ fn retrieve_inner(
         &warnings,
     )?;
     attach_local_working(store, context, request, &mut capsule)?;
+    if unreadable {
+        capsule.0["task_record_unreadable"] = true.into();
+    }
     capsule.0["no_match"] = json!(no_match);
     capsule.0["gate"] = gate.clone();
     capsule.0["repeated"] = json!(repeated);
@@ -1392,7 +1570,9 @@ fn retrieve_inner(
     }
     trace.boundary("pack_input", &selected);
     capsule.1 = prepared;
+    let pack_started = Instant::now();
     capsule = capsule::pack(capsule, request.delivery_profile)?;
+    pack_seconds += pack_started.elapsed().as_secs_f64();
     let shown = capsule.shown_paths();
     let shown_episodes = capsule.shown_episodes();
     let mut pack_omitted = Vec::new();
@@ -1505,7 +1685,9 @@ fn retrieve_inner(
         }
     }
     capsule::synchronize(&mut capsule);
+    let pack_started = Instant::now();
     capsule = capsule::pack(capsule, request.delivery_profile)?;
+    pack_seconds += pack_started.elapsed().as_secs_f64();
     let shown = capsule.shown_paths();
     let shown_episodes = capsule.shown_episodes();
     selected.retain(|item| {
@@ -1523,6 +1705,26 @@ fn retrieve_inner(
     });
     trace.boundary("pack_omitted", &pack_omitted);
     episodes.retain(|episode| shown_episodes.contains(&episode.id));
+    // The retired renderer cut excerpts from the capsule it delivered, so the
+    // room their growth shares counted only the documents still in it. One the
+    // pack dropped (a changelog past its slot, a fourth result) spent that
+    // room here and kept the best excerpts from growing; they are prepared
+    // again for what remains.
+    if !selector_prepared
+        && capsule.1.as_ref().is_some_and(|prepared| {
+            prepared
+                .excerpts
+                .keys()
+                .any(|key| match key.strip_prefix("episode ") {
+                    Some(id) => id
+                        .parse::<i64>()
+                        .map_or(true, |id| !shown_episodes.contains(&id)),
+                    None => !shown.contains(key),
+                })
+        })
+    {
+        capsule.prepare(&store.conn, &selected)?;
+    }
     identities = selected.iter().map(receipts::identity).collect();
     identities.extend(
         episodes
@@ -1593,7 +1795,7 @@ fn retrieve_inner(
             value["source_changed"] = json!(true);
         }
         value
-    }).collect::<Vec<_>>(),"excluded":excluded,"token_estimates":capsule.0["token_estimates"],"provider":final_config.value["provider"],"source_links":{"anchors":graph_anchor_count,"candidates":graph_candidate_count,"delivered":selected.iter().filter(|item|item.selection.as_deref()==Some("source-link")).count()},"escalation_reason":escalation,"query_source":capsule.0["query_source"],"host":request.host,"entry_point":request.entry_point,"gate":gate,"phase_seconds":{"stat":phase_seconds.get("stat"),"index":phase_seconds.get("index"),"retrieval":started.elapsed().as_secs_f64()}});
+    }).collect::<Vec<_>>(),"excluded":excluded,"token_estimates":capsule.0["token_estimates"],"provider":final_config.value["provider"],"source_links":{"anchors":graph_anchor_count,"candidates":graph_candidate_count,"delivered":selected.iter().filter(|item|item.selection.as_deref()==Some("source-link")).count()},"escalation_reason":escalation,"query_source":capsule.0["query_source"],"host":request.host,"entry_point":request.entry_point,"gate":gate,"phase_seconds":{"stat":phase_seconds.get("stat").copied().map(micro),"index":phase_seconds.get("index").copied().map(micro),"retrieval":micro((started.elapsed().as_secs_f64()-pack_seconds).max(0.0))}});
     if let Some(mut stats) = hint_stats {
         stats["delivered"] = json!(
             selected

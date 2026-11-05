@@ -319,43 +319,145 @@ pub fn evidence_tokens(tokens: &[String]) -> Vec<String> {
         .cloned()
         .collect()
 }
+/// The words a capsule asks with when no prompt names them: the given text,
+/// then the task's goal, progress and next steps and its files' stems
+/// (`src/Refund.php` asks for "Refund", not for "src" and "php", which match
+/// most of a PHP project), each word once and at most 32, as the retired
+/// runtime built it. Plain words only: aliases join when the query is
+/// searched, so they never take a slot from the task's own words.
 pub fn build_capsule_query(query: &str, working: Option<&Value>) -> Result<String> {
-    let mut text = query.to_string();
+    static WORDS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let words = WORDS
+        .get_or_init(|| regex::Regex::new(r"[\p{L}\p{N}_]+").expect("constant query word grammar"));
+    let mut values = vec![query.to_string()];
     if let Some(working) = working {
         for field in ["goal", "progress"] {
             if let Some(value) = working[field].as_str() {
-                text.push(' ');
-                text.push_str(value);
+                values.push(value.into());
             }
         }
-        for field in ["next_steps", "files"] {
-            for value in working[field]
+        let texts = |field: &str| {
+            working[field]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
-            {
-                text.push(' ');
-                text.push_str(value);
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
+        values.extend(texts("next_steps"));
+        values.extend(
+            texts("files")
+                .iter()
+                .map(|path| file_stem(path).to_string()),
+        );
+    }
+    let text = values.join(" ");
+    let mut tokens = Vec::new();
+    let mut seen = BTreeSet::new();
+    for word in words.find_iter(&text) {
+        if seen.insert(folded(word.as_str())) {
+            tokens.push(word.as_str());
+            if tokens.len() == 32 {
+                break;
             }
         }
     }
-    Ok(query_tokens(&text)?
-        .into_iter()
-        .take(32)
-        .collect::<Vec<_>>()
-        .join(" "))
+    if tokens.is_empty() {
+        return Err(RuntimeError::invalid("Search query must contain a word"));
+    }
+    Ok(tokens.join(" "))
 }
+/// A path's final name without its last suffix, as Python's `PurePath.stem`:
+/// a leading or trailing dot is part of the name.
+fn file_stem(path: &str) -> &str {
+    let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    match name.rfind('.') {
+        Some(at) if at > 0 && at + 1 < name.len() => &name[..at],
+        _ => name,
+    }
+}
+/// A raw prompt reduced to its most informative words, as the retired runtime
+/// distilled it: the prompt's plain words, each once; words neither the
+/// documents nor the local episodes hold, and words most of them hold, are
+/// dropped (all held ones stay when that leaves none, the prompt's head when
+/// none is held); the 24 rarest stay, in prompt order. Rarity counts the
+/// episodes beside the documents, so a word the recorded history repeats is
+/// as common as it is. Aliases and expansions join when the query is searched.
 pub fn distill_query(conn: &Connection, prompt: &str) -> Result<String> {
-    let tokens = informative_tokens(conn, expand_query_tokens(conn, query_tokens(prompt)?)?)?;
-    let counts = frequencies(conn, &tokens)?;
-    let mut ranked = tokens.into_iter().enumerate().collect::<Vec<_>>();
-    ranked.sort_by_key(|(index, token)| (counts.get(token).copied().unwrap_or(0), *index));
-    ranked.truncate(24);
-    ranked.sort_by_key(|(index, _)| *index);
-    Ok(ranked
+    static WORDS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let words = WORDS
+        .get_or_init(|| regex::Regex::new(r"[\p{L}\p{N}_]+").expect("constant query word grammar"));
+    let mut tokens = Vec::<String>::new();
+    let mut seen = BTreeSet::new();
+    for word in words.find_iter(prompt) {
+        if seen.insert(folded(word.as_str())) {
+            tokens.push(word.as_str().into());
+        }
+    }
+    if tokens.is_empty() {
+        return Ok(prompt.into());
+    }
+    let documents = conn.query_row("SELECT COUNT(*) FROM documents", [], |row| {
+        row.get::<_, usize>(0)
+    })?;
+    let episodes = conn
+        .query_row("SELECT COUNT(*) FROM episodes", [], |row| {
+            row.get::<_, usize>(0)
+        })
+        .unwrap_or(0);
+    let total = documents + episodes;
+    let head = |tokens: &[String]| {
+        tokens
+            .iter()
+            .take(24)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    if total == 0 {
+        return Ok(head(&tokens));
+    }
+    let mut counts = frequencies(conn, &tokens)?;
+    if episodes > 0 {
+        let mut statement =
+            conn.prepare("SELECT COUNT(*) FROM episodes WHERE episodes MATCH ?1")?;
+        for token in &tokens {
+            let count = statement
+                .query_row([fts_expression(std::slice::from_ref(token))], |row| {
+                    row.get::<_, usize>(0)
+                })
+                .unwrap_or(0);
+            *counts.entry(token.clone()).or_default() += count;
+        }
+    }
+    let matched = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(position, token)| {
+            let count = counts.get(token).copied().unwrap_or(0);
+            (count > 0).then(|| (count, position, token.clone()))
+        })
+        .collect::<Vec<_>>();
+    let informative = matched
+        .iter()
+        .filter(|(count, _, _)| *count as f64 <= total as f64 * 0.5)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut pool = if informative.is_empty() {
+        matched
+    } else {
+        informative
+    };
+    if pool.is_empty() {
+        return Ok(head(&tokens));
+    }
+    pool.sort();
+    pool.truncate(24);
+    pool.sort_by_key(|(_, position, _)| *position);
+    Ok(pool
         .into_iter()
-        .map(|(_, token)| token)
+        .map(|(_, _, token)| token)
         .collect::<Vec<_>>()
         .join(" "))
 }
@@ -515,7 +617,7 @@ pub fn search(
     let mut output = Vec::new();
     for row in rows {
         let (document, snippet) = row?;
-        if crate::retrieval::admit_document(context, &config, &document)?.is_none() {
+        if crate::retrieval::admit_searchable(context, &config, &document)?.is_none() {
             output.push(SearchItem {
                 path: document.path,
                 layer: document.layer,
@@ -653,13 +755,6 @@ pub fn rank_candidates_observed(
             }
             continue;
         }
-        let snippet = body_excerpt(
-            &document.content,
-            320,
-            &evidence,
-            document.kind == "changelog",
-        );
-        let cost = estimated_tokens(&format!("{}{snippet}", document.title));
         let adjusted_score = (-score).max(0.0)
             * ranking_weight(
                 &document.authority,
@@ -674,8 +769,10 @@ pub fn rank_candidates_observed(
             match_strength: Some(if covered { "covered" } else { "distinctive" }.into()),
             selection: None,
             source_changed: vec![],
-            snippet,
-            estimated_tokens: cost,
+            // Quoted below for the candidates that pass the score floor, as
+            // the retired ranking quoted only its survivors.
+            snippet: String::new(),
+            estimated_tokens: 0,
             delivery_identity: None,
             via: None,
             hint_raw_sha256: None,
@@ -722,6 +819,7 @@ pub fn rank_candidates_observed(
         admitted
     });
     let mut observed_rank = 0usize;
+    let mut terms = None;
     for (index, item) in output.iter_mut().enumerate() {
         item.rank = Some(index + 1);
         if let Some(trace) = trace.as_deref_mut() {
@@ -733,7 +831,8 @@ pub fn rank_candidates_observed(
                 &json!({"rank":observed_rank}),
             );
         }
-        item.snippet = crate::excerpts::quote_candidate(conn, item, query, 320)?;
+        let terms = terms.get_or_insert_with(|| crate::excerpts::QueryTerms::read(conn, query));
+        item.snippet = crate::excerpts::quote_candidate_with(conn, item, query, 320, terms)?;
         item.estimated_tokens =
             estimated_tokens(&format!("{}{}", item.document.title, item.snippet));
     }
@@ -743,7 +842,10 @@ pub fn rank_candidates_observed(
             .iter()
             .filter(|item| item.match_strength.as_deref() == Some("distinctive"))
             .count(),
-        top_score: output.first().map(|item| item.adjusted_score),
+        // Rounded as the retired gate recorded it: telemetry, never a threshold.
+        top_score: output
+            .first()
+            .map(|item| (item.adjusted_score * 1_000_000.0).round() / 1_000_000.0),
         coverage,
     };
     Ok((output, diagnostics))
@@ -1063,5 +1165,49 @@ mod query_work_tests {
         );
         conn.execute_batch("DROP TABLE documents").unwrap();
         assert!(frequencies(&conn, &[]).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod distill_tests {
+    use super::*;
+
+    /// A word half the documents hold stays informative only while the
+    /// recorded episodes do not repeat it: rarity counts both, as the retired
+    /// distillation did.
+    #[test]
+    fn distillation_counts_episodes_beside_documents() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE documents USING fts5(content);
+             CREATE VIRTUAL TABLE episodes USING fts5(summary);",
+        )
+        .unwrap();
+        for text in [
+            "review alpha",
+            "review beta",
+            "review gamma",
+            "delta",
+            "epsilon zircon",
+            "zeta",
+        ] {
+            conn.execute("INSERT INTO documents(content) VALUES (?1)", [text])
+                .unwrap();
+        }
+        for text in ["review one", "review two", "review three", "review four"] {
+            conn.execute("INSERT INTO episodes(summary) VALUES (?1)", [text])
+                .unwrap();
+        }
+        assert_eq!(distill_query(&conn, "review the zircon").unwrap(), "zircon");
+        conn.execute("DELETE FROM episodes", []).unwrap();
+        assert_eq!(
+            distill_query(&conn, "review the zircon").unwrap(),
+            "review zircon"
+        );
+        // A prompt of words nothing holds keeps its head, word by word.
+        assert_eq!(
+            distill_query(&conn, "unseen, words!").unwrap(),
+            "unseen words"
+        );
     }
 }

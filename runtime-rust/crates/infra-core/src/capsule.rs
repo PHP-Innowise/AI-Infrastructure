@@ -255,6 +255,13 @@ pub fn pack(mut capsule: Capsule, profile: DeliveryProfile) -> Result<Capsule> {
     if !capsule.0["omitted"].is_object() {
         capsule.0["omitted"] = json!({});
     }
+    // Every capsule reports these two, if only as zero, as the retired
+    // budget did; the others arrive with the working projection and layers.
+    for key in ["working_progress_characters", "last_turn_characters"] {
+        if capsule.0["omitted"].get(key).is_none() {
+            capsule.0["omitted"][key] = json!(0);
+        }
+    }
     let mut holders = BTreeMap::new();
     for layer in ["procedural", "semantic", "episodic"] {
         for item in capsule.0[layer].as_array().into_iter().flatten() {
@@ -680,7 +687,8 @@ pub fn render_plan(capsule: &Capsule, profile: DeliveryProfile) -> Result<Render
             head.insert(index, format!("{label}{}", paths.join(", ")));
         }
     }
-    if capsule.0["kind"] == "warming" && capsule.0["task_closed"] != true {
+    // A lightweight task is shown above from local state: nothing is pending.
+    if capsule.0["kind"] == "warming" && capsule.0["task_closed"] != true && !working.is_object() {
         head.push(if profile.persistent() {
             "warming: task checkpoint pending".into()
         } else {
