@@ -28,11 +28,16 @@ fn project_text(path: &Path) -> Result<String> {
 }
 pub fn project_key(project: &Path) -> Result<String> {
     let canonical = infra_core::fs::canonicalize(project)?;
-    let mut spelling = project_text(&canonical)?;
-    if cfg!(windows) {
-        spelling = spelling.replace('/', "\\").to_lowercase();
-    }
-    Ok(common::sha256(spelling.as_bytes())[..16].into())
+    Ok(spelling_key(&project_text(&canonical)?))
+}
+/// The key of a canonical folder spelling, as `project_key` derives it.
+fn spelling_key(spelling: &str) -> String {
+    let spelling = if cfg!(windows) {
+        spelling.replace('/', "\\").to_lowercase()
+    } else {
+        spelling.to_string()
+    };
+    common::sha256(spelling.as_bytes())[..16].into()
 }
 pub fn state_directory(project: &Path, base: Option<&Path>) -> Result<PathBuf> {
     let selected = if let Some(base) = base {
@@ -179,6 +184,82 @@ fn preamble(home: &Path, project: &Path, state: &Path, edition: &str) -> String 
         project.display(),
         state.display()
     )
+}
+/// The folder a Claude prompt file names as the project's sources, if the
+/// file opens with a preamble as `preamble` writes it.
+fn prompt_folder(text: &str) -> Option<&str> {
+    let mut lines = text.split('\n');
+    let accelerator = lines.next()?;
+    let tooling = lines.next()?;
+    let folder = lines.next()?.strip_prefix("Project sources: ")?;
+    let state = lines.next()?;
+    (accelerator.starts_with("Accelerator: ")
+        && tooling.starts_with("Tooling: ")
+        && state.starts_with("Private session state: "))
+    .then_some(folder)
+}
+/// Claude Code reads its policy from a file named at launch, and the root and
+/// the worktrees of one project launch on one state. The text names the
+/// folder the session serves, so each launch folder has a file of its own,
+/// `launch/claude-system-prompt-<project_key>.md`, which only launches from
+/// that folder rewrite: one started first goes on reading its own folder.
+const CLAUDE_PROMPT: (&str, &str) = ("claude-system-prompt-", ".md");
+/// The one prompt file that earlier launches of every folder rewrote.
+const SHARED_CLAUDE_PROMPT: &str = "claude-system-prompt.md";
+const PROMPT_LIMIT: usize = 8 * 1024 * 1024;
+/// Prompt files of other folders that one launch reads to tell whether their
+/// folder is gone.
+const PROMPT_SWEEP: usize = 64;
+/// Remove the Claude prompt files of launch folders that are gone - a
+/// worktree removed since its last launch - and the shared file of earlier
+/// launches once the folder it names is gone as well. A launch whose host has
+/// yet to read its file starts in that folder, which therefore exists, and
+/// this runs under the preparation lock, so meanwhile no prompt file is
+/// written or handed out. A file the sweep cannot read, or whose folder it
+/// cannot tell from the text, stays, and the launch goes on: the launch
+/// checks its state custody once more after the sweep. It reads at most
+/// `PROMPT_SWEEP` files, starting after this launch's own, so the next
+/// launches go on where it stopped.
+fn sweep_claude_prompts(files: &mut PublicationFiles, current: &str) {
+    let Ok(mut names) = files.archive_entries("launch", 1_000_000) else {
+        return;
+    };
+    names.sort();
+    let after = names.partition_point(|name| name.as_str() <= current);
+    names.rotate_left(after);
+    let prompts = names.into_iter().filter_map(|name| {
+        let key = if name == SHARED_CLAUDE_PROMPT {
+            None
+        } else {
+            let key = name
+                .strip_prefix(CLAUDE_PROMPT.0)?
+                .strip_suffix(CLAUDE_PROMPT.1)?;
+            Some(key.to_string())
+        };
+        (name != current).then_some((name, key))
+    });
+    for (name, key) in prompts.take(PROMPT_SWEEP) {
+        let relative = format!("launch/{name}");
+        let Ok(Some(bytes)) = files.read(&relative, PROMPT_LIMIT) else {
+            continue;
+        };
+        let Some(folder) = std::str::from_utf8(&bytes).ok().and_then(prompt_folder) else {
+            continue;
+        };
+        // A folder's own file carries its key: a name that does not belong
+        // to the folder the text names is not one this launcher wrote.
+        if key.is_some_and(|key| key != spelling_key(folder)) {
+            continue;
+        }
+        // Launches name their folder by its canonical, absolute path.
+        let folder = Path::new(folder);
+        if folder.is_absolute()
+            && std::fs::symlink_metadata(folder)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            let _ = files.unlink_expected_limit(&relative, &bytes, PROMPT_LIMIT);
+        }
+    }
 }
 fn toml(value: &Value) -> Result<String> {
     match value {
@@ -695,9 +776,26 @@ fn validate_attach_host(host: &str) -> Result<()> {
     }
     Ok(())
 }
+/// The overlay for a session started in the attached project's own folder.
 pub fn build_overlay(
     repository: &Path,
     project: &Path,
+    state: &Path,
+    edition: &str,
+    host: &str,
+) -> Result<Overlay> {
+    build_launch_overlay(repository, project, project, state, edition, host)
+}
+/// The overlay for a session of the attached `project` started in `launch`:
+/// the project's folder, or a worktree of it, which shares the project's
+/// state. The session is told it serves `launch`, and Claude Code reads that
+/// folder's own prompt file; the state's record names `project`, whose state
+/// it is. That `launch` belongs to `project` is the caller's to establish, as
+/// the Harness does from Git before it launches a worktree.
+pub fn build_launch_overlay(
+    repository: &Path,
+    project: &Path,
+    launch: &Path,
     state: &Path,
     edition: &str,
     host: &str,
@@ -709,46 +807,53 @@ pub fn build_overlay(
         ));
     }
     validate_attach_host(host)?;
-    let project = independent_project(repository, project)?;
+    let launch = independent_project(repository, launch)?;
     let home = infra_core::fs::canonicalize(repository.join(edition))?;
     let state = safe::absolute(state)?;
-    if state == project || state.starts_with(&project) {
+    if state == launch || state.starts_with(&launch) {
         return Err(RuntimeError::policy(
             "Attached state must lie outside the project",
         ));
     }
     // The lock stays held until the launch files below are written and checked.
-    let (mut files, _, _preparing) = prepare_state_custody(repository, &project, &state, edition)?;
+    let (mut files, _, _preparing) = prepare_state_custody(repository, project, &state, edition)?;
     let engine = std::env::current_exe()?;
     let policy = safe::read_text(&home.join("AGENTS.md"))?;
-    let prefix = preamble(&home, &project, &state, edition);
+    let prefix = preamble(&home, &launch, &state, edition);
     let mut overlay = Overlay {
         arguments: vec![],
-        environment: environment(&home, &project, &state, edition)?,
+        environment: environment(&home, &launch, &state, edition)?,
         settings: json!({}),
         prompt_prefix: String::new(),
     };
     match host {
         "claude" => {
-            let relative = "launch/claude-system-prompt.md";
+            let name = format!(
+                "{}{}{}",
+                CLAUDE_PROMPT.0,
+                project_key(&launch)?,
+                CLAUDE_PROMPT.1
+            );
+            let relative = format!("launch/{name}");
             let content = format!("{prefix}\n{policy}");
-            let old = files.read(relative, 8 * 1024 * 1024)?;
+            let old = files.read(&relative, PROMPT_LIMIT)?;
             if old.as_deref() != Some(content.as_bytes()) {
                 files.write_expected_mode(
-                    relative,
+                    &relative,
                     content.as_bytes(),
                     old.as_deref(),
                     0o600,
-                    8 * 1024 * 1024,
+                    PROMPT_LIMIT,
                 )?;
             }
             files.secure_private_directory("launch", false)?;
-            files.secure_private_file(relative)?;
+            files.secure_private_file(&relative)?;
+            sweep_claude_prompts(&mut files, &name);
             overlay.arguments = vec![
                 "--add-dir".into(),
                 project_text(&home)?,
                 "--append-system-prompt-file".into(),
-                project_text(&state.join(relative))?,
+                project_text(&state.join(&relative))?,
             ];
             let source = common::read_json(&home.join(".claude/settings.json"))?;
             let mut settings = json!({"permissions":{"allow":[],"deny":[]}});
@@ -1555,9 +1660,9 @@ fn prepare_state_custody(
     let mut files = PublicationFiles::open_private_root(&state)?;
     // Launches of one project can prepare its state at the same moment: fleet
     // reviewers start together, and a root and a worktree session can start
-    // together. Each re-protects the same files and may rewrite the record and
-    // the launch files, so unserialized they refused each other's effects as a
-    // changed state file.
+    // together. Each re-protects the same files and may write the launch
+    // files, so unserialized they refused each other's effects as a changed
+    // state file.
     let preparing = files.acquire_private_lock(PREPARATION_LOCK)?;
     let roots = Roots {
         tooling: home,
@@ -1566,6 +1671,11 @@ fn prepare_state_custody(
         shared: false,
     };
     roots.ensure_attached_state_in(&mut files)?;
+    // The record says whose state this is, for a person looking at it: the
+    // project the state is kept for, whichever of its folders launches. Each
+    // launch passes its own folder to the session itself; named here, the
+    // folder flipped the record between the root and a worktree on every pair
+    // of their launches and moved `since` each time.
     let previous = files.read("accelerator-attach.json", 1024 * 1024)?;
     let record = json!({"project":project,"edition":edition,"since":infra_core::domain::utc_now()});
     let same = previous
@@ -1795,19 +1905,51 @@ mod concurrent_preparation_tests {
                 scratch,
             }
         }
+        /// A session of the project started in `folder`, as the Harness
+        /// launches the project's root and its worktrees.
+        fn launch(&self, folder: &Path, host: &str) -> Result<Overlay> {
+            build_launch_overlay(
+                &self.repository,
+                &self.project,
+                folder,
+                &self.state,
+                "PHP Core",
+                host,
+            )
+        }
+        /// Another folder of the project, such as a worktree added later.
+        fn folder(&self, name: &str) -> PathBuf {
+            let folder = self.scratch.join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(
+                folder.join("composer.json"),
+                br#"{"name":"fixture/project"}"#,
+            )
+            .unwrap();
+            folder
+        }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.scratch);
         }
     }
+    /// The file Claude Code is told to read its system prompt from.
+    fn prompt_file(overlay: &Overlay) -> PathBuf {
+        let at = overlay
+            .arguments
+            .iter()
+            .position(|argument| argument == "--append-system-prompt-file")
+            .expect("a Claude overlay names its prompt file");
+        PathBuf::from(&overlay.arguments[at + 1])
+    }
 
     /// Launches of one project prepare its attached state at the same moment:
     /// fleet reviewers start together, and a root and a worktree session can
     /// start together. Every preparation re-protects the same private files,
-    /// and one from another folder rewrites the record and the launch files.
-    /// Unserialized, the others refused those effects as "Private state file
-    /// changed during protection" or "Private state lock custody changed".
+    /// and each writes its folder's launch files. Unserialized, the others
+    /// refused those effects as "Private state file changed during
+    /// protection" or "Private state lock custody changed".
     #[test]
     fn launches_of_one_project_prepare_its_state_at_the_same_moment() {
         let fixture = Fixture::new();
@@ -1833,12 +1975,20 @@ mod concurrent_preparation_tests {
                 .map(|(folder, host)| {
                     let start = start.clone();
                     let repository = fixture.repository.clone();
+                    let project = fixture.project.clone();
                     let state = fixture.state.clone();
                     std::thread::spawn(move || {
                         start.wait();
-                        build_overlay(&repository, &folder, &state, "PHP Core", host)
-                            .map(|_| ())
-                            .map_err(|error| format!("{host} in {}: {error}", folder.display()))
+                        build_launch_overlay(
+                            &repository,
+                            &project,
+                            &folder,
+                            &state,
+                            "PHP Core",
+                            host,
+                        )
+                        .map(|_| ())
+                        .map_err(|error| format!("{host} in {}: {error}", folder.display()))
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1849,12 +1999,7 @@ mod concurrent_preparation_tests {
             }
         }
         let record = read_record(&fixture.state).unwrap().unwrap();
-        assert!(
-            [&fixture.project, &fixture.worktree]
-                .iter()
-                .any(|folder| record["project"] == json!(folder)),
-            "{record}"
-        );
+        assert_eq!(record["project"], json!(fixture.project), "{record}");
     }
 
     /// The lock is what serializes them: a preparation waits while another
@@ -1961,5 +2106,128 @@ mod concurrent_preparation_tests {
             "{} of 60 launches failed: {failures:?}",
             failures.len()
         );
+    }
+
+    /// A root and a worktree session of one project launch on its one state,
+    /// and Claude Code reads the system prompt file it is given only once it
+    /// starts. The prompt names the folder the session serves: with one file
+    /// per state, a launch from the other folder rewrote it in between, and
+    /// the session that launched first took that folder for its project. Each
+    /// folder now has a file of its own, which a launch from the other folder
+    /// leaves as it was, and the record names the project throughout.
+    #[test]
+    fn launches_from_two_folders_each_keep_their_own_prompt_file() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = Fixture::new();
+        let image = |path: &Path| {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            (
+                common::sha256(&std::fs::read(path).unwrap()),
+                metadata.ino(),
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+            )
+        };
+        let root = prompt_file(&fixture.launch(&fixture.project, "claude").unwrap());
+        let first = image(&root);
+        let record = read_record(&fixture.state).unwrap().unwrap();
+        assert_eq!(record["project"], json!(fixture.project), "{record}");
+        let worktree = prompt_file(&fixture.launch(&fixture.worktree, "claude").unwrap());
+        assert_eq!(
+            image(&root),
+            first,
+            "the worktree's launch changed the root session's prompt file"
+        );
+        assert_eq!(
+            read_record(&fixture.state).unwrap().unwrap(),
+            record,
+            "the worktree's launch rewrote the project's record"
+        );
+        assert_ne!(root, worktree);
+        for (file, folder) in [(&root, &fixture.project), (&worktree, &fixture.worktree)] {
+            assert!(file.starts_with(fixture.state.join("launch")));
+            let text = std::fs::read_to_string(file).unwrap();
+            assert_eq!(
+                prompt_folder(&text),
+                Some(folder.to_str().unwrap()),
+                "{}",
+                file.display()
+            );
+        }
+        // An unchanged prompt is not written again.
+        fixture.launch(&fixture.project, "claude").unwrap();
+        assert_eq!(image(&root), first);
+    }
+
+    /// A worktree removed since its last launch leaves a prompt file that no
+    /// launch is handed again. The next Claude launch removes it, and the one
+    /// file earlier launches of every folder shared once the folder that file
+    /// names is gone as well. The files of folders that exist stay, and so
+    /// does a file whose name is not the key of the folder it names.
+    #[test]
+    fn a_launch_removes_the_prompt_files_of_folders_that_are_gone() {
+        let fixture = Fixture::new();
+        let removed = fixture.folder("removed worktree");
+        let orphan = prompt_file(&fixture.launch(&removed, "claude").unwrap());
+        let kept = prompt_file(&fixture.launch(&fixture.worktree, "claude").unwrap());
+        let text = std::fs::read(&orphan).unwrap();
+        let launch = fixture.state.join("launch");
+        let shared = launch.join(SHARED_CLAUDE_PROMPT);
+        let misnamed = launch.join(format!(
+            "{}{}{}",
+            CLAUDE_PROMPT.0,
+            "0".repeat(16),
+            CLAUDE_PROMPT.1
+        ));
+        for path in [&shared, &misnamed] {
+            std::fs::write(path, &text).unwrap();
+        }
+        std::fs::remove_dir_all(&removed).unwrap();
+        let root = prompt_file(&fixture.launch(&fixture.project, "claude").unwrap());
+        assert!(
+            !orphan.exists(),
+            "the removed worktree's prompt file stayed"
+        );
+        assert!(
+            !shared.exists(),
+            "the shared file naming a removed folder stayed"
+        );
+        for path in [&kept, &root, &misnamed] {
+            assert!(path.exists(), "{} was removed", path.display());
+        }
+    }
+
+    /// One launch reads at most `PROMPT_SWEEP` other prompt files, and the
+    /// next goes on where it stopped.
+    #[test]
+    fn the_sweep_reads_a_bounded_number_of_files_per_launch() {
+        let fixture = Fixture::new();
+        fixture.launch(&fixture.project, "claude").unwrap();
+        let stale = (0..PROMPT_SWEEP + 6)
+            .map(|index| {
+                let folder = fixture.scratch.join(format!("gone {index}"));
+                let folder = folder.to_str().unwrap();
+                let path = fixture.state.join(format!(
+                    "launch/{}{}{}",
+                    CLAUDE_PROMPT.0,
+                    spelling_key(folder),
+                    CLAUDE_PROMPT.1
+                ));
+                std::fs::write(
+                    &path,
+                    format!(
+                        "Accelerator: PHP Core\nTooling: /tooling\nProject sources: {folder}\nPrivate session state: {}\n",
+                        fixture.state.display()
+                    ),
+                )
+                .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let left = || stale.iter().filter(|path| path.exists()).count();
+        fixture.launch(&fixture.project, "claude").unwrap();
+        assert_eq!(left(), 6);
+        fixture.launch(&fixture.project, "claude").unwrap();
+        assert_eq!(left(), 0);
     }
 }

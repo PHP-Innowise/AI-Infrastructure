@@ -119,6 +119,15 @@ because the checkouts' documents differ - with one index, a lookup after one
 in the other checkout rebuilt it (580 ms against 250 ms on 400 notes). A
 checkpoint after the worktree is removed removes its index.
 
+Claude Code reads its system prompt - the preamble naming the folder the
+session serves, then `AGENTS.md` - when it starts, from a file of that
+folder's own in the state: `launch/claude-system-prompt-<key>.md`, keyed by a
+hash of the folder's path. A launch from another folder of the project leaves
+it as it is, so a root and a worktree session launched together each read
+their own; each Claude launch removes the files of folders that no longer
+exist. The state's record, `accelerator-attach.json`, names the registered
+project whichever of its folders launches.
+
 On Linux and macOS the state is its owner's alone - directories 0700, files
 0600 - whatever the umask: the launcher and the runtime create it that way, and
 tighten a state made before, where it is the accelerator's (never through a
@@ -127,7 +136,7 @@ link, never above the state directory).
 The state is never reached through a link. The Harness's state directory (or
 `--state-base`) is taken as named; below it the launcher opens `attached/` and
 the project's directory one inside the other without following a link, and
-reads and writes its record and Claude's system prompt through that
+reads and writes its record and Claude's system prompt files through that
 directory's descriptor. A link at either directory, at `launch/` or at those
 files is refused, and nothing is written. The runtime refuses a state
 directory, or a `project-brain/`, `memory-bank/`, `launch/` or record in it,

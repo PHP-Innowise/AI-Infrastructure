@@ -171,15 +171,22 @@ impl Accelerators {
         Ok(())
     }
     pub fn overlay(&self, project: &str, host: &str, cwd: &Path) -> Result<Option<Overlay>> {
-        self.store.project(project)?;
+        let registered = self.store.project(project)?;
         if Self::installed(cwd)? {
             return Ok(None);
         }
         let Some(edition) = self.edition(project)? else {
             return Ok(None);
         };
-        Ok(Some(attach::build_overlay(
+        // A worktree session shares the project's state: its record names the
+        // registered project, while the session is told the folder it serves.
+        Ok(Some(attach::build_launch_overlay(
             &self.source,
+            Path::new(
+                registered["path"]
+                    .as_str()
+                    .ok_or_else(|| HarnessError::invalid("Registered project path missing."))?,
+            ),
             cwd,
             &self.state(project)?,
             &edition,

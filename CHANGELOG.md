@@ -468,6 +468,21 @@ edition's own files remain in that edition's changelog.
   `eval memory-lifecycle-fuzz --attached`, which prepares the state for every
   hook event of up to three sessions at once, stopped on every seed before its
   checks; seeds 1-4 now pass them.
+- Claude Code sessions launched together from an attached project's root and
+  one of its worktrees each read their own system prompt. The prompt names the
+  folder the session serves, and both launch on the project's state, where
+  every launch rewrote the one `launch/claude-system-prompt.md`: Claude Code
+  reads the file only when it starts, so the session launched first could
+  read the other's and take that folder for its project. Each launch folder
+  now has a file of its own, `launch/claude-system-prompt-<key>.md` (a hash
+  of the folder's path), which only launches from that folder write, and only
+  when the text changed. A Claude launch removes the prompt files of folders
+  that no longer exist - a removed worktree - and the shared file of earlier
+  launches once the folder it names is gone, reading at most 64 of them per
+  launch. The state's record, `accelerator-attach.json`, names the registered
+  project whichever of its folders launches: it named the launch folder, and
+  flipped between the root and a worktree, with a new `since`, on every pair
+  of their launches.
 - An attached project's `bank validate` passes again. Its state holds only the
   project's memory; the Memory Bank README stays in the accelerator clone the
   project is attached from, and validation now finds it there instead of

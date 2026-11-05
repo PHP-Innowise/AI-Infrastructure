@@ -189,8 +189,11 @@ impl Harness {
     pub fn hook_env(&self, host: &str, launch: &Path) -> Result<BTreeMap<String, String>> {
         let mut env = self.env.clone();
         if self.attached {
-            let overlay = infra_tooling::attach::build_overlay(
+            // As the Harness launches a worktree of an attached project: on
+            // the project's state, serving the worktree.
+            let overlay = infra_tooling::attach::build_launch_overlay(
                 &self.source,
+                &self.project,
                 launch,
                 &self.state,
                 &self.edition,
