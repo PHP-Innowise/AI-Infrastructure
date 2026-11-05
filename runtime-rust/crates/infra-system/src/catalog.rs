@@ -603,10 +603,42 @@ impl System {
         let mut changed = BTreeSet::new();
         for selector in contracts {
             let values = selector.split(':').collect::<Vec<_>>();
-            if values.len() != 2 {
-                return Err(fail("Contract selector must be SERVICE:CONTRACT"));
-            }
-            let (sid, cid) = (identifier(values[0])?, identifier(values[1])?);
+            let (sid, cid) = match values.as_slice() {
+                [sid, cid] => (identifier(sid)?, identifier(cid)?),
+                // A contract ID alone names its provider when only one has it.
+                [cid] => {
+                    let cid = identifier(cid)?;
+                    let providers = self
+                        .services
+                        .iter()
+                        .filter(|(_, service)| {
+                            service
+                                .manifest
+                                .as_ref()
+                                .and_then(|value| value["provides"].as_array())
+                                .is_some_and(|entries| {
+                                    entries.iter().any(|entry| entry["id"] == cid)
+                                })
+                        })
+                        .map(|(sid, _)| sid.clone())
+                        .collect::<Vec<_>>();
+                    match providers.as_slice() {
+                        [sid] => (sid.clone(), cid),
+                        [] => {
+                            return Err(fail(format!(
+                                "No registered service provides contract {cid}"
+                            )));
+                        }
+                        _ => {
+                            return Err(fail(format!(
+                                "Contract {cid} is provided by {}; name one as SERVICE:CONTRACT",
+                                providers.join(", ")
+                            )));
+                        }
+                    }
+                }
+                _ => return Err(fail("Contract selector must be SERVICE:CONTRACT")),
+            };
             let provided = self
                 .services
                 .get(&sid)

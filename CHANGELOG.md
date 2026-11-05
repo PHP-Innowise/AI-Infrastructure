@@ -201,6 +201,10 @@ edition's own files remain in that edition's changelog.
     Patterns are compiled once, and HEAD is asked once per checkout, up to
     eight at a time (a monorepo's service folders share one; a folder outside
     any checkout needs no Git process).
+  - A changed contract may be named by its ID alone when one registered
+    service provides it, as the plan form's field suggested (`order.placed`
+    was refused with `Contract selector must be SERVICE:CONTRACT`); an
+    ambiguous or unknown ID names the providers or says none has it.
   - `plan --output` onto an existing file says that a saved plan is never
     replaced instead of `Publication effect changed before write`.
 

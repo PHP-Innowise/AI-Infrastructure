@@ -177,6 +177,10 @@ infra-engine system plan --system docs/examples/ai-system/system.json \
   --contract orders:order.cancelled
 ```
 
+A contract that only one registered service provides may be named by its ID
+alone (`--contract order.cancelled`); an ID two services provide must name its
+provider.
+
 Consumers reached later are checked conservatively through their own provided
 contracts. `--impact-depth 0` retains only origins; the default is 32, maximum
 64. A cut-off produces a warning. Cycles terminate with deduplicated services

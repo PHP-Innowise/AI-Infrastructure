@@ -1025,3 +1025,47 @@ esac"#;
     let (code, summary, _) = run_script(&edit.0, gate, "edit");
     assert_eq!(code, 1, "{summary:#}");
 }
+
+#[test]
+fn a_changed_contract_may_be_named_by_its_id_alone() {
+    let root = Root::new();
+    let config = system(&root.0);
+    let services = root.0.join("services");
+    let plan = |contract: &str| {
+        cli(
+            &root.0,
+            &[
+                "plan",
+                "--system",
+                config.to_str().unwrap(),
+                "--allow-root",
+                services.to_str().unwrap(),
+                "--task",
+                "Add the currency to placed orders",
+                "--change-id",
+                "currency",
+                "--contract",
+                contract,
+            ],
+        )
+    };
+    let (code, value, text) = plan("order.placed");
+    assert_eq!(code, 0, "{text}");
+    let impact = value["impact"].as_array().unwrap();
+    assert!(
+        impact
+            .iter()
+            .any(|entry| entry["service"] == "orders" && entry["reason"] == "contract_provider"),
+        "{value:#}"
+    );
+    assert!(
+        impact.iter().any(|entry| entry["service"] == "billing"),
+        "its consumer joins: {value:#}"
+    );
+    let (code, _, text) = plan("order.shipped");
+    assert_eq!(code, 2, "{text}");
+    assert!(
+        text.contains("No registered service provides contract order.shipped"),
+        "{text}"
+    );
+}
