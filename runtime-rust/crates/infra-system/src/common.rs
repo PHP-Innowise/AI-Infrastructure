@@ -85,8 +85,18 @@ pub fn texts(value: &Value) -> Vec<String> {
         })
         .unwrap_or_default()
 }
+// Patterns are compiled once: compiled per call, they were most of what a
+// 200-service catalog spent its second on. A pattern that cannot compile
+// still refuses (sensitive) rather than admits.
+static SENSITIVE: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{20,}|(?i:\b(?:password|api[_-]?key|access[_-]?token)\s*[:=]\s*['"]?[A-Za-z0-9_+/=-]{16,})"#).ok()
+});
+static IDENTIFIER: std::sync::LazyLock<Option<regex::Regex>> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z][a-z0-9._-]{0,79}$").ok());
 pub fn sensitive(value: &str) -> bool {
-    regex::Regex::new(r#"-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{20,}|(?i:\b(?:password|api[_-]?key|access[_-]?token)\s*[:=]\s*['"]?[A-Za-z0-9_+/=-]{16,})"#).map(|pattern|pattern.is_match(value)).unwrap_or(true)
+    SENSITIVE
+        .as_ref()
+        .is_none_or(|pattern| pattern.is_match(value))
 }
 pub fn text(value: &Value, label: &str, limit: usize) -> Result<String> {
     let value = value
@@ -104,8 +114,9 @@ pub fn text(value: &Value, label: &str, limit: usize) -> Result<String> {
     Ok(value.to_string())
 }
 pub fn identifier(value: &str) -> Result<String> {
-    let pattern = regex::Regex::new(r"^[a-z][a-z0-9._-]{0,79}$")
-        .map_err(|_| fail("Invalid identifier expression"))?;
+    let pattern = IDENTIFIER
+        .as_ref()
+        .ok_or_else(|| fail("Invalid identifier expression"))?;
     if !pattern.is_match(value) {
         let shown = value.chars().take(80).collect::<String>();
         return Err(fail(format!(

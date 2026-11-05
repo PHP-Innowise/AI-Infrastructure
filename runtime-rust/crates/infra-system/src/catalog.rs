@@ -988,8 +988,10 @@ const STOP_WORDS: &[&str] = &[
 /// Lowercase Unicode words of three or more characters, without function words,
 /// with English plurals folded (`orders` matches `order`, `policies` `policy`),
 /// applied alike to the task and to every capability.
+static WORD: std::sync::LazyLock<Option<regex::Regex>> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"[^\W_]{3,}").ok());
 fn words_for(value: &str) -> BTreeSet<String> {
-    regex::Regex::new(r"[^\W_]{3,}")
+    WORD.as_ref()
         .map(|pattern| {
             pattern
                 .find_iter(&value.to_lowercase())

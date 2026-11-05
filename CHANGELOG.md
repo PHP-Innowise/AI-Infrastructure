@@ -133,9 +133,15 @@ edition's own files remain in that edition's changelog.
     resume that accepts source changes now adopts a person's content edit to a
     system-folder source the plan fingerprints (never `system.json`, never
     during a run), and the recovery panel says so.
-  - A catalog asks Git for each checkout's HEAD once, up to eight at a time,
-    instead of once per service: a monorepo's service folders share one, and a
-    folder outside any checkout needs no Git process.
+  - A 200-service system answers `validate`, `catalog`, `map`, `locate` and a
+    one-hop `plan` in about 25 ms and `verify` in 70 ms instead of 1-2.5 s:
+    the secret, identifier and routing-word patterns were compiled again for
+    every field and source, and a catalog asked Git for every service's HEAD.
+    Patterns are compiled once, and HEAD is asked once per checkout, up to
+    eight at a time (a monorepo's service folders share one; a folder outside
+    any checkout needs no Git process).
+  - `plan --output` onto an existing file says that a saved plan is never
+    replaced instead of `Publication effect changed before write`.
 
 - Keep repository leases and inbox available when an unrelated Linux mount
   has a deleted bind source root or an empty source field. Read only mounts
