@@ -314,11 +314,24 @@ pub fn validate_bank(service: &BankService) -> Result<Vec<String>> {
 pub fn report(service: &BankService) -> Result<(Vec<String>, Vec<String>)> {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
-    let mut files = PublicationFiles::new(&service.context.roots.state)?;
+    let roots = &service.context.roots;
+    let mut files = PublicationFiles::new(&roots.state)?;
     for required in ["memory-bank/README.md", INDEX] {
-        if files.read(required, PLAN_LIMIT)?.is_none() {
-            errors.push(format!("{required}: required file is missing"));
+        if files.read(required, PLAN_LIMIT)?.is_some() {
+            continue;
         }
+        // An attached state holds only the project's memory; the README stays
+        // with the accelerator it is attached from, which is never seeded into
+        // the state. `bank validate` failed every attached project here.
+        if required == "memory-bank/README.md"
+            && roots.attached()
+            && PublicationFiles::new(&roots.tooling)?
+                .read(required, PLAN_LIMIT)?
+                .is_some()
+        {
+            continue;
+        }
+        errors.push(format!("{required}: required file is missing"));
     }
     if !errors.is_empty() {
         return Ok((errors, warnings));
@@ -543,4 +556,61 @@ pub fn write_errors(
         }
     }
     Ok(errors)
+}
+
+#[cfg(test)]
+mod readme_tests {
+    use super::*;
+    use crate::{Roots, RuntimeContext};
+    use std::path::PathBuf;
+
+    struct Directory(PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn readme_errors(roots: Roots) -> Vec<String> {
+        let service = BankService::new(RuntimeContext::new(roots, "local", "governed").unwrap());
+        validate_bank(&service)
+            .unwrap()
+            .into_iter()
+            .filter(|error| error.starts_with("memory-bank/README.md"))
+            .collect()
+    }
+
+    /// An attached state is seeded without the bank's README, which stays with
+    /// the accelerator clone: `bank validate` refused every healthy attached
+    /// project for it. An installed bank still needs its own.
+    #[test]
+    fn an_attached_bank_reads_its_readme_from_the_clone() {
+        let root =
+            std::env::temp_dir().join(format!("infra-bank-readme-{}", crate::domain::uuid4()));
+        let _cleanup = Directory(root.clone());
+        let (tooling, project, state) =
+            (root.join("clone"), root.join("project"), root.join("state"));
+        for folder in [&tooling, &state] {
+            std::fs::create_dir_all(folder.join("memory-bank")).unwrap();
+        }
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(state.join("memory-bank/INDEX.md"), "# Memory Bank Index\n").unwrap();
+        let attached = |tooling: &PathBuf| Roots {
+            tooling: tooling.clone(),
+            project: project.clone(),
+            state: state.clone(),
+            shared: false,
+        };
+        assert_eq!(
+            readme_errors(attached(&tooling)),
+            ["memory-bank/README.md: required file is missing"],
+            "a clone without the README must still fail"
+        );
+        std::fs::write(tooling.join("memory-bank/README.md"), "# Memory Bank\n").unwrap();
+        assert!(readme_errors(attached(&tooling)).is_empty());
+        assert_eq!(
+            readme_errors(Roots::installed(&state).unwrap()),
+            ["memory-bank/README.md: required file is missing"],
+            "an installed bank must keep its own README"
+        );
+    }
 }

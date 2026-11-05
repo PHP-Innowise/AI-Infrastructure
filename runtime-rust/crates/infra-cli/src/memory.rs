@@ -69,7 +69,13 @@ pub fn context(request: &Value) -> Result<RuntimeContext> {
             if !roots.shared && !roots.attached() && served_worktree(&roots.tooling, &project)? {
                 roots.shared = true;
             }
-            if !roots.shared {
+            // Attached, a launcher keeps one state for the project and all its
+            // worktrees. A session it started that entered another worktree is
+            // served there by its hooks, and the save they ask for names that
+            // worktree; state and clone stay where they are.
+            let entered =
+                !roots.shared && roots.attached() && served_worktree(&roots.project, &project)?;
+            if !roots.shared && !entered {
                 return Err(RuntimeError::policy(
                     "--project names neither this project nor a worktree this installation serves",
                 ));
@@ -97,6 +103,7 @@ pub fn context(request: &Value) -> Result<RuntimeContext> {
 /// Whether `project` is the place, in a linked worktree of this installation's
 /// repository, where the installation lies in its main checkout, with no engine
 /// of its own: the worktree these hooks serve when a session works there.
+/// Attached, `tooling` is the attached project, the place the hooks serve from.
 fn served_worktree(tooling: &Path, project: &Path) -> Result<bool> {
     let (Some(mine), Some(theirs)) = (
         infra_core::git::GitFrame::discover(tooling)?,

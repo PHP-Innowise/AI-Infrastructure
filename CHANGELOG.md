@@ -443,6 +443,39 @@ edition's own files remain in that edition's changelog.
   loader folded most of them into "Unsupported handoff metadata schema" and
   said "JSON key must be text" for broken frontmatter. On twin projects nine
   edited handoffs are refused as the retired ones.
+- Launches of one attached project no longer refuse each other. Every launch
+  prepares the project's private state: it re-protects the same files and,
+  from another folder, rewrites the record and the launch files. Started
+  together - Fleet starts its reviewers at once, and a root and a worktree
+  session can start together - one launch stopped with `Private state file
+  changed during protection`, `Private state lock custody changed` or
+  `Publication image changed during read`. A launch now prepares the state
+  under `accelerator-attach.lock` in the state directory, taken before
+  anything there is protected or written. A protection that would not change
+  a file's mode no longer calls `chmod`, which moved the file's change time
+  that every custody check compares, so a running session's hooks no longer
+  fail to read their configuration while another session launches.
+- A launch no longer fails because a running session of the same project
+  wrote its state at that moment. The launch walks the whole state to keep it
+  private, and an entry removed or replaced between the walk's looks - a
+  SQLite journal, a record renamed into place - stopped it with `No such file
+  or directory`, `Private state file changed during admission` or `Private
+  state requires owned ordinary entries`. What is gone needs no protection,
+  and a replacement is examined by the next launch; links, foreign owners and
+  a file replaced while its mode is being repaired are still refused.
+  `eval memory-lifecycle-fuzz --attached`, which prepares the state for every
+  hook event of up to three sessions at once, stopped on every seed before its
+  checks; seeds 1-4 now pass them.
+- An attached project's `bank validate` passes again. Its state holds only the
+  project's memory; the Memory Bank README stays in the accelerator clone the
+  project is attached from, and validation now finds it there instead of
+  failing every healthy attached project with `memory-bank/README.md:
+  required file is missing`.
+- An attached session that entered another worktree of its project saves its
+  turns again: `--project` naming that worktree is accepted, as the hooks
+  that ask for the save serve it there and the retired runtime accepted it.
+  The save was refused with `--project names neither this project nor a
+  worktree this installation serves`.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
