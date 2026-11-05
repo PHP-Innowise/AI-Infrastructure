@@ -823,6 +823,19 @@ fn a_person_may_accept_the_checks_verification_could_not_run() {
         verify["accepted_unrun_checks"],
         json!(["broker_integration"])
     );
+    let handoff: Value =
+        serde_json::from_slice(&fs::read(directory.join("handoff.json")).unwrap()).unwrap();
+    let reported = handoff["reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|report| report["phase"] == "verify")
+        .unwrap();
+    assert_eq!(
+        reported["accepted_unrun_checks"],
+        json!(["broker_integration"]),
+        "the handoff says a person accepted the gaps: {reported:#}"
+    );
     // The accepted receipt keeps the journal valid for later reads.
     let config = root.0.join("system/system.json");
     let services = root.0.join("services");

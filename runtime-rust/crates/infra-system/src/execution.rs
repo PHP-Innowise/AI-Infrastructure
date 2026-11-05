@@ -516,7 +516,11 @@ pub fn reports(directory: &Path, state: &Value) -> Result<Vec<Value>> {
                 return Err(fail("Completed dispatch lacks successful receipt"));
             }
             let report = &receipt["report"];
-            result.push(object!({"phase":step["id"],"summary":string(&report["summary"]).chars().take(1000).collect::<String>(),"checks":report["checks"].as_array().into_iter().flatten().take(10).cloned().collect::<Vec<_>>()}));
+            let mut entry = object!({"phase":step["id"],"summary":string(&report["summary"]).chars().take(1000).collect::<String>(),"checks":report["checks"].as_array().into_iter().flatten().take(10).cloned().collect::<Vec<_>>()});
+            if step["accepted_unrun_checks"].is_array() {
+                entry["accepted_unrun_checks"] = step["accepted_unrun_checks"].clone();
+            }
+            result.push(entry);
         }
     }
     Ok(result)
