@@ -193,6 +193,11 @@ fn run_status(v: &V) -> String {
             m::text(step, "id"),
             receipt_outcome(receipt)
         )),
+        // An executor that stopped (server restart, crash) left no receipt.
+        (Some(step), None) if v["execution"]["error"].is_null() => Some(format!(
+            "{} stopped before it saved a receipt; inspect its folder, then retry it",
+            m::text(step, "id")
+        )),
         _ => v["execution"]["error"].as_str().map(|error| {
             // A journal code reads as words; a sentence is shown as written.
             if error.contains(' ') {
@@ -2718,6 +2723,11 @@ mod display_tests {
         assert_eq!(
             run_status(&stale),
             "blocked · worker blocked or verification incomplete"
+        );
+        let restarted = run(V::Null, json!([]));
+        assert_eq!(
+            run_status(&restarted),
+            "blocked · contracts stopped before it saved a receipt; inspect its folder, then retry it"
         );
         let sentence = run(
             json!("Sources changed between dispatches; prepare new plan"),
