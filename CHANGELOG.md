@@ -354,7 +354,11 @@ edition's own files remain in that edition's changelog.
   nothing for warnings and no rename. On twin projects 55 banks, 53 of them
   broken, now draw the retired report and exit code; only the
   index-conflict hint differs, naming
-  `memory-bank/bin/infra-engine memory reindex-bank`.
+  `memory-bank/bin/infra-engine memory reindex-bank`. A chunk ID that names
+  no chunk is reported as before too: `bank-reverify` says "Memory Bank
+  chunk not found: <ID>", and `bank-retire` or `bank-quarantine` of an ID
+  no chunk file can carry says "Memory Bank retirement identity is
+  invalid"; the native commands said "Invalid memory ID".
 - `memory validate` runs the retired command's whole check again. The native
   command checked records, their relationships and the active handoffs only,
   so a credential stored in a record, a record whose ID does not match its

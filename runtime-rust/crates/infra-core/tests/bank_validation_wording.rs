@@ -203,3 +203,33 @@ fn the_index_and_lineage_are_checked_field_by_field_and_a_retired_chunk_only_war
     // Errors alone decide a write: a warning never blocks one.
     assert_eq!(fixture.bank.validate().unwrap(), errors);
 }
+
+#[test]
+fn a_chunk_id_that_names_no_chunk_is_refused_as_before() {
+    let fixture = Fixture::new();
+    let kept = chunk(1, json!({}));
+    fixture.bank(&[(&kept, text(&kept))], &[&kept]);
+    let missing = fixture
+        .bank
+        .reverify("MEM-20261104-abcdef99", None)
+        .unwrap_err();
+    assert_eq!(
+        missing.message,
+        "Memory Bank chunk not found: MEM-20261104-abcdef99"
+    );
+    let malformed = fixture.bank.reverify("<uncaptured>", None).unwrap_err();
+    assert_eq!(
+        malformed.message,
+        "Memory Bank chunk not found: <uncaptured>"
+    );
+    let quarantined = fixture.bank.quarantine("not-a-memory", None).unwrap_err();
+    assert_eq!(
+        quarantined.message,
+        "Memory Bank retirement identity is invalid"
+    );
+    let retired = fixture
+        .bank
+        .retire("MEM-20261104-abcde001", "someday", None, None)
+        .unwrap_err();
+    assert_eq!(retired.message, "valid_to must be an ISO date (YYYY-MM-DD)");
+}

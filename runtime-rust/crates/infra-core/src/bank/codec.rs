@@ -122,9 +122,12 @@ pub fn paths(service: &BankService) -> Result<Vec<String>> {
     paths.sort();
     Ok(paths)
 }
+/// The chunk an ID names, refused as the retired lookup refused it: an ID no
+/// chunk can carry is not found, like a missing one.
 pub fn find(service: &BankService, id: &str, files: &mut PublicationFiles) -> Result<Chunk> {
+    let missing = || RuntimeError::not_found(format!("Memory Bank chunk not found: {id}"));
     if id.len() > 128 || !id_pattern()?.is_match(id) {
-        return Err(RuntimeError::invalid("Invalid memory ID"));
+        return Err(missing());
     }
     let selected = paths(service)?
         .into_iter()
@@ -138,13 +141,11 @@ pub fn find(service: &BankService, id: &str, files: &mut PublicationFiles) -> Re
         })
         .collect::<Vec<_>>();
     if selected.len() > 1 {
-        return Err(RuntimeError::conflict(
-            "Memory chunk identifier is ambiguous",
-        ));
+        return Err(RuntimeError::conflict(format!(
+            "Memory Bank chunk identifier is ambiguous: {id}"
+        )));
     }
-    let path = selected
-        .first()
-        .ok_or_else(|| RuntimeError::not_found("Memory chunk not found"))?;
+    let path = selected.first().ok_or_else(missing)?;
     let chunk = read(files, path)?;
     if chunk.metadata["id"].as_str() != Some(id) {
         return Err(RuntimeError::invalid(
