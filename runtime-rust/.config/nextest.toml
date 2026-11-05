@@ -30,6 +30,15 @@ platform = 'cfg(windows)'
 filter = 'binary_id(infra-cli::native_generator) & test(=copied_creator_hooks_preserve_framework_union_after_rename)'
 priority = 90
 
+# An evaluation case installs a whole edition into its corpora and runs about
+# fifty Git processes; its fixture allows 120 s. On Windows the outcome seal
+# took 102-104 s and once 122 s, every time beside the other long evaluation
+# case. There each takes both end-to-end slots, so no case runs beside it.
+[[profile.default.overrides]]
+platform = 'cfg(windows)'
+filter = 'binary_id(infra-cli::eval_native_runtime)'
+threads-required = 2
+
 [[profile.default.overrides]]
 filter = 'binary_id(infra-cli::dispatch_custom_guards)'
 test-group = 'engine-copies'

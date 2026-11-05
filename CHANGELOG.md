@@ -494,6 +494,12 @@ edition's own files remain in that edition's changelog.
   native runtime printed the path with backslashes on Windows, and a record
   outside the project by its absolute path, which names the machine's own
   directories; such a record is named by its file alone again.
+- Windows nextest runs each `eval_native_runtime` case alone in both
+  end-to-end slots. The outcome seal's provider-free preparation takes 102-104 s
+  of its fixture's 120 s on the Windows runner, always beside the other long
+  evaluation case, and once took 122 s and failed; on Linux it takes 13-17 s
+  with or without this branch. The case and its deadline are unchanged; Linux
+  scheduling is unchanged.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
