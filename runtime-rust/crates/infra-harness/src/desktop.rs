@@ -37,6 +37,7 @@ pub struct ServerConfig {
     pub state: PathBuf,
     pub port: u16,
     pub timeout: u64,
+    pub session_concurrency: usize,
     pub projects: Vec<PathBuf>,
     pub providers: BTreeMap<String, String>,
 }
@@ -208,6 +209,7 @@ fn options(arguments: &[String], source: &Path) -> Result<(String, ServerConfig)
         state: default_state()?,
         port: 8766,
         timeout: 900,
+        session_concurrency: 1,
         projects: vec![],
         providers: BTreeMap::new(),
     };
@@ -245,12 +247,20 @@ fn options(arguments: &[String], source: &Path) -> Result<(String, ServerConfig)
                     .providers
                     .insert(flag[2..flag.len() - 4].into(), value.clone());
             }
+            "--session-concurrency" => {
+                config.session_concurrency = value
+                    .parse()
+                    .map_err(|_| HarnessError::invalid("Invalid session concurrency (1–4)."))?;
+            }
             _ => return Err(HarnessError::invalid("Unknown server option.")),
         }
         i += 2;
     }
     if !(1..=86400).contains(&config.timeout) {
         return Err(HarnessError::invalid("Invalid timeout (1–86400 seconds)."));
+    }
+    if !(1..=crate::session_scheduler::MAX_CONCURRENCY).contains(&config.session_concurrency) {
+        return Err(HarnessError::invalid("Invalid session concurrency (1–4)."));
     }
     if config.projects.is_empty() {
         let current = std::env::current_dir()?;
@@ -376,27 +386,7 @@ pub fn spawn_engine(config: &ServerConfig, executable: &Path, relaunch: bool) ->
     if log.metadata()?.len() > 256 * 1024 {
         log.set_len(0)?;
     }
-    let mut command = std::process::Command::new(executable);
-    command
-        .args([
-            "serve",
-            if relaunch { "relaunch" } else { "serve" },
-            "--source",
-        ])
-        .arg(&config.source)
-        .arg("--state-dir")
-        .arg(&config.state)
-        .arg("--port")
-        .arg(config.port.to_string())
-        .arg("--timeout")
-        .arg(config.timeout.to_string())
-        .current_dir(&config.source);
-    for project in &config.projects {
-        command.arg("--project").arg(project);
-    }
-    for (provider, executable) in &config.providers {
-        command.arg(format!("--{provider}-bin")).arg(executable);
-    }
+    let mut command = engine_command(config, executable, relaunch);
     command
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone()?)
@@ -423,6 +413,36 @@ pub fn spawn_engine(config: &ServerConfig, executable: &Path, relaunch: bool) ->
     }
     command.spawn()?;
     Ok(())
+}
+fn engine_command(
+    config: &ServerConfig,
+    executable: &Path,
+    relaunch: bool,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(executable);
+    command
+        .args([
+            "serve",
+            if relaunch { "relaunch" } else { "serve" },
+            "--source",
+        ])
+        .arg(&config.source)
+        .arg("--state-dir")
+        .arg(&config.state)
+        .arg("--port")
+        .arg(config.port.to_string())
+        .arg("--timeout")
+        .arg(config.timeout.to_string())
+        .arg("--session-concurrency")
+        .arg(config.session_concurrency.to_string())
+        .current_dir(&config.source);
+    for project in &config.projects {
+        command.arg("--project").arg(project);
+    }
+    for (provider, executable) in &config.providers {
+        command.arg(format!("--{provider}-bin")).arg(executable);
+    }
+    command
 }
 pub async fn server(
     args: &[String],
@@ -738,5 +758,52 @@ pub async fn app(args: &[String], source: &Path, factory: Arc<dyn ServicesFactor
             Ok(0)
         }
         _ => Err(HarnessError::invalid("Unknown application command.")),
+    }
+}
+
+#[cfg(test)]
+mod session_concurrency_tests {
+    use super::*;
+    fn parsed(root: &Path, extra: &[&str]) -> Result<ServerConfig> {
+        let mut arguments = vec![
+            "serve".to_string(),
+            "--project".into(),
+            root.to_string_lossy().into_owned(),
+        ];
+        arguments.extend(extra.iter().map(|s| s.to_string()));
+        options(&arguments, root).map(|(_, config)| config)
+    }
+    #[test]
+    fn concurrency_is_explicit_bounded_and_preserved_in_background_and_relaunch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = infra_core::fs::canonicalize(temporary.path()).unwrap();
+        assert_eq!(parsed(&root, &[]).unwrap().session_concurrency, 1);
+        for (arguments, expected) in [
+            (vec!["--session-concurrency", "1"], 1),
+            (vec!["--session-concurrency=2"], 2),
+            (vec!["--session-concurrency", "4"], 4),
+        ] {
+            let config = parsed(&root, &arguments).unwrap();
+            assert_eq!(config.session_concurrency, expected);
+            for relaunch in [false, true] {
+                let command = engine_command(&config, Path::new("fixture-engine"), relaunch);
+                let args = command
+                    .get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                assert_eq!(args[1], if relaunch { "relaunch" } else { "serve" });
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair == ["--session-concurrency", &expected.to_string()])
+                );
+            }
+        }
+        for value in ["0", "5", "-1", "1.5", "true", "", "184467440737095516160"] {
+            assert!(
+                parsed(&root, &["--session-concurrency", value]).is_err(),
+                "{value}"
+            );
+        }
+        assert!(parsed(&root, &["--session-concurrency"]).is_err());
     }
 }

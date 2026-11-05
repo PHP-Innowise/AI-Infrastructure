@@ -5,6 +5,7 @@ use crate::{
     projects,
     provider::{self, Launch, ProviderDomain},
     services::{Domain, Payload, Reply},
+    session_scheduler::{self, Lease},
     store::{self, SessionStore},
 };
 use rusqlite::{TransactionBehavior, params};
@@ -19,6 +20,9 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+mod inbox_driver;
+#[cfg(test)]
+mod inbox_tests;
 pub type Event = Arc<dyn Fn(Value) -> Result<()> + Send + Sync>;
 pub type RunReply<'a> = Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
 pub trait SpecialWorkflow: Send + Sync {
@@ -49,6 +53,10 @@ struct Job {
     generation: String,
     kind: JobKind,
 }
+pub struct SessionLimits {
+    pub seconds: u64,
+    pub concurrency: usize,
+}
 pub struct Sessions {
     pub store: SessionStore,
     pub source: PathBuf,
@@ -58,11 +66,15 @@ pub struct Sessions {
     pub special: BTreeMap<String, Arc<dyn SpecialWorkflow>>,
     operation: Arc<tokio::sync::Mutex<()>>,
     checks: Mutex<Option<Arc<dyn crate::results::CheckWorkflow>>>,
-    queue: tokio::sync::mpsc::Sender<Job>,
+    queue: session_scheduler::Queue<Job>,
     active: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     held: Mutex<Option<String>>,
     admission: Mutex<()>,
     stopping: Arc<AtomicBool>,
+    queue_wake: Arc<tokio::sync::Notify>,
+    queue_done: Arc<AtomicBool>,
+    inbox_wake: Arc<tokio::sync::Notify>,
+    inbox_done: Arc<AtomicBool>,
     ready: AtomicBool,
     accelerators: Mutex<Option<Arc<crate::accelerators::Accelerators>>>,
     commands: Mutex<Option<Arc<crate::commands::CommandCatalog>>>,
@@ -318,8 +330,11 @@ impl Sessions {
         knowledge: Arc<KnowledgeDomain>,
         blackboards: Arc<dyn BlackboardFactory>,
         special: BTreeMap<String, Arc<dyn SpecialWorkflow>>,
-        default_seconds: u64,
+        limits: SessionLimits,
     ) -> Result<Arc<Self>> {
+        if !(1..=session_scheduler::MAX_CONCURRENCY).contains(&limits.concurrency) {
+            return Err(HarnessError::invalid("Session concurrency must be 1–4."));
+        }
         for name in ["creator", "system_run", "system_discovery"] {
             if !special.contains_key(name) {
                 return Err(HarnessError::invalid(
@@ -327,7 +342,7 @@ impl Sessions {
                 ));
             }
         }
-        let (queue, mut rx) = tokio::sync::mpsc::channel(16);
+        let (queue, rx) = session_scheduler::channel();
         let lifecycle = Arc::new(
             crate::lifecycle::RunnerLifecycle::new(
                 store.clone(),
@@ -350,25 +365,58 @@ impl Sessions {
             held: Mutex::new(None),
             admission: Mutex::new(()),
             stopping: Arc::new(AtomicBool::new(false)),
+            queue_wake: Arc::new(tokio::sync::Notify::new()),
+            queue_done: Arc::new(AtomicBool::new(false)),
+            inbox_wake: Arc::new(tokio::sync::Notify::new()),
+            inbox_done: Arc::new(AtomicBool::new(false)),
             ready: AtomicBool::new(false),
             accelerators: Mutex::new(None),
             commands: Mutex::new(None),
             results: Mutex::new(None),
             lifecycle,
-            default_seconds,
+            default_seconds: limits.seconds,
         });
         let runner = Arc::downgrade(&result);
+        let classifier = runner.clone();
+        let failures = runner.clone();
+        let stopping = result.stopping.clone();
+        let wake = result.queue_wake.clone();
+        let done = result.queue_done.clone();
+        let parallel = limits.concurrency > 1;
         tokio::spawn(async move {
-            while let Some(job) = rx.recv().await {
-                let Some(runner) = runner.upgrade() else {
-                    break;
-                };
-                if runner.stopping.load(Ordering::Acquire) {
-                    break;
-                }
-                runner.execute_job(job).await;
-            }
+            session_scheduler::run(
+                rx,
+                limits.concurrency,
+                stopping,
+                wake,
+                move |job: &Job| {
+                    let runner = classifier.upgrade();
+                    let job = job.clone();
+                    async move {
+                        match runner {
+                            Some(runner) if parallel => runner.job_lease(job).await,
+                            _ => Lease::exclusive(&job.sid),
+                        }
+                    }
+                },
+                move |job, lease| {
+                    let runner = runner.upgrade();
+                    async move {
+                        if let Some(runner) = runner {
+                            Box::pin(runner.execute_job(job, Some(lease))).await;
+                        }
+                    }
+                },
+                move || {
+                    if let Some(runner) = failures.upgrade() {
+                        let _ = runner.close();
+                    }
+                },
+            )
+            .await;
+            done.store(true, Ordering::Release);
         });
+        result.start_inbox();
         Ok(result)
     }
     pub fn admit(&self) -> Result<()> {
@@ -409,6 +457,7 @@ impl Sessions {
     }
     pub fn release(&self) -> Result<()> {
         *lock(&self.held)? = None;
+        self.inbox_wake.notify_one();
         Ok(())
     }
     pub fn cancel(&self, sid: &str) -> Result<Value> {
@@ -425,9 +474,13 @@ impl Sessions {
     }
     pub fn close(&self) -> Result<()> {
         self.stopping.store(true, Ordering::Release);
+        self.queue_wake.notify_one();
+        self.inbox_wake.notify_one();
+        let _admission = lock(&self.admission)?;
         for token in lock(&self.active)?.values() {
             token.store(true, Ordering::Release);
         }
+        self.queue_wake.notify_one();
         Ok(())
     }
     pub fn launch_internal(
@@ -698,6 +751,7 @@ impl Sessions {
             ));
         }
         self.ready.store(true, Ordering::Release);
+        self.inbox_wake.notify_one();
         Ok(())
     }
     pub fn install_accelerators(
@@ -758,7 +812,10 @@ impl Sessions {
     }
     pub async fn wait_closed(&self) -> Result<()> {
         let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !lock(&self.active)?.is_empty() {
+        while !self.queue_done.load(Ordering::Acquire)
+            || !self.inbox_done.load(Ordering::Acquire)
+            || !lock(&self.active)?.is_empty()
+        {
             if std::time::Instant::now() >= until {
                 return Err(HarnessError {
                     status: 503,
@@ -984,11 +1041,120 @@ impl Sessions {
             hook_events: true,
         })
     }
-    async fn execute_job(self: &Arc<Self>, job: Job) {
+    #[cfg(test)]
+    fn repository_lease(&self, job: &Job) -> Result<Lease> {
+        Self::repository_lease_from(&self.store, job)
+    }
+    fn repository_lease_from(store: &SessionStore, job: &Job) -> Result<Lease> {
+        let session = store.get(&job.sid)?;
+        if !matches!(job.kind, JobKind::Run)
+            || session["workflow"] != "native"
+            || session["agents_enabled"] != false
+            || [
+                "brain",
+                "sdd",
+                "fleet",
+                "clash",
+                "creator",
+                "system_run",
+                "system_discovery",
+            ]
+            .iter()
+            .any(|field| !session[*field].is_null())
+        {
+            return Ok(Lease::exclusive(&job.sid));
+        }
+        let recorded = Path::new(session["project_path"].as_str().unwrap_or(""));
+        let workspace = infra_core::fs::canonicalize(recorded)?;
+        if workspace != recorded || !workspace.is_dir() {
+            return Err(HarnessError::conflict("The session workspace changed."));
+        }
+        let frame = infra_core::git::GitFrame::discover(&workspace)?.ok_or_else(|| {
+            HarnessError::conflict("Parallel sessions require a verified Git repository.")
+        })?;
+        let top = infra_core::fs::canonicalize(&frame.top)?;
+        let common = frame.common_dir()?;
+        let saved = session["git_common_dir"]
+            .as_str()
+            .ok_or_else(|| HarnessError::conflict("The session Git identity is unavailable."))?;
+        if top.parent().is_none() || infra_core::fs::canonicalize(saved)? != common {
+            return Err(HarnessError::conflict("The session Git identity changed."));
+        }
+        let images = [&workspace, &top, &common, &frame.admin]
+            .into_iter()
+            .map(|path| {
+                infra_core::fs::native_image(path)?
+                    .map(|image| image.without_contents())
+                    .ok_or_else(|| HarnessError::conflict("The session Git identity disappeared."))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mounts = crate::session_mounts::scopes(&[&workspace, &top, &common, &frame.admin])?;
+        Ok(Lease::repository(&job.sid, &workspace, &top, &common)
+            .with_images(images)
+            .with_mounts(mounts))
+    }
+    async fn job_lease(&self, job: Job) -> Lease {
+        let fallback = Lease::exclusive(&job.sid);
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || Self::repository_lease_from(&store, &job))
+            .await
+            .ok()
+            .and_then(std::result::Result::ok)
+            .unwrap_or(fallback)
+    }
+    fn remove_active(&self, sid: &str, cancel: &Arc<AtomicBool>) {
+        if let Ok(mut active) = lock(&self.active)
+            && active
+                .get(sid)
+                .is_some_and(|held| Arc::ptr_eq(held, cancel))
+        {
+            active.remove(sid);
+        }
+    }
+    fn stop_failed(&self, current: &Arc<AtomicBool>) {
+        self.stopping.store(true, Ordering::Release);
+        let _admission = lock(&self.admission).ok();
+        if let Ok(active) = lock(&self.active) {
+            for token in active.values() {
+                if !Arc::ptr_eq(token, current) {
+                    token.store(true, Ordering::Release);
+                }
+            }
+        }
+        self.queue_wake.notify_one();
+        self.inbox_wake.notify_one();
+    }
+    async fn execute_job(self: &Arc<Self>, job: Job, expected: Option<Lease>) {
         let cancel = Arc::new(AtomicBool::new(false));
-        if let Ok(mut active) = lock(&self.active) {
+        {
+            let Ok(_admission) = lock(&self.admission) else {
+                self.stop_failed(&cancel);
+                return;
+            };
+            if self.stopping.load(Ordering::Acquire) {
+                return;
+            }
+            if let Ok(session) = self.store.get(&job.sid)
+                && self.store.generation(&job.sid).ok().as_ref() == Some(&job.generation)
+                && !active(&session)
+                && session["status"] != "cancelled"
+            {
+                return;
+            }
+            let Ok(mut active) = lock(&self.active) else {
+                self.stopping.store(true, Ordering::Release);
+                self.queue_wake.notify_one();
+                return;
+            };
+            if active.contains_key(&job.sid) {
+                drop(active);
+                drop(_admission);
+                self.stop_failed(&cancel);
+                return;
+            }
             active.insert(job.sid.clone(), cancel.clone());
         }
+        self.inbox_wake.notify_one();
         if let JobKind::Check { check_id, .. } = &job.kind {
             let result = async {
                 let worker = lock(&self.checks)?.clone().ok_or_else(|| {
@@ -1038,17 +1204,34 @@ impl Sessions {
                 .err()
                 .is_some_and(|error| error.code == "cleanup-unconfirmed")
             {
-                self.stopping.store(true, Ordering::Release);
+                self.stop_failed(&cancel);
             }
             if finalize_job(&self.store, &job, &result, &cancel).is_err() {
-                self.stopping.store(true, Ordering::Release);
+                self.stop_failed(&cancel);
             }
-            if let Ok(mut active) = lock(&self.active) {
-                active.remove(&job.sid);
+            if self
+                .store
+                .inbox_settle(&job.sid, &job.generation, false, None)
+                .is_err()
+            {
+                self.stop_failed(&cancel);
             }
+            self.remove_active(&job.sid, &cancel);
+            self.inbox_wake.notify_one();
             return;
         }
-        let result = self.run_job(&job, cancel.clone()).await;
+        let mut native_proof = None;
+        let result = if let Some(expected) = expected.filter(Lease::parallel)
+            && self.job_lease(job.clone()).await != expected
+        {
+            Err(HarnessError::conflict(
+                "The queued repository identity changed; retry this task.",
+            ))
+        } else {
+            // Keep the large native workflow future out of the scheduler's
+            // task frame, including unoptimized builds with a 2 MiB worker stack.
+            Box::pin(self.run_job(&job, cancel.clone(), &mut native_proof)).await
+        };
         // Physical cleanup authority is global and survives replacement of a
         // session generation. It is never filtered by the terminal row CAS.
         if result
@@ -1056,28 +1239,65 @@ impl Sessions {
             .err()
             .is_some_and(|error| error.code == "cleanup-unconfirmed")
         {
-            self.stopping.store(true, Ordering::Release);
+            self.stop_failed(&cancel);
         }
         match finalize_job(&self.store, &job, &result, &cancel) {
             Ok(status) => {
                 if let Ok(results) = self.results() {
                     let _ = results.finish_launch(&job.generation, &status);
                 }
+                if self
+                    .store
+                    .inbox_settle(
+                        &job.sid,
+                        &job.generation,
+                        status == "completed",
+                        native_proof.as_deref(),
+                    )
+                    .is_err()
+                {
+                    self.stop_failed(&cancel);
+                }
             }
             Err(_) => {
-                self.stopping.store(true, Ordering::Release);
+                self.stop_failed(&cancel);
             }
         }
-        if let Ok(mut active) = lock(&self.active) {
-            active.remove(&job.sid);
-        }
+        self.remove_active(&job.sid, &cancel);
+        self.inbox_wake.notify_one();
     }
-    async fn run_job(&self, job: &Job, cancel: Arc<AtomicBool>) -> Result<Value> {
+    async fn run_job(
+        &self,
+        job: &Job,
+        cancel: Arc<AtomicBool>,
+        native_proof: &mut Option<String>,
+    ) -> Result<Value> {
         let mut session = self.store.get(&job.sid)?;
         if session["status"] == "cancelled" || self.store.generation(&job.sid)? != job.generation {
             return Err(HarnessError::conflict(
                 "The queued run is no longer current.",
             ));
+        }
+        let inbox_owned = self.store.inbox_owned(&job.sid, &job.generation)?;
+        let expected_native = if inbox_owned {
+            self.store.inbox_native_guard(&job.sid, &job.generation)?
+        } else {
+            None
+        };
+        if inbox_owned {
+            let lease = self.job_lease(job.clone()).await;
+            self.store.inbox_verify_execution(
+                &job.sid,
+                &job.generation,
+                &inbox_driver::stamp(&lease),
+            )?;
+            if expected_native.is_none()
+                || expected_native.as_deref() != session["native_session_id"].as_str()
+            {
+                return Err(HarnessError::conflict(
+                    "The assigned inbox native identity changed.",
+                ));
+            }
         }
         let requested_workspace = Path::new(session["project_path"].as_str().unwrap_or(""));
         std::fs::metadata(requested_workspace)?;
@@ -1086,13 +1306,14 @@ impl Sessions {
             return Err(HarnessError::forbidden("The session workspace changed."));
         }
         let results = self.results()?;
-        results.baseline(&session).await?;
+        Box::pin(results.baseline(&session)).await?;
         self.store.patch_guarded(
             &job.sid,
             &job.generation,
             &json!({"status":"running"}),
             &cancel,
         )?;
+        self.inbox_wake.notify_one();
         results.start_launch(&job.sid, &job.generation, None)?;
         let store = self.store.clone();
         let sid = job.sid.clone();
@@ -1353,7 +1574,7 @@ impl Sessions {
         let sid = job.sid.clone();
         let generation = job.generation.clone();
         let emit_events = emit.clone();
-        let observed = provider::run_monitored_locked(
+        let observed = Box::pin(provider::run_monitored_locked(
             &launch,
             Limits {
                 seconds: session["budgets"]["seconds"].as_u64(),
@@ -1375,6 +1596,7 @@ impl Sessions {
                         process_control.store(true, Ordering::Release);
                     }
                 }
+                check_inbox_identity(&store, &sid, &generation, &event)?;
                 if event["kind"] == "session"
                     && let Some(native) = event["native_session_id"].as_str()
                 {
@@ -1387,7 +1609,7 @@ impl Sessions {
                 }
                 emit_events(event)
             },
-        )
+        ))
         .await;
         drop(forwarding);
         let observed = observed.map_err(|error| {
@@ -1424,6 +1646,15 @@ impl Sessions {
                 return Err(error);
             }
         };
+        if inbox_owned
+            && (expected_native.is_none()
+                || result.session_id.as_deref() != expected_native.as_deref())
+        {
+            let _ = self.lifecycle.abort(&binding, "failed");
+            return Err(HarnessError::conflict(
+                "The assigned inbox turn has no matching native identity proof.",
+            ));
+        }
         let mut recovery = NativeRecovery {
             adapter,
             human_cancel: cancel.clone(),
@@ -1439,6 +1670,7 @@ impl Sessions {
                     .unwrap_or_else(|| "Native session did not complete.".into()),
             ));
         }
+        *native_proof = result.session_id.clone();
         Ok(
             json!({"kind":"result","ok":true,"text":result.text,"observed_cost_usd":result.cost_usd,"provider_billing":"unknown","memory":memory["memory"],"full_cost":memory["full_cost"]}),
         )
@@ -1539,6 +1771,43 @@ impl Domain for Sessions {
             let sid = request["params"]["session_id"].as_str().unwrap_or("");
             let body = &request["body"];
             let value = match operation {
+                "sessions.inbox_accept" => {
+                    if !store::exact(body, &["request_id", "prompt"], &[]) {
+                        return Err(HarnessError::invalid(
+                            "Inbox requires only request_id and prompt.",
+                        ));
+                    }
+                    let id = body["request_id"]
+                        .as_str()
+                        .ok_or_else(|| HarnessError::invalid("Missing request ID."))?;
+                    let prompt = body["prompt"]
+                        .as_str()
+                        .ok_or_else(|| HarnessError::invalid("Missing prompt."))?;
+                    return Ok(Payload::Json(self.accept_inbox(sid, id, prompt).await?));
+                }
+                "sessions.inbox_list" => {
+                    let before = request["query"]
+                        .get("before")
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .and_then(|text| text.parse::<i64>().ok())
+                                .filter(|cursor| *cursor > 0)
+                                .ok_or_else(|| HarnessError::invalid("Invalid inbox cursor."))
+                        })
+                        .transpose()?;
+                    return Ok(Payload::Json(self.store.inbox_list(sid, before)?));
+                }
+                "sessions.inbox_cancel" => {
+                    if !store::exact(body, &[], &[]) {
+                        return Err(HarnessError::invalid(
+                            "Inbox cancellation requires an empty object.",
+                        ));
+                    }
+                    let id = request["params"]["request_id"].as_str().unwrap_or("");
+                    let _admission = lock(&self.admission)?;
+                    return Ok(Payload::Json(self.store.inbox_cancel(sid, id)?));
+                }
                 "sessions.create" => self.create_ready(self.create_options(body)?)?,
                 "sessions.send" => {
                     let prompt = body["prompt"]
@@ -1656,6 +1925,25 @@ impl Domain for Sessions {
             Ok(Payload::Json(json!({"session":value})))
         })
     }
+}
+
+fn check_inbox_identity(
+    store: &SessionStore,
+    sid: &str,
+    generation: &str,
+    event: &Value,
+) -> Result<()> {
+    if let Some(native) = event["native_session_id"].as_str()
+        && store
+            .inbox_native_guard(sid, generation)?
+            .as_deref()
+            .is_some_and(|expected| expected != native)
+    {
+        return Err(HarnessError::conflict(
+            "The inbox native session identity changed in the provider stream.",
+        ));
+    }
+    Ok(())
 }
 
 fn finalize_job(
@@ -1822,10 +2110,10 @@ pub(crate) mod generation_completion_tests {
         }
     }
     pub(crate) struct Fixture {
-        sessions: Arc<Sessions>,
-        results: Arc<Results>,
-        queue: tokio::sync::mpsc::Receiver<Job>,
-        temporary: tempfile::TempDir,
+        pub(super) sessions: Arc<Sessions>,
+        pub(super) results: Arc<Results>,
+        pub(super) queue: tokio::sync::mpsc::Receiver<session_scheduler::Waiting<Job>>,
+        pub(super) temporary: tempfile::TempDir,
     }
     impl Fixture {
         pub(crate) fn new() -> Self {
@@ -1848,7 +2136,7 @@ pub(crate) mod generation_completion_tests {
                 )
                 .unwrap(),
             );
-            let (queue, receiver) = tokio::sync::mpsc::channel(16);
+            let (queue, receiver) = session_scheduler::channel();
             let sessions = Arc::new(Sessions {
                 store: store.clone(),
                 source: source.clone(),
@@ -1865,6 +2153,10 @@ pub(crate) mod generation_completion_tests {
                 held: Mutex::new(None),
                 admission: Mutex::new(()),
                 stopping,
+                queue_wake: Arc::new(tokio::sync::Notify::new()),
+                queue_done: Arc::new(AtomicBool::new(true)),
+                inbox_wake: Arc::new(tokio::sync::Notify::new()),
+                inbox_done: Arc::new(AtomicBool::new(true)),
                 ready: AtomicBool::new(true),
                 accelerators: Mutex::new(None),
                 commands: Mutex::new(None),
@@ -1941,8 +2233,8 @@ pub(crate) mod generation_completion_tests {
             fixture.sessions.cancel(&sid).unwrap()["status"],
             "cancelled"
         );
-        let job = fixture.queue.recv().await.unwrap();
-        fixture.sessions.execute_job(job).await;
+        let job = fixture.queue.recv().await.unwrap().into_job();
+        fixture.sessions.execute_job(job, None).await;
         assert_eq!(
             fixture.sessions.store.get(&sid).unwrap()["status"],
             "cancelled"
@@ -1951,6 +2243,269 @@ pub(crate) mod generation_completion_tests {
         assert!(!events.iter().any(|event| event["kind"] == "error"));
         assert!(fixture.sessions.active.lock().unwrap().is_empty());
         assert!(!fixture.sessions.stopping.load(Ordering::Acquire));
+    }
+
+    pub(super) fn git_fixture(fixture: &Fixture) -> (String, Job, Lease) {
+        let root = fixture.temporary.path().join("project");
+        assert_eq!(
+            projects::git(&root, &["init".into(), "--quiet".into()], 5)
+                .unwrap()
+                .code,
+            0
+        );
+        let sid = fixture.session("queued");
+        let common = infra_core::git::GitFrame::discover(&root)
+            .unwrap()
+            .unwrap()
+            .common_dir()
+            .unwrap();
+        fixture
+            .sessions
+            .store
+            .patch(&sid, &json!({"git_common_dir":common}))
+            .unwrap();
+        let job = fixture.job(&sid, JobKind::Run);
+        let lease = fixture.sessions.repository_lease(&job).unwrap();
+        assert!(lease.parallel());
+        (sid, job, lease)
+    }
+    #[test]
+    fn parallel_eligibility_requires_plain_native_work_and_fresh_git_identity() {
+        let fixture = Fixture::new();
+        let sid = fixture.session("queued");
+        let unknown = fixture.job(&sid, JobKind::Run);
+        assert!(fixture.sessions.repository_lease(&unknown).is_err());
+        let (sid, job, _) = git_fixture(&fixture);
+        for (field, value, reset) in [
+            ("agents_enabled", json!(true), json!(false)),
+            ("brain", json!({"approved":true}), Value::Null),
+            ("sdd", json!({}), Value::Null),
+            ("fleet", json!({}), Value::Null),
+            ("clash", json!({}), Value::Null),
+            ("creator", json!({}), Value::Null),
+            ("system_run", json!({}), Value::Null),
+            ("system_discovery", json!({}), Value::Null),
+        ] {
+            fixture
+                .sessions
+                .store
+                .patch(&sid, &json!({field:value}))
+                .unwrap();
+            assert!(
+                !fixture.sessions.repository_lease(&job).unwrap().parallel(),
+                "{field}"
+            );
+            fixture
+                .sessions
+                .store
+                .patch(&sid, &json!({field:reset}))
+                .unwrap();
+        }
+        let check = fixture.job(
+            &sid,
+            JobKind::Check {
+                check_id: "check".into(),
+                previous_status: "completed".into(),
+            },
+        );
+        assert!(
+            !fixture
+                .sessions
+                .repository_lease(&check)
+                .unwrap()
+                .parallel()
+        );
+        fixture
+            .sessions
+            .store
+            .connection()
+            .unwrap()
+            .execute("UPDATE sessions SET workflow='review' WHERE id=?1", [&sid])
+            .unwrap();
+        assert!(!fixture.sessions.repository_lease(&job).unwrap().parallel());
+        fixture
+            .sessions
+            .store
+            .connection()
+            .unwrap()
+            .execute("UPDATE sessions SET workflow='native' WHERE id=?1", [&sid])
+            .unwrap();
+        fixture
+            .sessions
+            .store
+            .patch(
+                &sid,
+                &json!({"git_common_dir":fixture.temporary.path().join("source")}),
+            )
+            .unwrap();
+        assert!(fixture.sessions.repository_lease(&job).is_err());
+    }
+    #[tokio::test]
+    async fn changed_queued_identity_fails_before_native_work_and_completed_duplicate_is_ignored() {
+        let fixture = Fixture::new();
+        let (sid, job, lease) = git_fixture(&fixture);
+        fixture
+            .sessions
+            .store
+            .patch(&sid, &json!({"git_common_dir":null}))
+            .unwrap();
+        fixture.sessions.execute_job(job, Some(lease)).await;
+        assert_eq!(
+            fixture.sessions.store.get(&sid).unwrap()["status"],
+            "failed"
+        );
+        assert!(fixture.sessions.active.lock().unwrap().is_empty());
+        let completed = fixture.session("completed");
+        fixture
+            .sessions
+            .execute_job(fixture.job(&completed, JobKind::Run), None)
+            .await;
+        assert_eq!(
+            fixture.sessions.store.get(&completed).unwrap()["status"],
+            "completed"
+        );
+    }
+    #[tokio::test]
+    async fn replaced_git_metadata_at_the_same_path_invalidates_the_queued_lease() {
+        let fixture = Fixture::new();
+        let (sid, job, lease) = git_fixture(&fixture);
+        let root = fixture.temporary.path().join("project");
+        std::fs::rename(root.join(".git"), root.join("previous-git")).unwrap();
+        assert_eq!(
+            projects::git(&root, &["init".into(), "--quiet".into()], 5)
+                .unwrap()
+                .code,
+            0
+        );
+        assert_ne!(fixture.sessions.repository_lease(&job).unwrap(), lease);
+        fixture.sessions.execute_job(job, Some(lease)).await;
+        assert_eq!(
+            fixture.sessions.store.get(&sid).unwrap()["status"],
+            "failed"
+        );
+        assert!(fixture.sessions.active.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn actual_linked_worktrees_and_nested_repositories_conflict() {
+        let fixture = Fixture::new();
+        let (_, _, main) = git_fixture(&fixture);
+        let root = fixture.temporary.path().join("project");
+        let hooks = fixture.temporary.path().join("empty-hooks");
+        std::fs::create_dir(&hooks).unwrap();
+        let config = format!("core.hooksPath={}", hooks.display());
+        let commit = [
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            &config,
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "-m",
+            "fixture",
+        ];
+        assert_eq!(
+            projects::git(&root, &commit.map(String::from), 5)
+                .unwrap()
+                .code,
+            0
+        );
+        let linked = fixture.temporary.path().join("linked");
+        let add = vec![
+            "-c".into(),
+            config,
+            "worktree".into(),
+            "add".into(),
+            "--detach".into(),
+            linked.to_string_lossy().into_owned(),
+        ];
+        assert_eq!(projects::git(&root, &add, 5).unwrap().code, 0);
+        for directory in [linked, root.join("nested")] {
+            if !directory.exists() {
+                std::fs::create_dir(&directory).unwrap();
+                assert_eq!(
+                    projects::git(&directory, &["init".into(), "--quiet".into()], 5)
+                        .unwrap()
+                        .code,
+                    0
+                );
+            }
+            let registered = fixture.sessions.store.register(&directory).unwrap();
+            let row = fixture.sessions.store.create(&json!({"project_id":registered["id"],"provider":"claude","workflow":"native","mode":"plan","agents_enabled":false}), "fixture", &[]).unwrap();
+            let sid = row["id"].as_str().unwrap();
+            let common = infra_core::git::GitFrame::discover(&directory)
+                .unwrap()
+                .unwrap()
+                .common_dir()
+                .unwrap();
+            fixture
+                .sessions
+                .store
+                .patch(sid, &json!({"git_common_dir":common}))
+                .unwrap();
+            let lease = fixture
+                .sessions
+                .repository_lease(&fixture.job(sid, JobKind::Run))
+                .unwrap();
+            assert!(lease.parallel());
+            assert!(main.conflicts(&lease));
+        }
+    }
+    #[tokio::test]
+    async fn close_before_dispatch_and_old_token_removal_cannot_lose_new_ownership() {
+        let fixture = Fixture::new();
+        let sid = fixture.session("queued");
+        let old = Arc::new(AtomicBool::new(false));
+        let replacement = Arc::new(AtomicBool::new(false));
+        fixture
+            .sessions
+            .active
+            .lock()
+            .unwrap()
+            .insert(sid.clone(), replacement.clone());
+        fixture.sessions.remove_active(&sid, &old);
+        assert!(Arc::ptr_eq(
+            fixture.sessions.active.lock().unwrap().get(&sid).unwrap(),
+            &replacement
+        ));
+        fixture.sessions.close().unwrap();
+        assert!(replacement.load(Ordering::Acquire));
+        fixture
+            .sessions
+            .execute_job(fixture.job(&sid, JobKind::Run), None)
+            .await;
+        assert_eq!(
+            fixture.sessions.store.get(&sid).unwrap()["status"],
+            "queued"
+        );
+        fixture.sessions.remove_active(&sid, &replacement);
+        fixture.sessions.wait_closed().await.unwrap();
+    }
+    #[test]
+    fn fatal_cleanup_stops_admission_and_cancels_other_active_work() {
+        let fixture = Fixture::new();
+        let failed = Arc::new(AtomicBool::new(false));
+        let sibling = Arc::new(AtomicBool::new(false));
+        fixture
+            .sessions
+            .active
+            .lock()
+            .unwrap()
+            .insert("failed".into(), failed.clone());
+        fixture
+            .sessions
+            .active
+            .lock()
+            .unwrap()
+            .insert("sibling".into(), sibling.clone());
+        fixture.sessions.stop_failed(&failed);
+        assert!(!failed.load(Ordering::Acquire));
+        assert!(sibling.load(Ordering::Acquire));
+        assert!(fixture.sessions.admit().is_err());
     }
 
     #[tokio::test]
@@ -1973,8 +2528,8 @@ pub(crate) mod generation_completion_tests {
                 .is_ok()
         );
         fixture.sessions.cancel(&sid).unwrap();
-        let job = fixture.queue.recv().await.unwrap();
-        fixture.sessions.execute_job(job).await;
+        let job = fixture.queue.recv().await.unwrap().into_job();
+        fixture.sessions.execute_job(job, None).await;
         assert_eq!(
             fixture.sessions.store.get(&sid).unwrap()["status"],
             "cancelled"
@@ -2184,9 +2739,9 @@ pub(crate) mod generation_completion_tests {
                 ))
                 .is_ok()
         );
-        let job = fixture.queue.recv().await.unwrap();
+        let job = fixture.queue.recv().await.unwrap().into_job();
         let runner = fixture.sessions.clone();
-        let executing = tokio::spawn(async move { runner.execute_job(job).await });
+        let executing = tokio::spawn(async move { runner.execute_job(job, None).await });
         ready.await.unwrap();
         fixture.sessions.cancel(&sid).unwrap();
         fixture

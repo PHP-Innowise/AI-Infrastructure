@@ -10,7 +10,7 @@ use crate::{
     knowledge::KnowledgeDomain,
     provider::ProviderDomain,
     services::{Domain, NativeServices, Services},
-    sessions::{Sessions, SpecialWorkflow},
+    sessions::{SessionLimits, Sessions, SpecialWorkflow},
     store::{self, SessionStore},
     updates::Updates,
 };
@@ -83,6 +83,7 @@ fn bootstrap(
     providers: &ProviderDomain,
     updates: &Updates,
     timeout: u64,
+    concurrency: usize,
     engine: &Value,
 ) -> Result<Value> {
     Ok(
@@ -91,7 +92,7 @@ fn bootstrap(
  "sdd_phases":[{"id":"initialize","name":"Initialize","description":"Create missing project principles and SDD guidance."},{"id":"specify","name":"Specify","description":"Write the feature specification: what and why."},{"id":"plan","name":"Plan","description":"Translate the reviewed specification into a technical plan."},{"id":"tasks","name":"Tasks","description":"Break the reviewed plan into test-first tasks and checkpoints."},{"id":"implement","name":"Implement / resume","description":"Execute the next task group and stop at its checkpoint."},{"id":"review","name":"Review","description":"Check implementation against acceptance criteria without editing files."}],
  "clash":{"workflows":["native","review"],"stages":{"implement":"The first participant implements, the challenger attacks the change, and the implementer fixes or rebuts objections.","review":"The first participant reviews, the challenger reviews independently and disputes findings, and the reviewer defends or withdraws each one."},"max_rounds":3,"default_rounds":2},
  "accelerators":[{"id":"kit1","name":"Kit 1 · Infrastructure Creator","description":"Scan, review, generate and apply a bespoke accelerator; update manifest-owned files."},{"id":"kit2","name":"Kit 2 · Ready-made editions","description":"Lend an edition to sessions from this clone or install its reviewed files into a project.","editions":["Laravel","Symfony","PHP Core","Cms/wordpress"]},{"id":"kit3","name":"Kit 3 · Open Source Kit","description":"Discover community tools and their installation commands."}],
- "runtime":{"engine":engine,"source_version":accelerators.source_version()?,"timeout_seconds":timeout,"max_active":1,"discovery_sandbox":sandbox_problem(providers)?,"max_agents":40,"default_agent_count":3,"context_excerpt_bytes":3000,"fleet":{"available":true,"backend":"native","max_worker_timeout":3600,"lenses":[{"id":"code-reviewer","name":"Code reviewer"},{"id":"security-reviewer","name":"Security reviewer"},{"id":"performance-optimization","name":"Performance optimization"}],"detail":"Durable Rust worker state; existing bounded checkpoint data is imported without executing Python."}}}),
+ "runtime":{"engine":engine,"source_version":accelerators.source_version()?,"timeout_seconds":timeout,"max_active":concurrency,"discovery_sandbox":sandbox_problem(providers)?,"max_agents":40,"default_agent_count":3,"context_excerpt_bytes":3000,"fleet":{"available":true,"backend":"native","max_worker_timeout":3600,"lenses":[{"id":"code-reviewer","name":"Code reviewer"},{"id":"security-reviewer","name":"Security reviewer"},{"id":"performance-optimization","name":"Performance optimization"}],"detail":"Durable Rust worker state; existing bounded checkpoint data is imported without executing Python."}}}),
     )
 }
 impl ServicesFactory for NativeFactory {
@@ -146,7 +147,10 @@ impl ServicesFactory for NativeFactory {
                 knowledge.clone(),
                 blackboards,
                 special,
-                config.timeout,
+                SessionLimits {
+                    seconds: config.timeout,
+                    concurrency: config.session_concurrency,
+                },
             )?;
             links.bind(Arc::downgrade(&sessions))?;
             let accelerators = Arc::new(Accelerators::new(
@@ -250,8 +254,10 @@ impl ServicesFactory for NativeFactory {
             let bp = providers.clone();
             let bu = updates.clone();
             let timeout = config.timeout;
-            let bootstrap =
-                Arc::new(move || bootstrap(&bs, &ba, &bp, &bu, timeout, &runtime_engine));
+            let concurrency = config.session_concurrency;
+            let bootstrap = Arc::new(move || {
+                bootstrap(&bs, &ba, &bp, &bu, timeout, concurrency, &runtime_engine)
+            });
             let closing = sessions.clone();
             let update_close = updates.clone();
             let closer = Arc::new(move || {

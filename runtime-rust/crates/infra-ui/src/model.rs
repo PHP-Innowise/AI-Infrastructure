@@ -145,10 +145,18 @@ pub fn label(s: &str) -> String {
     s.replace(['_', '-'], " ")
 }
 pub fn request_identity() -> String {
+    secure_request_identity().unwrap_or_else(|| format_identity([0; 16]))
+}
+pub fn secure_request_identity() -> Option<String> {
     let mut bytes = [0u8; 16];
-    if let Ok(c) = crate::dom::window().crypto() {
-        let _ = c.get_random_values_with_u8_array(&mut bytes);
-    }
+    crate::dom::window()
+        .crypto()
+        .ok()?
+        .get_random_values_with_u8_array(&mut bytes)
+        .ok()?;
+    Some(format_identity(bytes))
+}
+fn format_identity(mut bytes: [u8; 16]) -> String {
     bytes[6] = (bytes[6] & 15) | 64;
     bytes[8] = (bytes[8] & 63) | 128;
     let h = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();

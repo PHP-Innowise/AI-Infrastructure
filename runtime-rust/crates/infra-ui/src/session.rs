@@ -1,4 +1,4 @@
-use crate::{api, commands, dom, knowledge, management, model as m, run, systems};
+use crate::{api, commands, dom, inbox, knowledge, management, model as m, run, systems};
 use serde_json::{json, Value as V};
 use std::cell::RefCell;
 use wasm_bindgen::{prelude::*, JsCast};
@@ -486,11 +486,12 @@ fn split_budgets(prefix: &str) {
     }
 }
 pub fn controls() {
+    let inbox_retry = inbox::needs_confirmation();
     let (sid, session, locked, ready) = m::read(|s| {
         (
             s.sid.clone(),
             s.selected.clone(),
-            s.pending || m::active(&s.selected),
+            s.pending || m::active(&s.selected) || inbox_retry,
             !s.boot.is_null() && !s.auth_failed,
         )
     });
@@ -519,16 +520,25 @@ pub fn controls() {
         .as_str()
         .map(|x| x.len() <= 120 && !x.starts_with('-') && !x.chars().any(char::is_control))
         .unwrap_or(true);
+    let inbox_active = inbox::eligible(&session);
     let valid = ready
-        && !locked
-        && helper_valid
-        && model_valid
-        && sdd_valid
-        && budget_fields_valid("session-budgets")
-        && valid_budgets(&budgets("session-budgets"))
-        && !prompt.trim().is_empty()
-        && (dry || m::yes(&provider["available"]))
-        && session["workflow"] != "fleet-review";
+        && !m::read(|s| s.pending)
+        && if inbox_retry {
+            true
+        } else if m::active(&session) {
+            inbox::can_send(&session, &prompt) && FILES.with(|files| files.borrow().is_empty())
+        } else {
+            ready
+                && !locked
+                && helper_valid
+                && model_valid
+                && sdd_valid
+                && budget_fields_valid("session-budgets")
+                && valid_budgets(&budgets("session-budgets"))
+                && !prompt.trim().is_empty()
+                && (dry || m::yes(&provider["available"]))
+                && session["workflow"] != "fleet-review"
+        };
     dom::disabled("send", !valid);
     dom::disabled(
         "cancel-session",
@@ -543,6 +553,10 @@ pub fn controls() {
         "send-label",
         if m::read(|s| s.pending) {
             "Sending…"
+        } else if inbox_retry {
+            "Retry saving"
+        } else if inbox_active {
+            "Queue next message"
         } else if sid.is_empty() {
             "Send"
         } else {
@@ -569,6 +583,22 @@ pub fn controls() {
         "attach-files",
     ] {
         dom::disabled(id, !ready || locked);
+    }
+    dom::disabled(
+        "prompt",
+        !ready || m::read(|s| s.pending) || inbox_retry || (m::active(&session) && !inbox_active),
+    );
+    dom::attr(
+        "prompt",
+        "placeholder",
+        if inbox_active {
+            "Write the next message…"
+        } else {
+            "Describe a task or follow-up…"
+        },
+    );
+    if inbox_active || inbox_retry {
+        commands::close();
     }
     dom::hidden("fleet-settings", !fleet);
     let sdd_locked = !ready || locked || session["status"] == "awaiting_context";
@@ -724,6 +754,7 @@ pub fn controls() {
     context_meter(&session);
     result_controls();
     merge_controls();
+    inbox::render();
     run::render();
 }
 pub async fn open_view(view: &str, record: bool) {
@@ -925,6 +956,7 @@ pub fn save_preferences() {
     if m::read(|s| s.restoring || s.boot.is_null()) {
         return;
     }
+    inbox::save_draft();
     let prefs = dom::json_storage(PREFS);
     let project = draft_project(&dom::value("project"));
     let mut fields = json!({});
@@ -1088,6 +1120,7 @@ pub async fn select(id: &str) {
     clear_files();
     dom::clear("events");
     dom::set_value("prompt", "");
+    inbox::restore(id);
     run::reset();
     spawn_local(async {
         open_view("sessions", true).await;
@@ -1108,6 +1141,8 @@ pub async fn select(id: &str) {
 pub fn stop_poll() {
     dom::cancel_timer("session-poll");
     m::next("session-poll");
+    inbox::stop();
+    dom::error("inbox-error", "");
 }
 pub async fn poll(epoch: u64) {
     let (sid, cursor) = m::read(|s| (s.sid.clone(), s.cursor));
@@ -1148,10 +1183,16 @@ pub async fn poll(epoch: u64) {
                     run::observe(event);
                 }
             }
+            inbox::refresh(&sid, epoch).await;
+            if !m::current("session-poll", e)
+                || !m::read(|s| m::selection_matches(&s.sid, s.epoch, &sid, epoch))
+            {
+                return;
+            }
             history();
             controls();
             dom::error("events-error", "");
-            if length == 250 || m::read(|s| m::active(&s.selected)) {
+            if length == 250 || m::read(|s| m::active(&s.selected)) || inbox::watching(&sid) {
                 dom::later(
                     "session-poll",
                     if length == 250 { 0 } else { 1000 },
@@ -1166,7 +1207,9 @@ pub async fn poll(epoch: u64) {
         Ok(_) => {}
         Err(e) if !e.aborted && epoch == m::read(|s| s.epoch) => {
             dom::error("events-error", &e.message);
-            if m::read(|s| m::active(&s.selected)) && ![401, 403, 404].contains(&e.status) {
+            if (m::read(|s| m::active(&s.selected)) || inbox::watching(&sid))
+                && ![401, 403, 404].contains(&e.status)
+            {
                 dom::later("session-poll", 2500, move || {
                     spawn_local(async move {
                         poll(epoch).await;
@@ -1300,6 +1343,17 @@ fn add_files() {
     }
 }
 pub async fn send() {
+    if inbox::needs_confirmation() || m::read(|s| m::active(&s.selected)) {
+        if FILES.with(|files| !files.borrow().is_empty()) {
+            dom::error(
+                "composer-error",
+                "Remove attachments before queueing a plain-text next message.",
+            );
+        } else {
+            inbox::submit().await;
+        }
+        return;
+    }
     if m::read(|s| s.pending || s.auth_failed || s.boot.is_null() || m::active(&s.selected))
         || !dom::validity("session-form")
     {
@@ -1473,6 +1527,9 @@ pub async fn send() {
                 );
             } else {
                 m::upsert(session.clone());
+                if follow {
+                    inbox::clear_draft(&sid, &prompt);
+                }
                 dom::set_value("prompt", "");
                 clear_files();
                 m::write(|s| s.pending = false);
@@ -2520,6 +2577,7 @@ pub async fn event(
             open_view("sessions", true).await;
         }
         "cancel-session" => session_action("cancel", json!({}), "composer-error").await,
+        "inbox-cancel" => inbox::cancel(payload.as_str().unwrap_or("")).await,
         "attach-files" => {
             if let Some(e) =
                 dom::get("attachment-input").and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
