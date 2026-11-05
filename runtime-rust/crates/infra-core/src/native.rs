@@ -89,6 +89,18 @@ pub fn seconds() -> f64 {
 pub fn adapter() -> String {
     result_store::sha(concat!(include_str!("native.rs"), include_str!("review.rs")).as_bytes())
 }
+/// The refusal of a save another writer overtook in a way it cannot follow.
+/// The bare code left the agent to guess; the retired refusal said to stop and
+/// report the held save.
+fn overtaken(code: &str, what: &str) -> RuntimeError {
+    RuntimeError::coded(
+        ErrorKind::Policy,
+        code,
+        format!(
+            "{code}: {what} after this save was requested; nothing was written: report the held save, do not retry it"
+        ),
+    )
+}
 /// The refusal of an input that is not one JSON object. The journal counts
 /// its code; the agent reads what to correct in its one retry, worded as the
 /// retired runtime worded it.
@@ -881,7 +893,11 @@ impl NativeService {
             && normalized.next_steps.as_ref().is_none_or(Vec::is_empty)
             && normalized.learnings.is_empty()
         {
-            return Err(error("nothing-to-record"));
+            return Err(RuntimeError::coded(
+                ErrorKind::Policy,
+                "native-result:nothing-to-record",
+                "native-result:nothing-to-record: no task yet and nothing to start one with; give a progress summary or a learning, or run the command with --skip",
+            ));
         }
         let fresh = (0.0..600.0).contains(&(seconds() - state.updated));
         // Recorded at a task another session created or moved since the
@@ -891,7 +907,10 @@ impl NativeService {
             let task = match self.task(&state.task_id, tasks) {
                 Ok(task) => {
                     if !fresh {
-                        return Err(error("task-changed"));
+                        return Err(overtaken(
+                            "native-result:task-changed",
+                            "the branch task was created",
+                        ));
                     }
                     rebased = true;
                     task
@@ -907,7 +926,10 @@ impl NativeService {
         } else if !begun {
             let task = self.task(&state.task_id, tasks)?;
             if task["id"].as_str() != state.task_uuid.as_deref() {
-                return Err(error("task-changed"));
+                return Err(overtaken(
+                    "native-result:task-changed",
+                    "the branch task was replaced",
+                ));
             }
             if task["revision"].as_u64() != state.revision && fresh {
                 state.revision = task["revision"].as_u64();
@@ -924,16 +946,28 @@ impl NativeService {
         }
         state.digest = Some(digest);
         self.write_state(&slot, &state)?;
-        let result = self.results.record(RecordResult {
-            task_id: task.into(),
-            result_id: format!("native-{}", state.token),
-            revision: Revision::Exact(state.revision.ok_or_else(|| error("invalid-state"))?),
-            data: input.data.clone(),
-            reason: REASON.into(),
-            attestation: "agent".into(),
-            prepared: state.scope.clone(),
-            replay_only: begun,
-        })?;
+        let result = self
+            .results
+            .record(RecordResult {
+                task_id: task.into(),
+                result_id: format!("native-{}", state.token),
+                revision: Revision::Exact(state.revision.ok_or_else(|| error("invalid-state"))?),
+                data: input.data.clone(),
+                reason: REASON.into(),
+                attestation: "agent".into(),
+                prepared: state.scope.clone(),
+                replay_only: begun,
+            })
+            .map_err(|error| {
+                if error.refusal_code() == "memory-result-v1:prepared_stale_no_write" {
+                    overtaken(
+                        "memory-result-v1:prepared_stale_no_write",
+                        "another session or a person saved the task",
+                    )
+                } else {
+                    error
+                }
+            })?;
         let records = result["records"].as_array().cloned().unwrap_or_default();
         state.phase = if records
             .iter()

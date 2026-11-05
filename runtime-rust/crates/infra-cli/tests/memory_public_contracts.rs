@@ -2972,6 +2972,13 @@ fn a_refused_result_says_what_to_correct() {
         let stderr = refusal(&serde_json::to_vec(&result).unwrap());
         assert!(stderr.contains(said), "{said:?} in {stderr}");
     }
+    let stderr = refusal(br#"{"learnings": []}"#);
+    assert!(
+        stderr.contains(
+            "Nothing to record: give a progress summary, next steps or a checked learning"
+        ),
+        "{stderr}"
+    );
     let stderr = refusal(b"{not json");
     assert!(
         stderr.contains("The result must be a JSON object"),

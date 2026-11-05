@@ -308,6 +308,15 @@ edition's own files remain in that edition's changelog.
   Git merge conflict in <file>: keep one side or merge both, without the
   markers; checkpoints wait for it." The native prompt hook refused the
   whole capsule on every turn until the file was repaired.
+- A save from the Stop step that another writer overtook says to stop and
+  report the held save again, as the retired refusal did: "... the branch
+  task was created (or replaced, or another session or a person saved the
+  task) after this save was requested; nothing was written: report the
+  held save, do not retry it". A save that would start no task and record
+  nothing says to give a progress summary or a learning, or to run the
+  command with --skip, and a result with nothing in it asks for "a progress
+  summary, next steps or a checked learning". The native refusals were the
+  bare codes, which left the agent to guess.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

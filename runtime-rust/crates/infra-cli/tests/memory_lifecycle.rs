@@ -855,6 +855,40 @@ fn a_malformed_save_is_refused_with_what_to_correct_and_journaled() {
     );
 }
 
+/// A save that would start no task and record nothing says what to do
+/// instead, as the retired refusal did; its code alone left the agent to
+/// guess.
+#[test]
+fn an_empty_save_before_any_task_says_what_to_do_instead() {
+    let project = Project::new();
+    let base = json!({"session_id": "empty-save", "cwd": project.path});
+    let mut asked = base.clone();
+    asked["hook_event_name"] = "UserPromptSubmit".into();
+    asked["prompt"] = "Where is the ledger?".into();
+    project.hook("codex", "working-memory-read", &asked);
+    let mut stop = base.clone();
+    stop["hook_event_name"] = "Stop".into();
+    stop["stop_hook_active"] = false.into();
+    let stopped = project.hook("codex", "working-memory-write", &stop);
+    let output: Value = serde_json::from_str(stopped.lines().next().unwrap_or(""))
+        .unwrap_or_else(|_| panic!("no Stop continuation: {stopped}"));
+    let command = save_command(output["reason"].as_str().unwrap());
+    let refused = run(
+        project
+            .command("sh")
+            .args(["-c", &command])
+            .stdin(Stdio::piped()),
+        b"{\"verified\": true, \"next_steps\": [], \"learnings\": []}",
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success()
+            && stderr.contains("native-result:nothing-to-record: no task yet and nothing to start one with; give a progress summary or a learning, or run the command with --skip"),
+        "{}",
+        described(&refused)
+    );
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(

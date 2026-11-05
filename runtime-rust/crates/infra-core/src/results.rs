@@ -710,7 +710,7 @@ impl ResultService {
         if progress.is_none() && next_steps.is_none() && learnings.is_empty() {
             return Err(refused(
                 "nothing",
-                "Nothing to record: give progress, next steps or a checked learning",
+                "Nothing to record: give a progress summary, next steps or a checked learning",
             ));
         }
         Ok(NormalizedResult {
