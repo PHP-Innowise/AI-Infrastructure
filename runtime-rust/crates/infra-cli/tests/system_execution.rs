@@ -867,3 +867,24 @@ fn a_failed_verification_check_cannot_be_accepted() {
         "{text}"
     );
 }
+
+#[test]
+fn a_worker_that_exits_with_an_error_says_why_in_its_receipt_and_the_run() {
+    let root = Root::new();
+    let (code, summary, directory) = run_script(
+        &root.0,
+        r#"echo 'Not signed in: run the CLI login first'; exit 1"#,
+        "read-only",
+    );
+    assert_eq!(code, 1, "{summary:#}");
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(directory.join("contracts-a1.json")).unwrap()).unwrap();
+    assert_eq!(receipt["error"], "worker_exit_failure");
+    assert_eq!(receipt["failure"], "Not signed in: run the CLI login first");
+    let journal: Value =
+        serde_json::from_slice(&fs::read(directory.join("run.json")).unwrap()).unwrap();
+    assert_eq!(
+        journal["error"],
+        "The command CLI exited with code 1: Not signed in: run the CLI login first"
+    );
+}

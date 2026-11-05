@@ -167,7 +167,7 @@ impl SystemManager {
                     if step["attempt"].as_u64().unwrap_or(0) > 0
                         && let Some(receipt) = read(&receipt_name(step))?
                     {
-                        receipts.push(object!({"phase":step["id"],"service":step["service"],"attempt":step["attempt"],"ok":receipt["ok"],"error":receipt["error"],"rejection":receipt.get("rejection").cloned().unwrap_or(Value::Null),"report":receipt["report"]}));
+                        receipts.push(object!({"phase":step["id"],"service":step["service"],"attempt":step["attempt"],"ok":receipt["ok"],"error":receipt["error"],"rejection":receipt.get("rejection").cloned().unwrap_or(Value::Null),"failure":receipt.get("failure").cloned().unwrap_or(Value::Null),"report":receipt["report"]}));
                     }
                 }
                 result["receipts"] = object!(receipts);

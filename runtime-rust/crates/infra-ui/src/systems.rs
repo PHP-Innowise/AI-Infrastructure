@@ -522,6 +522,9 @@ fn receipt_outcome(receipt: &V) -> String {
             }
         }
     }
+    if let Some(failure) = receipt["failure"].as_str() {
+        return format!("the agent CLI failed: {failure}");
+    }
     match receipt["error"].as_str() {
         Some(error) => format!("blocked: {}", m::label(error)),
         None => "blocked".into(),
@@ -2615,6 +2618,13 @@ mod display_tests {
         assert_eq!(
             receipt_outcome(&json!({"ok":false,"error":"worker_exit_failure","report":null})),
             "blocked: worker exit failure"
+        );
+        assert_eq!(
+            receipt_outcome(
+                &json!({"ok":false,"error":"worker_exit_failure","report":null,
+                "failure":"Failed to authenticate: OAuth session expired"})
+            ),
+            "the agent CLI failed: Failed to authenticate: OAuth session expired"
         );
     }
     #[test]

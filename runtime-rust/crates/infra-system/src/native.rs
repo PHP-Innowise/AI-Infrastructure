@@ -257,6 +257,61 @@ pub fn launch(
     }
     Ok((argv, environment, input))
 }
+/// Why a worker CLI exited non-zero, in its own words: the message of its
+/// last error or failed result event (an expired sign-in, a usage limit),
+/// else its last plain output line. Bounded, and withheld if it looks like a
+/// secret. A receipt used to keep only `worker_exit_failure`.
+pub fn worker_failure(raw: &[u8], provider: &str) -> Option<String> {
+    let generic = [
+        "Provider error",
+        "Provider run failed",
+        "Assistant request failed",
+    ];
+    let (mut said, mut plain) = (None, None);
+    for line in raw
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+    {
+        match parse_json(line, 2 * MAX_BYTES)
+            .ok()
+            .filter(Value::is_object)
+        {
+            Some(event) => {
+                for normalized in infra_host::provider::normalize(provider, &event) {
+                    let failed = normalized["kind"] == "error"
+                        || (normalized["kind"] == "result" && normalized["ok"] != true);
+                    if let Some(text) = normalized["text"]
+                        .as_str()
+                        .filter(|text| failed && !text.trim().is_empty())
+                    {
+                        // A specific message outranks a generic one.
+                        if !generic.contains(&text) || said.is_none() {
+                            said = Some(text.to_string());
+                        }
+                    }
+                }
+            }
+            None => plain = Some(String::from_utf8_lossy(line).trim().to_string()),
+        }
+    }
+    let cause = said
+        .or(plain)?
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(300)
+        .collect::<String>();
+    Some(if sensitive(&cause) {
+        "(withheld: the message looks like a secret)".into()
+    } else {
+        cause
+    })
+}
 pub fn worker_result(raw: &[u8], provider: &str) -> Result<Value> {
     if provider == "command" {
         return parse_json(raw, 2 * MAX_BYTES);

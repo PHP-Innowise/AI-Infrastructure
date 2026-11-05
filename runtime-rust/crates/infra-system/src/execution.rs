@@ -476,12 +476,13 @@ pub fn dispatch_receipt(directory: &Path, state: &Value, step: &Value) -> Result
             "ok",
             "report",
         ],
-        &["rejection"],
+        &["rejection", "failure"],
     )?;
-    if receipt
-        .get("rejection")
-        .is_some_and(|rejection| !rejection.is_string() || receipt["ok"] == true)
-    {
+    if ["rejection", "failure"].iter().any(|key| {
+        receipt
+            .get(*key)
+            .is_some_and(|value| !value.is_string() || receipt["ok"] == true)
+    }) {
         return Err(fail("Invalid receipt rejection"));
     }
     if receipt["dispatch_id"] != step["dispatch_id"]
