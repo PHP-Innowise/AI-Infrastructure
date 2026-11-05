@@ -493,10 +493,11 @@ fn find_keeps_wrong_kind_and_unknown_kind_invalid_claimants() {
         .find(alias, Some("finding"), false)
         .unwrap_err()
         .message;
+    // Named from the project root with forward slashes on every system, as
+    // the retired runtime named it.
     assert!(
         refused.starts_with(
-            &"Project Brain record invalid: project-brain/dynamic/zz-claimants/wrong-kind.md: "
-                .replace('/', std::path::MAIN_SEPARATOR_STR)
+            "Project Brain record invalid: project-brain/dynamic/zz-claimants/wrong-kind.md: "
         ),
         "{refused}"
     );
@@ -515,14 +516,11 @@ fn find_keeps_wrong_kind_and_unknown_kind_invalid_claimants() {
     fs::remove_file(brain.dynamic_path(&task).unwrap()).unwrap();
     let invalid = brain.get_task(task_id).unwrap_err();
     assert_eq!(invalid.kind, ErrorKind::InvalidInput);
-    // Separators follow how each side spelled the path, not the record.
     assert_eq!(
-        invalid.message.replace('\\', "/"),
+        invalid.message,
         format!(
-            "Project Brain record invalid: {}: invalid JSON frontmatter",
-            unknown.strip_prefix(&fixture.root).unwrap().display()
+            "Project Brain record invalid: project-brain/dynamic/zz-claimants/{task_id}.md: invalid JSON frontmatter"
         )
-        .replace('\\', "/")
     );
     let second_unknown = fixture.root.join("project-brain/dynamic/zz-more");
     fs::create_dir_all(&second_unknown).unwrap();
