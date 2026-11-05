@@ -124,6 +124,23 @@ pub fn check_changes(
     }
     system.refresh_checkpoint(plan, &accepted)
 }
+/// What a person accepted when resuming a stopped run.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Acceptance {
+    /// Source edits since the checkpoint: a worker's partial edits, or a
+    /// person's own edit of a system-folder source.
+    pub source_changes: bool,
+    /// The checks a completed verification could not run here.
+    pub unrun_checks: bool,
+}
+impl Acceptance {
+    pub fn sources(source_changes: bool) -> Self {
+        Self {
+            source_changes,
+            unrun_checks: false,
+        }
+    }
+}
 fn finish(
     directory: &Path,
     state: &mut Value,
@@ -135,15 +152,24 @@ fn finish(
     let brain = brains
         .get(sid)
         .ok_or_else(|| fail("Missing dispatch Brain"))?;
+    let index = step_index(state, string(&step["id"]))?;
+    let accepted = texts(&state["steps"][index]["accepted_unrun_checks"]);
     brain.progress(
         reference_mut(state, sid)?,
         &format!(
-            "Dispatch {} reported complete: {}",
+            "Dispatch {} reported complete: {}{}",
             string(&step["dispatch_id"]),
-            string(&step["id"])
+            string(&step["id"]),
+            if accepted.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; a person accepted the checks it could not run: {}",
+                    accepted.join(", ")
+                )
+            }
         ),
     )?;
-    let index = step_index(state, string(&step["id"]))?;
     state["steps"][index]["status"] = "completed".into();
     if step["id"] == "contracts" {
         let mut by_id = state["steps"]
@@ -184,7 +210,7 @@ async fn execute_run_context(
     system: &mut System,
     directory: &Path,
     retry: Option<&str>,
-    accept_source_changes: bool,
+    accept: Acceptance,
     cancel: Arc<AtomicBool>,
     runner_lock: Option<Arc<std::fs::File>>,
     adapter: Option<Arc<dyn infra_host::provider::LaunchAdapter>>,
@@ -213,11 +239,16 @@ async fn execute_run_context(
     let result=async{
  let blocked=state["steps"].as_array().into_iter().flatten().find(|step|["running","blocked","interrupted"].contains(&string(&step["status"]))).cloned();
  if let Some(step)=blocked{let receipt=match dispatch_receipt(&directory,&state,&step){Ok(value)=>Some(value),Err(error)if error.kind==ErrorKind::NotFound=>None,Err(error)=>return Err(error)};
- if receipt.as_ref().is_some_and(|receipt|receipt["ok"]==true){let receipt=receipt.ok_or_else(||fail("Receipt disappeared"))?;if system.verify(&plan)?["fresh"]!=true{if !accept_source_changes{return Err(fail("Successful receipt has uncheckpointed edits; inspect and explicitly accept source changes"));}plan=check_changes(system,&plan,Some(&step),Some(&receipt["report"]),&state,true)?;save(&directory,"checkpoint.json",&plan,false)?;}finish(&directory,&mut state,&step,&receipt,&brains)?;retry=None;}
+ let unrun=receipt.as_ref().and_then(|receipt|execution::unrun_checks(receipt,&step));
+ if accept.unrun_checks&&unrun.is_none(){return Err(fail(format!("Only a completed verification whose only gaps are checks it could not run can be accepted; retry {id} instead (CLI: --retry-step {id})",id=string(&step["id"]))));}
+ if accept.unrun_checks&&retry.is_some(){return Err(fail("Accept the checks verification could not run, or retry verification, not both"));}
+ if receipt.as_ref().is_some_and(|receipt|receipt["ok"]==true)||accept.unrun_checks{let receipt=receipt.ok_or_else(||fail("Receipt disappeared"))?;if system.verify(&plan)?["fresh"]!=true{if !accept.source_changes{return Err(fail("Successful receipt has uncheckpointed edits; inspect and explicitly accept source changes"));}plan=check_changes(system,&plan,Some(&step),Some(&receipt["report"]),&state,true)?;save(&directory,"checkpoint.json",&plan,false)?;}
+ if let Some(unrun)=unrun.filter(|_|accept.unrun_checks){let index=step_index(&state,string(&step["id"]))?;state["steps"][index]["accepted_unrun_checks"]=object!(unrun);}finish(&directory,&mut state,&step,&receipt,&brains)?;retry=None;}
  else{if retry.as_deref()!=Some(string(&step["id"])){return Err(fail(format!("Dispatch {id} stopped without a successful receipt and may have changed files; inspect them, then retry {id} explicitly (CLI: --retry-step {id})",id=string(&step["id"]))));}
- if system.verify(&plan)?["fresh"]!=true{if !accept_source_changes{return Err(fail("Partial edits detected; inspect and explicitly accept source changes"));}plan=check_changes(system,&plan,Some(&step),None,&state,true)?;save(&directory,"checkpoint.json",&plan,false)?;}
+ if system.verify(&plan)?["fresh"]!=true{if !accept.source_changes{return Err(fail("Partial edits detected; inspect and explicitly accept source changes"));}plan=check_changes(system,&plan,Some(&step),None,&state,true)?;save(&directory,"checkpoint.json",&plan,false)?;}
  let index=step_index(&state,string(&step["id"]))?;state["steps"][index]["status"]="pending".into();}}
  else if retry.is_some(){return Err(fail("No unfinished dispatch matches the dispatch chosen for retry"));}
+ else if accept.unrun_checks{return Err(fail("No stopped verification has checks to accept"));}
  if system.verify(&plan)?["fresh"]!=true{return Err(fail("Checkpoint sources changed; prepare new plan"));}plan=system.refresh_checkpoint(&plan,&BTreeSet::new())?;
  let ids=brains.keys().cloned().collect::<Vec<_>>();for sid in &ids{let brain=brains.get(sid).ok_or_else(||fail("Missing Brain"))?;let record=brain.ensure(reference_mut(&mut state,sid)?)?;if record["status"]=="completed"&&!texts(&state["closed_tasks"]).contains(sid){if state["steps"].as_array().is_some_and(|steps|steps.iter().any(|step|step["status"]!="completed")){return Err(fail("Native task terminal before worker verification"));}let run=string(&state["run_id"]).to_string();brain.complete(reference_mut(&mut state,sid)?,&run)?;state["closed_tasks"].as_array_mut().ok_or_else(||fail("Closed tasks missing"))?.push(sid.clone().into());}save(&directory,"run.json",&state,false)?;}
  state["status"]="running".into();state["error"]=Value::Null;save(&directory,"run.json",&state,false)?;
@@ -288,7 +319,7 @@ pub async fn execute_run_locked(
         system,
         directory,
         retry,
-        accept,
+        Acceptance::sources(accept),
         cancel,
         runner_lock,
         None,
@@ -315,7 +346,7 @@ pub(crate) async fn drive_run_context(
     system: &mut System,
     directory: &Path,
     retry: Option<&str>,
-    accept: bool,
+    accept: Acceptance,
     cancel: Arc<AtomicBool>,
     runner_lock: Option<Arc<std::fs::File>>,
     adapter: Option<Arc<dyn infra_host::provider::LaunchAdapter>>,
@@ -343,7 +374,7 @@ pub(crate) async fn drive_run_context(
             system,
             directory,
             None,
-            false,
+            Acceptance::default(),
             cancel,
             runner_lock,
             adapter,
@@ -368,7 +399,7 @@ pub async fn drive_run_locked(
         system,
         directory,
         retry,
-        accept,
+        Acceptance::sources(accept),
         cancel,
         runner_lock,
         None,
@@ -381,11 +412,14 @@ pub async fn drive_run(
     system: &mut System,
     directory: &Path,
     retry: Option<&str>,
-    accept: bool,
+    accept: Acceptance,
     cancel: Arc<AtomicBool>,
     event: &mut (impl FnMut(Value) -> Result<()> + Send),
 ) -> Result<Value> {
-    drive_run_locked(system, directory, retry, accept, cancel, None, event).await
+    drive_run_context(
+        system, directory, retry, accept, cancel, None, None, None, event,
+    )
+    .await
 }
 #[expect(
     clippy::too_many_arguments,
@@ -406,7 +440,7 @@ pub async fn drive_run_with_adapter(
         system,
         directory,
         retry,
-        accept,
+        Acceptance::sources(accept),
         cancel,
         runner_lock,
         Some(adapter),

@@ -441,6 +441,33 @@ fn shown_status(step: &V, receipts: &V, active: bool) -> String {
 /// Why a dispatch receipt did or did not complete, naming what to inspect: the
 /// validator's rejection, the agent's own block, the checks that failed (or,
 /// for verification, did not run), or the files a read-only worker wrote.
+/// The checks a stopped verification's current attempt could not run when
+/// nothing else stopped it, as the runner decides them: only those can be
+/// accepted on resume.
+fn unrun_checks(step: &V, receipts: &V) -> Option<Vec<String>> {
+    let receipt = m::array(receipts)
+        .into_iter()
+        .find(|receipt| receipt["phase"] == step["id"] && receipt["attempt"] == step["attempt"])?;
+    let report = &receipt["report"];
+    let checks = m::array(&report["checks"]);
+    let unrun = checks
+        .iter()
+        .filter(|check| check["status"] == "not_run")
+        .map(|check| m::text(check, "name"))
+        .collect::<Vec<_>>();
+    (step["id"] == "verify"
+        && !m::yes(&receipt["ok"])
+        && receipt["error"] == "worker_blocked_or_verification_incomplete"
+        && receipt["rejection"].is_null()
+        && report["status"] == "completed"
+        && m::array(&report["changed_files"]).is_empty()
+        && checks.iter().any(|check| check["status"] == "passed")
+        && checks
+            .iter()
+            .all(|check| matches!(check["status"].as_str(), Some("passed" | "not_run")))
+        && !unrun.is_empty())
+    .then_some(unrun)
+}
 fn receipt_outcome(receipt: &V) -> String {
     if m::yes(&receipt["ok"]) {
         return "completed".into();
@@ -964,13 +991,39 @@ fn render_run() {
         .filter(|_| !reconcilable)
         .map(|step| m::text(step, "id"));
     dom::options("system-retry", &retry, m::summary, preselected.as_deref());
+    let unrun = unfinished
+        .first()
+        .and_then(|step| unrun_checks(step, &v["receipts"]));
+    dom::hidden("system-accept-unrun-field", unrun.is_none());
+    if let Some(names) = &unrun {
+        dom::text(
+            "system-accept-unrun-text",
+            &format!(
+                "I accept the checks verification could not run ({}); resuming completes it without running it again",
+                names.join(", ")
+            ),
+        );
+    } else if let Some(input) = dom::get("system-accept-unrun")
+        .and_then(|input| input.dyn_into::<web_sys::HtmlInputElement>().ok())
+    {
+        input.set_checked(false);
+    }
     dom::rows(
         "system-receipts",
         &m::array(&v["receipts"])
             .iter()
             .map(|receipt| {
                 let mut receipt = receipt.clone();
-                let outcome = receipt_outcome(&receipt);
+                let accepted = steps.iter().any(|step| {
+                    step["id"] == receipt["phase"]
+                        && step["attempt"] == receipt["attempt"]
+                        && step["accepted_unrun_checks"].is_array()
+                });
+                let outcome = if accepted {
+                    format!("{}; a person accepted them", receipt_outcome(&receipt))
+                } else {
+                    receipt_outcome(&receipt)
+                };
                 receipt["title"] = json!(format!(
                     "{} · attempt {} · {}",
                     m::text(&receipt, "phase"),
@@ -2297,7 +2350,10 @@ pub async fn event(
         "system-cancel" => mutate("cancel", json!({})).await,
         "system-resume" => {
             let mut extra = json!({"accept_source_changes":dom::checked("system-accept-changes")});
-            if !dom::value("system-retry").is_empty() {
+            // Accepting the unrun checks completes verification; it is not retried.
+            if dom::checked("system-accept-unrun") {
+                extra["accept_unrun_checks"] = json!(true);
+            } else if !dom::value("system-retry").is_empty() {
                 extra["retry_step"] = json!(dom::value("system-retry"));
             }
             mutate("resume", extra).await;
@@ -2553,6 +2609,35 @@ mod display_tests {
         assert_eq!(shown_status(&blocked, &receipts, false), "blocked");
         let done = json!({"id":"contracts","attempt":1,"status":"completed"});
         assert_eq!(shown_status(&done, &receipts, false), "completed");
+    }
+    #[test]
+    fn only_a_verification_whose_gaps_are_unrun_checks_offers_acceptance() {
+        let step = json!({"id":"verify","attempt":2,"status":"blocked"});
+        let receipt = |checks: V, status: &str| {
+            json!([{"phase":"verify","attempt":2,"ok":false,"error":"worker_blocked_or_verification_incomplete",
+                "rejection":null,"report":{"status":status,"checks":checks,"changed_files":[]}}])
+        };
+        let honest = receipt(
+            json!([{"name":"unit","status":"passed"},{"name":"runtime_integration","status":"not_run"}]),
+            "completed",
+        );
+        assert_eq!(
+            unrun_checks(&step, &honest),
+            Some(vec!["runtime_integration".to_string()])
+        );
+        let failed = receipt(
+            json!([{"name":"unit","status":"failed"},{"name":"runtime_integration","status":"not_run"}]),
+            "completed",
+        );
+        assert_eq!(unrun_checks(&step, &failed), None);
+        let blocked = receipt(json!([{"name":"unit","status":"not_run"}]), "blocked");
+        assert_eq!(unrun_checks(&step, &blocked), None);
+        let nothing_ran = receipt(json!([{"name":"unit","status":"not_run"}]), "completed");
+        assert_eq!(unrun_checks(&step, &nothing_ran), None);
+        let earlier = json!({"id":"verify","attempt":3,"status":"blocked"});
+        assert_eq!(unrun_checks(&earlier, &honest), None);
+        let service = json!({"id":"service-orders","attempt":2,"status":"blocked"});
+        assert_eq!(unrun_checks(&service, &honest), None);
     }
     #[test]
     fn lists_read_as_text() {

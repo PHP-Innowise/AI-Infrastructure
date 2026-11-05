@@ -788,3 +788,69 @@ fn a_saved_plan_is_never_replaced_and_the_refusal_says_so() {
     assert!(text.contains("already exists"), "{text}");
     assert_eq!(fs::read(&plan).unwrap(), saved);
 }
+
+/// Verification passes what it could run and reports one check it could not.
+const UNRUN_GATE: &str = r#"case "$input" in
+  *'"phase":"contracts","previous_receipts"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"phase":"verify","previous_receipts"'*) printf '{"status":"completed","summary":"Verified locally","checks":[{"name":"unit","status":"passed","detail":"ok"},{"name":"broker_integration","status":"not_run","detail":"no broker here"}],"changed_files":[],"service_order":[]}\n' ;;
+  *) report checked '[]' '[]' ;;
+esac"#;
+
+#[test]
+fn a_person_may_accept_the_checks_verification_could_not_run() {
+    let root = Root::new();
+    let (code, summary, directory) = run_script(&root.0, UNRUN_GATE, "read-only");
+    assert_eq!(
+        code, 1,
+        "verification with an unrun check stops the run: {summary:#}"
+    );
+    let (code, _, text) = resume(
+        &root.0,
+        &["--retry-step", "verify", "--accept-unrun-checks"],
+    );
+    assert_eq!(code, 2, "{text}");
+    assert!(text.contains("not both"), "{text}");
+    let (code, summary, text) = resume(&root.0, &["--accept-unrun-checks"]);
+    assert_eq!(code, 0, "{text}");
+    assert_completed(&summary, &directory);
+    let verify = summary["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "verify")
+        .unwrap();
+    assert_eq!(
+        verify["accepted_unrun_checks"],
+        json!(["broker_integration"])
+    );
+    // The accepted receipt keeps the journal valid for later reads.
+    let config = root.0.join("system/system.json");
+    let services = root.0.join("services");
+    let (code, status, text) = cli(
+        &root.0,
+        &[
+            "run-status",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--run-dir",
+            directory.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(status["status"], "completed");
+}
+
+#[test]
+fn a_failed_verification_check_cannot_be_accepted() {
+    let root = Root::new();
+    let (code, summary, _) = run_script(&root.0, REGISTRY_GATE, "read-only");
+    assert_eq!(code, 1, "{summary:#}");
+    let (code, _, text) = resume(&root.0, &["--accept-unrun-checks"]);
+    assert_eq!(code, 2, "{text}");
+    assert!(
+        text.contains("Only a completed verification whose only gaps are checks it could not run"),
+        "{text}"
+    );
+}

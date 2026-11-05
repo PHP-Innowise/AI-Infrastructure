@@ -98,7 +98,7 @@ async fn run_system_context(
             "retry_step",
             "accept_source_changes",
         ],
-        &[],
+        &["accept_unrun_checks"],
     )?;
     if absolute(Path::new(string(&request["directory"])))? != directory {
         return Err(fail("System request directory changed"));
@@ -161,7 +161,7 @@ async fn run_system_context(
         &mut event,
         object!({"kind":"status","text":"Sequential system dispatch started. Progress and receipts are saved after each dispatch."}),
     );
-    let result=runner::drive_run_context(&mut system,&journal,request["retry_step"].as_str(),request["accept_source_changes"]==true,cancel.clone(),runner_lock,adapter.clone(),observer.clone(),&mut|value:Value|{
+    let result=runner::drive_run_context(&mut system,&journal,request["retry_step"].as_str(),runner::Acceptance{source_changes:request["accept_source_changes"]==true,unrun_checks:request["accept_unrun_checks"]==true},cancel.clone(),runner_lock,adapter.clone(),observer.clone(),&mut|value:Value|{
  let kind=string(&value["type"]);match kind{
  "output"=>{if let Some(line)=value["line"].as_str(){signal(&mut agent,AgentSignal::Output{bytes:line.as_bytes().to_vec()});}},
  "dispatch_started"=>signal(&mut agent,AgentSignal::Started{agent:string(&value["phase"]).into(),attempt:value["attempt"].as_u64().unwrap_or(0),cwd:PathBuf::from(string(&value["root"])),details:object!({"service":value["service"],"label":match string(&value["phase"]){"contracts"=>"Contract agent".to_string(),"verify"=>"Verification agent".to_string(),_=>format!("{} agent",string(&value["service"]))},"mode":value["mode"],"provider":provider,"root":value["root"],"dispatch":value["dispatch_id"],"readable":value["readable"],"writable":value["writable"]})}),

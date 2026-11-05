@@ -569,8 +569,17 @@ pub fn validate_state_sync(
         fields(
             step,
             &["id", "service", "mode", "status", "attempt"],
-            &["dispatch_id", "input_sha256"],
+            &["dispatch_id", "input_sha256", "accepted_unrun_checks"],
         )?;
+        if !step["accepted_unrun_checks"].is_null()
+            && (step["id"] != "verify"
+                || step["status"] != "completed"
+                || items(&step["accepted_unrun_checks"], MAX_ITEMS)?
+                    .iter()
+                    .any(|name| !name.is_string() || string(name).chars().count() > 200))
+        {
+            return Err(fail("Invalid accepted verification checks"));
+        }
         let expected_mode = if step["service"] == "__system__" {
             "read-only"
         } else {

@@ -249,6 +249,7 @@
             <h4>Recover an unfinished run</h4><p class="system-note">Inspect the saved receipts and workspace before retrying. Completed dispatches are skipped. An interrupted dispatch may have made partial edits. No agent writes the system folder: to fix a shared contract or document a dispatch reported, edit it yourself, then accept the changes and retry that dispatch.</p>
             <label class="field system-retry-field">Dispatch to retry<select id="system-retry"></select></label>
             <p class="system-note" id="system-resume-note"></p>
+            <label class="checkbox" id="system-accept-unrun-field" hidden><input id="system-accept-unrun" type="checkbox"><span id="system-accept-unrun-text">I accept the checks verification could not run</span></label>
             <div class="system-confirm"><label class="checkbox"><input id="system-accept-changes" type="checkbox">I inspected and accept the source changes since the last checkpoint</label><button type="button" class="button" id="system-resume">Resume saved run</button></div>
           </div>
           <section class="agents-section" id="system-agents-section" aria-labelledby="system-agents-title" hidden>

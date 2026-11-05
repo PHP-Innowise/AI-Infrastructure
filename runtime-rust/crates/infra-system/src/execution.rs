@@ -426,6 +426,41 @@ pub fn success(receipt: &Value, step: &Value) -> bool {
         true
     }
 }
+/// The checks a verification left `not_run` when nothing else stopped it: it
+/// completed, ran and passed at least one check, failed none and wrote
+/// nothing. Verification needs every check passed, so an honest report of a
+/// check this environment cannot run (a container, a live broker) stops the
+/// run until a person accepts those gaps on resume. `None` otherwise.
+pub fn unrun_checks(receipt: &Value, step: &Value) -> Option<Vec<String>> {
+    let report = &receipt["report"];
+    let checks = report["checks"].as_array()?;
+    let unrun = checks
+        .iter()
+        .filter(|check| check["status"] == "not_run")
+        .map(|check| string(&check["name"]).to_string())
+        .collect::<Vec<_>>();
+    (step["id"] == "verify"
+        && receipt["ok"] != true
+        && receipt["returncode"] == 0
+        && receipt["error"] == "worker_blocked_or_verification_incomplete"
+        && receipt["rejection"].is_null()
+        && report["status"] == "completed"
+        && texts(&report["changed_files"]).is_empty()
+        && checks.iter().any(|check| check["status"] == "passed")
+        && checks
+            .iter()
+            .all(|check| matches!(string(&check["status"]), "passed" | "not_run"))
+        && !unrun.is_empty())
+    .then_some(unrun)
+}
+/// A completed step's receipt succeeded, or it is a verification whose unrun
+/// checks a person accepted, exactly as the step records them.
+pub fn completed_receipt(receipt: &Value, step: &Value) -> bool {
+    receipt["ok"] == true
+        || (step["accepted_unrun_checks"].is_array()
+            && unrun_checks(receipt, step)
+                .is_some_and(|unrun| unrun == texts(&step["accepted_unrun_checks"])))
+}
 pub fn dispatch_receipt(directory: &Path, state: &Value, step: &Value) -> Result<Value> {
     let receipt = read_json(directory, &receipt_name(step), MAX_STATE)?;
     fields(
@@ -477,7 +512,7 @@ pub fn reports(directory: &Path, state: &Value) -> Result<Vec<Value>> {
     for step in items(&state["steps"], MAX_SERVICES + 2)? {
         if step["status"] == "completed" {
             let receipt = dispatch_receipt(directory, state, step)?;
-            if receipt["ok"] != true {
+            if !completed_receipt(&receipt, step) {
                 return Err(fail("Completed dispatch lacks successful receipt"));
             }
             let report = &receipt["report"];

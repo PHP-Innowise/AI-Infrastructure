@@ -513,7 +513,17 @@ so when a dispatch reports that a shared contract or document there needs a
 change (a real verification agent found the topic registry missing a new
 consumer), edit it yourself and resume with `--accept-source-changes` and the
 dispatch to repeat: an edit of a system-folder source the plan fingerprints is
-adopted only by such a resume, never during a run. Passports, the system file,
+adopted only by such a resume, never during a run.
+
+Verification passes only when every check it reports passed. A completed
+verification whose only gaps are checks this environment cannot run (`not_run`:
+a framework container, a live broker) stops the run until a person accepts
+those gaps instead of repeating it: resume with `--accept-unrun-checks` (in
+Harness, the recovery checkbox that names them). The verify step then records
+`accepted_unrun_checks` and its native task's progress names them. A failed
+check, a blocked report, a report with no passed check or a reported write is
+never accepted that way, and acceptance cannot be combined with
+`--retry-step`. Passports, the system file,
 commit changes, newly appearing missing sources, expired/ineligible memory and
 changes in other services require a new plan/run. Canonical excerpts are reread before
 launch; editing a saved excerpt does not replace its cited source.

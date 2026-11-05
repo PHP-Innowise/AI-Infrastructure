@@ -138,14 +138,27 @@ pub async fn execute_async(
                             .unwrap_or("service"),
                     )
                     .await?;
-                    runner::drive_run(&mut system, &directory, None, false, cancel, event).await?
+                    runner::drive_run(
+                        &mut system,
+                        &directory,
+                        None,
+                        runner::Acceptance::default(),
+                        cancel,
+                        event,
+                    )
+                    .await?
                 } else if op == "resume" {
                     native::validate_state_sync(&mut system, &directory, true)?;
                     runner::drive_run(
                         &mut system,
                         &directory,
                         arg(request, "retry_step").and_then(Value::as_str),
-                        arg(request, "accept_source_changes") == Some(&Value::Bool(true)),
+                        runner::Acceptance {
+                            source_changes: arg(request, "accept_source_changes")
+                                == Some(&Value::Bool(true)),
+                            unrun_checks: arg(request, "accept_unrun_checks")
+                                == Some(&Value::Bool(true)),
+                        },
                         cancel,
                         event,
                     )

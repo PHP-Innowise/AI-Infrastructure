@@ -133,6 +133,14 @@ edition's own files remain in that edition's changelog.
     resume that accepts source changes now adopts a person's content edit to a
     system-folder source the plan fingerprints (never `system.json`, never
     during a run), and the recovery panel says so.
+  - A completed verification whose only gaps are checks this environment
+    cannot run can be accepted by a person on resume (`--accept-unrun-checks`,
+    or the recovery checkbox that names them) instead of stopping the run for
+    good: the real agent honestly reported Symfony runtime integration
+    `not_run` (no `vendor/` in the lab) on every attempt, so a run could only
+    complete if verification left such checks out. The step records
+    `accepted_unrun_checks`; failed checks, blocked reports and writes are
+    never accepted.
   - A 200-service system answers `validate`, `catalog`, `map`, `locate` and a
     one-hop `plan` in about 25 ms and `verify` in 70 ms instead of 1-2.5 s:
     the secret, identifier and routing-word patterns were compiled again for

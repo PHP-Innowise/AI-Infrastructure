@@ -270,6 +270,7 @@ impl SystemManager {
                 "access",
                 "retry_step",
                 "accept_source_changes",
+                "accept_unrun_checks",
             ],
         )?;
         let mut record = self.record(rid)?;
@@ -283,7 +284,13 @@ impl SystemManager {
             "execute" => vec![
                 "action", "revision", "mode", "timeout", "provider", "access",
             ],
-            "resume" => vec!["action", "revision", "retry_step", "accept_source_changes"],
+            "resume" => vec![
+                "action",
+                "revision",
+                "retry_step",
+                "accept_source_changes",
+                "accept_unrun_checks",
+            ],
             "cancel" => vec!["action", "revision"],
             _ => return Err(fail("Invalid system run action")),
         };
@@ -349,9 +356,9 @@ impl SystemManager {
             if record["session_id"].is_null() || view["status"] == "completed" {
                 return Err(fail("Only unfinished launches can be resumed"));
             }
-            if data
-                .get("accept_source_changes")
-                .is_some_and(|value| !value.is_boolean())
+            if ["accept_source_changes", "accept_unrun_checks"]
+                .iter()
+                .any(|key| data.get(*key).is_some_and(|value| !value.is_boolean()))
             {
                 return Err(fail("Source acknowledgement must be boolean"));
             }
@@ -398,7 +405,7 @@ impl SystemManager {
             .provider(&provider)?
             .ok_or_else(|| fail("Selected system provider CLI is unavailable"))?;
         let nonce = id32();
-        let request = object!({"directory":directory,"system_file":system.config,"allowed_roots":self.state.allowed()?,"provider":provider,"executable":executable,"mode":mode,"timeout":timeout,"access":access,"retry_step":data.get("retry_step"),"accept_source_changes":data["accept_source_changes"]==true});
+        let request = object!({"directory":directory,"system_file":system.config,"allowed_roots":self.state.allowed()?,"provider":provider,"executable":executable,"mode":mode,"timeout":timeout,"access":access,"retry_step":data.get("retry_step"),"accept_source_changes":data["accept_source_changes"]==true,"accept_unrun_checks":data["accept_unrun_checks"]==true});
         create_new(&directory, &format!("request-{nonce}.json"), &request)?;
         record["pending_nonce"] = nonce.clone().into();
         record["provider"] = provider.clone().into();
