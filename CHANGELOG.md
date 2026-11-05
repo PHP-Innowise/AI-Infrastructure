@@ -151,7 +151,12 @@ edition's own files remain in that edition's changelog.
     a fix would need as findings instead of blocking on them; verification
     checks findings, not changes. A real investigation's contract agent found
     the planted `customer_id` defect and then blocked the run on how a fix
-    should look, so neither service was investigated.
+    should look, so neither service was investigated. Its dispatches also
+    complete with failed or unrun checks, which are findings (the payments
+    agent reproduced the defect as a failed check and stopped the run before
+    verification); verification still needs one passed check, and the
+    receipt reads `completed; failed checks are findings: …`. A saved receipt
+    is refused only when it claims a success its rules do not grant.
   - A worker CLI that exits with an error says why: its receipt keeps the
     CLI's own message (`failure`: an expired sign-in, a usage limit, else its
     last plain line; withheld if it looks like a secret), and the run reads

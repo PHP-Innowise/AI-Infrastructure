@@ -402,7 +402,12 @@ pub fn result_schema(selected: &[String]) -> Value {
     let line = |limit| object!({"type":"string","minLength":1,"maxLength":limit,"pattern":r"^[^\x00-\x1f\x7f]+$"});
     object!({"type":"object","additionalProperties":false,"required":["status","summary","checks","changed_files","service_order"],"properties":{"status":{"type":"string","enum":["completed","blocked"]},"summary":line(4000),"checks":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","status","detail"],"properties":{"name":line(200),"status":{"type":"string","enum":["passed","failed","not_run"]},"detail":line(1000)}}},"changed_files":{"type":"array","items":{"type":"string"}},"service_order":{"type":"array","items":{"type":"string","enum":selected}}}})
 }
-pub fn success(receipt: &Value, step: &Value) -> bool {
+/// `investigating` is true in a read-only run. Its dispatches can fix
+/// nothing, so a check that failed (a reproduced defect) or could not run is
+/// a finding of the report, not a reason to stop: a real payments
+/// investigation reproduced the defect it was asked about and stopped the
+/// run before verification. Verification still needs one passed check.
+pub fn success(receipt: &Value, step: &Value, investigating: bool) -> bool {
     let report = &receipt["report"];
     if receipt["returncode"] != 0
         || !receipt["error"].is_null()
@@ -417,6 +422,9 @@ pub fn success(receipt: &Value, step: &Value) -> bool {
         return false;
     }
     let checks = report["checks"].as_array().cloned().unwrap_or_default();
+    if investigating {
+        return step["id"] != "verify" || checks.iter().any(|check| check["status"] == "passed");
+    }
     if checks.iter().any(|check| check["status"] == "failed") {
         return false;
     }
@@ -500,7 +508,11 @@ pub fn dispatch_receipt(directory: &Path, state: &Value, step: &Value) -> Result
             &texts(&state["selected"]),
             access_scope(state),
         )?;
-        if receipt["ok"] != object!(success(&receipt, step)) {
+        // Only an unjustified success is refused: a recorded failure is the
+        // conservative claim, and older receipts recorded stricter rules.
+        if !receipt["ok"].is_boolean()
+            || (receipt["ok"] == true && !success(&receipt, step, state["mode"] == "read-only"))
+        {
             return Err(fail("Invalid receipt success claim"));
         }
     } else if receipt["ok"] == true {

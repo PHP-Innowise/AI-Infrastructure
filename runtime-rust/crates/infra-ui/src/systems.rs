@@ -534,7 +534,20 @@ fn unrun_checks(step: &V, receipts: &V) -> Option<Vec<String>> {
 }
 fn receipt_outcome(receipt: &V) -> String {
     if m::yes(&receipt["ok"]) {
-        return "completed".into();
+        // In an investigation a failed check is a finding of a completed report.
+        let findings = m::array(&receipt["report"]["checks"])
+            .iter()
+            .filter(|check| check["status"] == "failed")
+            .map(|check| m::text(check, "name"))
+            .collect::<Vec<_>>();
+        return if findings.is_empty() {
+            "completed".into()
+        } else {
+            format!(
+                "completed; failed checks are findings: {}",
+                findings.join(", ")
+            )
+        };
     }
     if let Some(rejection) = receipt["rejection"].as_str() {
         return format!("rejected: {rejection}");
@@ -2622,6 +2635,11 @@ mod display_tests {
     #[test]
     fn a_receipt_names_what_stopped_its_dispatch() {
         assert_eq!(receipt_outcome(&json!({"ok":true})), "completed");
+        assert_eq!(
+            receipt_outcome(&json!({"ok":true,"report":{"status":"completed","checks":[
+                {"name":"reproduction","status":"failed"},{"name":"unit","status":"passed"}]}})),
+            "completed; failed checks are findings: reproduction"
+        );
         assert_eq!(
             receipt_outcome(
                 &json!({"ok":false,"error":"invalid_or_sensitive_worker_result",

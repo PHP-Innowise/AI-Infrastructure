@@ -804,10 +804,10 @@ esac"#;
 #[test]
 fn a_person_may_accept_the_checks_verification_could_not_run() {
     let root = Root::new();
-    let (code, summary, directory) = run_script(&root.0, UNRUN_GATE, "read-only");
+    let (code, summary, directory) = run_script(&root.0, UNRUN_GATE, "edit");
     assert_eq!(
         code, 1,
-        "verification with an unrun check stops the run: {summary:#}"
+        "verifying a change with an unrun check stops the run: {summary:#}"
     );
     let (code, _, text) = resume(
         &root.0,
@@ -999,6 +999,28 @@ esac"#;
     assert_eq!(code, 0, "{summary:#}");
     assert_completed(&summary, &directory);
     // An edit run keeps the agreement that may block on missing decisions.
+    let edit = Root::new();
+    let (code, summary, _) = run_script(&edit.0, gate, "edit");
+    assert_eq!(code, 1, "{summary:#}");
+}
+
+#[test]
+fn in_a_read_only_run_a_failed_check_is_a_finding_and_the_run_completes() {
+    // The billing investigation reproduces the defect it was asked about.
+    let gate = r#"case "$input" in
+  *'"phase":"contracts","previous_receipts"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"service":"billing","task"'*) printf '{"status":"completed","summary":"Defect reproduced","checks":[{"name":"reproduction","status":"failed","detail":"the defect is real"},{"name":"unit","status":"passed","detail":"ok"}],"changed_files":[],"service_order":[]}\n' ;;
+  *) report checked '[]' '[]' ;;
+esac"#;
+    let root = Root::new();
+    let (code, summary, directory) = run_script(&root.0, gate, "read-only");
+    assert_eq!(code, 0, "{summary:#}");
+    assert_completed(&summary, &directory);
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(directory.join("service-billing-a1.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["ok"], true);
+    // Implementing a change, the same failed check stops the run.
     let edit = Root::new();
     let (code, summary, _) = run_script(&edit.0, gate, "edit");
     assert_eq!(code, 1, "{summary:#}");

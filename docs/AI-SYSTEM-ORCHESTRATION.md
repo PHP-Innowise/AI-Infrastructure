@@ -31,7 +31,10 @@ sequential workers, bind native Brain tasks and save dispatch receipts. Executio
 defaults to read-only investigation; `--mode edit` authorizes scoped service edits.
 In a read-only run every agent is asked to investigate: the contract agent
 establishes the facts and the order to investigate in, and reports decisions a
-fix would need as findings instead of blocking on them.
+fix would need as findings instead of blocking on them. A read-only dispatch
+can fix nothing, so its failed or unrun checks (a reproduced defect, a missing
+broker) are findings: it completes once it reports and writes nothing, and
+verification needs one passed check.
 The coordinator does not commit, merge or deploy. Capability states and relationships are **declarations**; reading a file
 and hashing it establishes source currency, not correctness or deployment state.
 
