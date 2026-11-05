@@ -828,6 +828,13 @@ impl MemoryService {
                 let mut store = self.open()?;
                 let id = required(&request, "task_id")?;
                 let goal = required(&request, "goal")?;
+                {
+                    let files = list(&request, "files", "file")?;
+                    let sources = list(&request, "sources", "source")?;
+                    let mut values = vec![id, goal];
+                    values.extend(files.iter().chain(&sources).map(String::as_str));
+                    reject_secrets("working task", &values)?;
+                }
                 if self.context.mode == "lightweight" {
                     Ok(serde_json::to_value(store.start(storage::StartTask {
                         task_id: id.into(),
@@ -1080,6 +1087,19 @@ impl MemoryService {
             "brain-get" => brain.get(id()?),
             "brain-create" => {
                 let kind = required(&request, "type")?;
+                {
+                    let lists = ["files", "sources", "conflicts"]
+                        .into_iter()
+                        .zip(["file", "source", "conflict"])
+                        .map(|(key, alias)| list(&request, key, alias))
+                        .collect::<Result<Vec<_>>>()?;
+                    let mut values = vec![
+                        required(&request, "external_id")?,
+                        required(&request, "title")?.trim(),
+                    ];
+                    values.extend(lists.iter().flatten().map(String::as_str));
+                    reject_secrets("Brain record", &values)?;
+                }
                 let authority = text(&request, "authority").unwrap_or("observed");
                 brain.create(crate::CreateRecord {
                     record_type: kind.into(),
@@ -1119,6 +1139,16 @@ impl MemoryService {
                     return Err(RuntimeError::invalid(
                         "Brain record update requires a changed field",
                     ));
+                }
+                {
+                    let lists = ["next_steps", "files", "sources", "conflicts"]
+                        .into_iter()
+                        .zip(["next_step", "file", "source", "conflict"])
+                        .map(|(key, alias)| list(&request, key, alias))
+                        .collect::<Result<Vec<_>>>()?;
+                    let mut values = progress.into_iter().collect::<Vec<_>>();
+                    values.extend(lists.iter().flatten().map(String::as_str));
+                    reject_secrets("Brain record", &values)?;
                 }
                 let record = brain.get(id()?)?;
                 let verifying =
@@ -1221,6 +1251,12 @@ impl MemoryService {
                 flag(&request, "force"),
             ),
             "msg-send" => {
+                {
+                    let refs = list(&request, "refs", "ref")?;
+                    let mut values = vec![text(&request, "body").unwrap_or("")];
+                    values.extend(refs.iter().map(String::as_str));
+                    reject_secrets("message", &values)?;
+                }
                 let task = TaskService::new(self.context.clone(), None).task(task()?, true)?;
                 brain.append_message(
                     task["id"].as_str().unwrap_or(""),
@@ -1308,6 +1344,16 @@ impl MemoryService {
                 "Working task progress must not be empty",
             ));
         }
+        {
+            let lists = ["next_steps", "files", "sources"]
+                .into_iter()
+                .zip(["next_step", "file", "source"])
+                .map(|(key, alias)| list(request, key, alias))
+                .collect::<Result<Vec<_>>>()?;
+            let mut values = progress.into_iter().collect::<Vec<_>>();
+            values.extend(lists.iter().flatten().map(String::as_str));
+            reject_secrets("working task", &values)?;
+        }
         let update = storage::UpdateTask {
             task_id: id.into(),
             progress: progress.map(|progress| progress.trim().to_string()),
@@ -1376,8 +1422,20 @@ impl MemoryService {
         let id = required(request, "task_id")?;
         let outcome = required(request, "outcome")?;
         if self.context.mode == "lightweight" {
+            let files = list(request, "files", "file")?;
+            let verification = list(request, "verification", "verification")?;
+            let sources = list(request, "sources", "source")?;
+            let mut values = vec![text(request, "summary").unwrap_or(""), outcome];
+            values.extend(
+                files
+                    .iter()
+                    .chain(&verification)
+                    .chain(&sources)
+                    .map(String::as_str),
+            );
+            reject_secrets("episode", &values)?;
             return Ok(
-                object!({"episode_id":store.complete(storage::CompleteTask{task_id:id.into(),summary:text(request,"summary").map(String::from),outcome:outcome.into(),files:list(request,"files","file")?,verification:list(request,"verification","verification")?,sources:list(request,"sources","source")?})?}),
+                object!({"episode_id":store.complete(storage::CompleteTask{task_id:id.into(),summary:text(request,"summary").map(String::from),outcome:outcome.into(),files,verification,sources})?}),
             );
         }
         let revision = request["revision"]
@@ -1396,6 +1454,24 @@ impl MemoryService {
         let before = brain.get_task(&binding.task_uuid)?;
         let snapshot = brain.snapshot_record(&binding.task_uuid)?;
         let verification = list(request, "verification", "verification")?;
+        // The episode is checked before the task closes, as the retired
+        // completion recorded it first.
+        {
+            let files = list(request, "files", "file")?;
+            let sources = list(request, "sources", "source")?;
+            let mut values = vec![
+                text(request, "summary").unwrap_or(before["goal"].as_str().unwrap_or("")),
+                outcome,
+            ];
+            values.extend(
+                files
+                    .iter()
+                    .chain(&verification)
+                    .chain(&sources)
+                    .map(String::as_str),
+            );
+            reject_secrets("episode", &values)?;
+        }
         let task = brain.close_task(&binding.task_uuid, outcome, &verification, Some(revision))?;
         let episode = storage::EpisodeInput {
             summary: text(request, "summary")
@@ -1653,6 +1729,18 @@ fn update_expected(request: &Value, record: &Value) -> Result<Option<u64>> {
     } else {
         expected(request, record)
     }
+}
+/// A credential in what a command was given is refused before anything is
+/// written, under the name of what would have held it, as the retired
+/// commands refused it: "possible AWS access key detected; working task not
+/// stored". Personal data is left to the record's own guard.
+fn reject_secrets(label: &str, values: &[&str]) -> Result<()> {
+    if let Some(found) = domain::secret_label(&values.join("\n"))? {
+        return Err(RuntimeError::policy(format!(
+            "possible {found} detected; {label} not stored"
+        )));
+    }
+    Ok(())
 }
 /// Whether every record naming `task_id` is a finished task, so a new task
 /// of that name may move them to the archive. A record that cannot be read

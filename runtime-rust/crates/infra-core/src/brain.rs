@@ -360,13 +360,19 @@ impl BrainRepository {
             input.authority != "verified" || !["agent", "person"].contains(&actor)
         }) {
             return Err(RuntimeError::invalid(
-                "Attestation requires a verified record and agent or person",
+                "attestation says who checked a verified record: agent or person",
             ));
         }
         let mut introduced = vec![input.title.clone()];
         introduced.extend(input.goal.iter().cloned());
         introduced.extend(input.conflicts.clone());
-        guard_shared_text("Record", &introduced)?;
+        // Named as the retired guard named it: "Task record", "Finding record".
+        let mut kind = input.record_type.chars();
+        let label = kind
+            .next()
+            .map(|first| format!("{}{} record", first.to_uppercase(), kind.as_str()))
+            .unwrap_or_else(|| "Record".into());
+        guard_shared_text(&label, &introduced)?;
         let _guard = self.lock()?;
         match self.find(&input.external_id, None, false) {
             Err(error) if error.kind == ErrorKind::NotFound => {}

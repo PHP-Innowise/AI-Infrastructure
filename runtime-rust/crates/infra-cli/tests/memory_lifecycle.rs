@@ -1413,6 +1413,116 @@ fn an_edited_handoff_is_refused_by_what_no_longer_holds() {
     }
 }
 
+/// A credential handed to a command is refused before anything is written,
+/// under the name of what would have held it; personal data in a new task's
+/// goal is refused by the task record's own guard. The words are the retired
+/// ones.
+#[test]
+fn a_credential_is_refused_under_the_name_of_what_would_hold_it() {
+    let project = Project::new();
+    let engine = project.path.join("memory-bank/bin/infra-engine");
+    let refused = |args: &[&str]| {
+        let output = project
+            .command(&engine)
+            .arg("memory")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{}", described(&output));
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    let key = "key AKIAIOSFODNN7EXAMPLE";
+    for (args, refusal) in [
+        (
+            vec!["start", "--task-id", "SHOP-7", "--goal", key],
+            "possible AWS access key detected; working task not stored",
+        ),
+        (
+            vec![
+                "start",
+                "--task-id",
+                "SHOP-7",
+                "--goal",
+                "mail jane.doe@example.com",
+            ],
+            "Task record contains personal data (email address); replace it with a sanitized summary - nothing was stored",
+        ),
+    ] {
+        let stderr = refused(&args);
+        assert!(stderr.contains(refusal), "{args:?}: {stderr}");
+    }
+    let started = project
+        .command(&engine)
+        .args([
+            "memory",
+            "start",
+            "--task-id",
+            "SHOP-7",
+            "--goal",
+            "Fix refunds",
+        ])
+        .output()
+        .unwrap();
+    assert!(started.status.success(), "{}", described(&started));
+    for (args, refusal) in [
+        (
+            vec![
+                "update",
+                "--task-id",
+                "SHOP-7",
+                "--revision",
+                "auto",
+                "--progress",
+                key,
+            ],
+            "possible AWS access key detected; working task not stored",
+        ),
+        (
+            vec![
+                "brain-update",
+                "--record-id",
+                "SHOP-7",
+                "--revision",
+                "1",
+                "--progress",
+                key,
+            ],
+            "possible AWS access key detected; Brain record not stored",
+        ),
+        (
+            vec![
+                "complete",
+                "--task-id",
+                "SHOP-7",
+                "--revision",
+                "1",
+                "--outcome",
+                key,
+            ],
+            "possible AWS access key detected; episode not stored",
+        ),
+        (
+            vec![
+                "msg-send",
+                "--task-id",
+                "SHOP-7",
+                "--from",
+                "main",
+                "--to",
+                "*",
+                "--type",
+                "finding",
+                "--body",
+                key,
+            ],
+            "possible AWS access key detected; message not stored",
+        ),
+    ] {
+        let stderr = refused(&args);
+        assert!(stderr.contains(refusal), "{args:?}: {stderr}");
+    }
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(

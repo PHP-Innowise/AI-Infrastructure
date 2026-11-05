@@ -399,6 +399,17 @@ edition's own files remain in that edition's changelog.
   empty"). The native commands accepted both outside the hook queue: an
   empty update consumed a revision, and an empty progress erased the
   task's. An empty `msg-send` body is refused in the retired words.
+- A credential handed to `start`, `update`, `brain-create`, `brain-update`,
+  `complete` or `msg-send` is refused before anything is written, under the
+  name of what would have held it, as the retired commands refused it:
+  "possible AWS access key detected; working task not stored" (`Brain
+  record`, `episode`, `message`). The native commands left it to the
+  record's guard, which named a generic "Record update" or "Agent message".
+  Personal data in a new record is refused by that guard under the record's
+  type again ("Task record contains personal data (email address)"), and a
+  verified record created without a valid attestation says "attestation
+  says who checked a verified record: agent or person". On twin projects
+  nine such refusals read as the retired ones.
 - A refused `context-save` names what to correct again, as the retired
   command did: the unexpected or missing input fields, the flag a detail
   needs (`--topic is required when --detail topic`), the length limit of the
