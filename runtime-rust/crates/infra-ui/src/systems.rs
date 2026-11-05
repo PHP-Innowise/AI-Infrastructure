@@ -299,6 +299,15 @@ fn controls() {
         "system-discovery-cancel",
         !m::yes(&m::data("discovery-active")),
     );
+    layout();
+}
+/// The empty state stands in for the map and the editor, so it hides while either shows.
+fn layout() {
+    let shown = |id: &str| dom::get(id).is_some_and(|e| !e.has_attribute("hidden"));
+    dom::hidden(
+        "system-empty",
+        shown("system-editor") || shown("system-catalog"),
+    );
 }
 async fn catalog_load() {
     if !sync_editor_target() {
@@ -346,6 +355,125 @@ fn svg(tag: &str, attrs: &[(&str, String)], text: &str) -> web_sys::Element {
     }
     e.set_text_content(Some(text));
     e
+}
+/// The line from a provider node to a consumer node (190×76 boxes on a 236×124
+/// grid). It leaves and enters on the facing sides, so it never crosses its own
+/// two boxes; a pair linked both ways gets two parallel lines; a link that skips
+/// boxes in the same row arcs over them (forward) or under them (backward).
+fn edge_path(a: (usize, usize), b: (usize, usize)) -> String {
+    let (ax, ay) = (a.0 as i64, a.1 as i64);
+    let (bx, by) = (b.0 as i64, b.1 as i64);
+    if a == b {
+        // A service that consumes its own contract: a small loop on its corner.
+        return format!(
+            "M{},{ay} C{},{} {},{} {},{}",
+            ax + 160,
+            ax + 160,
+            ay - 24,
+            ax + 214,
+            ay + 8,
+            ax + 190,
+            ay + 22
+        );
+    }
+    if ay == by {
+        let span = (bx - ax).abs() / 236;
+        let forward = bx > ax;
+        if span <= 1 {
+            let y = ay + if forward { 30 } else { 46 };
+            let (x1, x2) = if forward {
+                (ax + 190, bx)
+            } else {
+                (ax, bx + 190)
+            };
+            return format!("M{x1},{y} L{x2},{y}");
+        }
+        let (x1, x2) = (ax + 95, bx + 95);
+        let (y, bend) = if forward {
+            (ay, ay - 22)
+        } else {
+            (ay + 76, ay + 76 + 22)
+        };
+        return format!("M{x1},{y} Q{},{bend} {x2},{y}", (x1 + x2) / 2);
+    }
+    if by > ay {
+        format!("M{},{} L{},{by}", ax + 80, ay + 76, bx + 80)
+    } else {
+        format!("M{},{ay} L{},{}", ax + 110, bx + 110, by + 76)
+    }
+}
+/// What to do when a plan could not choose its starting services itself.
+fn selection_hint(candidates: &[V]) -> String {
+    if candidates.is_empty() {
+        return "The task matches no declared capability. Choose starting services or changed contracts, then prepare the plan again.".into();
+    }
+    let listed = candidates
+        .iter()
+        .map(|candidate| {
+            let mut terms = m::array(&candidate["matches"])
+                .iter()
+                .flat_map(|matched| m::array(&matched["terms"]))
+                .map(|term| m::string(&term))
+                .collect::<Vec<_>>();
+            terms.sort();
+            terms.dedup();
+            terms.truncate(4);
+            format!("{} ({})", m::text(candidate, "service"), terms.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "The task matches {} services, so none was chosen for you: {listed}. They are now ticked as starting services; adjust them and prepare the plan again.",
+        candidates.len()
+    )
+}
+/// A list of names or paths as running text.
+fn joined(values: &V) -> String {
+    let items = m::array(values).iter().map(m::string).collect::<Vec<_>>();
+    if items.is_empty() {
+        "none".into()
+    } else {
+        items.join(", ")
+    }
+}
+/// A catalog or plan warning as a sentence: who it concerns, what is wrong, where.
+fn warning_text(warning: &V) -> String {
+    if let Some(text) = warning.as_str() {
+        return text.into();
+    }
+    let reason = m::text(warning, "reason");
+    let meaning = match reason.as_str() {
+        "relationships_incomplete" => "dependencies are not confirmed complete",
+        "root_not_allowed" => "the service folder is not registered in Harness",
+        "manifest_unavailable" => "its ai-service.json passport is missing or unreadable",
+        "provider_contract_unavailable" => {
+            "a consumed contract's provider has no readable passport"
+        }
+        "contract_version_mismatch" => "a consumed contract version differs from the provider's",
+        "dependency_cycle" => "declared contract dependencies form a cycle",
+        "impact_depth_exceeded" => "impact search stopped at the depth limit",
+        "source_unavailable_or_ineligible" => "a registered source is missing or not eligible",
+        "source_read_limit" => "source reading stopped at its limit; later sources were left out",
+        _ => "",
+    };
+    let service = m::text(warning, "service");
+    [
+        if service == "__system__" {
+            "System".to_owned()
+        } else {
+            service
+        },
+        if meaning.is_empty() {
+            m::label(&reason)
+        } else {
+            meaning.to_owned()
+        },
+        m::text(warning, "path"),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(": ")
 }
 fn render_catalog(v: &V) {
     let catalog = &v["catalog"];
@@ -450,16 +578,10 @@ fn render_catalog(v: &V) {
             positions.get(&m::text(edge, "provider")),
             positions.get(&m::text(edge, "consumer")),
         ) {
-            let same = a.1 == b.1;
-            let (x1, y1, x2, y2) = if same {
-                (a.0 + 190, a.1 + 38, b.0, b.1 + 38)
-            } else {
-                (a.0 + 95, a.1 + 76, b.0 + 95, b.1)
-            };
             let path = svg(
                 "path",
                 &[
-                    ("d", format!("M{x1},{y1} L{x2},{y2}")),
+                    ("d", edge_path(*a, *b)),
                     ("class", "system-edge".into()),
                     ("marker-end", "url(#system-arrow)".into()),
                 ],
@@ -575,7 +697,7 @@ fn render_catalog(v: &V) {
                         m::text(&cap, "id"),
                         m::text(&cap, "status"),
                         m::text(&cap, "description"),
-                        m::string(&cap["sources"])
+                        joined(&cap["sources"])
                     ),
                 ),
             );
@@ -601,11 +723,27 @@ fn render_catalog(v: &V) {
     }
     dom::clear("system-map");
     dom::append("system-map", &map);
-    dom::rows("system-relationships", &edges);
+    dom::rows(
+        "system-relationships",
+        &edges
+            .iter()
+            .map(|edge| {
+                let mut edge = edge.clone();
+                edge["title"] = json!(format!(
+                    "{} → {} · {} v{}",
+                    m::text(&edge, "provider"),
+                    m::text(&edge, "consumer"),
+                    m::text(&edge, "contract"),
+                    m::text(&edge, "version")
+                ));
+                edge
+            })
+            .collect::<Vec<_>>(),
+    );
     for warning in m::array(&catalog["warnings"]) {
         dom::append(
             "system-relationships",
-            &dom::el("p", "system-warning", &m::string(&warning)),
+            &dom::el("p", "system-warning", &warning_text(&warning)),
         );
     }
     dom::clear("system-banks");
@@ -644,14 +782,22 @@ fn render_run() {
             m::label(v["status"].as_str().unwrap_or("")),
             v["execution"]["error"]
                 .as_str()
-                .map(|s| format!(" · {}", m::label(s)))
+                // A journal code reads as words; a sentence is shown as written.
+                .map(|s| format!(
+                    " · {}",
+                    if s.contains(' ') {
+                        s.to_owned()
+                    } else {
+                        m::label(s)
+                    }
+                ))
                 .unwrap_or_default()
         ),
     );
     dom::pretty("system-plan-json", &v["plan"]);
     dom::clear("system-plan-summary");
     for (term, value) in [
-        ("Participants", m::string(&v["plan"]["context"]["services"])),
+        ("Participants", joined(&v["plan"]["context"]["services"])),
         (
             "Context",
             format!(
@@ -672,7 +818,27 @@ fn render_run() {
     } else {
         m::array(&v["plan"]["steps"])
     };
-    dom::rows("system-flow", &steps);
+    let running = m::yes(&v["active"]);
+    dom::rows(
+        "system-flow",
+        &steps
+            .iter()
+            .map(|step| {
+                let mut step = step.clone();
+                let status = match m::text(&step, "status").as_str() {
+                    // A dispatch the journal left running is not running any more.
+                    "running" if !running => "interrupted".to_owned(),
+                    status => status.to_owned(),
+                };
+                step["title"] = json!([m::text(&step, "id"), m::label(&status)]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · "));
+                step
+            })
+            .collect::<Vec<_>>(),
+    );
     dom::options(
         "system-provider",
         &m::array(&v["providers"]),
@@ -685,9 +851,63 @@ fn render_run() {
     );
     let mut retry =
         vec![json!({"id":"","label":"Reconcile saved receipt / continue pending dispatch"})];
-    retry.extend(steps.into_iter().filter(|s|matches!(s["status"].as_str(),Some("running"|"interrupted"|"blocked"))).map(|s|json!({"id":s["id"],"label":format!("Retry {} · {}",m::text(&s,"id"),m::text(&s,"status"))})));
-    dom::options("system-retry", &retry, m::summary, None);
-    dom::rows("system-receipts", &m::array(&v["receipts"]));
+    let unfinished = steps
+        .iter()
+        .filter(|s| {
+            matches!(
+                s["status"].as_str(),
+                Some("running" | "interrupted" | "blocked")
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    retry.extend(unfinished.iter().map(|s|json!({"id":s["id"],"label":format!("Retry {} · {}",m::text(s,"id"),m::text(s,"status"))})));
+    // Only a successful receipt can be reconciled; without one the dispatch
+    // must be retried, so that is what recovery offers first.
+    let reconcilable = unfinished.first().is_some_and(|step| {
+        m::array(&v["receipts"]).iter().any(|receipt| {
+            receipt["phase"] == step["id"]
+                && receipt["attempt"] == step["attempt"]
+                && m::yes(&receipt["ok"])
+        })
+    });
+    let preselected = unfinished
+        .first()
+        .filter(|_| !reconcilable)
+        .map(|step| m::text(step, "id"));
+    dom::options("system-retry", &retry, m::summary, preselected.as_deref());
+    dom::rows(
+        "system-receipts",
+        &m::array(&v["receipts"])
+            .iter()
+            .map(|receipt| {
+                let mut receipt = receipt.clone();
+                let outcome = if m::yes(&receipt["ok"]) {
+                    "completed".to_owned()
+                } else if let Some(rejection) = receipt["rejection"].as_str() {
+                    // The validator's own reason says what to change in the worker's answer.
+                    format!("rejected: {rejection}")
+                } else if receipt["report"]["status"] == "blocked" {
+                    format!(
+                        "blocked by the agent: {}",
+                        m::text(&receipt["report"], "summary")
+                    )
+                } else {
+                    match receipt["error"].as_str() {
+                        Some(error) => format!("blocked: {}", m::label(error)),
+                        None => "blocked".to_owned(),
+                    }
+                };
+                receipt["title"] = json!(format!(
+                    "{} · attempt {} · {}",
+                    m::text(&receipt, "phase"),
+                    m::string(&receipt["attempt"]),
+                    outcome
+                ));
+                receipt
+            })
+            .collect::<Vec<_>>(),
+    );
     dom::pretty("system-native-tasks", &v["execution"]["tasks"]);
     dom::hidden(
         "system-native-details",
@@ -824,8 +1044,27 @@ async fn plan() {
             let run_generation = m::bind_scope("system-scope", &project, &id);
             let mut value = value;
             value["view_generation"] = json!(run_generation);
+            let needs_selection = value["plan"]["status"] == "needs_selection";
+            let candidates = m::array(&value["plan"]["routing"]["candidates"]);
             m::set("system-run", value);
-            dom::hidden("system-plan-form", true);
+            if needs_selection {
+                // The form stays open with the routed candidates ticked, so the
+                // next plan starts from what the task matched.
+                let wanted = candidates
+                    .iter()
+                    .map(|candidate| m::text(candidate, "service"))
+                    .collect::<Vec<_>>();
+                for e in dom::all("#system-plan-services input[type=checkbox]") {
+                    if let Some(input) = e.dyn_ref::<web_sys::HtmlInputElement>() {
+                        if !input.disabled() {
+                            input.set_checked(wanted.contains(&input.value()));
+                        }
+                    }
+                }
+                dom::text("system-run-message", &selection_hint(&candidates));
+            } else {
+                dom::hidden("system-plan-form", true);
+            }
             dom::set_checked("system-reviewed", false);
             render_run();
         }
@@ -850,6 +1089,7 @@ pub async fn editor_open() {
     }
     if m::yes(&m::data("editor-dirty")) && editor_ready() {
         dom::hidden("system-editor", false);
+        layout();
         return;
     }
     clear_editor_notices();
@@ -898,12 +1138,14 @@ fn field(
     let (required, limit) = constraints;
     let wrap = dom::el(
         "label",
-        if kind == "lines" || kind == "textarea" {
+        if kind == "checkbox" {
+            "checkbox"
+        } else if kind == "lines" || kind == "textarea" {
             "field wide"
         } else {
             "field"
         },
-        label,
+        if kind == "checkbox" { "" } else { label },
     );
     let input = dom::el(
         if !choices.is_empty() {
@@ -948,7 +1190,34 @@ fn field(
         );
     }
     dom::add(&wrap, &input);
+    if kind == "checkbox" {
+        // A checkbox reads as one line: the box, then its statement.
+        dom::add(&wrap, &dom::el("span", "", label));
+    }
     dom::add(parent, &wrap);
+}
+/// A service card is named by its ID; before one is entered, by its folder.
+fn service_title(passport: &V, path: &str) -> String {
+    let id = m::text(passport, "id");
+    if !id.trim().is_empty() {
+        return id;
+    }
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("New service · {name}"))
+        .unwrap_or_else(|| "New service".into())
+}
+/// One-line singular name of a row in an editor section, used in headings and
+/// button names so that "Remove" and "Add" say what they act on.
+fn row_name(kind: &str) -> &'static str {
+    match kind {
+        "capabilities" => "Capability",
+        "provides" => "Provided contract",
+        "consumes" => "Consumed contract",
+        _ => "Source",
+    }
 }
 fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &str) {
     let d = dom::el("details", "system-editor-section", "");
@@ -960,10 +1229,27 @@ fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &s
             &format!("{title} ({})", m::array(values).len()),
         ),
     );
+    let name = row_name(kind);
     for (index, value) in m::array(values).into_iter().enumerate() {
-        let row = dom::el("div", "system-editor-row", "");
+        let item = dom::el("div", "system-editor-row", "");
+        let head = dom::el("div", "system-editor-row-head", "");
         let base = format!("{path}/{index}");
-        dom::add(&row, &dom::el("h6", "", &format!("{title} {}", index + 1)));
+        dom::add(&head, &dom::el("h6", "", &format!("{name} {}", index + 1)));
+        let remove = dom::button(
+            "Remove",
+            "editor-row-remove",
+            json!({"path":path,"index":index}),
+        );
+        let _ = remove.set_attribute("class", "button quiet");
+        let _ = remove.set_attribute(
+            "aria-label",
+            &format!("Remove {} {}", name.to_lowercase(), index + 1),
+        );
+        dom::add(&head, &remove);
+        dom::add(&item, &head);
+        // Field helpers below write into the row's two-column grid.
+        let row = dom::el("div", "system-editor-grid", "");
+        dom::add(&item, &row);
         match kind {
             "capabilities" => {
                 field(
@@ -995,7 +1281,7 @@ fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &s
                 );
                 field(
                     &row,
-                    "Source paths",
+                    "Source paths (one per line)",
                     &value["sources"],
                     &format!("{base}/sources"),
                     "lines",
@@ -1004,7 +1290,7 @@ fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &s
                 );
                 field(
                     &row,
-                    "Routing keywords",
+                    "Routing keywords (one per line)",
                     &value["keywords"],
                     &format!("{base}/keywords"),
                     "lines",
@@ -1042,7 +1328,7 @@ fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &s
                 );
                 field(
                     &row,
-                    "Source paths",
+                    "Source paths (one per line)",
                     &value["sources"],
                     &format!("{base}/sources"),
                     "lines",
@@ -1088,20 +1374,12 @@ fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &s
                 );
             }
         }
-        dom::add(
-            &row,
-            &dom::button(
-                "Remove",
-                "editor-row-remove",
-                json!({"path":path,"index":index}),
-            ),
-        );
-        dom::add(&d, &row);
+        dom::add(&d, &item);
     }
     dom::add(
         &d,
         &dom::button(
-            &format!("Add {}", title.to_lowercase()),
+            &format!("Add {}", name.to_lowercase()),
             "editor-row-add",
             json!({"path":path,"kind":kind}),
         ),
@@ -1128,29 +1406,40 @@ fn render_editor() {
     for (index, service) in m::array(&data["services"]).into_iter().enumerate() {
         let base = format!("/services/{index}/passport");
         let p = &service["passport"];
+        let path = m::text(&service, "path");
         let card = dom::el("section", "system-editor-service", "");
-        dom::add(
-            &card,
-            &dom::el("h5", "", p["id"].as_str().unwrap_or("New service")),
-        );
-        dom::add(
-            &card,
-            &dom::el("p", "system-note", &m::text(&service, "path")),
-        );
+        let head = dom::el("div", "system-editor-service-head", "");
+        let title = dom::el("div", "", "");
+        dom::add(&title, &dom::el("h5", "", &service_title(p, &path)));
+        dom::add(&title, &dom::el("p", "system-note", &path));
+        dom::add(&head, &title);
+        let actions = dom::el("div", "system-editor-service-actions", "");
+        for (label, action, payload) in [
+            (
+                "Choose another folder",
+                "editor-service-folder",
+                json!(index),
+            ),
+            (
+                "Remove service",
+                "editor-row-remove",
+                json!({"path":"/services","index":index}),
+            ),
+        ] {
+            let button = dom::button(label, action, payload);
+            let _ = button.set_attribute("class", "button quiet");
+            dom::add(&actions, &button);
+        }
+        dom::add(&head, &actions);
+        dom::add(&card, &head);
+        let grid = dom::el("div", "system-editor-grid", "");
         for (key, label, kind, required, limit) in [
             ("id", "Service ID", "text", true, 80),
             ("owner", "Owning team", "text", true, 200),
             ("description", "Service description", "textarea", true, 2000),
-            (
-                "relationships_complete",
-                "I have described all known dependencies",
-                "checkbox",
-                false,
-                200,
-            ),
         ] {
             field(
-                &card,
+                &grid,
                 label,
                 &p[key],
                 &format!("{base}/{key}"),
@@ -1159,21 +1448,15 @@ fn render_editor() {
                 (required, limit),
             );
         }
-        dom::add(
+        dom::add(&card, &grid);
+        field(
             &card,
-            &dom::button(
-                "Choose another folder",
-                "editor-service-folder",
-                json!(index),
-            ),
-        );
-        dom::add(
-            &card,
-            &dom::button(
-                "Remove service",
-                "editor-row-remove",
-                json!({"path":"/services","index":index}),
-            ),
+            "I have described all known dependencies",
+            &p["relationships_complete"],
+            &format!("{base}/relationships_complete"),
+            "checkbox",
+            &[],
+            (false, 200),
         );
         for (key, title) in [
             ("capabilities", "Capabilities"),
@@ -1280,7 +1563,30 @@ async fn service_folder(index: Option<u64>) {
     let purpose = index
         .map(|i| format!("service:{i}"))
         .unwrap_or_else(|| "service:".into());
-    management::folder_open(&purpose).await;
+    management::folder_open_at(
+        &purpose,
+        &service_folder_start(index),
+        "Choose a service folder",
+    )
+    .await;
+}
+/// Where the service folder browser opens: the replaced service's own folder; for a
+/// new service, the folder that holds the last added one (services are usually
+/// siblings); for the first, the system folder.
+fn service_folder_start(index: Option<u64>) -> String {
+    let services = m::array(&m::data("editor")["services"]);
+    if let Some(service) = index.and_then(|index| services.get(index as usize)) {
+        return m::text(service, "path");
+    }
+    if let Some(last) = services.last() {
+        let path = m::text(last, "path");
+        if let Some((parent, _)) = path.trim_end_matches(['/', '\\']).rsplit_once(['/', '\\']) {
+            if !parent.is_empty() {
+                return parent.to_owned();
+            }
+        }
+    }
+    m::text(&m::project(&dom::value("system-project")), "path")
 }
 pub async fn add_service(project: &str, index: Option<usize>) {
     let selected = m::take("service-folder-owner");
@@ -1828,7 +2134,14 @@ pub async fn event(
         "system-load" => catalog_load().await,
         "system-refresh" => load().await,
         "system-edit" => editor_open().await,
-        "system-choose-project" => management::folder_open("system-project").await,
+        "system-choose-project" => {
+            management::folder_open_at(
+                "system-project",
+                &m::text(&m::project(&dom::value("system-project")), "path"),
+                "Choose a system folder",
+            )
+            .await
+        }
         "system-editor-add" => service_folder(None).await,
         "editor-service-folder" => service_folder(Some(payload.as_u64().unwrap_or(0))).await,
         "editor-row-remove" => {
@@ -1873,7 +2186,10 @@ pub async fn event(
             changed();
             render_editor();
         }
-        "system-editor-close" => dom::hidden("system-editor", true),
+        "system-editor-close" => {
+            dom::hidden("system-editor", true);
+            layout();
+        }
         "system-editor-discard" => {
             if !m::yes(&m::data("editor-pending")) {
                 clear_editor_notices();
@@ -1895,8 +2211,13 @@ pub async fn event(
             }
             session::open_view("system-changes", true).await;
             dom::hidden("system-plan-form", false);
+            // The form is the next step; "no changes yet" would only repeat it.
+            dom::hidden("system-runs-empty", true);
         }
-        "system-plan-cancel" => dom::hidden("system-plan-form", true),
+        "system-plan-cancel" => {
+            dom::hidden("system-plan-form", true);
+            dom::hidden("system-runs-empty", !dom::value("system-runs").is_empty());
+        }
         "system-execute" => {
             if dom::checked("system-reviewed") {
                 mutate("execute",json!({"provider":dom::value("system-provider"),"mode":dom::value("system-mode"),"access":dom::value("system-access"),"timeout":dom::num("system-timeout")})).await;
@@ -2014,5 +2335,95 @@ mod editor_value_tests {
             );
             assert_eq!(data, before, "{path}");
         }
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    fn segment(path: &str) -> Vec<i64> {
+        path.split(|c: char| !c.is_ascii_digit() && c != '-')
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse().unwrap())
+            .collect()
+    }
+    #[test]
+    fn an_upward_edge_leaves_the_top_of_its_box_and_enters_the_bottom_of_the_target() {
+        // provider in the second row, consumer above it in the first
+        let points = segment(&edge_path((24, 148), (260, 24)));
+        assert_eq!(points[1], 148, "starts at the provider's top edge");
+        assert_eq!(points[3], 24 + 76, "ends at the consumer's bottom edge");
+    }
+    #[test]
+    fn a_downward_edge_leaves_the_bottom_and_enters_the_top() {
+        let points = segment(&edge_path((24, 24), (260, 148)));
+        assert_eq!(points[1], 24 + 76);
+        assert_eq!(points[3], 148);
+    }
+    #[test]
+    fn a_pair_linked_both_ways_gets_two_separate_lines() {
+        let forward = edge_path((24, 24), (260, 24));
+        let backward = edge_path((260, 24), (24, 24));
+        assert_ne!(segment(&forward)[1], segment(&backward)[1]);
+        // each line runs between the facing sides, never across its own boxes
+        assert_eq!(segment(&forward)[0], 24 + 190);
+        assert_eq!(segment(&forward)[2], 260);
+        assert_eq!(segment(&backward)[0], 260);
+        assert_eq!(segment(&backward)[2], 24 + 190);
+    }
+    #[test]
+    fn a_link_that_skips_boxes_in_its_row_arcs_around_them() {
+        assert!(edge_path((24, 24), (496, 24)).contains('Q'));
+        assert!(edge_path((496, 24), (24, 24)).contains('Q'));
+        assert!(!edge_path((24, 24), (260, 24)).contains('Q'));
+    }
+    #[test]
+    fn catalog_warnings_read_as_sentences() {
+        assert_eq!(
+            warning_text(&json!({"service":"orders","reason":"relationships_incomplete"})),
+            "orders: dependencies are not confirmed complete"
+        );
+        assert_eq!(
+            warning_text(&json!({"service":"__system__","reason":"dependency_cycle"})),
+            "System: declared contract dependencies form a cycle"
+        );
+        assert_eq!(
+            warning_text(
+                &json!({"service":"billing","reason":"source_unavailable_or_ineligible","path":"src/a.php"})
+            ),
+            "billing: a registered source is missing or not eligible: src/a.php"
+        );
+        assert_eq!(
+            warning_text(&json!({"service":"x","reason":"new_reason"})),
+            "x: new reason"
+        );
+        assert_eq!(warning_text(&json!("plain text")), "plain text");
+    }
+    #[test]
+    fn a_service_card_is_named_by_its_id_or_else_its_folder() {
+        assert_eq!(
+            service_title(&json!({"id":"orders"}), "/x/orders"),
+            "orders"
+        );
+        assert_eq!(
+            service_title(&json!({"id":""}), "/lab/harbor-payments/"),
+            "New service · harbor-payments"
+        );
+        assert_eq!(service_title(&json!({"id":" "}), ""), "New service");
+    }
+    #[test]
+    fn a_plan_without_services_explains_what_the_task_matched() {
+        let hint = selection_hint(&[
+            json!({"service":"orders","matches":[{"terms":["order","cancel"]},{"terms":["order"]}]}),
+            json!({"service":"payments","matches":[{"terms":["refund"]}]}),
+        ]);
+        assert!(hint.contains("orders (cancel, order)"), "{hint}");
+        assert!(hint.contains("payments (refund)"), "{hint}");
+        assert!(selection_hint(&[]).contains("matches no declared capability"));
+    }
+    #[test]
+    fn lists_read_as_text() {
+        assert_eq!(joined(&json!(["a", "b"])), "a, b");
+        assert_eq!(joined(&json!([])), "none");
     }
 }

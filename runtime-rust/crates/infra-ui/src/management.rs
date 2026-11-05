@@ -46,22 +46,38 @@ pub fn registered(projects: V) {
     }
 }
 pub async fn folder_open(purpose: &str) {
-    m::set("folder-purpose", json!(purpose));
-    dom::dialog("folder-picker", true);
-    folder("", false).await;
+    folder_open_at(purpose, "", "Choose a project folder").await;
 }
-async fn folder(path: &str, query: bool) {
+/// Opens the folder browser at `start` (the home folder when empty) under a title
+/// that names what the chosen folder becomes.
+pub async fn folder_open_at(purpose: &str, start: &str, title: &str) {
+    m::set("folder-purpose", json!(purpose));
+    dom::text("folder-picker-title", title);
+    dom::error("folder-picker-error", "");
+    dom::dialog("folder-picker", true);
+    // A start folder that no longer exists opens the home folder instead.
+    if !folder(start, false).await && !start.is_empty() {
+        dom::error("folder-picker-error", "");
+        folder("", false).await;
+    }
+}
+/// Lists `path`; returns whether the listing was shown.
+async fn folder(path: &str, query: bool) -> bool {
     let body = json!({"query":if query{dom::value("folder-picker-query").trim().to_owned()}else{String::new()},"hidden":dom::checked("folder-picker-hidden")});
     let mut body = body;
     if !path.is_empty() {
         body["path"] = json!(path);
     }
     let epoch = m::next("folder");
+    // A path typed while this listing loads is the person's next request; keep it.
+    let typed = dom::value("folder-picker-location");
     dom::text("folder-picker-status", "Reading folders…");
     match api::post("/api/projects/browse", body).await {
         Ok(v) if m::current("folder", epoch) => {
             m::set("folder", v.clone());
-            dom::set_value("folder-picker-location", &m::text(&v, "path"));
+            if dom::value("folder-picker-location") == typed {
+                dom::set_value("folder-picker-location", &m::text(&v, "path"));
+            }
             dom::text("folder-picker-current", &m::text(&v, "path"));
             dom::clear("folder-picker-list");
             for entry in m::array(&v["entries"]) {
@@ -84,9 +100,13 @@ async fn folder(path: &str, query: bool) {
             );
             dom::disabled("folder-picker-use", v["valid"] == false);
             dom::disabled("folder-picker-parent", v["parent"].is_null());
+            true
         }
-        Ok(_) => {}
-        Err(e) => dom::error("folder-picker-error", &e.message),
+        Ok(_) => false,
+        Err(e) => {
+            dom::error("folder-picker-error", &e.message);
+            false
+        }
     }
 }
 async fn folder_use() {
@@ -1497,9 +1517,15 @@ pub async fn event(
     }
     match action {
         "project-choose-folder" | "welcome-choose-folder" => folder_open("session").await,
-        "folder-enter" => folder(payload.as_str().unwrap_or(""), false).await,
-        "folder-picker-home" => folder("", false).await,
-        "folder-picker-parent" => folder(&m::text(&m::data("folder"), "parent"), false).await,
+        "folder-enter" => {
+            folder(payload.as_str().unwrap_or(""), false).await;
+        }
+        "folder-picker-home" => {
+            folder("", false).await;
+        }
+        "folder-picker-parent" => {
+            folder(&m::text(&m::data("folder"), "parent"), false).await;
+        }
         "folder-picker-clear" => {
             dom::set_value("folder-picker-query", "");
             folder(&m::text(&m::data("folder"), "path"), false).await;

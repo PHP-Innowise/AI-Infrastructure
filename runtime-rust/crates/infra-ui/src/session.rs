@@ -835,8 +835,27 @@ pub async fn open_view(view: &str, record: bool) {
             let _ = e.remove_attribute("aria-current");
         }
     }
-    dom::text("view-heading", &m::label(view));
-    dom::text("page-title", &m::label(group));
+    dom::text(
+        "view-heading",
+        &match view {
+            "systems" => "Services".to_owned(),
+            "system-changes" => "Changes".to_owned(),
+            _ => m::label(view),
+        },
+    );
+    // The page title repeats the navigation entry it belongs to.
+    let (title, subtitle) = match group {
+        "systems" => (
+            "System Orchestration",
+            "Services, their contracts and changes that span them",
+        ),
+        "knowledge" => ("Knowledge", "Your local workspace for agent sessions"),
+        "skills" => ("Skills", "Your local workspace for agent sessions"),
+        "accelerators" => ("Accelerators", "Your local workspace for agent sessions"),
+        _ => ("Sessions", "Your local workspace for agent sessions"),
+    };
+    dom::text("page-title", title);
+    dom::text("page-subtitle", subtitle);
     dom::class("sidebar", "open", false);
     dom::focus("view-heading");
     match view {
