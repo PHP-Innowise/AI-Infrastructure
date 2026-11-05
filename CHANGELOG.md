@@ -50,7 +50,11 @@ edition's own files remain in that edition's changelog.
   - A blocked contract agreement may propose an order (kept as evidence, never
     applied): such a report was discarded as an invalid result, losing the
     decisions it asked for. A rejected answer keeps the validator's reason in
-    its receipt (`rejection`) and on the agent's card.
+    its receipt (`rejection`) and on the agent's card. A read-only worker that
+    reports writes (a real agent honestly listed a marker a Codex hook had
+    created) now stops the run as `read_only_worker_reported_writes` with its
+    report kept, and workers are told that tool-created files belong in a
+    check and that a check they could not run is `not_run`, not `failed`.
   - Capability routing ignores English and Russian function words and folds
     English plurals, so a task written as a sentence no longer makes every
     service with a prose description a candidate; candidates are ranked by

@@ -419,12 +419,20 @@ Every worker returns the same strict schema (also saved as `result-schema.json`)
 ```
 
 `status` is `completed` or `blocked`; check status is `passed`, `failed` or
-`not_run`. Paths are relative to the current service root (in the `all` access
-scope, prefixed with the owning service ID). Read-only workers
-must report no writes. Only the contract phase returns a nonempty
-`service_order`. Empty required arrays remain present. Summary/check text must
+`not_run`. Workers are told that `failed` means a check ran and found a
+problem, and that a check they could not run is `not_run` with the reason: a
+failed check blocks any dispatch, an unrun one blocks only verification.
+Paths are relative to the current service root (in the `all` access
+scope, prefixed with the owning service ID) and name only files the worker
+edited; files that tools or hooks create on their own belong in a check. A
+read-only worker that reports writes stops the run with
+`read_only_worker_reported_writes`, and its report is kept so the named files
+can be inspected before a retry. Only the contract phase returns a nonempty
+`service_order`; a blocked agreement may propose one, which is kept and never
+applied. Empty required arrays remain present. Summary/check text must
 be bounded, single-line and free of detected secrets. Unknown fields and
-malformed results block the run. Raw stdout/stderr is never copied into the
+malformed results block the run as `invalid_or_sensitive_worker_result`, and
+the receipt's `rejection` says which rule the answer broke. Raw stdout/stderr is never copied into the
 journal or Memory Bank; validated reports may contain proprietary information,
 so keep the private run directory under your normal access controls. Harness
 additionally parses native output line by line for its [agents panel](#agents-panel);

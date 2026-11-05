@@ -341,7 +341,7 @@ fn a_rejected_answer_records_why_it_was_rejected() {
     let root = Root::new();
     let (code, summary, directory) = run_with(
         &root.0,
-        r#"{"status":"completed","summary":"Done","checks":[],"changed_files":["src/work.txt"],"service_order":["orders","billing"]}"#,
+        r#"{"status":"completed","summary":"Done","checks":[],"changed_files":[],"service_order":["orders"]}"#,
     );
     assert_eq!(code, 1, "{summary:#}");
     assert_eq!(summary["error"], "invalid_or_sensitive_worker_result");
@@ -349,7 +349,7 @@ fn a_rejected_answer_records_why_it_was_rejected() {
         serde_json::from_slice(&fs::read(directory.join("contracts-a1.json")).unwrap()).unwrap();
     assert!(receipt["report"].is_null());
     assert_eq!(
-        receipt["rejection"], "Read-only worker reported writes",
+        receipt["rejection"], "Contract worker must order every selected service exactly once",
         "{receipt:#}"
     );
     // The journal still reads back: a rejection is part of the receipt contract.
@@ -369,4 +369,23 @@ fn a_rejected_answer_records_why_it_was_rejected() {
     );
     assert_eq!(code, 0, "{text}");
     assert_eq!(status["status"], "blocked");
+}
+
+#[test]
+fn a_read_only_worker_that_reports_writes_stops_the_run_and_keeps_its_report() {
+    let root = Root::new();
+    let (code, summary, directory) = run_with(
+        &root.0,
+        r#"{"status":"completed","summary":"Agreed; a tool left a marker","checks":[{"name":"contracts","status":"passed","detail":"agreed"}],"changed_files":["billing/.tool/marker"],"service_order":["orders","billing"]}"#,
+    );
+    assert_eq!(code, 1, "{summary:#}");
+    assert_eq!(summary["error"], "read_only_worker_reported_writes");
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(directory.join("contracts-a1.json")).unwrap()).unwrap();
+    assert_eq!(receipt["ok"], false);
+    assert_eq!(
+        receipt["report"]["changed_files"],
+        json!(["billing/.tool/marker"])
+    );
+    assert_eq!(receipt["report"]["status"], "completed", "{receipt:#}");
 }

@@ -345,9 +345,6 @@ pub fn validate_report(
         };
         relative(path)?;
     }
-    if step["mode"] == "read-only" && !texts(&value["changed_files"]).is_empty() {
-        return Err(fail("Read-only worker reported writes"));
-    }
     let order = texts(&value["service_order"]);
     items(&value["service_order"], MAX_SERVICES)?;
     if step["id"] == "contracts" && value["status"] == "completed" {
@@ -384,6 +381,11 @@ pub fn success(receipt: &Value, step: &Value) -> bool {
         || report["status"] != "completed"
         || report["checks"].as_array().is_none()
     {
+        return false;
+    }
+    // A read-only dispatch that reports writes stops the run; its report is
+    // kept so the files it names can be inspected before a retry.
+    if step["mode"] == "read-only" && !texts(&report["changed_files"]).is_empty() {
         return false;
     }
     let checks = report["checks"].as_array().cloned().unwrap_or_default();
