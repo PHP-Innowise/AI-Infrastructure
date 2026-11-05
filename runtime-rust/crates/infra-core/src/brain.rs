@@ -327,13 +327,26 @@ impl BrainRepository {
             )));
         }
         if let Some(problem) = claimants.first() {
+            // Named from the project root with forward slashes on every
+            // system, as the retired runtime named it: the message reaches
+            // prompts and logs, where a turn quotes the file to repair, and an
+            // absolute path would name the machine's own directories, so a
+            // record outside the project is named by its file alone.
+            let shown = problem
+                .path
+                .strip_prefix(&self.roots().state)
+                .ok()
+                .and_then(Path::to_str)
+                .map(|relative| relative.replace('\\', "/"))
+                .unwrap_or_else(|| {
+                    problem
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                });
             return Err(RuntimeError::invalid(format!(
-                "Project Brain record invalid: {}: {}",
-                problem
-                    .path
-                    .strip_prefix(&self.roots().state)
-                    .unwrap_or(&problem.path)
-                    .display(),
+                "Project Brain record invalid: {shown}: {}",
                 problem.error
             )));
         }

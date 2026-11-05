@@ -64,7 +64,9 @@ edition's own files remain in that edition's changelog.
   `refresh-health`) was always `unavailable`. They are recorded again, and the
   diagnosis checks the capsule without the appended review notice, as before.
   A retrieval without a session leaves `repeat_withheld` unobserved, not an
-  exact zero: nothing was checked for repeats.
+  exact zero: nothing was checked for repeats. Native Windows still records
+  no render, printed or JSON, and its diagnosis stays `unavailable`: its trace
+  store cannot finalize a trace in place or check the trace's owner.
 - Cursor's subagent gate answers in Cursor's own words again: a built-in
   subagent is refused with "Blocked subagent ...: built-in Cursor subagents
   are disabled in this project ... (invoke with /agent-name)", and a second
@@ -485,6 +487,13 @@ edition's own files remain in that edition's changelog.
   merge your change into the release, then sync again" (or `--update-tracked`
   for a tracked file, `--rewire-codex` for Codex's trust-bound wiring).
   `bench --sync` shows the same in its refusal.
+- A Project Brain record that cannot be read is named from the project root
+  with forward slashes on native Windows too, as the retired runtime named it,
+  so a turn's notice about a half-merged task record reads `Unresolved Git
+  merge conflict in project-brain/dynamic/tasks/<id>.md` on every system. The
+  native runtime printed the path with backslashes on Windows, and a record
+  outside the project by its absolute path, which names the machine's own
+  directories; such a record is named by its file alone again.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

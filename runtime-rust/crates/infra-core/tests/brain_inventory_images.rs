@@ -4,7 +4,11 @@ use infra_core::{
     domain, index, query,
 };
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 struct Fixture {
     root: PathBuf,
@@ -98,13 +102,21 @@ fn inventory_find(
         )));
     }
     if let Some(problem) = claimants.first() {
+        let shown = problem
+            .path
+            .strip_prefix(&brain.roots().state)
+            .ok()
+            .and_then(Path::to_str)
+            .map(|relative| relative.replace('\\', "/"))
+            .unwrap_or_else(|| {
+                problem
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
         return Err(RuntimeError::invalid(format!(
-            "Project Brain record invalid: {}: {}",
-            problem
-                .path
-                .strip_prefix(&brain.roots().state)
-                .unwrap_or(&problem.path)
-                .display(),
+            "Project Brain record invalid: {shown}: {}",
             problem.error
         )));
     }

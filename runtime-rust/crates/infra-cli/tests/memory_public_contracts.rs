@@ -478,29 +478,36 @@ fn mcp_returns_canonical_status_and_refresh_without_bypassing_scope_guards() {
     // The reply carries capsule_text to the model, so its render is recorded
     // before the answer and the funnel is observed; with no session nothing
     // was withheld as a repeat, which stays unobserved rather than zero.
+    // Only Unix finalizes a trace in place and checks its owner: elsewhere no
+    // render is recorded, printed or JSON, and the diagnosis stays
+    // unavailable until the trace store gains that support there.
     let funnel = &result["funnel_diagnosis"];
-    assert_eq!(funnel["observation_state"], "observed", "{funnel}");
-    assert_eq!(
-        funnel["boundaries"]["selected_post_pack"]["state"], "exact",
-        "{funnel}"
-    );
-    assert_eq!(
-        funnel["boundaries"]["repeat_withheld"]["state"], "unknown",
-        "{funnel}"
-    );
-    let manifest = result["capsule"]["manifest"].as_str().unwrap();
-    let trace_name = Path::new(manifest).file_name().unwrap();
-    let trace: Value = serde_json::from_slice(
-        &fs::read(
-            fixture
-                .project
-                .join("memory-bank/local/retrieval-traces")
-                .join(trace_name),
+    if cfg!(unix) {
+        assert_eq!(funnel["observation_state"], "observed", "{funnel}");
+        assert_eq!(
+            funnel["boundaries"]["selected_post_pack"]["state"], "exact",
+            "{funnel}"
+        );
+        assert_eq!(
+            funnel["boundaries"]["repeat_withheld"]["state"], "unknown",
+            "{funnel}"
+        );
+        let manifest = result["capsule"]["manifest"].as_str().unwrap();
+        let trace_name = Path::new(manifest).file_name().unwrap();
+        let trace: Value = serde_json::from_slice(
+            &fs::read(
+                fixture
+                    .project
+                    .join("memory-bank/local/retrieval-traces")
+                    .join(trace_name),
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(trace["render"]["form"], "capsule_text", "{trace}");
+        .unwrap();
+        assert_eq!(trace["render"]["form"], "capsule_text", "{trace}");
+    } else {
+        assert_eq!(funnel["observation_state"], "unavailable", "{funnel}");
+    }
     assert!(!result.to_string().contains("PRIVATE-SCOPE-CANARY"));
     for id in 4..=7 {
         assert_eq!(
