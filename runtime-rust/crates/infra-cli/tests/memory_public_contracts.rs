@@ -2917,3 +2917,64 @@ fn a_refresh_without_a_capsule_records_nothing_to_observe() {
         "{health}"
     );
 }
+
+/// A refused result says what to correct, as the retired refusals said it:
+/// the fields a learning lacks or must not have (`verified` belongs to the
+/// result), the attestation, the kind of data it must not carry, two learnings
+/// to merge, and text that is no JSON at all.
+#[test]
+fn a_refused_result_says_what_to_correct() {
+    let fixture = Fixture::new(false);
+    fixture.start("TASK-REFUSED");
+    let refusal = |input: &[u8]| {
+        let output = fixture.execute(
+            "memory",
+            &[
+                "record-result",
+                "--task-id",
+                "TASK-REFUSED",
+                "--result-id",
+                "refused-1",
+                "--revision",
+                "auto",
+                "--input",
+                "-",
+                "--json",
+            ],
+            input,
+        );
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    let learning = json!({"type":"finding","title":"Cobalt retries","consequence":"Stop after three.","sources":["specs/source.md"]});
+    for (result, said) in [
+        (
+            json!({"progress":"p","learnings":[{"type":"finding","title":"t","consequence":"c","sources":["specs/source.md"],"verified":true}]}),
+            "Each learning needs type, title, consequence and sources; unexpected: verified (verified is a top-level boolean, never a learning field)",
+        ),
+        (
+            json!({"progress":"p","learnings":[{"title":"t","sources":["specs/source.md"]}]}),
+            "Each learning needs type, title, consequence and sources; missing: consequence, type",
+        ),
+        (
+            json!({"progress":"p","learnings":[learning]}),
+            "Attest that each learning was checked against its sources with verified=true",
+        ),
+        (
+            json!({"progress":"The key is AKIAABCDEFGHIJKLMNOP","verified":true,"learnings":[]}),
+            "progress contains a possible AWS access key; replace it with a sanitized summary - nothing was stored",
+        ),
+        (
+            json!({"progress":"p","verified":true,"learnings":[learning, {"type":"finding","title":"cobalt  RETRIES","consequence":"Another.","sources":["specs/source.md"]}]}),
+            "Conflicting learning identities in one result: two findings titled 'cobalt  RETRIES' cite the same sources; merge them",
+        ),
+    ] {
+        let stderr = refusal(&serde_json::to_vec(&result).unwrap());
+        assert!(stderr.contains(said), "{said:?} in {stderr}");
+    }
+    let stderr = refusal(b"{not json");
+    assert!(
+        stderr.contains("The result must be a JSON object"),
+        "{stderr}"
+    );
+}

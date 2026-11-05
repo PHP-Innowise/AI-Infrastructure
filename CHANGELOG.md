@@ -270,6 +270,25 @@ edition's own files remain in that edition's changelog.
   answer and in its `refresh-health` record. The native record carried
   neither, so `memory health` counted every such refresh as one whose
   diagnosis is missing, where the retired report counted it unavailable.
+- A refused save says what to correct again, as the retired refusals said
+  it; the save step allows one corrected retry, and the native refusals
+  had lost the part an agent corrects from. A save from the Stop step whose
+  input is not one JSON object names where and what ("not one JSON object
+  (Invalid control character at line 1 column 23); inside a string, write
+  a newline as \n ... pipe with echo -E", "more than one JSON object",
+  "one JSON object expected, got an array") in Python's own positions, and
+  the refusal reaches the native-result journal again; the native step
+  printed its parser's message ("Unescaped control character in JSON
+  string.") and journaled nothing. `record-result` names a learning's
+  missing and unexpected fields with the note that `verified` is a
+  top-level boolean, asks for `verified=true` in the retired words, names
+  the two learnings to merge, says "The result must be a JSON object" for
+  text that is no JSON, and names sensitive data as "a possible <secret>"
+  or "personal data (<kind>)". A missing record is named ("Project Brain
+  task not found: <id>"), an ambiguous identifier too, and a refused
+  promotion says "Promotion source is not eligible: ...". A result ID
+  reused with other content says so ("Result ID was already used with
+  different content") instead of its bare code.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

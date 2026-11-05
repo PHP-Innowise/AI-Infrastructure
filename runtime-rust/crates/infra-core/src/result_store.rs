@@ -257,7 +257,11 @@ impl EvidenceStore {
                 && (receipt.task_id == task || aliases.contains(&receipt.task_id))
                 && receipt.digest != digest
             {
-                return Err(fail("memory-result-v1:result_id_reused"));
+                return Err(RuntimeError::coded(
+                    ErrorKind::Conflict,
+                    "memory-result-v1:result_id_reused",
+                    "Result ID was already used with different content",
+                ));
             }
         }
         Ok((None, present))

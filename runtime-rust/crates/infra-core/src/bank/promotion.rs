@@ -583,7 +583,9 @@ fn source_images(
         }
         if let Some(reason) = eligibility(service, record, proposal["review_mode"] == "automatic")?
         {
-            return Err(RuntimeError::policy(reason));
+            return Err(RuntimeError::policy(format!(
+                "Promotion source is not eligible: {reason}"
+            )));
         }
         if proposal["review_mode"] == "automatic"
             && let Some(reason) = provenance(record, proposal["content"].as_str().unwrap_or(""))?

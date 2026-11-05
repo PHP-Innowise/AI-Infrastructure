@@ -277,9 +277,9 @@ impl BrainRepository {
             })
             .collect();
         if matches.len() + claimants.len() > 1 {
-            return Err(RuntimeError::conflict(
-                "Project Brain record identifier is ambiguous",
-            ));
+            return Err(RuntimeError::conflict(format!(
+                "Project Brain record identifier is ambiguous: {identifier}"
+            )));
         }
         if let Some(problem) = claimants.first() {
             return Err(RuntimeError::invalid(format!(
@@ -291,10 +291,14 @@ impl BrainRepository {
                     .display()
             )));
         }
-        matches
-            .into_iter()
-            .next()
-            .ok_or_else(|| RuntimeError::not_found("Project Brain record not found"))
+        matches.into_iter().next().ok_or_else(|| {
+            // Which record, as the retired lookup said: an agent told only
+            // "not found" cannot tell a typo from a task never started.
+            RuntimeError::not_found(format!(
+                "Project Brain {} not found: {identifier}",
+                record_type.unwrap_or("record")
+            ))
+        })
     }
 
     pub fn get(&self, identifier: &str) -> Result<Value> {

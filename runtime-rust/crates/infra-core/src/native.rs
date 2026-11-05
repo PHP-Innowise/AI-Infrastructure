@@ -89,14 +89,59 @@ pub fn seconds() -> f64 {
 pub fn adapter() -> String {
     result_store::sha(concat!(include_str!("native.rs"), include_str!("review.rs")).as_bytes())
 }
+/// The refusal of an input that is not one JSON object. The journal counts
+/// its code; the agent reads what to correct in its one retry, worded as the
+/// retired runtime worded it.
+fn invalid_input(detail: &str) -> RuntimeError {
+    let code = "native-result:invalid-input";
+    RuntimeError::coded(ErrorKind::Policy, code, format!("{code}: {detail}"))
+}
 pub fn parse_input(raw: &[u8]) -> Result<Value> {
     if raw.len() > MAX_INPUT {
         return Err(error("input-too-large"));
     }
-    let value = crate::strict_json::parse(raw, MAX_INPUT, 512, MAX_INPUT)
-        .map_err(|_| error("invalid-input"))?;
+    // Read as bytes, as json.loads read them: a UTF-8 byte order mark is
+    // decoded away.
+    let raw = raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw);
+    let value = match crate::strict_json::parse(raw, MAX_INPUT, 512, MAX_INPUT) {
+        Ok(value) => value,
+        Err(_) => {
+            let detail = std::str::from_utf8(raw)
+                .ok()
+                .and_then(crate::python_json::first_problem)
+                .filter(|(message, _, _)| message != "RecursionError")
+                .map(|(message, line, column)| {
+                    if message == "Extra data" {
+                        return format!(
+                            "more than one JSON object (more after line {line} column {column})"
+                        );
+                    }
+                    let mut detail = format!(
+                        "not one JSON object ({} at line {line} column {column})",
+                        message.strip_suffix(" at").unwrap_or(&message)
+                    );
+                    // A shell's echo turns the \n of a JSON string into a real
+                    // newline: the agent did write \n, so the hint names the echo.
+                    if message.starts_with("Invalid control character") {
+                        detail.push_str("; inside a string, write a newline as \\n and a tab as \\t (a plain echo in zsh turns \\n into a line break: pipe with echo -E)");
+                    }
+                    detail
+                })
+                .unwrap_or_else(|| "not one UTF-8 JSON object".into());
+            return Err(invalid_input(&detail));
+        }
+    };
     if !value.is_object() {
-        return Err(error("invalid-input"));
+        let kind = match value {
+            Value::Array(_) => "an array",
+            Value::String(_) => "a string",
+            Value::Number(_) => "a number",
+            Value::Bool(_) => "true or false",
+            _ => "null",
+        };
+        return Err(invalid_input(&format!(
+            "one JSON object expected, got {kind}"
+        )));
     }
     Ok(value)
 }

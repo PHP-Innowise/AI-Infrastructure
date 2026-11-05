@@ -93,9 +93,9 @@ fn inventory_find(
         })
         .collect();
     if matches.len() + claimants.len() > 1 {
-        return Err(RuntimeError::conflict(
-            "Project Brain record identifier is ambiguous",
-        ));
+        return Err(RuntimeError::conflict(format!(
+            "Project Brain record identifier is ambiguous: {identifier}"
+        )));
     }
     if let Some(problem) = claimants.first() {
         return Err(RuntimeError::invalid(format!(
@@ -107,10 +107,12 @@ fn inventory_find(
                 .display()
         )));
     }
-    matches
-        .into_iter()
-        .next()
-        .ok_or_else(|| RuntimeError::not_found("Project Brain record not found"))
+    matches.into_iter().next().ok_or_else(|| {
+        RuntimeError::not_found(format!(
+            "Project Brain {} not found: {identifier}",
+            record_type.unwrap_or("record")
+        ))
+    })
 }
 
 fn find_outcome(result: infra_core::Result<RecordImage>) -> Value {

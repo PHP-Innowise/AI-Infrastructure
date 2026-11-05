@@ -1054,8 +1054,24 @@ impl MemoryService {
                         token: required(&request, "token")?.into(),
                         data: if flag(&request, "skip") {
                             Value::Null
+                        } else if let Some(value) = request
+                            .get("request")
+                            .or_else(|| request.get("data"))
+                            .filter(|value| value.is_object())
+                        {
+                            value.clone()
                         } else {
-                            payload(&request, input)?
+                            // The save's own input: a refusal here never reaches
+                            // the save, so it is journaled here, as before.
+                            let raw = match text(&request, "input").filter(|path| *path != "-") {
+                                Some(path) => crate::result_store::read_bounded(
+                                    Path::new(path),
+                                    crate::native::MAX_INPUT + 1,
+                                )?
+                                .ok_or_else(|| RuntimeError::not_found("Input is unavailable"))?,
+                                None => input.to_vec(),
+                            };
+                            native.read_input(&raw, Some(required(&request, "request")?))?
                         },
                         skip: flag(&request, "skip"),
                         spooled: false,
@@ -1621,13 +1637,15 @@ fn payload(request: &Value, input: &[u8]) -> Result<Value> {
     {
         return Ok(value.clone());
     }
-    if let Some(path) = text(request, "input").filter(|path| *path != "-") {
+    let parsed = if let Some(path) = text(request, "input").filter(|path| *path != "-") {
         let bytes = crate::result_store::read_bounded(Path::new(path), 1024 * 1024)?
             .ok_or_else(|| RuntimeError::not_found("Input is unavailable"))?;
         crate::results::strict_input(&bytes)
     } else {
         crate::results::strict_input(input)
-    }
+    };
+    // Worded as the retired command refused text that was no JSON.
+    parsed.map_err(|_| RuntimeError::invalid("The result must be a JSON object"))
 }
 /// The refusal agents met most often in the retired runtime, which says how a
 /// task comes to be bound in this checkout.

@@ -809,6 +809,52 @@ fn the_session_banner_reads_the_project_as_its_edition_did() {
     );
 }
 
+/// A save whose input is not one JSON object is refused with what to correct
+/// in the one retry, worded as the retired runtime worded it, and the refusal
+/// is journaled: a plain echo in zsh turns the \n of a JSON string into a
+/// line break.
+#[test]
+fn a_malformed_save_is_refused_with_what_to_correct_and_journaled() {
+    let project = Project::new();
+    let base = json!({"session_id": "malformed", "cwd": project.path});
+    let mut asked = base.clone();
+    asked["hook_event_name"] = "UserPromptSubmit".into();
+    asked["prompt"] = "Fix the ledger".into();
+    project.hook("codex", "working-memory-read", &asked);
+    let mut stop = base.clone();
+    stop["hook_event_name"] = "Stop".into();
+    stop["stop_hook_active"] = false.into();
+    let stopped = project.hook("codex", "working-memory-write", &stop);
+    let output: Value = serde_json::from_str(stopped.lines().next().unwrap_or(""))
+        .unwrap_or_else(|_| panic!("no Stop continuation: {stopped}"));
+    let command = save_command(output["reason"].as_str().unwrap());
+    let refused = run(
+        project
+            .command("sh")
+            .args(["-c", &command])
+            .stdin(Stdio::piped()),
+        b"{\"progress\": \"line one\nline two\", \"learnings\": []}",
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success()
+            && stderr.contains("native-result:invalid-input: not one JSON object (Invalid control character at line 1 column 23); inside a string, write a newline as \\n and a tab as \\t (a plain echo in zsh turns \\n into a line break: pipe with echo -E)"),
+        "{}",
+        described(&refused)
+    );
+    let journal =
+        fs::read_to_string(project.path.join("memory-bank/local/native-results.ndjson")).unwrap();
+    assert!(
+        journal
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .any(|row| row["stage"] == "save"
+                && row["event"] == "refused"
+                && row["code"] == "native-result:invalid-input"),
+        "{journal}"
+    );
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(
