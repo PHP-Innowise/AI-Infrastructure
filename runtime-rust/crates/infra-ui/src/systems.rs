@@ -325,10 +325,12 @@ fn controls() {
     for e in dom::all(
         "#system-editor input,#system-editor select,#system-editor textarea,#system-editor button",
     ) {
-        if e.closest("#system-discovery-agents")
-            .ok()
-            .flatten()
-            .is_none()
+        // The scan's own Cancel stays usable while the scan locks the form.
+        if e.id() != "system-discovery-cancel"
+            && e.closest("#system-discovery-agents")
+                .ok()
+                .flatten()
+                .is_none()
         {
             if locked {
                 let _ = e.set_attribute("disabled", "");
@@ -385,6 +387,10 @@ fn controls() {
             || !m::yes(&m::provider(&dom::value("system-discovery-provider"))["available"]),
     );
     dom::hidden(
+        "system-discovery-cancel",
+        !m::yes(&m::data("discovery-active")),
+    );
+    dom::disabled(
         "system-discovery-cancel",
         !m::yes(&m::data("discovery-active")),
     );
