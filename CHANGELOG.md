@@ -410,6 +410,15 @@ edition's own files remain in that edition's changelog.
   verified record created without a valid attestation says "attestation
   says who checked a verified record: agent or person". On twin projects
   nine such refusals read as the retired ones.
+- `rebind --record <UUID>` binds the record it names again; the native
+  command ignored `--record` and bound whichever active record served the
+  task ID. A rebind that cannot bind says why, as the retired command did:
+  "Project Brain record not found: <ID>", "Rebind requires a task record;
+  <UUID> is a finding record", "Rebind target mismatch: record <UUID>
+  belongs to task id 'SHOP-8', not 'SHOP-7'", "Cannot rebind SHOP-7: task
+  <UUID> is completed; start new work under a new task id", or the binding
+  it refuses to repoint. The native command said "Working task not found"
+  or "Task is unavailable for rebind".
 - A refused `context-save` names what to correct again, as the retired
   command did: the unexpected or missing input fields, the flag a detail
   needs (`--topic is required when --detail topic`), the length limit of the

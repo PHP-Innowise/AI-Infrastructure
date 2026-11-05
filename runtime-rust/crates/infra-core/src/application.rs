@@ -892,7 +892,10 @@ impl MemoryService {
                     &mut store,
                     &self.context,
                     task()?,
-                    text(&request, "record_id").or(text(&request, "task_uuid")),
+                    // `--record` on the command line, `record_id` from Memory MCP.
+                    text(&request, "record")
+                        .or(text(&request, "record_id"))
+                        .or(text(&request, "task_uuid")),
                 )
             }
             "update" => self.update(&request),

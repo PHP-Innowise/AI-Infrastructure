@@ -1523,6 +1523,93 @@ fn a_credential_is_refused_under_the_name_of_what_would_hold_it() {
     }
 }
 
+/// `rebind --record` binds the record it names, and a rebind that cannot
+/// bind says why, as the retired command did: no such record, a record that
+/// is not a task, a task of another ID, or a finished task.
+#[test]
+fn rebind_binds_the_record_it_names_or_says_why_not() {
+    let project = Project::new();
+    let engine = project.path.join("memory-bank/bin/infra-engine");
+    let memory = |args: &[&str]| {
+        let output = project
+            .command(&engine)
+            .arg("memory")
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let uuid = |id: &str| {
+        let (_, stdout, _) = memory(&["brain-get", "--record-id", id, "--json"]);
+        serde_json::from_str::<Value>(&stdout).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(memory(&["start", "--task-id", "SHOP-7", "--goal", "Fix refunds"]).0);
+    assert!(memory(&["start", "--task-id", "SHOP-8", "--goal", "Other work"]).0);
+    assert!(
+        memory(&[
+            "brain-create",
+            "finding",
+            "--external-id",
+            "F-1",
+            "--title",
+            "Refunds keep the date"
+        ])
+        .0
+    );
+    let (finding, other, own) = (uuid("F-1"), uuid("SHOP-8"), uuid("SHOP-7"));
+    let (bound, stdout, stderr) = memory(&["rebind", "--task-id", "SHOP-7", "--record", &own]);
+    assert!(
+        bound && stdout.contains("already bound"),
+        "{stdout}{stderr}"
+    );
+    for (args, refusal) in [
+        (
+            vec!["rebind", "--task-id", "SHOP-404"],
+            "Project Brain record not found: SHOP-404".to_string(),
+        ),
+        (
+            vec!["rebind", "--task-id", "SHOP-7", "--record", &finding],
+            format!("Rebind requires a task record; {finding} is a finding record"),
+        ),
+        (
+            vec!["rebind", "--task-id", "SHOP-7", "--record", &other],
+            format!(
+                "Rebind target mismatch: record {other} belongs to task id 'SHOP-8', not 'SHOP-7'"
+            ),
+        ),
+    ] {
+        let (done, _, stderr) = memory(&args);
+        assert!(!done && stderr.contains(&refusal), "{args:?}: {stderr}");
+    }
+    assert!(
+        memory(&[
+            "complete",
+            "--task-id",
+            "SHOP-7",
+            "--revision",
+            "1",
+            "--outcome",
+            "Done"
+        ])
+        .0
+    );
+    let (done, _, stderr) = memory(&["rebind", "--task-id", "SHOP-7"]);
+    assert!(
+        !done
+            && stderr.contains(&format!(
+                "Cannot rebind SHOP-7: task {own} is completed; start new work under a new task id"
+            )),
+        "{stderr}"
+    );
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(

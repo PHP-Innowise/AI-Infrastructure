@@ -187,17 +187,37 @@ pub fn rebind(
 ) -> Result<Value> {
     let brain = BrainRepository::new(context.clone())?;
     let _guard = brain.lock()?;
-    let task = if let Some(uuid) = uuid {
-        brain.get_task(uuid)?
-    } else {
-        let uuid = served_uuid(Some(store), context, id)?
-            .ok_or_else(|| RuntimeError::not_found("Working task not found"))?;
-        brain.get_task(&uuid)?
+    // The record named, or the active one serving the task ID; failing that,
+    // whatever record the ID names, so the refusal says what it is, as the
+    // retired rebind said it.
+    let served = match uuid {
+        Some(_) => None,
+        None => served_uuid(Some(store), context, id)?,
     };
-    if task["external_id"] != id
-        || domain::is_terminal("task", task["status"].as_str().unwrap_or(""))
-    {
-        return Err(RuntimeError::conflict("Task is unavailable for rebind"));
+    let task = match (uuid, served) {
+        (Some(uuid), _) => brain.get(uuid)?,
+        (None, Some(uuid)) => brain.get_task(&uuid)?,
+        (None, None) => brain.get(id)?,
+    };
+    let record_id = task["id"].as_str().unwrap_or("");
+    let kind = task["type"].as_str().unwrap_or("");
+    if kind != "task" {
+        return Err(RuntimeError::conflict(format!(
+            "Rebind requires a task record; {record_id} is a {kind} record"
+        )));
+    }
+    if task["external_id"] != id {
+        return Err(RuntimeError::conflict(format!(
+            "Rebind target mismatch: record {record_id} belongs to task id {}, not {}",
+            crate::results::python_repr(task["external_id"].as_str().unwrap_or("")),
+            crate::results::python_repr(id)
+        )));
+    }
+    let status = task["status"].as_str().unwrap_or("");
+    if domain::is_terminal("task", status) {
+        return Err(RuntimeError::conflict(format!(
+            "Cannot rebind {id}: task {record_id} is {status}; start new work under a new task id"
+        )));
     }
     // The task as `get` shows it, and whether this checkout already pointed at
     // it: the text output reads both.
@@ -211,9 +231,10 @@ pub fn rebind(
             store.refresh_binding(id, task["revision"].as_u64().unwrap_or(1))?;
             return Ok(rebound(true));
         }
-        return Err(RuntimeError::conflict(
-            "Working task already bound to another record",
-        ));
+        return Err(RuntimeError::conflict(format!(
+            "Working task {id} is already bound to {}; refusing to repoint an existing binding",
+            binding.task_uuid
+        )));
     }
     store.bind(
         id,

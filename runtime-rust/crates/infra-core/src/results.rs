@@ -254,7 +254,7 @@ pub fn strict_json(raw: &[u8]) -> Result<Value> {
 /// `repr(text)` as Python prints a string: single quotes unless the text
 /// holds one and no double quote, with escapes for the quote, backslash and
 /// control characters.
-fn python_repr(text: &str) -> String {
+pub(crate) fn python_repr(text: &str) -> String {
     let quote = if text.contains('\'') && !text.contains('"') {
         '"'
     } else {
