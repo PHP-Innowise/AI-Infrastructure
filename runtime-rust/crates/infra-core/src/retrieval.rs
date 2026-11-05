@@ -791,6 +791,40 @@ pub fn retrieve(
 ) -> Result<Capsule> {
     retrieve_inner(store, context, request, None)
 }
+/// Another active record claims the task's ID: say so and how to keep one, in
+/// two lines, as the retired capsule did. The records come earliest created
+/// first; a clone without a binding settles on the earliest, so every clone
+/// advises cancelling a later one.
+fn twin_notices(store: &Store, external_id: &str, served: &str) -> Result<Vec<String>> {
+    let twins = store
+        .state()?
+        .get("task-twins")
+        .and_then(|raw| crate::domain::json::parse(raw).ok())
+        .unwrap_or(json!({}));
+    let claimed = twins[external_id]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    if claimed.len() < 2 || !claimed.contains(&served) {
+        return Ok(vec![]);
+    }
+    let other = claimed
+        .iter()
+        .find(|id| **id != served)
+        .copied()
+        .unwrap_or_default();
+    let cancel = if served != claimed[0] { served } else { other };
+    Ok(vec![
+        format!("Task record {other} also claims {external_id}; this turn uses {served}."),
+        format!(
+            // The installed CLI's name is longer than the retired one's: the
+            // whole command still fits the 160 characters a warning keeps.
+            "One task per branch: memory-bank/bin/infra-engine memory brain-update --record-id {cancel} --revision auto --transition cancelled"
+        ),
+    ])
+}
 /// Seconds to the microsecond, as the retired manifests and gates rounded them.
 fn micro(value: f64) -> f64 {
     (value * 1_000_000.0).round() / 1_000_000.0
@@ -866,9 +900,26 @@ fn retrieve_inner(
     let mut task_path = None::<PathBuf>;
     let mut task_image = None::<String>;
     let mut task_refused = false;
+    // What a turn says about the binding of its task, after its other
+    // warnings, as the retired capsule said it.
+    let mut binding_notices = Vec::new();
     if context.mode == "governed"
         && let Some(id) = &request.task_id
     {
+        // The record of the bound task was removed with uncommitted files: the
+        // turn is served as for a task not recorded yet, knowledge included,
+        // and says so.
+        if request.allow_unprovisioned
+            && let Some(binding) = store.binding(id)?
+            && brain
+                .find(&binding.task_uuid, Some("task"), false)
+                .is_err_and(|error| error.kind == ErrorKind::NotFound)
+        {
+            binding_notices.push(format!(
+                "The working task's record {} is gone (git stash -u or git clean removes an uncommitted task); the next checkpoint records the task again.",
+                binding.task_uuid
+            ));
+        }
         let served =
             crate::checkpoint::served_uuid(Some(store), context, id)?.unwrap_or_else(|| id.clone());
         match brain.find(&served, Some("task"), false) {
@@ -877,6 +928,13 @@ fn retrieve_inner(
                     index::record_eligibility(context, &config, &image.record)?.is_some();
                 task_image = Some(working_record_image(&image.record, &image.body)?);
                 task_path = Some(image.path);
+                if request.allow_unprovisioned {
+                    binding_notices.extend(twin_notices(
+                        store,
+                        image.record["external_id"].as_str().unwrap_or(id),
+                        image.record["id"].as_str().unwrap_or(&served),
+                    )?);
+                }
                 task = Some(image.record);
             }
             Err(error) if error.kind == ErrorKind::NotFound && request.allow_unprovisioned => {}
@@ -900,6 +958,7 @@ fn retrieve_inner(
         if store.read_only {
             warnings.push("Memory refresh incomplete: SQLite writes unavailable; retrieval was not consulted.".into());
         }
+        warnings.extend(binding_notices.iter().cloned());
         let mut capsule = capsule_projection(
             context,
             request,
@@ -929,6 +988,7 @@ fn retrieve_inner(
             json!({"procedural":0,"semantic":0,"episodic":0,"local_episodes":0,"total":0});
         return capsule::pack(capsule, request.delivery_profile);
     }
+    warnings.extend(binding_notices);
     let (mut candidates, diagnostics) = query::rank_candidates_observed(
         &store.conn,
         &query,

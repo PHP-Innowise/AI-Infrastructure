@@ -2978,3 +2978,85 @@ fn a_refused_result_says_what_to_correct() {
         "{stderr}"
     );
 }
+
+/// A turn says what happened to its task's binding, as the retired capsule
+/// did: a bound record that is gone (`git stash -u` or `git clean` removes an
+/// uncommitted task), and a second active record claiming the same task ID,
+/// with the whole command that keeps one.
+#[test]
+fn a_turn_says_when_its_task_record_is_gone_or_claimed_twice() {
+    let warnings = |fixture: &Fixture, id: &str| {
+        let report = fixture.success(
+            &[
+                "refresh",
+                "--json",
+                "--task-id",
+                id,
+                "--query",
+                "cobalt retries",
+            ],
+            None,
+        );
+        report["capsule"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect::<Vec<_>>()
+    };
+    let fixture = Fixture::new(false);
+    let task = fixture.start("TASK-GONE");
+    let uuid = task["task_uuid"].as_str().unwrap();
+    fs::remove_file(
+        fixture
+            .project
+            .join(format!("project-brain/dynamic/tasks/{uuid}.md")),
+    )
+    .unwrap();
+    assert!(
+        warnings(&fixture, "TASK-GONE").contains(&format!(
+            "The working task's record {uuid} is gone (git stash -u or git clean removes an uncommitted task); the next checkpoint records the task again."
+        )),
+        "{:?}",
+        warnings(&fixture, "TASK-GONE")
+    );
+
+    let task = fixture.start("TASK-TWIN");
+    let first = task["task_uuid"].as_str().unwrap().to_string();
+    let tasks = fixture.project.join("project-brain/dynamic/tasks");
+    let text = fs::read_to_string(tasks.join(format!("{first}.md"))).unwrap();
+    let second = infra_core::domain::uuid4();
+    fs::write(
+        tasks.join(format!("{second}.md")),
+        text.replace(&first, &second),
+    )
+    .unwrap();
+    let said = warnings(&fixture, "TASK-TWIN");
+    let keep = said
+        .iter()
+        .find_map(|warning| warning.strip_prefix("One task per branch: "))
+        .unwrap_or_else(|| panic!("{said:?}"));
+    assert!(
+        said.iter()
+            .any(|warning| warning.starts_with("Task record ")
+                && warning.contains(" also claims TASK-TWIN; this turn uses "))
+            && keep.starts_with("memory-bank/bin/infra-engine memory brain-update --record-id ")
+            && keep.ends_with(" --revision auto --transition cancelled")
+            && keep.len() + "One task per branch: ".len() <= 160,
+        "{said:?}"
+    );
+    let arguments = keep
+        .strip_prefix("memory-bank/bin/infra-engine memory ")
+        .unwrap()
+        .split(' ')
+        .collect::<Vec<_>>();
+    fixture.success(&[arguments.as_slice(), &["--json"]].concat(), None);
+    assert!(
+        !warnings(&fixture, "TASK-TWIN")
+            .iter()
+            .any(|warning| warning.contains("also claims")),
+        "{:?}",
+        warnings(&fixture, "TASK-TWIN")
+    );
+}

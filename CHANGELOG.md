@@ -289,6 +289,17 @@ edition's own files remain in that edition's changelog.
   promotion says "Promotion source is not eligible: ...". A result ID
   reused with other content says so ("Result ID was already used with
   different content") instead of its bare code.
+- A turn says what happened to its task's binding again. When the bound
+  task's record is gone (`git stash -u` or `git clean` removes an
+  uncommitted task) the capsule warns that the next checkpoint records the
+  task again, and when a second active record claims the same task ID (two
+  clones started the branch's task) it names both and the command that
+  keeps one. The native capsule said neither: it served "not recorded
+  yet" with no reason, and silently chose one of the twins. The command
+  reads "One task per branch: memory-bank/bin/infra-engine memory
+  brain-update ..." where the retired one read "Keep one task per branch:
+  context.py brain-update ...": the installed CLI's longer name would
+  have cut the command at a warning's 160 characters.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
