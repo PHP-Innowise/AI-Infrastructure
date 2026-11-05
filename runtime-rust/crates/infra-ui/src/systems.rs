@@ -417,6 +417,27 @@ fn edge_path(a: (usize, usize), b: (usize, usize)) -> String {
         format!("M{},{ay} L{},{}", ax + 110, bx + 110, by + 76)
     }
 }
+/// What a run step shows: a dispatch the journal left running is not running
+/// once its run stopped, and one whose current attempt saved a successful
+/// receipt has reported complete; resuming records that receipt.
+fn shown_status(step: &V, receipts: &V, active: bool) -> String {
+    let status = m::text(step, "status");
+    if active || !matches!(status.as_str(), "running" | "interrupted" | "blocked") {
+        return status;
+    }
+    let reported = m::array(receipts).iter().any(|receipt| {
+        receipt["phase"] == step["id"]
+            && receipt["attempt"] == step["attempt"]
+            && m::yes(&receipt["ok"])
+    });
+    if reported {
+        "reported".into()
+    } else if status == "running" {
+        "interrupted".into()
+    } else {
+        status
+    }
+}
 /// Why a dispatch receipt did or did not complete, naming what to inspect: the
 /// validator's rejection, the agent's own block, the checks that failed (or,
 /// for verification, did not run), or the files a read-only worker wrote.
@@ -888,10 +909,11 @@ fn render_run() {
             .iter()
             .map(|step| {
                 let mut step = step.clone();
-                let status = match m::text(&step, "status").as_str() {
-                    // A dispatch the journal left running is not running any more.
-                    "running" if !running => "interrupted".to_owned(),
-                    status => status.to_owned(),
+                let status = shown_status(&step, &v["receipts"], running);
+                let status = if status == "reported" {
+                    "reported complete; resume to record it".to_owned()
+                } else {
+                    status
                 };
                 step["title"] = json!([m::text(&step, "id"), m::label(&status)]
                     .into_iter()
@@ -924,7 +946,10 @@ fn render_run() {
         })
         .cloned()
         .collect::<Vec<_>>();
-    retry.extend(unfinished.iter().map(|s|json!({"id":s["id"],"label":format!("Retry {} · {}",m::text(s,"id"),m::text(s,"status"))})));
+    retry.extend(unfinished.iter().map(|s| {
+        let status = shown_status(s, &v["receipts"], running);
+        json!({"id":s["id"],"label":format!("Retry {} · {}",m::text(s,"id"),if status=="reported"{"reported complete".to_owned()}else{m::label(&status)})})
+    }));
     // Only a successful receipt can be reconciled; without one the dispatch
     // must be retried, so that is what recovery offers first.
     let reconcilable = unfinished.first().is_some_and(|step| {
@@ -2069,11 +2094,7 @@ async fn agents(v: &V) {
         step["label"] = json!(label);
         step["goal"] = json!(goal);
         step["journal"] = if current && step["status"].is_string() {
-            if step["status"] == "running" && !active {
-                json!("interrupted")
-            } else {
-                step["status"].clone()
-            }
+            json!(shown_status(step, &v["receipts"], active))
         } else {
             V::Null
         };
@@ -2513,6 +2534,25 @@ mod display_tests {
             receipt_outcome(&json!({"ok":false,"error":"worker_exit_failure","report":null})),
             "blocked: worker exit failure"
         );
+    }
+    #[test]
+    fn a_stopped_step_with_a_successful_receipt_reads_as_reported() {
+        let receipts = json!([
+            {"phase":"service-orders","attempt":1,"ok":true},
+            {"phase":"service-billing","attempt":1,"ok":false}
+        ]);
+        let orders = json!({"id":"service-orders","attempt":1,"status":"running"});
+        assert_eq!(shown_status(&orders, &receipts, false), "reported");
+        assert_eq!(shown_status(&orders, &receipts, true), "running");
+        // A receipt of an earlier attempt says nothing of this one.
+        let retried = json!({"id":"service-orders","attempt":2,"status":"interrupted"});
+        assert_eq!(shown_status(&retried, &receipts, false), "interrupted");
+        let billing = json!({"id":"service-billing","attempt":1,"status":"running"});
+        assert_eq!(shown_status(&billing, &receipts, false), "interrupted");
+        let blocked = json!({"id":"service-billing","attempt":1,"status":"blocked"});
+        assert_eq!(shown_status(&blocked, &receipts, false), "blocked");
+        let done = json!({"id":"contracts","attempt":1,"status":"completed"});
+        assert_eq!(shown_status(&done, &receipts, false), "completed");
     }
     #[test]
     fn lists_read_as_text() {

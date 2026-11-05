@@ -105,6 +105,16 @@ edition's own files remain in that edition's changelog.
     a plan is computed from the saved files, not the draft. A launch that
     leaves its run blocked or interrupted reads `failed` in Sessions instead
     of `completed`.
+  - A run no longer stops for good with `Updated context exceeds original
+    budget` after a worker grows a file the plan quotes. A plan fills its
+    budget (a real one held 15995 of 16000 characters), so the orders worker's
+    edit to `CancelOrder.php` made the refreshed context too big, and every
+    resume refreshed it again. A refreshed excerpt may now take the room the
+    approved context left free and is cut beyond that (marked `truncated`).
+  - A dispatch whose current attempt saved a successful receipt before its run
+    stopped reads `reported complete; resume to record it` in the run, the
+    retry list and its agent card, instead of `interrupted` and `Stopped`, and
+    a stopped agent's time ends at its last event instead of growing.
 
 - Keep repository leases and inbox available when an unrelated Linux mount
   has a deleted bind source root or an empty source field. Read only mounts
