@@ -29,6 +29,11 @@ impl Domain for Faults {
     fn execute<'a>(&'a self, operation: &'a str, request: Value) -> Reply<'a> {
         Box::pin(async move {
             let consume = |name: &str| fs::remove_file(self.root.join(name)).is_ok();
+            if operation == "sessions.inbox_accept" && consume("lose-next-request") {
+                // Model a transport failure before admission, while the
+                // browser must retain its identity until a definitive retry.
+                return Ok(Payload::Json(json!({"fixture_request_never_arrived":true})));
+            }
             if operation == "sessions.inbox_list"
                 && (self.root.join("fail-lists").exists() || consume("fail-next-list"))
             {

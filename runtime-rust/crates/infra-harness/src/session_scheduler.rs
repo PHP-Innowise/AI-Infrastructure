@@ -81,6 +81,15 @@ impl Lease {
         }
     }
     pub fn with_images(mut self, images: Vec<infra_core::fs::NativeIdentity>) -> Self {
+        #[cfg(unix)]
+        let images = images
+            .into_iter()
+            .map(|mut image| {
+                // POSIX S_IFMT: permissions are access checks, not object identity.
+                image.kind &= 0o170000;
+                image
+            })
+            .collect();
         self.images = images;
         self
     }
@@ -525,5 +534,28 @@ mod tests {
         let a = repo("one", "physical-alias-a").with_images(vec![image]);
         let b = repo("two", "physical-alias-b").with_images(vec![changed]);
         assert!(a.conflicts(&b));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn lease_identity_ignores_chmod_but_detects_a_replaced_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("scope");
+        std::fs::create_dir(&directory).unwrap();
+        let lease = || {
+            repo("one", "permission-scope").with_images(vec![
+                infra_core::fs::native_image(&directory)
+                    .unwrap()
+                    .unwrap()
+                    .without_contents(),
+            ])
+        };
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let before = lease();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(before, lease());
+        std::fs::rename(&directory, temporary.path().join("old-scope")).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        assert_ne!(before, lease());
     }
 }

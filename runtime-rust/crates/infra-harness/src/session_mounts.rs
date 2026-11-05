@@ -89,7 +89,7 @@ mod linux {
     }
     // Kernel field definitions: docs.kernel.org/filesystems/proc.html, section 3.5.
     // Unknown optional fields are deliberately ignored, as the format requires.
-    fn parse(raw: &[u8]) -> Result<Vec<Mount>> {
+    fn parse(raw: &[u8], paths: &[&Path]) -> Result<Vec<Mount>> {
         if raw.is_empty() || raw.len() > MAX_MOUNTINFO || !raw.ends_with(b"\n") {
             return Err(invalid());
         }
@@ -102,6 +102,16 @@ mod linux {
             let fields = line.split(|byte| *byte == b' ').collect::<Vec<_>>();
             if fields.len() < 10 || fields.iter().any(|field| field.is_empty()) {
                 return Err(invalid());
+            }
+            let point = path(fields[4])?;
+            // A replaced bind source can have an opaque //deleted root.
+            // Only mounts that cover or lie inside a declared tree can affect
+            // its coordinates; unrelated roots need not be interpretable.
+            if !paths
+                .iter()
+                .any(|root| root.starts_with(&point) || point.starts_with(root))
+            {
+                continue;
             }
             let separator = fields[6..]
                 .iter()
@@ -129,7 +139,7 @@ mod linux {
                 } else {
                     return Err(invalid());
                 },
-                point: path(fields[4])?,
+                point,
             });
         }
         Ok(mounts)
@@ -197,7 +207,7 @@ mod linux {
         File::open("/proc/self/mountinfo")?
             .take((MAX_MOUNTINFO + 1) as u64)
             .read_to_end(&mut raw)?;
-        trees(paths, &parse(&raw)?, |path| {
+        trees(paths, &parse(&raw, paths)?, |path| {
             if std::fs::canonicalize(path)?.as_path() != path {
                 return Err(invalid());
             }
@@ -215,6 +225,9 @@ mod linux {
     mod tests {
         use super::*;
         const ROOT: &str = "1 1 8:1 / / rw - ext4 /dev/root rw\n";
+        fn parse(raw: &[u8]) -> Result<Vec<Mount>> {
+            super::parse(raw, &[Path::new("/")])
+        }
         fn at(mounts: &[Mount], path: &str) -> MountScope {
             locate(Path::new(path), mounts).unwrap()
         }
@@ -234,6 +247,36 @@ mod linux {
             let mounts = parse(text.as_bytes()).unwrap();
             assert!(trees(&[Path::new("/repos/a")], &mounts, |_| Ok(())).is_ok());
             assert!(trees(&[Path::new("/run")], &mounts, |_| Ok(())).is_err());
+        }
+        #[test]
+        fn deleted_bind_roots_are_rejected_only_when_their_points_affect_a_declared_tree() {
+            let paths = [
+                Path::new("/repos/a"),
+                Path::new("/git/common"),
+                Path::new("/git/admin"),
+            ];
+            let expected = trees(
+                &paths,
+                &super::parse(ROOT.as_bytes(), &paths).unwrap(),
+                |_| Ok(()),
+            )
+            .unwrap();
+            for point in ["/outside/resolv.conf", "/repos/ab/config"] {
+                let text =
+                    format!("{ROOT}2 1 8:1 /old/source//deleted {point} rw - ext4 /dev/root rw\n");
+                let mounts = super::parse(text.as_bytes(), &paths).unwrap();
+                assert_eq!(trees(&paths, &mounts, |_| Ok(())).unwrap(), expected);
+            }
+            for point in [
+                "/repos",
+                "/repos/a/config",
+                "/git/common/config",
+                "/git/admin",
+            ] {
+                let text =
+                    format!("{ROOT}2 1 8:1 /old/source//deleted {point} rw - ext4 /dev/root rw\n");
+                assert!(super::parse(text.as_bytes(), &paths).is_err(), "{point}");
+            }
         }
         #[test]
         fn current_namespace_accepts_an_actual_disposable_directory() {

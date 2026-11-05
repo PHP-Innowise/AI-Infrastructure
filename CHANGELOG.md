@@ -24,6 +24,13 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Keep repository leases and inbox available when an unrelated Linux bind
+  mount has a deleted source root. Decode roots only for mounts covering or
+  nested inside declared Git trees, while retaining strict relevant-scope
+  validation. Ignore Unix permission bits in lease identity without weakening
+  inode/type checks. Refuse update holds while inbox delivery is still pending
+  or assigned, including the gap between native turns.
+
 - Add an offline scheduler/inbox A/B companion with sealed public Rust pilot
   tasks, counterbalanced serial/parallel streams and independent artifact
   verification. Pin the dataset-free oracle helper, compiler and resolved C

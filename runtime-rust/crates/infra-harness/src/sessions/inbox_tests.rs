@@ -51,6 +51,83 @@ fn receipt(fixture: &Fixture, sid: &str) -> Value {
     fixture.sessions.store.inbox_list(sid, None).unwrap()["items"][0].clone()
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn directory_chmod_preserves_the_lease_stamp_and_pending_inbox_delivery() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new();
+    let (sid, job, _) = running(&fixture);
+    let session = fixture.sessions.store.get(&sid).unwrap();
+    let admin = Path::new(session["project_path"].as_str().unwrap()).join(".git");
+    std::fs::set_permissions(&admin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let before = fixture.sessions.repository_lease(&job).unwrap();
+    fixture
+        .sessions
+        .accept_inbox(&sid, "next", "Continue.")
+        .await
+        .unwrap();
+    std::fs::set_permissions(&admin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let after = fixture.sessions.repository_lease(&job).unwrap();
+    assert_eq!(before, after);
+    assert_eq!(inbox_driver::stamp(&before), inbox_driver::stamp(&after));
+    complete(&fixture, &job, Some("native-1"));
+    assert!(!fixture.sessions.dispatch_inbox().await.unwrap());
+    let next = fixture.queue.try_recv().unwrap().into_job();
+    assert_eq!(receipt(&fixture, &sid)["status"], "assigned");
+    assert_eq!(
+        receipt(&fixture, &sid)["delivery_generation"],
+        next.generation
+    );
+}
+
+#[tokio::test]
+async fn update_hold_refuses_pending_and_assigned_inbox_even_between_native_turns() {
+    let mut fixture = Fixture::new();
+    let (sid, job, _) = running(&fixture);
+    fixture
+        .sessions
+        .accept_inbox(&sid, "next", "Continue.")
+        .await
+        .unwrap();
+    complete(&fixture, &job, Some("native-1"));
+    assert!(!fixture.sessions.has_active().unwrap());
+    assert_eq!(receipt(&fixture, &sid)["status"], "pending");
+    assert_eq!(fixture.sessions.hold("update").unwrap_err().status, 409);
+    assert!(fixture.sessions.held.lock().unwrap().is_none());
+    assert!(!fixture.sessions.dispatch_inbox().await.unwrap());
+    let next = fixture.queue.try_recv().unwrap().into_job();
+    fixture
+        .results
+        .start_launch(&sid, &next.generation, None)
+        .unwrap();
+    assert_eq!(
+        finalize_job(
+            &fixture.sessions.store,
+            &next,
+            &Ok(json!({})),
+            &AtomicBool::new(false)
+        )
+        .unwrap(),
+        "completed"
+    );
+    fixture
+        .results
+        .finish_launch(&next.generation, "completed")
+        .unwrap();
+    assert!(!fixture.sessions.has_active().unwrap());
+    assert_eq!(receipt(&fixture, &sid)["status"], "assigned");
+    assert_eq!(fixture.sessions.hold("update").unwrap_err().status, 409);
+    assert!(fixture.sessions.held.lock().unwrap().is_none());
+    fixture
+        .sessions
+        .store
+        .inbox_settle(&sid, &next.generation, true, Some("native-1"))
+        .unwrap();
+    assert_eq!(receipt(&fixture, &sid)["status"], "completed");
+    fixture.sessions.hold("update").unwrap();
+    fixture.sessions.release().unwrap();
+}
+
 #[tokio::test]
 async fn inbox_handoff_preserves_authority_and_assigns_one_generation_after_cleanup() {
     let mut fixture = Fixture::new();

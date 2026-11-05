@@ -452,6 +452,16 @@ impl Sessions {
                 "Wait for active runs and their cleanup before updating.",
             ));
         }
+        let inbox_active: bool = self.store.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_inbox WHERE status IN ('pending','assigned'))",
+            [],
+            |row| row.get(0),
+        )?;
+        if inbox_active {
+            return Err(HarnessError::conflict(
+                "Finish or cancel queued inbox messages before updating.",
+            ));
+        }
         *lock(&self.held)? = Some(reason.into());
         Ok(())
     }
