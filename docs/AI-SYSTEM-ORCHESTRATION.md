@@ -718,13 +718,18 @@ The run view polls persisted dispatches and displays receipts, reported checks,
 changed files and the handoff; native task UUIDs and the runner log sit behind
 toggles. A successful worker exit alone
 does not complete a run. Final verification needs at least one reported passed
-check and no missing/failed reported checks. Durable knowledge publication
+check and no missing/failed reported checks; when its only gaps are checks it
+could not run, the recovery panel offers a checkbox that names them, and
+resuming with it ticked completes verification without running it again. Durable knowledge publication
 remains a separate review through the owning runtime. No commit, push, merge or
 deployment is performed by this execution flow.
 
 Use **Cancel run** for active work and **Resume saved run** for unfinished runs.
-Select the interrupted/blocked dispatch explicitly before retrying. Inspect
-partial edits and acknowledge changed sources only when appropriate. A saved
+The run's status line names what stopped it, from the stopped dispatch's
+receipt. Select the interrupted/blocked dispatch explicitly before retrying
+(recovery preselects it when it has no successful receipt). Inspect partial
+edits, and your own edits of system-folder sources, and acknowledge changed
+sources only when appropriate. A saved
 successful receipt is reconciled instead of rerunning its worker. Pending launch
 identity is saved before enqueue and linked to the session during recovery.
 After server restart, sessions are interrupted; nothing is resumed automatically.
