@@ -427,9 +427,10 @@ scope, prefixed with the owning service ID) and name only files the worker
 edited; files that tools or hooks create on their own belong in a check. A
 read-only worker that reports writes stops the run with
 `read_only_worker_reported_writes`, and its report is kept so the named files
-can be inspected before a retry. Only the contract phase returns a nonempty
-`service_order`; a blocked agreement may propose one, which is kept and never
-applied. Empty required arrays remain present. Summary/check text must
+can be inspected before a retry. Only a completed contract agreement's
+`service_order` is applied, and it must name every selected service once; an
+order in any other report (a blocked agreement's proposal, a service worker
+echoing the agreed one) is kept as evidence and never applied. Empty required arrays remain present. Summary/check text must
 be bounded, single-line and free of detected secrets. Unknown fields and
 malformed results block the run as `invalid_or_sensitive_worker_result`, and
 the receipt's `rejection` says which rule the answer broke. Raw stdout/stderr is never copied into the

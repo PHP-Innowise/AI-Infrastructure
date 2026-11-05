@@ -389,3 +389,22 @@ fn a_read_only_worker_that_reports_writes_stops_the_run_and_keeps_its_report() {
     );
     assert_eq!(receipt["report"]["status"], "completed", "{receipt:#}");
 }
+
+#[test]
+fn a_service_worker_echoing_the_agreed_order_keeps_its_work() {
+    let root = Root::new();
+    let (code, summary, directory) = run_with(
+        &root.0,
+        r#"{"status":"completed","summary":"Done","checks":[{"name":"unit","status":"passed","detail":"ok"}],"changed_files":[],"service_order":["orders","billing"]}"#,
+    );
+    assert_eq!(code, 0, "{summary:#}");
+    assert_eq!(summary["status"], "completed");
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(directory.join("service-billing-a1.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["ok"], true, "{receipt:#}");
+    assert_eq!(
+        receipt["report"]["service_order"],
+        json!(["orders", "billing"])
+    );
+}

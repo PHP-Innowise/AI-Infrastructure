@@ -355,18 +355,14 @@ pub fn validate_report(
                 "Contract worker must order every selected service exactly once",
             ));
         }
-    } else if step["id"] == "contracts" {
-        // A blocked agreement may still propose an order; it is kept as evidence
-        // and never applied, but it must name selected services once each.
-        if order.len() != order.iter().collect::<BTreeSet<_>>().len()
-            || order.iter().any(|sid| !selected.contains(sid))
-        {
-            return Err(fail(
-                "A proposed service order may name each selected service once",
-            ));
-        }
-    } else if !order.is_empty() {
-        return Err(fail("Only contract worker can choose service order"));
+    } else if order.len() != order.iter().collect::<BTreeSet<_>>().len()
+        || order.iter().any(|sid| !selected.contains(sid))
+    {
+        // Only the completed agreement's order is ever applied. Any other
+        // dispatch's order (a blocked agreement's proposal, a service worker
+        // echoing it) is kept as evidence; it must still name selected services
+        // once each, but never costs the dispatch its work.
+        return Err(fail("A service order may name each selected service once"));
     }
     Ok(())
 }

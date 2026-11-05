@@ -59,7 +59,10 @@ edition's own files remain in that edition's changelog.
     reports writes (a real agent honestly listed a marker a Codex hook had
     created) now stops the run as `read_only_worker_reported_writes` with its
     report kept, and workers are told that tool-created files belong in a
-    check and that a check they could not run is `not_run`, not `failed`.
+    check and that a check they could not run is `not_run`, not `failed`. A
+    service report that echoes the agreed order (a real payments worker did,
+    after adding its tests) is no longer discarded: only the completed
+    agreement's order is applied, any other is kept as evidence.
   - Capability routing ignores English and Russian function words and folds
     English plurals, so a task written as a sentence no longer makes every
     service with a prose description a candidate; candidates are ranked by
