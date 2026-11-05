@@ -17,7 +17,8 @@ impl Drop for Root {
 fn root() -> Root {
     let path = std::env::temp_dir().join(format!("infra-system-heads-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&path).unwrap();
-    Root(fs::canonicalize(path).unwrap())
+    // Git cannot use the `\\?\` spelling std gives on Windows.
+    Root(infra_core::fs::canonicalize(path).unwrap())
 }
 fn git(folder: &Path, arguments: &[&str]) {
     let status = Command::new("git")
