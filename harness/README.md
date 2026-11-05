@@ -425,8 +425,14 @@ The browser saves the pending request identity and text locally before its
 first inbox POST. A matching receipt refresh confirms it automatically. If
 the response is lost or invalid and no matching receipt can be read, **Retry saving** confirms
 that same request, including after reload, reconnect or source completion; it
-does not send the message through ordinary follow-up. A rejected retry retains
-that identity until confirmation. New requests require secure browser random
+does not send the message through ordinary follow-up. The runner returns a
+receipt already recorded for that identity before it checks the session, so a
+retry it refuses with `404` or `409` (or a refused body) proves nothing was
+saved: the identity is released and the text returns to the composer as a
+draft. A connection-token refusal (`401`/`403`), lost reply or server error
+keeps the identity for another retry. Saved state too large to read back is
+never written; unreadable state can be cleared from the composer, and the
+runner's receipts stay listed. New requests require secure browser random
 IDs and writable local storage. Drafts belong to their selected conversation;
 late responses cannot clear another conversation's composer. Receipt refresh
 continues across the short interval between completed source and queued next

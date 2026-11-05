@@ -2,6 +2,8 @@
 use crate::{api, commands, dom, model as m, session};
 use serde_json::{json, Value as V};
 
+/// Largest saved state `stored` reads back; `persist` never writes more.
+const STORED_LIMIT: usize = 150000;
 fn key(sid: &str) -> String {
     format!("infra-harness-inbox-v1:{sid}")
 }
@@ -14,11 +16,17 @@ fn owner(sid: &str, epoch: u64) -> bool {
 fn stored(sid: &str) -> V {
     match dom::storage(&key(sid)) {
         None => V::Null,
-        Some(raw) if raw.len() <= 150000 => {
+        Some(raw) if raw.len() <= STORED_LIMIT => {
             serde_json::from_str(&raw).unwrap_or(json!({"invalid":true}))
         }
         Some(_) => json!({"invalid":true}),
     }
+}
+/// JSON escapes can grow a 32000-byte message several times over; state that
+/// could not be read back would lock the composer, so it is never written.
+fn storable(value: &V) -> Option<String> {
+    let raw = value.to_string();
+    (raw.len() <= STORED_LIMIT).then_some(raw)
 }
 fn persist(sid: &str, value: &V) -> bool {
     let Ok(Some(storage)) = dom::window().local_storage() else {
@@ -26,8 +34,10 @@ fn persist(sid: &str, value: &V) -> bool {
     };
     if value.is_null() {
         storage.remove_item(&key(sid)).is_ok()
+    } else if let Some(raw) = storable(value) {
+        storage.set_item(&key(sid), &raw).is_ok()
     } else {
-        storage.set_item(&key(sid), &value.to_string()).is_ok()
+        false
     }
 }
 fn unresolved(value: &V) -> bool {
@@ -36,6 +46,11 @@ fn unresolved(value: &V) -> bool {
 pub fn needs_confirmation() -> bool {
     let sid = m::read(|s| s.sid.clone());
     !sid.is_empty() && unresolved(&stored(&sid))
+}
+/// Saved state that cannot be read names no request to confirm.
+pub fn unreadable() -> bool {
+    let sid = m::read(|s| s.sid.clone());
+    !sid.is_empty() && stored(&sid)["invalid"] == true
 }
 pub fn eligible(v: &V) -> bool {
     v["status"] == "running"
@@ -105,20 +120,17 @@ pub fn save_draft() {
     if sid.is_empty() || m::read(|s| s.restoring) {
         return;
     }
-    let mut saved = stored(&sid);
-    if unresolved(&saved) {
+    if unresolved(&stored(&sid)) {
         return;
     }
     let draft = dom::value("prompt");
     if draft.len() > 32000 {
         return;
     }
-    if draft.is_empty() {
+    // A draft too large to read back is dropped rather than restoring an older one.
+    if draft.is_empty() || !persist(&sid, &json!({"draft":draft,"request":null})) {
         let _ = persist(&sid, &V::Null);
-        return;
     }
-    saved = json!({"draft":draft,"request":null});
-    let _ = persist(&sid, &saved);
 }
 pub fn restore(sid: &str) {
     let saved = stored(sid);
@@ -179,9 +191,18 @@ fn matches(v: &V, attempt: &V) -> bool {
         && v["request_id"] == attempt["request_id"]
         && v["prompt"] == attempt["prompt"]
 }
-fn rejected_first_attempt(saved: &V, status: u16) -> bool {
-    // A rejected retry says nothing about whether the original POST committed.
-    !unresolved(saved) && [400, 401, 403, 404, 409, 413, 422].contains(&status)
+/// Whether a refused POST proves that its request identity was never recorded.
+fn not_recorded(saved: &V, status: u16) -> bool {
+    if !unresolved(saved) {
+        // An explicitly refused first attempt cannot have committed.
+        return [400, 401, 403, 404, 409, 413, 422].contains(&status);
+    }
+    // A retry repeats the original identity and body. The runner returns any
+    // receipt recorded for that identity before it checks session state, and
+    // receipts are never deleted, so a later conflict or missing session
+    // proves nothing was recorded; a refused body refused the original alike.
+    // 401/403 come from the connection gate before that lookup: keep waiting.
+    [400, 404, 409, 413, 422].contains(&status)
 }
 fn remember(sid: &str, receipt: V) {
     let mut items = m::array(&m::data(&cache(sid))["items"]);
@@ -213,6 +234,20 @@ pub async fn submit() {
         return;
     }
     let saved = stored(&sid);
+    if saved["invalid"] == true {
+        // Nothing readable names a request to confirm. Receipts the runner
+        // recorded stay listed under Next messages.
+        dom::error(
+            "composer-error",
+            if persist(&sid, &V::Null) {
+                "The saved message state could not be read and was cleared. Check Next messages before sending it again."
+            } else {
+                "Could not clear the unreadable saved message state. Enable local storage and try again."
+            },
+        );
+        session::controls();
+        return;
+    }
     if !unresolved(&saved) && (!eligible(&selected) || has_pending(&sid)) {
         return;
     }
@@ -242,7 +277,7 @@ pub async fn submit() {
     };
     let durable = json!({"draft":attempt["prompt"],"request":attempt});
     if !persist(&sid, &durable) {
-        dom::error("composer-error", "Could not save the retry identity in this browser. Enable local storage before queueing a message.");
+        dom::error("composer-error", "Could not save the retry identity in this browser. Enable local storage, or shorten the message, before queueing it.");
         return;
     }
     stop();
@@ -268,13 +303,24 @@ pub async fn submit() {
             }
         }
         Err(error) => {
-            // Explicit client rejection cannot have committed this exact request;
-            // network/server/invalid-response failures retain its original identity.
-            if rejected_first_attempt(&saved, error.status) && stored(&sid)["request"] == attempt {
-                let _ = persist(&sid, &json!({"draft":attempt["prompt"],"request":null}));
-            }
+            // A refusal that proves nothing was recorded releases the identity
+            // and keeps the text as a draft; network/server/invalid-response
+            // failures and connection-gate refusals of a retry retain it.
+            let released = not_recorded(&saved, error.status)
+                && stored(&sid)["request"] == attempt
+                && persist(&sid, &json!({"draft":attempt["prompt"],"request":null}));
             if owner(&sid, epoch) {
-                dom::error("composer-error", &error.message);
+                dom::error(
+                    "composer-error",
+                    &if released && unresolved(&saved) {
+                        format!(
+                            "{} The runner never saved this message; its text is back in the composer.",
+                            error.message
+                        )
+                    } else {
+                        error.message.clone()
+                    },
+                );
             }
         }
     }
@@ -396,13 +442,32 @@ pub fn render() {
         m::set("inbox-render", projection);
         dom::clear("inbox-receipts");
         if unknown {
-            let message = saved["request"]["prompt"]
-                .as_str()
-                .unwrap_or("The saved message state needs review.");
             let card = dom::el("li", "inbox-receipt", "");
-            dom::add(&card, &dom::el("p", "inbox-status", "Save not confirmed"));
-            dom::add(&card, &dom::el("p", "inbox-prompt", message));
-            dom::add(&card, &dom::el("p", "knowledge-note", "This message may already be saved. Retry saving before sending another message; its identity will stay the same."));
+            if saved["invalid"] == true {
+                dom::add(
+                    &card,
+                    &dom::el("p", "inbox-status", "Saved state unreadable"),
+                );
+                dom::add(
+                    &card,
+                    &dom::el(
+                        "p",
+                        "knowledge-note",
+                        "Clear it to continue. Messages the runner recorded stay listed here.",
+                    ),
+                );
+            } else {
+                dom::add(&card, &dom::el("p", "inbox-status", "Save not confirmed"));
+                dom::add(
+                    &card,
+                    &dom::el(
+                        "p",
+                        "inbox-prompt",
+                        saved["request"]["prompt"].as_str().unwrap_or(""),
+                    ),
+                );
+                dom::add(&card, &dom::el("p", "knowledge-note", "This message may already be saved. Retry saving before sending another message; its identity will stay the same. If the runner never saved it, its text returns to the composer."));
+            }
             dom::append("inbox-receipts", &card);
         }
         for item in items.iter().take(5) {
@@ -445,8 +510,10 @@ pub fn render() {
             dom::append("inbox-receipts", &card);
         }
     }
-    let hint = if unknown {
-        "Retry confirms the original saved message, including after the current turn finishes."
+    let hint = if saved["invalid"] == true {
+        "Clear the unreadable saved state before sending another message."
+    } else if unknown {
+        "Retry confirms the original saved message, including after the current turn finishes, or returns its text to the composer if the runner never saved it."
     } else if has_pending(&sid) {
         "A next message is already queued. Cancel it before queueing another."
     } else if eligible(&selected) {
@@ -537,19 +604,41 @@ mod tests {
     }
 
     #[test]
-    fn forbidden_retry_cannot_erase_a_previously_uncertain_committed_request() {
+    fn retry_keeps_an_uncertain_identity_until_the_runner_proves_it_unsaved() {
         let attempt = request(&V::Null, "a", "Continue.", "original").unwrap();
         let saved = json!({"request":attempt});
-        for status in [0, 200, 400, 401, 403, 404, 409, 500, 503] {
-            assert!(!rejected_first_attempt(&saved, status), "{status}");
+        // Lost replies, server faults and connection-gate refusals say nothing
+        // about whether the original POST committed.
+        for status in [0, 200, 401, 403, 500, 503] {
+            assert!(!not_recorded(&saved, status), "{status}");
             assert_eq!(
                 request(&saved, "a", "Continue.", "new-id").unwrap()["request_id"],
                 "original"
             );
         }
-        assert!(rejected_first_attempt(&V::Null, 409));
-        assert!(!rejected_first_attempt(&V::Null, 0));
-        assert!(!rejected_first_attempt(&V::Null, 500));
+        // The runner returns a recorded identity's receipt before any state
+        // check, so its refusal of the retry proves the original was not kept:
+        // e.g. 409 once the source turn finished. The text returns as a draft.
+        for status in [400, 404, 409, 413, 422] {
+            assert!(not_recorded(&saved, status), "{status}");
+        }
+        assert!(not_recorded(&V::Null, 409));
+        assert!(not_recorded(&V::Null, 403));
+        assert!(!not_recorded(&V::Null, 0));
+        assert!(!not_recorded(&V::Null, 500));
+    }
+
+    #[test]
+    fn saved_state_that_could_not_be_read_back_is_never_written() {
+        let plain = "x".repeat(32000);
+        let attempt = request(&V::Null, "a", &plain, "id").unwrap();
+        assert!(storable(&json!({"draft":plain,"request":attempt})).is_some());
+        // Each control byte is escaped as six JSON bytes: a valid 32000-byte
+        // message would exceed what `stored` reads and lock the composer.
+        let escaped = "\u{1}".repeat(32000);
+        let attempt = request(&V::Null, "a", &escaped, "id").unwrap();
+        assert!(storable(&json!({"draft":escaped,"request":attempt})).is_none());
+        assert!(storable(&json!({"draft":escaped,"request":null})).is_none());
     }
 
     #[test]

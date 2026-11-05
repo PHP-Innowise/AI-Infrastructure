@@ -49,9 +49,12 @@ edition's own files remain in that edition's changelog.
   during eligible running sessions, show recent receipts and cancel pending
   messages. Preserve per-conversation drafts and uncertain request identities
   across reload/reconnect; retry confirms the same request even after source
-  completion. Fence stale responses and keep polling through handoff/read
-  failures. Active inbox input cannot change settings or attach files. Align
-  mobile navigation selectors with the Rust UI's open state.
+  completion. A retry the runner refuses after finding no record of its
+  identity releases it and returns the text to the composer, instead of
+  locking that conversation's composer for good; unreadable saved state can be
+  cleared and is never written. Fence stale responses and keep polling through
+  handoff/read failures. Active inbox input cannot change settings or attach
+  files. Align mobile navigation selectors with the Rust UI's open state.
 
 - Add a durable, prompt-only native Harness inbox API for the next turn of
   a running session with a known provider session identity. Idempotent request

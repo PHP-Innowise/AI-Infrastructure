@@ -553,6 +553,8 @@ pub fn controls() {
         "send-label",
         if m::read(|s| s.pending) {
             "Sending…"
+        } else if inbox_retry && inbox::unreadable() {
+            "Clear saved state"
         } else if inbox_retry {
             "Retry saving"
         } else if inbox_active {

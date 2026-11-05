@@ -138,6 +138,39 @@ async fn inbox_backpressure_retains_pending_until_a_waiting_slot_opens() {
 }
 
 #[tokio::test]
+async fn retry_after_source_completion_proves_whether_its_identity_was_recorded() {
+    let fixture = Fixture::new();
+    let (sid, job, _) = running(&fixture);
+    let recorded = fixture
+        .sessions
+        .accept_inbox(&sid, "recorded", "Continue.")
+        .await
+        .unwrap();
+    complete(&fixture, &job, Some("native-1"));
+    // The composer releases an uncertain request only on this contract: a
+    // recorded identity still returns its receipt after the source finished...
+    let replay = fixture
+        .sessions
+        .accept_inbox(&sid, "recorded", "Continue.")
+        .await
+        .unwrap();
+    assert_eq!(replay["id"], recorded["id"]);
+    // ...while an identity whose first POST never arrived is refused and
+    // leaves no receipt behind, however often it is retried.
+    for _ in 0..2 {
+        let refused = fixture
+            .sessions
+            .accept_inbox(&sid, "lost", "Continue later.")
+            .await
+            .unwrap_err();
+        assert_eq!(refused.status, 409);
+    }
+    let items = fixture.sessions.store.inbox_list(&sid, None).unwrap()["items"].clone();
+    assert_eq!(items.as_array().unwrap().len(), 1);
+    assert_eq!(items[0]["request_id"], "recorded");
+}
+
+#[tokio::test]
 async fn inbox_drift_failure_missing_proof_and_cancel_never_start_a_followup() {
     for failure in ["scope", "authority", "failure", "proof", "cancel"] {
         let mut fixture = Fixture::new();
