@@ -614,8 +614,12 @@ a system entirely in the application:
    checkout can move when its directory layout is retained. Each Harness instance
    still registers its own external service folders before accessing them.
 
-The same form edits existing systems. **Close editor** retains the current
-draft within this page; **Discard changes** drops it. Manual-only drafts do not
+The same form edits existing systems. **Fill with AI** on a system with
+passports reads them as the current, possibly outdated, declarations: it keeps
+what the evidence supports and changes what it contradicts or adds, and its
+report says per service what the proposal changes from the form (`changes
+consumes 5 → 7`, `same as saved`) before you save. **Close editor** retains the
+current draft within this page; **Discard changes** drops it. Manual-only drafts do not
 survive reload. AI scans retain their captured draft in private Harness state;
 reopening the editor reconnects to the last scan for that project/config. Completed
 results are restored only while their evidence is fresh. Cancellation or server
