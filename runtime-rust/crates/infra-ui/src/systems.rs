@@ -259,7 +259,7 @@ fn next_change_id(id: &str) -> String {
 fn replan(v: &V) {
     let plan = &v["plan"];
     let impact = m::array(&plan["impact"]);
-    let starting = impact
+    let mut starting = impact
         .iter()
         .filter(|entry| {
             matches!(
@@ -269,6 +269,13 @@ fn replan(v: &V) {
         })
         .map(|entry| m::text(entry, "service"))
         .collect::<Vec<_>>();
+    // A plan that still needs a selection offers what the task matched.
+    if starting.is_empty() {
+        starting = m::array(&plan["routing"]["candidates"])
+            .iter()
+            .map(|candidate| m::text(candidate, "service"))
+            .collect();
+    }
     for e in dom::all("#system-plan-services input[type=checkbox]") {
         if let Some(input) = e.dyn_ref::<web_sys::HtmlInputElement>() {
             if !input.disabled() {
@@ -279,7 +286,12 @@ fn replan(v: &V) {
     let downstream = impact
         .iter()
         .any(|entry| entry["reason"] == "potential_consumer");
-    dom::set_value("system-depth", if downstream { "32" } else { "0" });
+    let depth = if downstream || impact.is_empty() {
+        "32"
+    } else {
+        "0"
+    };
+    dom::set_value("system-depth", depth);
     dom::set_value("system-task", &m::text(&plan["context"], "task"));
     dom::set_value("system-contracts", "");
     if let Some(budget) = plan["context_budget_chars"].as_u64() {
