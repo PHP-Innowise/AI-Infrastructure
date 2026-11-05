@@ -32,12 +32,17 @@ fn step_index(state: &Value, id: &str) -> Result<usize> {
         .and_then(|steps| steps.iter().position(|step| step["id"] == id))
         .ok_or_else(|| fail("Missing dispatch step"))
 }
+/// `person_accepted` is true only on a resume that accepts source changes:
+/// then a person's content edit to a source the plan fingerprints in the
+/// system folder, which no worker may write, is adopted too (the system file
+/// itself still needs a new plan).
 pub fn check_changes(
     system: &mut System,
     plan: &Value,
     step: Option<&Value>,
     report: Option<&Value>,
     state: &Value,
+    person_accepted: bool,
 ) -> Result<Value> {
     let verification = system.verify(plan)?;
     if verification["fresh"] == true {
@@ -75,6 +80,22 @@ pub fn check_changes(
             format!("{sid}/{path}")
         };
         let reason = string(&change["reason"]).replace('_', " ");
+        if sid == "__system__" {
+            // The system folder is the system file's parent.
+            let config = system.config.file_name().and_then(|name| name.to_str());
+            if config == Some(path) || change["reason"] != "content_changed" {
+                return Err(fail(format!(
+                    "{place} changed ({reason}); the system file and the folder's sources define the run; prepare a new plan"
+                )));
+            }
+            if !person_accepted {
+                return Err(fail(format!(
+                    "{place} changed ({reason}), and no worker may write the system folder; inspect the edit, then resume accepting source changes (CLI: --accept-source-changes) or prepare a new plan"
+                )));
+            }
+            accepted.insert((sid.to_string(), path.to_string()));
+            continue;
+        }
         let Some(service) = system.services.get(sid) else {
             return Err(fail(format!(
                 "{place} changed ({reason}) outside the worker's scope; prepare a new plan"
@@ -192,9 +213,9 @@ async fn execute_run_context(
     let result=async{
  let blocked=state["steps"].as_array().into_iter().flatten().find(|step|["running","blocked","interrupted"].contains(&string(&step["status"]))).cloned();
  if let Some(step)=blocked{let receipt=match dispatch_receipt(&directory,&state,&step){Ok(value)=>Some(value),Err(error)if error.kind==ErrorKind::NotFound=>None,Err(error)=>return Err(error)};
- if receipt.as_ref().is_some_and(|receipt|receipt["ok"]==true){let receipt=receipt.ok_or_else(||fail("Receipt disappeared"))?;if system.verify(&plan)?["fresh"]!=true{if !accept_source_changes{return Err(fail("Successful receipt has uncheckpointed edits; inspect and explicitly accept source changes"));}plan=check_changes(system,&plan,Some(&step),Some(&receipt["report"]),&state)?;save(&directory,"checkpoint.json",&plan,false)?;}finish(&directory,&mut state,&step,&receipt,&brains)?;retry=None;}
+ if receipt.as_ref().is_some_and(|receipt|receipt["ok"]==true){let receipt=receipt.ok_or_else(||fail("Receipt disappeared"))?;if system.verify(&plan)?["fresh"]!=true{if !accept_source_changes{return Err(fail("Successful receipt has uncheckpointed edits; inspect and explicitly accept source changes"));}plan=check_changes(system,&plan,Some(&step),Some(&receipt["report"]),&state,true)?;save(&directory,"checkpoint.json",&plan,false)?;}finish(&directory,&mut state,&step,&receipt,&brains)?;retry=None;}
  else{if retry.as_deref()!=Some(string(&step["id"])){return Err(fail(format!("Dispatch {id} stopped without a successful receipt and may have changed files; inspect them, then retry {id} explicitly (CLI: --retry-step {id})",id=string(&step["id"]))));}
- if system.verify(&plan)?["fresh"]!=true{if !accept_source_changes{return Err(fail("Partial edits detected; inspect and explicitly accept source changes"));}plan=check_changes(system,&plan,Some(&step),None,&state)?;save(&directory,"checkpoint.json",&plan,false)?;}
+ if system.verify(&plan)?["fresh"]!=true{if !accept_source_changes{return Err(fail("Partial edits detected; inspect and explicitly accept source changes"));}plan=check_changes(system,&plan,Some(&step),None,&state,true)?;save(&directory,"checkpoint.json",&plan,false)?;}
  let index=step_index(&state,string(&step["id"]))?;state["steps"][index]["status"]="pending".into();}}
  else if retry.is_some(){return Err(fail("No unfinished dispatch matches the dispatch chosen for retry"));}
  if system.verify(&plan)?["fresh"]!=true{return Err(fail("Checkpoint sources changed; prepare new plan"));}plan=system.refresh_checkpoint(&plan,&BTreeSet::new())?;
@@ -218,7 +239,7 @@ async fn execute_run_context(
  Err(error)=>{receipt["error"]=if cancel.load(Ordering::SeqCst){"interrupted"}else{error.code.as_deref().unwrap_or("worker_process_failure")}.into();}}
  save(&directory,&receipt_name(&preview),&receipt,true)?;let finished=object!({"type":"dispatch_finished","phase":preview["id"],"service":sid,"attempt":attempt,"ok":receipt["ok"],"error":if receipt["rejection"].is_string(){object!(format!("{}: {}",string(&receipt["error"]),string(&receipt["rejection"])))}else{receipt["error"].clone()},"duration_seconds":elapsed,"report":receipt["report"]});
  if receipt["ok"]!=true{let interrupted=cancel.load(Ordering::SeqCst)||receipt["error"]=="interrupted";state["steps"][index]["status"]=if interrupted{"interrupted"}else{"blocked"}.into();state["status"]=if interrupted{"interrupted"}else{"blocked"}.into();state["error"]=receipt["error"].clone();save(&directory,"run.json",&state,false)?;notify(event,finished);return Ok(state.clone());}
- current=System::new(&system.config,&system.allow_roots)?;plan=check_changes(&mut current,&plan,Some(&preview),Some(&receipt["report"]),&state)?;save(&directory,"checkpoint.json",&plan,false)?;finish(&directory,&mut state,&preview,&receipt,&brains)?;notify(event,finished);
+ current=System::new(&system.config,&system.allow_roots)?;plan=check_changes(&mut current,&plan,Some(&preview),Some(&receipt["report"]),&state,false)?;save(&directory,"checkpoint.json",&plan,false)?;finish(&directory,&mut state,&preview,&receipt,&brains)?;notify(event,finished);
  if preview["id"]=="contracts"{break;}}
  if state["steps"].as_array().is_some_and(|steps|steps.iter().any(|step|step["status"]!="completed")){return Ok(state.clone());}
  let reports=reports(&directory,&state)?;save(&directory,"handoff.json",&object!({"schema_version":1,"kind":"ai-system-handoff","run_id":state["run_id"],"change_id":state["change_id"],"tasks":state["tasks"],"reports":reports,"receipts":state["steps"].as_array().into_iter().flatten().map(receipt_name).collect::<Vec<_>>(),"knowledge":"Review contract decisions and reusable lessons in receipts; publish through each owning runtime's promotion workflow. Raw context is not durable knowledge. If the change added, versioned or removed a contract or a dependency, update the service passports (Fill with AI or the system editor) before planning the next change: plans route and trace impact only through declared contracts.","meaning":"Worker-reported completion and checks; no commit, merge or deployment is implied."}),false)?;

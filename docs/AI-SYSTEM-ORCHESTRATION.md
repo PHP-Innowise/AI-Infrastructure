@@ -508,9 +508,14 @@ The original plan must be fresh before any task creation. Sources are checked
 before each dispatch. After a successful edit, only changed registered sources
 explicitly listed in that worker's `changed_files` are adopted into the next
 checkpoint. Interrupted partial edits require explicit acceptance and must
-remain inside that worker's service scope. Passports, system config, commit
-changes, newly appearing missing sources, expired/ineligible memory and changes
-in other services require a new plan/run. Canonical excerpts are reread before
+remain inside that worker's service scope. No worker writes the system folder,
+so when a dispatch reports that a shared contract or document there needs a
+change (a real verification agent found the topic registry missing a new
+consumer), edit it yourself and resume with `--accept-source-changes` and the
+dispatch to repeat: an edit of a system-folder source the plan fingerprints is
+adopted only by such a resume, never during a run. Passports, the system file,
+commit changes, newly appearing missing sources, expired/ineligible memory and
+changes in other services require a new plan/run. Canonical excerpts are reread before
 launch; editing a saved excerpt does not replace its cited source.
 
 Freshness covers **registered/fingerprinted inputs**, not every file in a

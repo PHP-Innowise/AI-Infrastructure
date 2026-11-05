@@ -671,3 +671,90 @@ fn an_executor_killed_mid_dispatch_resumes_only_with_an_explicit_retry() {
     assert_eq!(code, 0, "{text}");
     assert_eq!(summary["status"], "completed", "{summary:#}");
 }
+
+/// Verification blocks until the system policy it is given says the registry
+/// is current; every other dispatch completes.
+const REGISTRY_GATE: &str = r#"case "$input" in
+  *'"phase":"contracts","previous_receipts"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"phase":"verify","previous_receipts"'*)
+    case "$input" in
+      *'Registry lists every consumer'*) report verified '[]' '[]' ;;
+      *) printf '{"status":"blocked","summary":"The topic registry misses billing","checks":[{"name":"registry","status":"failed","detail":"system AGENTS.md"}],"changed_files":[],"service_order":[]}\n' ;;
+    esac ;;
+  *) report checked '[]' '[]' ;;
+esac"#;
+
+fn resume(root: &Path, extra: &[&str]) -> (i32, Value, String) {
+    let config = root.join("system/system.json");
+    let services = root.join("services");
+    let directory = root.join("run");
+    let mut args = vec![
+        "resume",
+        "--system",
+        config.to_str().unwrap(),
+        "--allow-root",
+        services.to_str().unwrap(),
+        "--run-dir",
+        directory.to_str().unwrap(),
+    ];
+    args.extend_from_slice(extra);
+    cli(root, &args)
+}
+
+#[test]
+fn a_persons_edit_to_a_system_source_is_adopted_only_by_an_accepting_resume() {
+    let root = Root::new();
+    let (code, summary, directory) = run_script(&root.0, REGISTRY_GATE, "read-only");
+    assert_eq!(code, 1, "{summary:#}");
+    // No worker may write the system folder: a person fixes what verification found.
+    let policy = root.0.join("system/AGENTS.md");
+    fs::write(
+        &policy,
+        "Coordinate contract changes first.\nRegistry lists every consumer.\n",
+    )
+    .unwrap();
+    let (code, _, text) = resume(&root.0, &["--retry-step", "verify"]);
+    assert_eq!(code, 2, "{text}");
+    assert!(text.contains("explicitly accept source changes"), "{text}");
+    let (code, summary, text) = resume(
+        &root.0,
+        &["--retry-step", "verify", "--accept-source-changes"],
+    );
+    assert_eq!(code, 0, "{text}");
+    assert_completed(&summary, &directory);
+    let checkpoint: Value =
+        serde_json::from_slice(&fs::read(directory.join("checkpoint.json")).unwrap()).unwrap();
+    let quoted = checkpoint["context"]["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["service"] == "__system__" && source["path"] == "AGENTS.md")
+        .unwrap();
+    assert!(
+        quoted["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("Registry lists every consumer"),
+        "{quoted:#}"
+    );
+}
+
+#[test]
+fn an_edited_system_file_still_needs_a_new_plan() {
+    let root = Root::new();
+    let (code, summary, _) = run_script(&root.0, REGISTRY_GATE, "read-only");
+    assert_eq!(code, 1, "{summary:#}");
+    let config = root.0.join("system/system.json");
+    let mut registry: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    registry["name"] = json!("Renamed fixture system");
+    write_json(&config, &registry);
+    let (code, _, text) = resume(
+        &root.0,
+        &["--retry-step", "verify", "--accept-source-changes"],
+    );
+    assert_eq!(code, 2, "{text}");
+    assert!(
+        text.contains("System folder system.json changed (content changed); the system file"),
+        "{text}"
+    );
+}

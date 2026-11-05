@@ -125,6 +125,17 @@ edition's own files remain in that edition's changelog.
     session is titled by its prompt's first 80 characters, so the nine launches
     of one real run all read `System orchestration: Allow customers to cancel
     a CONFIRMED order within 30 minu`. The runner footer says `1 active slot`.
+  - A shared contract or document in the system folder that verification
+    finds out of date no longer costs a whole new run. The real verification
+    agent passed every suite (Go with `-race`, PHP, Node and a cross-service
+    scenario in its scratch folder) and blocked on the topic registry, which no
+    worker may write; a person's edit there made the run stale for good. A
+    resume that accepts source changes now adopts a person's content edit to a
+    system-folder source the plan fingerprints (never `system.json`, never
+    during a run), and the recovery panel says so.
+  - A catalog asks Git for each checkout's HEAD once, up to eight at a time,
+    instead of once per service: a monorepo's service folders share one, and a
+    folder outside any checkout needs no Git process.
 
 - Keep repository leases and inbox available when an unrelated Linux mount
   has a deleted bind source root or an empty source field. Read only mounts
