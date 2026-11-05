@@ -99,7 +99,9 @@ edition's own files remain in that edition's changelog.
     names what stopped its dispatch (failed checks, unrun verification checks,
     files a read-only worker wrote). The Changes tab again says when unsaved
     editor changes or an AI scan hold planning and launching, and holds them:
-    a plan is computed from the saved files, not the draft.
+    a plan is computed from the saved files, not the draft. A launch that
+    leaves its run blocked or interrupted reads `failed` in Sessions instead
+    of `completed`.
 
 - Keep repository leases and inbox available when an unrelated Linux mount
   has a deleted bind source root or an empty source field. Read only mounts

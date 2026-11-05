@@ -178,7 +178,11 @@ async fn run_system_context(
                 &mut event,
                 object!({"kind":"result","ok":ok,"text":format!("System run {}",string(&state["status"]))}),
             );
-            Ok(execution::run_summary(&state, &journal))
+            // A saved but unfinished run (blocked, interrupted) is an incomplete
+            // launch: its Harness session reads failed, not completed.
+            let mut summary = execution::run_summary(&state, &journal);
+            summary["outcome"] = if ok { "completed" } else { "incomplete" }.into();
+            Ok(summary)
         }
         Err(error) => {
             display(
