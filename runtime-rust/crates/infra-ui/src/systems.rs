@@ -161,18 +161,7 @@ pub async fn load() {
         Ok((epoch, value))
             if m::current("system-list", epoch) && system_current(&project, "", generation) =>
         {
-            dom::options(
-                "system-runs",
-                &m::array(&value["runs"]),
-                |run| {
-                    format!(
-                        "{} · {}",
-                        m::text(run, "change_id"),
-                        m::label(run["status"].as_str().unwrap_or(""))
-                    )
-                },
-                None,
-            );
+            dom::options("system-runs", &m::array(&value["runs"]), run_label, None);
             dom::hidden("system-runs-empty", !m::array(&value["runs"]).is_empty());
             let id = dom::value("system-runs");
             if !id.is_empty() {
@@ -183,6 +172,31 @@ pub async fn load() {
             dom::error("system-run-error", &error.message)
         }
         _ => {}
+    }
+}
+/// How a change reads in the change list.
+fn run_label(run: &V) -> String {
+    format!(
+        "{} · {}",
+        m::text(run, "change_id"),
+        m::label(run["status"].as_str().unwrap_or(""))
+    )
+}
+/// Lists the project's changes again with `selected` chosen: a new plan is
+/// shown under the change list it joins.
+async fn relist(project: &str, selected: &str) {
+    let path = format!("/api/system-runs?project_id={}", dom::enc(project));
+    let Ok((epoch, value)) = api::scoped("system-list", &path).await else {
+        return;
+    };
+    if m::current("system-list", epoch) && dom::value("system-project") == project {
+        dom::options(
+            "system-runs",
+            &m::array(&value["runs"]),
+            run_label,
+            Some(selected),
+        );
+        dom::hidden("system-runs-empty", !m::array(&value["runs"]).is_empty());
     }
 }
 async fn read(id: &str) {
@@ -882,6 +896,17 @@ fn render_run() {
         return;
     }
     dom::hidden("system-run", false);
+    // The list entry follows the run's status as it changes.
+    if let Some(option) = dom::get("system-runs")
+        .and_then(|list| list.dyn_into::<web_sys::HtmlSelectElement>().ok())
+        .and_then(|list| {
+            (0..list.length())
+                .filter_map(|index| list.item(index))
+                .find(|option| option.get_attribute("value").as_deref() == Some(&m::text(&v, "id")))
+        })
+    {
+        option.set_text_content(Some(&run_label(&v)));
+    }
     dom::text(
         "system-run-title",
         &format!("{} · {}", m::text(&v, "change_id"), m::text(&v, "system")),
@@ -1159,7 +1184,7 @@ async fn plan() {
     }
     let generation = m::read(|s| s.epochs.get("editor-scope").copied().unwrap_or(0));
     let epoch = m::next("system-plan");
-    let body = json!({"project_id":project,"config_path":config,"task":dom::value("system-task"),"change_id":dom::value("system-change-id"),"services":dom::selected_checks("system-plan-services"),"contracts":dom::value("system-contracts").split(',').map(str::trim).filter(|s|!s.is_empty()).collect::<Vec<_>>(),"budget":dom::num("system-budget")});
+    let body = json!({"project_id":project,"config_path":config,"task":dom::value("system-task"),"change_id":dom::value("system-change-id"),"services":dom::selected_checks("system-plan-services"),"contracts":dom::value("system-contracts").split(',').map(str::trim).filter(|s|!s.is_empty()).collect::<Vec<_>>(),"budget":dom::num("system-budget"),"depth":dom::num("system-depth")});
     m::bind_pending("system-pending", epoch);
     controls();
     match api::post("/api/system-runs", body).await {
@@ -1195,6 +1220,7 @@ async fn plan() {
             }
             dom::set_checked("system-reviewed", false);
             render_run();
+            relist(&project, &id).await;
         }
         Err(error)
             if editor_current(&project, &config, generation)

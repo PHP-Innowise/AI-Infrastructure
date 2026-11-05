@@ -681,8 +681,11 @@ without claiming those records already exist.
 
 **Plan a change** on **Services** (or **New change** on **Changes**) opens the
 change form. Select starting services or supply changed contract IDs, describe
-the task, and **Prepare plan**. Contract consumers enter the impact scope
-automatically. A change then moves through **Plan**, **Review**, **Run** and
+the task, and **Prepare plan**. Contract consumers enter the impact scope:
+**Contract consumers that join the plan** takes every service downstream of
+the starting services (the default, `--impact-depth 32` in the CLI), only their
+direct consumers (`1`) or none (`0`, for a focused investigation). The prepared
+plan is selected in the change list. A change then moves through **Plan**, **Review**, **Run** and
 **Receipts**. The
 plan includes context excerpts, omitted sources, warnings and fingerprints.
 Its service list denotes participants; the contract dispatch later establishes

@@ -141,6 +141,12 @@ edition's own files remain in that edition's changelog.
     complete if verification left such checks out. The step records
     `accepted_unrun_checks`; failed checks, blocked reports and writes are
     never accepted.
+  - A prepared plan joins the change list and is selected there (the list
+    kept showing the previous change until a reload), and the selected entry
+    follows its run's status. The plan form chooses which contract consumers
+    join (`Every service downstream of them`, `Only their direct consumers`,
+    `None`): the API took an impact depth the form never sent, so a read-only
+    investigation of two services planned six.
   - A 200-service system answers `validate`, `catalog`, `map`, `locate` and a
     one-hop `plan` in about 25 ms and `verify` in 70 ms instead of 1-2.5 s:
     the secret, identifier and routing-word patterns were compiled again for
