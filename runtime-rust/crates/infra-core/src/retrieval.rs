@@ -794,24 +794,19 @@ pub fn retrieve(
 /// A lookup refused because a record claiming the task cannot be read.
 fn unreadable_record(error: &RuntimeError) -> bool {
     error.kind == ErrorKind::InvalidInput
-        && error
-            .message
-            .starts_with("Project Brain record is invalid: ")
+        && error.message.starts_with("Project Brain record invalid: ")
 }
 /// What a turn says when its task's record cannot be read, as the retired
 /// capsule said it; an unresolved merge conflict is named by its file first,
 /// since a warning is cut short.
-fn unreadable_notice(context: &RuntimeContext, error: &RuntimeError) -> String {
-    let path = error
+fn unreadable_notice(error: &RuntimeError) -> String {
+    let conflicted = error
         .message
-        .trim_start_matches("Project Brain record is invalid: ")
-        .to_string();
-    let conflicted = std::fs::read_to_string(context.roots.state.join(&path)).is_ok_and(|text| {
-        text.lines().any(|line| line.starts_with("<<<<<<< "))
-            && text.lines().any(|line| line == "=======")
-            && text.lines().any(|line| line.starts_with(">>>>>>> "))
-    });
-    if conflicted {
+        .strip_prefix("Project Brain record invalid: ")
+        .and_then(|rest| rest.split_once(": unresolved Git merge conflict"))
+        .map(|(path, _)| path)
+        .filter(|path| !path.is_empty() && !path.contains(char::is_whitespace));
+    if let Some(path) = conflicted {
         format!(
             "Unresolved Git merge conflict in {path}: keep one side or merge both, without the markers; checkpoints wait for it."
         )
@@ -958,7 +953,7 @@ fn retrieve_inner(
         let served = match crate::checkpoint::served_uuid(Some(store), context, id) {
             Ok(served) => served.unwrap_or_else(|| id.clone()),
             Err(error) if request.allow_unprovisioned && unreadable_record(&error) => {
-                binding_notices.push(unreadable_notice(context, &error));
+                binding_notices.push(unreadable_notice(&error));
                 unreadable = true;
                 String::new()
             }
@@ -988,7 +983,7 @@ fn retrieve_inner(
             Some(Err(error))
                 if error.kind == ErrorKind::NotFound && request.allow_unprovisioned => {}
             Some(Err(error)) if request.allow_unprovisioned && unreadable_record(&error) => {
-                binding_notices.push(unreadable_notice(context, &error));
+                binding_notices.push(unreadable_notice(&error));
                 unreadable = true;
             }
             Some(Err(error)) => return Err(error),

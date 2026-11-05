@@ -699,54 +699,17 @@ impl MemoryService {
     pub fn validate(&self) -> Result<Value> {
         let brain = BrainRepository::new(self.context.clone())?;
         let inventory = brain.inventory(true)?;
-        let mut errors = inventory
-            .problems
-            .iter()
-            .map(|problem| format!("{}: {}", problem.path.display(), problem.error))
-            .collect::<Vec<_>>();
-        // Brain alone: the Memory Bank has its own validator (`bank
-        // validate`). A chunk that reached its review date is the bank's
-        // problem, and it made every session banner report the Brain invalid.
-        let ids = inventory
-            .records
-            .iter()
-            .filter_map(|image| image.record["id"].as_str())
-            .collect::<std::collections::BTreeSet<_>>();
-        for image in &inventory.records {
-            for field in ["conflicts", "supersedes"] {
-                for id in image.record[field]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                {
-                    if !ids.contains(id) {
-                        errors.push(format!(
-                            "{}: unknown {field} record {id}",
-                            image.path.display()
-                        ));
-                    }
-                }
-            }
-        }
-        let handoffs = self.context.roots.brain_root().join("control/handoffs");
-        if handoffs.is_dir() {
-            for entry in std::fs::read_dir(handoffs)? {
-                let path = entry?.path();
-                if path.extension().is_none_or(|extension| extension != "md") {
-                    continue;
-                }
-                let checked = (|| -> Result<()> {
-                    let (handoff, _) =
-                        domain::parse_markdown_record(&crate::fs::read_text(&path)?)?;
-                    let task = brain.get_task(handoff["task_id"].as_str().unwrap_or(""))?;
-                    domain::validate_handoff(&handoff, Some(&task))
-                })();
-                if let Err(error) = checked {
-                    errors.push(format!("{}: {error}", path.display()));
-                }
-            }
-        }
+        // The retired command's whole check: records against the schema and
+        // their lifecycle, path binding, stored secrets, relationships,
+        // handoffs (archived too), message journals, retrieval manifests,
+        // promotions and the deterministic indexes. A changed citation is
+        // listed below instead. Brain alone: the Memory Bank has its own
+        // validator (`bank validate`); a chunk past its review date made
+        // every session banner report the Brain invalid.
+        let errors = crate::bank::maintenance::repository_errors(
+            &BankService::new(self.context.clone()),
+            false,
+        )?;
         // A record whose cited file changed is intact: retrieval serves it
         // marked for checking. It is listed, archived ones too, and does not
         // fail validation the way a broken record does.

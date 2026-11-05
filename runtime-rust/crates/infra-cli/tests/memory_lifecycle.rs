@@ -975,6 +975,99 @@ fn a_broken_chunk_fails_the_bank_and_leaves_the_brain_valid() {
     assert!(banner.contains("brain-validation=valid."), "{banner}");
 }
 
+/// `memory validate` runs the retired command's whole check and words each
+/// problem as it did: the field the schema rejects, a credential stored in a
+/// record, and a deterministic index left half-merged. The native command
+/// checked less and passed all three.
+#[test]
+fn a_broken_brain_record_is_named_by_its_field_and_a_stored_key_fails() {
+    let project = Project::new();
+    let engine = project.path.join("memory-bank/bin/infra-engine");
+    let memory = |args: &[&str]| {
+        let output = project
+            .command(&engine)
+            .arg("memory")
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+    let (code, started) = memory(&["start", "--task-id", "SHOP-7", "--goal", "Fix refunds"]);
+    assert_eq!(code, Some(0), "{started}");
+    let tasks = project.path.join("project-brain/dynamic/tasks");
+    let record = fs::read_dir(&tasks)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .unwrap();
+    let original = fs::read_to_string(&record).unwrap();
+    let relative = format!(
+        "project-brain/dynamic/tasks/{}",
+        record.file_name().unwrap().to_string_lossy()
+    );
+    assert_eq!(memory(&["validate"]).0, Some(0));
+
+    fs::write(
+        &record,
+        original.replacen(
+            "  \"authority\": ",
+            "  \"layer\": \"x\",\n  \"authority\": ",
+            1,
+        ),
+    )
+    .unwrap();
+    let (code, report) = memory(&["validate"]);
+    assert_eq!(code, Some(1), "{report}");
+    for line in [
+        format!("{}: $: unexpected keys layer\n", record.display()),
+        format!("Project Brain record invalid: {relative}: $: unexpected keys layer\n"),
+    ] {
+        assert!(report.contains(&line), "{line:?} in {report}");
+    }
+
+    fs::write(
+        &record,
+        original.replacen(
+            "\"progress\": \"\"",
+            "\"progress\": \"key AKIAIOSFODNN7EXAMPLE\"",
+            1,
+        ),
+    )
+    .unwrap();
+    let (code, report) = memory(&["validate"]);
+    assert_eq!(
+        (code, report.as_str()),
+        (
+            Some(1),
+            format!(
+                "{}: record contains a possible AWS access key; remove it from the record and rotate the credential, since Git history keeps it\n",
+                record.display()
+            )
+            .as_str()
+        )
+    );
+
+    fs::write(&record, &original).unwrap();
+    let index = project.path.join("project-brain/indexes/active.json");
+    let built = fs::read_to_string(&index).unwrap();
+    fs::write(
+        &index,
+        format!("<<<<<<< HEAD\n{built}=======\n{{}}\n>>>>>>> theirs\n"),
+    )
+    .unwrap();
+    let (code, report) = memory(&["validate"]);
+    assert_eq!(
+        (code, report.as_str()),
+        (
+            Some(1),
+            "project-brain/indexes/active.json: deterministic index is not valid JSON (Expecting value: line 1 column 1 (char 0)); a merge can leave conflict markers in it. It is derived from the records: the next Brain write rebuilds it - a checkpoint, `update`, `record-result` or `compact`.\n"
+        )
+    );
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(

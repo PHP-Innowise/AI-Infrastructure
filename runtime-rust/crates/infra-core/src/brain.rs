@@ -180,33 +180,78 @@ impl BrainRepository {
             let parsed = text
                 .as_ref()
                 .map_err(|error| RuntimeError::invalid(error.to_string()))
-                .and_then(|text| parse_markdown_record(text));
+                .and_then(|text| parse_markdown_record(text))
+                .map_err(|error| {
+                    // A half-merged record names the conflict, not the JSON
+                    // error its markers cause.
+                    if text.as_ref().is_ok_and(|text| {
+                        text.lines().any(|line| line.starts_with("<<<<<<< "))
+                    }) {
+                        RuntimeError::invalid(
+                            "unresolved Git merge conflict (<<<<<<< ... >>>>>>>); keep one side or merge both, without the markers",
+                        )
+                    } else {
+                        error
+                    }
+                });
             if let Ok((metadata, _)) = &parsed
                 && metadata["type"] == "handoff"
             {
                 let expected = metadata["task_id"].as_str().unwrap_or("");
-                if path.parent() == Some(anchor.join("archive/handoffs").as_path())
+                let error = if path.parent() == Some(anchor.join("archive/handoffs").as_path())
                     && path.file_stem().and_then(|name| name.to_str()) == Some(expected)
-                    && metadata["status"] == "closed"
-                    && validate_handoff(metadata, None).is_ok()
                 {
-                    continue;
-                }
+                    let checked = validate_handoff(metadata, None).and_then(|()| {
+                        if metadata["status"] == "closed" {
+                            Ok(())
+                        } else {
+                            Err(RuntimeError::invalid("archived handoff must be closed"))
+                        }
+                    });
+                    match checked {
+                        Ok(()) => continue,
+                        Err(error) => format!("archived handoff invalid: {}", error.message),
+                    }
+                } else {
+                    "unexpected handoff in authority path".into()
+                };
                 problems.push(RecordProblem {
                     path,
-                    error: "Unexpected or invalid archived handoff in authority path".into(),
+                    error,
                     record_type: None,
                     id: metadata["id"].as_str().map(String::from),
                     external_id: metadata
                         .get("external_id")
-                        .or(metadata.get("task_id"))
                         .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .or(metadata["task_id"].as_str())
                         .map(String::from),
                 });
                 continue;
             }
+            // A record that parsed but fails is named by the field the schema
+            // rejects where it rejects one; the lifecycle check alone may not
+            // name it.
             let parsed = parsed.and_then(|(record, body)| {
-                validate_record(&record, archived)?;
+                let identified = RECORD_TYPES.contains(&record["type"].as_str().unwrap_or(""))
+                    && record["id"].as_str().is_some_and(is_uuid4)
+                    && record["external_id"]
+                        .as_str()
+                        .is_some_and(|id| !id.trim().is_empty());
+                let checked = if identified {
+                    validate_record(&record, archived)
+                } else {
+                    Err(RuntimeError::invalid("record identity unavailable"))
+                };
+                if let Err(error) = checked {
+                    return Err(crate::domain::validate_schema_file(
+                        self.roots(),
+                        "dynamic-record.schema.json",
+                        &record,
+                    )
+                    .err()
+                    .unwrap_or(error));
+                }
                 Ok((record, body))
             });
             match parsed {
@@ -283,12 +328,13 @@ impl BrainRepository {
         }
         if let Some(problem) = claimants.first() {
             return Err(RuntimeError::invalid(format!(
-                "Project Brain record is invalid: {}",
+                "Project Brain record invalid: {}: {}",
                 problem
                     .path
                     .strip_prefix(&self.roots().state)
                     .unwrap_or(&problem.path)
-                    .display()
+                    .display(),
+                problem.error
             )));
         }
         matches.into_iter().next().ok_or_else(|| {

@@ -99,12 +99,13 @@ fn inventory_find(
     }
     if let Some(problem) = claimants.first() {
         return Err(RuntimeError::invalid(format!(
-            "Project Brain record is invalid: {}",
+            "Project Brain record invalid: {}: {}",
             problem
                 .path
                 .strip_prefix(&brain.roots().state)
                 .unwrap_or(&problem.path)
-                .display()
+                .display(),
+            problem.error
         )));
     }
     matches.into_iter().next().ok_or_else(|| {
@@ -209,10 +210,7 @@ fn inventory_preserves_archived_and_misplaced_handoff_classification() {
             .unwrap();
         assert_eq!(problem.external_id.as_deref(), Some(task_id));
         assert_eq!(problem.record_type, None);
-        assert_eq!(
-            problem.error,
-            "Unexpected or invalid archived handoff in authority path"
-        );
+        assert_eq!(problem.error, "unexpected handoff in authority path");
     }
     assert!(all.problems.iter().all(|problem| problem.path != archived));
 
@@ -479,13 +477,16 @@ fn find_keeps_wrong_kind_and_unknown_kind_invalid_claimants() {
     );
     assert_eq!(brain.get_task(alias).unwrap(), task);
     assert_eq!(brain.get(alias).unwrap_err().kind, ErrorKind::Conflict);
-    assert_eq!(
-        brain
-            .find(alias, Some("finding"), false)
-            .unwrap_err()
-            .message,
-        "Project Brain record is invalid: project-brain/dynamic/zz-claimants/wrong-kind.md"
-            .replace('/', std::path::MAIN_SEPARATOR_STR)
+    let refused = brain
+        .find(alias, Some("finding"), false)
+        .unwrap_err()
+        .message;
+    assert!(
+        refused.starts_with(
+            &"Project Brain record invalid: project-brain/dynamic/zz-claimants/wrong-kind.md: "
+                .replace('/', std::path::MAIN_SEPARATOR_STR)
+        ),
+        "{refused}"
     );
     assert_inventory_find_parity(&brain, &[alias, task_id]);
 
@@ -506,7 +507,7 @@ fn find_keeps_wrong_kind_and_unknown_kind_invalid_claimants() {
     assert_eq!(
         invalid.message.replace('\\', "/"),
         format!(
-            "Project Brain record is invalid: {}",
+            "Project Brain record invalid: {}: invalid JSON frontmatter",
             unknown.strip_prefix(&fixture.root).unwrap().display()
         )
         .replace('\\', "/")

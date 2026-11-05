@@ -355,6 +355,21 @@ edition's own files remain in that edition's changelog.
   broken, now draw the retired report and exit code; only the
   index-conflict hint differs, naming
   `memory-bank/bin/infra-engine memory reindex-bank`.
+- `memory validate` runs the retired command's whole check again. The native
+  command checked records, their relationships and the active handoffs only,
+  so a credential stored in a record, a record whose ID does not match its
+  file, a half-merged deterministic index, a broken message journal,
+  retrieval manifest or promotion file, and an open archived handoff all
+  passed, and the session banner said `brain-validation=valid`. Each problem
+  is worded as before: the schema names the field (`$.status: value is
+  outside schema enum`, `$: missing keys goal`), the lifecycle check names
+  the transition (`illegal lifecycle transition: active -> active`), a
+  half-merged record says so instead of "JSON key must be text", and a
+  lookup refused for an unreadable record gives the reason (`Project Brain
+  record invalid: <file>: <reason>`), which the turn's notice repeats. On
+  twin projects 38 broken Brains draw the retired report and exit code; a
+  handoff whose JSON is broken is named once, where the retired report
+  named its path twice.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits
