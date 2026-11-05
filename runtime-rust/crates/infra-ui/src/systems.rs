@@ -259,7 +259,11 @@ async fn read_scoped(id: &str, project: &str, generation: u64) {
                 && value["id"] == id
                 && value["project_id"] == project =>
         {
-            if m::data("system-run")["id"] != value["id"] {
+            let previous = m::data("system-run");
+            let stopped = previous["id"] == value["id"]
+                && m::yes(&previous["active"])
+                && !m::yes(&value["active"]);
+            if previous["id"] != value["id"] {
                 dom::set_checked("system-reviewed", false);
                 dom::set_checked("system-accept-changes", false);
                 m::take("agent-session");
@@ -270,6 +274,10 @@ async fn read_scoped(id: &str, project: &str, generation: u64) {
             m::set("system-run", value.clone());
             render_run();
             agents(&value).await;
+            // Sessions shows each launch; its status changes when the run stops.
+            if stopped {
+                session::refresh().await;
+            }
             if system_current(project, id, generation) && m::yes(&value["active"]) {
                 let id = id.to_owned();
                 let project = project.to_owned();
@@ -1174,6 +1182,10 @@ async fn mutate(action: &str, extra: V) {
                 value.clone(),
             );
             render_run();
+            // A launch is a new session in Sessions.
+            if action != "cancel" {
+                session::refresh().await;
+            }
             if m::yes(&value["active"]) {
                 dom::later("system-poll", 1100, move || {
                     spawn_local(async move {

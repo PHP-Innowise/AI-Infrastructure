@@ -125,6 +125,8 @@ edition's own files remain in that edition's changelog.
     session is titled by its prompt's first 80 characters, so the nine launches
     of one real run all read `System orchestration: Allow customers to cancel
     a CONFIRMED order within 30 minu`. The runner footer says `1 active slot`.
+    Sessions lists a launch when it starts and updates its status when the
+    run stops, instead of only after a reload.
   - A shared contract or document in the system folder that verification
     finds out of date no longer costs a whole new run. The real verification
     agent passed every suite (Go with `-race`, PHP, Node and a cross-service
