@@ -46,6 +46,16 @@ edition's own files remain in that edition's changelog.
     cause (a readable original path, an unwritable workspace, or a sandbox that
     could not start) instead of `boundary probe failed`, and a scan that stops
     without a proposal shows its last error.
+  - Read-only dispatches can build and test. Codex's read-only sandbox allows
+    no writes, not even `/tmp`, so a real contract agent could not run
+    `go test` and verification could never pass for a Go service. A Codex with
+    permission profiles (probed once without a model call) now runs read-only
+    dispatches under a profile that reads the disk, writes only the run's
+    private `scratch` folder and has no network, with `TMPDIR` and tool caches
+    pointed there; an older Codex keeps `--sandbox read-only`. Workers are also
+    told to report checks of the requested change (an unrelated, pre-existing
+    `composer validate --strict` warning blocked a finished inventory dispatch)
+    and to add no notes or task logs to the roots.
   - Contract and verification workers run in the system folder and now have it
     in `access.readable`: told to read only the services, a real contract agent
     refused to check the topic registry, envelope schema and ADRs it was meant

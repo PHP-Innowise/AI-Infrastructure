@@ -319,7 +319,16 @@ model/authentication. Prompts arrive over stdin; JSONL must contain a successful
 terminal event and a structured final report. Codex loads the local project
 policy. Explicitly registered/allowed roots also support non-Git coordination
 workspaces (`--skip-git-repo-check`). Service workers receive `workspace-write` in edit mode; contract and
-verification workers receive `read-only`. No approval/sandbox bypass flags are
+verification workers receive `read-only`. Codex's read-only sandbox allows no
+writes at all, not even to `/tmp`, so builds and tests that need a cache (Go,
+Cargo, npm) could not run there, and verification could never pass for such a
+service. On Linux and macOS, when the Codex CLI supports permission profiles
+(checked once with `codex sandbox -P … -- true`, no model call), read-only
+dispatches run instead under a profile that reads the whole disk, writes only a
+private `scratch` folder in the run directory and has no network; `TMPDIR`,
+`XDG_CACHE_HOME`, `GOCACHE`, `CARGO_TARGET_DIR` and the npm, pip and Composer
+caches point there, and the prompt says so. The roots stay unwritable. An older
+Codex keeps `--sandbox read-only`. No approval/sandbox bypass flags are
 used. Noninteractive approval requests cannot be answered, so unsupported
 operations stop the worker. Install/authenticate the CLI independently.
 
