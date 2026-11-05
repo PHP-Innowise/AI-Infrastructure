@@ -394,8 +394,9 @@ prevents later jobs overtaking them. There are at most 16 waiting jobs across
 the input channel and scheduler backlog together. Commit/transfer, attach and
 updates retain their existing global idle requirements. This option makes no
 automatic restart/resume or efficacy claim.
-Unrelated Linux mounts with deleted bind sources do not invalidate a project's
-scope; covering/nested mounts still require valid coordinates. Changing Unix
+Unrelated Linux mounts, such as a replaced bind source (`//deleted` root) or a
+mount with an empty source, do not invalidate a project's scope;
+covering/nested mounts still require valid coordinates. Changing Unix
 directory permissions keeps the same lease identity; replacing a directory
 does not. Before an update, finish or cancel saved pending inbox messages:
 pending/assigned delivery keeps the runner held out of update even between turns.

@@ -24,9 +24,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
-- Keep repository leases and inbox available when an unrelated Linux bind
-  mount has a deleted source root. Decode roots only for mounts covering or
-  nested inside declared Git trees, while retaining strict relevant-scope
+- Keep repository leases and inbox available when an unrelated Linux mount
+  has a deleted bind source root or an empty source field. Read only mounts
+  covering or nested inside declared Git trees, deciding that from the mount
+  point before any other field, while retaining strict relevant-scope
   validation. Ignore Unix permission bits in lease identity without weakening
   inode/type checks. Refuse update holds while inbox delivery is still pending
   or assigned, including the gap between native turns.

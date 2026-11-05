@@ -100,18 +100,21 @@ mod linux {
                 return Err(invalid());
             }
             let fields = line.split(|byte| *byte == b' ').collect::<Vec<_>>();
-            if fields.len() < 10 || fields.iter().any(|field| field.is_empty()) {
-                return Err(invalid());
-            }
-            let point = path(fields[4])?;
-            // A replaced bind source can have an opaque //deleted root.
-            // Only mounts that cover or lie inside a declared tree can affect
-            // its coordinates; unrelated roots need not be interpretable.
+            // The mount point is the fifth field; the kernel never prints the
+            // four before it empty. Only mounts that cover or lie inside a
+            // declared tree can affect its coordinates, so relevance is decided
+            // before the rest of the line is read: an unrelated line need not
+            // be interpretable. A replaced bind source has an opaque //deleted
+            // root, and a mount made with an empty source prints an empty field.
+            let point = path(fields.get(4).ok_or_else(invalid)?)?;
             if !paths
                 .iter()
                 .any(|root| root.starts_with(&point) || point.starts_with(root))
             {
                 continue;
+            }
+            if fields.len() < 10 || fields.iter().any(|field| field.is_empty()) {
+                return Err(invalid());
             }
             let separator = fields[6..]
                 .iter()
@@ -275,6 +278,26 @@ mod linux {
             ] {
                 let text =
                     format!("{ROOT}2 1 8:1 /old/source//deleted {point} rw - ext4 /dev/root rw\n");
+                assert!(super::parse(text.as_bytes(), &paths).is_err(), "{point}");
+            }
+        }
+        #[test]
+        fn empty_source_fields_are_rejected_only_when_their_points_affect_a_declared_tree() {
+            // `mount -t tmpfs "" <point>` prints its empty source as an empty field.
+            let paths = [Path::new("/repos/a"), Path::new("/git/common")];
+            let expected = trees(
+                &paths,
+                &super::parse(ROOT.as_bytes(), &paths).unwrap(),
+                |_| Ok(()),
+            )
+            .unwrap();
+            for point in ["/outside/scratch", "/repos/ab"] {
+                let text = format!("{ROOT}2 1 0:7 / {point} rw - tmpfs  rw\n");
+                let mounts = super::parse(text.as_bytes(), &paths).unwrap();
+                assert_eq!(trees(&paths, &mounts, |_| Ok(())).unwrap(), expected);
+            }
+            for point in ["/repos", "/repos/a/cache", "/git/common"] {
+                let text = format!("{ROOT}2 1 0:7 / {point} rw - tmpfs  rw\n");
                 assert!(super::parse(text.as_bytes(), &paths).is_err(), "{point}");
             }
         }
