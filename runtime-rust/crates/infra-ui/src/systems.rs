@@ -214,6 +214,16 @@ fn run_status(v: &V) -> String {
         _ => status,
     }
 }
+/// A message that ends as a sentence, so another can follow it: a CLI's own
+/// message usually has no full stop.
+fn sentence(text: &str) -> String {
+    let text = text.trim_end();
+    if text.ends_with(['.', '!', '?']) {
+        text.to_owned()
+    } else {
+        format!("{text}.")
+    }
+}
 /// How a change reads in the change list.
 fn run_label(run: &V) -> String {
     format!(
@@ -2118,9 +2128,11 @@ async fn discovery_poll(epoch: u64) {
                         "system-discovery-status",
                         &format!(
                             "{} Your original form is retained.",
-                            job["error"]
-                                .as_str()
-                                .unwrap_or("AI scan ended without a proposal.")
+                            sentence(
+                                job["error"]
+                                    .as_str()
+                                    .unwrap_or("AI scan ended without a proposal.")
+                            )
                         ),
                     );
                 }
@@ -2847,6 +2859,14 @@ mod display_tests {
             "changes owner, capabilities 1 → 2"
         );
         assert_eq!(passport_changes(&V::Null, &proposed), "new passport");
+    }
+    #[test]
+    fn a_message_followed_by_another_ends_as_a_sentence() {
+        assert_eq!(
+            sentence("Failed to authenticate"),
+            "Failed to authenticate."
+        );
+        assert_eq!(sentence("Scan ended. "), "Scan ended.");
     }
     #[test]
     fn lists_read_as_text() {
