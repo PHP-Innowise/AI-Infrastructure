@@ -39,6 +39,51 @@ pub struct PublicationFiles {
     root_identity: (u64, u64, u32),
     directories: BTreeMap<Vec<String>, File>,
     pins: Vec<Pin>,
+    /// The leading pins that hold the root's own chain: the ancestors a
+    /// private root was admitted through, and the root itself.
+    root_pins: usize,
+}
+
+// Counted for the private-state tests, which run on Unix.
+#[cfg(all(test, unix))]
+thread_local! {
+    /// Directories this thread has looked up again to re-prove their custody.
+    static REVALIDATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+#[cfg(all(test, unix))]
+pub(crate) fn revalidations() -> u64 {
+    REVALIDATIONS.with(std::cell::Cell::get)
+}
+fn revalidated() {
+    #[cfg(all(test, unix))]
+    REVALIDATIONS.with(|count| count.set(count.get() + 1));
+}
+
+/// A held directory is still the one its parent names, as it was admitted.
+fn check_held(parent: &File, name: &str, child: &File, identity: (u64, u64, u32)) -> Result<()> {
+    revalidated();
+    let named = native::directory(parent, name)?;
+    if native::identity(&named)?.namespace != identity
+        || native::identity(child)?.namespace != identity
+    {
+        return Err(RuntimeError::conflict(
+            "Publication directory custody changed",
+        ));
+    }
+    Ok(())
+}
+
+/// Refused before any lookup: empty, absolute, with a backslash or NUL, or
+/// with an empty, "." or ".." component.
+fn invalid_relative(relative: &str) -> bool {
+    relative.is_empty()
+        || relative.starts_with('/')
+        || relative.contains('\\')
+        || relative.contains('\0')
+        || relative
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || Path::new(relative).is_absolute()
 }
 
 impl PublicationFiles {
@@ -53,37 +98,32 @@ impl PublicationFiles {
             root_identity: identity.namespace,
             directories,
             pins: vec![],
+            root_pins: 0,
         };
         result.check()?;
         Ok(result)
     }
     pub fn check(&self) -> Result<()> {
+        self.check_root()?;
+        for pin in self.pins.iter().skip(self.root_pins) {
+            check_held(&pin.parent, &pin.name, &pin.child, pin.identity)?;
+        }
+        Ok(())
+    }
+    /// The root is still at its path, through the chain it was admitted by.
+    fn check_root(&self) -> Result<()> {
+        revalidated();
         if native::identity(&native::root(&self.root)?)?.namespace != self.root_identity {
             return Err(RuntimeError::conflict("Publication root custody changed"));
         }
-        for pin in &self.pins {
-            let named = native::directory(&pin.parent, &pin.name)?;
-            if native::identity(&named)?.namespace != pin.identity
-                || native::identity(&pin.child)?.namespace != pin.identity
-            {
-                return Err(RuntimeError::conflict(
-                    "Publication directory custody changed",
-                ));
-            }
+        for pin in self.pins.iter().take(self.root_pins) {
+            check_held(&pin.parent, &pin.name, &pin.child, pin.identity)?;
         }
         Ok(())
     }
     fn parent(&mut self, relative: &str, create: bool) -> Result<(File, String)> {
         let parts = relative.split('/').collect::<Vec<_>>();
-        if relative.is_empty()
-            || relative.starts_with('/')
-            || relative.contains('\\')
-            || relative.contains('\0')
-            || parts
-                .iter()
-                .any(|part| part.is_empty() || *part == "." || *part == "..")
-            || Path::new(relative).is_absolute()
-        {
+        if invalid_relative(relative) {
             return Err(RuntimeError::policy("Invalid publication path"));
         }
         for count in 1..parts.len() {

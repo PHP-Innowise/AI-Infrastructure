@@ -512,6 +512,23 @@ edition's own files remain in that edition's changelog.
   flags 0x40040c). Such a process now gets up to 2 s to finish; one that is
   not exiting still fails at once. With eight copies of the binary running
   together, the old check failed 2 of 200 runs and the new one none of 400.
+- An attached launch no longer slows down as the project's private state
+  grows. Every launch walks the state twice to keep it private, and after
+  each entry the walk re-proved every directory it had entered so far, so
+  one walk cost entries times directories. With 21 Cursor plugin images in
+  the state's `launch/` (3,769 files, 1,113 directories; release build, PHP
+  Core edition, state on tmpfs) a Claude launch took 30.5 s and a Cursor
+  launch 33.3 s, against 0.15 s and 0.55 s with one image. The walk now
+  holds the directories it enters apart from the state's own custody, and
+  before each repair and after each entry it re-proves only what that entry
+  rests on: the root, the root's ancestors and each directory down to the
+  entry's parent. It re-proves all of them once more when it ends and holds
+  none afterwards, so the rest of the launch does not re-prove them at every
+  step either. Over the same 21 images one walk takes 0.07 s instead of
+  9.8 s, a Claude launch 0.15 s and a Cursor launch 0.53 s; with one image
+  they take 0.004 s, 0.012 s and 0.40 s (0.06 s, 0.15 s and 0.55 s before).
+  Links, foreign owners, a file replaced while its mode is repaired and a
+  directory moved or replaced while the walk holds it are refused as before.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

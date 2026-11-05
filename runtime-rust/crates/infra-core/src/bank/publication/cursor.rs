@@ -33,6 +33,7 @@ impl CursorFiles {
                 root_identity: identity.namespace,
                 directories,
                 pins: vec![],
+                root_pins: 0,
             },
         };
         result.check()?;

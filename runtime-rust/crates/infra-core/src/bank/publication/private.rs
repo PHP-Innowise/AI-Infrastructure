@@ -335,6 +335,7 @@ impl PublicationFiles {
             root: path,
             root_identity,
             directories,
+            root_pins: files.pins.len(),
             pins: files.pins,
         };
         result.check()?;
@@ -575,23 +576,7 @@ impl PublicationFiles {
     pub fn secure_private_file(&mut self, relative: &str) -> Result<()> {
         let (parent, name) = self.parent(relative, false)?;
         self.check()?;
-        let file = native::private_file(&parent, &name)?;
-        let before = native::identity(&file)?;
-        if !file.metadata()?.is_file() || before.links != 1 {
-            return Err(RuntimeError::policy(
-                "Private state file must have one ordinary link",
-            ));
-        }
-        crate::security::secure_private_handle(&file, false)?;
-        let after = native::identity(&file)?;
-        let named = native::file(&parent, &name, false)?;
-        if native::identity(&named)? != after
-            || (before.namespace.0, before.namespace.1) != (after.namespace.0, after.namespace.1)
-        {
-            return Err(RuntimeError::conflict(
-                "Private state file changed during protection",
-            ));
-        }
+        protect_private_file(&parent, &name)?;
         self.check()
     }
 
@@ -608,6 +593,16 @@ impl PublicationFiles {
     /// examine. Walking on keeps one launch from failing for another
     /// session's write; links, foreign owners and a replacement during a
     /// repair are still refused.
+    ///
+    /// The walk holds every directory it enters beneath the one above it,
+    /// apart from the publication's own pins. An entry's custody rests on
+    /// the root, the root's ancestors and each held directory down to the
+    /// entry's parent: that chain is re-proved before every repair and after
+    /// every entry, at the cost of the entry's depth. Re-proving every held
+    /// directory per entry made one walk quadratic: a launch over a state
+    /// holding 21 Cursor plugin images took 30 s, now 0.15 s. Every held
+    /// directory is re-proved once more when the walk ends, and none stays
+    /// held after it.
     pub fn secure_private_tree(&mut self, relative: &str) -> Result<()> {
         match self.parent(&format!("{relative}/.private-tree-admission"), false) {
             Ok(_) => {}
@@ -615,85 +610,196 @@ impl PublicationFiles {
             Err(error) => return Err(error),
         }
         self.secure_private_directory(relative, false)?;
-        let mut pending = vec![(relative.to_string(), 0usize)];
+        let (mut tree, top) = self.hold_tree(relative)?;
+        let mut pending = vec![(top, relative.to_string(), 0usize)];
         let mut seen = std::collections::BTreeSet::new();
         let mut nodes = 0usize;
-        while let Some((directory, depth)) = pending.pop() {
+        while let Some((index, directory, depth)) = pending.pop() {
             if depth > 128 {
                 return Err(RuntimeError::policy(
                     "Private state tree exceeds its depth boundary",
                 ));
             }
-            let (parent, _) = match self.parent(&format!("{directory}/.private-tree-entry"), false)
-            {
-                Ok(value) => value,
+            match self.check_tree_chain(&tree, index) {
+                Ok(()) => {}
                 Err(error) if error.kind == crate::ErrorKind::NotFound && depth > 0 => continue,
                 Err(error) => return Err(error),
-            };
-            let before = native::identity(&parent)?.namespace;
+            }
+            let before = native::identity(&tree.held[index].file)?.namespace;
             if !seen.insert((before.0, before.1)) {
                 return Err(RuntimeError::policy(
                     "Repeated private state directory identity",
                 ));
             }
-            let mut names = super::cursor::cursor_names(&parent, Some(1_000_000 - nodes))?;
+            let mut names =
+                super::cursor::cursor_names(&tree.held[index].file, Some(1_000_000 - nodes))?;
             names.sort();
             for name in names {
                 nodes += 1;
-                // parent validates the entire component before the metadata call.
                 let path = format!("{directory}/{name}");
-                let (_, validated) = self.parent(&path, false)?;
-                let (is_directory, entry) = match private_entry(&parent, &validated) {
-                    Ok(value) => value,
-                    Err(error) if error.kind == crate::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error),
-                };
-                if is_directory {
-                    match self.secure_private_directory(&path, false) {
-                        Ok(_) => pending.push((path, depth + 1)),
-                        Err(error) if error.kind == crate::ErrorKind::NotFound => continue,
-                        Err(error) => return Err(error),
+                let child = self.secure_tree_entry(&mut tree, index, &path, &name)?;
+                // Protected or passed over, each entry ends with its custody
+                // re-proved, so no later repair follows an unnoticed change.
+                self.check_tree_chain(&tree, index)?;
+                #[cfg(all(test, unix))]
+                AFTER_TREE_ENTRY.with(|hook| {
+                    if let Some(hook) = hook.borrow_mut().as_mut() {
+                        hook(&path);
                     }
-                } else {
-                    #[cfg(unix)]
-                    let protected = repair_private_entry(&parent, &validated, entry);
-                    #[cfg(not(unix))]
-                    let protected = self.secure_private_file(&path);
-                    match protected {
-                        Ok(()) => {}
-                        Err(error) if error.kind == crate::ErrorKind::NotFound => continue,
-                        Err(error) => return Err(error),
-                    }
-                    let (after_directory, after) = match private_entry(&parent, &validated) {
-                        Ok(value) => value,
-                        Err(error) if error.kind == crate::ErrorKind::NotFound => continue,
-                        Err(error) => return Err(error),
-                    };
-                    let replaced = after_directory
-                        || (after.0, after.1, after.2 & 0o170000)
-                            != (entry.0, entry.1, entry.2 & 0o170000);
-                    // A repair checks its own boundary and refuses a
-                    // replacement; without one, the replacement came after.
-                    #[cfg(unix)]
-                    let repaired = entry.2 & 0o077 != 0;
-                    #[cfg(not(unix))]
-                    let repaired = true;
-                    if replaced && repaired {
-                        return Err(RuntimeError::conflict(
-                            "Private state file changed during admission",
-                        ));
-                    }
+                });
+                if let Some(child) = child {
+                    pending.push((child, path, depth + 1));
                 }
-                self.check()?;
             }
-            if native::identity(&parent)?.namespace != before {
+            if native::identity(&tree.held[index].file)?.namespace != before {
                 return Err(RuntimeError::conflict(
                     "Private state directory changed during admission",
                 ));
             }
-            self.check()?;
+            self.check_tree_chain(&tree, index)?;
+        }
+        tree.check_all()?;
+        self.check()
+    }
+
+    /// Hold the chain from the root down to the walk's top directory, as
+    /// `secure_private_directory` has just admitted and protected it.
+    fn hold_tree(&self, relative: &str) -> Result<(HeldTree, usize)> {
+        let root = self
+            .directories
+            .get(&Vec::<String>::new())
+            .ok_or_else(|| RuntimeError::unavailable("Private root unavailable"))?
+            .try_clone()?;
+        let parts = relative.split('/').map(str::to_string).collect::<Vec<_>>();
+        let mut held = Vec::with_capacity(parts.len());
+        for count in 1..=parts.len() {
+            let file = self
+                .directories
+                .get(&parts[..count])
+                .ok_or_else(|| RuntimeError::unavailable("Private tree directory unavailable"))?
+                .try_clone()?;
+            held.push(HeldDirectory {
+                above: count.checked_sub(2),
+                name: parts[count - 1].clone(),
+                identity: native::identity(&file)?.namespace,
+                file,
+            });
+        }
+        Ok((HeldTree { root, held }, parts.len() - 1))
+    }
+
+    /// Re-prove the custody one held directory rests on: the root, the
+    /// root's own chain and each held directory from the root down to it.
+    fn check_tree_chain(&self, tree: &HeldTree, index: usize) -> Result<()> {
+        self.check_root()?;
+        let mut chain = vec![index];
+        while let Some(above) = tree.held[chain[chain.len() - 1]].above {
+            chain.push(above);
+        }
+        for index in chain.into_iter().rev() {
+            tree.check(index)?;
         }
         Ok(())
+    }
+
+    /// Keep one entry of a held directory private. Returns the directory now
+    /// held when the entry was one; an entry gone between looks needs nothing.
+    fn secure_tree_entry(
+        &mut self,
+        tree: &mut HeldTree,
+        above: usize,
+        path: &str,
+        name: &str,
+    ) -> Result<Option<usize>> {
+        // Entries are named as every publication path is.
+        if super::invalid_relative(path) {
+            return Err(RuntimeError::policy("Invalid publication path"));
+        }
+        let (is_directory, entry) = match private_entry(&tree.held[above].file, name) {
+            Ok(value) => value,
+            Err(error) if error.kind == crate::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if is_directory {
+            return self.hold_tree_directory(tree, above, name);
+        }
+        let parent = &tree.held[above].file;
+        #[cfg(unix)]
+        let repaired = entry.2 & 0o077 != 0;
+        #[cfg(not(unix))]
+        let repaired = true;
+        // A repair is an effect: prove where it lands just before it.
+        if repaired {
+            self.check_tree_chain(tree, above)?;
+        }
+        #[cfg(unix)]
+        let protected = repair_private_entry(parent, name, entry);
+        #[cfg(not(unix))]
+        let protected = protect_private_file(parent, name);
+        match protected {
+            Ok(()) => {}
+            Err(error) if error.kind == crate::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        let (after_directory, after) = match private_entry(parent, name) {
+            Ok(value) => value,
+            Err(error) if error.kind == crate::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let replaced = after_directory
+            || (after.0, after.1, after.2 & 0o170000) != (entry.0, entry.1, entry.2 & 0o170000);
+        // A repair checks its own boundary and refuses a replacement;
+        // without one, the replacement came after.
+        if replaced && repaired {
+            return Err(RuntimeError::conflict(
+                "Private state file changed during admission",
+            ));
+        }
+        Ok(None)
+    }
+
+    /// Protect a directory the walk entered and hold it beneath its held
+    /// parent. None when it was gone by the time it was opened.
+    fn hold_tree_directory(
+        &mut self,
+        tree: &mut HeldTree,
+        above: usize,
+        name: &str,
+    ) -> Result<Option<usize>> {
+        let file = match native::private_directory(&tree.held[above].file, name) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let before = native::identity(&file)?.namespace;
+        #[cfg(unix)]
+        let tightened = before.2 & 0o7777 != 0o700;
+        #[cfg(not(unix))]
+        let tightened = true;
+        // Protection is an effect too: prove where it lands just before it.
+        if tightened {
+            self.check_tree_chain(tree, above)?;
+        }
+        crate::security::secure_private_handle(&file, true)?;
+        let after = native::identity(&file)?.namespace;
+        if after != before {
+            // Wherever the publication holds this same directory, it now
+            // has this mode.
+            self.refresh_private_namespace(&file, before)?;
+        }
+        let named = native::directory(&tree.held[above].file, name)?;
+        if native::identity(&named)?.namespace != after {
+            return Err(RuntimeError::conflict(
+                "Private directory changed during protection",
+            ));
+        }
+        tree.held.push(HeldDirectory {
+            above: Some(above),
+            name: name.into(),
+            file,
+            identity: after,
+        });
+        Ok(Some(tree.held.len() - 1))
     }
 
     /// Lock the ordinary Brain mutex through the same state custody. The
@@ -753,6 +859,70 @@ impl PublicationFiles {
         self.check()?;
         Ok(file)
     }
+}
+
+/// A directory the private walk entered, held until the walk ends. It was
+/// opened beneath the directory above it, and holding it keeps its device
+/// and file ID from being recycled.
+struct HeldDirectory {
+    /// The held directory above, or the root.
+    above: Option<usize>,
+    name: String,
+    file: File,
+    identity: (u64, u64, u32),
+}
+
+/// The private walk's own custody, kept apart from the publication's pins so
+/// that neither the walk nor anything after it re-proves all of it per step.
+struct HeldTree {
+    root: File,
+    held: Vec<HeldDirectory>,
+}
+impl HeldTree {
+    /// The held directory is still the one the directory above it names.
+    fn check(&self, index: usize) -> Result<()> {
+        let held = &self.held[index];
+        let above = held
+            .above
+            .map_or(&self.root, |above| &self.held[above].file);
+        super::check_held(above, &held.name, &held.file, held.identity)
+    }
+    fn check_all(&self) -> Result<()> {
+        (0..self.held.len()).try_for_each(|index| self.check(index))
+    }
+}
+
+/// Called with each entry's path once the private walk has finished with it.
+#[cfg(all(test, unix))]
+type TreeEntryHook = Box<dyn FnMut(&str)>;
+#[cfg(all(test, unix))]
+thread_local! {
+    /// Lets a test change the state between two entries of the walk.
+    static AFTER_TREE_ENTRY: std::cell::RefCell<Option<TreeEntryHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Keep one ordinary file private through a data handle, refusing a name
+/// replaced meanwhile.
+fn protect_private_file(parent: &File, name: &str) -> Result<()> {
+    let file = native::private_file(parent, name)?;
+    let before = native::identity(&file)?;
+    if !file.metadata()?.is_file() || before.links != 1 {
+        return Err(RuntimeError::policy(
+            "Private state file must have one ordinary link",
+        ));
+    }
+    crate::security::secure_private_handle(&file, false)?;
+    let after = native::identity(&file)?;
+    let named = native::file(parent, name, false)?;
+    if native::identity(&named)? != after
+        || (before.namespace.0, before.namespace.1) != (after.namespace.0, after.namespace.1)
+    {
+        return Err(RuntimeError::conflict(
+            "Private state file changed during protection",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1125,6 +1295,160 @@ mod private_state_tests {
             .secure_private_file("project-brain/local/custom.json")
             .unwrap();
         assert_eq!(changed(&file).2, 0o600, "a loose mode was not repaired");
+    }
+    /// Run `walk` with `hook` called after each entry the walk finishes.
+    fn with_tree_hook<T>(hook: impl FnMut(&str) + 'static, walk: impl FnOnce() -> T) -> T {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                super::AFTER_TREE_ENTRY.with(|slot| drop(slot.take()));
+            }
+        }
+        super::AFTER_TREE_ENTRY.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        let _clear = Clear;
+        walk()
+    }
+    fn loose_files(directory: &std::path::Path, names: &[&str]) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(directory).unwrap();
+        for name in names {
+            std::fs::write(directory.join(name), b"private").unwrap();
+            std::fs::set_permissions(directory.join(name), std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+        }
+    }
+    fn mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    }
+    /// A walk re-proves an entry's custody along that entry's own chain, so
+    /// what it costs per entry stays flat however many directories the state
+    /// holds, and it leaves none of them held. Re-proving every directory
+    /// held so far per entry made a launch over 21 Cursor plugin images take
+    /// 30 s instead of 0.2 s.
+    #[test]
+    fn the_walk_costs_each_entry_its_depth_not_the_directories_it_holds() {
+        use crate::bank::publication::revalidations;
+        let walk = |images: usize| {
+            let fixture = Fixture::new();
+            for image in 0..images {
+                let skills = format!("launch/image-{image}/skills");
+                loose_files(
+                    &fixture.roots.state.join(skills),
+                    &["a.md", "b.md", "c.md", "d.md"],
+                );
+            }
+            let mut files =
+                super::PublicationFiles::open_private_root(&fixture.roots.state).unwrap();
+            let before = revalidations();
+            files.secure_private_tree("launch").unwrap();
+            // Each image is its directory, its skills folder and four files.
+            let per_entry = (revalidations() - before) as f64 / (images * 6) as f64;
+            let before = revalidations();
+            files.check().unwrap();
+            let skill = fixture.roots.state.join("launch/image-0/skills/a.md");
+            assert_eq!(mode(&skill), 0o600, "the walk left a loose file");
+            (per_entry, revalidations() - before)
+        };
+        let (few, held_after_few) = walk(4);
+        let (many, held_after_many) = walk(64);
+        assert!(
+            many <= few * 1.1,
+            "custody re-proofs per entry grew with the directories: {few:.1} -> {many:.1}"
+        );
+        assert_eq!(
+            held_after_many, held_after_few,
+            "the walk left the directories it went through held"
+        );
+    }
+    /// The walk's effects stay under custody: a directory moved out of the
+    /// state while the walk is inside it is refused before a repair lands
+    /// outside.
+    #[test]
+    fn a_directory_moved_out_mid_walk_is_refused_before_a_repair_lands_outside() {
+        let fixture = Fixture::new();
+        let moved = fixture.roots.state.join("launch/moved");
+        loose_files(&moved, &["a.md", "b.md", "c.md"]);
+        let outside = fixture.root.join("outside");
+        let (from, to) = (moved.clone(), outside.clone());
+        let mut files = super::PublicationFiles::open_private_root(&fixture.roots.state).unwrap();
+        let error = with_tree_hook(
+            move |path| {
+                if path == "launch/moved/a.md" {
+                    std::fs::rename(&from, &to).unwrap();
+                }
+            },
+            || files.secure_private_tree("launch"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error.kind,
+                crate::ErrorKind::NotFound | crate::ErrorKind::Conflict
+            ),
+            "{error}"
+        );
+        assert_eq!(mode(&outside.join("a.md")), 0o600, "{error}");
+        assert_eq!(
+            (mode(&outside.join("b.md")), mode(&outside.join("c.md"))),
+            (0o644, 0o644),
+            "a repair landed outside the state: {error}"
+        );
+    }
+    /// An ancestor replaced by another directory of the same name is refused
+    /// though the entry's own directory still answers beneath it.
+    #[test]
+    fn an_ancestor_swapped_mid_walk_is_refused_before_a_repair_lands_outside() {
+        let fixture = Fixture::new();
+        let outer = fixture.roots.state.join("launch/outer");
+        loose_files(&outer.join("inner"), &["a.md", "b.md"]);
+        let outside = fixture.root.join("outside");
+        let (from, to) = (outer.clone(), outside.clone());
+        let mut files = super::PublicationFiles::open_private_root(&fixture.roots.state).unwrap();
+        let error = with_tree_hook(
+            move |path| {
+                if path == "launch/outer/inner/a.md" {
+                    std::fs::rename(&from, &to).unwrap();
+                    std::fs::create_dir_all(from.join("inner")).unwrap();
+                }
+            },
+            || files.secure_private_tree("launch"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, crate::ErrorKind::Conflict, "{error}");
+        assert_eq!(
+            mode(&outside.join("inner/b.md")),
+            0o644,
+            "a repair landed outside the state: {error}"
+        );
+    }
+    /// Every directory the walk went through is re-proved when it ends: one
+    /// replaced after the walk left it is refused, as the check of every
+    /// held directory after each entry refused it before.
+    #[test]
+    fn a_directory_replaced_after_the_walk_left_it_is_refused_when_the_walk_ends() {
+        let fixture = Fixture::new();
+        let launch = fixture.roots.state.join("launch");
+        // The walk takes the last name first: "z-left" before "a-later".
+        loose_files(&launch.join("z-left"), &["a.md"]);
+        loose_files(&launch.join("a-later"), &["a.md"]);
+        let (left, outside) = (launch.join("z-left"), fixture.root.join("outside"));
+        let mut files = super::PublicationFiles::open_private_root(&fixture.roots.state).unwrap();
+        let error = with_tree_hook(
+            move |path| {
+                if path == "launch/a-later/a.md" {
+                    std::fs::rename(&left, &outside).unwrap();
+                    std::fs::create_dir(&left).unwrap();
+                }
+            },
+            || files.secure_private_tree("launch"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, crate::ErrorKind::Conflict, "{error}");
     }
     #[test]
     fn metadata_only_file_admission_still_refuses_symlinks_and_hardlinks() {
