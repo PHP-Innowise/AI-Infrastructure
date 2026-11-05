@@ -39,13 +39,16 @@ pub fn filename_id(name: &str) -> Result<Option<String>> {
         .map_err(|_| RuntimeError::invalid("Invalid internal memory filename expression"))?;
     Ok(pattern.captures(name).map(|capture| capture[1].into()))
 }
+/// A chunk's frontmatter and body. Each refusal is worded as the retired
+/// validator worded it: it reaches the engineer through `bank validate` and a
+/// refused promotion, and names what to repair.
 pub fn parse_raw(bytes: &[u8]) -> Result<(Value, String)> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| RuntimeError::invalid("Memory chunk is not UTF-8"))?;
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| RuntimeError::invalid("invalid UTF-8 chunk"))?;
     let rest = text
         .strip_prefix("---\r\n")
         .or_else(|| text.strip_prefix("---\n"))
-        .ok_or_else(|| RuntimeError::invalid("Memory frontmatter opening delimiter is missing"))?;
+        .ok_or_else(|| RuntimeError::invalid("missing opening frontmatter delimiter"))?;
     static DELIMITER: std::sync::OnceLock<std::result::Result<regex::Regex, regex::Error>> =
         std::sync::OnceLock::new();
     let delimiter = DELIMITER
@@ -54,12 +57,26 @@ pub fn parse_raw(bytes: &[u8]) -> Result<(Value, String)> {
         .map_err(|_| RuntimeError::invalid("Invalid delimiter expression"))?;
     let found = delimiter
         .find(rest)
-        .ok_or_else(|| RuntimeError::invalid("Memory frontmatter is unterminated"))?;
-    let metadata = json::parse(&rest[..found.start()])?;
+        .ok_or_else(|| RuntimeError::invalid("missing closing frontmatter delimiter"))?;
+    let raw = &rest[..found.start()];
+    let metadata = json::parse(raw).map_err(|error| {
+        // Two clones that both re-verified or retired a chunk conflict in
+        // its frontmatter on pull; "not valid JSON" did not say why.
+        if raw
+            .lines()
+            .any(|line| line.starts_with("<<<<<<< ") || line.starts_with(">>>>>>> "))
+        {
+            return RuntimeError::invalid(
+                "unresolved Git merge conflict in the frontmatter; keep one side or merge both, without the markers",
+            );
+        }
+        let reason = crate::python_json::decode_error(raw).unwrap_or_else(|| error.to_string());
+        RuntimeError::invalid(format!(
+            "frontmatter is not valid JSON-compatible YAML: {reason}"
+        ))
+    })?;
     if !metadata.is_object() {
-        return Err(RuntimeError::invalid(
-            "Memory frontmatter must be an object",
-        ));
+        return Err(RuntimeError::invalid("frontmatter must be an object"));
     }
     Ok((metadata, rest[found.end()..].into()))
 }
@@ -330,15 +347,17 @@ mod constant_pattern_tests {
     fn malformed_chunks_keep_their_specific_errors_on_repeated_calls() {
         for _ in 0..2 {
             for (raw, message) in [
-                (&b"\xff"[..], "Memory chunk is not UTF-8"),
+                (&b"\xff"[..], "invalid UTF-8 chunk"),
+                (&b"{}"[..], "missing opening frontmatter delimiter"),
+                (&b"---\n{}\nbody"[..], "missing closing frontmatter delimiter"),
+                (&b"---\n[]\n---\n"[..], "frontmatter must be an object"),
                 (
-                    &b"{}"[..],
-                    "Memory frontmatter opening delimiter is missing",
+                    &b"---\n{\"id\": \"MEM-0001\",}\n---\n"[..],
+                    "frontmatter is not valid JSON-compatible YAML: Illegal trailing comma before end of object: line 1 column 18 (char 17)",
                 ),
-                (&b"---\n{}\nbody"[..], "Memory frontmatter is unterminated"),
                 (
-                    &b"---\n[]\n---\n"[..],
-                    "Memory frontmatter must be an object",
+                    &b"---\n{\n<<<<<<< HEAD\n\"id\": \"MEM-0001\"\n=======\n\"id\": \"MEM-0002\"\n>>>>>>> theirs\n}\n---\n"[..],
+                    "unresolved Git merge conflict in the frontmatter; keep one side or merge both, without the markers",
                 ),
             ] {
                 let error = parse_raw(raw).unwrap_err();

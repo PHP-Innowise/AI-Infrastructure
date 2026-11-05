@@ -25,6 +25,10 @@ impl BankService {
     pub fn validate(&self) -> Result<Vec<String>> {
         validation::validate_bank(self)
     }
+    /// Errors, then warnings that do not fail the bank.
+    pub fn report(&self) -> Result<(Vec<String>, Vec<String>)> {
+        validation::report(self)
+    }
     pub fn index(&self) -> Result<Value> {
         codec::reindex(self)
     }

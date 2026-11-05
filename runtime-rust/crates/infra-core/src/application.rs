@@ -704,7 +704,9 @@ impl MemoryService {
             .iter()
             .map(|problem| format!("{}: {}", problem.path.display(), problem.error))
             .collect::<Vec<_>>();
-        errors.extend(BankService::new(self.context.clone()).validate()?);
+        // Brain alone: the Memory Bank has its own validator (`bank
+        // validate`). A chunk that reached its review date is the bank's
+        // problem, and it made every session banner report the Brain invalid.
         let ids = inventory
             .records
             .iter()

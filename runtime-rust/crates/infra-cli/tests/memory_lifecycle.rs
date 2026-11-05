@@ -889,6 +889,92 @@ fn an_empty_save_before_any_task_says_what_to_do_instead() {
     );
 }
 
+/// The Memory Bank has its own validator: a chunk citing a file Git renamed
+/// fails `bank validate`, which names where the file went, while Project
+/// Brain stays valid and the session banner says so. A retired chunk whose
+/// file is gone only warns.
+#[test]
+fn a_broken_chunk_fails_the_bank_and_leaves_the_brain_valid() {
+    let project = Project::new();
+    fs::write(
+        project.path.join("src/Old.php"),
+        "<?php\nfinal class Old {}\n",
+    )
+    .unwrap();
+    project.git(&["add", "src/Old.php"]);
+    project.git(&["commit", "--quiet", "-m", "Old"]);
+    project.git(&["mv", "src/Old.php", "src/New.php"]);
+    project.git(&["commit", "--quiet", "-m", "Rename Old"]);
+    let mut index = String::from(
+        "# Memory Index\n\n| ID | Title | Type | Scope | Tags | Status | Last Verified | File |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n",
+    );
+    fs::create_dir_all(project.path.join("memory-bank/chunks")).unwrap();
+    for (id, status, source) in [
+        ("MEM-20261104-0000000a", "active", "src/Old.php"),
+        ("MEM-20261104-0000000b", "archived", "src/Gone.php"),
+    ] {
+        let metadata = json!({"id": id, "title": "Old keeps the date", "type": "decision",
+            "status": status, "scope": ["billing"], "tags": ["billing"], "created": "2026-01-01",
+            "last_verified": "2026-01-01", "review_after": "2999-01-01", "sources": [source],
+            "supersedes": [], "superseded_by": null});
+        fs::write(
+            project
+                .path
+                .join(format!("memory-bank/chunks/{id}-old-keeps-the-date.md")),
+            format!(
+                "---\n{}\n---\n\nOld keeps the date.\n",
+                serde_json::to_string_pretty(&metadata).unwrap()
+            ),
+        )
+        .unwrap();
+        index.push_str(&format!("| {id} | Old keeps the date | decision | billing | billing | {status} | 2026-01-01 | chunks/{id}-old-keeps-the-date.md |\n"));
+    }
+    fs::write(project.path.join("memory-bank/INDEX.md"), index).unwrap();
+    let engine = project.path.join("memory-bank/bin/infra-engine");
+    let bank = project
+        .command(&engine)
+        .args(["bank", "validate"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        (
+            bank.status.code(),
+            String::from_utf8_lossy(&bank.stdout).as_ref(),
+            String::from_utf8_lossy(&bank.stderr).as_ref()
+        ),
+        (
+            Some(1),
+            "",
+            "Memory bank validation warnings (2):\n\
+             - memory-bank/chunks/MEM-20261104-0000000b-old-keeps-the-date.md: cited source no longer exists: src/Gone.php (chunk is archived and no longer retrievable)\n\
+             - memory-bank/INDEX.md: MEM-20261104-0000000a index row retained for invalid chunk (chunks/MEM-20261104-0000000a-old-keeps-the-date.md)\n\
+             Memory bank validation failed (1 error(s)):\n\
+             - memory-bank/chunks/MEM-20261104-0000000a-old-keeps-the-date.md: source path does not exist: src/Old.php - Git moved it to src/New.php\n"
+        ),
+        "{}",
+        described(&bank)
+    );
+    let brain = project
+        .command(&engine)
+        .args(["memory", "validate"])
+        .output()
+        .unwrap();
+    assert!(
+        brain.status.success()
+            && String::from_utf8_lossy(&brain.stdout)
+                .starts_with("Project Brain validation passed."),
+        "{}",
+        described(&brain)
+    );
+    let banner = project.hook(
+        "claude",
+        "local-context",
+        &json!({"session_id": "bank-broken", "cwd": project.path,
+            "hook_event_name": "SessionStart", "source": "startup"}),
+    );
+    assert!(banner.contains("brain-validation=valid."), "{banner}");
+}
+
 /// The prompt hook's capsule for a session on this checkout.
 fn prompt(project: &Project, host: &str, session: &str) -> String {
     project.hook(

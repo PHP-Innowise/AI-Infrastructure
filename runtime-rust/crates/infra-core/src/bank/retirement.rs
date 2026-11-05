@@ -280,7 +280,7 @@ pub fn retire(
         let errors = validation::write_errors(service, &before_errors, &attested)?;
         if !errors.is_empty() {
             return Err(RuntimeError::invalid(format!(
-                "Memory retirement failed validation: {}",
+                "Memory Bank retire failed validation: {}",
                 errors.join("; ")
             )));
         }
@@ -345,7 +345,7 @@ pub fn reverify(service: &BankService, id: &str, review_after: Option<&str>) -> 
             validation::write_errors(service, &before_errors, std::slice::from_ref(&chunk.path))?;
         if !errors.is_empty() {
             return Err(RuntimeError::invalid(format!(
-                "Memory re-verification failed: {}",
+                "Memory Bank re-verify failed validation: {}",
                 errors.join("; ")
             )));
         }

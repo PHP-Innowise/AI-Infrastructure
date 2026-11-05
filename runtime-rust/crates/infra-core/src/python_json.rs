@@ -11,6 +11,21 @@
 /// module's own trailing " at" where it has one) and its line and column.
 /// `None` when the module would accept the text.
 pub fn first_problem(text: &str) -> Option<(String, usize, usize)> {
+    let (message, _, line, column) = located(text)?;
+    Some((message, line, column))
+}
+
+/// What `str()` of the `JSONDecodeError` from `json.loads(text)` reads, as
+/// the retired runtime quoted it in a refusal. `None` when the module would
+/// accept the text, or would give up without a position.
+pub fn decode_error(text: &str) -> Option<String> {
+    let (message, position, line, column) = located(text)?;
+    (message != "RecursionError")
+        .then(|| format!("{message}: line {line} column {column} (char {position})"))
+}
+
+/// The first problem's message, character position, line and column.
+fn located(text: &str) -> Option<(String, usize, usize, usize)> {
     let characters = text.chars().collect::<Vec<_>>();
     let scanner = Scanner { text: &characters };
     let problem = if characters.first() == Some(&'\u{feff}') {
@@ -35,7 +50,7 @@ pub fn first_problem(text: &str) -> Option<(String, usize, usize)> {
         Some(newline) => position - newline,
         None => position + 1,
     };
-    Some((message, line, column))
+    Some((message, position, line, column))
 }
 
 /// Deeper than this, the module itself gives up (RecursionError); the caller
@@ -257,6 +272,14 @@ mod tests {
                 "{text:?}"
             );
         }
+        assert_eq!(
+            super::decode_error("{\n  \"a\": 1\n  \"b\": 2}").as_deref(),
+            Some("Expecting ',' delimiter: line 3 column 3 (char 13)")
+        );
+        assert_eq!(
+            super::decode_error("\"abc").as_deref(),
+            Some("Unterminated string starting at: line 1 column 1 (char 0)")
+        );
         for accepted in [
             "{}",
             " {\"a\": [1, 2.5e3, -0, null, true, false, NaN]} ",

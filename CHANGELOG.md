@@ -333,6 +333,28 @@ edition's own files remain in that edition's changelog.
   saved, as the retired command did; the native output added a blank line
   after it. Saved and loaded handoffs otherwise match the retired ones on
   twin projects, files included.
+- `memory validate` validates Project Brain alone again, as the retired
+  command and the operations guide say; the Memory Bank keeps its own
+  validator, `bank validate`. The native command added every bank error, so
+  a chunk that reached its review date, or one citing a deleted file, failed
+  Brain validation, the `memory` skill's step and `refresh --validate`, and
+  every session banner read `brain-validation=invalid` (invoice-api's first
+  chunk reaches its review date on 2027-01-30).
+- `bank validate` reports a broken chunk in the retired validator's words
+  and order again: which metadata keys are missing or unexpected, which date
+  rule failed, which source escapes, the frontmatter's merge conflict or JSON
+  error with its line and column, each index field that differs, and each
+  lineage link that does not point back. Warnings print again, without
+  failing: a retired chunk whose cited file is gone, and an index row kept
+  for a chunk that is broken. A cited file renamed with `git mv` is named
+  (`- Git moved it to src/New.php`), and the refusals of promotion,
+  retirement and re-verification read as before. The native validator
+  printed one generic sentence per rule ("Missing or unexpected memory
+  metadata keys", "Memory verification dates are invalid or overdue"),
+  nothing for warnings and no rename. On twin projects 60 banks, 58 of them
+  broken, now draw the retired report and exit code; only the
+  index-conflict hint differs, naming
+  `memory-bank/bin/infra-engine memory reindex-bank`.
 - `infra-engine bench --target <project> --sync` and the hook rehearsal's
   `--target` bring the copied project to the native runtime again. They
   synced the copy with default options, and an installed project commits

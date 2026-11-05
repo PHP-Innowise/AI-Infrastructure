@@ -1048,7 +1048,7 @@ fn resume(service: &BankService, proposal: &Value) -> Result<Value> {
         )?;
         if !errors.is_empty() {
             return Err(RuntimeError::invalid(format!(
-                "Promoted Bank publication failed validation: {}",
+                "Promoted Memory Bank publication failed validation: {}",
                 errors.join("; ")
             )));
         }
