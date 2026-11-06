@@ -720,7 +720,10 @@ fn plan(proposal: &Value) -> Result<Plan> {
     let id = format!("MEM-{}-{suffix}", created.format("%Y%m%d"));
     if metadata["id"] != id
         || created != frozen.with_timezone(&chrono::Utc).date_naive()
-        || destination != format!("memory-bank/chunks/{id}-{}.md", codec::slug(title)?)
+        // A publication started before chunk names were bounded keeps its
+        // full slug.
+        || (destination != format!("memory-bank/chunks/{id}-{}.md", codec::chunk_slug(title)?)
+            && destination != format!("memory-bank/chunks/{id}-{}.md", codec::slug(title)?))
         || metadata["title"] != proposal["title"]
         || metadata["status"] != "active"
         || body.trim() != expected.trim()
@@ -1151,7 +1154,10 @@ pub fn apply(service: &BankService, id: &str) -> Result<Value> {
     let today = instant.date_naive();
     let memory_id = format!("MEM-{}-{suffix}", today.format("%Y%m%d"));
     let title = proposal["title"].as_str().unwrap_or("");
-    let destination = format!("memory-bank/chunks/{memory_id}-{}.md", codec::slug(title)?);
+    let destination = format!(
+        "memory-bank/chunks/{memory_id}-{}.md",
+        codec::chunk_slug(title)?
+    );
     if files.read(&destination, IMAGE_LIMIT)?.is_some() {
         return Err(RuntimeError::conflict(
             "Promotion destination already exists",

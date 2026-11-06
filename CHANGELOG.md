@@ -24,6 +24,13 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Memory Bank: a record with a long title can be promoted. A chunk took its
+  file name from the whole title, and publication writes `.{name}.{uuid}.tmp`
+  beside it, so any title over about 190 characters failed with `File name too
+  long` and that record could never become memory (a real system run's outcome
+  hit it). A new chunk's name now carries at most 80 characters of the title's
+  slug, cut at a word; the whole title stays in the chunk. A publication started
+  before the change keeps its full-slug name and still resumes.
 - System Orchestration: every agent of a run shares one context. Each worker's
   input carries `shared_context`, the same for all of them: the task, the
   services and their folders, the contract relationships, the plan's excerpts
