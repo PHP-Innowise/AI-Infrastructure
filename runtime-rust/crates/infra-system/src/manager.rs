@@ -117,10 +117,18 @@ impl SystemManager {
             .map(|session| session["status"].clone())
             .unwrap_or(Value::Null);
         result["active"] = is_active.into();
+        // Before any launch a change is in its plan's state: a plan that could
+        // not choose its services needs selection, not review.
         result["status"] = session
             .as_ref()
             .map(|session| session["status"].clone())
-            .unwrap_or(object!("needs_review"));
+            .unwrap_or_else(|| {
+                record
+                    .get("plan_status")
+                    .filter(|status| status.is_string())
+                    .cloned()
+                    .unwrap_or(object!("needs_review"))
+            });
         result["access"] = record
             .get("access")
             .cloned()
@@ -136,7 +144,9 @@ impl SystemManager {
             if !journal.is_dir() {
                 return Ok(None);
             }
-            match read_json(&journal, name, MAX_BYTES) {
+            // As large as the run itself writes them: the handoff keeps every
+            // complete report.
+            match read_json(&journal, name, execution::MAX_STATE) {
                 Ok(value) => Ok(Some(value)),
                 Err(error) if is_active || error.kind == infra_core::ErrorKind::NotFound => {
                     Ok(None)
@@ -159,7 +169,15 @@ impl SystemManager {
                     if step["attempt"].as_u64().unwrap_or(0) > 0
                         && let Some(receipt) = read(&receipt_name(step))?
                     {
-                        receipts.push(object!({"phase":step["id"],"service":step["service"],"attempt":step["attempt"],"ok":receipt["ok"],"error":receipt["error"],"report":receipt["report"]}));
+                        // The exact input the agent received, the run's shared
+                        // context included, when this run saved it.
+                        let input = journal.join(input_name(step));
+                        let input = if input.is_file() {
+                            object!(path_string(&input)?)
+                        } else {
+                            Value::Null
+                        };
+                        receipts.push(object!({"phase":step["id"],"service":step["service"],"attempt":step["attempt"],"ok":receipt["ok"],"error":receipt["error"],"rejection":receipt.get("rejection").cloned().unwrap_or(Value::Null),"failure":receipt.get("failure").cloned().unwrap_or(Value::Null),"report":receipt["report"],"input":input}));
                     }
                 }
                 result["receipts"] = object!(receipts);
@@ -198,14 +216,18 @@ impl SystemManager {
                     .collect::<Result<Vec<_>>>()?
             );
             result["providers"] = object!(
-                ["codex", "claude", "cursor"]
-                    .into_iter()
-                    .map(|id| self
-                        .state
-                        .host
-                        .provider(id)
-                        .map(|exe| object!({"id":id,"name":id,"available":exe.is_some()})))
-                    .collect::<Result<Vec<_>>>()?
+                [
+                    ("codex", "Codex"),
+                    ("claude", "Claude Code"),
+                    ("cursor", "Cursor Agent")
+                ]
+                .into_iter()
+                .map(|(id, name)| self
+                    .state
+                    .host
+                    .provider(id)
+                    .map(|exe| object!({"id":id,"name":name,"available":exe.is_some()})))
+                .collect::<Result<Vec<_>>>()?
             );
             result["codex_available"] = self.state.host.provider("codex")?.is_some().into();
         }
@@ -243,7 +265,7 @@ impl SystemManager {
         let directory = self.state.state.join("ai-system").join(&rid);
         create_private(&directory)?;
         create_new(&directory, "approved-plan.json", &plan)?;
-        let record = object!({"id":rid,"revision":0,"created_at":now(),"project_id":data["project_id"],"config_path":data["config_path"],"system":plan["system"],"change_id":plan["change_id"],"session_id":null,"provider":null,"mode":null,"timeout":null});
+        let record = object!({"id":rid,"revision":0,"created_at":now(),"project_id":data["project_id"],"config_path":data["config_path"],"system":plan["system"],"change_id":plan["change_id"],"plan_status":plan["status"],"session_id":null,"provider":null,"mode":null,"timeout":null});
         self.save(&record)?;
         self.view(&record, true)
     }
@@ -258,6 +280,7 @@ impl SystemManager {
                 "access",
                 "retry_step",
                 "accept_source_changes",
+                "accept_unrun_checks",
             ],
         )?;
         let mut record = self.record(rid)?;
@@ -271,8 +294,14 @@ impl SystemManager {
             "execute" => vec![
                 "action", "revision", "mode", "timeout", "provider", "access",
             ],
-            "resume" => vec!["action", "revision", "retry_step", "accept_source_changes"],
-            "cancel" => vec!["action", "revision"],
+            "resume" => vec![
+                "action",
+                "revision",
+                "retry_step",
+                "accept_source_changes",
+                "accept_unrun_checks",
+            ],
+            "cancel" | "archive" => vec!["action", "revision"],
             _ => return Err(fail("Invalid system run action")),
         };
         if data
@@ -288,6 +317,19 @@ impl SystemManager {
             if view["active"] == true {
                 self.state.host.cancel(string(&record["session_id"]))?;
             }
+            return self.view(&record, true);
+        }
+        // Removing a change from the list keeps its plan, receipts and the
+        // services' native tasks; only a stopped change can be removed.
+        if action == "archive" {
+            if view["active"] == true || record["pending_nonce"].is_string() {
+                return Err(RuntimeError::conflict(
+                    "Wait for this launch to stop before removing the change from the list",
+                ));
+            }
+            record["archived"] = true.into();
+            record["revision"] = (record["revision"].as_u64().unwrap_or(0) + 1).into();
+            self.save(&record)?;
             return self.view(&record, true);
         }
         if view["active"] == true {
@@ -337,9 +379,9 @@ impl SystemManager {
             if record["session_id"].is_null() || view["status"] == "completed" {
                 return Err(fail("Only unfinished launches can be resumed"));
             }
-            if data
-                .get("accept_source_changes")
-                .is_some_and(|value| !value.is_boolean())
+            if ["accept_source_changes", "accept_unrun_checks"]
+                .iter()
+                .any(|key| data.get(*key).is_some_and(|value| !value.is_boolean()))
             {
                 return Err(fail("Source acknowledgement must be boolean"));
             }
@@ -386,7 +428,7 @@ impl SystemManager {
             .provider(&provider)?
             .ok_or_else(|| fail("Selected system provider CLI is unavailable"))?;
         let nonce = id32();
-        let request = object!({"directory":directory,"system_file":system.config,"allowed_roots":self.state.allowed()?,"provider":provider,"executable":executable,"mode":mode,"timeout":timeout,"access":access,"retry_step":data.get("retry_step"),"accept_source_changes":data["accept_source_changes"]==true});
+        let request = object!({"directory":directory,"system_file":system.config,"allowed_roots":self.state.allowed()?,"provider":provider,"executable":executable,"mode":mode,"timeout":timeout,"access":access,"retry_step":data.get("retry_step"),"accept_source_changes":data["accept_source_changes"]==true,"accept_unrun_checks":data["accept_unrun_checks"]==true});
         create_new(&directory, &format!("request-{nonce}.json"), &request)?;
         record["pending_nonce"] = nonce.clone().into();
         record["provider"] = provider.clone().into();
@@ -396,7 +438,8 @@ impl SystemManager {
         record["revision"] = (record["revision"].as_u64().unwrap_or(0) + 1).into();
         self.save(&record)?;
         let internal = object!({"run_id":rid,"nonce":nonce});
-        let session=self.state.host.launch(&object!({"project_id":record["project_id"],"provider":provider,"workflow":"native","mode":if mode=="edit"{"edit"}else{"plan"},"prompt":format!("System orchestration: {}",string(&plan["context"]["task"])),"project_context":false,"agents_enabled":false,"budgets":{"seconds":null,"tokens":null,"usd":null}}),Some(&internal),None)?;
+        let prompt = launch_title(&record, &plan, data["retry_step"].as_str());
+        let session=self.state.host.launch(&object!({"project_id":record["project_id"],"provider":provider,"workflow":"native","mode":if mode=="edit"{"edit"}else{"plan"},"prompt":prompt,"project_context":false,"agents_enabled":false,"budgets":{"seconds":null,"tokens":null,"usd":null}}),Some(&internal),None)?;
         let sid = string(&session["id"]);
         if sid.is_empty() {
             return Err(fail("Queue returned no session identity"));
@@ -450,7 +493,7 @@ impl SystemManager {
                     .ok_or_else(|| fail("Project identity required"))?;
                 self.state.project(project)?;
                 Ok(
-                    object!({"runs":self.state.db.all("system_runs",Some(project))?.into_iter().map(|(rid,record)|self.reconcile_record(&rid,record).and_then(|record|self.view(&record,false))).collect::<Result<Vec<_>>>()?}),
+                    object!({"runs":self.state.db.all("system_runs",Some(project))?.into_iter().filter(|(_,record)|record["archived"]!=true).map(|(rid,record)|self.reconcile_record(&rid,record).and_then(|record|self.view(&record,false))).collect::<Result<Vec<_>>>()?}),
                 )
             }
             "systems.get" => self.view(
@@ -519,4 +562,53 @@ pub fn create_private(path: &std::path::Path) -> Result<()> {
     custody.create_directory(name)?;
     native::private_directory(&path)?;
     custody.check()
+}
+/// A session is titled by the first 80 characters of its prompt, so the
+/// change and the launch lead: every launch of one run used to read the same.
+fn launch_title(record: &Value, plan: &Value, retry: Option<&str>) -> String {
+    let launches = texts(&record["launches"]);
+    let previous = if launches.is_empty() {
+        usize::from(record["session_id"].is_string())
+    } else {
+        launches.len()
+    };
+    let change = string(&plan["change_id"]);
+    let task = string(&plan["context"]["task"]);
+    match (previous, retry) {
+        (0, _) => format!("System change {change}: {task}"),
+        (_, Some(step)) => format!(
+            "System change {change} · launch {} retries {step}: {task}",
+            previous + 1
+        ),
+        _ => format!(
+            "System change {change} · launch {} resumes: {task}",
+            previous + 1
+        ),
+    }
+}
+#[cfg(test)]
+mod launch_title_tests {
+    use super::*;
+    #[test]
+    fn each_launch_of_a_run_is_titled_by_its_change_and_number() {
+        let plan = object!({"change_id":"cancel-v3","context":{"task":"Allow cancellation"}});
+        assert_eq!(
+            launch_title(&object!({}), &plan, None),
+            "System change cancel-v3: Allow cancellation"
+        );
+        let record = object!({"launches":["a","b"],"session_id":"b"});
+        assert_eq!(
+            launch_title(&record, &plan, None),
+            "System change cancel-v3 · launch 3 resumes: Allow cancellation"
+        );
+        assert_eq!(
+            launch_title(&record, &plan, Some("service-orders")),
+            "System change cancel-v3 · launch 3 retries service-orders: Allow cancellation"
+        );
+        // A record from before launches were listed names only its session.
+        assert_eq!(
+            launch_title(&object!({"session_id":"a"}), &plan, None),
+            "System change cancel-v3 · launch 2 resumes: Allow cancellation"
+        );
+    }
 }

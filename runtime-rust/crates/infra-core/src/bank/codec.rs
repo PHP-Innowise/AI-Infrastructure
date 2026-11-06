@@ -297,10 +297,49 @@ pub fn slug(title: &str) -> Result<String> {
         slug
     })
 }
+/// The longest slug a new chunk's file name carries.
+pub const CHUNK_SLUG_LIMIT: usize = 80;
+/// The slug of a new chunk's file name: [`slug`] cut to at most
+/// [`CHUNK_SLUG_LIMIT`] characters at a word boundary. Publication writes
+/// `.{name}.{uuid}.tmp` beside a chunk, so an unbounded slug of a title over
+/// about 190 characters overran the 255-byte name limit and the record could
+/// never be promoted.
+pub fn chunk_slug(title: &str) -> Result<String> {
+    let slug = slug(title)?;
+    if slug.len() <= CHUNK_SLUG_LIMIT {
+        return Ok(slug);
+    }
+    // The slug is ASCII: byte and character positions agree.
+    let head = &slug[..CHUNK_SLUG_LIMIT];
+    let cut = if slug.as_bytes()[CHUNK_SLUG_LIMIT] == b'-' {
+        head
+    } else {
+        head.rsplit_once('-').map_or(head, |(words, _)| words)
+    };
+    Ok(cut.trim_end_matches('-').to_string())
+}
 
 #[cfg(test)]
 mod constant_pattern_tests {
     use super::*;
+
+    #[test]
+    fn a_new_chunk_name_keeps_a_bounded_slug_cut_at_a_word() {
+        assert_eq!(chunk_slug("Cache policy").unwrap(), "cache-policy");
+        let long = "System change refund-customer-id-field-2: Specify the customer_id field that refund.completed v1 should carry so harbor-notifications can resolve the refund recipient";
+        let bounded = chunk_slug(long).unwrap();
+        assert!(bounded.len() <= CHUNK_SLUG_LIMIT, "{bounded}");
+        assert!(slug(long).unwrap().starts_with(&bounded));
+        assert!(!bounded.ends_with('-'));
+        // Cut at a word: the next slug character is a separator.
+        assert_eq!(slug(long).unwrap().as_bytes()[bounded.len()], b'-');
+        // One unbroken word is cut at the limit.
+        assert_eq!(
+            chunk_slug(&"a".repeat(300)).unwrap().len(),
+            CHUNK_SLUG_LIMIT
+        );
+        assert_eq!(chunk_slug("!!!").unwrap(), "promoted");
+    }
 
     #[test]
     fn memory_names_keep_modern_legacy_unicode_and_slug_boundaries() {

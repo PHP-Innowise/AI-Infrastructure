@@ -161,18 +161,7 @@ pub async fn load() {
         Ok((epoch, value))
             if m::current("system-list", epoch) && system_current(&project, "", generation) =>
         {
-            dom::options(
-                "system-runs",
-                &m::array(&value["runs"]),
-                |run| {
-                    format!(
-                        "{} · {}",
-                        m::text(run, "change_id"),
-                        m::label(run["status"].as_str().unwrap_or(""))
-                    )
-                },
-                None,
-            );
+            dom::options("system-runs", &m::array(&value["runs"]), run_label, None);
             dom::hidden("system-runs-empty", !m::array(&value["runs"]).is_empty());
             let id = dom::value("system-runs");
             if !id.is_empty() {
@@ -183,6 +172,222 @@ pub async fn load() {
             dom::error("system-run-error", &error.message)
         }
         _ => {}
+    }
+}
+/// The run's status and what stopped it: the stopped dispatch's receipt says
+/// that best (the agent's own reason, failed checks, the CLI's message); the
+/// journal's error is the fallback, a code read as words.
+fn run_status(v: &V) -> String {
+    let status = m::label(v["status"].as_str().unwrap_or(""));
+    // Launches share the Harness runner; one waits while another holds it.
+    if v["status"] == "queued" {
+        return "queued · waits for a free runner slot".into();
+    }
+    let stopped = m::array(&v["execution"]["steps"])
+        .into_iter()
+        .find(|step| matches!(step["status"].as_str(), Some("blocked" | "interrupted")));
+    let receipt = stopped.as_ref().and_then(|step| {
+        m::array(&v["receipts"])
+            .into_iter()
+            .find(|receipt| receipt["phase"] == step["id"] && receipt["attempt"] == step["attempt"])
+    });
+    let reason = match (&stopped, &receipt) {
+        (Some(step), Some(receipt)) if receipt["error"] != "interrupted" => Some(format!(
+            "{}: {}",
+            m::text(step, "id"),
+            receipt_outcome(receipt)
+        )),
+        // An executor that stopped (server restart, crash) left no receipt.
+        (Some(step), None) if v["execution"]["error"].is_null() => Some(format!(
+            "{} stopped before it saved a receipt; inspect its folder, then retry it",
+            m::text(step, "id")
+        )),
+        _ => v["execution"]["error"].as_str().map(|error| {
+            // A journal code reads as words; a sentence is shown as written.
+            if error.contains(' ') {
+                error.to_owned()
+            } else {
+                m::label(error)
+            }
+        }),
+    };
+    match reason {
+        Some(reason) if !m::yes(&v["active"]) && reason != status => {
+            format!("{status} · {reason}")
+        }
+        _ => status,
+    }
+}
+/// Why a scan ended without a proposal. Its status says it at once; the error
+/// event of a cancelled scan can arrive after the last poll.
+fn scan_end(job: &V) -> String {
+    match job["status"].as_str() {
+        Some("cancelled") => "AI scan cancelled.".into(),
+        Some("interrupted") => {
+            "AI scan stopped before it finished (Harness restarted or the agent was stopped)."
+                .into()
+        }
+        _ => sentence(
+            job["error"]
+                .as_str()
+                .unwrap_or("AI scan ended without a proposal."),
+        ),
+    }
+}
+/// A message that ends as a sentence, so another can follow it: a CLI's own
+/// message usually has no full stop.
+fn sentence(text: &str) -> String {
+    let text = text.trim_end();
+    if text.ends_with(['.', '!', '?']) {
+        text.to_owned()
+    } else {
+        format!("{text}.")
+    }
+}
+/// The next change ID of a revised plan: `cancel-v3` → `cancel-v4`,
+/// `cancel` → `cancel-2`.
+fn next_change_id(id: &str) -> String {
+    let digits = id.chars().rev().take_while(char::is_ascii_digit).count();
+    let (stem, number) = id.split_at(id.len() - digits);
+    match number.parse::<u64>() {
+        Ok(number) if !stem.is_empty() => format!("{stem}{}", number + 1),
+        _ => format!("{id}-2"),
+    }
+}
+/// Opens the plan form filled from a change: a blocked agreement asks for a
+/// decision, and the next plan states it, so only the task needs editing.
+fn replan(v: &V) {
+    let plan = &v["plan"];
+    let impact = m::array(&plan["impact"]);
+    let mut starting = impact
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry["reason"].as_str(),
+                Some("selected" | "contract_provider")
+            )
+        })
+        .map(|entry| m::text(entry, "service"))
+        .collect::<Vec<_>>();
+    // A plan that still needs a selection offers what the task matched.
+    if starting.is_empty() {
+        starting = m::array(&plan["routing"]["candidates"])
+            .iter()
+            .map(|candidate| m::text(candidate, "service"))
+            .collect();
+    }
+    for e in dom::all("#system-plan-services input[type=checkbox]") {
+        if let Some(input) = e.dyn_ref::<web_sys::HtmlInputElement>() {
+            if !input.disabled() {
+                input.set_checked(starting.contains(&input.value()));
+            }
+        }
+    }
+    let downstream = impact
+        .iter()
+        .any(|entry| entry["reason"] == "potential_consumer");
+    let depth = if downstream || impact.is_empty() {
+        "32"
+    } else {
+        "0"
+    };
+    dom::set_value("system-depth", depth);
+    dom::set_value("system-task", &m::text(&plan["context"], "task"));
+    dom::set_value("system-contracts", "");
+    if let Some(budget) = plan["context_budget_chars"].as_u64() {
+        dom::set_value("system-budget", &budget.to_string());
+    }
+    dom::set_value(
+        "system-change-id",
+        &next_change_id(&m::text(v, "change_id")),
+    );
+    dom::hidden("system-plan-form", false);
+    dom::hidden("system-runs-empty", true);
+    if let Some(task) =
+        dom::get("system-task").and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = task.focus();
+    }
+}
+/// Which of Plan, Review, Run and Receipts a change has reached, and how that
+/// stage stands: a change stops at Review until someone launches it. The
+/// stepper was drawn by the browser UI before the Wasm port and stayed empty.
+fn stages(v: &V) -> Vec<(&'static str, &'static str)> {
+    let active = m::yes(&v["active"]);
+    let status = m::text(v, "status");
+    let launched = v["session_id"].is_string();
+    let attention = !active
+        && (matches!(
+            status.as_str(),
+            "blocked" | "interrupted" | "failed" | "cancelled"
+        ) || (!launched && v["plan"]["status"] != "needs_review"));
+    let current = if !launched {
+        1
+    } else if status == "completed" && !active {
+        4
+    } else {
+        2
+    };
+    ["Plan", "Review", "Run", "Receipts"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let state = if index < current {
+                "done"
+            } else if index > current {
+                "upcoming"
+            } else if attention {
+                "attention"
+            } else if active {
+                "running"
+            } else {
+                "current"
+            };
+            (label, state)
+        })
+        .collect()
+}
+fn stepper(v: &V) {
+    dom::clear("system-stepper");
+    for (index, (label, state)) in stages(v).into_iter().enumerate() {
+        let item = dom::el("li", "step", "");
+        let _ = item.set_attribute("data-state", state);
+        if matches!(state, "current" | "running" | "attention") {
+            let _ = item.set_attribute("aria-current", "step");
+        }
+        let mark = if state == "done" {
+            "✓".to_owned()
+        } else {
+            (index + 1).to_string()
+        };
+        dom::add(&item, &dom::el("span", "step-mark", &mark));
+        dom::add(&item, &dom::el("span", "step-label", label));
+        dom::append("system-stepper", &item);
+    }
+}
+/// How a change reads in the change list.
+fn run_label(run: &V) -> String {
+    format!(
+        "{} · {}",
+        m::text(run, "change_id"),
+        m::label(run["status"].as_str().unwrap_or(""))
+    )
+}
+/// Lists the project's changes again with `selected` chosen: a new plan is
+/// shown under the change list it joins.
+async fn relist(project: &str, selected: &str) {
+    let path = format!("/api/system-runs?project_id={}", dom::enc(project));
+    let Ok((epoch, value)) = api::scoped("system-list", &path).await else {
+        return;
+    };
+    if m::current("system-list", epoch) && dom::value("system-project") == project {
+        dom::options(
+            "system-runs",
+            &m::array(&value["runs"]),
+            run_label,
+            Some(selected),
+        );
+        dom::hidden("system-runs-empty", !m::array(&value["runs"]).is_empty());
     }
 }
 async fn read(id: &str) {
@@ -205,7 +410,11 @@ async fn read_scoped(id: &str, project: &str, generation: u64) {
                 && value["id"] == id
                 && value["project_id"] == project =>
         {
-            if m::data("system-run")["id"] != value["id"] {
+            let previous = m::data("system-run");
+            let stopped = previous["id"] == value["id"]
+                && m::yes(&previous["active"])
+                && !m::yes(&value["active"]);
+            if previous["id"] != value["id"] {
                 dom::set_checked("system-reviewed", false);
                 dom::set_checked("system-accept-changes", false);
                 m::take("agent-session");
@@ -216,6 +425,10 @@ async fn read_scoped(id: &str, project: &str, generation: u64) {
             m::set("system-run", value.clone());
             render_run();
             agents(&value).await;
+            // Sessions shows each launch; its status changes when the run stops.
+            if stopped {
+                session::refresh().await;
+            }
             if system_current(project, id, generation) && m::yes(&value["active"]) {
                 let id = id.to_owned();
                 let project = project.to_owned();
@@ -253,10 +466,12 @@ fn controls() {
     for e in dom::all(
         "#system-editor input,#system-editor select,#system-editor textarea,#system-editor button",
     ) {
-        if e.closest("#system-discovery-agents")
-            .ok()
-            .flatten()
-            .is_none()
+        // The scan's own Cancel stays usable while the scan locks the form.
+        if e.id() != "system-discovery-cancel"
+            && e.closest("#system-discovery-agents")
+                .ok()
+                .flatten()
+                .is_none()
         {
             if locked {
                 let _ = e.set_attribute("disabled", "");
@@ -265,9 +480,24 @@ fn controls() {
             }
         }
     }
+    // A plan is computed from the saved system files, so a draft or an AI scan
+    // in the editor holds planning and launching until it is saved or discarded.
+    let scanning = m::yes(&m::data("discovery-active"));
+    let held = dirty || scanning;
+    let notice = if scanning {
+        "An AI scan is filling the system editor on Services. Planning and launching wait until it ends."
+    } else if dirty {
+        "The system editor on Services has unsaved changes. Save or discard them to plan or launch a change."
+    } else {
+        ""
+    };
+    dom::text("system-editor-lock", notice);
+    dom::hidden("system-editor-lock", notice.is_empty());
+    dom::disabled("system-prepare", pending || held);
     dom::disabled(
         "system-execute",
         pending
+            || held
             || active
             || v["session_id"].is_string()
             || v["plan"]["status"] != "needs_review"
@@ -285,6 +515,9 @@ fn controls() {
     );
     dom::hidden("system-launch", v["session_id"].is_string());
     dom::hidden("system-cancel", !active);
+    dom::hidden("system-archive", !v.is_object() || active);
+    dom::hidden("system-replan", !v.is_object() || active);
+    dom::disabled("system-archive", pending || active);
     let editor = m::data("editor");
     dom::disabled("system-edit", pending || locked);
     dom::disabled("system-editor-save", locked || !editor.is_object());
@@ -299,6 +532,31 @@ fn controls() {
         "system-discovery-cancel",
         !m::yes(&m::data("discovery-active")),
     );
+    dom::disabled(
+        "system-discovery-cancel",
+        !m::yes(&m::data("discovery-active")),
+    );
+    layout();
+}
+/// The empty state stands in for the map and the editor, so it hides while either shows.
+fn layout() {
+    let shown = |id: &str| dom::get(id).is_some_and(|e| !e.has_attribute("hidden"));
+    dom::hidden(
+        "system-empty",
+        shown("system-editor") || shown("system-catalog"),
+    );
+}
+/// Opening Services shows the project's system when its file exists: the
+/// form already names it, so a Load system click on every visit added
+/// nothing. A project without the file keeps the empty state, quietly.
+pub async fn catalog_autoload() {
+    if !m::data("system-catalog").is_null()
+        || m::yes(&m::data("editor-dirty"))
+        || dom::value("system-project").is_empty()
+    {
+        return;
+    }
+    catalog_fetch(true).await;
 }
 async fn catalog_load() {
     if !sync_editor_target() {
@@ -309,6 +567,12 @@ async fn catalog_load() {
             "system-error",
             "Save or discard the current system draft before reloading.",
         );
+        return;
+    }
+    catalog_fetch(false).await;
+}
+async fn catalog_fetch(quiet_when_missing: bool) {
+    if !sync_editor_target() {
         return;
     }
     let project = dom::value("system-project");
@@ -330,7 +594,8 @@ async fn catalog_load() {
         }
         Err(error)
             if editor_current(&project, &config, generation)
-                && m::current("system-catalog-load", epoch) =>
+                && m::current("system-catalog-load", epoch)
+                && !(quiet_when_missing && error.status == 404) =>
         {
             dom::error("system-error", &error.message)
         }
@@ -346,6 +611,237 @@ fn svg(tag: &str, attrs: &[(&str, String)], text: &str) -> web_sys::Element {
     }
     e.set_text_content(Some(text));
     e
+}
+/// The line from a provider node to a consumer node (190×76 boxes on a 236×124
+/// grid). It leaves and enters on the facing sides, so it never crosses its own
+/// two boxes; a pair linked both ways gets two parallel lines; a link that skips
+/// boxes in the same row arcs over them (forward) or under them (backward).
+fn edge_path(a: (usize, usize), b: (usize, usize)) -> String {
+    let (ax, ay) = (a.0 as i64, a.1 as i64);
+    let (bx, by) = (b.0 as i64, b.1 as i64);
+    if a == b {
+        // A service that consumes its own contract: a small loop on its corner.
+        return format!(
+            "M{},{ay} C{},{} {},{} {},{}",
+            ax + 160,
+            ax + 160,
+            ay - 24,
+            ax + 214,
+            ay + 8,
+            ax + 190,
+            ay + 22
+        );
+    }
+    if ay == by {
+        let span = (bx - ax).abs() / 236;
+        let forward = bx > ax;
+        if span <= 1 {
+            let y = ay + if forward { 30 } else { 46 };
+            let (x1, x2) = if forward {
+                (ax + 190, bx)
+            } else {
+                (ax, bx + 190)
+            };
+            return format!("M{x1},{y} L{x2},{y}");
+        }
+        let (x1, x2) = (ax + 95, bx + 95);
+        let (y, bend) = if forward {
+            (ay, ay - 22)
+        } else {
+            (ay + 76, ay + 76 + 22)
+        };
+        return format!("M{x1},{y} Q{},{bend} {x2},{y}", (x1 + x2) / 2);
+    }
+    if by > ay {
+        format!("M{},{} L{},{by}", ax + 80, ay + 76, bx + 80)
+    } else {
+        format!("M{},{ay} L{},{}", ax + 110, bx + 110, by + 76)
+    }
+}
+/// What a run step shows: a dispatch the journal left running is not running
+/// once its run stopped, and one whose current attempt saved a successful
+/// receipt has reported complete; resuming records that receipt.
+fn shown_status(step: &V, receipts: &V, active: bool) -> String {
+    let status = m::text(step, "status");
+    if active || !matches!(status.as_str(), "running" | "interrupted" | "blocked") {
+        return status;
+    }
+    let reported = m::array(receipts).iter().any(|receipt| {
+        receipt["phase"] == step["id"]
+            && receipt["attempt"] == step["attempt"]
+            && m::yes(&receipt["ok"])
+    });
+    if reported {
+        "reported".into()
+    } else if status == "running" {
+        "interrupted".into()
+    } else {
+        status
+    }
+}
+/// Why a dispatch receipt did or did not complete, naming what to inspect: the
+/// validator's rejection, the agent's own block, the checks that failed (or,
+/// for verification, did not run), or the files a read-only worker wrote.
+/// The checks a stopped verification's current attempt could not run when
+/// nothing else stopped it, as the runner decides them: only those can be
+/// accepted on resume.
+fn unrun_checks(step: &V, receipts: &V) -> Option<Vec<String>> {
+    let receipt = m::array(receipts)
+        .into_iter()
+        .find(|receipt| receipt["phase"] == step["id"] && receipt["attempt"] == step["attempt"])?;
+    let report = &receipt["report"];
+    let checks = m::array(&report["checks"]);
+    let unrun = checks
+        .iter()
+        .filter(|check| check["status"] == "not_run")
+        .map(|check| m::text(check, "name"))
+        .collect::<Vec<_>>();
+    (step["id"] == "verify"
+        && !m::yes(&receipt["ok"])
+        && receipt["error"] == "worker_blocked_or_verification_incomplete"
+        && receipt["rejection"].is_null()
+        && report["status"] == "completed"
+        && m::array(&report["changed_files"]).is_empty()
+        && checks.iter().any(|check| check["status"] == "passed")
+        && checks
+            .iter()
+            .all(|check| matches!(check["status"].as_str(), Some("passed" | "not_run")))
+        && !unrun.is_empty())
+    .then_some(unrun)
+}
+fn receipt_outcome(receipt: &V) -> String {
+    if m::yes(&receipt["ok"]) {
+        // In an investigation a failed check is a finding of a completed report.
+        let findings = m::array(&receipt["report"]["checks"])
+            .iter()
+            .filter(|check| check["status"] == "failed")
+            .map(|check| m::text(check, "name"))
+            .collect::<Vec<_>>();
+        return if findings.is_empty() {
+            "completed".into()
+        } else {
+            format!(
+                "completed; failed checks are findings: {}",
+                findings.join(", ")
+            )
+        };
+    }
+    if let Some(rejection) = receipt["rejection"].as_str() {
+        return format!("rejected: {rejection}");
+    }
+    let report = &receipt["report"];
+    if report.is_object() {
+        if report["status"] == "blocked" {
+            return format!("blocked by the agent: {}", m::text(report, "summary"));
+        }
+        let checks = m::array(&report["checks"]);
+        let named = |status: &str| {
+            checks
+                .iter()
+                .filter(|check| check["status"] == status)
+                .map(|check| m::text(check, "name"))
+                .collect::<Vec<_>>()
+        };
+        let failed = named("failed");
+        if !failed.is_empty() {
+            return format!("failed checks: {}", failed.join(", "));
+        }
+        if receipt["error"] == "read_only_worker_reported_writes" {
+            return format!(
+                "read-only worker reported writes: {}",
+                joined(&report["changed_files"])
+            );
+        }
+        if receipt["phase"] == "verify" {
+            if checks.is_empty() {
+                return "verification reported no checks".into();
+            }
+            let unrun = named("not_run");
+            if !unrun.is_empty() {
+                return format!("checks not run: {}", unrun.join(", "));
+            }
+        }
+    }
+    if let Some(failure) = receipt["failure"].as_str() {
+        return format!("the agent CLI failed: {failure}");
+    }
+    match receipt["error"].as_str() {
+        Some(error) => format!("blocked: {}", m::label(error)),
+        None => "blocked".into(),
+    }
+}
+/// What to do when a plan could not choose its starting services itself.
+fn selection_hint(candidates: &[V]) -> String {
+    if candidates.is_empty() {
+        return "The task matches no declared capability. Choose starting services or changed contracts, then prepare the plan again.".into();
+    }
+    let listed = candidates
+        .iter()
+        .map(|candidate| {
+            let mut terms = m::array(&candidate["matches"])
+                .iter()
+                .flat_map(|matched| m::array(&matched["terms"]))
+                .map(|term| m::string(&term))
+                .collect::<Vec<_>>();
+            terms.sort();
+            terms.dedup();
+            terms.truncate(4);
+            format!("{} ({})", m::text(candidate, "service"), terms.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "The task matches {} services, so none was chosen for you: {listed}. They are now ticked as starting services; adjust them and prepare the plan again.",
+        candidates.len()
+    )
+}
+/// A list of names or paths as running text.
+fn joined(values: &V) -> String {
+    let items = m::array(values).iter().map(m::string).collect::<Vec<_>>();
+    if items.is_empty() {
+        "none".into()
+    } else {
+        items.join(", ")
+    }
+}
+/// A catalog or plan warning as a sentence: who it concerns, what is wrong, where.
+fn warning_text(warning: &V) -> String {
+    if let Some(text) = warning.as_str() {
+        return text.into();
+    }
+    let reason = m::text(warning, "reason");
+    let meaning = match reason.as_str() {
+        "relationships_incomplete" => "dependencies are not confirmed complete",
+        "root_not_allowed" => "the service folder is not registered in Harness",
+        "manifest_unavailable" => "its ai-service.json passport is missing or unreadable",
+        "provider_contract_unavailable" => {
+            "a consumed contract's provider has no readable passport"
+        }
+        "contract_version_mismatch" => "a consumed contract version differs from the provider's",
+        "dependency_cycle" => "declared contract dependencies form a cycle",
+        "impact_depth_exceeded" => "impact search stopped at the depth limit",
+        "source_unavailable_or_ineligible" => "a registered source is missing or not eligible",
+        "source_read_limit" => "source reading stopped at its limit; later sources were left out",
+        _ => "",
+    };
+    let service = m::text(warning, "service");
+    [
+        if service == "__system__" {
+            "System".to_owned()
+        } else {
+            service
+        },
+        if meaning.is_empty() {
+            m::label(&reason)
+        } else {
+            meaning.to_owned()
+        },
+        m::text(warning, "path"),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(": ")
 }
 fn render_catalog(v: &V) {
     let catalog = &v["catalog"];
@@ -450,16 +946,10 @@ fn render_catalog(v: &V) {
             positions.get(&m::text(edge, "provider")),
             positions.get(&m::text(edge, "consumer")),
         ) {
-            let same = a.1 == b.1;
-            let (x1, y1, x2, y2) = if same {
-                (a.0 + 190, a.1 + 38, b.0, b.1 + 38)
-            } else {
-                (a.0 + 95, a.1 + 76, b.0 + 95, b.1)
-            };
             let path = svg(
                 "path",
                 &[
-                    ("d", format!("M{x1},{y1} L{x2},{y2}")),
+                    ("d", edge_path(*a, *b)),
                     ("class", "system-edge".into()),
                     ("marker-end", "url(#system-arrow)".into()),
                 ],
@@ -575,7 +1065,7 @@ fn render_catalog(v: &V) {
                         m::text(&cap, "id"),
                         m::text(&cap, "status"),
                         m::text(&cap, "description"),
-                        m::string(&cap["sources"])
+                        joined(&cap["sources"])
                     ),
                 ),
             );
@@ -601,11 +1091,27 @@ fn render_catalog(v: &V) {
     }
     dom::clear("system-map");
     dom::append("system-map", &map);
-    dom::rows("system-relationships", &edges);
+    dom::rows(
+        "system-relationships",
+        &edges
+            .iter()
+            .map(|edge| {
+                let mut edge = edge.clone();
+                edge["title"] = json!(format!(
+                    "{} → {} · {} v{}",
+                    m::text(&edge, "provider"),
+                    m::text(&edge, "consumer"),
+                    m::text(&edge, "contract"),
+                    m::text(&edge, "version")
+                ));
+                edge
+            })
+            .collect::<Vec<_>>(),
+    );
     for warning in m::array(&catalog["warnings"]) {
         dom::append(
             "system-relationships",
-            &dom::el("p", "system-warning", &m::string(&warning)),
+            &dom::el("p", "system-warning", &warning_text(&warning)),
         );
     }
     dom::clear("system-banks");
@@ -633,35 +1139,29 @@ fn render_run() {
         return;
     }
     dom::hidden("system-run", false);
+    stepper(&v);
+    // The list entry follows the run's status as it changes.
+    if let Some(option) = dom::get("system-runs")
+        .and_then(|list| list.dyn_into::<web_sys::HtmlSelectElement>().ok())
+        .and_then(|list| {
+            (0..list.length())
+                .filter_map(|index| list.item(index))
+                .find(|option| option.get_attribute("value").as_deref() == Some(&m::text(&v, "id")))
+        })
+    {
+        option.set_text_content(Some(&run_label(&v)));
+    }
     dom::text(
         "system-run-title",
         &format!("{} · {}", m::text(&v, "change_id"), m::text(&v, "system")),
     );
-    dom::text(
-        "system-run-status",
-        &format!(
-            "{}{}",
-            m::label(v["status"].as_str().unwrap_or("")),
-            v["execution"]["error"]
-                .as_str()
-                .map(|s| format!(" · {}", m::label(s)))
-                .unwrap_or_default()
-        ),
-    );
+    dom::text("system-run-status", &run_status(&v));
     dom::pretty("system-plan-json", &v["plan"]);
     dom::clear("system-plan-summary");
     for (term, value) in [
-        ("Participants", m::string(&v["plan"]["context"]["services"])),
-        (
-            "Context",
-            format!(
-                "{} of {} characters · {} sources · {} omitted",
-                m::string(&v["plan"]["context_chars"]),
-                m::string(&v["plan"]["context_budget_chars"]),
-                m::array(&v["plan"]["context"]["sources"]).len(),
-                m::array(&v["plan"]["omitted_sources"]).len()
-            ),
-        ),
+        ("Participants", joined(&v["plan"]["context"]["services"])),
+        ("Context", context_summary(&v["plan"])),
+        ("Shared memory", shared_memory_summary(&v["plan"])),
         ("System file", m::text(&v, "config_path")),
     ] {
         dom::append("system-plan-summary", &dom::el("dt", "", term));
@@ -672,7 +1172,28 @@ fn render_run() {
     } else {
         m::array(&v["plan"]["steps"])
     };
-    dom::rows("system-flow", &steps);
+    let running = m::yes(&v["active"]);
+    dom::rows(
+        "system-flow",
+        &steps
+            .iter()
+            .map(|step| {
+                let mut step = step.clone();
+                let status = shown_status(&step, &v["receipts"], running);
+                let status = if status == "reported" {
+                    "reported complete; resume to record it".to_owned()
+                } else {
+                    status
+                };
+                step["title"] = json!([m::text(&step, "id"), m::label(&status)]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · "));
+                step
+            })
+            .collect::<Vec<_>>(),
+    );
     dom::options(
         "system-provider",
         &m::array(&v["providers"]),
@@ -685,9 +1206,77 @@ fn render_run() {
     );
     let mut retry =
         vec![json!({"id":"","label":"Reconcile saved receipt / continue pending dispatch"})];
-    retry.extend(steps.into_iter().filter(|s|matches!(s["status"].as_str(),Some("running"|"interrupted"|"blocked"))).map(|s|json!({"id":s["id"],"label":format!("Retry {} · {}",m::text(&s,"id"),m::text(&s,"status"))})));
-    dom::options("system-retry", &retry, m::summary, None);
-    dom::rows("system-receipts", &m::array(&v["receipts"]));
+    let unfinished = steps
+        .iter()
+        .filter(|s| {
+            matches!(
+                s["status"].as_str(),
+                Some("running" | "interrupted" | "blocked")
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    retry.extend(unfinished.iter().map(|s| {
+        let status = shown_status(s, &v["receipts"], running);
+        json!({"id":s["id"],"label":format!("Retry {} · {}",m::text(s,"id"),if status=="reported"{"reported complete".to_owned()}else{m::label(&status)})})
+    }));
+    // Only a successful receipt can be reconciled; without one the dispatch
+    // must be retried, so that is what recovery offers first.
+    let reconcilable = unfinished.first().is_some_and(|step| {
+        m::array(&v["receipts"]).iter().any(|receipt| {
+            receipt["phase"] == step["id"]
+                && receipt["attempt"] == step["attempt"]
+                && m::yes(&receipt["ok"])
+        })
+    });
+    let preselected = unfinished
+        .first()
+        .filter(|_| !reconcilable)
+        .map(|step| m::text(step, "id"));
+    dom::options("system-retry", &retry, m::summary, preselected.as_deref());
+    let unrun = unfinished
+        .first()
+        .and_then(|step| unrun_checks(step, &v["receipts"]));
+    dom::hidden("system-accept-unrun-field", unrun.is_none());
+    if let Some(names) = &unrun {
+        dom::text(
+            "system-accept-unrun-text",
+            &format!(
+                "I accept the checks verification could not run ({}); resuming completes it without running it again",
+                names.join(", ")
+            ),
+        );
+    } else if let Some(input) = dom::get("system-accept-unrun")
+        .and_then(|input| input.dyn_into::<web_sys::HtmlInputElement>().ok())
+    {
+        input.set_checked(false);
+    }
+    dom::rows(
+        "system-receipts",
+        &m::array(&v["receipts"])
+            .iter()
+            .map(|receipt| {
+                let mut receipt = receipt.clone();
+                let accepted = steps.iter().any(|step| {
+                    step["id"] == receipt["phase"]
+                        && step["attempt"] == receipt["attempt"]
+                        && step["accepted_unrun_checks"].is_array()
+                });
+                let outcome = if accepted {
+                    format!("{}; a person accepted them", receipt_outcome(&receipt))
+                } else {
+                    receipt_outcome(&receipt)
+                };
+                receipt["title"] = json!(format!(
+                    "{} · attempt {} · {}",
+                    m::text(&receipt, "phase"),
+                    m::string(&receipt["attempt"]),
+                    outcome
+                ));
+                receipt
+            })
+            .collect::<Vec<_>>(),
+    );
     dom::pretty("system-native-tasks", &v["execution"]["tasks"]);
     dom::hidden(
         "system-native-details",
@@ -699,9 +1288,10 @@ fn render_run() {
             String::new()
         } else {
             format!(
-                "Handoff saved: {}/handoff.json\n{}",
+                "Handoff saved: {}/handoff.json\n{}{}",
                 m::text(&v["execution"], "run_dir"),
-                m::text(&v["handoff"], "knowledge")
+                m::text(&v["handoff"], "knowledge"),
+                handoff_memory(&v["handoff"])
             )
         },
     );
@@ -778,6 +1368,10 @@ async fn mutate(action: &str, extra: V) {
                 value.clone(),
             );
             render_run();
+            // A launch is a new session in Sessions.
+            if matches!(action, "execute" | "resume") {
+                session::refresh().await;
+            }
             if m::yes(&value["active"]) {
                 dom::later("system-poll", 1100, move || {
                     spawn_local(async move {
@@ -798,6 +1392,8 @@ async fn mutate(action: &str, extra: V) {
 }
 async fn plan() {
     if !sync_editor_target()
+        || m::yes(&m::data("editor-dirty"))
+        || m::yes(&m::data("discovery-active"))
         || m::yes(&m::data("system-pending"))
         || m::data("system-catalog").is_null()
         || !dom::validity("system-plan-form")
@@ -811,7 +1407,7 @@ async fn plan() {
     }
     let generation = m::read(|s| s.epochs.get("editor-scope").copied().unwrap_or(0));
     let epoch = m::next("system-plan");
-    let body = json!({"project_id":project,"config_path":config,"task":dom::value("system-task"),"change_id":dom::value("system-change-id"),"services":dom::selected_checks("system-plan-services"),"contracts":dom::value("system-contracts").split(',').map(str::trim).filter(|s|!s.is_empty()).collect::<Vec<_>>(),"budget":dom::num("system-budget")});
+    let body = json!({"project_id":project,"config_path":config,"task":dom::value("system-task"),"change_id":dom::value("system-change-id"),"services":dom::selected_checks("system-plan-services"),"contracts":dom::value("system-contracts").split(',').map(str::trim).filter(|s|!s.is_empty()).collect::<Vec<_>>(),"budget":dom::num("system-budget"),"depth":dom::num("system-depth")});
     m::bind_pending("system-pending", epoch);
     controls();
     match api::post("/api/system-runs", body).await {
@@ -824,10 +1420,30 @@ async fn plan() {
             let run_generation = m::bind_scope("system-scope", &project, &id);
             let mut value = value;
             value["view_generation"] = json!(run_generation);
+            let needs_selection = value["plan"]["status"] == "needs_selection";
+            let candidates = m::array(&value["plan"]["routing"]["candidates"]);
             m::set("system-run", value);
-            dom::hidden("system-plan-form", true);
+            if needs_selection {
+                // The form stays open with the routed candidates ticked, so the
+                // next plan starts from what the task matched.
+                let wanted = candidates
+                    .iter()
+                    .map(|candidate| m::text(candidate, "service"))
+                    .collect::<Vec<_>>();
+                for e in dom::all("#system-plan-services input[type=checkbox]") {
+                    if let Some(input) = e.dyn_ref::<web_sys::HtmlInputElement>() {
+                        if !input.disabled() {
+                            input.set_checked(wanted.contains(&input.value()));
+                        }
+                    }
+                }
+                dom::text("system-run-message", &selection_hint(&candidates));
+            } else {
+                dom::hidden("system-plan-form", true);
+            }
             dom::set_checked("system-reviewed", false);
             render_run();
+            relist(&project, &id).await;
         }
         Err(error)
             if editor_current(&project, &config, generation)
@@ -850,6 +1466,7 @@ pub async fn editor_open() {
     }
     if m::yes(&m::data("editor-dirty")) && editor_ready() {
         dom::hidden("system-editor", false);
+        layout();
         return;
     }
     clear_editor_notices();
@@ -898,12 +1515,14 @@ fn field(
     let (required, limit) = constraints;
     let wrap = dom::el(
         "label",
-        if kind == "lines" || kind == "textarea" {
+        if kind == "checkbox" {
+            "checkbox"
+        } else if kind == "lines" || kind == "textarea" {
             "field wide"
         } else {
             "field"
         },
-        label,
+        if kind == "checkbox" { "" } else { label },
     );
     let input = dom::el(
         if !choices.is_empty() {
@@ -948,7 +1567,34 @@ fn field(
         );
     }
     dom::add(&wrap, &input);
+    if kind == "checkbox" {
+        // A checkbox reads as one line: the box, then its statement.
+        dom::add(&wrap, &dom::el("span", "", label));
+    }
     dom::add(parent, &wrap);
+}
+/// A service card is named by its ID; before one is entered, by its folder.
+fn service_title(passport: &V, path: &str) -> String {
+    let id = m::text(passport, "id");
+    if !id.trim().is_empty() {
+        return id;
+    }
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("New service · {name}"))
+        .unwrap_or_else(|| "New service".into())
+}
+/// One-line singular name of a row in an editor section, used in headings and
+/// button names so that "Remove" and "Add" say what they act on.
+fn row_name(kind: &str) -> &'static str {
+    match kind {
+        "capabilities" => "Capability",
+        "provides" => "Provided contract",
+        "consumes" => "Consumed contract",
+        _ => "Source",
+    }
 }
 fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &str) {
     let d = dom::el("details", "system-editor-section", "");
@@ -960,10 +1606,27 @@ fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &s
             &format!("{title} ({})", m::array(values).len()),
         ),
     );
+    let name = row_name(kind);
     for (index, value) in m::array(values).into_iter().enumerate() {
-        let row = dom::el("div", "system-editor-row", "");
+        let item = dom::el("div", "system-editor-row", "");
+        let head = dom::el("div", "system-editor-row-head", "");
         let base = format!("{path}/{index}");
-        dom::add(&row, &dom::el("h6", "", &format!("{title} {}", index + 1)));
+        dom::add(&head, &dom::el("h6", "", &format!("{name} {}", index + 1)));
+        let remove = dom::button(
+            "Remove",
+            "editor-row-remove",
+            json!({"path":path,"index":index}),
+        );
+        let _ = remove.set_attribute("class", "button quiet");
+        let _ = remove.set_attribute(
+            "aria-label",
+            &format!("Remove {} {}", name.to_lowercase(), index + 1),
+        );
+        dom::add(&head, &remove);
+        dom::add(&item, &head);
+        // Field helpers below write into the row's two-column grid.
+        let row = dom::el("div", "system-editor-grid", "");
+        dom::add(&item, &row);
         match kind {
             "capabilities" => {
                 field(
@@ -995,7 +1658,7 @@ fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &s
                 );
                 field(
                     &row,
-                    "Source paths",
+                    "Source paths (one per line)",
                     &value["sources"],
                     &format!("{base}/sources"),
                     "lines",
@@ -1004,7 +1667,7 @@ fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &s
                 );
                 field(
                     &row,
-                    "Routing keywords",
+                    "Routing keywords (one per line)",
                     &value["keywords"],
                     &format!("{base}/keywords"),
                     "lines",
@@ -1042,7 +1705,7 @@ fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &s
                 );
                 field(
                     &row,
-                    "Source paths",
+                    "Source paths (one per line)",
                     &value["sources"],
                     &format!("{base}/sources"),
                     "lines",
@@ -1088,20 +1751,12 @@ fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &s
                 );
             }
         }
-        dom::add(
-            &row,
-            &dom::button(
-                "Remove",
-                "editor-row-remove",
-                json!({"path":path,"index":index}),
-            ),
-        );
-        dom::add(&d, &row);
+        dom::add(&d, &item);
     }
     dom::add(
         &d,
         &dom::button(
-            &format!("Add {}", title.to_lowercase()),
+            &format!("Add {}", name.to_lowercase()),
             "editor-row-add",
             json!({"path":path,"kind":kind}),
         ),
@@ -1128,29 +1783,40 @@ fn render_editor() {
     for (index, service) in m::array(&data["services"]).into_iter().enumerate() {
         let base = format!("/services/{index}/passport");
         let p = &service["passport"];
+        let path = m::text(&service, "path");
         let card = dom::el("section", "system-editor-service", "");
-        dom::add(
-            &card,
-            &dom::el("h5", "", p["id"].as_str().unwrap_or("New service")),
-        );
-        dom::add(
-            &card,
-            &dom::el("p", "system-note", &m::text(&service, "path")),
-        );
+        let head = dom::el("div", "system-editor-service-head", "");
+        let title = dom::el("div", "", "");
+        dom::add(&title, &dom::el("h5", "", &service_title(p, &path)));
+        dom::add(&title, &dom::el("p", "system-note", &path));
+        dom::add(&head, &title);
+        let actions = dom::el("div", "system-editor-service-actions", "");
+        for (label, action, payload) in [
+            (
+                "Choose another folder",
+                "editor-service-folder",
+                json!(index),
+            ),
+            (
+                "Remove service",
+                "editor-row-remove",
+                json!({"path":"/services","index":index}),
+            ),
+        ] {
+            let button = dom::button(label, action, payload);
+            let _ = button.set_attribute("class", "button quiet");
+            dom::add(&actions, &button);
+        }
+        dom::add(&head, &actions);
+        dom::add(&card, &head);
+        let grid = dom::el("div", "system-editor-grid", "");
         for (key, label, kind, required, limit) in [
             ("id", "Service ID", "text", true, 80),
             ("owner", "Owning team", "text", true, 200),
             ("description", "Service description", "textarea", true, 2000),
-            (
-                "relationships_complete",
-                "I have described all known dependencies",
-                "checkbox",
-                false,
-                200,
-            ),
         ] {
             field(
-                &card,
+                &grid,
                 label,
                 &p[key],
                 &format!("{base}/{key}"),
@@ -1159,21 +1825,15 @@ fn render_editor() {
                 (required, limit),
             );
         }
-        dom::add(
+        dom::add(&card, &grid);
+        field(
             &card,
-            &dom::button(
-                "Choose another folder",
-                "editor-service-folder",
-                json!(index),
-            ),
-        );
-        dom::add(
-            &card,
-            &dom::button(
-                "Remove service",
-                "editor-row-remove",
-                json!({"path":"/services","index":index}),
-            ),
+            "I have described all known dependencies",
+            &p["relationships_complete"],
+            &format!("{base}/relationships_complete"),
+            "checkbox",
+            &[],
+            (false, 200),
         );
         for (key, title) in [
             ("capabilities", "Capabilities"),
@@ -1280,7 +1940,30 @@ async fn service_folder(index: Option<u64>) {
     let purpose = index
         .map(|i| format!("service:{i}"))
         .unwrap_or_else(|| "service:".into());
-    management::folder_open(&purpose).await;
+    management::folder_open_at(
+        &purpose,
+        &service_folder_start(index),
+        "Choose a service folder",
+    )
+    .await;
+}
+/// Where the service folder browser opens: the replaced service's own folder; for a
+/// new service, the folder that holds the last added one (services are usually
+/// siblings); for the first, the system folder.
+fn service_folder_start(index: Option<u64>) -> String {
+    let services = m::array(&m::data("editor")["services"]);
+    if let Some(service) = index.and_then(|index| services.get(index as usize)) {
+        return m::text(service, "path");
+    }
+    if let Some(last) = services.last() {
+        let path = m::text(last, "path");
+        if let Some((parent, _)) = path.trim_end_matches(['/', '\\']).rsplit_once(['/', '\\']) {
+            if !parent.is_empty() {
+                return parent.to_owned();
+            }
+        }
+    }
+    m::text(&m::project(&dom::value("system-project")), "path")
 }
 pub async fn add_service(project: &str, index: Option<usize>) {
     let selected = m::take("service-folder-owner");
@@ -1462,7 +2145,40 @@ async fn discovery_start() {
         _ => {}
     }
 }
-fn proposal(v: &V) {
+/// What a proposed passport changes from the one the form held before the
+/// scan: the proposal replaces the whole form, so a scan of a system whose
+/// passports were edited by hand says what Save would overwrite.
+fn passport_changes(before: &V, after: &V) -> String {
+    if !before.is_object() {
+        return "new passport".into();
+    }
+    let changed = [
+        "description",
+        "owner",
+        "relationships_complete",
+        "capabilities",
+        "provides",
+        "consumes",
+        "sources",
+    ]
+    .iter()
+    .filter(|key| before[**key] != after[**key])
+    .map(
+        |key| match (before[*key].as_array(), after[*key].as_array()) {
+            (Some(old), Some(new)) if old.len() != new.len() => {
+                format!("{} {} → {}", m::label(key), old.len(), new.len())
+            }
+            _ => m::label(key),
+        },
+    )
+    .collect::<Vec<_>>();
+    if changed.is_empty() {
+        "same as saved".into()
+    } else {
+        format!("changes {}", changed.join(", "))
+    }
+}
+fn proposal(v: &V, draft: &V) {
     if !editor_ready()
         || v["editor"]["project_id"] != dom::value("system-project")
         || v["editor"]["config_path"] != dom::value("system-config")
@@ -1484,13 +2200,19 @@ fn proposal(v: &V) {
         );
     }
     for report in m::array(&v["reports"]) {
+        let saved = m::array(&draft["services"])
+            .into_iter()
+            .find(|service| service["passport"]["id"] == report["id"])
+            .map(|service| service["passport"].clone())
+            .unwrap_or(V::Null);
         let d = dom::details(
             &format!(
-                "{} · {} capabilities · {} provided · {} consumed contracts",
+                "{} · {} capabilities · {} provided · {} consumed contracts · {}",
                 m::text(&report, "id"),
                 m::array(&report["passport"]["capabilities"]).len(),
                 m::array(&report["passport"]["provides"]).len(),
-                m::array(&report["passport"]["consumes"]).len()
+                m::array(&report["passport"]["consumes"]).len(),
+                passport_changes(&saved, &report["passport"])
             ),
             &serde_json::to_string_pretty(&report).unwrap_or_default(),
         );
@@ -1541,17 +2263,12 @@ async fn discovery_poll(epoch: u64) {
                 });
             } else {
                 if job["proposal"].is_object() {
-                    proposal(&job["proposal"]);
+                    proposal(&job["proposal"], &job["draft"]);
                     dom::text("system-editor-status","AI filled service details. Review sources and uncertainties, then Save system.");
                 } else {
                     dom::text(
                         "system-discovery-status",
-                        &format!(
-                            "{} Your original form is retained.",
-                            job["error"]
-                                .as_str()
-                                .unwrap_or("AI scan ended without a proposal.")
-                        ),
+                        &format!("{} Your original form is retained.", scan_end(&job)),
                     );
                 }
                 session::refresh().await;
@@ -1634,7 +2351,7 @@ async fn restore_discovery() {
                 render_editor();
                 discovery_poll(epoch).await;
             } else if job["proposal"].is_object() {
-                proposal(&job["proposal"]);
+                proposal(&job["proposal"], &job["draft"]);
             } else if same_target && draft["revision"] == m::data("editor")["revision"] {
                 m::set("editor", draft.clone());
                 changed();
@@ -1700,30 +2417,96 @@ async fn agents(v: &V) {
             ),
             _ => (
                 format!("{service} agent"),
-                format!(
-                    "Works on {service}; folder access: {}.",
-                    if v["access"] == "all" {
-                        "every selected service folder (read; write in edit mode)"
-                    } else {
-                        "own service folder only"
-                    }
-                ),
+                service_agent_goal(&service, &v["access"], &step["mode"]),
             ),
         };
         step["label"] = json!(label);
         step["goal"] = json!(goal);
         step["journal"] = if current && step["status"].is_string() {
-            if step["status"] == "running" && !active {
-                json!("interrupted")
-            } else {
-                step["status"].clone()
-            }
+            json!(shown_status(step, &v["receipts"], active))
         } else {
             V::Null
         };
     }
     crate::activity::set_plan("system-agents", steps, active);
     crate::activity::load("system-agents", &sid).await;
+}
+fn context_summary(plan: &V) -> String {
+    format!(
+        "{} of {} characters · {} sources · {} omitted",
+        m::string(&plan["context_chars"]),
+        m::string(&plan["context_budget_chars"]),
+        m::array(&plan["context"]["sources"]).len(),
+        m::array(&plan["omitted_sources"]).len()
+    )
+}
+/// How much memory the plan gives every agent: entries of the system's and
+/// the services' Memory Banks, those no person reviewed, and those it found
+/// but could not share.
+fn shared_memory_summary(plan: &V) -> String {
+    let memory = m::array(&plan["context"]["sources"])
+        .into_iter()
+        .filter(|source| source["kind"] == "memory")
+        .collect::<Vec<_>>();
+    let automatic = memory
+        .iter()
+        .filter(|source| source["trust"] == "automatic_memory")
+        .count();
+    let unshared = m::array(&plan["warnings"])
+        .iter()
+        .filter(|warning| warning["reason"] == "memory_not_shared")
+        .map(|warning| warning["count"].as_u64().unwrap_or(0))
+        .sum::<u64>();
+    let mut text = match memory.len() {
+        0 => "none".to_string(),
+        1 => "1 entry".to_string(),
+        count => format!("{count} entries"),
+    };
+    if automatic > 0 {
+        text.push_str(&format!(" · {automatic} not reviewed by a person"));
+    }
+    if unshared > 0 {
+        text.push_str(&format!(" · {unshared} not shared"));
+    }
+    text
+}
+/// The line a run's handoff adds about the system memory its outcome became:
+/// shared by itself, held for a person where the system folder turns
+/// automatic promotion off, or why it is not memory yet.
+fn handoff_memory(handoff: &V) -> String {
+    let memory = &handoff["memory"];
+    let title = m::text(memory, "title");
+    if memory["status"] == "applied" {
+        format!(
+            "\nShared as system memory: {title} ({}). Later changes give it to every agent.",
+            m::text(memory, "memory_id")
+        )
+    } else if memory["review_mode"] == "human" {
+        format!(
+            "\nProposed as system memory: {title} (proposal {}). The system folder turns automatic promotion off: approve it with memory promote-review, then promote-apply.",
+            m::text(memory, "proposal_id")
+        )
+    } else if let Some(note) = memory["note"].as_str() {
+        format!("\nThe outcome is not system memory yet: {note}")
+    } else if let Some(error) = memory["error"].as_str() {
+        format!("\nThe outcome did not become system memory: {error}")
+    } else {
+        String::new()
+    }
+}
+/// What a service agent's card says before its dispatch starts. Every agent
+/// reads the system folder and every service of the change (they share one
+/// context); the access scope decides only where a service agent edits. The
+/// card used to say "own service folder only" of an agent that reads them all.
+fn service_agent_goal(service: &str, access: &V, mode: &V) -> String {
+    let reads = "reads the system folder and every service of this change";
+    if mode != "edit" {
+        format!("Investigates {service}; {reads}.")
+    } else if access == "all" {
+        format!("Works on {service}; {reads} and edits any selected service.")
+    } else {
+        format!("Works on {service}; {reads} and edits only its own folder.")
+    }
 }
 async fn discovery_agents(job: &V) {
     dom::hidden("system-discovery-agents", false);
@@ -1828,7 +2611,14 @@ pub async fn event(
         "system-load" => catalog_load().await,
         "system-refresh" => load().await,
         "system-edit" => editor_open().await,
-        "system-choose-project" => management::folder_open("system-project").await,
+        "system-choose-project" => {
+            management::folder_open_at(
+                "system-project",
+                &m::text(&m::project(&dom::value("system-project")), "path"),
+                "Choose a system folder",
+            )
+            .await
+        }
         "system-editor-add" => service_folder(None).await,
         "editor-service-folder" => service_folder(Some(payload.as_u64().unwrap_or(0))).await,
         "editor-row-remove" => {
@@ -1873,7 +2663,10 @@ pub async fn event(
             changed();
             render_editor();
         }
-        "system-editor-close" => dom::hidden("system-editor", true),
+        "system-editor-close" => {
+            dom::hidden("system-editor", true);
+            layout();
+        }
         "system-editor-discard" => {
             if !m::yes(&m::data("editor-pending")) {
                 clear_editor_notices();
@@ -1895,17 +2688,41 @@ pub async fn event(
             }
             session::open_view("system-changes", true).await;
             dom::hidden("system-plan-form", false);
+            // The form is the next step; "no changes yet" would only repeat it.
+            dom::hidden("system-runs-empty", true);
         }
-        "system-plan-cancel" => dom::hidden("system-plan-form", true),
+        "system-replan" => {
+            let v = m::data("system-run");
+            if !v.is_object() || m::yes(&v["active"]) {
+                return true;
+            }
+            if m::data("system-catalog").is_null() {
+                catalog_load().await;
+            }
+            replan(&v);
+        }
+        "system-plan-cancel" => {
+            dom::hidden("system-plan-form", true);
+            dom::hidden("system-runs-empty", !dom::value("system-runs").is_empty());
+        }
         "system-execute" => {
             if dom::checked("system-reviewed") {
                 mutate("execute",json!({"provider":dom::value("system-provider"),"mode":dom::value("system-mode"),"access":dom::value("system-access"),"timeout":dom::num("system-timeout")})).await;
             }
         }
         "system-cancel" => mutate("cancel", json!({})).await,
+        "system-archive" => {
+            mutate("archive", json!({})).await;
+            if m::data("system-run")["archived"] == true {
+                load().await;
+            }
+        }
         "system-resume" => {
             let mut extra = json!({"accept_source_changes":dom::checked("system-accept-changes")});
-            if !dom::value("system-retry").is_empty() {
+            // Accepting the unrun checks completes verification; it is not retried.
+            if dom::checked("system-accept-unrun") {
+                extra["accept_unrun_checks"] = json!(true);
+            } else if !dom::value("system-retry").is_empty() {
                 extra["retry_step"] = json!(dom::value("system-retry"));
             }
             mutate("resume", extra).await;
@@ -2014,5 +2831,381 @@ mod editor_value_tests {
             );
             assert_eq!(data, before, "{path}");
         }
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    fn segment(path: &str) -> Vec<i64> {
+        path.split(|c: char| !c.is_ascii_digit() && c != '-')
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse().unwrap())
+            .collect()
+    }
+    #[test]
+    fn an_upward_edge_leaves_the_top_of_its_box_and_enters_the_bottom_of_the_target() {
+        // provider in the second row, consumer above it in the first
+        let points = segment(&edge_path((24, 148), (260, 24)));
+        assert_eq!(points[1], 148, "starts at the provider's top edge");
+        assert_eq!(points[3], 24 + 76, "ends at the consumer's bottom edge");
+    }
+    #[test]
+    fn a_downward_edge_leaves_the_bottom_and_enters_the_top() {
+        let points = segment(&edge_path((24, 24), (260, 148)));
+        assert_eq!(points[1], 24 + 76);
+        assert_eq!(points[3], 148);
+    }
+    #[test]
+    fn a_pair_linked_both_ways_gets_two_separate_lines() {
+        let forward = edge_path((24, 24), (260, 24));
+        let backward = edge_path((260, 24), (24, 24));
+        assert_ne!(segment(&forward)[1], segment(&backward)[1]);
+        // each line runs between the facing sides, never across its own boxes
+        assert_eq!(segment(&forward)[0], 24 + 190);
+        assert_eq!(segment(&forward)[2], 260);
+        assert_eq!(segment(&backward)[0], 260);
+        assert_eq!(segment(&backward)[2], 24 + 190);
+    }
+    #[test]
+    fn a_link_that_skips_boxes_in_its_row_arcs_around_them() {
+        assert!(edge_path((24, 24), (496, 24)).contains('Q'));
+        assert!(edge_path((496, 24), (24, 24)).contains('Q'));
+        assert!(!edge_path((24, 24), (260, 24)).contains('Q'));
+    }
+    #[test]
+    fn catalog_warnings_read_as_sentences() {
+        assert_eq!(
+            warning_text(&json!({"service":"orders","reason":"relationships_incomplete"})),
+            "orders: dependencies are not confirmed complete"
+        );
+        assert_eq!(
+            warning_text(&json!({"service":"__system__","reason":"dependency_cycle"})),
+            "System: declared contract dependencies form a cycle"
+        );
+        assert_eq!(
+            warning_text(
+                &json!({"service":"billing","reason":"source_unavailable_or_ineligible","path":"src/a.php"})
+            ),
+            "billing: a registered source is missing or not eligible: src/a.php"
+        );
+        assert_eq!(
+            warning_text(&json!({"service":"x","reason":"new_reason"})),
+            "x: new reason"
+        );
+        assert_eq!(warning_text(&json!("plain text")), "plain text");
+    }
+    #[test]
+    fn a_service_card_is_named_by_its_id_or_else_its_folder() {
+        assert_eq!(
+            service_title(&json!({"id":"orders"}), "/x/orders"),
+            "orders"
+        );
+        assert_eq!(
+            service_title(&json!({"id":""}), "/lab/harbor-payments/"),
+            "New service · harbor-payments"
+        );
+        assert_eq!(service_title(&json!({"id":" "}), ""), "New service");
+    }
+    #[test]
+    fn a_plan_without_services_explains_what_the_task_matched() {
+        let hint = selection_hint(&[
+            json!({"service":"orders","matches":[{"terms":["order","cancel"]},{"terms":["order"]}]}),
+            json!({"service":"payments","matches":[{"terms":["refund"]}]}),
+        ]);
+        assert!(hint.contains("orders (cancel, order)"), "{hint}");
+        assert!(hint.contains("payments (refund)"), "{hint}");
+        assert!(selection_hint(&[]).contains("matches no declared capability"));
+    }
+    #[test]
+    fn a_receipt_names_what_stopped_its_dispatch() {
+        assert_eq!(receipt_outcome(&json!({"ok":true})), "completed");
+        assert_eq!(
+            receipt_outcome(&json!({"ok":true,"report":{"status":"completed","checks":[
+                {"name":"reproduction","status":"failed"},{"name":"unit","status":"passed"}]}})),
+            "completed; failed checks are findings: reproduction"
+        );
+        assert_eq!(
+            receipt_outcome(
+                &json!({"ok":false,"error":"invalid_or_sensitive_worker_result",
+                "rejection":"Read-only worker reported writes","report":null})
+            ),
+            "rejected: Read-only worker reported writes"
+        );
+        assert_eq!(
+            receipt_outcome(
+                &json!({"ok":false,"error":"worker_blocked_or_verification_incomplete",
+                "report":{"status":"blocked","summary":"Refund rule undecided","checks":[]}})
+            ),
+            "blocked by the agent: Refund rule undecided"
+        );
+        assert_eq!(
+            receipt_outcome(
+                &json!({"ok":false,"phase":"service-inventory","error":"worker_blocked_or_verification_incomplete",
+                "report":{"status":"completed","checks":[{"name":"tests","status":"passed"},{"name":"composer_metadata","status":"failed"}]}})
+            ),
+            "failed checks: composer_metadata"
+        );
+        assert_eq!(
+            receipt_outcome(
+                &json!({"ok":false,"phase":"verify","error":"worker_blocked_or_verification_incomplete",
+                "report":{"status":"completed","checks":[{"name":"go","status":"not_run"},{"name":"php","status":"passed"}]}})
+            ),
+            "checks not run: go"
+        );
+        assert_eq!(
+            receipt_outcome(
+                &json!({"ok":false,"phase":"contracts","error":"read_only_worker_reported_writes",
+                "report":{"status":"completed","checks":[],"changed_files":["billing/.tool/marker"]}})
+            ),
+            "read-only worker reported writes: billing/.tool/marker"
+        );
+        assert_eq!(
+            receipt_outcome(&json!({"ok":false,"error":"worker_exit_failure","report":null})),
+            "blocked: worker exit failure"
+        );
+        assert_eq!(
+            receipt_outcome(
+                &json!({"ok":false,"error":"worker_exit_failure","report":null,
+                "failure":"Failed to authenticate: OAuth session expired"})
+            ),
+            "the agent CLI failed: Failed to authenticate: OAuth session expired"
+        );
+    }
+    #[test]
+    fn a_stopped_step_with_a_successful_receipt_reads_as_reported() {
+        let receipts = json!([
+            {"phase":"service-orders","attempt":1,"ok":true},
+            {"phase":"service-billing","attempt":1,"ok":false}
+        ]);
+        let orders = json!({"id":"service-orders","attempt":1,"status":"running"});
+        assert_eq!(shown_status(&orders, &receipts, false), "reported");
+        assert_eq!(shown_status(&orders, &receipts, true), "running");
+        // A receipt of an earlier attempt says nothing of this one.
+        let retried = json!({"id":"service-orders","attempt":2,"status":"interrupted"});
+        assert_eq!(shown_status(&retried, &receipts, false), "interrupted");
+        let billing = json!({"id":"service-billing","attempt":1,"status":"running"});
+        assert_eq!(shown_status(&billing, &receipts, false), "interrupted");
+        let blocked = json!({"id":"service-billing","attempt":1,"status":"blocked"});
+        assert_eq!(shown_status(&blocked, &receipts, false), "blocked");
+        let done = json!({"id":"contracts","attempt":1,"status":"completed"});
+        assert_eq!(shown_status(&done, &receipts, false), "completed");
+    }
+    #[test]
+    fn only_a_verification_whose_gaps_are_unrun_checks_offers_acceptance() {
+        let step = json!({"id":"verify","attempt":2,"status":"blocked"});
+        let receipt = |checks: V, status: &str| {
+            json!([{"phase":"verify","attempt":2,"ok":false,"error":"worker_blocked_or_verification_incomplete",
+                "rejection":null,"report":{"status":status,"checks":checks,"changed_files":[]}}])
+        };
+        let honest = receipt(
+            json!([{"name":"unit","status":"passed"},{"name":"runtime_integration","status":"not_run"}]),
+            "completed",
+        );
+        assert_eq!(
+            unrun_checks(&step, &honest),
+            Some(vec!["runtime_integration".to_string()])
+        );
+        let failed = receipt(
+            json!([{"name":"unit","status":"failed"},{"name":"runtime_integration","status":"not_run"}]),
+            "completed",
+        );
+        assert_eq!(unrun_checks(&step, &failed), None);
+        let blocked = receipt(json!([{"name":"unit","status":"not_run"}]), "blocked");
+        assert_eq!(unrun_checks(&step, &blocked), None);
+        let nothing_ran = receipt(json!([{"name":"unit","status":"not_run"}]), "completed");
+        assert_eq!(unrun_checks(&step, &nothing_ran), None);
+        let earlier = json!({"id":"verify","attempt":3,"status":"blocked"});
+        assert_eq!(unrun_checks(&earlier, &honest), None);
+        let service = json!({"id":"service-orders","attempt":2,"status":"blocked"});
+        assert_eq!(unrun_checks(&service, &honest), None);
+    }
+    #[test]
+    fn a_queued_run_says_what_it_waits_for() {
+        assert_eq!(
+            run_status(&json!({"status":"queued","active":true})),
+            "queued · waits for a free runner slot"
+        );
+    }
+    #[test]
+    fn a_stopped_run_says_what_stopped_it() {
+        let run = |error: V, receipts: V| {
+            json!({"status":"blocked","active":false,
+                "execution":{"error":error,"steps":[
+                    {"id":"contracts","status":"blocked","attempt":2}]},
+                "receipts":receipts})
+        };
+        let agent = run(
+            json!("worker_blocked_or_verification_incomplete"),
+            json!([{"phase":"contracts","attempt":2,"ok":false,
+                "error":"worker_blocked_or_verification_incomplete",
+                "report":{"status":"blocked","summary":"The refund owner is undecided","checks":[]}}]),
+        );
+        assert_eq!(
+            run_status(&agent),
+            "blocked · contracts: blocked by the agent: The refund owner is undecided"
+        );
+        // Without a receipt of the stopped attempt the journal's error is shown.
+        let stale = run(
+            json!("worker_blocked_or_verification_incomplete"),
+            json!([{"phase":"contracts","attempt":1,"ok":false,"error":"interrupted","report":null}]),
+        );
+        assert_eq!(
+            run_status(&stale),
+            "blocked · worker blocked or verification incomplete"
+        );
+        let restarted = run(V::Null, json!([]));
+        assert_eq!(
+            run_status(&restarted),
+            "blocked · contracts stopped before it saved a receipt; inspect its folder, then retry it"
+        );
+        let sentence = run(
+            json!("Sources changed between dispatches; prepare new plan"),
+            json!([]),
+        );
+        assert_eq!(
+            run_status(&sentence),
+            "blocked · Sources changed between dispatches; prepare new plan"
+        );
+    }
+    #[test]
+    fn a_proposal_says_what_it_changes_from_the_saved_passport() {
+        let saved = json!({"id":"orders","description":"Orders","owner":"@team",
+            "capabilities":[{"id":"a"}],"provides":[],"consumes":[],"sources":[]});
+        let mut proposed = saved.clone();
+        assert_eq!(passport_changes(&saved, &proposed), "same as saved");
+        proposed["owner"] = json!("unknown");
+        proposed["capabilities"] = json!([{"id":"a"},{"id":"b"}]);
+        assert_eq!(
+            passport_changes(&saved, &proposed),
+            "changes owner, capabilities 1 → 2"
+        );
+        assert_eq!(passport_changes(&V::Null, &proposed), "new passport");
+    }
+    #[test]
+    fn a_scan_that_ended_without_a_proposal_says_why() {
+        assert_eq!(
+            scan_end(&json!({"status":"cancelled","error":null})),
+            "AI scan cancelled."
+        );
+        assert_eq!(
+            scan_end(
+                &json!({"status":"failed","error":"The codex CLI exited with code 1: Not signed in"})
+            ),
+            "The codex CLI exited with code 1: Not signed in."
+        );
+        assert_eq!(
+            scan_end(&json!({"status":"failed"})),
+            "AI scan ended without a proposal."
+        );
+    }
+    #[test]
+    fn a_message_followed_by_another_ends_as_a_sentence() {
+        assert_eq!(
+            sentence("Failed to authenticate"),
+            "Failed to authenticate."
+        );
+        assert_eq!(sentence("Scan ended. "), "Scan ended.");
+    }
+    #[test]
+    fn a_revised_plan_gets_the_next_change_id() {
+        assert_eq!(
+            next_change_id("cancel-after-capture-v3"),
+            "cancel-after-capture-v4"
+        );
+        assert_eq!(
+            next_change_id("payments-missing-customer"),
+            "payments-missing-customer-2"
+        );
+        assert_eq!(next_change_id("change-001"), "change-2");
+        assert_eq!(next_change_id("7"), "7-2");
+    }
+    #[test]
+    fn the_stepper_shows_where_a_change_stands() {
+        let states = |v: V| {
+            stages(&v)
+                .into_iter()
+                .map(|(_, state)| state)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            states(json!({"status":"needs_review","plan":{"status":"needs_review"}})),
+            ["done", "current", "upcoming", "upcoming"]
+        );
+        assert_eq!(
+            states(json!({"status":"needs_selection","plan":{"status":"needs_selection"}})),
+            ["done", "attention", "upcoming", "upcoming"]
+        );
+        assert_eq!(
+            states(json!({"status":"running","active":true,"session_id":"s"})),
+            ["done", "done", "running", "upcoming"]
+        );
+        assert_eq!(
+            states(json!({"status":"blocked","session_id":"s"})),
+            ["done", "done", "attention", "upcoming"]
+        );
+        assert_eq!(
+            states(json!({"status":"completed","session_id":"s"})),
+            ["done", "done", "done", "done"]
+        );
+    }
+    #[test]
+    fn lists_read_as_text() {
+        assert_eq!(joined(&json!(["a", "b"])), "a, b");
+        assert_eq!(joined(&json!([])), "none");
+    }
+    #[test]
+    fn a_plan_says_how_much_memory_every_agent_shares() {
+        assert_eq!(
+            shared_memory_summary(&json!({"context":{"sources":[]}})),
+            "none"
+        );
+        let plan = json!({"context":{"sources":[
+            {"kind":"memory","trust":"reviewed_memory"},
+            {"kind":"memory","trust":"automatic_memory"},
+            {"kind":"code","trust":"source_evidence"}]},
+            "warnings":[{"reason":"memory_not_shared","count":3}]});
+        assert_eq!(
+            shared_memory_summary(&plan),
+            "2 entries · 1 not reviewed by a person · 3 not shared"
+        );
+    }
+    #[test]
+    fn a_handoff_says_what_memory_the_outcome_became() {
+        let title = "System change refunds: check receipts";
+        assert_eq!(
+            handoff_memory(&json!({"memory":{"status":"applied","review_mode":"automatic","memory_id":"MEM-1","title":title}})),
+            "\nShared as system memory: System change refunds: check receipts (MEM-1). Later changes give it to every agent."
+        );
+        assert_eq!(
+            handoff_memory(&json!({"memory":{"status":"proposed","review_mode":"human","proposal_id":"p1","title":title}})),
+            "\nProposed as system memory: System change refunds: check receipts (proposal p1). The system folder turns automatic promotion off: approve it with memory promote-review, then promote-apply."
+        );
+        assert_eq!(
+            handoff_memory(
+                &json!({"memory":{"status":"proposed","review_mode":"automatic","note":"Promotion source is not eligible"}})
+            ),
+            "\nThe outcome is not system memory yet: Promotion source is not eligible"
+        );
+        assert_eq!(
+            handoff_memory(&json!({"memory":{"error":"Record content contains a secret"}})),
+            "\nThe outcome did not become system memory: Record content contains a secret"
+        );
+        assert_eq!(handoff_memory(&json!({})), "");
+    }
+    #[test]
+    fn a_waiting_service_agent_reads_the_whole_change() {
+        assert_eq!(
+            service_agent_goal("payments", &json!("service"), &json!("read-only")),
+            "Investigates payments; reads the system folder and every service of this change."
+        );
+        assert_eq!(
+            service_agent_goal("payments", &json!("service"), &json!("edit")),
+            "Works on payments; reads the system folder and every service of this change and edits only its own folder."
+        );
+        assert_eq!(
+            service_agent_goal("payments", &json!("all"), &json!("edit")),
+            "Works on payments; reads the system folder and every service of this change and edits any selected service."
+        );
     }
 }

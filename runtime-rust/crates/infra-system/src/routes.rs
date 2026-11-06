@@ -65,6 +65,13 @@ fn read_document(path: &Path) -> Result<Value> {
 pub fn initialize(root: &Path, name: &str) -> Result<Value> {
     text(&object!(name), "system name", 200)?;
     let root = absolute(root)?;
+    // A system workspace is created new, never over an existing folder.
+    if std::fs::symlink_metadata(&root).is_ok() {
+        return Err(fail(format!(
+            "{} already exists; init creates a new system folder, so choose another path",
+            root.display()
+        )));
+    }
     crate::manager::create_private(&root)?;
     create_new(
         &root,
@@ -138,20 +145,46 @@ pub async fn execute_async(
                             .unwrap_or("service"),
                     )
                     .await?;
-                    runner::drive_run(&mut system, &directory, None, false, cancel, event).await?
+                    runner::drive_run(
+                        &mut system,
+                        &directory,
+                        None,
+                        runner::Acceptance::default(),
+                        cancel,
+                        event,
+                    )
+                    .await?
                 } else if op == "resume" {
                     native::validate_state_sync(&mut system, &directory, true)?;
                     runner::drive_run(
                         &mut system,
                         &directory,
                         arg(request, "retry_step").and_then(Value::as_str),
-                        arg(request, "accept_source_changes") == Some(&Value::Bool(true)),
+                        runner::Acceptance {
+                            source_changes: arg(request, "accept_source_changes")
+                                == Some(&Value::Bool(true)),
+                            unrun_checks: arg(request, "accept_unrun_checks")
+                                == Some(&Value::Bool(true)),
+                        },
                         cancel,
                         event,
                     )
                     .await?
                 } else {
-                    native::validate_state_sync(&mut system, &directory, false)?
+                    let mut state = native::validate_state_sync(&mut system, &directory, false)?;
+                    // A journal left running by an executor that is gone (killed,
+                    // crashed, machine stopped) is reported as what it is now.
+                    if matches!(string(&state["status"]), "running" | "prepared")
+                        && !execution::executing(&directory)
+                    {
+                        state["status"] = "interrupted".into();
+                        for step in state["steps"].as_array_mut().into_iter().flatten() {
+                            if step["status"] == "running" {
+                                step["status"] = "interrupted".into();
+                            }
+                        }
+                    }
+                    state
                 };
                 let summary = execution::run_summary(&state, &directory);
                 return emit(
@@ -184,6 +217,13 @@ pub async fn execute_async(
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| fail("Invalid output filename"))?;
+        // A plan may already be under review, so a file is never replaced.
+        if std::fs::symlink_metadata(&path).is_ok() {
+            return Err(fail(format!(
+                "Plan output {} already exists; a saved plan is never replaced, so write a new file",
+                path.display()
+            )));
+        }
         let bytes = string(&output["_cli"]["stdout"]).as_bytes();
         let mut files = infra_core::bank::publication::PublicationFiles::new(parent)?;
         files.write_expected_limit(name, bytes, None, MAX_BYTES)?;
@@ -195,20 +235,26 @@ pub async fn execute_async(
 pub fn execute(operation: &str, request: &Value) -> Result<Value> {
     let operation = operation.to_string();
     let request = request.clone();
-    let result = std::thread::spawn(move || -> Result<Value> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| RuntimeError::unavailable(error.to_string()))?;
-        runtime.block_on(execute_async(
-            &operation,
-            &request,
-            Arc::new(AtomicBool::new(false)),
-            &mut |_| Ok(()),
-        ))
-    })
-    .join()
-    .map_err(|_| RuntimeError::unavailable("Native system worker panicked"))?;
+    // The whole sequential run is one future polled on this thread; its state
+    // outgrows the default 2 MiB thread stack, so the stack is sized for it.
+    let result = std::thread::Builder::new()
+        .name("infra-system".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || -> Result<Value> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| RuntimeError::unavailable(error.to_string()))?;
+            runtime.block_on(execute_async(
+                &operation,
+                &request,
+                Arc::new(AtomicBool::new(false)),
+                &mut |_| Ok(()),
+            ))
+        })
+        .map_err(|error| RuntimeError::unavailable(error.to_string()))?
+        .join()
+        .map_err(|_| RuntimeError::unavailable("Native system worker panicked"))?;
     match result {
         Ok(value) => Ok(value),
         Err(error) => Ok(cli(

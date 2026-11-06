@@ -887,6 +887,8 @@ button.run-file:hover { border-color:var(--field-line-hover); }
 .system-choice input { margin:0; accent-color:var(--purple); }
 .system-plan-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:16px; }
 .system-plan-grid input { width:100%; }
+.system-depth { margin-top:12px; max-width:360px; }
+.system-depth select { width:100%; }
 .system-run-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
 .system-run-head h3 { margin:0 0 4px; overflow-wrap:anywhere; }
 .system-run-status { display:flex; align-items:center; gap:8px; margin:0; color:var(--ink-2); font-size:var(--text-ui); overflow-wrap:anywhere; }
@@ -940,7 +942,7 @@ button.run-file:hover { border-color:var(--field-line-hover); }
 .agent-card-top strong { flex:1; min-width:0; font-size:var(--text-ui); font-weight:var(--weight-strong); overflow-wrap:anywhere; }
 .agent-dot { flex:none; width:6px; height:6px; border-radius:50%; background:var(--dot); }
 .agent-card.running .agent-dot { background:var(--purple); animation:pulse var(--motion-pulse) var(--ease-pulse) infinite; }
-.agent-card.completed .agent-dot { background:var(--success-dot); }
+.agent-card:is(.completed,.reported) .agent-dot { background:var(--success-dot); }
 .agent-card:is(.blocked,.interrupted) .agent-dot { background:var(--warning-dot); }
 .agent-card-status { color:var(--muted); font-size:var(--text-meta); white-space:nowrap; }
 .agent-card p { margin:4px 0 0; color:var(--muted); font-size:var(--text-ui); line-height:var(--leading-body); overflow-wrap:anywhere; }

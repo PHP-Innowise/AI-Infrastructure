@@ -229,11 +229,12 @@ pub fn populate() {
             .unwrap_or(40)
             .to_string(),
     );
+    let slots = boot["runtime"]["max_active"].as_u64().unwrap_or(1);
     dom::text(
         "runtime-label",
         &format!(
-            "Local runner · {} active slots",
-            boot["runtime"]["max_active"].as_u64().unwrap_or(1)
+            "Local runner · {slots} active slot{}",
+            if slots == 1 { "" } else { "s" }
         ),
     );
     for prefix in ["", "clash-", "routing-plan-", "routing-edit-"] {
@@ -835,8 +836,27 @@ pub async fn open_view(view: &str, record: bool) {
             let _ = e.remove_attribute("aria-current");
         }
     }
-    dom::text("view-heading", &m::label(view));
-    dom::text("page-title", &m::label(group));
+    dom::text(
+        "view-heading",
+        &match view {
+            "systems" => "Services".to_owned(),
+            "system-changes" => "Changes".to_owned(),
+            _ => m::label(view),
+        },
+    );
+    // The page title repeats the navigation entry it belongs to.
+    let (title, subtitle) = match group {
+        "systems" => (
+            "System Orchestration",
+            "Services, their contracts and changes that span them",
+        ),
+        "knowledge" => ("Knowledge", "Your local workspace for agent sessions"),
+        "skills" => ("Skills", "Your local workspace for agent sessions"),
+        "accelerators" => ("Accelerators", "Your local workspace for agent sessions"),
+        _ => ("Sessions", "Your local workspace for agent sessions"),
+    };
+    dom::text("page-title", title);
+    dom::text("page-subtitle", subtitle);
     dom::class("sidebar", "open", false);
     dom::focus("view-heading");
     match view {
@@ -850,6 +870,9 @@ pub async fn open_view(view: &str, record: bool) {
         "systems" | "system-changes" => {
             systems::adopt_sidebar_project(&previous_view);
             systems::load().await;
+            if view == "systems" {
+                systems::catalog_autoload().await;
+            }
         }
         "accelerators" => management::accelerators(),
         "kit3" => dom::attr("kit3-frame", "src", "/kit3/"),

@@ -381,7 +381,7 @@ async fn system(args: &[String]) -> Result<i32> {
             "allow-root",
         ],
         &["service", "contract", "allow-root"],
-        &["accept-source-changes"],
+        &["accept-source-changes", "accept-unrun-checks"],
     )?;
     let cancel = Arc::new(AtomicBool::new(false));
     let control = cancel.clone();

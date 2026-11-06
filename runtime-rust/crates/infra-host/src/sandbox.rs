@@ -1,8 +1,8 @@
 //! Native platform profiles and in-sandbox discovery boundary probe.
 use crate::{HarnessError, Result, provider, store};
-use serde_json::json;
 #[cfg(windows)]
-use serde_json::{Map, Value};
+use serde_json::Map;
+use serde_json::{Value, json};
 use std::{
     fs::OpenOptions,
     io::Write,
@@ -267,6 +267,9 @@ fn command(spec: &Spec, argv: &[String], discovery: bool) -> Result<Vec<String>>
     #[cfg(not(windows))]
     {
         if let Some(bwrap) = provider::find_executable("bwrap") {
+            // The private scratch folder exists on every platform: the discovery
+            // probe proves the workspace is writable by creating a file in it.
+            infra_core::fs::ensure_directory(&spec.workspace.join(".harness-tmp"), true)?;
             let mut out = vec![
                 arg(&bwrap)?,
                 "--die-with-parent".into(),
@@ -438,11 +441,33 @@ pub fn child_entry(arguments: &[String]) -> Result<i32> {
 fn readable(path: &Path) -> bool {
     std::fs::read_dir(path).is_ok() || std::fs::File::open(path).is_ok()
 }
+/// Runs inside the discovery sandbox. Every outcome, failure included, is one JSON
+/// line on stdout: the caller never sees this process's stderr, so a refusal must
+/// name its own reason there.
 pub fn probe_entry(arguments: &[String]) -> Result<i32> {
+    // A malformed invocation is a usage error (exit 2) like any internal
+    // command's; only a check that ran reports its refusal as a JSON line.
     if arguments.len() != 3 {
         return Err(HarnessError::invalid("Missing discovery probe paths."));
     }
-    let listing = infra_core::fs::read_text(Path::new(&arguments[0]))?;
+    match probe(arguments) {
+        Ok(receipt) => {
+            println!("{receipt}");
+            Ok(0)
+        }
+        Err(error) => {
+            println!("{}", json!({"ok":false,"error":error.to_string()}));
+            Ok(1)
+        }
+    }
+}
+fn probe(arguments: &[String]) -> Result<Value> {
+    if arguments.len() != 3 {
+        return Err(HarnessError::invalid("Missing discovery probe paths."));
+    }
+    let listing = infra_core::fs::read_text(Path::new(&arguments[0])).map_err(|_| {
+        HarnessError::unavailable("The sandbox could not read the list of paths to check.")
+    })?;
     if listing.len() > 32 * 1024 * 1024 {
         return Err(HarnessError::invalid(
             "Boundary path listing exceeds its limit.",
@@ -488,8 +513,14 @@ pub fn probe_entry(arguments: &[String]) -> Result<i32> {
     let scratch = workspace
         .join(".harness-tmp")
         .join(format!("probe-{}", store::hexid()));
-    std::fs::write(&scratch, b"workspace probe")?;
-    std::fs::remove_file(scratch)?;
+    std::fs::write(&scratch, b"workspace probe")
+        .and_then(|()| std::fs::remove_file(&scratch))
+        .map_err(|error| {
+            HarnessError::unavailable(format!(
+                "The sandbox workspace is not writable ({}): {error}",
+                scratch.display()
+            ))
+        })?;
     let denied = evidence.join(format!("probe-{}", store::hexid()));
     match OpenOptions::new()
         .write(true)
@@ -497,20 +528,16 @@ pub fn probe_entry(arguments: &[String]) -> Result<i32> {
         .open(&denied)
     {
         Ok(mut file) => {
-            file.write_all(b"evidence probe")?;
+            let _ = file.write_all(b"evidence probe");
             drop(file);
-            std::fs::remove_file(denied)?;
+            let _ = std::fs::remove_file(denied);
             Err(HarnessError::forbidden(
                 "The sandbox could change captured evidence.",
             ))
         }
-        Err(_) => {
-            println!(
-                "{}",
-                json!({"ok":true,"denied":denied_count,"allowed":allowed_count,"evidence_read_only":true,"workspace_writable":true})
-            );
-            Ok(0)
-        }
+        Err(_) => Ok(
+            json!({"ok":true,"denied":denied_count,"allowed":allowed_count,"evidence_read_only":true,"workspace_writable":true}),
+        ),
     }
 }
 pub fn original_paths(roots: &[PathBuf]) -> Result<Vec<PathBuf>> {

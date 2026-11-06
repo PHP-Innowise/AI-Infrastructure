@@ -29,6 +29,12 @@ task → service candidates → declared contract consumers → bounded source c
 Plans are read-only inputs. Explicit `execute` and `resume` commands launch
 sequential workers, bind native Brain tasks and save dispatch receipts. Execution
 defaults to read-only investigation; `--mode edit` authorizes scoped service edits.
+In a read-only run every agent is asked to investigate: the contract agent
+establishes the facts and the order to investigate in, and reports decisions a
+fix would need as findings instead of blocking on them. A read-only dispatch
+can fix nothing, so its failed or unrun checks (a reproduced defect, a missing
+broker) are findings: it completes once it reports and writes nothing, and
+verification needs one passed check.
 The coordinator does not commit, merge or deploy. Capability states and relationships are **declarations**; reading a file
 and hashing it establishes source currency, not correctness or deployment state.
 
@@ -146,8 +152,13 @@ independent of language or framework.
 ## Routing and impact
 
 `locate` matches Unicode words in capability IDs, descriptions and keywords.
-It is a deterministic discovery aid, not an LLM semantic classifier. Supply
-domain terms in the languages used by your team.
+It is a deterministic discovery aid, not an LLM semantic classifier. Words of
+fewer than three characters and English and Russian function words (`and`,
+`the`, `must`, `для`, `что`…) are ignored, and English plurals are folded
+(`orders` matches `order`, `policies` `policy`), so a task written as a sentence
+matches services on its domain terms only. Candidates are ranked by `score`, the
+number of distinct task terms they match. Supply domain terms in the languages
+used by your team.
 
 A unique matching service can seed a plan with `selection_provenance: inferred`.
 Multiple candidates or no match produce `needs_selection`, no service work and
@@ -166,6 +177,10 @@ infra-engine system plan --system docs/examples/ai-system/system.json \
   --contract orders:order.cancelled
 ```
 
+A contract that only one registered service provides may be named by its ID
+alone (`--contract order.cancelled`); an ID two services provide must name its
+provider.
+
 Consumers reached later are checked conservatively through their own provided
 contracts. `--impact-depth 0` retains only origins; the default is 32, maximum
 64. A cut-off produces a warning. Cycles terminate with deduplicated services
@@ -183,8 +198,11 @@ It measures the entire compact serialized `context` object, including the task,
 selected IDs, source metadata and excerpts. Plan/snapshot metadata lives outside
 this capsule; a model integration must account for its own total input budget.
 
-Sources are ordered by kind and path within each service and selected round-robin
-across the system/shared group and service groups. Each excerpt is at most 2,000
+Within each service (and the shared group), policies come first; the other
+sources are ranked by how many task terms they share through their path (a file
+name such as `CancelOrder.php` reads as `cancel order`) and through the
+capabilities and contracts that cite them, then by kind and path. Sources are
+selected round-robin across the system/shared group and service groups. Each excerpt is at most 2,000
 characters with an explicit truncation marker. Entries that do not fit are
 omitted as whole entries with `reason: budget`. No service receives a separate
 copy of the global budget.
@@ -219,14 +237,29 @@ contract text and excerpts remain evidence; embedded instructions are not execut
 
 Native Brain dynamic/control records cannot enter context through this reader;
 their ownership/privacy rules belong to their runtime. Native memory chunks must
-use kind `memory`, be active, not automatically promoted without review, have a
-current review/validity date, and cite a complete matching set of local source
-digests. Their full metadata and filenames use the trusted source checkout's
+use kind `memory`, be active and not superseded, have a current review/validity
+date, and cite a complete matching set of local source digests. A chunk a
+person reviewed is marked `"trust": "reviewed_memory"`; one promoted
+automatically (tagged `auto-promoted`, as Harness sessions and system runs save
+memory) is shared too, marked `"trust": "automatic_memory"`, so agents check it
+against the sources it cites. Their full metadata and filenames use the trusted source checkout's
 shared Python Memory Bank validator; no validator or code is loaded from a
 target service. This needs the complete AI-Infrastructure checkout. Like the
 native index, durable chunks are classified public/verified, and an existing
 runtime's allowed privacy/authority filters are respected. Unverifiable external
-citations, malformed, superseded, stale and unreviewed chunks are excluded.
+citations, malformed, superseded and stale chunks are excluded.
+
+A plan offers more than the chunks passports cite: every chunk in the Memory
+Bank of the system folder and of each selected service (`memory-bank/chunks/*.md`)
+competes for the context beside the passport sources, under the same rules, so
+the system's memory and each participant's reach every agent (see
+[Shared memory](#shared-memory)). A chunk promoted from a Brain record cites
+that record (`project-brain/dynamic/...`); its digest is compared, and the
+record itself never enters context. Digests read CRLF as LF, as the Memory
+Bank records them. A chunk's excerpt is its text without the metadata block,
+while its digest covers the whole file. Chunks a plan finds but does not share are counted per
+service in one `memory_not_shared` warning (`count`, and `causes` such as
+`ineligible`, `budget` or `read_limit`) instead of being listed one by one.
 `verify` also rechecks delivered memory eligibility when time passes without any
 file change. This conservative explicit-source reader does
 not replace the native retrieval engine or its full policy/authority model.
@@ -311,7 +344,16 @@ model/authentication. Prompts arrive over stdin; JSONL must contain a successful
 terminal event and a structured final report. Codex loads the local project
 policy. Explicitly registered/allowed roots also support non-Git coordination
 workspaces (`--skip-git-repo-check`). Service workers receive `workspace-write` in edit mode; contract and
-verification workers receive `read-only`. No approval/sandbox bypass flags are
+verification workers receive `read-only`. Codex's read-only sandbox allows no
+writes at all, not even to `/tmp`, so builds and tests that need a cache (Go,
+Cargo, npm) could not run there, and verification could never pass for such a
+service. On Linux and macOS, when the Codex CLI supports permission profiles
+(checked once with `codex sandbox -P … -- true`, no model call), read-only
+dispatches run instead under a profile that reads the whole disk, writes only a
+private `scratch` folder in the run directory and has no network; `TMPDIR`,
+`XDG_CACHE_HOME`, `GOCACHE`, `CARGO_TARGET_DIR` and the npm, pip and Composer
+caches point there, and the prompt says so. The roots stay unwritable. An older
+Codex keeps `--sandbox read-only`. No approval/sandbox bypass flags are
 used. Noninteractive approval requests cannot be answered, so unsupported
 operations stop the worker. Install/authenticate the CLI independently.
 
@@ -332,23 +374,35 @@ and executable digest are pinned in the journal; resume cannot switch providers.
 
 ### Service folder access
 
-`--access` sets which registered service folders each worker may use:
+Every worker of a run reads the system folder and every selected service: they
+share one context (see [Shared run context](#shared-run-context)). `--access`
+sets only where service workers write:
 
 | Scope | Contract and verification workers | Service workers |
 | --- | --- | --- |
-| `service` (CLI default) | Granted every selected service, read-only. | Granted their own service root; they write only there, only in edit mode. |
-| `all` | Granted every selected service, read-only. | Granted every selected service; in edit mode they may write in any of them. |
+| `service` (CLI default) | Read the system folder and every selected service; never write. | Read the same; write only their own service root, only in edit mode. |
+| `all` | Read the system folder and every selected service; never write. | Read the same; in edit mode they may write in any selected service. |
 
+Contract and verification workers run in the system folder and service workers
+in their own root, so the system's shared contracts, topic registry and
+decisions, and the neighbours' code and tests, are part of what each reads. A root's own
+build and test commands may also read the repository that contains it (for
+example the shared packages of a monorepo whose service folders are
+registered), but nothing outside the writable roots is edited.
 The system folder is never writable by a worker, and read-only dispatches never
 write. Grants add folders a CLI would otherwise lack; they do not remove access a
 CLI already has (Codex reads the whole disk in both sandboxes). Claude gets
-`--add-dir` for each other selected root (plan mode keeps them read-only,
-`acceptEdits` makes them writable). Codex needs only writable roots, so edit
+`--add-dir` for each other root it may write and, in plan mode, which keeps
+added folders read-only, for every root it reads and the run folder. A Claude
+edit dispatch reads the roots it does not write and the run folder through
+`--allowedTools` rules such as `Read(//work/orders/**)`, since `acceptEdits`
+makes an added folder writable. Codex needs only writable roots, so edit
 dispatches in the `all` scope get `--add-dir` for the other services. Cursor
 Agent has no verified CLI option to grant other folders, so the `all` scope is
-refused for it (its changelog mentions `--add-dir`; this adapter does not rely on
-unverified sandbox semantics). The command adapter receives the `access` object
-in its dispatch input and must enforce it itself.
+refused for it and what it reads beyond its working folder depends on that CLI
+(its changelog mentions `--add-dir`; this adapter does not rely on unverified
+sandbox semantics). The command adapter receives the `access` object in its
+dispatch input and must enforce it itself.
 
 In the `all` scope every `changed_files` entry starts with the owning service ID,
 for example `payments/src/refunds.ts`. A registered source changed in another
@@ -363,8 +417,9 @@ current phase's root, and must emit **only** the final report JSON on stdout.
 It must enforce the requested mode/scope itself: the command adapter has no OS
 sandbox. No command strings are taken from passports or plans. All adapters
 have a per-worker timeout, a 2 MiB stdout limit and process-group cleanup on
-failure, timeout or interruption. The prompt limit is 128000 characters; narrow
-large plans that exceed it. Total cost is controlled by your provider settings;
+failure, timeout or interruption. The prompt limit is 128000 characters; earlier
+reports are shortened first (see [Shared run context](#shared-run-context)), and
+a plan whose own context exceeds it must be narrowed. Total cost is controlled by your provider settings;
 there is no universal monetary budget enforcement.
 
 ```mermaid
@@ -406,16 +461,86 @@ Every worker returns the same strict schema (also saved as `result-schema.json`)
 ```
 
 `status` is `completed` or `blocked`; check status is `passed`, `failed` or
-`not_run`. Paths are relative to the current service root (in the `all` access
-scope, prefixed with the owning service ID). Read-only workers
-must report no writes. Only the contract phase returns a nonempty
-`service_order`. Empty required arrays remain present. Summary/check text must
+`not_run`. Workers are told that `failed` means a check ran and found a
+problem, and that a check they could not run is `not_run` with the reason: a
+failed check blocks any dispatch, an unrun one blocks only verification.
+Paths are relative to the current service root (in the `all` access
+scope, prefixed with the owning service ID) and name only files the worker
+edited; files that tools or hooks create on their own belong in a check. A
+read-only worker that reports writes stops the run with
+`read_only_worker_reported_writes`, and its report is kept so the named files
+can be inspected before a retry. Only a completed contract agreement's
+`service_order` is applied, and it must name every selected service once; an
+order in any other report (a blocked agreement's proposal, a service worker
+echoing the agreed one) is kept as evidence and never applied. Empty required arrays remain present. Summary/check text must
 be bounded, single-line and free of detected secrets. Unknown fields and
-malformed results block the run. Raw stdout/stderr is never copied into the
+malformed results block the run as `invalid_or_sensitive_worker_result`, and
+the receipt's `rejection` says which rule the answer broke. Raw stdout/stderr is never copied into the
 journal or Memory Bank; validated reports may contain proprietary information,
 so keep the private run directory under your normal access controls. Harness
 additionally parses native output line by line for its [agents panel](#agents-panel);
 the journal and receipts do not change.
+
+### Shared run context
+
+Every worker of a run receives one context, the same for all of them, under
+`shared_context` in its input: the task, the selected services and their
+folders (`roots`, the system folder `__system__` included), the contract
+relationships between them, the plan's source excerpts with its warnings and
+omitted sources, and the reports of every worker that finished before it, in
+run order. Only the worker's own assignment differs: its phase, service, mode,
+goal, native task and `access`. Each earlier report is complete (`summary`,
+every check, `changed_files`, an agreement's `service_order` and the checks a
+person accepted) and names its receipt; a later worker used to see the first
+1000 characters of each summary and ten checks.
+
+The context follows the run. After each dispatch, the excerpts of the sources it
+changed are read again within the plan's budget, so the next worker sees the
+current text, and its report joins the context. Workers never share one model
+session: each runs as its own CLI process in its own root, under its own
+sandbox, so verification inspects the result independently of the workers that
+produced it and no session has to hold the whole run.
+
+The prompt limit is 128,000 characters (120,000 bytes for Cursor Agent, which
+takes the prompt as one argument). When the complete reports would not fit,
+all of them are shortened alike and `reports_condensed` is true: first to
+summaries of 1000 characters, check details of 200 and 20 changed files, then
+to summaries of 300 characters, check counts by status and the number of
+changed files. Each still names its receipt, which workers may read. A plan
+whose own context does not fit still has to be narrowed.
+
+Each attempt's exact input is saved next to its receipt as
+`PHASE-aN.input.json`: the prompt and its `input_sha256`, which the receipt
+records. What every worker received can be read back from there, and the run
+view lists the file with the receipt.
+
+### Shared memory
+
+The memory of a change's participants is shared the same way. The plan's
+sources include the Memory Bank chunks of the system folder and of every
+selected service (kind `memory`), so every worker receives the system's memory
+and its neighbours' in `shared_context`, not only what its own folder's tools
+would load. A chunk that stops holding during a run (a worker changed a
+source it cites, a person's accepted edit did, or its review fell due) leaves
+the context with `memory_no_longer_holds` in `omitted_sources`; the run goes on,
+and the sources the chunk described are still in the context.
+
+A completed run adds to that memory by itself, without a button. It records what
+the change established as a resolved finding in the system folder's Brain,
+verified by the run's independent verification worker (attestation `agent`)
+and citing the system documents its context held, and promotes it to the
+system Memory Bank without a person's review (tags `auto-promoted` and
+`agent-attested`). `handoff.json` names the finding, the promotion and the
+memory under `memory`, and the run view shows it. Later plans offer it to every
+worker of a change it is relevant to, marked `automatic_memory`; a change to the
+documents it cites makes it stale. A system folder whose own
+`project-brain/config/runtime.json` sets `"automatic_promotion": false` keeps a
+proposal for a person instead: `infra-engine memory --root SYSTEM_FOLDER
+promote-review --promotion-id ID --reviewer NAME`, then `promote-apply` (the
+proposer is the run, so the reviewer is someone else). Content that reads like
+an injected instruction is never promoted automatically; the handoff says why
+and how to retry. Sharing never fails a completed run: an error is recorded
+under `memory` instead.
 
 ### Brain and Memory ownership
 
@@ -423,8 +548,12 @@ Execution calls **this AI-Infrastructure checkout's trusted Rust native
 runtime** directly, bound to each registered project root and explicit governed
 mode. It never runs a service-supplied memory launcher or imports target code. The native store is stack-neutral; no PHP runtime or application
 edition is required. An existing native Brain is reused; otherwise the runtime
-creates task/handoff/index/local storage on first use. This does not install
-framework policy, hooks or local CLI wrappers. Native task UUIDs and revisions
+creates task/handoff/index/local storage on first use: `project-brain/` holds
+the task, handoff and index records to review and commit with the change, and
+`project-brain/local/` and `memory-bank/local/` hold this clone's lock and
+context database. Each `local/` folder gets a `.gitignore` that hides it from
+Git, so `git add -A` in a service folder without an installed edition does not
+commit them. This does not install framework policy, hooks or local CLI wrappers. Native task UUIDs and revisions
 remain authoritative; the execution journal stores references and dispatch
 position. Existing native storage must contain no symlinks, hard links or special
 files, and the full trusted checkout must remain available for recovery.
@@ -439,7 +568,8 @@ UUID. Workers do not own task lifecycle. Tasks close only after every worker
 and verification have reported complete; partial closure is reconciled without
 repeating workers.
 
-`handoff.json` records task references, report summaries, receipt paths and the
+`handoff.json` records task references, every worker's complete report with its
+receipt path, the receipt names, the system memory the outcome became and the
 knowledge publishing step. Native handoffs preserve active work in each Brain;
 local completion episodes remain in that project's Context Engine. Reusable
 service knowledge belongs in its service Memory Bank; cross-service contract
@@ -450,7 +580,8 @@ turn raw prompts or unreviewed worker claims into verified durable memory.
 ### Recovery and freshness
 
 `run.json` and `checkpoint.json` are atomically replaced and fsynced. Each
-attempt has an immutable `PHASE-aN.json` receipt. The run directory must be new
+attempt has an immutable `PHASE-aN.json` receipt, and `PHASE-aN.input.json`
+keeps the input its worker received. The run directory must be new
 and is created with mode 0700; files use 0600 (on Windows they inherit the
 private Harness state permissions). A launch identity and input hash
 are persisted **before** starting a worker. Do not manually edit journal files.
@@ -473,9 +604,24 @@ The original plan must be fresh before any task creation. Sources are checked
 before each dispatch. After a successful edit, only changed registered sources
 explicitly listed in that worker's `changed_files` are adopted into the next
 checkpoint. Interrupted partial edits require explicit acceptance and must
-remain inside that worker's service scope. Passports, system config, commit
-changes, newly appearing missing sources, expired/ineligible memory and changes
-in other services require a new plan/run. Canonical excerpts are reread before
+remain inside that worker's service scope. No worker writes the system folder,
+so when a dispatch reports that a shared contract or document there needs a
+change (a real verification agent found the topic registry missing a new
+consumer), edit it yourself and resume with `--accept-source-changes` and the
+dispatch to repeat: an edit of a system-folder source the plan fingerprints is
+adopted only by such a resume, never during a run.
+
+Verification passes only when every check it reports passed. A completed
+verification whose only gaps are checks this environment cannot run (`not_run`:
+a framework container, a live broker) stops the run until a person accepts
+those gaps instead of repeating it: resume with `--accept-unrun-checks` (in
+Harness, the recovery checkbox that names them). The verify step then records
+`accepted_unrun_checks` and its native task's progress names them. A failed
+check, a blocked report, a report with no passed check or a reported write is
+never accepted that way, and acceptance cannot be combined with
+`--retry-step`. Passports, the system file,
+commit changes, newly appearing missing sources, expired/ineligible memory and
+changes in other services require a new plan/run. Canonical excerpts are reread before
 launch; editing a saved excerpt does not replace its cited source.
 
 Freshness covers **registered/fingerprinted inputs**, not every file in a
@@ -492,7 +638,10 @@ use isolated checkout roots where hard write isolation is required.
 For execution, exit `0` means worker-reported completion, `1` means a saved
 blocked/interrupted run, and `2` means invalid/refused input or a reconciliation
 error (the existing journal retains its state). `run-status` reads the journal
-without launching AI or mutating native tasks. It reports historical run state,
+without launching AI or mutating native tasks; a journal left running by an
+executor that is gone (killed, crashed, machine stopped) is reported
+`interrupted`, with its unfinished dispatch, so `resume --retry-step` is the
+next step. It reports historical run state,
 not current deployment or new validation of a completed change.
 
 Historical pre-Rust invocation (reference only):
@@ -530,8 +679,10 @@ a system entirely in the application:
    and becomes the working project in every view. A folder that is already
    registered can be chosen in the sidebar instead.
 2. **Create or edit system**, enter the system name, then **Add service folder**
-   for each existing service repository or monorepo subdirectory. Choosing a
-   folder registers it automatically; an existing passport is loaded into fields.
+   for each existing service repository or monorepo subdirectory. The folder
+   browser opens in the system folder for the first service and beside the last
+   added service after that. Choosing a folder registers it automatically; an
+   existing passport is loaded into fields.
 3. Select an installed/authenticated **Codex, Claude Code or Cursor Agent** and
    click **Fill with AI**. AI inspects copied code, interfaces, documentation,
    project policy, tests and eligible Memory Bank chunks, then fills the system
@@ -549,8 +700,12 @@ a system entirely in the application:
    checkout can move when its directory layout is retained. Each Harness instance
    still registers its own external service folders before accessing them.
 
-The same form edits existing systems. **Close editor** retains the current
-draft within this page; **Discard changes** drops it. Manual-only drafts do not
+The same form edits existing systems. **Fill with AI** on a system with
+passports reads them as the current, possibly outdated, declarations: it keeps
+what the evidence supports and changes what it contradicts or adds, and its
+report says per service what the proposal changes from the form (`changes
+consumes 5 → 7`, `same as saved`) before you save. **Close editor** retains the
+current draft within this page; **Discard changes** drops it. Manual-only drafts do not
 survive reload. AI scans retain their captured draft in private Harness state;
 reopening the editor reconnects to the last scan for that project/config. Completed
 results are restored only while their evidence is fresh. Cancellation or server
@@ -626,35 +781,68 @@ without claiming those records already exist.
 
 **Plan a change** on **Services** (or **New change** on **Changes**) opens the
 change form. Select starting services or supply changed contract IDs, describe
-the task, and **Prepare plan**. Contract consumers enter the impact scope
-automatically. A change then moves through **Plan**, **Review**, **Run** and
+the task, and **Prepare plan**. Contract consumers enter the impact scope:
+**Contract consumers that join the plan** takes every service downstream of
+the starting services (the default, `--impact-depth 32` in the CLI), only their
+direct consumers (`1`) or none (`0`, for a focused investigation). The prepared
+plan is selected in the change list. A change then moves through **Plan**, **Review**, **Run** and
 **Receipts**. The
-plan includes context excerpts, omitted sources, warnings and fingerprints.
+plan includes context excerpts, omitted sources, warnings and fingerprints; its
+**Shared memory** line counts the memory entries every agent receives, those no
+person reviewed and those found but not shared.
 Its service list denotes participants; the contract dispatch later establishes
 the actual implementation order. Task line breaks are normalized to spaces.
 
 After reviewing the scope/context, use the **Launch** card: choose read-only
 investigation or service edits, **Codex / Claude Code / Cursor Agent**, the
-**Service folder access**
+**Service agents may edit** choice
 (**All selected services** by default in the browser, or **Own service only**;
 see [Service folder access](#service-folder-access)) and a timeout per agent,
-confirm that you reviewed the scope and context, then **Execute reviewed plan**. Cursor Agent offers only own-service access. System dispatches
+confirm that you reviewed the scope and context, then **Execute reviewed plan**. Cursor Agent offers only own-service edits.
+Whatever the choice, every agent reads the system folder and all services of
+the change and receives the complete reports of the agents before it. System dispatches
 share the existing Harness queue, runner lock, cancellation and watchdog. They
 use the selected CLI's default model. The provider is fixed after launch and
-recovery keeps it. Ordinary session model/agent controls do not apply. No arbitrary executable can be passed by API.
+recovery keeps it. A dispatch whose CLI exits with an error shows that CLI's
+own message on the run and its receipt (for example `The claude CLI exited
+with code 1: Failed to authenticate: OAuth session expired and could not be
+refreshed`): sign that CLI in and retry the dispatch, or prepare a new change
+to use another provider. A CLI that could not start at all is named the same
+way (`The codex CLI could not run: ...`), and one that went missing or changed
+between dispatches blocks the run with that cause. Restart Harness after
+rebuilding or updating its engine: dispatches of a running Harness start
+through the engine it was started with. Dispatches run the CLI with your own configuration,
+so its plugins, hooks and global instructions apply: in a real run, Codex hooks
+wrote `.agentops/` and `.agentic-security/` into every service folder and a
+global instruction made agents add `tasks/todo.md` although the dispatch asks
+for no notes. Review such files with the change, or disable those plugins for
+system runs. Ordinary session model/agent controls do not apply. No arbitrary executable can be passed by API.
 Access to external roots comes exclusively from registered Harness projects.
 
 The run view polls persisted dispatches and displays receipts, reported checks,
 changed files and the handoff; native task UUIDs and the runner log sit behind
 toggles. A successful worker exit alone
-does not complete a run. Final verification needs at least one reported passed
-check and no missing/failed reported checks. Durable knowledge publication
+does not complete a run. A contract agreement proceeds when it reports
+`completed` and stops the run when it reports `blocked`; its checks, a
+confirmed defect the change is meant to fix included, are the evidence it
+rests on. Final verification needs at least one reported passed
+check and no missing/failed reported checks; when its only gaps are checks it
+could not run, the recovery panel offers a checkbox that names them, and
+resuming with it ticked completes verification without running it again. Durable knowledge publication
 remains a separate review through the owning runtime. No commit, push, merge or
 deployment is performed by this execution flow.
 
 Use **Cancel run** for active work and **Resume saved run** for unfinished runs.
-Select the interrupted/blocked dispatch explicitly before retrying. Inspect
-partial edits and acknowledge changed sources only when appropriate. A saved
+**Plan again** opens the plan form filled from the selected change (task,
+starting services, consumers, budget and the next change ID), so a decision a
+blocked agreement asked for can be added to the task and planned again.
+**Remove from list** hides a change that is not running from the change list;
+its plan, receipts and the services' native tasks are kept.
+The run's status line names what stopped it, from the stopped dispatch's
+receipt. Select the interrupted/blocked dispatch explicitly before retrying
+(recovery preselects it when it has no successful receipt). Inspect partial
+edits, and your own edits of system-folder sources, and acknowledge changed
+sources only when appropriate. A saved
 successful receipt is reconciled instead of rerunning its worker. Pending launch
 identity is saved before enqueue and linked to the session during recovery.
 After server restart, sessions are interrupted; nothing is resumed automatically.
@@ -683,9 +871,10 @@ Local API surface (existing Host/Origin/CSRF boundaries apply):
 - `POST /api/system-runs/<id>`: `action`, current integer `revision`; execute
   accepts optional `provider` (`codex`, `claude`, `cursor`; default `codex`),
   `mode`/`timeout` and `access` (`service` or `all`; default `service`; `all`
-  is refused for `cursor`); resume accepts `retry_step`/`accept_source_changes`
-  and keeps the saved access, and cancel has no extra options. Unknown fields
-  are rejected. Run details include `access`, `launches` (one session per
+  is refused for `cursor`); resume accepts `retry_step`, `accept_source_changes`
+  and `accept_unrun_checks` and keeps the saved access; cancel and `archive`
+  (which hides a stopped change from the list) have no extra options. Unknown
+  fields are rejected. Run details include `access`, `launches` (one session per
   execute/resume) and the latest runner-level `events`.
 - `GET /api/sessions/<session_id>?after=<event id>`: agent lifecycle (`agent`),
   activity (`agent_activity`) and per-agent `usage` events of one launch or AI
@@ -712,7 +901,11 @@ says, its reasoning summaries and plans, and each tool call with its target — 
 file path (shown as `service · path`), command, search pattern or URL location —
 and whether it finished or failed. **Follow the active agent** keeps the running
 agent selected. A resumed run lists each launch separately; the newest launch
-uses the journal as the authority for step state. The AI scan in the editor shows
+uses the journal as the authority for step state. In **Sessions** each launch is
+titled by its change and number (`System change cancel-v3 · launch 2 retries
+service-orders: …`). A dispatch whose attempt saved a successful receipt before
+its run stopped reads **Reported complete**; resuming records that receipt
+without running the agent again. The AI scan in the editor shows
 the same panel for its discovery agent, with copied evidence files mapped back
 to their original service paths.
 
@@ -751,6 +944,8 @@ journal keeps its generic code (for example `worker_exit_failure`).
 | --- | --- | --- |
 | `… is not signed in or its login expired` | The native CLI cannot authenticate. A stored login can expire even while a status command still lists it. | Sign in again in a terminal with `claude auth login`, `codex login` or `cursor-agent login`, then retry. |
 | `The AI discovery sandbox cannot start` / `could not start` | The host does not allow the unprivileged user namespaces that bubblewrap needs. | See [Allow bubblewrap](#allow-bubblewrap-on-ubuntu-2310-and-later). |
+| `The AI discovery sandbox did not keep the original folders unreadable` | Before the scan, a probe inside the sandbox could open an original service file or folder; the message names it. | Move that path out of the service folder, or check which sandbox grant exposes it. |
+| `The AI discovery sandbox check failed: …` | The probe itself refused, for example because the private workspace was not writable; the rest of the message is the probe's reason. | Fix the named condition and retry; a stale build of Harness may lack the Linux scratch folder fix. |
 | `AI discovery on Windows needs the Codex CLI` | Codex is missing, too old for permission profiles, or its elevated sandbox is not set up. | Install Codex, complete its elevated sandbox setup once in native Codex, then reload the page. |
 | `The Codex sandbox could not start the check` | Codex's elevated sandbox did not start, usually because its setup is incomplete. | Complete the elevated sandbox setup once in native Codex; the message shows Codex's own error. |
 | `The Codex sandbox did not keep the original folders unreadable` | The probe before the scan could read an original file or folder, usually one with its own Windows permission entry. | Remove the file's own allow entry (for example `icacls FILE /reset`), or move it out of the service folder. The message names one such path. |

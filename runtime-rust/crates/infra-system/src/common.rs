@@ -85,8 +85,18 @@ pub fn texts(value: &Value) -> Vec<String> {
         })
         .unwrap_or_default()
 }
+// Patterns are compiled once: compiled per call, they were most of what a
+// 200-service catalog spent its second on. A pattern that cannot compile
+// still refuses (sensitive) rather than admits.
+static SENSITIVE: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{20,}|(?i:\b(?:password|api[_-]?key|access[_-]?token)\s*[:=]\s*['"]?[A-Za-z0-9_+/=-]{16,})"#).ok()
+});
+static IDENTIFIER: std::sync::LazyLock<Option<regex::Regex>> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z][a-z0-9._-]{0,79}$").ok());
 pub fn sensitive(value: &str) -> bool {
-    regex::Regex::new(r#"-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{20,}|(?i:\b(?:password|api[_-]?key|access[_-]?token)\s*[:=]\s*['"]?[A-Za-z0-9_+/=-]{16,})"#).map(|pattern|pattern.is_match(value)).unwrap_or(true)
+    SENSITIVE
+        .as_ref()
+        .is_none_or(|pattern| pattern.is_match(value))
 }
 pub fn text(value: &Value, label: &str, limit: usize) -> Result<String> {
     let value = value
@@ -104,10 +114,14 @@ pub fn text(value: &Value, label: &str, limit: usize) -> Result<String> {
     Ok(value.to_string())
 }
 pub fn identifier(value: &str) -> Result<String> {
-    let pattern = regex::Regex::new(r"^[a-z][a-z0-9._-]{0,79}$")
-        .map_err(|_| fail("Invalid identifier expression"))?;
+    let pattern = IDENTIFIER
+        .as_ref()
+        .ok_or_else(|| fail("Invalid identifier expression"))?;
     if !pattern.is_match(value) {
-        return Err(fail("Invalid identifier"));
+        let shown = value.chars().take(80).collect::<String>();
+        return Err(fail(format!(
+            "Invalid identifier {shown:?}: use lowercase letters, digits, '.', '_' or '-', starting with a letter, at most 80 characters"
+        )));
     }
     Ok(value.to_string())
 }
@@ -121,12 +135,28 @@ pub fn fields(value: &Value, required: &[&str], optional: &[&str]) -> Result<()>
     let object = value
         .as_object()
         .ok_or_else(|| fail("Invalid object fields"))?;
-    if required.iter().any(|key| !object.contains_key(*key))
-        || object
-            .keys()
-            .any(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
-    {
-        return Err(fail("Invalid object fields (missing or unknown keys)"));
+    let missing = required
+        .iter()
+        .filter(|key| !object.contains_key(**key))
+        .copied()
+        .collect::<Vec<_>>();
+    let unknown = object
+        .keys()
+        .filter(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
+        .map(|key| key.chars().take(40).collect::<String>())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() || !unknown.is_empty() {
+        let mut parts = vec![];
+        if !missing.is_empty() {
+            parts.push(format!("missing {}", missing.join(", ")));
+        }
+        if !unknown.is_empty() {
+            parts.push(format!("unknown {}", unknown.join(", ")));
+        }
+        return Err(fail(format!(
+            "Invalid object fields (missing or unknown keys): {}",
+            parts.join("; ")
+        )));
     }
     Ok(())
 }
@@ -139,7 +169,11 @@ pub fn items(value: &Value, limit: usize) -> Result<&Vec<Value>> {
 pub fn choice(value: &Value, allowed: &[&str], label: &str) -> Result<String> {
     let value = string(value);
     if !allowed.contains(&value) {
-        return Err(fail(format!("Invalid {label}")));
+        return Err(fail(format!(
+            "Invalid {label} {:?}: choose {}",
+            value.chars().take(40).collect::<String>(),
+            allowed.join(", ")
+        )));
     }
     Ok(value.to_string())
 }
@@ -176,7 +210,10 @@ pub fn relative(value: &str) -> Result<String> {
                 && ["local", "archive", "dynamic", "control"].contains(&parts[1])
         })
     {
-        return Err(fail("Refused source path"));
+        return Err(fail(format!(
+            "Refused source path {:?}: use a relative path to a non-secret file outside dependency, VCS and local runtime folders",
+            value.chars().take(200).collect::<String>()
+        )));
     }
     let name = parts.last().copied().unwrap_or("").to_lowercase();
     let suffix = Path::new(&name)
@@ -186,7 +223,10 @@ pub fn relative(value: &str) -> Result<String> {
     if ["pem", "key", "p12", "pfx", "sqlite", "db"].contains(&suffix)
         || ["credentials", "credentials.json", "id_rsa", "id_ed25519"].contains(&name.as_str())
     {
-        return Err(fail("Refused source path"));
+        return Err(fail(format!(
+            "Refused source path {:?}: keys, certificates, credentials and databases are never context",
+            value.chars().take(200).collect::<String>()
+        )));
     }
     Ok(value.into())
 }
@@ -206,6 +246,71 @@ pub fn source(value: &Value) -> Result<()> {
 pub fn is_memory(path: &str) -> bool {
     let parts = path.split('/').collect::<Vec<_>>();
     parts.contains(&"memory-bank") && parts.contains(&"chunks")
+}
+/// A Brain record file, `project-brain/dynamic/<kind>/<uuid>.md`: a promoted
+/// memory chunk cites the record it came from.
+pub fn is_record_image(path: &str) -> bool {
+    let parts = path.split('/').collect::<Vec<_>>();
+    parts.len() == 4
+        && parts[0] == "project-brain"
+        && parts[1] == "dynamic"
+        && [
+            "findings",
+            "decisions",
+            "incidents",
+            "bugs",
+            "events",
+            "tasks",
+        ]
+        .contains(&parts[2])
+        && parts[3].strip_suffix(".md").is_some_and(|id| {
+            id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        })
+}
+/// The digest Memory Bank records for a cited source: SHA-256 of its bytes,
+/// with CRLF read as LF unless the first 8192 bytes hold a NUL. A plain
+/// digest made every chunk citing a CRLF file look stale.
+pub fn memory_digest(raw: &[u8]) -> String {
+    if raw[..raw.len().min(8192)].contains(&0) {
+        return digest(raw);
+    }
+    let mut text = Vec::with_capacity(raw.len());
+    let mut index = 0;
+    while index < raw.len() {
+        if raw[index] == b'\r' && raw.get(index + 1) == Some(&b'\n') {
+            text.push(b'\n');
+            index += 2;
+        } else {
+            text.push(raw[index]);
+            index += 1;
+        }
+    }
+    digest(&text)
+}
+/// The Memory Bank chunks a root keeps, `memory-bank/chunks/*.md`: the
+/// candidates for the shared context of a plan's agents. A missing or linked
+/// bank has none; the reader still checks each chunk it is offered.
+pub fn memory_chunks(root: &Path) -> Result<Vec<String>> {
+    for folder in ["memory-bank", "memory-bank/chunks"] {
+        match std::fs::symlink_metadata(root.join(folder)) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Ok(vec![]),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut chunks = vec![];
+    for entry in std::fs::read_dir(root.join("memory-bank/chunks"))? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if entry.file_type()?.is_file() && name.ends_with(".md") && !name.starts_with('.') {
+            chunks.push(format!("memory-bank/chunks/{name}"));
+        }
+    }
+    chunks.sort();
+    Ok(chunks)
 }
 pub fn absolute(path: &Path) -> Result<PathBuf> {
     fs::absolute(path)
@@ -275,6 +380,15 @@ pub fn unique(values: &[String]) -> bool {
 pub fn receipt_name(step: &Value) -> String {
     format!(
         "{}-a{}.json",
+        string(&step["id"]),
+        step["attempt"].as_u64().unwrap_or(0)
+    )
+}
+/// The saved input of a dispatch attempt, next to its receipt: the exact
+/// prompt its agent received, whose digest the receipt records.
+pub fn input_name(step: &Value) -> String {
+    format!(
+        "{}-a{}.input.json",
         string(&step["id"]),
         step["attempt"].as_u64().unwrap_or(0)
     )
