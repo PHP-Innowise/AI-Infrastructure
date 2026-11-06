@@ -739,13 +739,17 @@ impl System {
             if content.contains('\0') || sensitive(content) {
                 return Err(fail("sensitive_or_binary"));
             }
+            let mut excerpt = content.to_string();
             if entry["kind"] == "memory" {
                 let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-                let raw = normalized
+                let (raw, body) = normalized
                     .strip_prefix("---\n")
                     .and_then(|value| value.split_once("\n---\n"))
-                    .ok_or_else(|| fail("unverified_memory"))?
-                    .0;
+                    .ok_or_else(|| fail("unverified_memory"))?;
+                // Agents get what the memory says. Its metadata took 1643 of
+                // a real excerpt's 2000 characters and left 357 for the
+                // knowledge; the digest still covers the whole chunk.
+                excerpt = body.trim_start().to_string();
                 let meta = parse_json(raw.as_bytes(), MAX_SOURCE_BYTES)?;
                 if !meta.is_object()
                     || meta["status"] != "active"
@@ -853,7 +857,7 @@ impl System {
                 }
             }
             Ok(
-                object!({"service":sid,"path":path,"kind":entry["kind"],"sha256":digest(&raw),"trust":trust,"excerpt":content.chars().take(2000).collect::<String>(),"truncated":content.chars().count()>2000}),
+                object!({"service":sid,"path":path,"kind":entry["kind"],"sha256":digest(&raw),"trust":trust,"excerpt":excerpt.chars().take(2000).collect::<String>(),"truncated":excerpt.chars().count()>2000}),
             )
         })();
         match result {

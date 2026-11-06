@@ -256,7 +256,8 @@ the system's memory and each participant's reach every agent (see
 [Shared memory](#shared-memory)). A chunk promoted from a Brain record cites
 that record (`project-brain/dynamic/...`); its digest is compared, and the
 record itself never enters context. Digests read CRLF as LF, as the Memory
-Bank records them. Chunks a plan finds but does not share are counted per
+Bank records them. A chunk's excerpt is its text without the metadata block,
+while its digest covers the whole file. Chunks a plan finds but does not share are counted per
 service in one `memory_not_shared` warning (`count`, and `causes` such as
 `ineligible`, `budget` or `read_limit`) instead of being listed one by one.
 `verify` also rechecks delivered memory eligibility when time passes without any

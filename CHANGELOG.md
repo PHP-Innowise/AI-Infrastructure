@@ -47,7 +47,8 @@ edition's own files remain in that edition's changelog.
   Memory a person reviewed is marked `reviewed_memory`; memory promoted
   automatically, which plans used to refuse, is shared as `automatic_memory`.
   Chunks found but not shared are counted per service in one
-  `memory_not_shared` warning. A chunk promoted from a Brain record is
+  `memory_not_shared` warning. An agent gets what a chunk says, without its
+  metadata, which took 1643 of a real excerpt's 2000 characters. A chunk promoted from a Brain record is
   admitted by comparing that record's digest (the record never enters
   context), so promoted memory can be shared at all, and digests read CRLF as
   LF as the Memory Bank records them. Memory that stops holding during a run

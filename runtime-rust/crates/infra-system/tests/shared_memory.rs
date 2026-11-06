@@ -249,6 +249,20 @@ fn every_participant_shares_its_memory_and_memory_that_no_longer_holds_is_counte
         Some("automatic_memory")
     );
     assert_eq!(shared_memory(&plan).len(), 3, "{:?}", shared_memory(&plan));
+    // Agents get what the memory says, not its metadata.
+    let excerpt = plan["context"]["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["path"] == billing_memory.as_str())
+        .map(|source| source["excerpt"].as_str().unwrap().to_string())
+        .unwrap();
+    assert!(
+        excerpt.starts_with("# Billing charges each placed order once"),
+        "{excerpt}"
+    );
+    assert!(excerpt.contains("deduplicates order.placed deliveries by order id"));
+    assert!(!excerpt.contains("source_digests"), "{excerpt}");
     // The stale chunk is counted, not named.
     assert!(
         plan["warnings"].as_array().unwrap().contains(
