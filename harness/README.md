@@ -143,12 +143,17 @@ including recovery. Browser requests cannot supply executables. Workers run
 sequentially through the same single Harness queue;
 read-only is the default. Native system/service Brain task records are written
 even in read-only mode. Edit mode uses each service's current checkout.
-**Service folder access** decides which selected service folders agents may use:
-**All selected services** (the browser default) lets every agent read all of
-them and, in edit mode, lets each service agent change files in any of them;
-**Own service only** keeps each service agent in its own folder. The system
-folder stays read-only. Claude receives the folders through `--add-dir`, Codex
-through writable roots; Cursor Agent supports only own-service access.
+Every agent of a run shares one context: it reads the system folder and every
+selected service, and receives the task, the plan's excerpts and the complete
+reports of the agents before it (shortened only when they would not fit its
+prompt). Each agent's exact input is saved next to its receipt.
+**Service agents may edit** decides only where service agents write:
+**All selected services** (the browser default) lets each service agent change
+files in any of them in edit mode; **Own service only** keeps its edits in its
+own folder. The system folder stays read-only. Claude receives the folders it
+writes through `--add-dir` and the others through read rules (plan mode adds
+them all), Codex reads the whole disk and is granted only writable roots;
+Cursor Agent supports only own-service edits.
 
 The **Agents** panel follows a launched run live: one card per agent (contract,
 each service, verification) with state, time, granted folders, tool calls,

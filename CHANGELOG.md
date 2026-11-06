@@ -24,6 +24,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- System Orchestration: every agent of a run shares one context. Each worker's
+  input carries `shared_context`, the same for all of them: the task, the
+  services and their folders, the contract relationships, the plan's excerpts
+  (read again after a dispatch changed their sources) and the complete reports
+  of the agents before it with their receipt paths; a later agent used to see
+  1000 characters of each summary and ten checks. Reports are shortened alike,
+  and marked `reports_condensed`, only when they would not fit the prompt
+  limit. Every agent reads the system folder and every selected service
+  whatever the access scope, which now decides only where service agents write
+  (**Service agents may edit** in the browser): an own-service agent could
+  read neither its neighbours nor the system's contracts. A Claude edit
+  dispatch reads those folders through `Read(//…/**)` rules, since an added
+  folder would be writable. Each attempt's exact input is saved beside its
+  receipt as `PHASE-aN.input.json`, which the run view names, and
+  `handoff.json` keeps the complete reports. Workers remain separate CLI
+  processes, so verification stays independent of the agents it checks.
 - System Orchestration, found by running it on an eight-service, five-repository
   microservice system with real Codex workers:
   - Executing a reviewed plan no longer stops at its first dispatch with

@@ -272,54 +272,70 @@ pub fn access_scope(state: &Value) -> &str {
         .and_then(Value::as_str)
         .unwrap_or("service")
 }
+/// What a dispatch may read and write. Every agent of a run shares one
+/// context, so each reads the system folder and every service of the change
+/// whatever the scope: a service agent that saw only its own folder could not
+/// check how its neighbours use what it changes. The scope decides only where
+/// a service agent writes; coordination and verification never write, and no
+/// agent writes the system folder.
 pub fn dispatch_access(state: &Value, step: &Value) -> Value {
     let selected = texts(&state["selected"]);
-    let system = step["service"] == "__system__";
-    let readable = if system || access_scope(state) == "all" {
+    let readable = std::iter::once("__system__".to_string())
+        .chain(selected.iter().cloned())
+        .collect::<Vec<_>>();
+    let writable = if step["service"] == "__system__" || step["mode"] != "edit" {
+        vec![]
+    } else if access_scope(state) == "all" {
         selected
     } else {
         vec![string(&step["service"]).to_string()]
     };
-    let writable = if !system && step["mode"] == "edit" {
-        readable.clone()
-    } else {
-        vec![]
-    };
-    // Coordination and verification run in the system folder: its shared
-    // contracts, registry and decisions are what they must check, read-only.
-    let readable = if system {
-        std::iter::once("__system__".to_string())
-            .chain(readable)
-            .collect()
-    } else {
-        readable
-    };
     object!({"scope":access_scope(state),"readable":readable,"writable":writable})
 }
-/// Folders a dispatch is granted beyond its working folder. A read-only
-/// Claude dispatch (plan mode keeps them read-only) also gets the run's own
-/// folder, so the receipts its prompt names can be read: a real verification
-/// agent was given their paths and could not open them.
+/// Folders added to a dispatch's working folder (`--add-dir`). Codex reads the
+/// whole disk already and is granted only the roots it writes. Claude may
+/// write in an added folder under `acceptEdits`, so an edit dispatch adds only
+/// the roots it writes and reads the others through [`read_directories`]; a
+/// read-only one (plan mode keeps them read-only) adds every root it reads and
+/// the run's own folder, so the receipts its prompt names can be read: a real
+/// verification agent was given their paths and could not open them.
 pub fn extra_directories(state: &Value, step: &Value, run: &Path) -> Vec<PathBuf> {
-    let mut result = granted_directories(state, step);
-    if string(&state["provider"]) == "claude"
-        && step["mode"] == "read-only"
-        && !result.iter().any(|path| path == run)
-    {
+    let access = dispatch_access(state, step);
+    let edit = step["mode"] == "edit";
+    let wanted = match string(&state["provider"]) {
+        "codex" => texts(&access["writable"]),
+        "claude" if edit => texts(&access["writable"]),
+        "claude" => texts(&access["readable"]),
+        _ => vec![],
+    };
+    let mut result = outside_working_folder(state, step, wanted);
+    if string(&state["provider"]) == "claude" && !edit && !result.iter().any(|path| path == run) {
         result.push(run.to_path_buf());
     }
     result
 }
-fn granted_directories(state: &Value, step: &Value) -> Vec<PathBuf> {
-    let provider = string(&state["provider"]);
+/// Folders a Claude edit dispatch may read but not write: the roots of the
+/// run's shared context it does not write, and the run's own folder with the
+/// receipts its prompt names. They are granted as read rules, since an added
+/// folder would be writable. Other CLIs need none: Codex reads the whole disk,
+/// and Cursor Agent has no verified option to grant a folder.
+pub fn read_directories(state: &Value, step: &Value, run: &Path) -> Vec<PathBuf> {
+    if string(&state["provider"]) != "claude" || step["mode"] != "edit" {
+        return vec![];
+    }
     let access = dispatch_access(state, step);
-    let wanted = if provider == "codex" {
-        texts(&access["writable"])
-    } else if provider == "claude" {
-        texts(&access["readable"])
-    } else {
-        vec![]
-    };
+    let writable = texts(&access["writable"]);
+    let wanted = texts(&access["readable"])
+        .into_iter()
+        .filter(|sid| !writable.contains(sid))
+        .collect();
+    let mut result = outside_working_folder(state, step, wanted);
+    if !result.iter().any(|path| path == run) {
+        result.push(run.to_path_buf());
+    }
+    result
+}
+fn outside_working_folder(state: &Value, step: &Value, wanted: Vec<String>) -> Vec<PathBuf> {
     let cwd = Path::new(string(&state["roots"][string(&step["service"])]));
     let mut result = vec![];
     for sid in wanted {
@@ -540,6 +556,10 @@ pub fn dispatch_receipt(directory: &Path, state: &Value, step: &Value) -> Result
     }
     Ok(receipt)
 }
+/// The complete reports of the run's completed dispatches, in run order, each
+/// naming its receipt. Every later agent receives them in its shared context,
+/// and the handoff keeps them: a later agent used to see only the first 1000
+/// characters of a summary and ten checks of each earlier one.
 pub fn reports(directory: &Path, state: &Value) -> Result<Vec<Value>> {
     let mut result = vec![];
     for step in items(&state["steps"], MAX_SERVICES + 2)? {
@@ -549,7 +569,10 @@ pub fn reports(directory: &Path, state: &Value) -> Result<Vec<Value>> {
                 return Err(fail("Completed dispatch lacks successful receipt"));
             }
             let report = &receipt["report"];
-            let mut entry = object!({"phase":step["id"],"summary":string(&report["summary"]).chars().take(1000).collect::<String>(),"checks":report["checks"].as_array().into_iter().flatten().take(10).cloned().collect::<Vec<_>>()});
+            let mut entry = object!({"phase":step["id"],"service":step["service"],"attempt":step["attempt"],"status":report["status"],"summary":report["summary"],"checks":report["checks"],"changed_files":report["changed_files"],"receipt":path_string(&directory.join(receipt_name(step)))?});
+            if !texts(&report["service_order"]).is_empty() {
+                entry["service_order"] = report["service_order"].clone();
+            }
             if step["accepted_unrun_checks"].is_array() {
                 entry["accepted_unrun_checks"] = step["accepted_unrun_checks"].clone();
             }

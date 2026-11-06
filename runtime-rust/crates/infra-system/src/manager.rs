@@ -144,7 +144,9 @@ impl SystemManager {
             if !journal.is_dir() {
                 return Ok(None);
             }
-            match read_json(&journal, name, MAX_BYTES) {
+            // As large as the run itself writes them: the handoff keeps every
+            // complete report.
+            match read_json(&journal, name, execution::MAX_STATE) {
                 Ok(value) => Ok(Some(value)),
                 Err(error) if is_active || error.kind == infra_core::ErrorKind::NotFound => {
                     Ok(None)
@@ -167,7 +169,15 @@ impl SystemManager {
                     if step["attempt"].as_u64().unwrap_or(0) > 0
                         && let Some(receipt) = read(&receipt_name(step))?
                     {
-                        receipts.push(object!({"phase":step["id"],"service":step["service"],"attempt":step["attempt"],"ok":receipt["ok"],"error":receipt["error"],"rejection":receipt.get("rejection").cloned().unwrap_or(Value::Null),"failure":receipt.get("failure").cloned().unwrap_or(Value::Null),"report":receipt["report"]}));
+                        // The exact input the agent received, the run's shared
+                        // context included, when this run saved it.
+                        let input = journal.join(input_name(step));
+                        let input = if input.is_file() {
+                            object!(path_string(&input)?)
+                        } else {
+                            Value::Null
+                        };
+                        receipts.push(object!({"phase":step["id"],"service":step["service"],"attempt":step["attempt"],"ok":receipt["ok"],"error":receipt["error"],"rejection":receipt.get("rejection").cloned().unwrap_or(Value::Null),"failure":receipt.get("failure").cloned().unwrap_or(Value::Null),"report":receipt["report"],"input":input}));
                     }
                 }
                 result["receipts"] = object!(receipts);

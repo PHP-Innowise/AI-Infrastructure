@@ -383,6 +383,7 @@ async fn run_discovery_context(
         &directory.join("schema.json"),
         "read-only",
         &[],
+        &[],
         adapter.as_deref(),
     )?;
     let original = request["roots"]

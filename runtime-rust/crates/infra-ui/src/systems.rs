@@ -2424,14 +2424,7 @@ async fn agents(v: &V) {
             ),
             _ => (
                 format!("{service} agent"),
-                format!(
-                    "Works on {service}; folder access: {}.",
-                    if v["access"] == "all" {
-                        "every selected service folder (read; write in edit mode)"
-                    } else {
-                        "own service folder only"
-                    }
-                ),
+                service_agent_goal(&service, &v["access"], &step["mode"]),
             ),
         };
         step["label"] = json!(label);
@@ -2444,6 +2437,20 @@ async fn agents(v: &V) {
     }
     crate::activity::set_plan("system-agents", steps, active);
     crate::activity::load("system-agents", &sid).await;
+}
+/// What a service agent's card says before its dispatch starts. Every agent
+/// reads the system folder and every service of the change (they share one
+/// context); the access scope decides only where a service agent edits. The
+/// card used to say "own service folder only" of an agent that reads them all.
+fn service_agent_goal(service: &str, access: &V, mode: &V) -> String {
+    let reads = "reads the system folder and every service of this change";
+    if mode != "edit" {
+        format!("Investigates {service}; {reads}.")
+    } else if access == "all" {
+        format!("Works on {service}; {reads} and edits any selected service.")
+    } else {
+        format!("Works on {service}; {reads} and edits only its own folder.")
+    }
 }
 async fn discovery_agents(job: &V) {
     dom::hidden("system-discovery-agents", false);
@@ -3090,5 +3097,20 @@ mod display_tests {
     fn lists_read_as_text() {
         assert_eq!(joined(&json!(["a", "b"])), "a, b");
         assert_eq!(joined(&json!([])), "none");
+    }
+    #[test]
+    fn a_waiting_service_agent_reads_the_whole_change() {
+        assert_eq!(
+            service_agent_goal("payments", &json!("service"), &json!("read-only")),
+            "Investigates payments; reads the system folder and every service of this change."
+        );
+        assert_eq!(
+            service_agent_goal("payments", &json!("service"), &json!("edit")),
+            "Works on payments; reads the system folder and every service of this change and edits only its own folder."
+        );
+        assert_eq!(
+            service_agent_goal("payments", &json!("all"), &json!("edit")),
+            "Works on payments; reads the system folder and every service of this change and edits any selected service."
+        );
     }
 }

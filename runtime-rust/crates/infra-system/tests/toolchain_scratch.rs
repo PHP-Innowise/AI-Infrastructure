@@ -42,6 +42,7 @@ fn read_only_launch(executable: &Path, project: &Path) -> infra_host::provider::
         &project.join("schema.json"),
         "read-only",
         &[],
+        &[],
         None,
     )
     .unwrap()

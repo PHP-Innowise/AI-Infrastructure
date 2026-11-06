@@ -359,28 +359,35 @@ and executable digest are pinned in the journal; resume cannot switch providers.
 
 ### Service folder access
 
-`--access` sets which registered service folders each worker may use:
+Every worker of a run reads the system folder and every selected service: they
+share one context (see [Shared run context](#shared-run-context)). `--access`
+sets only where service workers write:
 
 | Scope | Contract and verification workers | Service workers |
 | --- | --- | --- |
-| `service` (CLI default) | Granted the system folder and every selected service, read-only. | Granted their own service root; they write only there, only in edit mode. |
-| `all` | Granted the system folder and every selected service, read-only. | Granted every selected service; in edit mode they may write in any of them. |
+| `service` (CLI default) | Read the system folder and every selected service; never write. | Read the same; write only their own service root, only in edit mode. |
+| `all` | Read the system folder and every selected service; never write. | Read the same; in edit mode they may write in any selected service. |
 
-Contract and verification workers run in the system folder, so its shared
-contracts, topic registry and decisions are part of what they read. A root's own
+Contract and verification workers run in the system folder and service workers
+in their own root, so the system's shared contracts, topic registry and
+decisions, and the neighbours' code and tests, are part of what each reads. A root's own
 build and test commands may also read the repository that contains it (for
 example the shared packages of a monorepo whose service folders are
 registered), but nothing outside the writable roots is edited.
 The system folder is never writable by a worker, and read-only dispatches never
 write. Grants add folders a CLI would otherwise lack; they do not remove access a
 CLI already has (Codex reads the whole disk in both sandboxes). Claude gets
-`--add-dir` for each other selected root (plan mode keeps them read-only,
-`acceptEdits` makes them writable). Codex needs only writable roots, so edit
+`--add-dir` for each other root it may write and, in plan mode, which keeps
+added folders read-only, for every root it reads and the run folder. A Claude
+edit dispatch reads the roots it does not write and the run folder through
+`--allowedTools` rules such as `Read(//work/orders/**)`, since `acceptEdits`
+makes an added folder writable. Codex needs only writable roots, so edit
 dispatches in the `all` scope get `--add-dir` for the other services. Cursor
 Agent has no verified CLI option to grant other folders, so the `all` scope is
-refused for it (its changelog mentions `--add-dir`; this adapter does not rely on
-unverified sandbox semantics). The command adapter receives the `access` object
-in its dispatch input and must enforce it itself.
+refused for it and what it reads beyond its working folder depends on that CLI
+(its changelog mentions `--add-dir`; this adapter does not rely on unverified
+sandbox semantics). The command adapter receives the `access` object in its
+dispatch input and must enforce it itself.
 
 In the `all` scope every `changed_files` entry starts with the owning service ID,
 for example `payments/src/refunds.ts`. A registered source changed in another
@@ -395,8 +402,9 @@ current phase's root, and must emit **only** the final report JSON on stdout.
 It must enforce the requested mode/scope itself: the command adapter has no OS
 sandbox. No command strings are taken from passports or plans. All adapters
 have a per-worker timeout, a 2 MiB stdout limit and process-group cleanup on
-failure, timeout or interruption. The prompt limit is 128000 characters; narrow
-large plans that exceed it. Total cost is controlled by your provider settings;
+failure, timeout or interruption. The prompt limit is 128000 characters; earlier
+reports are shortened first (see [Shared run context](#shared-run-context)), and
+a plan whose own context exceeds it must be narrowed. Total cost is controlled by your provider settings;
 there is no universal monetary budget enforcement.
 
 ```mermaid
@@ -458,6 +466,39 @@ so keep the private run directory under your normal access controls. Harness
 additionally parses native output line by line for its [agents panel](#agents-panel);
 the journal and receipts do not change.
 
+### Shared run context
+
+Every worker of a run receives one context, the same for all of them, under
+`shared_context` in its input: the task, the selected services and their
+folders (`roots`, the system folder `__system__` included), the contract
+relationships between them, the plan's source excerpts with its warnings and
+omitted sources, and the reports of every worker that finished before it, in
+run order. Only the worker's own assignment differs: its phase, service, mode,
+goal, native task and `access`. Each earlier report is complete (`summary`,
+every check, `changed_files`, an agreement's `service_order` and the checks a
+person accepted) and names its receipt; a later worker used to see the first
+1000 characters of each summary and ten checks.
+
+The context follows the run. After each dispatch, the excerpts of the sources it
+changed are read again within the plan's budget, so the next worker sees the
+current text, and its report joins the context. Workers never share one model
+session: each runs as its own CLI process in its own root, under its own
+sandbox, so verification inspects the result independently of the workers that
+produced it and no session has to hold the whole run.
+
+The prompt limit is 128,000 characters (120,000 bytes for Cursor Agent, which
+takes the prompt as one argument). When the complete reports would not fit,
+all of them are shortened alike and `reports_condensed` is true: first to
+summaries of 1000 characters, check details of 200 and 20 changed files, then
+to summaries of 300 characters, check counts by status and the number of
+changed files. Each still names its receipt, which workers may read. A plan
+whose own context does not fit still has to be narrowed.
+
+Each attempt's exact input is saved next to its receipt as
+`PHASE-aN.input.json`: the prompt and its `input_sha256`, which the receipt
+records. What every worker received can be read back from there, and the run
+view lists the file with the receipt.
+
 ### Brain and Memory ownership
 
 Execution calls **this AI-Infrastructure checkout's trusted Rust native
@@ -484,8 +525,8 @@ UUID. Workers do not own task lifecycle. Tasks close only after every worker
 and verification have reported complete; partial closure is reconciled without
 repeating workers.
 
-`handoff.json` records task references, report summaries, receipt paths and the
-knowledge publishing step. Native handoffs preserve active work in each Brain;
+`handoff.json` records task references, every worker's complete report with its
+receipt path, the receipt names and the knowledge publishing step. Native handoffs preserve active work in each Brain;
 local completion episodes remain in that project's Context Engine. Reusable
 service knowledge belongs in its service Memory Bank; cross-service contract
 choices belong in the system specs/Brain/Memory Bank. Review and publish those
@@ -495,7 +536,8 @@ turn raw prompts or unreviewed worker claims into verified durable memory.
 ### Recovery and freshness
 
 `run.json` and `checkpoint.json` are atomically replaced and fsynced. Each
-attempt has an immutable `PHASE-aN.json` receipt. The run directory must be new
+attempt has an immutable `PHASE-aN.json` receipt, and `PHASE-aN.input.json`
+keeps the input its worker received. The run directory must be new
 and is created with mode 0700; files use 0600 (on Windows they inherit the
 private Harness state permissions). A launch identity and input hash
 are persisted **before** starting a worker. Do not manually edit journal files.
@@ -707,10 +749,12 @@ the actual implementation order. Task line breaks are normalized to spaces.
 
 After reviewing the scope/context, use the **Launch** card: choose read-only
 investigation or service edits, **Codex / Claude Code / Cursor Agent**, the
-**Service folder access**
+**Service agents may edit** choice
 (**All selected services** by default in the browser, or **Own service only**;
 see [Service folder access](#service-folder-access)) and a timeout per agent,
-confirm that you reviewed the scope and context, then **Execute reviewed plan**. Cursor Agent offers only own-service access. System dispatches
+confirm that you reviewed the scope and context, then **Execute reviewed plan**. Cursor Agent offers only own-service edits.
+Whatever the choice, every agent reads the system folder and all services of
+the change and receives the complete reports of the agents before it. System dispatches
 share the existing Harness queue, runner lock, cancellation and watchdog. They
 use the selected CLI's default model. The provider is fixed after launch and
 recovery keeps it. A dispatch whose CLI exits with an error shows that CLI's

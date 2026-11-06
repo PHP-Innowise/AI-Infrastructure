@@ -89,7 +89,8 @@ fn system(root: &Path) -> PathBuf {
 }
 
 /// Answers each dispatch from the top-level phase and service of its prompt
-/// (canonical JSON sorts keys, so `phase` is followed by `previous_receipts`).
+/// (canonical JSON sorts keys, so the top-level `phase` and `service` are
+/// followed by `shared_context`, which the earlier reports inside it are not).
 /// In edit mode the billing worker changes a registered source and reports it.
 fn adapter(root: &Path) -> PathBuf {
     let script = root.join("adapter.sh");
@@ -99,13 +100,13 @@ fn adapter(root: &Path) -> PathBuf {
 input=$(cat)
 report() { printf '{"status":"completed","summary":"%s","checks":[{"name":"%s","status":"passed","detail":"fixture"}],"changed_files":%s,"service_order":%s}\n' "$1" "$2" "$3" "$4"; }
 case "$input" in
-  *'"readable":["__system__","billing","orders"]'*'"phase":"contracts","previous_receipts"'*) ;;
-  *'"phase":"contracts","previous_receipts"'*) printf '{"status":"blocked","summary":"System folder not readable","checks":[],"changed_files":[],"service_order":[]}\n'; exit 0 ;;
+  *'"readable":["__system__","billing","orders"]'*'"phase":"contracts","service":"__system__","shared_context"'*) ;;
+  *'"phase":"contracts","service":"__system__","shared_context"'*) printf '{"status":"blocked","summary":"System folder not readable","checks":[],"changed_files":[],"service_order":[]}\n'; exit 0 ;;
 esac
 case "$input" in
-  *'"phase":"contracts","previous_receipts"'*) report "Contracts agreed" "contracts" '[]' '["orders","billing"]' ;;
-  *'"phase":"verify","previous_receipts"'*) report "Verified end to end" "end-to-end" '[]' '[]' ;;
-  *'"mode":"edit"'*'"service":"billing","task"'*) printf 'after\n' > src/work.txt; report "Billing updated" "unit" '["src/work.txt"]' '[]' ;;
+  *'"phase":"contracts","service":"__system__","shared_context"'*) report "Contracts agreed" "contracts" '[]' '["orders","billing"]' ;;
+  *'"phase":"verify","service":"__system__","shared_context"'*) report "Verified end to end" "end-to-end" '[]' '[]' ;;
+  *'"mode":"edit"'*'"service":"billing","shared_context"'*) printf 'after\n' > src/work.txt; report "Billing updated" "unit" '["src/work.txt"]' '[]' ;;
   *) report "Service checked" "unit" '[]' '[]' ;;
 esac
 "#,
@@ -514,8 +515,8 @@ fn a_service_worker_editing_another_service_stops_the_run() {
     let (code, summary, _) = run_script(
         &root.0,
         r#"case "$input" in
-  *'"phase":"contracts","previous_receipts"'*) report agreed '[]' '["orders","billing"]' ;;
-  *'"service":"billing","task"'*) printf 'tampered\n' > ../orders/src/work.txt; printf 'after\n' > src/work.txt; report billed '["src/work.txt"]' '[]' ;;
+  *'"phase":"contracts","service":"__system__","shared_context"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"service":"billing","shared_context"'*) printf 'tampered\n' > ../orders/src/work.txt; printf 'after\n' > src/work.txt; report billed '["src/work.txt"]' '[]' ;;
   *) report checked '[]' '[]' ;;
 esac"#,
         "edit",
@@ -539,7 +540,7 @@ fn a_read_only_worker_changing_a_source_unreported_stops_the_run() {
     let (code, summary, _) = run_script(
         &root.0,
         r#"case "$input" in
-  *'"phase":"contracts","previous_receipts"'*) printf 'tampered\n' > ../services/billing/src/work.txt; report agreed '[]' '["orders","billing"]' ;;
+  *'"phase":"contracts","service":"__system__","shared_context"'*) printf 'tampered\n' > ../services/billing/src/work.txt; report agreed '[]' '["orders","billing"]' ;;
   *) report checked '[]' '[]' ;;
 esac"#,
         "read-only",
@@ -590,7 +591,7 @@ fn an_executor_killed_mid_dispatch_resumes_only_with_an_explicit_retry() {
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ninput=$(cat)\nreport() {{ printf '{{\"status\":\"completed\",\"summary\":\"%s\",\"checks\":[{{\"name\":\"unit\",\"status\":\"passed\",\"detail\":\"ok\"}}],\"changed_files\":[],\"service_order\":%s}}\\n' \"$1\" \"$2\"; }}\ncase \"$input\" in\n  *'\"phase\":\"contracts\",\"previous_receipts\"'*) report agreed '[\"orders\",\"billing\"]' ;;\n  *'\"service\":\"billing\",\"task\"'*) if [ ! -e '{marker}' ]; then : > '{marker}'; sleep 60; fi; report billed '[]' ;;\n  *) report checked '[]' ;;\nesac\n",
+            "#!/bin/sh\ninput=$(cat)\nreport() {{ printf '{{\"status\":\"completed\",\"summary\":\"%s\",\"checks\":[{{\"name\":\"unit\",\"status\":\"passed\",\"detail\":\"ok\"}}],\"changed_files\":[],\"service_order\":%s}}\\n' \"$1\" \"$2\"; }}\ncase \"$input\" in\n  *'\"phase\":\"contracts\",\"service\":\"__system__\",\"shared_context\"'*) report agreed '[\"orders\",\"billing\"]' ;;\n  *'\"service\":\"billing\",\"shared_context\"'*) if [ ! -e '{marker}' ]; then : > '{marker}'; sleep 60; fi; report billed '[]' ;;\n  *) report checked '[]' ;;\nesac\n",
             marker = marker.display()
         ),
     )
@@ -680,8 +681,8 @@ fn an_executor_killed_mid_dispatch_resumes_only_with_an_explicit_retry() {
 /// Verification blocks until the system policy it is given says the registry
 /// is current; every other dispatch completes.
 const REGISTRY_GATE: &str = r#"case "$input" in
-  *'"phase":"contracts","previous_receipts"'*) report agreed '[]' '["orders","billing"]' ;;
-  *'"phase":"verify","previous_receipts"'*)
+  *'"phase":"contracts","service":"__system__","shared_context"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"phase":"verify","service":"__system__","shared_context"'*)
     case "$input" in
       *'Registry lists every consumer'*) report verified '[]' '[]' ;;
       *) printf '{"status":"blocked","summary":"The topic registry misses billing","checks":[{"name":"registry","status":"failed","detail":"system AGENTS.md"}],"changed_files":[],"service_order":[]}\n' ;;
@@ -796,8 +797,8 @@ fn a_saved_plan_is_never_replaced_and_the_refusal_says_so() {
 
 /// Verification passes what it could run and reports one check it could not.
 const UNRUN_GATE: &str = r#"case "$input" in
-  *'"phase":"contracts","previous_receipts"'*) report agreed '[]' '["orders","billing"]' ;;
-  *'"phase":"verify","previous_receipts"'*) printf '{"status":"completed","summary":"Verified locally","checks":[{"name":"unit","status":"passed","detail":"ok"},{"name":"broker_integration","status":"not_run","detail":"no broker here"}],"changed_files":[],"service_order":[]}\n' ;;
+  *'"phase":"contracts","service":"__system__","shared_context"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"phase":"verify","service":"__system__","shared_context"'*) printf '{"status":"completed","summary":"Verified locally","checks":[{"name":"unit","status":"passed","detail":"ok"},{"name":"broker_integration","status":"not_run","detail":"no broker here"}],"changed_files":[],"service_order":[]}\n' ;;
   *) report checked '[]' '[]' ;;
 esac"#;
 
@@ -900,8 +901,8 @@ fn in_the_all_scope_a_worker_may_edit_another_selected_service_it_reports() {
     let (code, summary, directory) = run_script_access(
         &root.0,
         r#"case "$input" in
-  *'"phase":"contracts","previous_receipts"'*) report agreed '[]' '["orders","billing"]' ;;
-  *'"service":"billing","task"'*) printf 'billed\n' > ../orders/src/work.txt; printf 'after\n' > src/work.txt; report billed '["orders/src/work.txt","billing/src/work.txt"]' '[]' ;;
+  *'"phase":"contracts","service":"__system__","shared_context"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"service":"billing","shared_context"'*) printf 'billed\n' > ../orders/src/work.txt; printf 'after\n' > src/work.txt; report billed '["orders/src/work.txt","billing/src/work.txt"]' '[]' ;;
   *) report checked '[]' '[]' ;;
 esac"#,
         "edit",
@@ -918,8 +919,8 @@ esac"#,
     let (code, summary, _) = run_script_access(
         &other.0,
         r#"case "$input" in
-  *'"phase":"contracts","previous_receipts"'*) report agreed '[]' '["orders","billing"]' ;;
-  *'"service":"billing","task"'*) printf 'billed\n' > ../orders/src/work.txt; report billed '[]' '[]' ;;
+  *'"phase":"contracts","service":"__system__","shared_context"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"service":"billing","shared_context"'*) printf 'billed\n' > ../orders/src/work.txt; report billed '[]' '[]' ;;
   *) report checked '[]' '[]' ;;
 esac"#,
         "edit",
@@ -987,9 +988,9 @@ fn between_dispatches_a_persons_system_edit_needs_acceptance_and_others_a_new_pl
 fn a_read_only_run_asks_each_dispatch_to_investigate_not_to_agree_a_fix() {
     // Each dispatch completes only when its goal fits the run's mode.
     let gate = r#"case "$input" in
-  *'"phase":"contracts","previous_receipts"'*)
+  *'"phase":"contracts","service":"__system__","shared_context"'*)
     case "$input" in *'This run only investigates'*) report agreed '[]' '["orders","billing"]' ;; *) printf '{"status":"blocked","summary":"wrong goal","checks":[],"changed_files":[],"service_order":[]}\n' ;; esac ;;
-  *'"phase":"verify","previous_receipts"'*)
+  *'"phase":"verify","service":"__system__","shared_context"'*)
     case "$input" in *'This run only investigated'*) report verified '[]' '[]' ;; *) printf '{"status":"blocked","summary":"wrong goal","checks":[],"changed_files":[],"service_order":[]}\n' ;; esac ;;
   *)
     case "$input" in *'Investigate the request in this service without editing'*) report checked '[]' '[]' ;; *) printf '{"status":"blocked","summary":"wrong goal","checks":[],"changed_files":[],"service_order":[]}\n' ;; esac ;;
@@ -1008,8 +1009,8 @@ esac"#;
 fn in_a_read_only_run_a_failed_check_is_a_finding_and_the_run_completes() {
     // The billing investigation reproduces the defect it was asked about.
     let gate = r#"case "$input" in
-  *'"phase":"contracts","previous_receipts"'*) report agreed '[]' '["orders","billing"]' ;;
-  *'"service":"billing","task"'*) printf '{"status":"completed","summary":"Defect reproduced","checks":[{"name":"reproduction","status":"failed","detail":"the defect is real"},{"name":"unit","status":"passed","detail":"ok"}],"changed_files":[],"service_order":[]}\n' ;;
+  *'"phase":"contracts","service":"__system__","shared_context"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"service":"billing","shared_context"'*) printf '{"status":"completed","summary":"Defect reproduced","checks":[{"name":"reproduction","status":"failed","detail":"the defect is real"},{"name":"unit","status":"passed","detail":"ok"}],"changed_files":[],"service_order":[]}\n' ;;
   *) report checked '[]' '[]' ;;
 esac"#;
     let root = Root::new();
@@ -1097,11 +1098,106 @@ fn init_creates_a_new_system_folder_and_says_so_when_one_exists() {
 fn a_completed_agreement_proceeds_though_a_check_confirms_the_defect_to_fix() {
     // The contract agent agrees the fix and reports the defect it is for.
     let gate = r#"case "$input" in
-  *'"phase":"contracts","previous_receipts"'*) printf '{"status":"completed","summary":"Agreed: reject missing identities","checks":[{"name":"current_handler","status":"failed","detail":"charges without an identity today"},{"name":"compatibility","status":"passed","detail":"v1 unchanged"}],"changed_files":[],"service_order":["orders","billing"]}\n' ;;
+  *'"phase":"contracts","service":"__system__","shared_context"'*) printf '{"status":"completed","summary":"Agreed: reject missing identities","checks":[{"name":"current_handler","status":"failed","detail":"charges without an identity today"},{"name":"compatibility","status":"passed","detail":"v1 unchanged"}],"changed_files":[],"service_order":["orders","billing"]}\n' ;;
   *) report checked '[]' '[]' ;;
 esac"#;
     let root = Root::new();
     let (code, summary, directory) = run_script(&root.0, gate, "edit");
     assert_eq!(code, 0, "{summary:#}");
     assert_completed(&summary, &directory);
+}
+
+#[test]
+fn every_agent_receives_one_shared_context_with_the_complete_earlier_reports() {
+    // The contract agent's answer is longer than the 1000 characters and the
+    // ten checks a later agent used to see of it.
+    let root = Root::new();
+    let agreement = json!({"status":"completed",
+        "summary":format!("Agreed: {}", "billing charges each placed order once. ".repeat(40)),
+        "checks":(0..12).map(|n|json!({"name":format!("invariant-{n}"),"status":"passed","detail":format!("invariant {n} holds")})).collect::<Vec<_>>(),
+        "changed_files":[],"service_order":["orders","billing"]});
+    let answer = root.0.join("agreement.json");
+    fs::write(&answer, serde_json::to_string(&agreement).unwrap() + "\n").unwrap();
+    let gate = format!(
+        r#"case "$input" in
+  *'"phase":"contracts","service":"__system__","shared_context"'*) cat '{}' ;;
+  *'"service":"billing","shared_context"'*) printf 'after\n' > src/work.txt; report billed '["src/work.txt"]' '[]' ;;
+  *) report checked '[]' '[]' ;;
+esac"#,
+        answer.display()
+    );
+    let (code, summary, directory) = run_script(&root.0, &gate, "edit");
+    assert_eq!(code, 0, "{summary:#}");
+    assert_completed(&summary, &directory);
+    let read = |name: &str| -> Value {
+        serde_json::from_slice(&fs::read(directory.join(name)).unwrap()).unwrap()
+    };
+    let handoff = read("handoff.json");
+    let reports = handoff["reports"].as_array().unwrap();
+    assert_eq!(reports[0]["summary"], agreement["summary"]);
+    assert_eq!(reports[0]["checks"], agreement["checks"]);
+    assert!(Path::new(reports[0]["receipt"].as_str().unwrap()).is_file());
+    let excerpt = |shared: &Value| {
+        shared["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["service"] == "billing" && source["path"] == "src/work.txt")
+            .map(|source| source["excerpt"].clone())
+            .unwrap()
+    };
+    let mut unchanged = None;
+    for (index, (phase, writable)) in [
+        ("contracts", json!([])),
+        ("service-orders", json!(["orders"])),
+        ("service-billing", json!(["billing"])),
+        ("verify", json!([])),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input = read(&format!("{phase}-a1.input.json"));
+        let prompt = input["prompt"].as_str().unwrap();
+        // The receipt records the digest of exactly the saved input.
+        assert_eq!(
+            input["input_sha256"],
+            infra_core::query::sha256(prompt.as_bytes())
+        );
+        assert_eq!(
+            read(&format!("{phase}-a1.json"))["input_sha256"],
+            input["input_sha256"]
+        );
+        let payload: Value = serde_json::from_str(prompt.rsplit_once('\n').unwrap().1).unwrap();
+        assert_eq!(payload["phase"], phase);
+        // Every agent reads the system folder and both services; the
+        // own-service scope keeps writes in the agent's own folder.
+        assert_eq!(
+            payload["access"]["readable"],
+            json!(["__system__", "billing", "orders"]),
+            "{phase}"
+        );
+        assert_eq!(payload["access"]["writable"], writable, "{phase}");
+        let shared = &payload["shared_context"];
+        // Each agent receives the complete reports of every agent before it.
+        assert_eq!(shared["reports"], json!(reports[..index]), "{phase}");
+        assert_eq!(shared["reports_condensed"], false);
+        // An excerpt follows the earlier agents' edits: verification reads
+        // what the billing agent wrote.
+        assert_eq!(
+            excerpt(shared),
+            if phase == "verify" {
+                "after\n"
+            } else {
+                "before\n"
+            },
+            "{phase}"
+        );
+        let mut rest = shared.clone();
+        rest["reports"] = Value::Null;
+        rest["sources"] = Value::Null;
+        match &unchanged {
+            None => unchanged = Some(rest),
+            Some(first) => assert_eq!(&rest, first, "{phase}"),
+        }
+    }
 }

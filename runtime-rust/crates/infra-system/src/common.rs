@@ -319,6 +319,15 @@ pub fn receipt_name(step: &Value) -> String {
         step["attempt"].as_u64().unwrap_or(0)
     )
 }
+/// The saved input of a dispatch attempt, next to its receipt: the exact
+/// prompt its agent received, whose digest the receipt records.
+pub fn input_name(step: &Value) -> String {
+    format!(
+        "{}-a{}.input.json",
+        string(&step["id"]),
+        step["attempt"].as_u64().unwrap_or(0)
+    )
+}
 pub fn b64(bytes: &[u8]) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
