@@ -353,21 +353,26 @@ impl Brain {
         let mut note = Value::Null;
         if proposal["review_mode"] == "automatic" && proposal["status"] != "applied" {
             let promotion = string(&proposal["id"]).to_string();
-            let applied = (|| -> Result<Value> {
-                if proposal["status"] == "proposed" {
-                    bank.review(&promotion, None, true)?;
+            // The handoff reports the promotion as far as it got.
+            let mut attempt = Ok(());
+            if proposal["status"] == "proposed" {
+                match bank.review(&promotion, None, true) {
+                    Ok(reviewed) => proposal = reviewed,
+                    Err(error) => attempt = Err(error),
                 }
-                bank.apply(&promotion)
-            })();
-            match applied {
-                Ok(applied) => proposal = applied,
-                Err(error) => {
-                    note = format!(
-                        "it stays finding {id} in the system's Brain: promoting it failed: {}",
-                        error.message
-                    )
-                    .into()
+            }
+            if attempt.is_ok() {
+                match bank.apply(&promotion) {
+                    Ok(applied) => proposal = applied,
+                    Err(error) => attempt = Err(error),
                 }
+            }
+            if let Err(error) = attempt {
+                note = format!(
+                    "it stays finding {id} in the system's Brain: promoting it failed: {}",
+                    error.message
+                )
+                .into();
             }
         }
         Ok(
