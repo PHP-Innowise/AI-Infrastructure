@@ -54,7 +54,9 @@ edition's own files remain in that edition's changelog.
   leaves the context (`memory_no_longer_holds`) instead of stopping the run.
   A completed run makes its outcome the system's memory by itself: a resolved
   finding in the system Brain, verified by the run's verification agent,
-  promoted to the system Memory Bank. A system folder that turns
+  promoted to the system Memory Bank; its title is bounded so the chunk's file
+  name fits (a real 200-character title overran the name limit), and the whole
+  task stays in its text. A system folder that turns
   `automatic_promotion` off keeps a proposal for `memory promote-review` and
   `promote-apply` instead. The handoff and the run view name the memory, and
   the plan summary's Shared memory line counts what every agent receives.

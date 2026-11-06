@@ -280,11 +280,14 @@ impl Brain {
         let run = string(&state["run_id"]);
         let external = format!("ai-system/{run}/outcome");
         let task = string(&plan["context"]["task"]);
+        // The Memory Bank names the chunk after its title, and its publication
+        // writes `.{name}.{uuid}.tmp` beside it: a real 200-character title
+        // overran the 255-byte name limit. The whole task stays in the text.
         let title = clipped(
             &format!("System change {}: {task}", string(&plan["change_id"])),
-            200,
+            120,
         );
-        let body = outcome_text(state, reports);
+        let body = format!("Task: {task} {}", outcome_text(state, reports));
         let root = self.repository.context.roots.state.clone();
         // What the agreement rested on: the system's own documents in the
         // shared context. A later change to them makes the memory stale.
@@ -360,7 +363,7 @@ impl Brain {
                 Ok(applied) => proposal = applied,
                 Err(error) => {
                     note = format!(
-                        "{}; run memory promote-auto in the system folder once it is resolved",
+                        "it stays finding {id} in the system's Brain: promoting it failed: {}",
                         error.message
                     )
                     .into()

@@ -1628,3 +1628,85 @@ esac"#;
         .unwrap_or_else(|| panic!("{status:#}"));
     assert!(error.ends_with(failure), "{error}\n{receipt:#}");
 }
+
+#[test]
+fn a_long_task_still_becomes_system_memory() {
+    // A real 200-character title overran the file name limit when the Memory
+    // Bank named the chunk after it.
+    let root = Root::new();
+    let config = system(&root.0);
+    let services = root.0.join("services");
+    let task = format!(
+        "Bill every placed order exactly once: {}",
+        "check how orders and billing agree on order identity, retries and refunds under the contract versioning rules; "
+            .repeat(4)
+    );
+    let plan = root.0.join("plan.json");
+    let (code, _, text) = cli(
+        &root.0,
+        &[
+            "plan",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--task",
+            task.trim(),
+            "--change-id",
+            "bill-orders-once",
+            "--service",
+            "orders",
+            "--output",
+            plan.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{text}");
+    let script = root.0.join("script.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ninput=$(cat)\nreport() {{ printf '{{\"status\":\"completed\",\"summary\":\"%s\",\"checks\":[{{\"name\":\"unit\",\"status\":\"passed\",\"detail\":\"ok\"}}],\"changed_files\":%s,\"service_order\":%s}}\\n' \"$1\" \"$2\" \"$3\"; }}\n{AGREEMENT}\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let directory = root.0.join("run");
+    let (code, summary, text) = cli(
+        &root.0,
+        &[
+            "execute",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--plan",
+            plan.to_str().unwrap(),
+            "--run-dir",
+            directory.to_str().unwrap(),
+            "--provider",
+            "command",
+            "--executable",
+            script.to_str().unwrap(),
+            "--mode",
+            "read-only",
+            "--timeout",
+            "60",
+        ],
+    );
+    assert_eq!(code, 0, "{text}");
+    assert_completed(&summary, &directory);
+    let handoff: Value =
+        serde_json::from_slice(&fs::read(directory.join("handoff.json")).unwrap()).unwrap();
+    assert_eq!(
+        handoff["memory"]["status"], "applied",
+        "{:#}",
+        handoff["memory"]
+    );
+    let chunks = system_chunks(&root.0.join("system"));
+    assert_eq!(chunks.len(), 1);
+    let text = fs::read_to_string(root.0.join("system").join(&chunks[0])).unwrap();
+    assert!(
+        text.contains(task.trim()),
+        "the whole task stays in the memory"
+    );
+}
