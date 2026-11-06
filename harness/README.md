@@ -144,9 +144,12 @@ sequentially through the same single Harness queue;
 read-only is the default. Native system/service Brain task records are written
 even in read-only mode. Edit mode uses each service's current checkout.
 Every agent of a run shares one context: it reads the system folder and every
-selected service, and receives the task, the plan's excerpts and the complete
-reports of the agents before it (shortened only when they would not fit its
-prompt). Each agent's exact input is saved next to its receipt.
+selected service, and receives the task, the plan's excerpts, the reviewed
+memory of the system and of every selected service, and the complete reports of
+the agents before it (shortened only when they would not fit its prompt). Each
+agent's exact input is saved next to its receipt. A completed run's outcome
+becomes the system's memory by itself, and later changes share it with every
+agent, marked as memory no person reviewed.
 **Service agents may edit** decides only where service agents write:
 **All selected services** (the browser default) lets each service agent change
 files in any of them in edit mode; **Own service only** keeps its edits in its

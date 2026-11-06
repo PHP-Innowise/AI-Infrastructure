@@ -247,6 +247,71 @@ pub fn is_memory(path: &str) -> bool {
     let parts = path.split('/').collect::<Vec<_>>();
     parts.contains(&"memory-bank") && parts.contains(&"chunks")
 }
+/// A Brain record file, `project-brain/dynamic/<kind>/<uuid>.md`: a promoted
+/// memory chunk cites the record it came from.
+pub fn is_record_image(path: &str) -> bool {
+    let parts = path.split('/').collect::<Vec<_>>();
+    parts.len() == 4
+        && parts[0] == "project-brain"
+        && parts[1] == "dynamic"
+        && [
+            "findings",
+            "decisions",
+            "incidents",
+            "bugs",
+            "events",
+            "tasks",
+        ]
+        .contains(&parts[2])
+        && parts[3].strip_suffix(".md").is_some_and(|id| {
+            id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        })
+}
+/// The digest Memory Bank records for a cited source: SHA-256 of its bytes,
+/// with CRLF read as LF unless the first 8192 bytes hold a NUL. A plain
+/// digest made every chunk citing a CRLF file look stale.
+pub fn memory_digest(raw: &[u8]) -> String {
+    if raw[..raw.len().min(8192)].contains(&0) {
+        return digest(raw);
+    }
+    let mut text = Vec::with_capacity(raw.len());
+    let mut index = 0;
+    while index < raw.len() {
+        if raw[index] == b'\r' && raw.get(index + 1) == Some(&b'\n') {
+            text.push(b'\n');
+            index += 2;
+        } else {
+            text.push(raw[index]);
+            index += 1;
+        }
+    }
+    digest(&text)
+}
+/// The Memory Bank chunks a root keeps, `memory-bank/chunks/*.md`: the
+/// candidates for the shared context of a plan's agents. A missing or linked
+/// bank has none; the reader still checks each chunk it is offered.
+pub fn memory_chunks(root: &Path) -> Result<Vec<String>> {
+    for folder in ["memory-bank", "memory-bank/chunks"] {
+        match std::fs::symlink_metadata(root.join(folder)) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Ok(vec![]),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut chunks = vec![];
+    for entry in std::fs::read_dir(root.join("memory-bank/chunks"))? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if entry.file_type()?.is_file() && name.ends_with(".md") && !name.starts_with('.') {
+            chunks.push(format!("memory-bank/chunks/{name}"));
+        }
+    }
+    chunks.sort();
+    Ok(chunks)
+}
 pub fn absolute(path: &Path) -> Result<PathBuf> {
     fs::absolute(path)
 }

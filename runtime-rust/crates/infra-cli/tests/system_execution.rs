@@ -251,13 +251,17 @@ fn a_run_keeps_the_native_storage_local_to_this_clone_out_of_git() {
             .output()
             .expect("run git status");
         let listed = String::from_utf8_lossy(&output.stdout);
-        // Brain records stay visible for review; the clone's own state does not.
+        // Brain records and the system's new memory stay visible for review;
+        // the clone's own state does not.
         assert!(listed.contains("project-brain/dynamic/tasks/"), "{listed}");
         assert!(
-            !listed.contains("memory-bank/") && !listed.contains("project-brain/local/"),
+            !listed.contains("memory-bank/local/") && !listed.contains("project-brain/local/"),
             "{}: {listed}",
             folder.display()
         );
+        if folder.ends_with("system") {
+            assert!(listed.contains("memory-bank/chunks/MEM-"), "{listed}");
+        }
     }
 }
 
@@ -1200,4 +1204,357 @@ esac"#,
             Some(first) => assert_eq!(&rest, first, "{phase}"),
         }
     }
+}
+
+/// `infra-engine memory --root PROJECT ...` as a person runs it, isolated from
+/// this machine's accelerator and owner settings.
+fn memory(root: &Path, project: &Path, args: &[&str]) -> Value {
+    let mut command = Command::new(engine());
+    command
+        .arg("memory")
+        .arg("--root")
+        .arg(project)
+        .args(args)
+        .current_dir(root)
+        .env("HOME", root.join("home"))
+        .stdin(Stdio::null());
+    for key in [
+        "PROJECT_BRAIN_OWNER",
+        "PROJECT_BRAIN_MODE",
+        "ACCELERATOR_HOME",
+        "ACCELERATOR_STATE_DIR",
+        "ACCELERATOR_PROJECT_DIR",
+    ] {
+        command.env_remove(key);
+    }
+    let output = command.output().expect("run infra-engine memory");
+    assert!(
+        output.status.success(),
+        "memory {args:?}: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn system_chunks(system: &Path) -> Vec<String> {
+    fs::read_dir(system.join("memory-bank/chunks"))
+        .map(|entries| {
+            entries
+                .map(|entry| {
+                    format!(
+                        "memory-bank/chunks/{}",
+                        entry.unwrap().file_name().into_string().unwrap()
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+/// Plans `refund-orders` and runs it read-only with the saved script; returns
+/// the plan and each dispatch's shared context.
+fn refund_run(root: &Path) -> (Value, Vec<Value>) {
+    let config = root.join("system/system.json");
+    let services = root.join("services");
+    let plan = root.join("refund-plan.json");
+    let (code, value, text) = cli(
+        root,
+        &[
+            "plan",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--task",
+            "Refund a cancelled placed order",
+            "--change-id",
+            "refund-orders",
+            "--service",
+            "orders",
+            "--output",
+            plan.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{text}");
+    let run = root.join("refund-run");
+    let script = root.join("script.sh");
+    let (code, summary, text) = cli(
+        root,
+        &[
+            "execute",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--plan",
+            plan.to_str().unwrap(),
+            "--run-dir",
+            run.to_str().unwrap(),
+            "--provider",
+            "command",
+            "--executable",
+            script.to_str().unwrap(),
+            "--mode",
+            "read-only",
+            "--timeout",
+            "60",
+        ],
+    );
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(summary["status"], "completed", "{summary:#}");
+    let shared = ["contracts", "service-orders", "service-billing", "verify"]
+        .iter()
+        .map(|phase| {
+            let input: Value = serde_json::from_slice(
+                &fs::read(run.join(format!("{phase}-a1.input.json"))).unwrap(),
+            )
+            .unwrap();
+            let prompt = input["prompt"].as_str().unwrap();
+            let payload: Value = serde_json::from_str(prompt.rsplit_once('\n').unwrap().1).unwrap();
+            payload["shared_context"].clone()
+        })
+        .collect();
+    (value, shared)
+}
+fn carries(sources: &Value, path: &str, trust: &str) -> bool {
+    sources.as_array().unwrap().iter().any(|source| {
+        source["service"] == "__system__"
+            && source["path"] == path
+            && source["kind"] == "memory"
+            && source["trust"] == trust
+    })
+}
+const AGREEMENT: &str = r#"case "$input" in
+  *'"phase":"contracts","service":"__system__","shared_context"'*) report "Agreed: billing charges each placed order exactly once" '[]' '["orders","billing"]' ;;
+  *) report "Checked" '[]' '[]' ;;
+esac"#;
+
+#[test]
+fn a_runs_outcome_becomes_system_memory_that_every_later_agent_shares() {
+    let root = Root::new();
+    let (code, summary, directory) = run_script(&root.0, AGREEMENT, "read-only");
+    assert_eq!(code, 0, "{summary:#}");
+    assert_completed(&summary, &directory);
+    let handoff: Value =
+        serde_json::from_slice(&fs::read(directory.join("handoff.json")).unwrap()).unwrap();
+    let shared = &handoff["memory"];
+    assert_eq!(shared["status"], "applied", "{handoff:#}");
+    assert_eq!(shared["review_mode"], "automatic");
+    assert!(
+        handoff["knowledge"]
+            .as_str()
+            .unwrap()
+            .contains("now the system's memory")
+    );
+    let system = root.0.join("system");
+    let chunks = system_chunks(&system);
+    assert_eq!(chunks.len(), 1, "{chunks:?}");
+    let chunk = &chunks[0];
+    let text = fs::read_to_string(system.join(chunk)).unwrap();
+    assert!(text.contains("billing charges each placed order exactly once"));
+    assert!(text.contains("auto-promoted") && text.contains("agent-attested"));
+    // The next change gives it to every agent, marked as memory no person reviewed.
+    let (plan, inputs) = refund_run(&root.0);
+    assert!(
+        carries(&plan["context"]["sources"], chunk, "automatic_memory"),
+        "{plan:#}"
+    );
+    for shared in inputs {
+        assert!(carries(&shared["sources"], chunk, "automatic_memory"));
+    }
+}
+
+#[test]
+fn a_system_that_turns_automatic_promotion_off_keeps_the_outcome_for_a_person() {
+    let root = Root::new();
+    system(&root.0);
+    write_json(
+        &root.0.join("system/project-brain/config/runtime.json"),
+        &json!({"automatic_promotion":false}),
+    );
+    let (code, summary, directory) = run_script(&root.0, AGREEMENT, "read-only");
+    assert_eq!(code, 0, "{summary:#}");
+    assert_completed(&summary, &directory);
+    let handoff: Value =
+        serde_json::from_slice(&fs::read(directory.join("handoff.json")).unwrap()).unwrap();
+    let proposed = &handoff["memory"];
+    assert_eq!(proposed["status"], "proposed", "{handoff:#}");
+    assert_eq!(proposed["review_mode"], "human");
+    let system = root.0.join("system");
+    assert!(system_chunks(&system).is_empty());
+    let promotion = proposed["proposal_id"].as_str().unwrap();
+    let reviewed = memory(
+        &root.0,
+        &system,
+        &[
+            "promote-review",
+            "--promotion-id",
+            promotion,
+            "--reviewer",
+            "person",
+            "--json",
+        ],
+    );
+    assert_eq!(reviewed["status"], "reviewed", "{reviewed:#}");
+    let applied = memory(
+        &root.0,
+        &system,
+        &["promote-apply", "--promotion-id", promotion, "--json"],
+    );
+    assert_eq!(applied["status"], "applied", "{applied:#}");
+    let chunks = system_chunks(&system);
+    assert_eq!(chunks.len(), 1);
+    let (plan, inputs) = refund_run(&root.0);
+    assert!(
+        carries(&plan["context"]["sources"], &chunks[0], "reviewed_memory"),
+        "{plan:#}"
+    );
+    for shared in inputs {
+        assert!(carries(&shared["sources"], &chunks[0], "reviewed_memory"));
+    }
+}
+
+/// A Memory Bank chunk as a person publishes one in `project`: a verified
+/// finding citing `sources`, proposed by its author, approved by another.
+fn reviewed_memory(project: &Path, title: &str, content: &str, sources: &[&str]) -> String {
+    use infra_core::{
+        BankService, BrainRepository, CreateRecord, Roots, RuntimeContext, UpdateRecord,
+    };
+    let context = |actor: &str| {
+        RuntimeContext::new(
+            Roots::installed(project.to_path_buf()).unwrap(),
+            actor,
+            "governed",
+        )
+        .unwrap()
+    };
+    let brain = BrainRepository::new(context("author")).unwrap();
+    let record = brain
+        .create(CreateRecord {
+            record_type: "finding".into(),
+            external_id: "BILLING-ONCE".into(),
+            title: title.into(),
+            goal: Some(title.into()),
+            sources: sources.iter().map(|source| source.to_string()).collect(),
+            authority: "verified".into(),
+            attestation: Some("person".into()),
+            ..CreateRecord::default()
+        })
+        .unwrap();
+    let id = record["id"].as_str().unwrap().to_string();
+    brain
+        .update(
+            &id,
+            UpdateRecord {
+                expected_revision: record["revision"].as_u64(),
+                progress: Some(content.into()),
+                transition_to: Some("resolved".into()),
+                reason: "Checked against the code".into(),
+                attestation: Some("person".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let proposal = BankService::new(context("author"))
+        .propose(&[id], title, content, false)
+        .unwrap();
+    let reviewer = BankService::new(context("reviewer"));
+    let promotion = proposal["id"].as_str().unwrap();
+    reviewer.review(promotion, Some("reviewer"), true).unwrap();
+    let applied = reviewer.apply(promotion).unwrap();
+    let memory = applied["destination_memory_id"].as_str().unwrap();
+    let name = fs::read_dir(project.join("memory-bank/chunks"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .find(|name| name.starts_with(memory))
+        .unwrap();
+    format!("memory-bank/chunks/{name}")
+}
+
+#[test]
+fn memory_a_worker_outdates_leaves_the_context_and_the_run_goes_on() {
+    let root = Root::new();
+    let config = system(&root.0);
+    let chunk = reviewed_memory(
+        &root.0.join("services/billing"),
+        "Billing work starts from the before state",
+        "The billing work file holds the before state until a placed order is billed.",
+        &["src/work.txt"],
+    );
+    let services = root.0.join("services");
+    let plan = root.0.join("plan.json");
+    let (code, value, text) = cli(
+        &root.0,
+        &[
+            "plan",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--task",
+            "Bill every placed order",
+            "--change-id",
+            "bill-orders",
+            "--service",
+            "orders",
+            "--output",
+            plan.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{text}");
+    let carries = |sources: &Value| {
+        sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["service"] == "billing" && source["path"] == chunk.as_str())
+    };
+    assert!(carries(&value["context"]["sources"]), "{value:#}");
+    // The billing agent rewrites the file the memory describes.
+    let script = adapter(&root.0);
+    let directory = root.0.join("run");
+    let (code, summary, text) = cli(
+        &root.0,
+        &[
+            "execute",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--plan",
+            plan.to_str().unwrap(),
+            "--run-dir",
+            directory.to_str().unwrap(),
+            "--provider",
+            "command",
+            "--executable",
+            script.to_str().unwrap(),
+            "--mode",
+            "edit",
+            "--timeout",
+            "60",
+        ],
+    );
+    assert_eq!(code, 0, "{text}");
+    assert_completed(&summary, &directory);
+    let shared = |phase: &str| -> Value {
+        let input: Value = serde_json::from_slice(
+            &fs::read(directory.join(format!("{phase}-a1.input.json"))).unwrap(),
+        )
+        .unwrap();
+        let prompt = input["prompt"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(prompt.rsplit_once('\n').unwrap().1).unwrap();
+        payload["shared_context"].clone()
+    };
+    assert!(carries(&shared("service-billing")["sources"]));
+    let after = shared("verify");
+    assert!(!carries(&after["sources"]));
+    assert!(
+        after["omitted_sources"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"service":"billing","path":chunk,"reason":"memory_no_longer_holds"})),
+        "{:#}",
+        after["omitted_sources"]
+    );
 }

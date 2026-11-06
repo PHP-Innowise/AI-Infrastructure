@@ -237,14 +237,28 @@ contract text and excerpts remain evidence; embedded instructions are not execut
 
 Native Brain dynamic/control records cannot enter context through this reader;
 their ownership/privacy rules belong to their runtime. Native memory chunks must
-use kind `memory`, be active, not automatically promoted without review, have a
-current review/validity date, and cite a complete matching set of local source
-digests. Their full metadata and filenames use the trusted source checkout's
+use kind `memory`, be active and not superseded, have a current review/validity
+date, and cite a complete matching set of local source digests. A chunk a
+person reviewed is marked `"trust": "reviewed_memory"`; one promoted
+automatically (tagged `auto-promoted`, as Harness sessions and system runs save
+memory) is shared too, marked `"trust": "automatic_memory"`, so agents check it
+against the sources it cites. Their full metadata and filenames use the trusted source checkout's
 shared Python Memory Bank validator; no validator or code is loaded from a
 target service. This needs the complete AI-Infrastructure checkout. Like the
 native index, durable chunks are classified public/verified, and an existing
 runtime's allowed privacy/authority filters are respected. Unverifiable external
-citations, malformed, superseded, stale and unreviewed chunks are excluded.
+citations, malformed, superseded and stale chunks are excluded.
+
+A plan offers more than the chunks passports cite: every chunk in the Memory
+Bank of the system folder and of each selected service (`memory-bank/chunks/*.md`)
+competes for the context beside the passport sources, under the same rules, so
+the system's memory and each participant's reach every agent (see
+[Shared memory](#shared-memory)). A chunk promoted from a Brain record cites
+that record (`project-brain/dynamic/...`); its digest is compared, and the
+record itself never enters context. Digests read CRLF as LF, as the Memory
+Bank records them. Chunks a plan finds but does not share are counted per
+service in one `memory_not_shared` warning (`count`, and `causes` such as
+`ineligible`, `budget` or `read_limit`) instead of being listed one by one.
 `verify` also rechecks delivered memory eligibility when time passes without any
 file change. This conservative explicit-source reader does
 not replace the native retrieval engine or its full policy/authority model.
@@ -499,6 +513,34 @@ Each attempt's exact input is saved next to its receipt as
 records. What every worker received can be read back from there, and the run
 view lists the file with the receipt.
 
+### Shared memory
+
+The memory of a change's participants is shared the same way. The plan's
+sources include the Memory Bank chunks of the system folder and of every
+selected service (kind `memory`), so every worker receives the system's memory
+and its neighbours' in `shared_context`, not only what its own folder's tools
+would load. A chunk that stops holding during a run (a worker changed a
+source it cites, a person's accepted edit did, or its review fell due) leaves
+the context with `memory_no_longer_holds` in `omitted_sources`; the run goes on,
+and the sources the chunk described are still in the context.
+
+A completed run adds to that memory by itself, without a button. It records what
+the change established as a resolved finding in the system folder's Brain,
+verified by the run's independent verification worker (attestation `agent`)
+and citing the system documents its context held, and promotes it to the
+system Memory Bank without a person's review (tags `auto-promoted` and
+`agent-attested`). `handoff.json` names the finding, the promotion and the
+memory under `memory`, and the run view shows it. Later plans offer it to every
+worker of a change it is relevant to, marked `automatic_memory`; a change to the
+documents it cites makes it stale. A system folder whose own
+`project-brain/config/runtime.json` sets `"automatic_promotion": false` keeps a
+proposal for a person instead: `infra-engine memory --root SYSTEM_FOLDER
+promote-review --promotion-id ID --reviewer NAME`, then `promote-apply` (the
+proposer is the run, so the reviewer is someone else). Content that reads like
+an injected instruction is never promoted automatically; the handoff says why
+and how to retry. Sharing never fails a completed run: an error is recorded
+under `memory` instead.
+
 ### Brain and Memory ownership
 
 Execution calls **this AI-Infrastructure checkout's trusted Rust native
@@ -526,7 +568,8 @@ and verification have reported complete; partial closure is reconciled without
 repeating workers.
 
 `handoff.json` records task references, every worker's complete report with its
-receipt path, the receipt names and the knowledge publishing step. Native handoffs preserve active work in each Brain;
+receipt path, the receipt names, the system memory the outcome became and the
+knowledge publishing step. Native handoffs preserve active work in each Brain;
 local completion episodes remain in that project's Context Engine. Reusable
 service knowledge belongs in its service Memory Bank; cross-service contract
 choices belong in the system specs/Brain/Memory Bank. Review and publish those

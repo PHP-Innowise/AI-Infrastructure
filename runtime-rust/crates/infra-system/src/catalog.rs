@@ -1,4 +1,5 @@
 use crate::common::*;
+use infra_core::bank::publication::PublicationFiles;
 use infra_core::{BankService, ErrorKind, Result, Roots, RuntimeContext, RuntimeError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json as object};
@@ -733,6 +734,7 @@ impl System {
         let path = string(&entry["path"]).to_string();
         let result = (|| -> Result<Value> {
             let raw = self.read(sid, root, &path, budget.as_deref_mut(), room)?;
+            let mut trust = "source_evidence";
             let content = std::str::from_utf8(&raw).map_err(|_| fail("Source is not UTF-8"))?;
             if content.contains('\0') || sensitive(content) {
                 return Err(fail("sensitive_or_binary"));
@@ -747,12 +749,19 @@ impl System {
                 let meta = parse_json(raw.as_bytes(), MAX_SOURCE_BYTES)?;
                 if !meta.is_object()
                     || meta["status"] != "active"
-                    || texts(&meta["tags"])
-                        .iter()
-                        .any(|tag| tag == "auto-promoted")
                     || !meta["superseded_by"].is_null()
                 {
                     return Err(fail("ineligible_memory"));
+                }
+                // Memory promoted without a person's review is shared too, as
+                // Harness sessions share it, and marked so agents check it.
+                if texts(&meta["tags"])
+                    .iter()
+                    .any(|tag| tag == "auto-promoted")
+                {
+                    trust = "automatic_memory";
+                } else {
+                    trust = "reviewed_memory";
                 }
                 let today = infra_core::domain::clock::local_today();
                 for key in ["review_after", "valid_to"] {
@@ -792,9 +801,20 @@ impl System {
                 {
                     return Err(fail("ineligible_memory"));
                 }
+                // A chunk promoted from a Brain record also cites that record.
+                // The record never enters context: only its digest is
+                // compared, to show it still says what was promoted.
+                let cited = |value: &str| -> Result<String> {
+                    let value = value.split('#').next().unwrap_or("");
+                    if is_record_image(value) {
+                        Ok(value.to_string())
+                    } else {
+                        relative(value)
+                    }
+                };
                 let sources = items(&meta["sources"], MAX_ITEMS)?
                     .iter()
-                    .map(|value| relative(string(value).split('#').next().unwrap_or("")))
+                    .map(|value| cited(string(value)))
                     .collect::<Result<BTreeSet<_>>>()?;
                 let fingerprints = items(&meta["source_digests"], MAX_ITEMS)?;
                 if sources.is_empty() || fingerprints.len() != sources.len() {
@@ -803,16 +823,21 @@ impl System {
                 let mut seen = BTreeSet::new();
                 for fingerprint in fingerprints {
                     fields(fingerprint, &["path", "sha256"], &[])?;
-                    let source = relative(string(&fingerprint["path"]))?;
+                    let source = cited(string(&fingerprint["path"]))?;
                     if !sources.contains(&source)
                         || !seen.insert(source.clone())
                         || !hex(string(&fingerprint["sha256"]), 64)
                     {
                         return Err(fail("unverified_memory"));
                     }
-                    if digest(&self.read(sid, root, &source, budget.as_deref_mut(), None)?)
-                        != string(&fingerprint["sha256"])
-                    {
+                    let raw = if is_record_image(&source) {
+                        PublicationFiles::new(root)?
+                            .read_checked(&source, MAX_SOURCE_BYTES, |_| Ok(()))?
+                            .ok_or_else(|| fail("stale_memory"))?
+                    } else {
+                        self.read(sid, root, &source, budget.as_deref_mut(), None)?
+                    };
+                    if memory_digest(&raw) != string(&fingerprint["sha256"]) {
                         return Err(fail("stale_memory"));
                     }
                 }
@@ -828,7 +853,7 @@ impl System {
                 }
             }
             Ok(
-                object!({"service":sid,"path":path,"kind":entry["kind"],"sha256":digest(&raw),"trust":"source_evidence","excerpt":content.chars().take(2000).collect::<String>(),"truncated":content.chars().count()>2000}),
+                object!({"service":sid,"path":path,"kind":entry["kind"],"sha256":digest(&raw),"trust":trust,"excerpt":content.chars().take(2000).collect::<String>(),"truncated":content.chars().count()>2000}),
             )
         })();
         match result {
@@ -837,7 +862,11 @@ impl System {
                 Err(error)
             }
             Err(_) => {
-                self.warn(sid, "source_unavailable_or_ineligible", Some(&path));
+                // Memory found in a bank rather than cited by a passport is
+                // counted by the planner, not named one file at a time.
+                if entry["discovered"] != true {
+                    self.warn(sid, "source_unavailable_or_ineligible", Some(&path));
+                }
                 Ok(None)
             }
         }

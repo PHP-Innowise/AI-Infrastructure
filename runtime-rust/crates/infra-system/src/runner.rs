@@ -67,6 +67,11 @@ pub fn check_changes(
         &verification["changed"],
         MAX_SERVICES * MAX_ITEMS * 3 + MAX_ITEMS,
     )? {
+        // Shared memory that stopped holding only leaves the context, which
+        // the refresh below does; it is no change to a source.
+        if change["reason"] == "memory_ineligible" {
+            continue;
+        }
         let sid = string(&change["service"]);
         let path = string(&change["path"]);
         let place = if sid == "__system__" {
@@ -259,7 +264,9 @@ async fn execute_run_context(
  let steps=state["steps"].as_array().cloned().ok_or_else(||fail("Missing steps"))?;
  for step in steps{if step["status"]=="completed"{continue;}
  if cancel.load(Ordering::SeqCst){return Err(RuntimeError::coded(ErrorKind::Unavailable,"interrupted","interrupted"));}
- let mut current=System::new(&system.config,&system.allow_roots)?;if current.verify(&plan)?["fresh"]!=true{check_changes(&mut current,&plan,None,None,&state,false)?;return Err(fail("Sources changed between dispatches; prepare new plan"));}
+ let mut current=System::new(&system.config,&system.allow_roots)?;let verdict=current.verify(&plan)?;if verdict["fresh"]!=true{
+ // Memory that stopped holding between dispatches leaves the shared context; any other change needs a new plan.
+ if verdict["changed"].as_array().is_some_and(|changed|changed.iter().all(|change|change["reason"]=="memory_ineligible")){plan=current.refresh_checkpoint(&plan,&BTreeSet::new())?;save(&directory,"checkpoint.json",&plan,false)?;}else{check_changes(&mut current,&plan,None,None,&state,false)?;return Err(fail("Sources changed between dispatches; prepare new plan"));}}
  let prior=reports(&directory,&state)?;let attempt=step["attempt"].as_u64().filter(|attempt|*attempt<100).ok_or_else(||fail("Dispatch retry limit reached"))?+1;let mut preview=step.clone();preview["dispatch_id"]=id32().into();preview["status"]="running".into();preview["attempt"]=object!(attempt);
  let sid=string(&step["service"]).to_string();let provider=string(&state["provider"]).to_string();let executable=std::path::PathBuf::from(string(&state["executable"]));let scratch=native::read_only_scratch(&provider,&executable,string(&step["mode"]),&directory)?;
  let prompt=native::prompt_for(&state,&plan,&preview,&prior,scratch.as_deref())?;let access=dispatch_access(&state,&step);let root=std::path::PathBuf::from(string(&state["roots"][&sid]));let schema=execution::result_schema(&texts(&state["selected"]));
@@ -279,7 +286,11 @@ async fn execute_run_context(
  current=System::new(&system.config,&system.allow_roots)?;plan=check_changes(&mut current,&plan,Some(&preview),Some(&receipt["report"]),&state,false)?;save(&directory,"checkpoint.json",&plan,false)?;finish(&directory,&mut state,&preview,&receipt,&brains)?;notify(event,finished);
  if preview["id"]=="contracts"{break;}}
  if state["steps"].as_array().is_some_and(|steps|steps.iter().any(|step|step["status"]!="completed")){return Ok(state.clone());}
- let reports=reports(&directory,&state)?;save(&directory,"handoff.json",&object!({"schema_version":1,"kind":"ai-system-handoff","run_id":state["run_id"],"change_id":state["change_id"],"tasks":state["tasks"],"reports":reports,"receipts":state["steps"].as_array().into_iter().flatten().map(receipt_name).collect::<Vec<_>>(),"knowledge":"Review contract decisions and reusable lessons in receipts; publish through each owning runtime's promotion workflow. Raw context is not durable knowledge. If the change added, versioned or removed a contract or a dependency, update the service passports (Fill with AI or the system editor) before planning the next change: plans route and trace impact only through declared contracts.","meaning":"Worker-reported completion and checks; no commit, merge or deployment is implied."}),false)?;
+ let reports=reports(&directory,&state)?;
+ // The run's outcome becomes the system's memory by itself; failing to share it never fails a completed run.
+ let memory=match brains.get("__system__"){Some(brain)=>brain.share_outcome(&state,&plan,&reports).unwrap_or_else(|error|object!({"error":error.message})),None=>Value::Null};
+ let shared=if memory["status"]=="applied"{" Its outcome is now the system's memory: later plans share it with every agent."}else if memory["review_mode"]=="human"{" Its outcome waits as a proposal for the system's memory, since the system folder turns automatic promotion off: approve it with memory promote-review, then promote-apply."}else{""};
+ save(&directory,"handoff.json",&object!({"schema_version":1,"kind":"ai-system-handoff","run_id":state["run_id"],"change_id":state["change_id"],"tasks":state["tasks"],"reports":reports,"memory":memory,"receipts":state["steps"].as_array().into_iter().flatten().map(receipt_name).collect::<Vec<_>>(),"knowledge":format!("Review contract decisions and reusable lessons in receipts; publish through each owning runtime's promotion workflow. Raw context is not durable knowledge.{shared} If the change added, versioned or removed a contract or a dependency, update the service passports (Fill with AI or the system editor) before planning the next change: plans route and trace impact only through declared contracts."),"meaning":"Worker-reported completion and checks; no commit, merge or deployment is implied."}),false)?;
  for sid in &ids{if !texts(&state["closed_tasks"]).contains(sid){let run=string(&state["run_id"]).to_string();brains.get(sid).ok_or_else(||fail("Missing native Brain"))?.complete(reference_mut(&mut state,sid)?,&run)?;state["closed_tasks"].as_array_mut().ok_or_else(||fail("Closed tasks missing"))?.push(sid.clone().into());save(&directory,"run.json",&state,false)?;}}
  state["status"]="completed".into();state["finished_at"]=now().into();save(&directory,"run.json",&state,false)?;Ok(state.clone())
  }.await;

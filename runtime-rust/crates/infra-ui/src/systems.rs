@@ -1296,9 +1296,10 @@ fn render_run() {
             String::new()
         } else {
             format!(
-                "Handoff saved: {}/handoff.json\n{}",
+                "Handoff saved: {}/handoff.json\n{}{}",
                 m::text(&v["execution"], "run_dir"),
-                m::text(&v["handoff"], "knowledge")
+                m::text(&v["handoff"], "knowledge"),
+                handoff_memory(&v["handoff"])
             )
         },
     );
@@ -2438,6 +2439,30 @@ async fn agents(v: &V) {
     crate::activity::set_plan("system-agents", steps, active);
     crate::activity::load("system-agents", &sid).await;
 }
+/// The line a run's handoff adds about the system memory its outcome became:
+/// shared by itself, held for a person where the system folder turns
+/// automatic promotion off, or why it is not memory yet.
+fn handoff_memory(handoff: &V) -> String {
+    let memory = &handoff["memory"];
+    let title = m::text(memory, "title");
+    if memory["status"] == "applied" {
+        format!(
+            "\nShared as system memory: {title} ({}). Later changes give it to every agent.",
+            m::text(memory, "memory_id")
+        )
+    } else if memory["review_mode"] == "human" {
+        format!(
+            "\nProposed as system memory: {title} (proposal {}). The system folder turns automatic promotion off: approve it with memory promote-review, then promote-apply.",
+            m::text(memory, "proposal_id")
+        )
+    } else if let Some(note) = memory["note"].as_str() {
+        format!("\nThe outcome is not system memory yet: {note}")
+    } else if let Some(error) = memory["error"].as_str() {
+        format!("\nThe outcome did not become system memory: {error}")
+    } else {
+        String::new()
+    }
+}
 /// What a service agent's card says before its dispatch starts. Every agent
 /// reads the system folder and every service of the change (they share one
 /// context); the access scope decides only where a service agent edits. The
@@ -3097,6 +3122,29 @@ mod display_tests {
     fn lists_read_as_text() {
         assert_eq!(joined(&json!(["a", "b"])), "a, b");
         assert_eq!(joined(&json!([])), "none");
+    }
+    #[test]
+    fn a_handoff_says_what_memory_the_outcome_became() {
+        let title = "System change refunds: check receipts";
+        assert_eq!(
+            handoff_memory(&json!({"memory":{"status":"applied","review_mode":"automatic","memory_id":"MEM-1","title":title}})),
+            "\nShared as system memory: System change refunds: check receipts (MEM-1). Later changes give it to every agent."
+        );
+        assert_eq!(
+            handoff_memory(&json!({"memory":{"status":"proposed","review_mode":"human","proposal_id":"p1","title":title}})),
+            "\nProposed as system memory: System change refunds: check receipts (proposal p1). The system folder turns automatic promotion off: approve it with memory promote-review, then promote-apply."
+        );
+        assert_eq!(
+            handoff_memory(
+                &json!({"memory":{"status":"proposed","review_mode":"automatic","note":"Promotion source is not eligible"}})
+            ),
+            "\nThe outcome is not system memory yet: Promotion source is not eligible"
+        );
+        assert_eq!(
+            handoff_memory(&json!({"memory":{"error":"Record content contains a secret"}})),
+            "\nThe outcome did not become system memory: Record content contains a secret"
+        );
+        assert_eq!(handoff_memory(&json!({})), "");
     }
     #[test]
     fn a_waiting_service_agent_reads_the_whole_change() {

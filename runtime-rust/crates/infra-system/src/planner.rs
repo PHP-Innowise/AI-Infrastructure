@@ -49,11 +49,24 @@ impl System {
         // source the task is about outranks an unrelated one of the same kind.
         let mut cited = BTreeMap::<(String, String), String>::new();
         if !selected.is_empty() {
+            let mut declared = BTreeSet::new();
             for entry in items(&self.config_data["shared_sources"], MAX_ITEMS)? {
+                declared.insert(string(&entry["path"]).to_string());
                 groups
                     .entry("__system__".into())
                     .or_default()
                     .push_back((self.root.clone(), entry.clone()));
+            }
+            // The system's memory and each participant's below are offered to
+            // the context every agent shares; the reader admits current chunks
+            // and marks those no person reviewed.
+            for path in memory_chunks(&self.root).unwrap_or_default() {
+                if !declared.contains(&path) {
+                    groups.entry("__system__".into()).or_default().push_back((
+                        self.root.clone(),
+                        object!({"path":path,"kind":"memory","discovered":true}),
+                    ));
+                }
             }
         }
         for selected in &selected {
@@ -94,6 +107,11 @@ impl System {
                         object!({"path":path,"kind":if is_memory(&path){"memory"}else{"contract"}}),
                     );
                 }
+            }
+            for path in memory_chunks(&service.root).unwrap_or_default() {
+                declared
+                    .entry(path.clone())
+                    .or_insert(object!({"path":path,"kind":"memory","discovered":true}));
             }
             for entry in declared.into_values() {
                 groups
@@ -141,6 +159,20 @@ impl System {
         }
         let mut queue = groups.keys().cloned().collect::<VecDeque<_>>();
         let mut omissions = vec![];
+        // Memory found in a bank is counted per service when it is not shared,
+        // so a large bank does not fill the plan with one line per chunk.
+        let mut unshared = BTreeMap::<String, BTreeMap<String, usize>>::new();
+        let mut omit = |sid: &str, entry: &Value, reason: &str| {
+            if entry["discovered"] == true {
+                *unshared
+                    .entry(sid.to_string())
+                    .or_default()
+                    .entry(reason.to_string())
+                    .or_default() += 1;
+            } else {
+                omissions.push(object!({"service":sid,"path":entry["path"],"reason":reason}));
+            }
+        };
         let mut reads = ReadBudget::default();
         let mut exhausted = false;
         while let Some(sid) = queue.pop_front() {
@@ -159,18 +191,18 @@ impl System {
             let floor=encoded(&object!({"service":sid,"path":path,"kind":entry["kind"],"sha256":"0".repeat(64),"trust":"source_evidence","excerpt":"","truncated":true}))?.chars().count();
             let room = budget.saturating_sub(length + separator + floor);
             if room < 1 {
-                omissions.push(object!({"service":sid,"path":path,"reason":"budget"}));
+                omit(&sid, &entry, "budget");
                 continue;
             }
             if exhausted {
-                omissions.push(object!({"service":sid,"path":path,"reason":"read_limit"}));
+                omit(&sid, &entry, "read_limit");
                 continue;
             }
             let content =
                 match self.source_content(&sid, &root, &entry, Some(&mut reads), Some(room)) {
                     Ok(Some(content)) => content,
                     Ok(None) => {
-                        omissions.push(object!({"service":sid,"path":path,"reason":"ineligible"}));
+                        omit(&sid, &entry, "ineligible");
                         continue;
                     }
                     Err(error)
@@ -181,7 +213,7 @@ impl System {
                             exhausted = true;
                             self.warn("__system__", "source_read_limit", None);
                         }
-                        omissions.push(object!({"service":sid,"path":path,"reason":reason}));
+                        omit(&sid, &entry, reason);
                         continue;
                     }
                     Err(error) => return Err(error),
@@ -194,8 +226,14 @@ impl System {
                     .push(content);
                 length += added;
             } else {
-                omissions.push(object!({"service":sid,"path":path,"reason":"budget"}));
+                omit(&sid, &entry, "budget");
             }
+        }
+        for (sid, causes) in unshared {
+            let count = causes.values().sum::<usize>();
+            self.warnings.push(
+                object!({"service":sid,"reason":"memory_not_shared","count":count,"causes":causes}),
+            );
         }
         let mut steps = vec![
             object!({"id":"scope","depends_on":[],"goal":"Confirm affected services and missing relationships"}),
@@ -474,6 +512,7 @@ impl System {
         let budget = updated["context_budget_chars"].as_u64().unwrap_or(0) as usize;
         let mut room = budget.saturating_sub(encoded(&plan["context"])?.chars().count());
         let mut sources = vec![];
+        let mut dropped = vec![];
         for entry in items(&updated["context"]["sources"], MAX_SERVICES * MAX_ITEMS)? {
             let before = encoded(entry)?.chars().count();
             let sid = string(&entry["service"]);
@@ -487,15 +526,28 @@ impl System {
                     .root
                     .clone()
             };
-            let content = self
-                .source_content(
-                    sid,
-                    &root,
-                    &object!({"path":path,"kind":entry["kind"]}),
-                    None,
-                    None,
-                )?
-                .ok_or_else(|| fail("Delivered source no longer eligible; prepare new plan"))?;
+            let Some(content) = self.source_content(
+                sid,
+                &root,
+                &object!({"path":path,"kind":entry["kind"]}),
+                None,
+                None,
+            )?
+            else {
+                // Memory that stopped holding (a worker changed what it cites,
+                // or its review fell due) leaves the shared context; the
+                // sources it described are still there.
+                if entry["kind"] == "memory" {
+                    dropped.push(
+                        object!({"service":sid,"path":path,"reason":"memory_no_longer_holds"}),
+                    );
+                    room += before + 1;
+                    continue;
+                }
+                return Err(fail(
+                    "Delivered source no longer eligible; prepare new plan",
+                ));
+            };
             if hashes
                 .get(&(sid.to_string(), path.to_string()))
                 .map(String::as_str)
@@ -508,6 +560,16 @@ impl System {
             sources.push(content);
         }
         updated["context"]["sources"] = object!(sources);
+        if !dropped.is_empty() {
+            let omitted = updated["omitted_sources"]
+                .as_array_mut()
+                .ok_or_else(|| fail("Invalid omitted sources"))?;
+            for entry in dropped {
+                if !omitted.contains(&entry) {
+                    omitted.push(entry);
+                }
+            }
+        }
         let size = encoded(&updated["context"])?.chars().count();
         updated["context_chars"] = object!(size);
         if size > budget {

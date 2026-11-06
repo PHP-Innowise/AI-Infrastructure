@@ -1,7 +1,8 @@
 use crate::{catalog::System, common::*};
 use infra_core::bank::publication::PublicationFiles;
 use infra_core::{
-    BrainRepository, ErrorKind, Result, Roots, RuntimeContext, RuntimeError, Store, UpdateRecord,
+    BankService, BrainRepository, CreateRecord, ErrorKind, Result, Roots, RuntimeContext,
+    RuntimeError, Store, UpdateRecord,
 };
 use serde_json::{Value, json as object};
 use std::{
@@ -265,6 +266,144 @@ impl Brain {
         }
         Err(last.unwrap_or_else(|| fail("Native task completion unavailable")))
     }
+    /// Makes what a completed run established the system's memory, by itself:
+    /// a resolved finding in this (the system's) Brain, verified by the agent
+    /// that independently checked the run, promoted to its Memory Bank
+    /// without a person's review (tagged `auto-promoted`, as Harness sessions
+    /// save memory). Later plans share it with every agent of a change. A
+    /// system folder whose runtime settings turn `automatic_promotion` off
+    /// keeps a proposal for a person instead (`memory promote-review`, then
+    /// `promote-apply`). Running it again for the same run reuses the finding
+    /// and its promotion.
+    pub fn share_outcome(&self, state: &Value, plan: &Value, reports: &[Value]) -> Result<Value> {
+        guard_brain(&self.repository.context.roots.state)?;
+        let run = string(&state["run_id"]);
+        let external = format!("ai-system/{run}/outcome");
+        let task = string(&plan["context"]["task"]);
+        let title = clipped(
+            &format!("System change {}: {task}", string(&plan["change_id"])),
+            200,
+        );
+        let body = outcome_text(state, reports);
+        let root = self.repository.context.roots.state.clone();
+        // What the agreement rested on: the system's own documents in the
+        // shared context. A later change to them makes the memory stale.
+        let sources = plan["context"]["sources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|source| source["service"] == "__system__" && source["kind"] != "memory")
+            .map(|source| string(&source["path"]).to_string())
+            .filter(|path| root.join(path).is_file())
+            .take(10)
+            .collect::<Vec<_>>();
+        let record = match self.repository.find(&external, None, false) {
+            Ok(image) => image.record,
+            Err(error) if error.kind == ErrorKind::NotFound => {
+                self.repository.create(CreateRecord {
+                    record_type: "finding".into(),
+                    external_id: external.clone(),
+                    title: title.clone(),
+                    goal: Some(task.into()),
+                    sources,
+                    privacy: "team".into(),
+                    authority: "verified".into(),
+                    attestation: Some("agent".into()),
+                    ..CreateRecord::default()
+                })?
+            }
+            Err(error) => return Err(error),
+        };
+        let id = string(&record["id"]).to_string();
+        if record["status"] != "resolved" {
+            self.repository.update(
+                &id,
+                UpdateRecord {
+                    expected_revision: record["revision"].as_u64(),
+                    progress: Some(body.clone()),
+                    transition_to: Some("resolved".into()),
+                    reason: format!("System run {run} completed and its verification passed"),
+                    attestation: Some("agent".into()),
+                    ..Default::default()
+                },
+            )?;
+        }
+        let bank = BankService::new(self.repository.context.clone());
+        let existing = infra_core::bank::promotion::list(&bank, false)?
+            .into_iter()
+            .find(|proposal| {
+                proposal["status"] != "rejected"
+                    && proposal["source_records"]
+                        .as_array()
+                        .is_some_and(|rows| rows.iter().any(|row| row["id"] == id.as_str()))
+            });
+        // Only an explicit `false` in the folder's own settings holds the
+        // outcome for a person; the loaded default is off everywhere.
+        let held = std::fs::read(root.join("project-brain/config/runtime.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+            .is_some_and(|config| config["automatic_promotion"] == false);
+        let mut proposal = match existing {
+            Some(proposal) => proposal,
+            None => bank.propose(std::slice::from_ref(&id), &title, &body, !held)?,
+        };
+        let mut note = Value::Null;
+        if proposal["review_mode"] == "automatic" && proposal["status"] != "applied" {
+            let promotion = string(&proposal["id"]).to_string();
+            let applied = (|| -> Result<Value> {
+                if proposal["status"] == "proposed" {
+                    bank.review(&promotion, None, true)?;
+                }
+                bank.apply(&promotion)
+            })();
+            match applied {
+                Ok(applied) => proposal = applied,
+                Err(error) => {
+                    note = format!(
+                        "{}; run memory promote-auto in the system folder once it is resolved",
+                        error.message
+                    )
+                    .into()
+                }
+            }
+        }
+        Ok(
+            object!({"record_id":id,"proposal_id":proposal["id"],"status":proposal["status"],"review_mode":proposal["review_mode"],"memory_id":proposal["destination_memory_id"],"title":title,"note":note}),
+        )
+    }
+}
+/// Text of a run's outcome for its memory proposal: the mode and services,
+/// then each report's summary in run order, bounded.
+fn outcome_text(state: &Value, reports: &[Value]) -> String {
+    let mode = if state["mode"] == "read-only" {
+        "Investigation"
+    } else {
+        "Change"
+    };
+    let mut parts = vec![format!(
+        "{mode} across {}.",
+        texts(&state["selected"]).join(", ")
+    )];
+    for report in reports {
+        let label = match string(&report["phase"]) {
+            "contracts" => "Agreement",
+            "verify" => "Verification",
+            phase => phase.strip_prefix("service-").unwrap_or(phase),
+        };
+        parts.push(format!(
+            "{label}: {}",
+            clipped(string(&report["summary"]), 900)
+        ));
+    }
+    clipped(&parts.join(" "), 6000)
+}
+fn clipped(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let mut short = text.chars().take(limit - 1).collect::<String>();
+    short.push('…');
+    short
 }
 pub fn access_scope(state: &Value) -> &str {
     state

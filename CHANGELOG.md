@@ -40,6 +40,23 @@ edition's own files remain in that edition's changelog.
   receipt as `PHASE-aN.input.json`, which the run view names, and
   `handoff.json` keeps the complete reports. Workers remain separate CLI
   processes, so verification stays independent of the agents it checks.
+- System Orchestration: a change's memory is shared by all of its agents.
+  A plan offers the Memory Bank chunks of the system folder and of every
+  selected service to the shared context; a service agent used to get at most
+  its own folder's memory, and only through an attached edition's hooks.
+  Memory a person reviewed is marked `reviewed_memory`; memory promoted
+  automatically, which plans used to refuse, is shared as `automatic_memory`.
+  Chunks found but not shared are counted per service in one
+  `memory_not_shared` warning. A chunk promoted from a Brain record is
+  admitted by comparing that record's digest (the record never enters
+  context), so promoted memory can be shared at all, and digests read CRLF as
+  LF as the Memory Bank records them. Memory that stops holding during a run
+  leaves the context (`memory_no_longer_holds`) instead of stopping the run.
+  A completed run makes its outcome the system's memory by itself: a resolved
+  finding in the system Brain, verified by the run's verification agent,
+  promoted to the system Memory Bank. A system folder that turns
+  `automatic_promotion` off keeps a proposal for `memory promote-review` and
+  `promote-apply` instead. The handoff and the run view name the memory.
 - System Orchestration, found by running it on an eight-service, five-repository
   microservice system with real Codex workers:
   - Executing a reviewed plan no longer stops at its first dispatch with
