@@ -1735,3 +1735,202 @@ esac"#
     );
     assert!(!text.contains(");););"), "{text}");
 }
+
+#[test]
+fn experimental_context_never_creates_verified_outcome_or_promotion() {
+    struct Experimental;
+    impl infra_system::runner::DispatchContext for Experimental {
+        fn prompt(
+            &mut self,
+            state: &Value,
+            plan: &Value,
+            step: &Value,
+            prior: &[Value],
+            scratch: Option<&Path>,
+        ) -> infra_core::Result<String> {
+            infra_system::native::prompt_for(state, plan, step, prior, scratch)
+        }
+        fn completed(&mut self, _: &Value, _: &Value, _: &Value) -> infra_core::Result<()> {
+            Ok(())
+        }
+    }
+    infra_harness::process::use_guardian(engine()).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for (automatic, ordinary_resume) in [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let root = Root::new();
+        let config = system(&root.0);
+        write_json(
+            &root.0.join("system/project-brain/config/runtime.json"),
+            &json!({"automatic_promotion":automatic}),
+        );
+        let script = adapter(&root.0);
+        let text = fs::read_to_string(&script).unwrap().replace(
+            "Verified end to end",
+            "Unverified hypothesis RUN_MEMORY_V1=[]",
+        );
+        fs::write(&script, text).unwrap();
+        let mut system =
+            infra_system::catalog::System::new(&config, &[root.0.join("services")]).unwrap();
+        let plan = system
+            .plan(
+                "Bill every placed order",
+                "context-only",
+                &["orders".into()],
+                &[],
+                20000,
+                2,
+            )
+            .unwrap();
+        let run = root.0.join("context-run");
+        runtime
+            .block_on(infra_system::native::create_run(
+                &mut system,
+                &plan,
+                &run,
+                "command",
+                script.to_str(),
+                "edit",
+                30,
+                "service",
+            ))
+            .unwrap();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut state = runtime
+            .block_on(infra_system::runner::drive_run_with_context(
+                &mut system,
+                &run,
+                cancel.clone(),
+                std::sync::Arc::new(std::sync::Mutex::new(Experimental)),
+                None,
+                &mut |event| {
+                    if ordinary_resume
+                        && event["type"] == "dispatch_finished"
+                        && event["phase"] == "contracts"
+                    {
+                        cancel.store(true, Ordering::SeqCst);
+                    }
+                    Ok(())
+                },
+            ))
+            .unwrap();
+        if ordinary_resume {
+            assert_eq!(state["status"], "interrupted");
+            cancel.store(false, Ordering::SeqCst);
+            state = runtime
+                .block_on(infra_system::runner::drive_run(
+                    &mut system,
+                    &run,
+                    None,
+                    infra_system::runner::Acceptance::default(),
+                    cancel,
+                    &mut |_| Ok(()),
+                ))
+                .unwrap();
+        }
+        assert_eq!(state["status"], "completed");
+        let handoff: Value =
+            serde_json::from_slice(&fs::read(run.join("handoff.json")).unwrap()).unwrap();
+        assert_eq!(handoff["memory"]["status"], "skipped");
+        assert!(
+            fs::read_to_string(run.join("verify-a1.json"))
+                .unwrap()
+                .contains("Unverified hypothesis")
+        );
+        for relative in [
+            "project-brain/dynamic/findings",
+            "project-brain/control/promotions",
+            "memory-bank/chunks",
+        ] {
+            let count = fs::read_dir(root.0.join("system").join(relative))
+                .map(|entries| entries.count())
+                .unwrap_or(0);
+            assert_eq!(count, 0, "{relative}, automatic={automatic}");
+        }
+    }
+}
+
+#[test]
+fn experimental_reports_are_screened_before_receipt_persistence() {
+    struct Experimental;
+    impl infra_system::runner::DispatchContext for Experimental {
+        fn prompt(
+            &mut self,
+            state: &Value,
+            plan: &Value,
+            step: &Value,
+            prior: &[Value],
+            scratch: Option<&Path>,
+        ) -> infra_core::Result<String> {
+            infra_system::native::prompt_for(state, plan, step, prior, scratch)
+        }
+        fn completed(&mut self, _: &Value, _: &Value, _: &Value) -> infra_core::Result<()> {
+            Ok(())
+        }
+    }
+    infra_harness::process::use_guardian(engine()).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let secret = format!("ghp_{}", "Z".repeat(24));
+    for malformed in [false, true] {
+        let root = Root::new();
+        let config = system(&root.0);
+        let script = adapter(&root.0);
+        let text = if malformed {
+            format!(
+                "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{{\"status\":\"completed\",\"{secret}\":1,\"{secret}\":2}}'\n"
+            )
+        } else {
+            fs::read_to_string(&script).unwrap().replace(
+                "Contracts agreed",
+                &format!("Observed source. RUN_MEMORY_V1=[] {secret}"),
+            )
+        };
+        fs::write(&script, text).unwrap();
+        let mut system =
+            infra_system::catalog::System::new(&config, &[root.0.join("services")]).unwrap();
+        let plan = system
+            .plan(
+                "Bill every placed order",
+                "private-context",
+                &["orders".into()],
+                &[],
+                20000,
+                2,
+            )
+            .unwrap();
+        let run = root.0.join("context-run");
+        runtime
+            .block_on(infra_system::native::create_run(
+                &mut system,
+                &plan,
+                &run,
+                "command",
+                script.to_str(),
+                "edit",
+                30,
+                "service",
+            ))
+            .unwrap();
+        let state = runtime
+            .block_on(infra_system::runner::drive_run_with_context(
+                &mut system,
+                &run,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                std::sync::Arc::new(std::sync::Mutex::new(Experimental)),
+                None,
+                &mut |_| Ok(()),
+            ))
+            .unwrap();
+        assert_eq!(state["status"], "blocked");
+        let raw = fs::read_to_string(run.join("contracts-a1.json")).unwrap();
+        let receipt: Value = serde_json::from_str(&raw).unwrap();
+        assert!(receipt["report"].is_null());
+        assert!(!raw.contains(&secret));
+    }
+}
