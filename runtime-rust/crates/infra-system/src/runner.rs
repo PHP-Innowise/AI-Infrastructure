@@ -226,7 +226,23 @@ async fn execute_run_context(
 ) -> Result<Value> {
     let directory = absolute(directory)?;
     let _run_lock = execution::lock(&directory, ".run.lock")?;
-    let initial = native::validate_state(system, &directory, true).await?;
+    let initial = match native::validate_state(system, &directory, true).await {
+        Ok(state) => state,
+        Err(error) => {
+            // A CLI that went missing or changed (a self-updating CLI) stops
+            // the run in its journal too, not only on the terminal that
+            // resumed it: the run view showed such a run as interrupted with
+            // no cause.
+            if let Ok(mut state) = native::validate_state(system, &directory, false).await
+                && state["status"] != "completed"
+            {
+                state["status"] = "blocked".into();
+                state["error"] = error.message.clone().into();
+                let _ = save(&directory, "run.json", &state, false);
+            }
+            return Err(error);
+        }
+    };
     let _workspaces = execution::workspace_locks(system, &texts(&initial["selected"]))?;
     let mut state = native::validate_state(system, &directory, true).await?;
     if state["status"] == "completed" {
@@ -280,9 +296,10 @@ async fn execute_run_context(
  let output=native::run_raw_monitored(&prepared.argv,&root,&prepared.environment,&prepared.remove,&prepared.input,timeout,cancel.clone(),runner_lock.clone(),observer.clone(),|line|{let line=String::from_utf8_lossy(line).to_string();notify(event,object!({"type":"output","phase":phase,"attempt":attempt,"line":line}));Ok(())}).await;
  let elapsed=started.elapsed().as_secs_f64();let mut receipt=object!({"dispatch_id":preview["dispatch_id"],"phase":preview["id"],"input_sha256":preview["input_sha256"],"mode":preview["mode"],"returncode":null,"error":null,"duration_seconds":elapsed,"ok":false,"report":null});
  match output{Ok(output)=>{receipt["returncode"]=object!(output.code);if output.code==0{match native::worker_result(&output.bytes,&provider).and_then(|report|{execution::validate_report(&report,&preview,&texts(&state["selected"]),access_scope(&state))?;Ok(report)}){Ok(report)=>{receipt["report"]=report;receipt["ok"]=object!(execution::success(&receipt,&preview,state["mode"]=="read-only"));if receipt["ok"]!=true{receipt["error"]=if preview["mode"]=="read-only"&&!texts(&receipt["report"]["changed_files"]).is_empty(){"read_only_worker_reported_writes"}else{"worker_blocked_or_verification_incomplete"}.into();}},Err(error)=>{receipt["error"]="invalid_or_sensitive_worker_result".into();receipt["rejection"]=error.message.chars().take(500).collect::<String>().into();}}}else{receipt["error"]="worker_exit_failure".into();if let Some(failure)=native::worker_failure(&output.bytes,&provider){receipt["failure"]=failure.into();}}},
- Err(error)=>{receipt["error"]=if cancel.load(Ordering::SeqCst){"interrupted"}else{error.code.as_deref().unwrap_or("worker_process_failure")}.into();}}
+ // A CLI that could not start or be supervised says why: a real verification stopped as only "unavailable" after the engine binary was replaced under a running Harness.
+ Err(error)=>{let interrupted=cancel.load(Ordering::SeqCst);receipt["error"]=if interrupted{"interrupted"}else{error.code.as_deref().unwrap_or("worker_process_failure")}.into();if !interrupted&&!error.message.trim().is_empty(){receipt["failure"]=native::shown_failure(&error.message).into();}}}
  save(&directory,&receipt_name(&preview),&receipt,true)?;let finished=object!({"type":"dispatch_finished","phase":preview["id"],"service":sid,"attempt":attempt,"ok":receipt["ok"],"error":if receipt["rejection"].is_string(){object!(format!("{}: {}",string(&receipt["error"]),string(&receipt["rejection"])))}else if receipt["failure"].is_string(){object!(format!("{}: {}",string(&receipt["error"]),string(&receipt["failure"])))}else{receipt["error"].clone()},"duration_seconds":elapsed,"report":receipt["report"]});
- if receipt["ok"]!=true{let interrupted=cancel.load(Ordering::SeqCst)||receipt["error"]=="interrupted";state["steps"][index]["status"]=if interrupted{"interrupted"}else{"blocked"}.into();state["status"]=if interrupted{"interrupted"}else{"blocked"}.into();state["error"]=if receipt["failure"].is_string(){object!(format!("The {} CLI exited with code {}: {}",provider,receipt["returncode"].as_i64().map_or_else(||"?".to_string(),|code|code.to_string()),string(&receipt["failure"])))}else{receipt["error"].clone()};save(&directory,"run.json",&state,false)?;notify(event,finished);return Ok(state.clone());}
+ if receipt["ok"]!=true{let interrupted=cancel.load(Ordering::SeqCst)||receipt["error"]=="interrupted";state["steps"][index]["status"]=if interrupted{"interrupted"}else{"blocked"}.into();state["status"]=if interrupted{"interrupted"}else{"blocked"}.into();state["error"]=if receipt["failure"].is_string(){object!(match receipt["returncode"].as_i64(){Some(code)=>format!("The {provider} CLI exited with code {code}: {}",string(&receipt["failure"])),None=>format!("The {provider} CLI could not run: {}",string(&receipt["failure"]))})}else{receipt["error"].clone()};save(&directory,"run.json",&state,false)?;notify(event,finished);return Ok(state.clone());}
  current=System::new(&system.config,&system.allow_roots)?;plan=check_changes(&mut current,&plan,Some(&preview),Some(&receipt["report"]),&state,false)?;save(&directory,"checkpoint.json",&plan,false)?;finish(&directory,&mut state,&preview,&receipt,&brains)?;notify(event,finished);
  if preview["id"]=="contracts"{break;}}
  if state["steps"].as_array().is_some_and(|steps|steps.iter().any(|step|step["status"]!="completed")){return Ok(state.clone());}

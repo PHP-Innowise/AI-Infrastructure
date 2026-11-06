@@ -1558,3 +1558,73 @@ fn memory_a_worker_outdates_leaves_the_context_and_the_run_goes_on() {
         after["omitted_sources"]
     );
 }
+
+fn status(root: &Path, directory: &Path) -> Value {
+    let config = root.join("system/system.json");
+    let services = root.join("services");
+    let (code, status, text) = cli(
+        root,
+        &[
+            "run-status",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--run-dir",
+            directory.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{text}");
+    status
+}
+
+#[test]
+fn a_worker_cli_gone_between_dispatches_stops_the_run_and_says_why() {
+    // The adapter removes itself after the agreement, as an uninstalled CLI
+    // would. The run used to read as interrupted with no cause.
+    let gate = r#"case "$input" in
+  *'"phase":"contracts","service":"__system__","shared_context"'*) rm -f "$0"; report agreed '[]' '["orders","billing"]' ;;
+  *) report checked '[]' '[]' ;;
+esac"#;
+    let root = Root::new();
+    let (code, _, directory) = run_script(&root.0, gate, "read-only");
+    assert_ne!(code, 0);
+    let status = status(&root.0, &directory);
+    assert_eq!(status["status"], "blocked", "{status:#}");
+    let error = status["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{status:#}"));
+    assert!(
+        error.starts_with("Worker executable ")
+            && error.ends_with(" is missing; reinstall it and resume, or start a new run"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_worker_cli_that_cannot_start_says_why_in_its_receipt() {
+    // The adapter removes itself during the first service, so the next
+    // dispatch of the same pass has nothing to start.
+    let gate = r#"case "$input" in
+  *'"phase":"contracts","service":"__system__","shared_context"'*) report agreed '[]' '["orders","billing"]' ;;
+  *'"service":"orders","shared_context"'*) rm -f "$0"; report checked '[]' '[]' ;;
+  *) report checked '[]' '[]' ;;
+esac"#;
+    let root = Root::new();
+    let (_, _, directory) = run_script(&root.0, gate, "read-only");
+    let status = status(&root.0, &directory);
+    let receipt: Value = serde_json::from_slice(
+        &fs::read(directory.join("service-billing-a1.json"))
+            .unwrap_or_else(|_| panic!("{status:#}")),
+    )
+    .unwrap();
+    assert_eq!(receipt["ok"], false, "{receipt:#}");
+    let failure = receipt["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{receipt:#}"));
+    assert!(!failure.trim().is_empty());
+    let error = status["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{status:#}"));
+    assert!(error.ends_with(failure), "{error}\n{receipt:#}");
+}

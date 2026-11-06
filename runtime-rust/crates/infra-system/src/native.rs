@@ -320,8 +320,12 @@ pub fn worker_failure(raw: &[u8], provider: &str) -> Option<String> {
             None => plain = Some(String::from_utf8_lossy(line).trim().to_string()),
         }
     }
-    let cause = said
-        .or(plain)?
+    Some(shown_failure(&said.or(plain)?))
+}
+/// A failure's text as a receipt keeps it: one bounded line, withheld if it
+/// looks like a secret.
+pub fn shown_failure(text: &str) -> String {
+    let cause = text
         .chars()
         .map(|character| {
             if character.is_control() {
@@ -332,11 +336,11 @@ pub fn worker_failure(raw: &[u8], provider: &str) -> Option<String> {
         })
         .take(300)
         .collect::<String>();
-    Some(if sensitive(&cause) {
+    if sensitive(&cause) {
         "(withheld: the message looks like a secret)".into()
     } else {
         cause
-    })
+    }
 }
 pub fn worker_result(raw: &[u8], provider: &str) -> Result<Value> {
     if provider == "command" {
@@ -677,7 +681,16 @@ pub fn validate_state_sync(
         return Err(fail("Invalid saved execution options"));
     }
     if for_execution {
-        let current = infra_core::fs::canonicalize(string(&state["executable"]))?;
+        let current = match infra_core::fs::canonicalize(string(&state["executable"])) {
+            Ok(current) => current,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(fail(format!(
+                    "Worker executable {} is missing; reinstall it and resume, or start a new run",
+                    string(&state["executable"])
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        };
         if !current.is_file() {
             return Err(fail("Worker executable unavailable"));
         }

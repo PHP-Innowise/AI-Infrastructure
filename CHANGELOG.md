@@ -58,6 +58,14 @@ edition's own files remain in that edition's changelog.
   `automatic_promotion` off keeps a proposal for `memory promote-review` and
   `promote-apply` instead. The handoff and the run view name the memory, and
   the plan summary's Shared memory line counts what every agent receives.
+- System Orchestration: a worker CLI that cannot run says why. A real
+  verification stopped as only `unavailable` after the engine was replaced
+  under a running Harness; the receipt now keeps the process error as
+  `failure` and the run reads `The codex CLI could not run: ...`. A CLI that
+  went missing or changed between dispatches (a self-updating CLI) blocks the
+  run with that cause in its journal (`Worker executable ... is missing;
+  reinstall it and resume, or start a new run`) instead of leaving it
+  `interrupted` with no error.
 - System Orchestration, found by running it on an eight-service, five-repository
   microservice system with real Codex workers:
   - Executing a reviewed plan no longer stops at its first dispatch with

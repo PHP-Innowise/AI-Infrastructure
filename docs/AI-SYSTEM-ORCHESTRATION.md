@@ -806,7 +806,11 @@ recovery keeps it. A dispatch whose CLI exits with an error shows that CLI's
 own message on the run and its receipt (for example `The claude CLI exited
 with code 1: Failed to authenticate: OAuth session expired and could not be
 refreshed`): sign that CLI in and retry the dispatch, or prepare a new change
-to use another provider. Dispatches run the CLI with your own configuration,
+to use another provider. A CLI that could not start at all is named the same
+way (`The codex CLI could not run: ...`), and one that went missing or changed
+between dispatches blocks the run with that cause. Restart Harness after
+rebuilding or updating its engine: dispatches of a running Harness start
+through the engine it was started with. Dispatches run the CLI with your own configuration,
 so its plugins, hooks and global instructions apply: in a real run, Codex hooks
 wrote `.agentops/` and `.agentic-security/` into every service folder and a
 global instruction made agents add `tasks/todo.md` although the dispatch asks
