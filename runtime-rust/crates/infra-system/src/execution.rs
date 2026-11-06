@@ -400,10 +400,40 @@ fn outcome_text(state: &Value, reports: &[Value]) -> String {
         };
         parts.push(format!(
             "{label}: {}",
-            clipped(string(&report["summary"]), 900)
+            clipped(&without_repetition(string(&report["summary"])), 900)
         ));
     }
     clipped(&parts.join(" "), 6000)
+}
+/// A summary without a degenerate tail: a unit of at most eight characters
+/// repeated ten times or more at its end. A real verification summary ended
+/// in 3848 characters of `");`, and the run's memory kept 750 of them.
+fn without_repetition(text: &str) -> String {
+    let mut characters = text.chars().collect::<Vec<_>>();
+    loop {
+        let cut = (1..=8).find_map(|unit| {
+            if characters.len() < unit * 10 {
+                return None;
+            }
+            let tail = characters[characters.len() - unit..].to_vec();
+            let mut end = characters.len();
+            let mut count = 0;
+            while end >= unit && characters[end - unit..end] == tail[..] {
+                end -= unit;
+                count += 1;
+            }
+            (count >= 10).then_some(end)
+        });
+        match cut {
+            Some(end) => characters.truncate(end),
+            None => break,
+        }
+    }
+    characters
+        .into_iter()
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 fn clipped(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {

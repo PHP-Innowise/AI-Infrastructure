@@ -1710,3 +1710,28 @@ fn a_long_task_still_becomes_system_memory() {
         "the whole task stays in the memory"
     );
 }
+
+#[test]
+fn a_summary_that_degenerates_into_repetition_stays_out_of_memory() {
+    // A real verification summary ended in 3848 characters of `");`.
+    let junk = ");".repeat(300);
+    let gate = format!(
+        r#"case "$input" in
+  *'"phase":"contracts","service":"__system__","shared_context"'*) report "Agreed: billing charges each placed order exactly once" '[]' '["orders","billing"]' ;;
+  *'"phase":"verify","service":"__system__","shared_context"'*) report "Verified end to end.{junk}" '[]' '[]' ;;
+  *) report "Checked" '[]' '[]' ;;
+esac"#
+    );
+    let root = Root::new();
+    let (code, summary, directory) = run_script(&root.0, &gate, "read-only");
+    assert_eq!(code, 0, "{summary:#}");
+    assert_completed(&summary, &directory);
+    let chunks = system_chunks(&root.0.join("system"));
+    assert_eq!(chunks.len(), 1);
+    let text = fs::read_to_string(root.0.join("system").join(&chunks[0])).unwrap();
+    assert!(
+        text.contains("Verification: Verified end to end."),
+        "{text}"
+    );
+    assert!(!text.contains(");););"), "{text}");
+}
