@@ -514,6 +514,14 @@ Each attempt's exact input is saved next to its receipt as
 records. What every worker received can be read back from there, and the run
 view lists the file with the receipt.
 
+### Short-term working-memory pilot
+
+The [maintainer Run Working Memory pilot](RUN-WORKING-MEMORY-PILOT.md)
+compares the current context with a bounded, receipt-linked view backed by
+SQLite or Redis. It is explicitly feature-gated and does not change ordinary
+runs, worker report schemas, Brain ownership or Memory Bank promotion. Its
+scripted rehearsal establishes mechanics and recovery, not agent efficacy.
+
 ### Shared memory
 
 The memory of a change's participants is shared the same way. The plan's

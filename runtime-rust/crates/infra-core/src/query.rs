@@ -873,40 +873,56 @@ pub fn is_anchor(token: &str, where_words: &[String]) -> bool {
             .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
         || where_words.contains(&folded(token))
 }
-thread_local! {static TERM_FORMS:std::cell::RefCell<BTreeMap<String,String>>=const{std::cell::RefCell::new(BTreeMap::new())};}
-pub fn term_forms(words: &[String]) -> BTreeMap<String, String> {
-    let missing = TERM_FORMS.with(|cache| {
-        words
-            .iter()
-            .filter(|word| !cache.borrow().contains_key(*word))
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>()
-    });
-    // Warm hits need no tokenizer database. Keep the shared eviction and
-    // projection below: a single oversized batch can exceed the cache limit.
-    let fresh = if missing.is_empty() {
-        Ok(BTreeMap::new())
-    } else {
-        (|| -> rusqlite::Result<BTreeMap<String, String>> {
-            let conn = Connection::open_in_memory()?;
-            conn.execute_batch("CREATE VIRTUAL TABLE words USING fts5(word,tokenize='porter unicode61'); CREATE VIRTUAL TABLE forms USING fts5vocab(words,'instance');")?;
-            for (index, word) in missing.iter().enumerate() {
-                conn.execute(
-                    "INSERT INTO words(rowid,word) VALUES(?1,?2)",
-                    params![index + 1, word],
-                )?;
+const TERM_FORM_CACHE_LIMIT: usize = 4096;
+
+#[derive(Default)]
+struct TermForms {
+    cache: BTreeMap<String, String>,
+    tokenizer: Option<Connection>,
+}
+
+thread_local! {
+    static TERM_FORMS: std::cell::RefCell<TermForms> = const {
+        std::cell::RefCell::new(TermForms {
+            cache: BTreeMap::new(),
+            tokenizer: None,
+        })
+    };
+}
+
+impl TermForms {
+    fn tokenize(&mut self, words: &[String]) -> rusqlite::Result<BTreeMap<String, String>> {
+        let result = (|| {
+            if self.tokenizer.is_none() {
+                let conn = Connection::open_in_memory()?;
+                conn.execute_batch("CREATE VIRTUAL TABLE words USING fts5(word,tokenize='porter unicode61'); CREATE VIRTUAL TABLE forms USING fts5vocab(words,'instance');")?;
+                self.tokenizer = Some(conn);
             }
-            let mut statement = conn.prepare("SELECT doc,term FROM forms ORDER BY doc,offset")?;
+            let conn = self.tokenizer.as_mut().expect("tokenizer initialized");
+            let transaction = conn.transaction()?;
+            {
+                let mut insert =
+                    transaction.prepare_cached("INSERT INTO words(rowid,word) VALUES(?1,?2)")?;
+                for (index, word) in words.iter().enumerate() {
+                    insert.execute(params![index + 1, word])?;
+                }
+            }
             let mut stems = BTreeMap::<usize, Vec<String>>::new();
-            for row in statement.query_map([], |row| {
-                Ok((row.get::<_, usize>(0)?, row.get::<_, String>(1)?))
-            })? {
-                let (id, term) = row?;
-                stems.entry(id).or_default().push(term);
+            {
+                let mut statement =
+                    transaction.prepare_cached("SELECT doc,term FROM forms ORDER BY doc,offset")?;
+                for row in statement.query_map([], |row| {
+                    Ok((row.get::<_, usize>(0)?, row.get::<_, String>(1)?))
+                })? {
+                    let (id, term) = row?;
+                    stems.entry(id).or_default().push(term);
+                }
             }
-            Ok(missing
+            // The workspace owns only this batch. Leave no rows for the next
+            // call, and roll back the entire batch if projection or cleanup fails.
+            transaction.execute("DELETE FROM words", [])?;
+            transaction.commit()?;
+            Ok(words
                 .iter()
                 .enumerate()
                 .map(|(index, word)| {
@@ -920,26 +936,45 @@ pub fn term_forms(words: &[String]) -> BTreeMap<String, String> {
                     )
                 })
                 .collect())
-        })()
-    };
-    let fresh = fresh.unwrap_or_else(|_| {
-        missing
-            .into_iter()
-            .map(|word| (word.clone(), folded(&word)))
-            .collect()
-    });
-    TERM_FORMS.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.len() + fresh.len() > 4096 {
-            cache.clear();
+        })();
+        // A failed workspace must not poison later batches. Oversized batches
+        // also release their scratch allocation rather than retaining it per thread.
+        if result.is_err() || words.len() > TERM_FORM_CACHE_LIMIT {
+            self.tokenizer = None;
         }
-        cache.extend(fresh.clone());
+        result
+    }
+
+    fn project(&mut self, words: &[String]) -> BTreeMap<String, String> {
+        let missing = words
+            .iter()
+            .filter(|word| !self.cache.contains_key(*word))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        // Warm hits never initialize or touch the tokenizer. Preserve the
+        // existing eviction/projection order, including oversized all-hit batches.
+        let fresh = if missing.is_empty() {
+            BTreeMap::new()
+        } else {
+            self.tokenize(&missing).unwrap_or_else(|_| {
+                missing
+                    .iter()
+                    .map(|word| (word.clone(), folded(word)))
+                    .collect()
+            })
+        };
+        if self.cache.len() + fresh.len() > TERM_FORM_CACHE_LIMIT {
+            self.cache.clear();
+        }
+        self.cache.extend(fresh.clone());
         words
             .iter()
             .map(|word| {
                 (
                     word.clone(),
-                    cache
+                    self.cache
                         .get(word)
                         .cloned()
                         .or_else(|| fresh.get(word).cloned())
@@ -947,7 +982,13 @@ pub fn term_forms(words: &[String]) -> BTreeMap<String, String> {
                 )
             })
             .collect()
-    })
+    }
+}
+
+/// Project evidence words with the same tokenizer used by the local FTS index.
+/// The thread-local module owns memoization, scratch rows and failed-workspace recovery.
+pub fn term_forms(words: &[String]) -> BTreeMap<String, String> {
+    TERM_FORMS.with(|state| state.borrow_mut().project(words))
 }
 
 pub fn body_excerpt(content: &str, limit: usize, tokens: &[String], prefer_head: bool) -> String {
@@ -1063,7 +1104,7 @@ mod term_forms_tests {
 
     #[test]
     fn cold_warm_and_partial_cache_preserve_tokenizer_forms() {
-        TERM_FORMS.with(|cache| cache.borrow_mut().clear());
+        TERM_FORMS.with(|state| *state.borrow_mut() = TermForms::default());
         let words = ["Running", "FILES", "ПРОВЕРКА", "Task_ID", "HTTPServer"].map(String::from);
         let expected = BTreeMap::from([
             ("Running".into(), "run".into()),
@@ -1086,12 +1127,64 @@ mod term_forms_tests {
                 ("Task_ID".into(), "task id".into()),
             ])
         );
-        TERM_FORMS.with(|cache| cache.borrow_mut().clear());
+        TERM_FORMS.with(|state| *state.borrow_mut() = TermForms::default());
+    }
+
+    #[test]
+    fn missing_batches_keep_empty_and_unicode_projections_separate() {
+        let mut forms = TermForms::default();
+        assert_eq!(
+            forms.project(&["Running".into(), "FILES".into()]),
+            BTreeMap::from([
+                ("Running".into(), "run".into()),
+                ("FILES".into(), "file".into())
+            ])
+        );
+        assert_eq!(
+            forms.project(&[
+                "Jumping".into(),
+                "".into(),
+                "ПРОВЕРКА".into(),
+                "Task_ID".into(),
+                "Jumping".into()
+            ]),
+            BTreeMap::from([
+                ("Jumping".into(), "jump".into()),
+                ("".into(), "".into()),
+                ("ПРОВЕРКА".into(), "проверка".into()),
+                ("Task_ID".into(), "task id".into()),
+            ])
+        );
+        assert_eq!(forms.project(&["Walking".into()])["Walking"], "walk");
+        assert!(forms.project(&[]).is_empty());
+    }
+
+    #[test]
+    fn failed_batch_folds_missing_words_and_recovers_for_the_next_batch() {
+        let mut forms = TermForms::default();
+        assert_eq!(forms.project(&["Running".into()])["Running"], "run");
+        // Fail after the next batch's inserts, when its vocabulary is read.
+        forms
+            .tokenizer
+            .as_ref()
+            .unwrap()
+            .execute_batch("DROP TABLE forms")
+            .unwrap();
+        assert_eq!(
+            forms.project(&["Running".into(), "Jumping".into()]),
+            BTreeMap::from([
+                ("Running".into(), "run".into()),
+                ("Jumping".into(), "jumping".into())
+            ])
+        );
+        assert_eq!(forms.project(&["Walking".into()])["Walking"], "walk");
+        // Failure folding remains memoized, as it was before workspace reuse.
+        assert_eq!(forms.project(&["Jumping".into()])["Jumping"], "jumping");
     }
 
     #[test]
     fn oversized_warm_cache_keeps_existing_eviction_and_fallback() {
-        TERM_FORMS.with(|cache| cache.borrow_mut().clear());
+        TERM_FORMS.with(|state| *state.borrow_mut() = TermForms::default());
         let mut words = (0..4095)
             .map(|index| format!("entry_{index}"))
             .collect::<Vec<_>>();
@@ -1099,14 +1192,14 @@ mod term_forms_tests {
         assert_eq!(term_forms(&words)["Running"], "run");
         assert_eq!(term_forms(&["Running".into()])["Running"], "run");
 
-        TERM_FORMS.with(|cache| cache.borrow_mut().clear());
+        TERM_FORMS.with(|state| *state.borrow_mut() = TermForms::default());
         words.push("entry_4095".into());
         assert_eq!(term_forms(&words)["Running"], "run");
         // Existing behavior clears an oversized cache even on an all-hit
         // request, then uses folding because no fresh forms were requested.
         assert_eq!(term_forms(&["Running".into()])["Running"], "running");
         assert_eq!(term_forms(&["Running".into()])["Running"], "run");
-        TERM_FORMS.with(|cache| cache.borrow_mut().clear());
+        TERM_FORMS.with(|state| *state.borrow_mut() = TermForms::default());
     }
 }
 

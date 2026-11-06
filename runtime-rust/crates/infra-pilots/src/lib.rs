@@ -2,6 +2,8 @@ pub mod excerpt;
 pub mod hindsight;
 pub mod longmemeval;
 pub mod onnx;
+#[cfg(feature = "run-memory")]
+pub mod run_working_memory;
 pub mod sqlite_vec;
 pub mod strict;
 use anyhow::{Context, Result, bail};

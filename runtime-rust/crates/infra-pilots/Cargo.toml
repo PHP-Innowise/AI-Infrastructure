@@ -7,9 +7,15 @@ publish = false
 [features]
 default = ["onnx"]
 onnx = ["dep:ort","dep:tokenizers","dep:libloading","dep:half"]
+run-memory = ["dep:infra-system", "dep:infra-host", "dep:tokio"]
+run-memory-redis = ["run-memory", "dep:redis"]
 [dependencies]
 anyhow = "1"
 infra-core = { path = "../infra-core" }
+infra-system = { path = "../infra-system", optional = true }
+infra-host = { path = "../infra-host", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+redis = { version = "=1.7.1", default-features = false, optional = true }
 fancy-regex = "0.14"
 futures-util = "0.3"
 chrono = "=0.4.45"
@@ -30,3 +36,11 @@ tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation","Win32_Security","Win32_System_JobObjects","Win32_System_Threading"] }
+
+[[example]]
+name = "run_working_memory"
+required-features = ["run-memory"]
+
+[[example]]
+name = "run_working_memory_live"
+required-features = ["run-memory"]
