@@ -1160,16 +1160,8 @@ fn render_run() {
     dom::clear("system-plan-summary");
     for (term, value) in [
         ("Participants", joined(&v["plan"]["context"]["services"])),
-        (
-            "Context",
-            format!(
-                "{} of {} characters · {} sources · {} omitted",
-                m::string(&v["plan"]["context_chars"]),
-                m::string(&v["plan"]["context_budget_chars"]),
-                m::array(&v["plan"]["context"]["sources"]).len(),
-                m::array(&v["plan"]["omitted_sources"]).len()
-            ),
-        ),
+        ("Context", context_summary(&v["plan"])),
+        ("Shared memory", shared_memory_summary(&v["plan"])),
         ("System file", m::text(&v, "config_path")),
     ] {
         dom::append("system-plan-summary", &dom::el("dt", "", term));
@@ -2439,6 +2431,45 @@ async fn agents(v: &V) {
     crate::activity::set_plan("system-agents", steps, active);
     crate::activity::load("system-agents", &sid).await;
 }
+fn context_summary(plan: &V) -> String {
+    format!(
+        "{} of {} characters · {} sources · {} omitted",
+        m::string(&plan["context_chars"]),
+        m::string(&plan["context_budget_chars"]),
+        m::array(&plan["context"]["sources"]).len(),
+        m::array(&plan["omitted_sources"]).len()
+    )
+}
+/// How much memory the plan gives every agent: entries of the system's and
+/// the services' Memory Banks, those no person reviewed, and those it found
+/// but could not share.
+fn shared_memory_summary(plan: &V) -> String {
+    let memory = m::array(&plan["context"]["sources"])
+        .into_iter()
+        .filter(|source| source["kind"] == "memory")
+        .collect::<Vec<_>>();
+    let automatic = memory
+        .iter()
+        .filter(|source| source["trust"] == "automatic_memory")
+        .count();
+    let unshared = m::array(&plan["warnings"])
+        .iter()
+        .filter(|warning| warning["reason"] == "memory_not_shared")
+        .map(|warning| warning["count"].as_u64().unwrap_or(0))
+        .sum::<u64>();
+    let mut text = match memory.len() {
+        0 => "none".to_string(),
+        1 => "1 entry".to_string(),
+        count => format!("{count} entries"),
+    };
+    if automatic > 0 {
+        text.push_str(&format!(" · {automatic} not reviewed by a person"));
+    }
+    if unshared > 0 {
+        text.push_str(&format!(" · {unshared} not shared"));
+    }
+    text
+}
 /// The line a run's handoff adds about the system memory its outcome became:
 /// shared by itself, held for a person where the system folder turns
 /// automatic promotion off, or why it is not memory yet.
@@ -3122,6 +3153,22 @@ mod display_tests {
     fn lists_read_as_text() {
         assert_eq!(joined(&json!(["a", "b"])), "a, b");
         assert_eq!(joined(&json!([])), "none");
+    }
+    #[test]
+    fn a_plan_says_how_much_memory_every_agent_shares() {
+        assert_eq!(
+            shared_memory_summary(&json!({"context":{"sources":[]}})),
+            "none"
+        );
+        let plan = json!({"context":{"sources":[
+            {"kind":"memory","trust":"reviewed_memory"},
+            {"kind":"memory","trust":"automatic_memory"},
+            {"kind":"code","trust":"source_evidence"}]},
+            "warnings":[{"reason":"memory_not_shared","count":3}]});
+        assert_eq!(
+            shared_memory_summary(&plan),
+            "2 entries · 1 not reviewed by a person · 3 not shared"
+        );
     }
     #[test]
     fn a_handoff_says_what_memory_the_outcome_became() {

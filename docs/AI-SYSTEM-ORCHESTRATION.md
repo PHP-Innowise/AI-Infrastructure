@@ -786,7 +786,9 @@ the starting services (the default, `--impact-depth 32` in the CLI), only their
 direct consumers (`1`) or none (`0`, for a focused investigation). The prepared
 plan is selected in the change list. A change then moves through **Plan**, **Review**, **Run** and
 **Receipts**. The
-plan includes context excerpts, omitted sources, warnings and fingerprints.
+plan includes context excerpts, omitted sources, warnings and fingerprints; its
+**Shared memory** line counts the memory entries every agent receives, those no
+person reviewed and those found but not shared.
 Its service list denotes participants; the contract dispatch later establishes
 the actual implementation order. Task line breaks are normalized to spaces.
 

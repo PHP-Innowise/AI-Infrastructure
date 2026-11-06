@@ -56,7 +56,8 @@ edition's own files remain in that edition's changelog.
   finding in the system Brain, verified by the run's verification agent,
   promoted to the system Memory Bank. A system folder that turns
   `automatic_promotion` off keeps a proposal for `memory promote-review` and
-  `promote-apply` instead. The handoff and the run view name the memory.
+  `promote-apply` instead. The handoff and the run view name the memory, and
+  the plan summary's Shared memory line counts what every agent receives.
 - System Orchestration, found by running it on an eight-service, five-repository
   microservice system with real Codex workers:
   - Executing a reviewed plan no longer stops at its first dispatch with
