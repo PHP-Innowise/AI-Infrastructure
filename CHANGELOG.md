@@ -24,6 +24,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Delete the Harness code graph while the graph of a chosen commit is being
+  built. The folder was removed at once, under a build that was still writing
+  into it, so now and then the removal failed, the request was answered with
+  an error and the build went on. That build is now told to end first and
+  removes the folder when it has ended.
+
 - Leave out of the Harness dependency map the links between Rust crates that
   cannot be. Graphify matches names across a project, so `use std::fs` became
   a link to another crate's `fs.rs`, marked as read from the code. A crate can

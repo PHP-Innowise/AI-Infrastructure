@@ -1856,6 +1856,11 @@ impl Graphs {
         {
             revisions.remove(project);
         }
+        // The graph was deleted while this build was ending: the folder
+        // that was left to it goes now.
+        if !purge && job.purge.load(Ordering::Acquire) {
+            let _ = std::fs::remove_dir_all(folder(&self.store.state, project));
+        }
     }
     /// Keeps the newest graphs of other commits and removes the rest.
     fn prune(&self, project: &str, keep: &str) {
@@ -2000,6 +2005,17 @@ impl Graphs {
             }
             "delete" => {
                 self.edit(project, |setting| *setting = json!({"enabled": false}))?;
+                // A commit's graph that is still being built writes into
+                // the folder. It is told to end first, and removes the
+                // folder when it has ended: it is told while it is known to
+                // run, so it cannot end without having heard.
+                let growing = lock(&self.revisions)?
+                    .get(project)
+                    .map(|(_, job)| {
+                        job.purge.store(true, Ordering::Release);
+                        job.cancel.store(true, Ordering::Release);
+                    })
+                    .is_some();
                 let running = lock(&self.jobs)?.get(project).cloned();
                 match running {
                     // The build owns the folder until it has ended.
@@ -2009,16 +2025,15 @@ impl Graphs {
                     }
                     None => {
                         let home = folder(&self.store.state, project);
-                        if home.exists() {
-                            std::fs::remove_dir_all(home)?;
+                        // Under a commit's build the folder may not go at
+                        // once: what that build still writes goes with it.
+                        if home.exists()
+                            && let Err(error) = std::fs::remove_dir_all(home)
+                            && !growing
+                        {
+                            return Err(error.into());
                         }
                     }
-                }
-                // A commit's graph that is still being built removes the
-                // folder again when its build has ended.
-                if let Some((_, job)) = lock(&self.revisions)?.get(project) {
-                    job.purge.store(true, Ordering::Release);
-                    job.cancel.store(true, Ordering::Release);
                 }
                 lock(&self.chosen)?.retain(|(name, _), _| name != project);
                 lock(&self.refused)?.retain(|(name, _), _| name != project);
