@@ -1769,6 +1769,20 @@ a box lights its links and lists, beside the map, everything it uses and everyth
 that uses it, also outside the open folder. A file opens in turn to its classes,
 methods and functions, as described below.
 
+**Open here**, beside a selected folder, or `+` at the corner of its box, opens the
+folder inside the picture instead of in place of it. The folder gives way to a
+frame that holds its folders and files, so what uses them and what they use stays
+in view. What a frame holds stands in the same columns as everything else and
+still shows which way each part depends; the frames lie above the rest of the
+picture, and a folder in a frame opens in turn into a frame inside it. A frame
+draws the 20 most linked places of its folder and says how many it holds when
+that is more; **Filter names** reaches the others. A picture with frames holds up
+to 100 boxes, of which at least 20 are left to the open folder itself. `−` at the
+corner of a frame draws the folder as one box again, with whatever was opened
+inside it. What is open here is remembered while the folders are walked, until a
+change is chosen or the map is opened anew. Frames are for the map of the whole
+project: a map of changes and the links followed from a place have none.
+
 Colour tells the direction. An arrow shades from the colour of using, where it
 leaves a box, to the colour of being used, where its head arrives, and every box
 wears the same two colours on its edges: one on the side arrows leave from, the

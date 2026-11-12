@@ -16,6 +16,10 @@ const COLUMN_GAP: f64 = 72.0;
 const ROW_GAP: f64 = 10.0;
 const MARGIN: f64 = 12.0;
 const CAPTION: f64 = 20.0;
+/// The room at the top of a frame for the name of its folder, and the room
+/// between a frame and what it holds.
+const FRAME_HEAD: f64 = 22.0;
+const FRAME_PAD: f64 = 8.0;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placed {
     pub x: f64,
@@ -32,10 +36,30 @@ pub struct Wire {
     /// Runs right to left: the weaker direction of a cycle.
     pub back: bool,
 }
+/// The folders spread out in a picture: each is drawn as a frame around the
+/// boxes of what it holds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Frames {
+    /// The frame each node lies in; none for what the open folder itself
+    /// holds.
+    pub of: Vec<Option<usize>>,
+    /// The frame that holds each frame. A holder stands before what it holds.
+    pub holder: Vec<Option<usize>>,
+}
+/// Where a frame lies. A frame that holds nothing drawn has no width.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Framed {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Plan {
     pub nodes: Vec<Placed>,
     pub wires: Vec<Wire>,
+    /// The frames, as they were numbered.
+    pub frames: Vec<Framed>,
     pub width: f64,
     pub height: f64,
     /// Where the grid of unlinked nodes begins, when there is one under a map.
@@ -166,11 +190,23 @@ fn curve(path: &mut String, from: (f64, f64), to: (f64, f64)) {
         to.1
     ));
 }
+/// A picture without frames.
+#[cfg(test)]
+pub fn plan(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
+    plan_with(count, edges, &Frames::default())
+}
 /// Places `count` nodes and routes `edges` (user, used, weight) between them.
 /// Layers run left to right along the links; a link that skips a layer bends
 /// through a slot of its own there, so it does not cross a box. A cycle cannot
 /// be laid out that way, so its weakest links run back, right to left.
-pub fn plan(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
+///
+/// Some nodes may lie in frames. The layers run through the whole picture,
+/// so what a frame holds stands in the columns of everything else and still
+/// shows which way it depends. A frame is a band across those columns: the
+/// frames lie one under another above what is in no frame, a frame inside
+/// its holder, and no other box stands in a band. A link between two frames
+/// passes outside both.
+pub fn plan_with(count: usize, edges: &[(usize, usize, u64)], frames: &Frames) -> Plan {
     let mut links: BTreeMap<(usize, usize), u64> = BTreeMap::new();
     let mut out = vec![vec![]; count];
     let mut linked = vec![false; count];
@@ -231,6 +267,77 @@ pub fn plan(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
         .map(|node| layer[*node])
         .max()
         .map_or(0, |last| last + 1);
+    // A band is what one frame holds itself; the last band is what lies in
+    // no frame. The band over a band is that of the frame's holder.
+    let framed = frames.holder.len();
+    let free = framed;
+    let over = |band: usize| {
+        (band != free).then(|| {
+            frames.holder[band]
+                .filter(|holder| *holder < band)
+                .unwrap_or(free)
+        })
+    };
+    // Where two bands meet: the nearest one that holds both.
+    let meet = |one: usize, other: usize| {
+        let mut held = vec![one];
+        while let Some(band) = over(held[held.len() - 1]) {
+            held.push(band);
+        }
+        let mut at = other;
+        while !held.contains(&at) {
+            at = over(at).unwrap_or(free);
+        }
+        at
+    };
+    let mut band = (0..count)
+        .map(|node| {
+            frames
+                .of
+                .get(node)
+                .copied()
+                .flatten()
+                .filter(|frame| *frame < framed)
+                .unwrap_or(free)
+        })
+        .collect::<Vec<_>>();
+    // The frames from top to bottom: a frame begins, holds its frames, then
+    // what it holds itself, and ends.
+    #[derive(Clone, Copy)]
+    enum Step {
+        Begin(usize),
+        Own(usize),
+        End(usize),
+    }
+    let mut inner = vec![vec![]; framed];
+    let mut todo = vec![];
+    for frame in (0..framed).rev() {
+        match over(frame) {
+            Some(holder) if holder != free => inner[holder].insert(0, frame),
+            _ => todo.push(Step::Begin(frame)),
+        }
+    }
+    let mut steps = vec![];
+    while let Some(step) = todo.pop() {
+        if let Step::Begin(frame) = step {
+            todo.push(Step::End(frame));
+            todo.push(Step::Own(frame));
+            todo.extend(inner[frame].iter().rev().map(|held| Step::Begin(*held)));
+        }
+        steps.push(step);
+    }
+    // The bands in that order, what lies in no frame last.
+    let mut rank = vec![framed; framed + 1];
+    for (at, frame) in steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::Own(frame) => Some(*frame),
+            _ => None,
+        })
+        .enumerate()
+    {
+        rank[frame] = at;
+    }
     // Items of a layer: nodes first, then one bend per link passing through.
     let mut columns: Vec<Vec<usize>> = vec![vec![]; layers];
     for node in (0..count).filter(|node| linked[*node]) {
@@ -242,9 +349,12 @@ pub fn plan(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
         (vec![vec![]; count], vec![vec![]; count]);
     for (near, far, ..) in &wired {
         let mut chain = vec![*near];
+        // A link passes through the band that holds both of its ends.
+        let through = meet(band[*near], band[*far]);
         for column in columns.iter_mut().take(layer[*far]).skip(layer[*near] + 1) {
             let bend = heights.len();
             heights.push(BEND_HEIGHT);
+            band.push(through);
             above.push(vec![]);
             below.push(vec![]);
             column.push(bend);
@@ -257,8 +367,13 @@ pub fn plan(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
         }
         chains.push(chain);
     }
+    // In every layer the bands stand in the same order.
+    for column in &mut columns {
+        column.sort_by_key(|item| rank[band[*item]]);
+    }
     // Each item moves towards the average place of its neighbours in the
     // layer before it, then after it; a few rounds remove most crossings.
+    // It stays in its band.
     let mut place = vec![0.0; heights.len()];
     let number = |columns: &[Vec<usize>], place: &mut [f64]| {
         for column in columns {
@@ -286,11 +401,15 @@ pub fn plan(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
                     } else {
                         links.iter().map(|other| place[*other]).sum::<f64>() / links.len() as f64
                     };
-                    (middle, place[*item], *item)
+                    (rank[band[*item]], middle, place[*item], *item)
                 })
                 .collect::<Vec<_>>();
-            keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-            columns[at] = keyed.into_iter().map(|(_, _, item)| item).collect();
+            keyed.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then(a.1.total_cmp(&b.1))
+                    .then(a.2.total_cmp(&b.2))
+            });
+            columns[at] = keyed.into_iter().map(|(.., item)| item).collect();
             number(&columns[at..=at], &mut place);
         }
     }
@@ -302,35 +421,132 @@ pub fn plan(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
             BEND_GAP
         }
     };
-    let mut top = vec![0.0; heights.len()];
-    let mut tall = vec![0.0; layers];
+    // What a band holds in one layer is a run; a band is as tall as its
+    // tallest run.
+    let mut offset = vec![0.0; heights.len()];
+    let mut runs: BTreeMap<(usize, usize), f64> = BTreeMap::new();
     for (at, column) in columns.iter().enumerate() {
         let mut y = 0.0;
         for (index, item) in column.iter().enumerate() {
             if index > 0 {
-                y += gap(column[index - 1], *item);
+                let upper = column[index - 1];
+                if band[upper] == band[*item] {
+                    y += gap(upper, *item);
+                } else {
+                    runs.insert((at, band[upper]), y);
+                    y = 0.0;
+                }
             }
-            top[*item] = y;
+            offset[*item] = y;
             y += heights[*item];
         }
-        tall[at] = y;
-    }
-    let tallest = tall.iter().copied().fold(0.0, f64::max);
-    for (at, column) in columns.iter().enumerate() {
-        for item in column {
-            top[*item] += MARGIN + (tallest - tall[at]) / 2.0;
+        if let Some(last) = column.last() {
+            runs.insert((at, band[*last]), y);
         }
     }
-    let left = |at: usize| MARGIN + at as f64 * (BOX_WIDTH + COLUMN_GAP);
+    let mut tall = vec![0.0; framed + 1];
+    for ((_, band), run) in &runs {
+        tall[*band] = f64::max(tall[*band], *run);
+    }
+    // The layers a frame spans: those of what it holds, its frames included.
+    let mut span: Vec<Option<(usize, usize)>> = vec![None; framed];
+    let widen = |span: &mut Option<(usize, usize)>, first: usize, last: usize| {
+        *span = Some(span.map_or((first, last), |(from, to)| (from.min(first), to.max(last))));
+    };
+    let pass = |span: &mut Vec<Option<(usize, usize)>>| {
+        for frame in (0..framed).rev() {
+            if let (Some(holder), Some((first, last))) =
+                (over(frame).filter(|holder| *holder != free), span[frame])
+            {
+                widen(&mut span[holder], first, last);
+            }
+        }
+    };
+    for node in (0..count).filter(|node| linked[*node] && band[*node] != free) {
+        widen(&mut span[band[node]], layer[node], layer[node]);
+    }
+    pass(&mut span);
+    // What a frame holds that no link here touches lies in a grid under the
+    // rest of it, from the frame's first layer on.
+    let apart_in = |frame: usize| {
+        (0..count)
+            .filter(|node| !linked[*node] && band[*node] == frame)
+            .collect::<Vec<_>>()
+    };
+    let mut across = vec![1usize; framed];
+    for frame in 0..framed {
+        let unlinked = apart_in(frame).len();
+        if unlinked > 0 {
+            let (first, last) = span[frame].unwrap_or((0, 0));
+            across[frame] = (last - first + 1).max(unlinked.min(3));
+            widen(&mut span[frame], first, first + across[frame] - 1);
+        }
+    }
+    pass(&mut span);
+    // A frame stands off what it holds, a holder off its frames, so the
+    // picture begins further in the deeper its frames go.
+    let mut deep = vec![1usize; framed];
+    for frame in (0..framed).rev() {
+        if let Some(holder) = over(frame).filter(|holder| *holder != free) {
+            deep[holder] = deep[holder].max(deep[frame] + 1);
+        }
+    }
+    let inset = FRAME_PAD * deep.iter().copied().max().unwrap_or(0) as f64;
+    let mut band_top = vec![0.0; framed + 1];
+    let mut grid_in = vec![0.0; framed];
+    let mut edge = vec![(0.0, 0.0); framed];
+    let mut y = MARGIN;
+    for step in &steps {
+        match *step {
+            Step::Begin(frame) => {
+                edge[frame].0 = y;
+                y += FRAME_HEAD;
+            }
+            Step::Own(frame) => {
+                band_top[frame] = y;
+                y += tall[frame];
+                let unlinked = apart_in(frame).len();
+                if unlinked > 0 {
+                    if tall[frame] > 0.0 {
+                        y += ROW_GAP;
+                    }
+                    grid_in[frame] = y;
+                    let rows = unlinked.div_ceil(across[frame]);
+                    y += rows as f64 * (BOX_HEIGHT + ROW_GAP) - ROW_GAP;
+                }
+            }
+            Step::End(frame) => {
+                y += FRAME_PAD;
+                edge[frame].1 = y;
+                y += if over(frame) == Some(free) {
+                    MARGIN
+                } else {
+                    FRAME_PAD
+                };
+            }
+        }
+    }
+    band_top[free] = y;
+    let mut top = vec![0.0; heights.len()];
+    for (at, column) in columns.iter().enumerate() {
+        for item in column {
+            let band = band[*item];
+            top[*item] = band_top[band] + (tall[band] - runs[&(at, band)]) / 2.0 + offset[*item];
+        }
+    }
+    let left = |at: usize| MARGIN + inset + at as f64 * (BOX_WIDTH + COLUMN_GAP);
     let layered_width = if layers == 0 {
         0.0
     } else {
-        left(layers - 1) + BOX_WIDTH + MARGIN
+        left(layers - 1) + BOX_WIDTH + MARGIN + inset
     };
-    let loose = (0..count).filter(|node| !linked[*node]).collect::<Vec<_>>();
+    let below_all = band_top[free] + tall[free];
+    let loose = (0..count)
+        .filter(|node| !linked[*node] && band[*node] == free)
+        .collect::<Vec<_>>();
     let per_row = (((layered_width - MARGIN) / (BOX_WIDTH + ROW_GAP)).floor() as usize).max(4);
-    let apart = (layers > 0 && !loose.is_empty()).then_some(MARGIN + tallest + 2.0 * MARGIN);
-    let grid_top = apart.map_or(MARGIN, |apart| apart + CAPTION);
+    let apart = (layers > 0 && !loose.is_empty()).then_some(below_all + 2.0 * MARGIN);
+    let grid_top = apart.map_or(band_top[free], |apart| apart + CAPTION);
     let mut nodes = vec![];
     for node in 0..count {
         nodes.push(if linked[node] {
@@ -340,16 +556,42 @@ pub fn plan(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
                 layer: Some(layer[node]),
                 cycle: size[group[node]] > 1,
             }
+        } else if band[node] != free {
+            let frame = band[node];
+            let at = apart_in(frame)
+                .iter()
+                .position(|other| *other == node)
+                .unwrap_or(0);
+            Placed {
+                x: left(span[frame].map_or(0, |(first, _)| first) + at % across[frame]),
+                y: grid_in[frame] + (at / across[frame]) as f64 * (BOX_HEIGHT + ROW_GAP),
+                layer: None,
+                cycle: false,
+            }
         } else {
             let at = loose.iter().position(|other| *other == node).unwrap_or(0);
             Placed {
-                x: MARGIN + (at % per_row) as f64 * (BOX_WIDTH + ROW_GAP),
+                x: MARGIN + inset + (at % per_row) as f64 * (BOX_WIDTH + ROW_GAP),
                 y: grid_top + (at / per_row) as f64 * (BOX_HEIGHT + ROW_GAP),
                 layer: None,
                 cycle: false,
             }
         });
     }
+    let frames = (0..framed)
+        .map(|frame| match span[frame] {
+            Some((first, last)) => {
+                let pad = FRAME_PAD * deep[frame] as f64;
+                Framed {
+                    x: left(first) - pad,
+                    y: edge[frame].0,
+                    width: left(last) + BOX_WIDTH + pad - (left(first) - pad),
+                    height: edge[frame].1 - edge[frame].0,
+                }
+            }
+            None => Framed::default(),
+        })
+        .collect::<Vec<_>>();
     let mut wires = vec![];
     for (chain, (near, _, back, pair)) in chains.iter().zip(&wired) {
         let edge = edges
@@ -393,13 +635,21 @@ pub fn plan(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
         });
     }
     let rows = loose.len().div_ceil(per_row);
-    let grid_width = MARGIN + loose.len().min(per_row) as f64 * (BOX_WIDTH + ROW_GAP);
+    let grid_width = MARGIN + inset + loose.len().min(per_row) as f64 * (BOX_WIDTH + ROW_GAP);
+    let framed_width = frames
+        .iter()
+        .map(|frame| frame.x + frame.width + MARGIN)
+        .fold(0.0, f64::max);
     Plan {
         nodes,
         wires,
-        width: layered_width.max(grid_width).max(BOX_WIDTH + 2.0 * MARGIN),
+        frames,
+        width: layered_width
+            .max(grid_width)
+            .max(framed_width)
+            .max(BOX_WIDTH + 2.0 * MARGIN),
         height: if loose.is_empty() {
-            tallest + 2.0 * MARGIN
+            below_all + MARGIN
         } else {
             grid_top + rows as f64 * (BOX_HEIGHT + ROW_GAP)
         }
@@ -458,6 +708,11 @@ fn symbols(view: &V) -> bool {
     view["mode"] == "file"
 }
 /// The links of one place followed step by step, wherever they lead.
+/// Whether the picture is one where a folder can be spread out among the
+/// others: a folder of the whole project.
+fn spreads(view: &V) -> bool {
+    view["frames"].is_array()
+}
 fn follows(view: &V) -> bool {
     view["mode"] == "follow"
 }
@@ -1073,7 +1328,14 @@ pub fn canvas(view: &V) -> String {
         .zip(&edges)
         .map(|((from, to), edge)| (*from, *to, edge["links"].as_u64().unwrap_or(1)))
         .collect::<Vec<_>>();
-    let plan = plan(nodes.len(), &weighted);
+    // A folder that is spread out is a frame around what it holds.
+    let frames = m::array(&view["frames"]);
+    let frame = |path: &V| frames.iter().position(|frame| &frame["path"] == path);
+    let framed = Frames {
+        of: nodes.iter().map(|node| frame(&node["holder"])).collect(),
+        holder: frames.iter().map(|held| frame(&held["holder"])).collect(),
+    };
+    let plan = plan_with(nodes.len(), &weighted, &framed);
     // How much each box uses and is used through the links drawn here.
     let mut flow = vec![(0u64, 0u64); nodes.len()];
     for (from, to, links) in &weighted {
@@ -1125,6 +1387,18 @@ pub fn canvas(view: &V) -> String {
         ));
     }
     html.push_str("</defs>");
+    for (index, place) in plan.frames.iter().enumerate() {
+        if place.width > 0.0 {
+            html.push_str(&format!(
+                "<rect class=\"graph-map-frame\" data-inner=\"{}\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"8\"/>",
+                framed.holder[index].is_some(),
+                place.x,
+                place.y,
+                place.width,
+                place.height
+            ));
+        }
+    }
     for wire in &plan.wires {
         let edge = edges[wire.edge];
         let (links, guessed) = (
@@ -1302,6 +1576,51 @@ pub fn canvas(view: &V) -> String {
                 chosen.is_some() && !near(index),
             ));
         }
+        if folder && spreads(view) {
+            // A folder opens here too: + at its corner spreads it out.
+            let told = format!(
+                "Open {} here, among the others",
+                escape(&m::text(node, "name"))
+            );
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"graph-map-spread\" data-dim=\"{}\" data-action=\"graph-map-spread\" data-payload=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{told}\" aria-label=\"{told}\">+</button>",
+                chosen.is_some() && !near(index),
+                payload(&node["path"]),
+                placed.x,
+                placed.y,
+            ));
+        }
+    }
+    // The head of a frame: − draws the folder as one box again, then its
+    // name, and how much of it is drawn where that is not all.
+    for (held, place) in frames.iter().zip(&plan.frames) {
+        if place.width <= 0.0 {
+            continue;
+        }
+        let name = escape(&m::text(held, "name"));
+        let (places, drawn) = (
+            held["places"].as_u64().unwrap_or(0),
+            held["drawn"].as_u64().unwrap_or(0),
+        );
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-map-spread\" data-action=\"graph-map-gather\" data-payload=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"Draw {name} as one box again\" aria-label=\"Draw {name} as one box again\">−</button><span class=\"graph-map-frame-name\" style=\"left:{:.0}px;top:{:.0}px;max-width:{:.0}px\" title=\"{}\">{name}{}</span>",
+            payload(&held["path"]),
+            place.x + 13.0,
+            place.y + 11.0,
+            place.x + 26.0,
+            place.y + 3.0,
+            (place.width - 32.0).max(40.0),
+            escape(&m::text(held, "path")),
+            if drawn < places {
+                format!(
+                    "<span class=\"graph-map-frame-count\"> · {} of {} drawn</span>",
+                    count(drawn),
+                    count(places)
+                )
+            } else {
+                String::new()
+            },
+        ));
     }
     html.push_str("</div>");
     html
@@ -1527,7 +1846,7 @@ pub fn side(view: &V) -> String {
         } else if changes(view) {
             "<p class=\"knowledge-note\">Select a file to see what it uses and what uses it. The highlighted ones changed; the others use them or are used by them. Select a file again to open it to its classes, methods and functions.</p>"
         } else {
-            "<p class=\"knowledge-note\">Select a folder or a file to see what it uses and what uses it. Select it again to open it: a folder to what it holds, a file to its classes, methods and functions.</p>"
+            "<p class=\"knowledge-note\">Select a folder or a file to see what it uses and what uses it. Select it again to open it: a folder to what it holds, a file to its classes, methods and functions. + at the corner of a folder opens it here, among the others.</p>"
         }
         .to_owned();
     }
@@ -1602,6 +1921,12 @@ pub fn side(view: &V) -> String {
             "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-open\" data-payload=\"{}\">Open folder</button>",
             payload(&focus["path"])
         ));
+        if spreads(view) && m::yes(&focus["inside"]) {
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-spread\" data-payload=\"{}\">Open here</button>",
+                payload(&focus["path"])
+            ));
+        }
     } else if held > 0 {
         html.push_str(&open_file(&focus["path"]));
     }
@@ -1666,6 +1991,9 @@ fn legend(view: &V, change: bool) -> String {
             "{LEGEND} + and − at the corners of a box unfold and fold what it uses, on the right, and what uses it, on the left.{}",
             if change { " Highlighted: changed." } else { "" }
         ),
+        _ if !m::array(&view["frames"]).is_empty() => {
+            format!("{LEGEND} A frame is a folder opened here: − at its corner closes it.")
+        }
         _ => LEGEND.to_owned(),
     };
     format!(
@@ -1932,7 +2260,27 @@ pub fn interim(view: &V, phase: &str) -> String {
     }
 }
 fn fresh(target: &str) -> V {
-    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "filter": "", "follow": "", "out": [], "into": []})
+    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "filter": "", "follow": "", "out": [], "into": [], "spread": []})
+}
+/// How many folders a picture keeps spread out; the oldest gives way.
+const SPREAD: usize = 32;
+/// The state with a folder spread out in the picture, or, with `gather`,
+/// drawn as one box again together with whatever was spread out inside it.
+fn spread(mut state: V, folder: &str, gather: bool) -> V {
+    let inside = format!("{folder}/");
+    let mut folders = unfolded(&state, "spread");
+    folders.retain(|other| other != folder && !(gather && other.starts_with(&inside)));
+    if !gather {
+        folders.push(folder.to_owned());
+        let extra = folders.len().saturating_sub(SPREAD);
+        folders.drain(..extra);
+        // The folder is no place to select any more.
+        if state["focus"] == folder {
+            state["focus"] = json!("");
+        }
+    }
+    state["spread"] = json!(folders);
+    state
 }
 /// Where this browser keeps whether the map leaves tests out.
 const NOTESTS: &str = "graph-map-notests";
@@ -1942,8 +2290,9 @@ fn anew(target: &str) -> V {
     state["notests"] = json!(dom::storage(NOTESTS).as_deref() == Some("1"));
     state
 }
-/// The places whose side `key` (`out` or `into`) is unfolded among followed
-/// links, each named once for every step unfolded.
+/// The places a list of the state names: those whose side `key` (`out` or
+/// `into`) is unfolded among followed links, each once for every step
+/// unfolded, or the folders spread out in a picture (`spread`).
 fn unfolded(state: &V, key: &str) -> Vec<String> {
     m::array(&state[key])
         .iter()
@@ -2335,6 +2684,9 @@ async fn load(quiet: bool) {
     }
     if !m::text(&state, "follow").is_empty() {
         query.push(("follow", m::text(&state, "follow")));
+    } else if !unfolded(&state, "spread").is_empty() {
+        // The folders spread out in the picture of the open one.
+        query.push(("spread", json!(unfolded(&state, "spread")).to_string()));
     }
     let path = format!(
         "/api/projects/{}/graph/map{}",
@@ -2621,6 +2973,13 @@ pub async fn event(
                 places.push(place.to_owned());
             }
             state[key] = json!(places);
+        }
+        ("click", _, "graph-map-spread" | "graph-map-gather") => {
+            state = spread(
+                state,
+                payload.as_str().unwrap_or(""),
+                action == "graph-map-gather",
+            );
         }
         ("click", _, "graph-map-go") => {
             let path = payload["path"].as_str().unwrap_or("");
@@ -3900,5 +4259,284 @@ mod tests {
         assert!(side(&json!({"focus": null})).contains("Select a folder or a file"));
         assert_eq!(parent("src/Cart/Cart.php"), "src/Cart");
         assert_eq!(parent("README.md"), "");
+    }
+    /// A column of the layout, by number.
+    fn column(at: usize, inset: f64) -> f64 {
+        MARGIN + inset + at as f64 * (BOX_WIDTH + COLUMN_GAP)
+    }
+    #[test]
+    fn a_frame_is_a_band_across_the_layers_above_what_lies_in_none() {
+        // a uses x, x uses y, y uses b, and a uses b past them. x, y and z
+        // are of one spread-out folder; z and c are linked to nothing.
+        let frames = Frames {
+            of: vec![None, Some(0), Some(0), None, Some(0), None],
+            holder: vec![None],
+        };
+        let plan = plan_with(6, &[(0, 1, 1), (1, 2, 1), (2, 3, 1), (0, 3, 1)], &frames);
+        // The layers are those of the whole picture.
+        assert_eq!(
+            (0..4).map(|node| layer(&plan, node)).collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        let (frame, inset) = (&plan.frames[0], FRAME_PAD);
+        assert_eq!(
+            (frame.x, frame.y, frame.width, frame.height),
+            (
+                column(1, inset) - FRAME_PAD,
+                MARGIN,
+                BOX_WIDTH + COLUMN_GAP + BOX_WIDTH + 2.0 * FRAME_PAD,
+                FRAME_HEAD + BOX_HEIGHT + ROW_GAP + BOX_HEIGHT + FRAME_PAD
+            )
+        );
+        // What the frame holds stands in its layers, under the room for the
+        // name; what no link touches lies under that, still in the frame.
+        let inside = MARGIN + FRAME_HEAD;
+        assert_eq!(
+            (plan.nodes[1].x, plan.nodes[1].y),
+            (column(1, inset), inside)
+        );
+        assert_eq!(
+            (plan.nodes[2].x, plan.nodes[2].y),
+            (column(2, inset), inside)
+        );
+        assert_eq!(
+            (plan.nodes[4].x, plan.nodes[4].y, plan.nodes[4].layer),
+            (column(1, inset), inside + BOX_HEIGHT + ROW_GAP, None)
+        );
+        // Everything else lies under the frame: the two ends of the picture
+        // and, further down, what is linked to nothing.
+        let under = frame.y + frame.height + MARGIN;
+        assert_eq!(
+            (plan.nodes[0].x, plan.nodes[0].y),
+            (column(0, inset), under)
+        );
+        assert_eq!(
+            (plan.nodes[3].x, plan.nodes[3].y),
+            (column(3, inset), under)
+        );
+        assert_eq!(plan.apart, Some(under + BOX_HEIGHT + 2.0 * MARGIN));
+        assert_eq!(
+            (plan.nodes[5].x, plan.nodes[5].y),
+            (MARGIN + inset, under + BOX_HEIGHT + 2.0 * MARGIN + CAPTION)
+        );
+        // The link that passes the frame's layers passes under the frame.
+        let past = plan.wires.iter().find(|wire| wire.edge == 3).unwrap();
+        let heights = past
+            .path
+            .split(|letter: char| !(letter.is_ascii_digit() || letter == '.'))
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse::<f64>().unwrap())
+            .skip(1)
+            .step_by(2)
+            .collect::<Vec<_>>();
+        assert!(heights.iter().all(|y| *y >= under), "{}", past.path);
+        assert!(plan.width >= frame.x + frame.width + MARGIN);
+        assert_eq!(plan.height, plan.nodes[5].y + BOX_HEIGHT + ROW_GAP);
+        // Without frames the picture is as it was.
+        assert!(plan_with(4, &[(0, 1, 1)], &Frames::default())
+            .frames
+            .is_empty());
+        assert_eq!(
+            plan_with(4, &[(0, 1, 1), (2, 1, 1)], &Frames::default()),
+            super::plan(4, &[(0, 1, 1), (2, 1, 1)])
+        );
+    }
+    #[test]
+    fn a_frame_lies_inside_the_frame_of_its_holder() {
+        // x of the inner folder uses y of the outer one, which uses b.
+        let frames = Frames {
+            of: vec![Some(1), Some(0), None],
+            holder: vec![None, Some(0)],
+        };
+        let plan = plan_with(3, &[(0, 1, 1), (1, 2, 1)], &frames);
+        let (outer, inner) = (&plan.frames[0], &plan.frames[1]);
+        assert!(inner.x > outer.x && inner.x + inner.width < outer.x + outer.width);
+        assert!(inner.y > outer.y && inner.y + inner.height < outer.y + outer.height);
+        // The inner frame holds x alone, above what the outer one holds
+        // itself; the picture begins further in for the two of them.
+        let inset = 2.0 * FRAME_PAD;
+        assert_eq!(
+            (inner.x, inner.width),
+            (column(0, inset) - FRAME_PAD, BOX_WIDTH + 2.0 * FRAME_PAD)
+        );
+        assert_eq!(
+            (outer.x, outer.width),
+            (
+                column(0, inset) - inset,
+                BOX_WIDTH + COLUMN_GAP + BOX_WIDTH + 2.0 * inset
+            )
+        );
+        assert!(plan.nodes[0].y >= inner.y + FRAME_HEAD);
+        assert!(plan.nodes[0].y + BOX_HEIGHT <= inner.y + inner.height);
+        assert!(plan.nodes[1].y >= inner.y + inner.height);
+        assert!(plan.nodes[1].y + BOX_HEIGHT <= outer.y + outer.height);
+        assert!(plan.nodes[2].y >= outer.y + outer.height);
+        // A frame that names a later one as its holder stands on its own.
+        let odd = Frames {
+            of: vec![Some(0), Some(1)],
+            holder: vec![Some(1), Some(7)],
+        };
+        let plan = plan_with(2, &[(0, 1, 1)], &odd);
+        assert!(plan.frames[0].y + plan.frames[0].height <= plan.frames[1].y);
+    }
+    #[test]
+    fn a_frame_of_what_is_linked_to_nothing_is_a_grid_of_its_own() {
+        // Five places of one folder and one beside them, no link anywhere.
+        let frames = Frames {
+            of: vec![Some(0), Some(0), Some(0), Some(0), Some(0), None],
+            holder: vec![None],
+        };
+        let plan = plan_with(6, &[], &frames);
+        let frame = &plan.frames[0];
+        // Three to a row, two rows, in a frame at the corner of the picture.
+        assert_eq!((frame.x, frame.y), (MARGIN, MARGIN));
+        assert_eq!(
+            frame.width,
+            3.0 * BOX_WIDTH + 2.0 * COLUMN_GAP + 2.0 * FRAME_PAD
+        );
+        assert_eq!(
+            frame.height,
+            FRAME_HEAD + 2.0 * BOX_HEIGHT + ROW_GAP + FRAME_PAD
+        );
+        assert_eq!(
+            (0..5)
+                .map(|node| (plan.nodes[node].x, plan.nodes[node].y))
+                .collect::<Vec<_>>(),
+            [
+                (column(0, FRAME_PAD), MARGIN + FRAME_HEAD),
+                (column(1, FRAME_PAD), MARGIN + FRAME_HEAD),
+                (column(2, FRAME_PAD), MARGIN + FRAME_HEAD),
+                (
+                    column(0, FRAME_PAD),
+                    MARGIN + FRAME_HEAD + BOX_HEIGHT + ROW_GAP
+                ),
+                (
+                    column(1, FRAME_PAD),
+                    MARGIN + FRAME_HEAD + BOX_HEIGHT + ROW_GAP
+                ),
+            ]
+        );
+        // The one beside them lies under the frame, and no caption parts
+        // them: nothing here is linked.
+        assert_eq!(plan.apart, None);
+        assert_eq!(plan.nodes[5].y, frame.y + frame.height + MARGIN);
+        assert!(plan.width >= frame.x + frame.width + MARGIN);
+    }
+    /// A folder with one of its folders spread out: `src/Cart` gives way to
+    /// two of the five places it holds.
+    fn spread_view() -> V {
+        json!({
+            "scope": "src", "certain": false, "children": 7, "matching": 7, "between": 3,
+            "crumbs": [{"name": "shop", "path": ""}, {"name": "src", "path": "src"}],
+            "totals": {"files": 1115, "links": 4165, "read": 115, "guessed": 4050, "unplaced": 0},
+            "nodes": [
+                {"path": "src/Cart/Cart.php", "name": "Cart.php", "folder": false, "holder": "src/Cart", "files": 1, "symbols": 2, "out": 1, "in": 2, "within": 0},
+                {"path": "src/Cart/Rules", "name": "Rules", "folder": true, "holder": "src/Cart", "files": 3, "out": 0, "in": 1, "within": 1},
+                {"path": "src/Order", "name": "Order", "folder": true, "holder": null, "files": 1, "out": 2, "in": 0, "within": 0},
+                {"path": "src/a<b>.php", "name": "a<b>.php", "folder": false, "holder": null, "files": 1, "out": 0, "in": 0, "within": 0}
+            ],
+            "frames": [{"path": "src/Cart", "name": "Cart", "holder": null, "places": 5, "drawn": 2}],
+            "edges": [
+                {"from": "src/Order", "to": "src/Cart/Cart.php", "links": 2, "guessed": 0},
+                {"from": "src/Cart/Cart.php", "to": "src/Cart/Rules", "links": 1, "guessed": 1}
+            ],
+            "focus": null
+        })
+    }
+    #[test]
+    fn a_spread_out_folder_is_drawn_as_a_frame_with_its_name_and_a_way_back() {
+        let html = canvas(&spread_view());
+        // One frame, behind the links, of the open folder itself.
+        assert_eq!(html.matches("<rect class=\"graph-map-frame\"").count(), 1);
+        assert!(html.contains("<rect class=\"graph-map-frame\" data-inner=\"false\""));
+        assert!(html.find("graph-map-frame\"").unwrap() < html.find("graph-map-edge").unwrap());
+        // Its head: − gathers the folder, then its name and how much of it
+        // is drawn.
+        assert!(
+            html.contains("data-action=\"graph-map-gather\" data-payload=\"&quot;src/Cart&quot;\"")
+        );
+        assert!(html.contains("title=\"Draw Cart as one box again\" aria-label=\"Draw Cart as one box again\">−</button>"));
+        assert!(html.contains("title=\"src/Cart\">Cart<span class=\"graph-map-frame-count\"> · 2 of 5 drawn</span></span>"));
+        // A folder has + at its corner, in the frame as outside it; a file
+        // has none.
+        assert_eq!(html.matches("data-action=\"graph-map-spread\"").count(), 2);
+        assert!(html.contains(
+            "data-action=\"graph-map-spread\" data-payload=\"&quot;src/Cart/Rules&quot;\""
+        ));
+        assert!(html.contains("title=\"Open Order here, among the others\""));
+        // What the frame holds lies in it; the rest lies under it.
+        let frames = Frames {
+            of: vec![Some(0), Some(0), None, None],
+            holder: vec![None],
+        };
+        let plan = plan_with(4, &[(2, 0, 2), (0, 1, 1)], &frames);
+        let bottom = plan.frames[0].y + plan.frames[0].height;
+        assert!(plan.nodes[0].y + BOX_HEIGHT < bottom && plan.nodes[1].y + BOX_HEIGHT < bottom);
+        assert!(plan.nodes[2].y > bottom && plan.nodes[3].y > bottom);
+        // A frame that holds all of its folder says no more than its name.
+        let mut whole = spread_view();
+        whole["frames"][0]["drawn"] = json!(5);
+        assert!(canvas(&whole).contains("title=\"src/Cart\">Cart</span>"));
+        // A frame inside another is told apart.
+        let mut nested = spread_view();
+        nested["frames"] = json!([
+            {"path": "src/Cart", "name": "Cart", "holder": null, "places": 2, "drawn": 1},
+            {"path": "src/Cart/Rules", "name": "Rules", "holder": "src/Cart", "places": 1, "drawn": 1}
+        ]);
+        nested["nodes"][1] = json!({"path": "src/Cart/Rules/Tax.php", "name": "Tax.php", "folder": false, "holder": "src/Cart/Rules", "files": 1, "out": 0, "in": 1, "within": 0});
+        nested["edges"][1]["to"] = json!("src/Cart/Rules/Tax.php");
+        let html = canvas(&nested);
+        assert_eq!(html.matches("<rect class=\"graph-map-frame\"").count(), 2);
+        assert!(html.contains("<rect class=\"graph-map-frame\" data-inner=\"true\""));
+        // Only the picture of a folder of the whole project spreads folders
+        // out: no other picture has the handles, and a folder view from an
+        // older server draws as before.
+        for other in [super::tests::view(), change(), file(), trail()] {
+            assert!(!canvas(&other).contains("graph-map-spread"));
+        }
+        // The legend tells a frame once there is one.
+        assert!(legend(&spread_view(), false).contains("A frame is a folder opened here"));
+        assert!(!legend(&super::tests::view(), false).contains("frame"));
+    }
+    #[test]
+    fn a_selected_folder_is_opened_here_and_a_spread_out_one_is_remembered() {
+        let mut view = spread_view();
+        view["focus"] = json!({
+            "path": "src/Order", "name": "Order", "folder": true, "inside": true, "files": 1, "within": 0,
+            "uses": [], "uses_more": 0, "used_by": [], "used_by_more": 0, "kinds": []
+        });
+        let html = side(&view);
+        assert!(html.contains("data-action=\"graph-map-open\" data-payload=\"&quot;src/Order&quot;\">Open folder</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-spread\" data-payload=\"&quot;src/Order&quot;\">Open here</button>"));
+        // A folder outside the open one is not in the picture to open here,
+        // nor is a file; another picture does not offer it.
+        view["focus"]["inside"] = json!(false);
+        assert!(!side(&view).contains("Open here"));
+        assert!(!side(&super::tests::view()).contains("Open here"));
+        assert!(side(&json!({"focus": null})).contains("+ at the corner of a folder opens it here"));
+        // The state: a folder is named once, the newest last.
+        let state = spread(fresh(""), "src/Cart", false);
+        let state = spread(state, "src", false);
+        let state = spread(state, "src/Cart", false);
+        assert_eq!(state["spread"], json!(["src", "src/Cart"]));
+        // Gathered, it goes with what was spread out inside it, and nothing
+        // else does.
+        let state = spread(state, "src/Cart/Rules", false);
+        let state = spread(state, "src/Cartoon", false);
+        let state = spread(state, "src/Cart", true);
+        assert_eq!(state["spread"], json!(["src", "src/Cartoon"]));
+        // A selected folder that is spread out is selected no more.
+        let mut chosen = fresh("");
+        chosen["focus"] = json!("lib");
+        assert_eq!(spread(chosen.clone(), "lib", false)["focus"], "");
+        assert_eq!(spread(chosen, "src", false)["focus"], "lib");
+        // Only so many are kept; the oldest gives way.
+        let mut many = fresh("");
+        for number in 0..SPREAD + 3 {
+            many = spread(many, &format!("f{number}"), false);
+        }
+        let kept = unfolded(&many, "spread");
+        assert_eq!(kept.len(), SPREAD);
+        assert_eq!((kept[0].as_str(), kept[SPREAD - 1].as_str()), ("f3", "f34"));
+        assert_eq!(fresh("work")["spread"], json!([]));
     }
 }

@@ -913,11 +913,35 @@ pub struct Shown<'a> {
     pub followed: Option<&'a Followed>,
     /// Without tests: the files that are tests, and the tests inside others.
     pub notests: bool,
+    /// Folders of the open one that are spread out in its picture.
+    pub spread: &'a [String],
 }
-/// How many unfolded places a request may name on one side, and in how
-/// many bytes.
+/// How many places a request may name in one list, and in how many bytes.
 const UNFOLDED: usize = 256;
 const UNFOLDED_BYTES: usize = 32 * 1024;
+/// A list of places as a request carries it: a JSON list of paths, which a
+/// URL carries whatever the paths hold. `many` and `wrong` say what to do
+/// about a list that is too long and one that is none.
+pub fn places(text: &str, many: &'static str, wrong: &'static str) -> Result<Vec<String>> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    if text.len() > UNFOLDED_BYTES {
+        return Err(HarnessError::invalid(many));
+    }
+    let places =
+        serde_json::from_str::<Vec<String>>(text).map_err(|_| HarnessError::invalid(wrong))?;
+    if places.len() > UNFOLDED {
+        return Err(HarnessError::invalid(many));
+    }
+    if places
+        .iter()
+        .any(|place| place.is_empty() || place.len() > 1024)
+    {
+        return Err(HarnessError::invalid(wrong));
+    }
+    Ok(places)
+}
 /// A place whose links are followed step by step in the map, with the places
 /// whose uses (`out`) and whose users (`into`) are unfolded, each named once
 /// for every step that is unfolded.
@@ -929,35 +953,17 @@ pub struct Followed {
 }
 impl Followed {
     /// Reads what a request names: the place, and the unfolded places of
-    /// each side as a JSON list of paths, which a URL carries whatever the
-    /// paths hold. `None` where no place is followed.
+    /// each side as a list of paths. `None` where no place is followed.
     pub fn parse(root: &str, out: &str, into: &str) -> Result<Option<Self>> {
         if root.is_empty() {
             return Ok(None);
         }
         let list = |text: &str| {
-            if text.is_empty() {
-                return Ok(Vec::new());
-            }
-            if text.len() > UNFOLDED_BYTES {
-                return Err(HarnessError::invalid(
-                    "Too much is unfolded; fold something first.",
-                ));
-            }
-            let places = serde_json::from_str::<Vec<String>>(text)
-                .map_err(|_| HarnessError::invalid("Invalid unfolded places."))?;
-            if places.len() > UNFOLDED {
-                return Err(HarnessError::invalid(
-                    "Too much is unfolded; fold something first.",
-                ));
-            }
-            if places
-                .iter()
-                .any(|place| place.is_empty() || place.len() > 1024)
-            {
-                return Err(HarnessError::invalid("Invalid unfolded places."));
-            }
-            Ok(places)
+            places(
+                text,
+                "Too much is unfolded; fold something first.",
+                "Invalid unfolded places.",
+            )
         };
         Ok(Some(Self {
             root: root.to_owned(),
@@ -1039,6 +1045,7 @@ impl Graphs {
             filter,
             followed,
             notests,
+            spread,
         } = *shown;
         // The graph as it was read, or as it is without its tests, with how
         // much that leaves out.
@@ -1082,7 +1089,7 @@ impl Graphs {
                 &root,
             )?);
             let mut view = follow(&index, &[])
-                .unwrap_or_else(|| index.view(name, scope, focus, certain, filter));
+                .unwrap_or_else(|| index.view_with(name, scope, spread, focus, certain, filter));
             view["project_id"] = json!(project);
             view["built"] = json!({"commit": built["commit"], "at": built["at"]});
             told(&mut view);
@@ -2160,6 +2167,11 @@ impl Domain for Graphs {
                         query["out"].as_str().unwrap_or(""),
                         query["into"].as_str().unwrap_or(""),
                     )?;
+                    let spread = places(
+                        query["spread"].as_str().unwrap_or(""),
+                        "Too many folders are open here; close some first.",
+                        "Invalid folders to open here.",
+                    )?;
                     let me = self.me.upgrade().ok_or_else(|| {
                         HarnessError::unavailable("The code graph is shutting down.")
                     })?;
@@ -2175,6 +2187,7 @@ impl Domain for Graphs {
                                 filter: &filter,
                                 followed: followed.as_ref(),
                                 notests,
+                                spread: &spread,
                             },
                         )
                     })
@@ -2234,9 +2247,18 @@ mod tests {
             .unwrap();
         for part in [
             "scope", "focus", "certain", "filter", "target", "follow", "out", "into", "notests",
+            "spread",
         ] {
             assert!(route.query.contains(&part), "{part}");
         }
+        // The folders spread out in a picture come as the same kind of list.
+        assert_eq!(
+            places("[\"src\",\"src/b, c\"]", "many", "wrong").unwrap(),
+            ["src", "src/b, c"]
+        );
+        assert!(places("", "many", "wrong").unwrap().is_empty());
+        assert!(places(&many, "many", "wrong").is_err());
+        assert!(places("src", "many", "wrong").is_err());
     }
     #[test]
     fn progress_lines_of_both_releases_are_read() {
@@ -2944,6 +2966,22 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 (&json!(1), &json!(1))
             );
             assert_eq!(arrows(&own), ["app -> core"]);
+            // A folder a request names is spread out in the picture.
+            let spread = ["app".to_owned()];
+            let opened = fixture
+                .graphs
+                .map(
+                    &fixture.project,
+                    None,
+                    &Shown {
+                        spread: &spread,
+                        ..Shown::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(arrows(&opened), ["app/src -> core"]);
+            assert_eq!(opened["frames"][0]["path"], "app");
+            assert_eq!(opened["nodes"][0]["holder"], "app");
             // The graph of the commit is read with the manifests of the
             // commit, which rule out both links between the two, and with
             // what its sources say: the helper is compiled into the core.

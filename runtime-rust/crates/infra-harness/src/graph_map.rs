@@ -48,6 +48,13 @@ const TOLD: usize = 30;
 pub const STEP: usize = 12;
 /// Places a picture of followed links holds.
 pub const FOLLOWED: usize = 60;
+/// Places of a folder that is spread out in the picture of the folder that
+/// holds it, drawn at once: the most linked first.
+pub const HELD: usize = 20;
+/// Boxes a picture with spread-out folders holds, and how many of them are
+/// left to what the open folder itself holds, however much is spread out.
+const SPREAD: usize = 100;
+const OWN: usize = 20;
 /// Folders that hold tests, or what tests are fed with, in the common
 /// languages.
 const TEST_FOLDERS: &[&str] = &[
@@ -650,8 +657,23 @@ fn group<'a>(scope: &str, path: &'a str) -> (&'a str, bool) {
     }
     (&path[..end.min(path.len())], false)
 }
+/// The part of `path` that stands for it when `scope` is open and some of
+/// its folders are spread out in it: as `group` tells, but a folder that is
+/// spread out gives way to what it holds, and so on down.
+fn place<'a>(scope: &str, spread: &HashSet<&str>, path: &'a str) -> (&'a str, bool) {
+    let (mut key, inside) = group(scope, path);
+    while inside && key.len() < path.len() && spread.contains(key) {
+        let rest = &path[key.len() + 1..];
+        key = &path[..rest.find('/').map_or(path.len(), |at| key.len() + 1 + at)];
+    }
+    (key, inside)
+}
 fn name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+/// The folder a place lies in; none for what lies in the project itself.
+fn holder(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(folder, _)| folder)
 }
 /// The part of `path` that stands for it among the links followed from a
 /// place `depth` folders deep: the folder at that depth that holds it, or the
@@ -880,14 +902,34 @@ impl Index {
         certain: bool,
         filter: &str,
     ) -> Value {
+        self.view_with(project, scope, &[], focus, certain, filter)
+    }
+    /// One folder of the map with some of the folders in it spread out:
+    /// such a folder is not drawn as one place but as the places it holds,
+    /// among the others, so what is around it stays in the picture. A
+    /// folder inside a spread-out one may be spread out in turn. What a
+    /// request names that the picture does not reach is passed over.
+    pub fn view_with(
+        &self,
+        project: &str,
+        scope: &str,
+        spread: &[String],
+        focus: Option<&str>,
+        certain: bool,
+        filter: &str,
+    ) -> Value {
         if let Some(file) = self.opened(scope) {
             return self.file(project, file, &HashMap::new(), None, focus, certain, filter);
         }
         let scope = scope.trim_matches('/');
         let scope = if self.folder(scope) { scope } else { "" };
+        let spread = spread
+            .iter()
+            .map(|folder| folder.trim_matches('/'))
+            .collect::<HashSet<_>>();
         let mut tallies: BTreeMap<&str, Tally> = BTreeMap::new();
         for (id, file) in self.files.iter().enumerate() {
-            let (key, inside) = group(scope, file);
+            let (key, inside) = place(scope, &spread, file);
             let tally = tallies.entry(key).or_default();
             tally.files += 1;
             tally.inside = inside;
@@ -901,8 +943,8 @@ impl Index {
             if weight == 0 {
                 continue;
             }
-            let (source, _) = group(scope, &self.files[*from as usize]);
-            let (target, _) = group(scope, &self.files[*to as usize]);
+            let (source, _) = place(scope, &spread, &self.files[*from as usize]);
+            let (target, _) = place(scope, &spread, &self.files[*to as usize]);
             if source == target {
                 if let Some(tally) = tallies.get_mut(source) {
                     tally.within += weight;
@@ -938,11 +980,46 @@ impl Index {
                 .cmp(&(a.out + a.into + a.within))
                 .then(left.cmp(right))
         });
-        children.truncate(SHOWN);
-        let shown = children
-            .iter()
-            .map(|(key, _)| **key)
-            .collect::<std::collections::BTreeSet<_>>();
+        // Each folder shows the most linked of what it holds: the open one
+        // `SHOWN` of them, a spread-out one `HELD`. What was spread out was
+        // asked for, so it is drawn first, and where the picture is full the
+        // open folder shows fewer, though never less than `OWN`.
+        let mut shown = HashSet::new();
+        let mut drawn: HashMap<&str, usize> = HashMap::new();
+        for framed in [true, false] {
+            let full = if framed { SPREAD - OWN } else { SPREAD };
+            for (key, _) in &children {
+                let folder = holder(key);
+                if (folder != scope) != framed || shown.len() >= full {
+                    continue;
+                }
+                let count = drawn.entry(folder).or_default();
+                if *count < if framed { HELD } else { SHOWN } {
+                    *count += 1;
+                    shown.insert(**key);
+                }
+            }
+        }
+        children.retain(|(key, _)| shown.contains(**key));
+        // The folders that are spread out and hold something drawn, each
+        // with how many places it holds and how many of them are drawn.
+        let mut frames: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+        for (key, _) in &children {
+            let mut folder = holder(key);
+            let mut direct = 1;
+            while folder != scope {
+                frames.entry(folder).or_default().1 += direct;
+                direct = 0;
+                folder = holder(folder);
+            }
+        }
+        for (key, tally) in &tallies {
+            if tally.inside
+                && let Some(frame) = frames.get_mut(holder(key))
+            {
+                frame.0 += 1;
+            }
+        }
         let mut edges = flows
             .iter()
             .filter(|((source, target), _)| shown.contains(source) && shown.contains(target))
@@ -1035,11 +1112,19 @@ impl Index {
                 "path": key,
                 "name": name(key),
                 "folder": tally.folder,
+                "holder": Some(holder(key)).filter(|folder| *folder != scope),
                 "files": tally.files,
                 "symbols": tally.symbols,
                 "within": tally.within,
                 "out": tally.out,
                 "in": tally.into,
+            })).collect::<Vec<_>>(),
+            "frames": frames.iter().map(|(path, (places, drawn))| json!({
+                "path": path,
+                "name": name(path),
+                "holder": Some(holder(path)).filter(|folder| *folder != scope),
+                "places": places,
+                "drawn": drawn,
             })).collect::<Vec<_>>(),
             "between": between,
             "backbone": backbone,
@@ -3629,6 +3714,201 @@ mod tests {
     /// An application over a library. `main` uses two handlers and both use
     /// `core`; `core` uses `db` through two links and a cache through one;
     /// one handler is only guessed to use `db`; `count` reports use `db`.
+    /// The places of a view, each with the frame that holds it.
+    fn held(view: &Value) -> Vec<String> {
+        let mut places = view["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| {
+                format!(
+                    "{}{}",
+                    node["path"].as_str().unwrap(),
+                    node["holder"]
+                        .as_str()
+                        .map(|holder| format!(" in {holder}"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>();
+        places.sort();
+        places
+    }
+    /// The frames of a view: the folder, the frame that holds it, and how
+    /// many of its places are drawn.
+    fn framed(view: &Value) -> Vec<String> {
+        view["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|frame| {
+                format!(
+                    "{}{} {}/{}",
+                    frame["path"].as_str().unwrap(),
+                    frame["holder"]
+                        .as_str()
+                        .map(|holder| format!(" in {holder}"))
+                        .unwrap_or_default(),
+                    frame["drawn"],
+                    frame["places"]
+                )
+            })
+            .collect()
+    }
+    fn sorted(mut rows: Vec<String>) -> Vec<String> {
+        rows.sort();
+        rows
+    }
+    #[test]
+    fn a_folder_is_spread_out_among_what_lies_beside_it() {
+        let index = shop();
+        let spread = |scope: &str, folders: &[&str], focus: Option<&str>, filter: &str| {
+            let folders = folders
+                .iter()
+                .map(|folder| (*folder).to_owned())
+                .collect::<Vec<_>>();
+            index.view_with("shop", scope, &folders, focus, false, filter)
+        };
+        // As it is drawn without: the folder is one place.
+        let plain = index.view("shop", "", None, false, "");
+        assert_eq!(held(&plain), ["README.md", "src", "tests"]);
+        assert_eq!(framed(&plain), [""; 0]);
+        // Spread out, it gives way to what it holds, and the links are those
+        // of what it holds.
+        let view = spread("", &["src"], None, "");
+        assert_eq!(
+            held(&view),
+            [
+                "README.md",
+                "src/Cart in src",
+                "src/Mail in src",
+                "src/Order in src",
+                "tests"
+            ]
+        );
+        assert_eq!(framed(&view), ["src 3/3"]);
+        assert_eq!(
+            sorted(rows(&view, "edges")),
+            [
+                "src/Order -> src/Cart 1/0",
+                "src/Order -> src/Mail 1/1",
+                "tests -> src/Cart 2/1"
+            ]
+        );
+        assert_eq!((&view["scope"], &view["children"]), (&json!(""), &json!(5)));
+        // A folder inside it is spread out in turn, down to its files.
+        let deep = spread("", &["src/Cart", "src"], None, "");
+        assert_eq!(
+            held(&deep),
+            [
+                "README.md",
+                "src/Cart/Cart.php in src/Cart",
+                "src/Cart/Price.php in src/Cart",
+                "src/Mail in src",
+                "src/Order in src",
+                "tests"
+            ]
+        );
+        assert_eq!(framed(&deep), ["src 2/2", "src/Cart in src 2/2"]);
+        assert_eq!(
+            sorted(rows(&deep, "edges")),
+            [
+                "src/Cart/Cart.php -> src/Cart/Price.php 2/1",
+                "src/Order -> src/Cart/Cart.php 1/0",
+                "src/Order -> src/Mail 1/1",
+                "tests -> src/Cart/Cart.php 1/1",
+                "tests -> src/Cart/Price.php 1/0"
+            ]
+        );
+        // What is named and not reached is passed over: a folder inside one
+        // that is not spread out, a file, a name the graph does not know.
+        let unreached = spread("", &["src/Cart", "README.md", "nowhere"], None, "");
+        assert_eq!(unreached["nodes"], plain["nodes"]);
+        assert_eq!(framed(&unreached), [""; 0]);
+        // In an open folder the frame of its own folder has no holder.
+        let inside = spread("src", &["src/Cart/"], None, "");
+        assert_eq!(
+            held(&inside),
+            [
+                "src/Cart/Cart.php in src/Cart",
+                "src/Cart/Price.php in src/Cart",
+                "src/Mail",
+                "src/Order"
+            ]
+        );
+        assert_eq!(framed(&inside), ["src/Cart 2/2"]);
+        // A filter keeps the places of that name, wherever they lie, with
+        // the frames that hold them.
+        let filtered = spread("", &["src", "src/Cart"], None, "price");
+        assert_eq!(held(&filtered), ["src/Cart/Price.php in src/Cart"]);
+        assert_eq!(framed(&filtered), ["src 0/2", "src/Cart in src 1/2"]);
+        assert_eq!(filtered["matching"], 1);
+        // A place in a frame is selected as any other.
+        let chosen = spread("", &["src", "src/Cart"], Some("src/Cart/Cart.php"), "");
+        assert_eq!(chosen["focus"]["name"], "Cart.php");
+        let side = |key: &str| {
+            chosen["focus"][key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["path"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(side("uses"), ["src/Cart/Price.php"]);
+        assert_eq!(sorted(side("used_by")), ["src/Order", "tests"]);
+        // A folder that is spread out is no place to select.
+        assert_eq!(spread("", &["src"], Some("src"), "")["focus"], Value::Null);
+    }
+    /// A project of `folders` folders of `files` files each, every file of
+    /// which uses one hub, as does one more file beside them.
+    fn wheel(folders: usize, files: usize) -> Index {
+        let mut nodes = vec![
+            json!({"id": "hub", "label": "hub()", "source_file": "hub.rs"}),
+            json!({"id": "app", "label": "app()", "source_file": "app.rs"}),
+        ];
+        let mut links = vec![
+            json!({"source": "app", "target": "hub", "relation": "calls", "confidence": "EXTRACTED", "source_file": "app.rs"}),
+        ];
+        for folder in 0..folders {
+            for file in 0..files {
+                let (id, path) = (
+                    format!("f{folder}_{file}"),
+                    format!("p{folder}/f{file:02}.rs"),
+                );
+                nodes.push(json!({"id": id, "label": "spoke()", "source_file": path}));
+                links.push(json!({"source": id, "target": "hub", "relation": "calls", "confidence": "EXTRACTED", "source_file": path}));
+            }
+        }
+        index(json!({"directed": false, "nodes": nodes, "links": links}))
+    }
+    #[test]
+    fn a_spread_out_folder_shows_its_most_linked_and_a_full_picture_keeps_the_open_folder() {
+        let index = wheel(1, HELD + 5);
+        let view = index.view_with("wheel", "", &["p0".to_owned()], None, false, "");
+        // The frame holds what it can; the open folder keeps its own.
+        assert_eq!(framed(&view), [format!("p0 {HELD}/{}", HELD + 5)]);
+        let places = held(&view);
+        assert_eq!(places.len(), HELD + 2);
+        assert!(places.contains(&"app.rs".to_owned()) && places.contains(&"hub.rs".to_owned()));
+        assert!(places.contains(&"p0/f00.rs in p0".to_owned()));
+        assert!(!places.contains(&format!("p0/f{:02}.rs in p0", HELD)));
+        assert_eq!(
+            (&view["children"], &view["matching"]),
+            (&json!(HELD + 7), &json!(HELD + 7))
+        );
+        // More is spread out than a picture holds: the frames fill their
+        // share, and what the open folder itself holds is still there.
+        let folders = SPREAD / HELD;
+        let index = wheel(folders, HELD);
+        let all = (0..folders)
+            .map(|folder| format!("p{folder}"))
+            .collect::<Vec<_>>();
+        let view = index.view_with("wheel", "", &all, None, false, "");
+        let places = held(&view);
+        assert_eq!(places.len(), SPREAD - OWN + 2);
+        assert!(places.contains(&"app.rs".to_owned()) && places.contains(&"hub.rs".to_owned()));
+        assert_eq!(framed(&view).len(), (SPREAD - OWN) / HELD);
+    }
     fn office(count: usize) -> Index {
         let call = |from: &str, to: &str, file: &str, read: bool| {
             json!({

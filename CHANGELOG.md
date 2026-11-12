@@ -24,6 +24,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Open a folder inside the picture of the Harness dependency map. **Open
+  here**, or `+` at the corner of a folder, draws the folder as a frame around
+  its folders and files, among everything else, so opening a folder no longer
+  loses what is around it. What a frame holds stands in the same columns as
+  the rest and keeps its direction; a folder in a frame opens into a frame
+  inside it, and `−` at the corner of a frame draws the folder as one box
+  again. A frame draws the 20 most linked places of its folder and says how
+  many it holds.
+
 - Delete the Harness code graph while the graph of a chosen commit is being
   built. The folder was removed at once, under a build that was still writing
   into it, so now and then the removal failed, the request was answered with
