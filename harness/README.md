@@ -1804,6 +1804,13 @@ picture is made no smaller than a quarter of its size: beyond that the rest of i
 is scrolled to. Boxes and links are selected at any scale, and a box tells its
 name when the pointer rests on it. The choice is kept in this browser.
 
+Resting the pointer on a box lights its links and the boxes at their other ends
+and leaves the rest of the picture faint; resting it on a link lights the link and
+its two ends. So what a box is linked with is seen before anything is selected. A
+box reached with the keyboard is lit the same way. Nothing is selected by it, and
+once the pointer has left, the picture is as it was, with what was selected in it.
+The window of a link does the same for its names.
+
 Colour tells the direction. An arrow shades from the colour of using, where it
 leaves a box, to the colour of being used, where its head arrives, and every box
 wears the same two colours on its edges: one on the side arrows leave from, the

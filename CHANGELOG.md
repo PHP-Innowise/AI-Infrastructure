@@ -24,6 +24,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Light what the pointer rests on in the Harness dependency map. A box lights
+  its links and the boxes at their other ends, a link its two ends, and the
+  rest of the picture is left faint until the pointer has left; a box reached
+  with the keyboard is lit the same way, and so are the names in the window
+  of a link. Nothing is selected by it and the picture is not drawn again.
+
 - Fit the picture of the Harness dependency map to the window. **Fit to
   window** scales a picture down until all of it is in sight, so a map wider
   than the window is seen whole, and fits it again when the window changes its

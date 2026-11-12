@@ -1422,7 +1422,7 @@ pub fn canvas(view: &V) -> String {
             None => "",
         };
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}{}\" d=\"{}\" stroke=\"url(#graph-map-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow)\"><title>{} uses {} · {}{}</title></path>",
+            "<path class=\"graph-map-edge{state}{}{}\" data-ends=\"{from} {to}\" d=\"{}\" stroke=\"url(#graph-map-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow)\"><title>{} uses {} · {}{}</title></path>",
             if guessed == links { " graph-map-edge-guess" } else { "" },
             if back { " graph-map-edge-back" } else { "" },
             wire.path,
@@ -1441,7 +1441,7 @@ pub fn canvas(view: &V) -> String {
     for wire in &plan.wires {
         let (from, to) = pairs[wire.edge];
         html.push_str(&format!(
-            "<path class=\"graph-map-hit\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {} · select to see what makes up this link</title></path>",
+            "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {} · select to see what makes up this link</title></path>",
             wire.path,
             payload(&json!({"from": nodes[from]["path"], "to": nodes[to]["path"]})),
             escape(&m::text(&nodes[from], "name")),
@@ -1545,7 +1545,7 @@ pub fn canvas(view: &V) -> String {
         };
         let (out, into) = flow[index];
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
             payload(&node["path"]),
             escape(kind),
             opened && !symbol,
@@ -1593,6 +1593,7 @@ pub fn canvas(view: &V) -> String {
         if followed {
             html.push_str(&handles(
                 node,
+                index,
                 placed.x,
                 placed.y,
                 chosen.is_some() && !near(index),
@@ -1605,7 +1606,7 @@ pub fn canvas(view: &V) -> String {
                 escape(&m::text(node, "name"))
             );
             html.push_str(&format!(
-                "<button type=\"button\" class=\"graph-map-spread\" data-dim=\"{}\" data-action=\"graph-map-spread\" data-payload=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{told}\" aria-label=\"{told}\">+</button>",
+                "<button type=\"button\" class=\"graph-map-spread\" data-of=\"{index}\" data-dim=\"{}\" data-action=\"graph-map-spread\" data-payload=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{told}\" aria-label=\"{told}\">+</button>",
                 chosen.is_some() && !near(index),
                 payload(&node["path"]),
                 placed.x,
@@ -1654,7 +1655,7 @@ const HANDLE_GAP: f64 = 11.0;
 /// as the links leave on the right and arrive on the left. A side that is
 /// unfolded has − to fold it back; a side with places not drawn has + with
 /// how many, which unfolds the next of them.
-fn handles(node: &V, x: f64, y: f64, dim: bool) -> String {
+fn handles(node: &V, at: usize, x: f64, y: f64, dim: bool) -> String {
     let name = escape(&m::text(node, "name"));
     let mut html = String::new();
     for (side, corner, outward, hang) in [
@@ -1671,7 +1672,7 @@ fn handles(node: &V, x: f64, y: f64, dim: bool) -> String {
         let asked = payload(&json!({"path": node["path"], "side": side}));
         if unfolded {
             html.push_str(&format!(
-                "<button type=\"button\" class=\"graph-map-more\" data-side=\"{side}\" data-dim=\"{dim}\" data-action=\"graph-map-fold\" data-payload=\"{asked}\" style=\"left:{corner:.0}px;top:{y:.0}px\" title=\"Hide {what}\" aria-label=\"Hide {what}\">−</button>"
+                "<button type=\"button\" class=\"graph-map-more\" data-of=\"{at}\" data-side=\"{side}\" data-dim=\"{dim}\" data-action=\"graph-map-fold\" data-payload=\"{asked}\" style=\"left:{corner:.0}px;top:{y:.0}px\" title=\"Hide {what}\" aria-label=\"Hide {what}\">−</button>"
             ));
         }
         if more > 0 {
@@ -1687,7 +1688,7 @@ fn handles(node: &V, x: f64, y: f64, dim: bool) -> String {
                 format!("Show {what}: {} not drawn", count(more))
             };
             html.push_str(&format!(
-                "<button type=\"button\" class=\"graph-map-more\" data-side=\"{side}\" data-hang=\"{hang}\" data-dim=\"{dim}\" data-action=\"graph-map-unfold\" data-payload=\"{asked}\" style=\"left:{at:.0}px;top:{y:.0}px\" title=\"{told}\" aria-label=\"{told}\">+{}</button>",
+                "<button type=\"button\" class=\"graph-map-more\" data-of=\"{at}\" data-side=\"{side}\" data-hang=\"{hang}\" data-dim=\"{dim}\" data-action=\"graph-map-unfold\" data-payload=\"{asked}\" style=\"left:{at:.0}px;top:{y:.0}px\" title=\"{told}\" aria-label=\"{told}\">+{}</button>",
                 count(more)
             ));
         }
@@ -1895,7 +1896,7 @@ pub fn link_canvas(view: &V, chosen: &str) -> String {
         };
         let guessed = m::yes(&edge["guessed"]);
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}\" d=\"{wire}\" stroke=\"url(#graph-link-flow)\" stroke-width=\"1.4\" marker-end=\"url(#graph-link-arrow)\"><title>{} uses {} · {}{}</title></path>",
+            "<path class=\"graph-map-edge{state}{}\" data-ends=\"{from} {to}\" d=\"{wire}\" stroke=\"url(#graph-link-flow)\" stroke-width=\"1.4\" marker-end=\"url(#graph-link-arrow)\"><title>{} uses {} · {}{}</title></path>",
             if guessed { " graph-map-edge-guess" } else { "" },
             escape(&m::text(&names[*from].0, "name")),
             escape(&m::text(&names[*to].0, "name")),
@@ -1941,7 +1942,7 @@ pub fn link_canvas(view: &V, chosen: &str) -> String {
             }
         );
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-action=\"graph-link-node\" data-payload=\"{}\" data-folder=\"false\" data-kind=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-flow=\"{}\" data-out=\"{uses}\" data-in=\"{}\" style=\"left:{x:.0}px;top:{y:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>{}</button>",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-link-node\" data-payload=\"{}\" data-folder=\"false\" data-kind=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-flow=\"{}\" data-out=\"{uses}\" data-in=\"{}\" style=\"left:{x:.0}px;top:{y:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>{}</button>",
             payload(&name["key"]),
             escape(kind),
             picked == Some(index),
@@ -2815,8 +2816,113 @@ fn fit() {
     };
     let _ = plane.set_attribute("style", &scaled(size, scale));
 }
-/// Fits the picture again when the window changes its size. Asked for each
-/// time the map opens, and set up once.
+/// What the pointer rests on in a picture: a box, by its number there, or a
+/// link, by the numbers of its two ends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pointed {
+    Place(usize),
+    Link(usize, usize),
+}
+/// The two ends a link is marked with.
+fn ends_of(mark: &str) -> Option<(usize, usize)> {
+    let (from, to) = mark.split_once(' ')?;
+    Some((from.parse().ok()?, to.parse().ok()?))
+}
+/// What a part of a picture stands for, from its marks: the number of a
+/// box, which a handle of the box carries too, or the ends of a link.
+pub fn pointed(place: Option<&str>, ends: Option<&str>) -> Option<Pointed> {
+    match (place, ends) {
+        (Some(place), _) => place.parse().ok().map(Pointed::Place),
+        (None, Some(ends)) => ends_of(ends).map(|(from, to)| Pointed::Link(from, to)),
+        _ => None,
+    }
+}
+/// Whether a link is lit while the pointer rests on something: the link
+/// itself, or every link of the box.
+pub fn lit_link(pointed: Pointed, link: (usize, usize)) -> bool {
+    match pointed {
+        Pointed::Place(place) => link.0 == place || link.1 == place,
+        Pointed::Link(from, to) => link == (from, to),
+    }
+}
+/// Whether a box is lit: the box itself and what its links lead to, or the
+/// two ends of the link.
+pub fn lit_place(pointed: Pointed, links: &[(usize, usize)], place: usize) -> bool {
+    match pointed {
+        Pointed::Place(at) => {
+            at == place
+                || links
+                    .iter()
+                    .any(|link| *link == (at, place) || *link == (place, at))
+        }
+        Pointed::Link(from, to) => place == from || place == to,
+    }
+}
+/// Lights what the pointer rests on in a picture, with what it is linked
+/// to, and leaves the rest faint: a box with its links and the boxes at
+/// their other ends, a link with its two ends. The picture is not drawn
+/// again and the server is asked nothing; once the pointer has left, the
+/// picture is as it was, with what was selected in it.
+fn point(canvas: &str, target: Option<web_sys::Element>) {
+    let Some(plane) = dom::all(&format!("#{canvas} .graph-map-plane"))
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    let stands = |part: &web_sys::Element| {
+        pointed(
+            part.get_attribute("data-n")
+                .or_else(|| part.get_attribute("data-of"))
+                .as_deref(),
+            part.get_attribute("data-ends").as_deref(),
+        )
+    };
+    let at = target
+        .and_then(|target| {
+            target
+                .closest("[data-n],[data-of],[data-ends]")
+                .ok()
+                .flatten()
+        })
+        .and_then(|part| stands(&part));
+    // The pointer moves over the parts of one box many times.
+    let told = at.map(|at| format!("{at:?}")).unwrap_or_default();
+    if plane.get_attribute("data-pointed").unwrap_or_default() == told {
+        return;
+    }
+    let _ = plane.set_attribute("data-pointed", &told);
+    let parts = dom::all(&format!(
+        "#{canvas} [data-n],#{canvas} [data-of],#{canvas} [data-ends]"
+    ));
+    let Some(at) = at else {
+        let _ = plane.remove_attribute("data-hover");
+        for part in &parts {
+            let _ = part.remove_attribute("data-lit");
+        }
+        return;
+    };
+    let links = parts
+        .iter()
+        .filter_map(|part| ends_of(&part.get_attribute("data-ends")?))
+        .collect::<Vec<_>>();
+    for part in &parts {
+        let lit = match stands(part) {
+            Some(Pointed::Place(place)) => lit_place(at, &links, place),
+            Some(Pointed::Link(from, to)) => lit_link(at, (from, to)),
+            None => false,
+        };
+        let _ = if lit {
+            part.set_attribute("data-lit", "true")
+        } else {
+            part.remove_attribute("data-lit")
+        };
+    }
+    let _ = plane.set_attribute("data-hover", "true");
+}
+/// Fits the picture again when the window changes its size, and lights
+/// what the pointer or the keyboard rests on in the map and in the window
+/// of a link. Asked for each time the map opens, and set up once.
 fn watch() {
     if m::yes(&m::data("graph-map-watched")) {
         return;
@@ -2830,6 +2936,27 @@ fn watch() {
     let _ =
         dom::window().add_event_listener_with_callback("resize", resized.as_ref().unchecked_ref());
     resized.forget();
+    for canvas in ["graph-map-canvas", "graph-link-canvas"] {
+        let Some(element) = dom::get(canvas) else {
+            continue;
+        };
+        // Entering a part lights it; leaving the picture puts it out.
+        for (kind, rests) in [
+            ("mouseover", true),
+            ("focusin", true),
+            ("mouseleave", false),
+            ("focusout", false),
+        ] {
+            let moved = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+                let target = event
+                    .target()
+                    .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+                point(canvas, target.filter(|_| rests));
+            });
+            let _ = element.add_event_listener_with_callback(kind, moved.as_ref().unchecked_ref());
+            moved.forget();
+        }
+    }
 }
 fn fresh(target: &str) -> V {
     json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "filter": "", "follow": "", "out": [], "into": [], "spread": []})
@@ -5512,5 +5639,74 @@ mod tests {
         assert_eq!(scale((900.0, 400.0), (-2.0, 600.0)), 1.0);
         // A map begins as it is drawn, until the viewer chose otherwise.
         assert_eq!(fresh("work")["fit"], false);
+    }
+    #[test]
+    fn what_the_pointer_rests_on_is_lit_with_what_it_is_linked_to() {
+        // Three boxes in a row: the first uses the second, the second the
+        // third.
+        let links = [(0, 1), (1, 2)];
+        // A box lights its links and the boxes at their other ends.
+        let middle = Pointed::Place(1);
+        assert!(links.iter().all(|link| lit_link(middle, *link)));
+        assert!((0..3).all(|place| lit_place(middle, &links, place)));
+        let first = Pointed::Place(0);
+        assert_eq!(links.map(|link| lit_link(first, link)), [true, false]);
+        assert_eq!(
+            [0, 1, 2].map(|place| lit_place(first, &links, place)),
+            [true, true, false]
+        );
+        // A link lights itself and its two ends, not the link back.
+        let link = Pointed::Link(1, 2);
+        assert_eq!(links.map(|other| lit_link(link, other)), [false, true]);
+        assert!(!lit_link(link, (2, 1)));
+        assert_eq!(
+            [0, 1, 2].map(|place| lit_place(link, &links, place)),
+            [false, true, true]
+        );
+        // What a part of a picture stands for is read from its marks: a
+        // box or a handle of it by its number, a link by its two ends.
+        assert_eq!(pointed(Some("7"), None), Some(Pointed::Place(7)));
+        assert_eq!(pointed(None, Some("3 12")), Some(Pointed::Link(3, 12)));
+        assert_eq!(pointed(Some("7"), Some("3 12")), Some(Pointed::Place(7)));
+        for wrong in [
+            (None, None),
+            (Some("x"), None),
+            (None, Some("3")),
+            (None, Some("3 x")),
+        ] {
+            assert_eq!(pointed(wrong.0, wrong.1), None, "{wrong:?}");
+        }
+        // The pictures carry those marks: each box its number, each link
+        // and the wider link over it the numbers of its ends, each handle
+        // the number of its box.
+        let html = canvas(&super::tests::view());
+        assert!(html.contains("class=\"graph-map-node\" data-n=\"0\" data-action=\"graph-map-node\" data-payload=\"&quot;src/Cart&quot;\""));
+        assert!(
+            html.contains("class=\"graph-map-node\" data-n=\"2\" data-action=\"graph-map-node\"")
+        );
+        assert_eq!(html.matches(" data-ends=\"1 0\" ").count(), 2);
+        assert_eq!(html.matches(" data-ends=\"1 2\" ").count(), 2);
+        assert!(html.contains("<path class=\"graph-map-hit\" data-ends=\"1 0\" d=\"M"));
+        let spread = canvas(&spread_view());
+        assert!(spread.contains("class=\"graph-map-spread\" data-of=\"1\" data-dim=\"false\" data-action=\"graph-map-spread\" data-payload=\"&quot;src/Cart/Rules&quot;\""));
+        // The corner of a frame is of no box, and is never made faint.
+        assert!(spread.contains("class=\"graph-map-spread\" data-action=\"graph-map-gather\""));
+        let followed = canvas(&trail());
+        assert_eq!(
+            followed
+                .matches("class=\"graph-map-more\" data-of=\"")
+                .count(),
+            followed.matches("class=\"graph-map-more\"").count()
+        );
+        assert!(followed.matches("class=\"graph-map-more\"").count() > 0);
+        // So does the window of a link: the names that use come first.
+        let link = link_canvas(&link_view(), "");
+        assert!(link.contains("class=\"graph-map-node\" data-n=\"0\" data-action=\"graph-link-node\" data-payload=\"&quot;src/Order/Order.php#L3:Order&quot;\""));
+        assert!(link.contains("class=\"graph-map-node\" data-n=\"4\" data-action=\"graph-link-node\" data-payload=\"&quot;src/Cart/Cart.php#L20:.add&lt;T&gt;()&quot;\""));
+        assert_eq!(
+            ["0 3", "0 4", "1 3", "2 3"]
+                .map(|ends| link.matches(&format!(" data-ends=\"{ends}\" ")).count()),
+            [1; 4]
+        );
     }
 }
