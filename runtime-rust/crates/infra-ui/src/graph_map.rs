@@ -20,6 +20,12 @@ const CAPTION: f64 = 20.0;
 /// between a frame and what it holds.
 const FRAME_HEAD: f64 = 22.0;
 const FRAME_PAD: f64 = 8.0;
+/// In the window of one link: how wide a name is, how far its two ends
+/// stand apart, and the room between two names and between two files.
+const LINK_BOX: f64 = 220.0;
+const LINK_GAP: f64 = 220.0;
+const LINK_ROW: f64 = 6.0;
+const LINK_BETWEEN: f64 = 10.0;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placed {
     pub x: f64,
@@ -1426,6 +1432,19 @@ pub fn canvas(view: &V) -> String {
             if back { " · against the main direction, closes a cycle" } else { "" },
         ));
     }
+    // Over each link lies a wider one that cannot be seen and is easy to
+    // hit: selecting a link looks into it. They lie over all the links, so
+    // none of them is hidden under a link drawn later.
+    for wire in &plan.wires {
+        let (from, to) = pairs[wire.edge];
+        html.push_str(&format!(
+            "<path class=\"graph-map-hit\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {} · select to see what makes up this link</title></path>",
+            wire.path,
+            payload(&json!({"from": nodes[from]["path"], "to": nodes[to]["path"]})),
+            escape(&m::text(&nodes[from], "name")),
+            escape(&m::text(&nodes[to], "name")),
+        ));
+    }
     html.push_str("</svg>");
     if let Some(apart) = plan.apart {
         html.push_str(&format!(
@@ -1672,7 +1691,442 @@ fn handles(node: &V, x: f64, y: f64, dim: bool) -> String {
     }
     html
 }
-fn rows(title: &str, rows: &V, more: &V) -> String {
+/// Where the names of a looked-into link stand: what uses in a column on
+/// the left, what is used in a column on the right, each file a frame around
+/// its names.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Ends {
+    /// Where each name stands, in the order the names were given: those
+    /// that use, file by file, then those that are used.
+    pub names: Vec<(f64, f64)>,
+    /// The frame of each file, in the same order.
+    pub files: Vec<Framed>,
+    /// The curve of each link.
+    pub wires: Vec<String>,
+    pub width: f64,
+    pub height: f64,
+}
+/// Lays out the two ends of a link. `users` and `used` say how many names
+/// each file of an end holds; a link names its two names by their numbers
+/// among all of them, those that use first. Files and the names in them are
+/// ordered so that the links cross as little as a few rounds can make them.
+/// Both ends begin at the top, so a long end does not push the short one
+/// out of sight.
+pub fn ends(users: &[usize], used: &[usize], links: &[(usize, usize)]) -> Ends {
+    let left = users.iter().sum::<usize>();
+    let count = left + used.iter().sum::<usize>();
+    let mut file = Vec::with_capacity(count);
+    for (group, names) in users.iter().chain(used).enumerate() {
+        file.extend(std::iter::repeat_n(group, *names));
+    }
+    let mut near = vec![vec![]; count];
+    for (from, to) in links {
+        if *from < left && (left..count).contains(to) {
+            near[*from].push(*to);
+            near[*to].push(*from);
+        }
+    }
+    let mut order = [(0..left).collect::<Vec<_>>(), (left..count).collect()];
+    let mut place = (0..count)
+        .map(|name| (if name < left { name } else { name - left }) as f64)
+        .collect::<Vec<_>>();
+    // Each name moves towards the average place of what it is linked with
+    // at the other end, and a file towards that of its names.
+    for round in 0..6 {
+        let side = 1 - round % 2;
+        let mut keyed = order[side]
+            .iter()
+            .map(|name| {
+                let linked = &near[*name];
+                let middle = if linked.is_empty() {
+                    place[*name]
+                } else {
+                    linked.iter().map(|other| place[*other]).sum::<f64>() / linked.len() as f64
+                };
+                (middle, place[*name], *name)
+            })
+            .collect::<Vec<_>>();
+        let mut middles: BTreeMap<usize, (f64, f64)> = BTreeMap::new();
+        for (middle, _, name) in &keyed {
+            let of_file = middles.entry(file[*name]).or_insert((0.0, 0.0));
+            of_file.0 += middle;
+            of_file.1 += 1.0;
+        }
+        let middle = |name: usize| middles[&file[name]].0 / middles[&file[name]].1;
+        keyed.sort_by(|a, b| {
+            middle(a.2)
+                .total_cmp(&middle(b.2))
+                .then(file[a.2].cmp(&file[b.2]))
+                .then(a.0.total_cmp(&b.0))
+                .then(a.1.total_cmp(&b.1))
+        });
+        order[side] = keyed.into_iter().map(|(.., name)| name).collect();
+        for (index, name) in order[side].iter().enumerate() {
+            place[*name] = index as f64;
+        }
+    }
+    let mut names = vec![(0.0, 0.0); count];
+    let mut files = vec![Framed::default(); users.len() + used.len()];
+    let mut tall = [0.0f64; 2];
+    for (side, order) in order.iter().enumerate() {
+        let x = MARGIN + FRAME_PAD + side as f64 * (LINK_BOX + LINK_GAP);
+        let mut y = MARGIN;
+        let mut open: Option<usize> = None;
+        for name in order {
+            let of = file[*name];
+            if open == Some(of) {
+                y += LINK_ROW;
+            } else {
+                // The frame before ends under its last name; this one
+                // begins with the room for the name of its file.
+                if open.is_some() {
+                    y += FRAME_PAD + LINK_BETWEEN;
+                }
+                open = Some(of);
+                files[of] = Framed {
+                    x: x - FRAME_PAD,
+                    y,
+                    width: LINK_BOX + 2.0 * FRAME_PAD,
+                    height: 0.0,
+                };
+                y += FRAME_HEAD;
+            }
+            names[*name] = (x, y);
+            y += BOX_HEIGHT;
+            files[of].height = y + FRAME_PAD - files[of].y;
+        }
+        if open.is_some() {
+            y += FRAME_PAD;
+        }
+        tall[side] = y;
+    }
+    let tallest = tall[0].max(tall[1]);
+    let wires = links
+        .iter()
+        .map(|(from, to)| {
+            if *from >= left || !(left..count).contains(to) {
+                return String::new();
+            }
+            let start = (names[*from].0 + LINK_BOX, names[*from].1 + BOX_HEIGHT / 2.0);
+            let end = (names[*to].0, names[*to].1 + BOX_HEIGHT / 2.0);
+            let mut path = format!("M{:.1} {:.1}", start.0, start.1);
+            curve(&mut path, start, end);
+            path
+        })
+        .collect();
+    Ends {
+        names,
+        files,
+        wires,
+        width: 2.0 * (MARGIN + FRAME_PAD + LINK_BOX) + LINK_GAP,
+        height: (tallest + MARGIN).max(BOX_HEIGHT + 2.0 * MARGIN),
+    }
+}
+/// The names of a looked-into link in one list, those that use first, each
+/// with the file it lies in; and how many names each file of each end holds.
+fn link_names(view: &V) -> (Vec<(V, V)>, [Vec<usize>; 2]) {
+    let mut names = vec![];
+    let mut held = [vec![], vec![]];
+    for (side, end) in ["users", "used"].iter().enumerate() {
+        for mut group in m::array(&view[*end]["groups"]) {
+            let of_group = m::array(&group["names"]);
+            held[side].push(of_group.len());
+            // A name carries its file, not the file's other names.
+            group["names"] = V::Null;
+            names.extend(of_group.into_iter().map(|name| (name, group.clone())));
+        }
+    }
+    (names, held)
+}
+/// The picture of one link, looked into: the names that use on the left,
+/// the names that are used on the right, each in the frame of its file, and
+/// every link between two of them. `chosen` is the name whose links are lit.
+pub fn link_canvas(view: &V, chosen: &str) -> String {
+    let (names, held) = link_names(view);
+    let at = |key: &V| names.iter().position(|(name, _)| &name["key"] == key);
+    let edges = m::array(&view["edges"]);
+    let pairs = edges
+        .iter()
+        .filter_map(|edge| Some((at(&edge["from"])?, at(&edge["to"])?, edge)))
+        .collect::<Vec<_>>();
+    let plan = ends(
+        &held[0],
+        &held[1],
+        &pairs
+            .iter()
+            .map(|(from, to, _)| (*from, *to))
+            .collect::<Vec<_>>(),
+    );
+    let users = held[0].iter().sum::<usize>();
+    let picked = names.iter().position(|(name, _)| name["key"] == chosen);
+    let near = |name: usize| {
+        picked.is_some_and(|picked| {
+            picked == name
+                || pairs.iter().any(|(from, to, _)| {
+                    (*from, *to) == (picked, name) || (*from, *to) == (name, picked)
+                })
+        })
+    };
+    let mut html = format!(
+        "<div class=\"graph-map-plane\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs><marker id=\"graph-link-arrow\" class=\"graph-map-arrow\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\"/></marker><linearGradient id=\"graph-link-flow\" gradientUnits=\"userSpaceOnUse\" x1=\"{:.0}\" y1=\"0\" x2=\"{:.0}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient></defs>",
+        plan.width,
+        plan.height,
+        plan.width,
+        plan.height,
+        MARGIN + FRAME_PAD + LINK_BOX,
+        MARGIN + FRAME_PAD + LINK_BOX + LINK_GAP,
+    );
+    for frame in &plan.files {
+        if frame.width > 0.0 {
+            html.push_str(&format!(
+                "<rect class=\"graph-map-frame\" data-inner=\"false\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"8\"/>",
+                frame.x, frame.y, frame.width, frame.height
+            ));
+        }
+    }
+    for ((from, to, edge), wire) in pairs.iter().zip(&plan.wires) {
+        let state = match picked {
+            Some(picked) if picked == *from || picked == *to => " graph-map-edge-on",
+            Some(_) => " graph-map-edge-off",
+            None => "",
+        };
+        let guessed = m::yes(&edge["guessed"]);
+        html.push_str(&format!(
+            "<path class=\"graph-map-edge{state}{}\" d=\"{wire}\" stroke=\"url(#graph-link-flow)\" stroke-width=\"1.4\" marker-end=\"url(#graph-link-arrow)\"><title>{} uses {} · {}{}</title></path>",
+            if guessed { " graph-map-edge-guess" } else { "" },
+            escape(&m::text(&names[*from].0, "name")),
+            escape(&m::text(&names[*to].0, "name")),
+            escape(&m::text(edge, "kind").replace('_', " ")),
+            if guessed { ", guessed by name" } else { "" },
+        ));
+    }
+    html.push_str("</svg>");
+    // The head of a frame: the file its names lie in.
+    let mut first = 0;
+    for (frame, size) in plan.files.iter().zip(held.iter().flatten()) {
+        if let Some((_, file)) = names.get(first).filter(|_| *size > 0) {
+            html.push_str(&format!(
+                "<span class=\"graph-map-frame-name\" style=\"left:{:.0}px;top:{:.0}px;max-width:{:.0}px\" title=\"{}\">{}</span>",
+                frame.x + FRAME_PAD,
+                frame.y + 3.0,
+                frame.width - 2.0 * FRAME_PAD,
+                escape(&m::text(file, "path")),
+                escape(&m::text(file, "name")),
+            ));
+        }
+        first += size;
+    }
+    for (index, (name, file)) in names.iter().enumerate() {
+        let (x, y) = plan.names[index];
+        let uses = index < users;
+        let kind = name["kind"].as_str().unwrap_or("");
+        let line = name["line"].as_u64().unwrap_or(0);
+        let links = name["links"].as_u64().unwrap_or(0);
+        let place = match line {
+            0 => m::text(file, "path"),
+            line => format!("{}:{line}", m::text(file, "path")),
+        };
+        let label = format!(
+            "{}, {}, {}, {} here",
+            m::text(name, "name"),
+            what(name),
+            place,
+            if uses {
+                format!("uses through {}", plural(links, "link", "links"))
+            } else {
+                format!("is used through {}", plural(links, "link", "links"))
+            }
+        );
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-map-node\" data-action=\"graph-link-node\" data-payload=\"{}\" data-folder=\"false\" data-kind=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-flow=\"{}\" data-out=\"{uses}\" data-in=\"{}\" style=\"left:{x:.0}px;top:{y:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>{}</button>",
+            payload(&name["key"]),
+            escape(kind),
+            picked == Some(index),
+            picked.is_some() && !near(index),
+            if uses { "uses" } else { "used" },
+            !uses,
+            escape(&place),
+            escape(&label),
+            match letter(kind) {
+                "" => String::new(),
+                letter => format!(
+                    "<span class=\"graph-map-node-kind\" aria-hidden=\"true\">{letter}</span>"
+                ),
+            },
+            escape(&m::text(name, "name")),
+            if links > 1 {
+                format!(
+                    "<span class=\"graph-map-node-count\" aria-hidden=\"true\">{}</span>",
+                    count(links)
+                )
+            } else {
+                String::new()
+            },
+        ));
+    }
+    html.push_str("</div>");
+    html
+}
+/// What the window of a link is called: what uses, and what is used.
+pub fn link_title(view: &V) -> String {
+    format!(
+        "{} uses {}",
+        m::text(&view["from"], "name"),
+        m::text(&view["to"], "name")
+    )
+}
+/// The link in a line: how many links it stands for and how they were
+/// found, and how many names in how many files lie at each end.
+pub fn link_summary(view: &V) -> String {
+    if m::yes(&view["missing"]) {
+        return "The graph does not know one end of this link any more.".to_owned();
+    }
+    let links = view["links"].as_u64().unwrap_or(0);
+    let guessed = view["guessed"].as_u64().unwrap_or(0);
+    if links == 0 {
+        return if m::yes(&view["certain"]) {
+            "No link read from the code runs this way.".to_owned()
+        } else {
+            "No link runs this way.".to_owned()
+        };
+    }
+    let end = |side: &str| {
+        let names = view[side]["names"].as_u64().unwrap_or(0);
+        match view[side]["files"].as_u64().unwrap_or(0) {
+            1 => plural(names, "name", "names"),
+            files => format!(
+                "{} in {} files",
+                plural(names, "name", "names"),
+                count(files)
+            ),
+        }
+    };
+    format!(
+        "{}: {} read from the code, {} guessed by name · {} {} {}",
+        plural(links, "link", "links"),
+        count(links - guessed.min(links)),
+        count(guessed),
+        end("users"),
+        if view["users"]["names"] == 1 {
+            "uses"
+        } else {
+            "use"
+        },
+        end("used"),
+    )
+}
+/// What of a link is not drawn, where it is more than a window holds.
+pub fn link_note(view: &V) -> String {
+    let (names, _) = link_names(view);
+    let users = m::array(&view["users"]["groups"])
+        .iter()
+        .map(|group| m::array(&group["names"]).len() as u64)
+        .sum::<u64>();
+    let used = names.len() as u64 - users;
+    let number = |side: &str| view[side]["names"].as_u64().unwrap_or(0);
+    let drawn = m::array(&view["edges"]).len() as u64;
+    let links = view["links"].as_u64().unwrap_or(0);
+    let mut parts = vec![];
+    if m::yes(&view["preliminary"]) {
+        parts.push(
+            "The links are those the files have in the checkout, not in that commit.".to_owned(),
+        );
+    }
+    if users < number("users") || used < number("used") {
+        parts.push(format!(
+            "Showing the most linked names: {} of {} that use, {} of {} that are used, and {} of the {} between them. Look into a narrower link to see the rest: open the folder, or open it here.",
+            count(users),
+            count(number("users")),
+            count(used),
+            count(number("used")),
+            count(drawn),
+            plural(links, "link", "links"),
+        ));
+    } else if drawn < links {
+        parts.push(format!(
+            "Drawing {} of the {}.",
+            count(drawn),
+            plural(links, "link", "links")
+        ));
+    }
+    parts.join(" ")
+}
+/// Beside the picture of a link: what the chosen name is and what it is
+/// linked with here; with no name chosen, how to choose one and of which
+/// kinds the links are.
+pub fn link_side(view: &V, chosen: &str) -> String {
+    let (names, _) = link_names(view);
+    let Some((name, file)) = names.iter().find(|(name, _)| name["key"] == chosen) else {
+        let kinds = m::array(&view["kinds"])
+            .iter()
+            .map(|kind| {
+                format!(
+                    "{} {}",
+                    escape(&m::text(kind, "kind").replace('_', " ")),
+                    count(kind["links"].as_u64().unwrap_or(0))
+                )
+            })
+            .collect::<Vec<_>>();
+        return format!(
+            "<p class=\"knowledge-note\">Select a name to light its links. Select it again to open its file on it in the map.</p>{}",
+            if kinds.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<p class=\"knowledge-note\">Links by kind: {}</p>",
+                    kinds.join(" · ")
+                )
+            }
+        );
+    };
+    let line = name["line"].as_u64().unwrap_or(0);
+    let mut html = format!(
+        "<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p><button type=\"button\" class=\"button compact\" data-action=\"graph-link-open\" data-payload=\"{}\">Open in the map</button>",
+        escape(&m::text(name, "name")),
+        escape(&m::text(file, "path")),
+        if line > 0 {
+            format!(":{line}")
+        } else {
+            String::new()
+        },
+        escape(&capital(&what(name))),
+        payload(&name["key"]),
+    );
+    // What it is linked with in this link, each with the way it is.
+    let edges = m::array(&view["edges"]);
+    for (title, own, other) in [("Uses here", "from", "to"), ("Used by here", "to", "from")] {
+        let linked = edges
+            .iter()
+            .filter(|edge| edge[own] == name["key"])
+            .filter_map(|edge| {
+                let (other, _) = names.iter().find(|(name, _)| name["key"] == edge[other])?;
+                Some((other, edge))
+            })
+            .collect::<Vec<_>>();
+        if linked.is_empty() {
+            continue;
+        }
+        html.push_str(&format!(
+            "<h4>{title} <span class=\"graph-map-total\">{}</span></h4><ul class=\"graph-map-rows\">",
+            count(linked.len() as u64)
+        ));
+        for (other, edge) in linked {
+            html.push_str(&format!(
+                "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-link-node\" data-payload=\"{}\"><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{}{}</span></button></li>",
+                payload(&other["key"]),
+                escape(&m::text(other, "name")),
+                escape(&m::text(edge, "kind").replace('_', " ")),
+                if m::yes(&edge["guessed"]) { ", guessed" } else { "" },
+            ));
+        }
+        html.push_str("</ul>");
+    }
+    html
+}
+/// The rows of one side of a selected place. `look` names the selected
+/// place and whether the rows are what it uses: each row then stands for a
+/// link between two places, and a button beside it looks into that link.
+fn rows(title: &str, rows: &V, more: &V, look: Option<(&V, bool)>) -> String {
     let rows = m::array(rows);
     let more = more.as_u64().unwrap_or(0);
     let mut html = format!(
@@ -1703,7 +2157,7 @@ fn rows(title: &str, rows: &V, more: &V) -> String {
             },
         };
         html.push_str(&format!(
-            "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-go\" data-changed=\"{}\" data-payload=\"{}\" title=\"{}\"><span class=\"graph-map-row-name\">{}{}{}</span><span class=\"graph-map-row-links\">{}</span></button></li>",
+            "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-go\" data-changed=\"{}\" data-payload=\"{}\" title=\"{}\"><span class=\"graph-map-row-name\">{}{}{}</span><span class=\"graph-map-row-links\">{}</span></button>{}</li>",
             m::yes(&row["changed"]),
             payload(&json!({"path": row["path"], "inside": row["inside"], "open": elsewhere})),
             escape(&m::text(row, "path")),
@@ -1717,6 +2171,22 @@ fn rows(title: &str, rows: &V, more: &V) -> String {
                 None => String::new(),
             },
             told,
+            match look {
+                // A row of two symbols is one link, and says it all.
+                Some((place, uses)) if row["relation"].is_null() => {
+                    let (from, to) = if uses {
+                        (place, &row["path"])
+                    } else {
+                        (&row["path"], place)
+                    };
+                    format!(
+                        "<button type=\"button\" class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with {}\">↗</button>",
+                        payload(&json!({"from": from, "to": to})),
+                        escape(&m::text(row, "name")),
+                    )
+                }
+                _ => String::new(),
+            },
         ));
     }
     html.push_str("</ul>");
@@ -1796,10 +2266,20 @@ fn file_side(view: &V) -> String {
             escape(&reached(focus, capital(&what(focus)))),
         );
         if !m::array(&focus["members"]).is_empty() {
-            html.push_str(&rows("Members", &focus["members"], &focus["members_more"]));
+            html.push_str(&rows(
+                "Members",
+                &focus["members"],
+                &focus["members_more"],
+                None,
+            ));
         }
-        html.push_str(&rows("Uses", &focus["uses"], &focus["uses_more"]));
-        html.push_str(&rows("Used by", &focus["used_by"], &focus["used_by_more"]));
+        html.push_str(&rows("Uses", &focus["uses"], &focus["uses_more"], None));
+        html.push_str(&rows(
+            "Used by",
+            &focus["used_by"],
+            &focus["used_by_more"],
+            None,
+        ));
         html.push_str(&kinds(focus));
         return html;
     }
@@ -1824,11 +2304,17 @@ fn file_side(view: &V) -> String {
     }
     html.push_str(&follow_links(&focus["path"]));
     // Its own symbols at the other end of the links with this file.
-    html.push_str(&rows("Uses this file", &focus["uses"], &focus["uses_more"]));
+    html.push_str(&rows(
+        "Uses this file",
+        &focus["uses"],
+        &focus["uses_more"],
+        None,
+    ));
     html.push_str(&rows(
         "Used by this file",
         &focus["used_by"],
         &focus["used_by_more"],
+        None,
     ));
     html.push_str(&kinds(focus));
     html
@@ -1842,11 +2328,11 @@ pub fn side(view: &V) -> String {
     let followed = follows(view);
     if !focus.is_object() {
         return if followed {
-            "<p class=\"knowledge-note\">Select a box to see what it uses and what uses it. + at the right corner of a box shows more of what it uses, + at the left corner more of what uses it, and − folds them back.</p>"
+            "<p class=\"knowledge-note\">Select a box to see what it uses and what uses it. + at the right corner of a box shows more of what it uses, + at the left corner more of what uses it, and − folds them back. Select a link to see what makes it up.</p>"
         } else if changes(view) {
-            "<p class=\"knowledge-note\">Select a file to see what it uses and what uses it. The highlighted ones changed; the others use them or are used by them. Select a file again to open it to its classes, methods and functions.</p>"
+            "<p class=\"knowledge-note\">Select a file to see what it uses and what uses it. The highlighted ones changed; the others use them or are used by them. Select a file again to open it to its classes, methods and functions. Select a link to see what makes it up.</p>"
         } else {
-            "<p class=\"knowledge-note\">Select a folder or a file to see what it uses and what uses it. Select it again to open it: a folder to what it holds, a file to its classes, methods and functions. + at the corner of a folder opens it here, among the others.</p>"
+            "<p class=\"knowledge-note\">Select a folder or a file to see what it uses and what uses it. Select it again to open it: a folder to what it holds, a file to its classes, methods and functions. + at the corner of a folder opens it here, among the others. Select a link to see what makes it up.</p>"
         }
         .to_owned();
     }
@@ -1939,8 +2425,20 @@ pub fn side(view: &V) -> String {
     } else {
         ("Uses", "Used by")
     };
-    html.push_str(&rows(uses, &focus["uses"], &focus["uses_more"]));
-    html.push_str(&rows(used, &focus["used_by"], &focus["used_by_more"]));
+    // Each row is a link of the selected place, and can be looked into.
+    let place = &focus["path"];
+    html.push_str(&rows(
+        uses,
+        &focus["uses"],
+        &focus["uses_more"],
+        Some((place, true)),
+    ));
+    html.push_str(&rows(
+        used,
+        &focus["used_by"],
+        &focus["used_by_more"],
+        Some((place, false)),
+    ));
     html.push_str(&kinds(focus));
     html
 }
@@ -2312,6 +2810,80 @@ fn state() -> V {
         state
     } else {
         fresh("")
+    }
+}
+/// The link the window shows: its two ends, the name chosen in it, and
+/// what the server said of it.
+fn looked() -> V {
+    let link = m::data("graph-link");
+    if link.is_object() {
+        link
+    } else {
+        json!({"from": "", "to": "", "chosen": "", "view": null})
+    }
+}
+/// Draws the window of the link as it stands.
+fn draw_link() {
+    let link = looked();
+    let view = &link["view"];
+    if !view.is_object() {
+        return;
+    }
+    let chosen = m::text(&link, "chosen");
+    dom::text("graph-link-title", &link_title(view));
+    dom::text("graph-link-summary", &link_summary(view));
+    dom::text("graph-link-note", &link_note(view));
+    html("graph-link-canvas", &link_canvas(view, &chosen));
+    html("graph-link-side", &link_side(view, &chosen));
+}
+/// Opens the window of one link of the map and reads what makes the link
+/// up, on the graph the map is read from. The map stays as it is behind it.
+async fn look(from: &str, to: &str) {
+    let state = state();
+    let project = dom::value("project");
+    if project.is_empty() || from.is_empty() || to.is_empty() {
+        return;
+    }
+    m::set(
+        "graph-link",
+        json!({"from": from, "to": to, "chosen": "", "view": null}),
+    );
+    dom::text("graph-link-title", "Link");
+    dom::text("graph-link-summary", "");
+    dom::text("graph-link-note", "Reading the link…");
+    dom::error("graph-link-error", "");
+    html("graph-link-canvas", "");
+    html("graph-link-side", "");
+    dom::dialog("graph-link", true);
+    let mut query = vec![("from", from.to_owned()), ("to", to.to_owned())];
+    if !m::text(&state, "target").is_empty() {
+        query.push(("target", m::text(&state, "target")));
+    }
+    for key in ["certain", "notests"] {
+        if m::yes(&state[key]) {
+            query.push((key, "1".to_owned()));
+        }
+    }
+    let path = format!(
+        "/api/projects/{}/graph/map{}",
+        dom::enc(&project),
+        dom::query(&query)
+    );
+    match api::scoped("graph-link", &path).await {
+        Ok((epoch, view)) => {
+            if !m::current("graph-link", epoch) || dom::value("project") != project {
+                return;
+            }
+            let mut link = looked();
+            link["view"] = view;
+            m::set("graph-link", link);
+            draw_link();
+        }
+        Err(error) if error.aborted => {}
+        Err(error) => {
+            dom::text("graph-link-note", "");
+            dom::error("graph-link-error", &error.message);
+        }
     }
 }
 fn picker() -> V {
@@ -2973,6 +3545,39 @@ pub async fn event(
                 places.push(place.to_owned());
             }
             state[key] = json!(places);
+        }
+        ("click", _, "graph-map-link") => {
+            look(
+                payload["from"].as_str().unwrap_or(""),
+                payload["to"].as_str().unwrap_or(""),
+            )
+            .await;
+            return true;
+        }
+        ("click", "graph-link-close", _) => {
+            dom::dialog("graph-link", false);
+            return true;
+        }
+        ("click", _, "graph-link-node" | "graph-link-open") => {
+            let key = payload.as_str().unwrap_or("");
+            let mut link = looked();
+            if action == "graph-link-node" && link["chosen"] != key {
+                link["chosen"] = json!(key);
+                m::set("graph-link", link);
+                draw_link();
+                return true;
+            }
+            // Selected again, or asked for: its file opens on it in the map.
+            let (names, _) = link_names(&link["view"]);
+            let Some((_, file)) = names.iter().find(|(name, _)| name["key"] == key) else {
+                return true;
+            };
+            dom::dialog("graph-link", false);
+            state = unfollowed(state);
+            state["scope"] = file["path"].clone();
+            state["focus"] = json!(key);
+            state["filter"] = json!("");
+            dom::set_value("graph-map-filter", "");
         }
         ("click", _, "graph-map-spread" | "graph-map-gather") => {
             state = spread(
@@ -4538,5 +5143,260 @@ mod tests {
         assert_eq!(kept.len(), SPREAD);
         assert_eq!((kept[0].as_str(), kept[SPREAD - 1].as_str()), ("f3", "f34"));
         assert_eq!(fresh("work")["spread"], json!([]));
+    }
+    #[test]
+    fn the_ends_of_a_link_stand_in_two_columns_file_by_file() {
+        // Two files use one: the first file with two names, the second
+        // with one; the file that is used holds two names.
+        let plan = ends(&[2, 1], &[2], &[(0, 3), (0, 4), (1, 3), (2, 3)]);
+        let (left, right) = (MARGIN + FRAME_PAD, MARGIN + FRAME_PAD + LINK_BOX + LINK_GAP);
+        let frame = LINK_BOX + 2.0 * FRAME_PAD;
+        let first = MARGIN + FRAME_HEAD;
+        let second = first + BOX_HEIGHT + LINK_ROW;
+        // Each file is a frame around its names; the next begins under it.
+        let other = first + 2.0 * BOX_HEIGHT + LINK_ROW + FRAME_PAD + LINK_BETWEEN;
+        assert_eq!(
+            plan.names[..3],
+            [(left, first), (left, second), (left, other + FRAME_HEAD)]
+        );
+        assert_eq!(
+            plan.files[..2],
+            [
+                Framed {
+                    x: MARGIN,
+                    y: MARGIN,
+                    width: frame,
+                    height: FRAME_HEAD + 2.0 * BOX_HEIGHT + LINK_ROW + FRAME_PAD
+                },
+                Framed {
+                    x: MARGIN,
+                    y: other,
+                    width: frame,
+                    height: FRAME_HEAD + BOX_HEIGHT + FRAME_PAD
+                },
+            ]
+        );
+        // The other end begins at the top as well, and the name used only
+        // by the topmost name stands on top there.
+        assert_eq!(plan.names[3..], [(right, second), (right, first)]);
+        assert_eq!(
+            plan.files[2],
+            Framed {
+                x: right - FRAME_PAD,
+                y: MARGIN,
+                width: frame,
+                height: FRAME_HEAD + 2.0 * BOX_HEIGHT + LINK_ROW + FRAME_PAD
+            }
+        );
+        assert_eq!(
+            (plan.width, plan.height),
+            (
+                2.0 * (MARGIN + FRAME_PAD + LINK_BOX) + LINK_GAP,
+                other + FRAME_HEAD + BOX_HEIGHT + FRAME_PAD + MARGIN
+            )
+        );
+        // A link runs from the right edge of what uses to the left edge of
+        // what is used, at mid height.
+        assert_eq!(plan.wires.len(), 4);
+        assert!(plan.wires[0].starts_with(&format!(
+            "M{:.1} {:.1} C",
+            left + LINK_BOX,
+            first + BOX_HEIGHT / 2.0
+        )));
+        assert!(plan.wires[0].ends_with(&format!(
+            " {:.1} {:.1}",
+            right,
+            second + BOX_HEIGHT / 2.0
+        )));
+        // Two links that would cross are untangled: what the second name
+        // uses is put under what the first uses.
+        let crossed = ends(&[2], &[2], &[(0, 3), (1, 2)]);
+        assert!(crossed.names[3].1 < crossed.names[2].1);
+        // And files change places as their names do.
+        let files = ends(&[1, 1], &[1, 1], &[(0, 3), (1, 2)]);
+        assert!(files.files[3].y < files.files[2].y);
+        // A link that names nothing here is no curve, and an empty link is
+        // an empty picture of some size.
+        assert_eq!(ends(&[1], &[1], &[(0, 9), (1, 0)]).wires, ["", ""]);
+        let empty = ends(&[], &[], &[]);
+        assert!(empty.names.is_empty() && empty.files.is_empty());
+        assert!(empty.height > 0.0 && empty.width > 0.0);
+    }
+    /// The link between two folders, looked into: three names of two files
+    /// use two names of one file.
+    fn link_view() -> V {
+        json!({
+            "mode": "link", "certain": false,
+            "from": {"path": "src/Order", "name": "Order", "what": "folder"},
+            "to": {"path": "src/Cart", "name": "Cart", "what": "folder"},
+            "links": 4, "guessed": 1,
+            "users": {"names": 3, "files": 2, "groups": [
+                {"path": "src/Order/Order.php", "name": "Order.php", "names": [
+                    {"key": "src/Order/Order.php#L3:Order", "name": "Order", "kind": "type", "line": 3, "owner": null, "links": 2},
+                    {"key": "src/Order/Order.php#L9:.total()", "name": "Order.total()", "kind": "method", "line": 9, "owner": "Order", "links": 1}
+                ]},
+                {"path": "src/Order/Notifier.php", "name": "Notifier.php", "names": [
+                    {"key": "src/Order/Notifier.php#L5:notify()", "name": "notify()", "kind": "function", "line": 5, "owner": null, "links": 1}
+                ]}
+            ]},
+            "used": {"names": 2, "files": 1, "groups": [
+                {"path": "src/Cart/Cart.php", "name": "Cart.php", "names": [
+                    {"key": "src/Cart/Cart.php#L4:Cart", "name": "Cart", "kind": "type", "line": 4, "owner": null, "links": 3},
+                    {"key": "src/Cart/Cart.php#L20:.add<T>()", "name": "Cart.add<T>()", "kind": "method", "line": 20, "owner": "Cart", "links": 1}
+                ]}
+            ]},
+            "edges": [
+                {"from": "src/Order/Order.php#L3:Order", "to": "src/Cart/Cart.php#L4:Cart", "kind": "imports_from", "guessed": false},
+                {"from": "src/Order/Order.php#L3:Order", "to": "src/Cart/Cart.php#L20:.add<T>()", "kind": "calls", "guessed": true},
+                {"from": "src/Order/Order.php#L9:.total()", "to": "src/Cart/Cart.php#L4:Cart", "kind": "calls", "guessed": false},
+                {"from": "src/Order/Notifier.php#L5:notify()", "to": "src/Cart/Cart.php#L4:Cart", "kind": "references", "guessed": false}
+            ],
+            "kinds": [{"kind": "calls", "links": 2}, {"kind": "imports_from", "links": 1}, {"kind": "references", "links": 1}]
+        })
+    }
+    #[test]
+    fn a_link_of_the_map_is_selected_and_its_window_shows_only_what_makes_it_up() {
+        // Every link of a map lies under a wider one that is selected, and
+        // says which two places it joins.
+        let html = canvas(&super::tests::view());
+        assert_eq!(html.matches("<path class=\"graph-map-hit\"").count(), 2);
+        assert!(html.contains("data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order&quot;,&quot;to&quot;:&quot;src/Cart&quot;}\"><title>Order uses Cart · select to see what makes up this link</title>"));
+        // They lie over the links that are seen.
+        assert!(
+            html.rfind("class=\"graph-map-edge").unwrap()
+                < html.find("class=\"graph-map-hit\"").unwrap()
+        );
+        for other in [change(), file(), trail(), spread_view()] {
+            let html = canvas(&other);
+            assert_eq!(
+                html.matches("<path class=\"graph-map-hit\"").count(),
+                html.matches("<path class=\"graph-map-edge").count()
+            );
+        }
+        // So does each row of a selected place: the link is named in the
+        // direction it runs.
+        let side = side(&super::tests::view());
+        assert!(side.contains("class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order&quot;,&quot;to&quot;:&quot;src/Cart&quot;}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with Cart\">↗</button></li>"));
+        assert!(side.contains("data-payload=\"{&quot;from&quot;:&quot;tests&quot;,&quot;to&quot;:&quot;src/Order&quot;}\""));
+        // A row of two symbols is one link, and has no window to open.
+        let mut opened = file();
+        opened["focus"] = json!({
+            "symbol": true, "name": "Cart.total()", "file": "src/Cart/Cart.php", "line": 14, "kind": "method",
+            "uses": [{"path": "src/Cart/Cart.php#L20:.add()", "name": "Cart.add()", "symbol": true, "relation": "calls", "guessed": 0}],
+            "uses_more": 0, "used_by": [], "used_by_more": 0, "kinds": []
+        });
+        assert!(!super::side(&opened).contains("graph-map-row-look"));
+        // The window: its name, and the link in a line.
+        let view = link_view();
+        assert_eq!(link_title(&view), "Order uses Cart");
+        assert_eq!(
+            link_summary(&view),
+            "4 links: 3 read from the code, 1 guessed by name · 3 names in 2 files use 2 names"
+        );
+        assert_eq!(link_note(&view), "");
+        // The picture: a frame for each file, a box for each name, a curve
+        // for each link, and no link to select further.
+        let html = link_canvas(&view, "");
+        assert_eq!(html.matches("<rect class=\"graph-map-frame\"").count(), 3);
+        assert_eq!(html.matches("data-action=\"graph-link-node\"").count(), 5);
+        assert_eq!(html.matches("<path class=\"graph-map-edge").count(), 4);
+        assert_eq!(
+            html.matches("class=\"graph-map-edge graph-map-edge-guess\"")
+                .count(),
+            1
+        );
+        assert!(!html.contains("graph-map-hit") && !html.contains("graph-map-link"));
+        assert!(html.contains("title=\"src/Order/Notifier.php\">Notifier.php</span>"));
+        assert!(html.contains("<title>Order uses Cart · imports from</title>"));
+        assert!(
+            html.contains("<title>Order uses Cart.add&lt;T&gt;() · calls, guessed by name</title>")
+        );
+        // A name says what it is, where it lies and how much it does here.
+        assert!(html.contains("data-payload=\"&quot;src/Order/Order.php#L3:Order&quot;\" data-folder=\"false\" data-kind=\"type\" data-selected=\"false\" data-dim=\"false\" data-flow=\"uses\" data-out=\"true\" data-in=\"false\""));
+        assert!(html.contains("title=\"src/Order/Order.php:3\" aria-label=\"Order, type, src/Order/Order.php:3, uses through 2 links here\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">T</span><span class=\"graph-map-node-name\">Order</span><span class=\"graph-map-node-count\" aria-hidden=\"true\">2</span></button>"));
+        assert!(html.contains("data-flow=\"used\" data-out=\"false\" data-in=\"true\""));
+        assert!(html.contains("aria-label=\"Cart.add&lt;T&gt;(), method of Cart, src/Cart/Cart.php:20, is used through 1 link here\""));
+        // A chosen name lights its links and dims what it is not linked
+        // with.
+        let lit = link_canvas(&view, "src/Order/Order.php#L9:.total()");
+        assert_eq!(lit.matches("graph-map-edge graph-map-edge-on").count(), 1);
+        assert_eq!(lit.matches("graph-map-edge-off").count(), 3);
+        assert_eq!(lit.matches("data-selected=\"true\"").count(), 1);
+        assert_eq!(lit.matches("data-dim=\"true\"").count(), 3);
+        // Beside the picture: how to choose, and the kinds of the links.
+        let idle = link_side(&view, "");
+        assert!(idle.contains("Select a name to light its links."));
+        assert!(idle.contains("<p class=\"knowledge-note\">Links by kind: calls 2 · imports from 1 · references 1</p>"));
+        // Or the chosen name, the way to its file, and what it is linked
+        // with here.
+        let told = link_side(&view, "src/Cart/Cart.php#L4:Cart");
+        assert!(told.contains("<h3>Cart</h3><p class=\"graph-map-path\">src/Cart/Cart.php:4</p><p class=\"knowledge-note\">Type</p><button type=\"button\" class=\"button compact\" data-action=\"graph-link-open\" data-payload=\"&quot;src/Cart/Cart.php#L4:Cart&quot;\">Open in the map</button>"));
+        assert!(told.contains("<h4>Used by here <span class=\"graph-map-total\">3</span></h4>"));
+        assert!(!told.contains("Uses here"));
+        assert!(told.contains("data-action=\"graph-link-node\" data-payload=\"&quot;src/Order/Notifier.php#L5:notify()&quot;\"><span class=\"graph-map-row-name\">notify()</span><span class=\"graph-map-row-links\">references</span>"));
+        let user = link_side(&view, "src/Order/Order.php#L3:Order");
+        assert!(user.contains("<h4>Uses here <span class=\"graph-map-total\">2</span></h4>"));
+        assert!(user.contains("<span class=\"graph-map-row-links\">calls, guessed</span>"));
+    }
+    #[test]
+    fn the_window_of_a_link_says_what_it_does_not_draw_and_what_is_not_there() {
+        // More names than a window holds.
+        let mut wide = link_view();
+        wide["links"] = json!(1_240);
+        wide["guessed"] = json!(40);
+        wide["users"]["names"] = json!(310);
+        wide["users"]["files"] = json!(41);
+        wide["used"]["names"] = json!(95);
+        wide["used"]["files"] = json!(12);
+        assert_eq!(
+            link_summary(&wide),
+            "1,240 links: 1,200 read from the code, 40 guessed by name · 310 names in 41 files use 95 names in 12 files"
+        );
+        assert_eq!(
+            link_note(&wide),
+            "Showing the most linked names: 3 of 310 that use, 2 of 95 that are used, and 4 of the 1,240 links between them. Look into a narrower link to see the rest: open the folder, or open it here."
+        );
+        // All names are drawn, and more links than are.
+        let mut dense = link_view();
+        dense["links"] = json!(9);
+        assert_eq!(link_note(&dense), "Drawing 4 of the 9 links.");
+        // One name uses one.
+        let mut single = link_view();
+        single["links"] = json!(1);
+        single["guessed"] = json!(0);
+        single["users"]["names"] = json!(1);
+        single["users"]["files"] = json!(1);
+        single["used"]["names"] = json!(1);
+        single["used"]["files"] = json!(1);
+        assert_eq!(
+            link_summary(&single),
+            "1 link: 1 read from the code, 0 guessed by name · 1 name uses 1 name"
+        );
+        // A link the other way, a link that is gone, a first picture.
+        let mut none = link_view();
+        none["links"] = json!(0);
+        assert_eq!(link_summary(&none), "No link runs this way.");
+        none["certain"] = json!(true);
+        assert_eq!(
+            link_summary(&none),
+            "No link read from the code runs this way."
+        );
+        let gone = json!({"mode": "link", "missing": true, "from": {"path": "a", "name": "a"}, "to": {"path": "b", "name": "b"}});
+        assert_eq!(
+            link_summary(&gone),
+            "The graph does not know one end of this link any more."
+        );
+        assert_eq!(
+            (link_title(&gone), link_note(&gone)),
+            ("a uses b".to_owned(), String::new())
+        );
+        assert!(link_canvas(&gone, "").contains("graph-map-plane"));
+        assert!(link_side(&gone, "").contains("Select a name"));
+        let mut early = link_view();
+        early["preliminary"] = json!(true);
+        assert_eq!(
+            link_note(&early),
+            "The links are those the files have in the checkout, not in that commit."
+        );
     }
 }

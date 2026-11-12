@@ -915,6 +915,9 @@ pub struct Shown<'a> {
     pub notests: bool,
     /// Folders of the open one that are spread out in its picture.
     pub spread: &'a [String],
+    /// One link of a picture to look into, instead of a picture: the place
+    /// that uses and the place that is used.
+    pub link: Option<(&'a str, &'a str)>,
 }
 /// How many places a request may name in one list, and in how many bytes.
 const UNFOLDED: usize = 256;
@@ -1046,6 +1049,7 @@ impl Graphs {
             followed,
             notests,
             spread,
+            link,
         } = *shown;
         // The graph as it was read, or as it is without its tests, with how
         // much that leaves out.
@@ -1060,8 +1064,11 @@ impl Graphs {
             }
         };
         // The links followed from a place, where one is followed and the
-        // graph knows it.
+        // graph knows it; or, before that, one link looked into.
         let follow = |index: &crate::graph_map::Index, changed: &[(String, char)]| {
+            if let Some((from, to)) = link {
+                return Some(index.link(from, to, certain));
+            }
             followed.and_then(|asked| {
                 index.follow(
                     name,
@@ -2172,6 +2179,11 @@ impl Domain for Graphs {
                         "Too many folders are open here; close some first.",
                         "Invalid folders to open here.",
                     )?;
+                    // A link is named by its two ends, and by both.
+                    let (from, to) = (text("from")?, text("to")?);
+                    if from.is_empty() != to.is_empty() {
+                        return Err(HarnessError::invalid("Invalid code graph link."));
+                    }
                     let me = self.me.upgrade().ok_or_else(|| {
                         HarnessError::unavailable("The code graph is shutting down.")
                     })?;
@@ -2188,6 +2200,7 @@ impl Domain for Graphs {
                                 followed: followed.as_ref(),
                                 notests,
                                 spread: &spread,
+                                link: (!from.is_empty()).then_some((from.as_str(), to.as_str())),
                             },
                         )
                     })
@@ -2247,7 +2260,7 @@ mod tests {
             .unwrap();
         for part in [
             "scope", "focus", "certain", "filter", "target", "follow", "out", "into", "notests",
-            "spread",
+            "spread", "from", "to",
         ] {
             assert!(route.query.contains(&part), "{part}");
         }
@@ -2982,6 +2995,23 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert_eq!(arrows(&opened), ["app/src -> core"]);
             assert_eq!(opened["frames"][0]["path"], "app");
             assert_eq!(opened["nodes"][0]["holder"], "app");
+            // A link a request names is looked into instead of a picture.
+            let looked = fixture
+                .graphs
+                .map(
+                    &fixture.project,
+                    None,
+                    &Shown {
+                        link: Some(("app", "core")),
+                        ..Shown::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                (&looked["mode"], &looked["links"], &looked["project_id"]),
+                (&json!("link"), &json!(1), &json!(fixture.project))
+            );
+            assert_eq!(looked["used"]["groups"][0]["path"], "core/src/lib.rs");
             // The graph of the commit is read with the manifests of the
             // commit, which rule out both links between the two, and with
             // what its sources say: the helper is compiled into the core.

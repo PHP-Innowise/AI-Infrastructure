@@ -1783,6 +1783,20 @@ inside it. What is open here is remembered while the folders are walked, until a
 change is chosen or the map is opened anew. Frames are for the map of the whole
 project: a map of changes and the links followed from a place have none.
 
+A link opens too. Selecting an arrow, or `↗` beside a row of a selected place,
+opens a window over the map with only what makes up that link: on the left the
+names that use, on the right the names that are used, each in the frame of its
+file, and every link of the graph between two of them. A link between two folders
+shows the classes, methods and functions at both ends, with a file's own name
+where the link is one of its imports; a link in an opened file shows the symbols
+at its two ends. Selecting a name lights its links and lists them, each with the
+way it was found; selecting it again, or **Open in the map**, closes the window
+and opens the name's file on it. An end shows its 150 most linked names, and
+where a link has more the window says how many: a narrower link, of a folder
+opened or opened here, shows the rest. The window reads the graph the map is
+drawn from, the commit's own in a map of changes, and keeps to **Only links read
+from the code** and **Without tests**.
+
 Colour tells the direction. An arrow shades from the colour of using, where it
 leaves a box, to the colour of being used, where its head arrives, and every box
 wears the same two colours on its edges: one on the side arrows leave from, the

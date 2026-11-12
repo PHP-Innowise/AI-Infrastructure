@@ -154,6 +154,8 @@ svg { flex:none; }
 .graph-map { width:min(1280px,calc(100vw - 32px)); height:min(880px,calc(100vh - 32px)); max-height:none; padding:20px 24px; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius-lg); background:var(--paper); color:var(--ink); box-shadow:0 20px 80px var(--shadow-strong); }
 .graph-map[open] { display:flex; flex-direction:column; gap:8px; }
 .graph-map::backdrop { background:var(--backdrop); }
+.graph-link { width:min(1120px,calc(100vw - 64px)); height:min(820px,calc(100vh - 64px)); }
+.graph-link .graph-map-node { width:220px; }
 .graph-map-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .graph-map-head h2 { margin:0; font-size:var(--text-display); }
 .graph-map-pick { position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; }
@@ -211,6 +213,8 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-plane svg { position:absolute; inset:0; overflow:visible; }
 /* Colour tells the direction: a link runs from the colour of using to the colour of being used, and a box wears the one it does more. */
 .graph-map-edge { fill:none; opacity:.85; }
+.graph-map-hit { fill:none; stroke:var(--purple); stroke-opacity:0; stroke-width:12px; pointer-events:stroke; cursor:pointer; }
+.graph-map-hit:hover { stroke-opacity:.16; }
 .graph-map-edge-guess { stroke-dasharray:5 4; opacity:.6; }
 .graph-map-edge-back { stroke-dasharray:0 5; stroke-linecap:round; opacity:.6; }
 .graph-map-edge-on { opacity:1; }
@@ -271,6 +275,10 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-row:hover { background:var(--soft); }
 .graph-map-row-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .graph-map-row-links { flex:none; color:var(--muted); font-size:var(--text-meta); font-variant-numeric:tabular-nums; }
+.graph-map-rows li { display:flex; align-items:center; gap:2px; }
+.graph-map-rows .graph-map-row { flex:1; min-width:0; width:auto; }
+.graph-map-row-look { flex:none; width:22px; height:22px; padding:0; border:0; border-radius:var(--radius-sm); background:transparent; color:var(--muted); font:inherit; line-height:22px; }
+.graph-map-row-look:hover { background:var(--soft); color:var(--purple); }
 .graph-map-row-file { margin-left:6px; color:var(--muted); font-size:var(--text-meta); }
 .graph-map-legend { margin:0; color:var(--muted); font-size:var(--text-meta); }
 .graph-map-key { display:inline-block; width:9px; height:9px; border-radius:2px; vertical-align:-1px; }

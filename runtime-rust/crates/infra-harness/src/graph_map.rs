@@ -55,6 +55,10 @@ pub const HELD: usize = 20;
 /// left to what the open folder itself holds, however much is spread out.
 const SPREAD: usize = 100;
 const OWN: usize = 20;
+/// Names each end of a link shows when the link is looked into, the most
+/// linked first, and the links drawn between the two ends.
+pub const LINKED: usize = 150;
+const WIRED: usize = 600;
 /// Folders that hold tests, or what tests are fed with, in the common
 /// languages.
 const TEST_FOLDERS: &[&str] = &[
@@ -684,6 +688,14 @@ fn level(path: &str, depth: usize) -> &str {
         None => path,
     }
 }
+/// What a place of a picture stands for when a link between two places is
+/// looked into: everything under a folder, one file, or one symbol.
+#[derive(Clone, Copy)]
+enum Reach<'a> {
+    Folder(&'a str),
+    File(u32),
+    Symbol(u32),
+}
 #[derive(Default)]
 struct Tally {
     files: u64,
@@ -1135,6 +1147,191 @@ impl Index {
                 "guessed": flow.guessed,
             })).collect::<Vec<_>>(),
             "focus": focus,
+        })
+    }
+    /// What a place stands for: a file or a folder by its path, or a symbol
+    /// by the name the picture of its file selects it by.
+    fn reach<'a>(&self, place: &'a str) -> Option<Reach<'a>> {
+        if let Some(file) = self.files.iter().position(|file| file == place) {
+            return Some(Reach::File(file as u32));
+        }
+        let folder = place.trim_matches('/');
+        if !folder.is_empty() && self.folder(folder) {
+            return Some(Reach::Folder(folder));
+        }
+        // A symbol is named after its file: `src/cart.rs#L12:total()`.
+        place.match_indices('#').find_map(|(at, _)| {
+            let file = self.files.iter().position(|file| *file == place[..at])? as u32;
+            let slot = self.keys(file).iter().position(|key| key == place)?;
+            Some(Reach::Symbol(self.range(file).start + slot as u32))
+        })
+    }
+    /// One link of a picture, looked into: the names at its two ends, by
+    /// file, and every link of the graph between a name of the one end and a
+    /// name of the other. `from` uses `to`; each is a folder, a file, or a
+    /// symbol of an opened file. `certain` leaves out what the tool inferred.
+    /// An end shows its `LINKED` most linked names; the counts are of the
+    /// whole link. An end the graph does not know makes the link missing.
+    pub fn link(&self, from: &str, to: &str, certain: bool) -> Value {
+        let told = |place: &str, reach: Option<Reach>| match reach {
+            Some(Reach::Symbol(at)) => json!({
+                "path": place,
+                "name": self.shown(at),
+                "what": "symbol",
+                "file": self.files[self.symbols[at as usize].file as usize],
+            }),
+            Some(Reach::File(_)) => json!({"path": place, "name": name(place), "what": "file"}),
+            _ => json!({
+                "path": place,
+                "name": name(place.trim_matches('/')),
+                "what": "folder",
+            }),
+        };
+        let (user, used) = (self.reach(from), self.reach(to));
+        let (Some(user), Some(used)) = (user, used) else {
+            return json!({
+                "mode": "link",
+                "missing": true,
+                "certain": certain,
+                "from": told(from, user),
+                "to": told(to, used),
+            });
+        };
+        // The files of an end and, where it is one symbol, that symbol.
+        let reached = |reach: Reach| {
+            let files = self
+                .files
+                .iter()
+                .enumerate()
+                .map(|(id, file)| match reach {
+                    Reach::Folder(folder) => file
+                        .strip_prefix(folder)
+                        .is_some_and(|rest| rest.starts_with('/')),
+                    Reach::File(own) => id as u32 == own,
+                    Reach::Symbol(symbol) => id as u32 == self.symbols[symbol as usize].file,
+                })
+                .collect::<Vec<_>>();
+            let only = match reach {
+                Reach::Symbol(symbol) => Some(symbol),
+                _ => None,
+            };
+            (files, only)
+        };
+        let (uses, is_used) = (reached(user), reached(used));
+        let of = |(files, only): &(Vec<bool>, Option<u32>), at: u32| {
+            files[self.symbols[at as usize].file as usize] && only.is_none_or(|only| only == at)
+        };
+        let links = self
+            .uses
+            .iter()
+            .filter(|(from, to, _, guessed)| {
+                !(certain && *guessed) && of(&uses, *from) && of(&is_used, *to)
+            })
+            .collect::<Vec<_>>();
+        let (mut out, mut into): (HashMap<u32, u64>, HashMap<u32, u64>) = Default::default();
+        let mut kinds: BTreeMap<u16, u64> = BTreeMap::new();
+        let mut guessed = 0u64;
+        for (from, to, kind, inferred) in &links {
+            *out.entry(*from).or_default() += 1;
+            *into.entry(*to).or_default() += 1;
+            *kinds.entry(*kind).or_default() += 1;
+            guessed += u64::from(*inferred);
+        }
+        // The names of one end that are shown: the most linked first.
+        let chosen = |counts: &HashMap<u32, u64>| {
+            let mut names = counts
+                .iter()
+                .map(|(at, links)| (*at, *links))
+                .collect::<Vec<_>>();
+            names.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            names.truncate(LINKED);
+            names
+        };
+        let (users, useds) = (chosen(&out), chosen(&into));
+        let shown = users
+            .iter()
+            .chain(&useds)
+            .map(|(at, _)| *at)
+            .collect::<HashSet<_>>();
+        let home = |at: u32| self.symbols[at as usize].file;
+        let paths = shown
+            .iter()
+            .map(|at| self.files[home(*at) as usize].as_str())
+            .collect::<Vec<_>>();
+        // A name is told as the picture of its file tells it.
+        let mut keyed: HashMap<u32, Vec<String>> = HashMap::new();
+        let mut key = |at: u32| {
+            let file = home(at);
+            let keys = keyed.entry(file).or_insert_with(|| self.keys(file));
+            keys[(at - self.range(file).start) as usize].clone()
+        };
+        // One end as it is drawn: its files, the most linked first, each
+        // with its names in the order of their lines.
+        let mut side = |names: &[(u32, u64)], counts: &HashMap<u32, u64>| {
+            let mut groups: BTreeMap<u32, Vec<(u32, u64)>> = BTreeMap::new();
+            for (at, links) in names {
+                groups.entry(home(*at)).or_default().push((*at, *links));
+            }
+            let mut groups = groups.into_iter().collect::<Vec<_>>();
+            let weight = |names: &[(u32, u64)]| names.iter().map(|(_, links)| links).sum::<u64>();
+            groups.sort_by(|a, b| weight(&b.1).cmp(&weight(&a.1)).then(a.0.cmp(&b.0)));
+            let files = counts
+                .keys()
+                .map(|at| home(*at))
+                .collect::<HashSet<_>>()
+                .len();
+            json!({
+                "names": counts.len(),
+                "files": files,
+                "groups": groups.into_iter().map(|(file, mut names)| {
+                    names.sort_by_key(|(at, _)| (self.symbols[*at as usize].line, *at));
+                    let path = self.files[file as usize].as_str();
+                    json!({
+                        "path": path,
+                        "name": label(path, &paths),
+                        "names": names.into_iter().map(|(at, links)| {
+                            let symbol = &self.symbols[at as usize];
+                            json!({
+                                "key": key(at),
+                                "name": self.shown(at),
+                                "kind": symbol.kind.word(),
+                                "line": symbol.line,
+                                "owner": self.owner(at),
+                                "links": links,
+                            })
+                        }).collect::<Vec<_>>(),
+                    })
+                }).collect::<Vec<_>>(),
+            })
+        };
+        let (users, useds) = (side(&users, &out), side(&useds, &into));
+        let mut edges = links
+            .iter()
+            .filter(|(from, to, ..)| shown.contains(from) && shown.contains(to))
+            .collect::<Vec<_>>();
+        edges.sort_by_key(|(from, to, ..)| (*from, *to));
+        edges.truncate(WIRED);
+        let mut kinds = kinds
+            .iter()
+            .map(|(kind, count)| (self.kinds[*kind as usize].as_str(), *count))
+            .collect::<Vec<_>>();
+        kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
+        json!({
+            "mode": "link",
+            "certain": certain,
+            "from": told(from, Some(user)),
+            "to": told(to, Some(used)),
+            "links": links.len(),
+            "guessed": guessed,
+            "users": users,
+            "used": useds,
+            "edges": edges.iter().map(|(from, to, kind, inferred)| json!({
+                "from": key(*from),
+                "to": key(*to),
+                "kind": self.kinds[*kind as usize],
+                "guessed": inferred,
+            })).collect::<Vec<_>>(),
+            "kinds": kinds.into_iter().map(|(kind, count)| json!({"kind": kind, "links": count})).collect::<Vec<_>>(),
         })
     }
 }
@@ -3908,6 +4105,178 @@ mod tests {
         assert_eq!(places.len(), SPREAD - OWN + 2);
         assert!(places.contains(&"app.rs".to_owned()) && places.contains(&"hub.rs".to_owned()));
         assert_eq!(framed(&view).len(), (SPREAD - OWN) / HELD);
+    }
+    /// One end of a looked-into link: each file with the names drawn in it.
+    fn end(view: &Value, side: &str) -> Vec<String> {
+        view[side]["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|group| {
+                format!(
+                    "{}: {}",
+                    group["name"].as_str().unwrap(),
+                    group["names"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|name| format!(
+                            "{} {}x{}",
+                            name["kind"].as_str().unwrap(),
+                            name["name"].as_str().unwrap(),
+                            name["links"]
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .collect()
+    }
+    /// The links of a looked-into link, by the names of their two ends.
+    fn wires(view: &Value) -> Vec<String> {
+        let named = |key: &Value| {
+            ["users", "used"]
+                .iter()
+                .flat_map(|side| view[*side]["groups"].as_array().unwrap())
+                .flat_map(|group| group["names"].as_array().unwrap())
+                .find(|name| name["key"] == *key)
+                .map(|name| name["name"].as_str().unwrap().to_owned())
+                .unwrap()
+        };
+        view["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|edge| {
+                format!(
+                    "{} -> {} {}{}",
+                    named(&edge["from"]),
+                    named(&edge["to"]),
+                    edge["kind"].as_str().unwrap(),
+                    if edge["guessed"] == true {
+                        " guessed"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect()
+    }
+    #[test]
+    fn a_link_is_looked_into_down_to_the_names_at_its_two_ends() {
+        let index = shop();
+        // The arrow of the project's picture: the tests use the source.
+        let view = index.link("tests", "src", false);
+        assert_eq!(
+            (&view["mode"], &view["links"], &view["guessed"]),
+            (&json!("link"), &json!(2), &json!(1))
+        );
+        assert_eq!(
+            view["from"],
+            json!({"path": "tests", "name": "tests", "what": "folder"})
+        );
+        assert_eq!(
+            view["to"],
+            json!({"path": "src", "name": "src", "what": "folder"})
+        );
+        // What has a method is a type; the graph says no more of the rest.
+        assert_eq!(end(&view, "users"), ["CartTest.php: name CartTestx2"]);
+        assert_eq!(
+            end(&view, "used"),
+            ["Cart.php: type Cartx1", "Price.php: name Pricex1"]
+        );
+        assert_eq!(
+            wires(&view),
+            ["CartTest -> Cart calls guessed", "CartTest -> Price calls"]
+        );
+        assert_eq!(
+            (&view["users"]["names"], &view["users"]["files"]),
+            (&json!(1), &json!(1))
+        );
+        assert_eq!(
+            (&view["used"]["names"], &view["used"]["files"]),
+            (&json!(2), &json!(2))
+        );
+        assert_eq!(view["kinds"], json!([{"kind": "calls", "links": 2}]));
+        // Only what the tool read from the code.
+        let certain = index.link("tests", "src", true);
+        assert_eq!(
+            (&certain["links"], &certain["guessed"]),
+            (&json!(1), &json!(0))
+        );
+        assert_eq!(wires(&certain), ["CartTest -> Price calls"]);
+        // Between two files the names are their symbols: a method under the
+        // name of its type.
+        let files = index.link("src/Cart/Cart.php", "src/Cart/Price.php", false);
+        assert_eq!(files["from"]["what"], "file");
+        assert_eq!(
+            end(&files, "users"),
+            ["Cart.php: type Cartx1, method Cart.total()x1"]
+        );
+        assert_eq!(end(&files, "used"), ["Price.php: name Pricex2"]);
+        assert_eq!(
+            wires(&files),
+            [
+                "Cart -> Price imports",
+                "Cart.total() -> Price calls guessed"
+            ]
+        );
+        // A symbol of an opened file is an end by the name that file's
+        // picture gives it.
+        let key = files["users"]["groups"][0]["names"][1]["key"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(key, "src/Cart/Cart.php#.total()");
+        let symbol = index.link(&key, "src/Cart/Price.php", false);
+        assert_eq!(
+            symbol["from"],
+            json!({"path": key, "name": "Cart.total()", "what": "symbol", "file": "src/Cart/Cart.php"})
+        );
+        assert_eq!(wires(&symbol), ["Cart.total() -> Price calls guessed"]);
+        // The other way round nothing links the two, and that is an answer.
+        let back = index.link("src", "tests", false);
+        assert_eq!(
+            (&back["links"], &back["missing"]),
+            (&json!(0), &Value::Null)
+        );
+        assert_eq!((end(&back, "users"), wires(&back)), (vec![], vec![]));
+        // An end the graph does not know makes the link missing: the
+        // project itself, a path that is not there, a symbol that is not.
+        for (from, to) in [
+            ("", "src"),
+            ("src", "nowhere"),
+            ("src/Cart/Cart.php#.gone()", "src"),
+        ] {
+            let missing = index.link(from, to, false);
+            assert_eq!(missing["missing"], true, "{from} -> {to}");
+            assert_eq!(missing["mode"], "link");
+        }
+    }
+    #[test]
+    fn a_wide_link_shows_the_most_linked_names_of_each_end_and_counts_them_all() {
+        // Every file of one folder uses the hub; the hub is one name.
+        let index = wheel(1, LINKED + 7);
+        let view = index.link("p0", "hub.rs", false);
+        assert_eq!(view["links"], json!(LINKED + 7));
+        assert_eq!(
+            (&view["users"]["names"], &view["users"]["files"]),
+            (&json!(LINKED + 7), &json!(LINKED + 7))
+        );
+        let drawn = view["users"]["groups"].as_array().unwrap().len();
+        assert_eq!(drawn, LINKED);
+        // A link is drawn where both of its ends are.
+        assert_eq!(view["edges"].as_array().unwrap().len(), LINKED);
+        assert_eq!(
+            end(&view, "used"),
+            [format!("hub.rs: function hub()x{}", LINKED + 7)]
+        );
+        // Files that share a name are told apart by their folders.
+        let index = wheel(2, 1);
+        let view = index.link("p0", "hub.rs", false);
+        assert_eq!(end(&view, "users"), ["f00.rs: function spoke()x1"]);
+        let both = index.link("p1/f00.rs", "hub.rs", false);
+        assert_eq!(end(&both, "users"), ["f00.rs: function spoke()x1"]);
     }
     fn office(count: usize) -> Index {
         let call = |from: &str, to: &str, file: &str, read: bool| {

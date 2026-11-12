@@ -24,6 +24,13 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Look into a link of the Harness dependency map. Selecting an arrow, or `↗`
+  beside a row of a selected place, opens a window with only what makes up
+  that link: the names that use on the left, the names that are used on the
+  right, each in the frame of its file, and every link of the graph between
+  two of them. Selecting a name lights its links and lists them, and selecting
+  it again opens its file on it in the map.
+
 - Open a folder inside the picture of the Harness dependency map. **Open
   here**, or `+` at the corner of a folder, draws the folder as a frame around
   its folders and files, among everything else, so opening a folder no longer

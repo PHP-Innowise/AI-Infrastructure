@@ -404,6 +404,14 @@
     <div class="graph-map-body"><div class="graph-map-canvas" id="graph-map-canvas" aria-busy="false"></div><aside class="graph-map-side" id="graph-map-side" aria-label="Selected place"></aside></div>
     <p class="graph-map-legend" id="graph-map-legend">An arrow runs from what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span> to what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, and a box is tinted by which it does more here. Solid: read from the code. Dashed: guessed by name. Thicker: more links. Dotted: against the main direction, closing a cycle (↻).</p>
   </dialog>
+  <dialog class="graph-map graph-link" id="graph-link" aria-labelledby="graph-link-title">
+    <div class="graph-map-head"><h2 id="graph-link-title">Link</h2><button class="button" id="graph-link-close" type="button">Close</button></div>
+    <p class="knowledge-note" id="graph-link-summary"></p>
+    <p class="knowledge-note" id="graph-link-note" role="status"></p>
+    <p class="error-text" id="graph-link-error" role="alert" hidden></p>
+    <div class="graph-map-body"><div class="graph-map-canvas" id="graph-link-canvas"></div><aside class="graph-map-side" id="graph-link-side" aria-label="Selected name"></aside></div>
+    <p class="graph-map-legend">On the left what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span>, on the right what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, each name in the frame of its file. Solid: read from the code. Dashed: guessed by name.</p>
+  </dialog>
   <div class="run-file-card" id="run-file-card" role="dialog" aria-label="File details" hidden></div>
   <script type="module" src="/boot.js"></script>
 </body>
