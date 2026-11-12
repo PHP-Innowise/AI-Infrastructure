@@ -1769,6 +1769,16 @@ a box lights its links and lists, beside the map, everything it uses and everyth
 that uses it, also outside the open folder. A file opens in turn to its classes,
 methods and functions, as described below.
 
+Colour tells the direction. An arrow shades from the colour of using, where it
+leaves a box, to the colour of being used, where its head arrives, and every box
+wears the same two colours on its edges: one on the side arrows leave from, the
+other on the side they arrive at. A box is also tinted by which it does more
+through the links in the picture, in five steps from only using to only being used,
+so what uses stands out from what is leaned on. In a map of changes the same tint
+tells the files that use the change from the files it uses. A box that no link in
+the picture touches has no colour. The legend under the map shows both colours;
+they were chosen to stay apart for colour-blind readers in both themes.
+
 Between folders and files the map counts the graph's links that cross a file
 boundary; the links inside one file show when that file is opened. The relations
 that only say where a symbol lives (`contains`, `method`, `defines`, `case_of`,
@@ -1885,7 +1895,7 @@ A folder shows its 40 most connected children, and **Filter names** reaches the
 rest. Where a folder has more than two links per child, each child keeps its three
 strongest uses on the map and the side panel still lists all of them. A cycle cannot
 be drawn left to right: its members carry ↻, and its weaker direction runs back,
-right to left, in the warning colour. The server reads `graph.json` in one streaming
+right to left, as a thin row of dots. The server reads `graph.json` in one streaming
 pass and keeps the last four graphs it read. On the development machine a 500 MB
 graph of 545,000 symbols took two seconds to read and 10 ms per folder after that.
 

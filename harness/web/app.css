@@ -1,7 +1,7 @@
 /* Harness UI styles. Colors come from the two token sets below; the theme guard in tests/test_harness_web.py enforces it. */
 /* Colors live only in these two token sets: a rule that needs a new color adds it to both. */
-:root { color-scheme:light; --paper:#fff; --soft:#f8f8fa; --hover:#ededf2; --ink:#202023; --ink-hover:#343139; --ink-2:#4f4e57; --muted:#65646d; --faint:#74707a; --line:#e7e7eb; --field-line:#dcdbe3; --field-line-hover:#bfbacb; --dot:#aaa9b0; --purple:#6841c6; --purple-soft:#f0ebfa; --purple-tint:#f8f5fd; --purple-faint:#fdfbff; --purple-line:#ddd2f1; --focus:#7c55d9; --focus-line:#a599bd; --focus-glow:#6841c608; --error:#a93535; --error-soft:#fff0f0; --error-surface:#fffafa; --error-line:#e8cfcf; --error-line-strong:#cf9191; --error-dot:#b84f4f; --warning:#85602a; --warning-soft:#fcf7e9; --warning-surface:#fffaf3; --warning-line:#e8d6c0; --warning-dot:#ba882d; --success:#2f7a3d; --success-soft:#eef7f0; --success-line:#afcfb8; --success-dot:#4f9a65; --mem-rules:#3987e5; --mem-bank:#256abf; --mem-brain:#184f95; --mem-auto:#d55181; --ctx-rest:#918e9a; --ctx-added:#62606b; --rejected-dot:#91785f; --shadow:#17112214; --shadow-strong:#17112230; --composer-shadow:#29243b05; --scrim:#18132140; --backdrop:#18132165; font-family:var(--font-sans); color:var(--ink); background:var(--paper); }
-:root[data-theme="dark"] { color-scheme:dark; --paper:#16151a; --soft:#1e1d23; --hover:#2a2930; --ink:#ececf1; --ink-hover:#cfced8; --ink-2:#c0bfc9; --muted:#9e9da8; --faint:#878491; --line:#2c2b33; --field-line:#3b3a44; --field-line-hover:#5a5766; --dot:#6d6c76; --purple:#a68cf5; --purple-soft:#2b2443; --purple-tint:#221d33; --purple-faint:#1c1a24; --purple-line:#45396b; --focus:#8f72e8; --focus-line:#7a68ad; --focus-glow:#a68cf51f; --error:#f19595; --error-soft:#3b2023; --error-surface:#241a1d; --error-line:#5a3237; --error-line-strong:#a35a5e; --error-dot:#e06a6a; --warning:#e2b56a; --warning-soft:#34291a; --warning-surface:#221d15; --warning-line:#57452a; --warning-dot:#d8a23f; --success:#86d29a; --success-soft:#1b3123; --success-line:#2f5a3c; --success-dot:#5fb878; --mem-rules:#256abf; --mem-bank:#3987e5; --mem-brain:#6da7ec; --mem-auto:#d55181; --ctx-rest:#6d696a; --ctx-added:#9f9b9c; --rejected-dot:#a8917a; --shadow:#00000059; --shadow-strong:#00000099; --composer-shadow:#0000001f; --scrim:#00000080; --backdrop:#000000a6; }
+:root { color-scheme:light; --paper:#fff; --soft:#f8f8fa; --hover:#ededf2; --ink:#202023; --ink-hover:#343139; --ink-2:#4f4e57; --muted:#65646d; --faint:#74707a; --line:#e7e7eb; --field-line:#dcdbe3; --field-line-hover:#bfbacb; --dot:#aaa9b0; --purple:#6841c6; --purple-soft:#f0ebfa; --purple-tint:#f8f5fd; --purple-faint:#fdfbff; --purple-line:#ddd2f1; --focus:#7c55d9; --focus-line:#a599bd; --focus-glow:#6841c608; --error:#a93535; --error-soft:#fff0f0; --error-surface:#fffafa; --error-line:#e8cfcf; --error-line-strong:#cf9191; --error-dot:#b84f4f; --warning:#85602a; --warning-soft:#fcf7e9; --warning-surface:#fffaf3; --warning-line:#e8d6c0; --warning-dot:#ba882d; --success:#2f7a3d; --success-soft:#eef7f0; --success-line:#afcfb8; --success-dot:#4f9a65; --mem-rules:#3987e5; --mem-bank:#256abf; --mem-brain:#184f95; --mem-auto:#d55181; --ctx-rest:#918e9a; --ctx-added:#62606b; --rejected-dot:#91785f; --map-uses:#eb6834; --map-uses-line:#f5b49a; --map-uses-soft:#fceae3; --map-uses-faint:#fef4f1; --map-between:#8d62d6; --map-used:#2a78d6; --map-used-line:#94bcea; --map-used-soft:#dfebf9; --map-used-faint:#eff5fc; --shadow:#17112214; --shadow-strong:#17112230; --composer-shadow:#29243b05; --scrim:#18132140; --backdrop:#18132165; font-family:var(--font-sans); color:var(--ink); background:var(--paper); }
+:root[data-theme="dark"] { color-scheme:dark; --paper:#16151a; --soft:#1e1d23; --hover:#2a2930; --ink:#ececf1; --ink-hover:#cfced8; --ink-2:#c0bfc9; --muted:#9e9da8; --faint:#878491; --line:#2c2b33; --field-line:#3b3a44; --field-line-hover:#5a5766; --dot:#6d6c76; --purple:#a68cf5; --purple-soft:#2b2443; --purple-tint:#221d33; --purple-faint:#1c1a24; --purple-line:#45396b; --focus:#8f72e8; --focus-line:#7a68ad; --focus-glow:#a68cf51f; --error:#f19595; --error-soft:#3b2023; --error-surface:#241a1d; --error-line:#5a3237; --error-line-strong:#a35a5e; --error-dot:#e06a6a; --warning:#e2b56a; --warning-soft:#34291a; --warning-surface:#221d15; --warning-line:#57452a; --warning-dot:#d8a23f; --success:#86d29a; --success-soft:#1b3123; --success-line:#2f5a3c; --success-dot:#5fb878; --mem-rules:#256abf; --mem-bank:#3987e5; --mem-brain:#6da7ec; --mem-auto:#d55181; --ctx-rest:#6d696a; --ctx-added:#9f9b9c; --rejected-dot:#a8917a; --map-uses:#d95926; --map-uses-line:#8b3e21; --map-uses-soft:#49271d; --map-uses-faint:#311f1c; --map-between:#9a7df0; --map-used:#3987e5; --map-used-line:#2b5994; --map-used-soft:#203553; --map-used-faint:#1b2638; --shadow:#00000059; --shadow-strong:#00000099; --composer-shadow:#0000001f; --scrim:#00000080; --backdrop:#000000a6; }
 /* Type, shape, control and motion scale shared by both themes. Spacing uses a 4px grid: 2, 4, 8, 12, 16, 24, 32, 48.
    Motion: fast for fades and exits, base for geometry, slow for slides and reorders, travel for one long move; pulse is the only loop. */
 :root { --font-sans:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; --font-mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; --text-meta:11px; --text-ui:12px; --text-body:13px; --text-title:15px; --text-display:20px; --weight-regular:400; --weight-strong:600; --leading-tight:1.25; --leading-ui:1.45; --leading-body:1.6; --radius-sm:4px; --radius:6px; --radius-md:8px; --radius-lg:12px; --control-height:36px; --control-height-sm:28px; --page-x:32px; --motion-fast:150ms; --motion-base:240ms; --motion-slow:400ms; --motion-travel:700ms; --motion-stagger:16ms; --motion-pulse:1500ms; --ease-standard:cubic-bezier(.2,0,0,1); --ease-enter:cubic-bezier(0,0,0,1); --ease-exit:cubic-bezier(.3,0,1,1); --ease-pulse:ease-in-out; }
@@ -209,21 +209,31 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-canvas[aria-busy="true"] { opacity:.6; }
 .graph-map-plane { position:relative; }
 .graph-map-plane svg { position:absolute; inset:0; overflow:visible; }
-.graph-map-edge { fill:none; stroke:var(--dot); opacity:.8; }
-.graph-map-edge-guess { stroke-dasharray:5 4; }
-.graph-map-edge-back { stroke:var(--warning-dot); }
-.graph-map-edge-on { stroke:var(--purple); opacity:1; }
-.graph-map-edge-off { opacity:.16; }
-.graph-map-arrow path,.graph-map-arrow-off path { fill:var(--dot); }
-.graph-map-arrow-on path { fill:var(--purple); }
-.graph-map-arrow-back path { fill:var(--warning-dot); }
+/* Colour tells the direction: a link runs from the colour of using to the colour of being used, and a box wears the one it does more. */
+.graph-map-edge { fill:none; opacity:.85; }
+.graph-map-edge-guess { stroke-dasharray:5 4; opacity:.6; }
+.graph-map-edge-back { stroke-dasharray:0 5; stroke-linecap:round; opacity:.6; }
+.graph-map-edge-on { opacity:1; }
+.graph-map-edge-off { opacity:.14; }
+.graph-map-flow-uses { stop-color:var(--map-uses); }
+.graph-map-flow-between { stop-color:var(--map-between); }
+.graph-map-flow-used { stop-color:var(--map-used); }
+.graph-map-arrow path { fill:var(--map-used); }
 .graph-map-caption { position:absolute; left:12px; color:var(--muted); font-size:var(--text-meta); }
-.graph-map-node { position:absolute; display:flex; align-items:center; gap:6px; width:164px; height:30px; padding:0 8px; border:1px solid var(--field-line); border-radius:var(--radius); background:var(--paper); color:var(--ink); font-size:var(--text-ui); text-align:left; }
+.graph-map-node { position:absolute; display:flex; align-items:center; gap:6px; width:164px; height:30px; padding:0 10px; border:1px solid var(--field-line); border-radius:var(--radius); background:var(--paper); color:var(--ink); font-size:var(--text-ui); text-align:left; }
 .graph-map-node:hover { border-color:var(--field-line-hover); }
 .graph-map-node[data-folder="true"] { box-shadow:3px 3px 0 var(--line); }
-.graph-map-node[data-outside="true"] { background:transparent; color:var(--ink-2); }
+.graph-map-node[data-outside="true"] { border-style:dashed; background:transparent; color:var(--ink-2); }
 .graph-map-node[data-kind="file"][data-outside="false"] .graph-map-node-name { font-style:italic; }
-.graph-map-node[data-selected="true"] { border-color:var(--purple); background:var(--purple-soft); color:var(--purple); }
+.graph-map-node[data-flow="uses"] { border-color:var(--map-uses-line); background:var(--map-uses-soft); }
+.graph-map-node[data-flow="uses-more"] { border-color:var(--map-uses-line); background:var(--map-uses-faint); }
+.graph-map-node[data-flow="used-more"] { border-color:var(--map-used-line); background:var(--map-used-faint); }
+.graph-map-node[data-flow="used"] { border-color:var(--map-used-line); background:var(--map-used-soft); }
+/* The side links leave from is the colour of using, the side they arrive at the colour of being used. */
+.graph-map-node[data-out="true"]::after,.graph-map-node[data-in="true"]::before { content:""; position:absolute; top:-1px; bottom:-1px; width:4px; }
+.graph-map-node[data-out="true"]::after { right:-1px; border-radius:0 var(--radius) var(--radius) 0; background:var(--map-uses); }
+.graph-map-node[data-in="true"]::before { left:-1px; border-radius:var(--radius) 0 0 var(--radius); background:var(--map-used); }
+.graph-map-node[data-selected="true"] { border-color:var(--purple); background:var(--purple-soft); color:var(--purple); outline:2px solid var(--purple); outline-offset:1px; }
 .graph-map-node[data-changed="true"] { border-color:var(--success-line); background:var(--success-soft); }
 .graph-map-node[data-changed="true"][data-selected="true"] { border-color:var(--purple); background:var(--purple-soft); }
 .graph-map-node[data-dim="true"] { opacity:.45; }
@@ -247,8 +257,11 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-row-links { flex:none; color:var(--muted); font-size:var(--text-meta); font-variant-numeric:tabular-nums; }
 .graph-map-row-file { margin-left:6px; color:var(--muted); font-size:var(--text-meta); }
 .graph-map-legend { margin:0; color:var(--muted); font-size:var(--text-meta); }
+.graph-map-key { display:inline-block; width:9px; height:9px; border-radius:2px; vertical-align:-1px; }
+.graph-map-key-uses { background:var(--map-uses); }
+.graph-map-key-used { background:var(--map-used); }
 @media (max-width:860px) { .graph-map-body { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1fr) minmax(0,38%); } }
-@media (forced-colors:active) { .graph-map-edge { stroke:CanvasText; } .graph-map-edge-on { stroke:Highlight; } .graph-map-arrow path,.graph-map-arrow-off path { fill:CanvasText; } .graph-map-arrow-on path { fill:Highlight; } .graph-map-node[data-selected="true"] { outline:2px solid Highlight; } }
+@media (forced-colors:active) { .graph-map-edge { stroke:CanvasText; } .graph-map-edge-on { stroke:Highlight; } .graph-map-arrow path { fill:CanvasText; } .graph-map-node[data-selected="true"] { outline:2px solid Highlight; } .graph-map-node::before,.graph-map-node::after,.graph-map-key { forced-color-adjust:none; } }
 .settings-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; max-width:1160px; margin:0; }
 .settings-grid > .model-field { grid-column:span 2; }
 .field-label { display:flex; align-items:center; gap:4px; }

@@ -402,7 +402,7 @@
     <p class="knowledge-note" id="graph-map-note" role="status"></p>
     <p class="error-text" id="graph-map-error" role="alert" hidden></p>
     <div class="graph-map-body"><div class="graph-map-canvas" id="graph-map-canvas" aria-busy="false"></div><aside class="graph-map-side" id="graph-map-side" aria-label="Selected place"></aside></div>
-    <p class="graph-map-legend" id="graph-map-legend">An arrow points from what uses to what is used. Solid: read from the code. Dashed: guessed by name. Thicker: more links. A link pointing left runs against the main direction and closes a cycle (↻).</p>
+    <p class="graph-map-legend" id="graph-map-legend">An arrow runs from what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span> to what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, and a box is tinted by which it does more here. Solid: read from the code. Dashed: guessed by name. Thicker: more links. Dotted: against the main direction, closing a cycle (↻).</p>
   </dialog>
   <div class="run-file-card" id="run-file-card" role="dialog" aria-label="File details" hidden></div>
   <script type="module" src="/boot.js"></script>

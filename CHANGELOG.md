@@ -24,6 +24,17 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Colour the Harness dependency map by direction. An arrow shades from the
+  colour of using at its start to the colour of being used at its head, a box
+  wears the two colours on the edges where arrows leave it and arrive, and it
+  is tinted by which it does more through the links drawn. So what uses stands
+  out from what is leaned on in a folder, in an opened file and around a
+  change, where the tint tells the files that use the change from the files it
+  uses. The weaker direction of a cycle is now a thin row of dots: its warning
+  colour would be mistaken for the colour of using. Links that are only guessed
+  are lighter, and the legend shows both colours. The pair was checked for
+  colour-blind readers and for contrast on the map's surface in both themes.
+
 - Mark the symbols a change touched in an opened file of the Harness map of
   changes. A method, a function or a type whose own lines changed is
   highlighted with `A` when all of it is new and `M` otherwise, a type shows

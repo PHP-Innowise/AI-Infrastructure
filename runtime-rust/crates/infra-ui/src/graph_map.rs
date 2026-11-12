@@ -927,8 +927,30 @@ pub fn note(view: &V) -> String {
     }
     parts.join(" ")
 }
+/// Which a box does more through the links drawn here, in five even steps
+/// from only using to only being used. A box no link here touches leans
+/// neither way.
+fn leaning(uses: u64, used: u64) -> &'static str {
+    // Wide enough that the largest counts still compare as they are.
+    let (fifths, whole) = (u128::from(used) * 5, u128::from(uses) + u128::from(used));
+    if whole == 0 {
+        ""
+    } else if fifths <= whole {
+        "uses"
+    } else if fifths < whole * 2 {
+        "uses-more"
+    } else if fifths <= whole * 3 {
+        "even"
+    } else if fifths < whole * 4 {
+        "used-more"
+    } else {
+        "used"
+    }
+}
 /// The map itself: links as curves underneath, one button per folder or
-/// file, or, in an opened file, per symbol and per file around.
+/// file, or, in an opened file, per symbol and per file around. Colour tells
+/// the direction: a link runs from the colour of using to the colour of being
+/// used, and a box is tinted by which of the two it does more here.
 pub fn canvas(view: &V) -> String {
     let nodes = m::array(&view["nodes"]);
     let edges = m::array(&view["edges"]);
@@ -948,6 +970,29 @@ pub fn canvas(view: &V) -> String {
         .map(|((from, to), edge)| (*from, *to, edge["links"].as_u64().unwrap_or(1)))
         .collect::<Vec<_>>();
     let plan = plan(nodes.len(), &weighted);
+    // How much each box uses and is used through the links drawn here.
+    let mut flow = vec![(0u64, 0u64); nodes.len()];
+    for (from, to, links) in &weighted {
+        if from != to {
+            flow[*from].0 += (*links).max(1);
+            flow[*to].1 += (*links).max(1);
+        }
+    }
+    // A link starts in the colour of using and ends in the colour of being
+    // used. It shades along the way between its two columns, so the links
+    // between the same two columns share one shading.
+    let span = |wire: &Wire| {
+        let (from, to) = pairs[wire.edge];
+        let (start, end) = (plan.nodes[from].x, plan.nodes[to].x);
+        if wire.back {
+            (start.round() as i64, (end + BOX_WIDTH).round() as i64)
+        } else {
+            ((start + BOX_WIDTH).round() as i64, end.round() as i64)
+        }
+    };
+    let mut spans = plan.wires.iter().map(span).collect::<Vec<_>>();
+    spans.sort_unstable();
+    spans.dedup();
     let focus = view["focus"]["path"].as_str();
     let chosen = focus.and_then(|path| at(&json!(path)));
     // A folder of changed files both uses and is used by the files around
@@ -967,9 +1012,11 @@ pub fn canvas(view: &V) -> String {
         "<div class=\"graph-map-plane\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>",
         plan.width, plan.height, plan.width, plan.height
     );
-    for state in ["", "-on", "-off", "-back"] {
+    // The head of an arrow lies at what is used.
+    html.push_str("<marker id=\"graph-map-arrow\" class=\"graph-map-arrow\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\"/></marker>");
+    for (index, (start, end)) in spans.iter().enumerate() {
         html.push_str(&format!(
-            "<marker id=\"graph-map-arrow{state}\" class=\"graph-map-arrow{state}\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\"/></marker>"
+            "<linearGradient id=\"graph-map-flow-{index}\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
         ));
     }
     html.push_str("</defs>");
@@ -982,18 +1029,18 @@ pub fn canvas(view: &V) -> String {
         let (from, to) = pairs[wire.edge];
         let back = wire.back && cycles;
         let state = match chosen {
-            Some(chosen) if chosen == from || chosen == to => "-on",
-            Some(_) => "-off",
-            None if back => "-back",
+            Some(chosen) if chosen == from || chosen == to => " graph-map-edge-on",
+            Some(_) => " graph-map-edge-off",
             None => "",
         };
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{}{}{}\" d=\"{}\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow{state})\"><title>{} uses {} · {}{}</title></path>",
-            if ["-on", "-off"].contains(&state) { format!(" graph-map-edge{state}") } else { String::new() },
-            if back { " graph-map-edge-back" } else { "" },
+            "<path class=\"graph-map-edge{state}{}{}\" d=\"{}\" stroke=\"url(#graph-map-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow)\"><title>{} uses {} · {}{}</title></path>",
             if guessed == links { " graph-map-edge-guess" } else { "" },
+            if back { " graph-map-edge-back" } else { "" },
             wire.path,
-            1.0 + ((links.max(1) as f64).log2() * 0.5).min(3.0),
+            spans.binary_search(&span(wire)).unwrap_or(0),
+            // A link that closes a cycle is a row of dots, kept thin.
+            (1.0 + ((links.max(1) as f64).log2() * 0.5).min(2.5)).min(if back { 1.8 } else { 3.5 }),
             escape(&m::text(&nodes[from], "name")),
             escape(&m::text(&nodes[to], "name")),
             weight(links, guessed),
@@ -1090,8 +1137,9 @@ pub fn canvas(view: &V) -> String {
             ),
             _ => m::text(node, "path"),
         };
+        let (out, into) = flow[index];
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
+            "<button type=\"button\" class=\"graph-map-node\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
             payload(&node["path"]),
             escape(kind),
             opened && !symbol,
@@ -1099,6 +1147,9 @@ pub fn canvas(view: &V) -> String {
             chosen == Some(index),
             chosen.is_some() && !near(index),
             cycle,
+            leaning(out, into),
+            out > 0,
+            into > 0,
             placed.x,
             placed.y,
             escape(&title),
@@ -1391,8 +1442,29 @@ fn html(id: &str, markup: &str) {
         element.set_inner_html(markup);
     }
 }
-const LEGEND: &str = "An arrow points from what uses to what is used. Solid: read from the code. Dashed: guessed by name. Thicker: more links. A link pointing left runs against the main direction and closes a cycle (↻).";
-const FILE_LEGEND: &str = "An arrow points from what uses to what is used. Solid: read from the code. Dashed: guessed by name. Thicker: more links. T type · m method · f function · c case · # heading. A box without a letter is another file, a plain name, or the open file itself for its imports.";
+const LEGEND: &str = "Dotted: against the main direction, closing a cycle (↻).";
+const FILE_LEGEND: &str = "T type · m method · f function · c case · # heading. A box without a letter is another file, a plain name, or the open file itself for its imports.";
+/// What the colours and the lines of the map mean, each colour beside a
+/// patch of it, then what is particular to the picture: a folder, an opened
+/// file, or a change (`change` says a change is chosen).
+fn legend(view: &V, change: bool) -> String {
+    let patch = |side: &str| {
+        format!("<span class=\"graph-map-key graph-map-key-{side}\" aria-hidden=\"true\"></span>")
+    };
+    let particular = match (symbols(view), change) {
+        (true, true) => format!("{FILE_LEGEND} Highlighted: touched by the change."),
+        (true, false) => FILE_LEGEND.to_owned(),
+        _ if changes(view) => {
+            "Highlighted: changed. The rest use the change or are used by it.".to_owned()
+        }
+        _ => LEGEND.to_owned(),
+    };
+    format!(
+        "An arrow runs from what uses {} to what is used {}, and a box is tinted by which it does more here. Solid: read from the code. Dashed: guessed by name. Thicker: more links. {particular}",
+        patch("uses"),
+        patch("used"),
+    )
+}
 const TABS: [&str; 3] = ["commits", "pulls", "branches"];
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -1973,15 +2045,7 @@ fn render(view: &V) {
     dom::set_checked("graph-map-certain", m::yes(&view["certain"]));
     html("graph-map-canvas", &canvas(view));
     html("graph-map-side", &side(view));
-    dom::text(
-        "graph-map-legend",
-        &match (symbols(view), change) {
-            (true, true) => format!("{FILE_LEGEND} Highlighted: touched by the change."),
-            (true, false) => FILE_LEGEND.to_owned(),
-            _ if changes(view) => "An arrow points from what uses to what is used. Solid: read from the code. Dashed: guessed by name. Thicker: more links. Highlighted: changed. The rest use the change or are used by it.".to_owned(),
-            _ => LEGEND.to_owned(),
-        },
-    );
+    html("graph-map-legend", &legend(view, change));
 }
 /// Asks the server to work out a pull request, a branch or a commit, which
 /// starts the graph of its commit when there is none. `false` when it could
@@ -3201,6 +3265,102 @@ mod tests {
         let html = canvas(&unselected);
         assert_eq!(html.matches("data-selected=\"true\"").count(), 0);
         assert_eq!(html.matches("graph-map-edge-on").count(), 0);
+    }
+    #[test]
+    fn a_link_shades_from_the_colour_of_using_to_the_colour_of_being_used() {
+        let html = canvas(&view());
+        // Order stands in the first column and what it uses in the second,
+        // so both links take the one shading between those columns.
+        let (start, end) = (MARGIN + BOX_WIDTH, MARGIN + BOX_WIDTH + COLUMN_GAP);
+        assert_eq!(html.matches("<linearGradient ").count(), 1);
+        assert!(html.contains(&format!(
+            "<linearGradient id=\"graph-map-flow-0\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
+        )), "{html}");
+        assert_eq!(html.matches("stroke=\"url(#graph-map-flow-0)\"").count(), 2);
+        // Every arrow has the one head, in the colour of being used.
+        assert_eq!(html.matches("<marker ").count(), 1);
+        assert_eq!(
+            html.matches("marker-end=\"url(#graph-map-arrow)\"").count(),
+            2
+        );
+        // The weaker direction of a cycle runs right to left, so it shades
+        // right to left too; it is a thin row of dots however many links it is.
+        let ring = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/Cart", "name": "Cart", "folder": true, "files": 2},
+                {"path": "src/Order", "name": "Order", "folder": true, "files": 1}
+            ],
+            "edges": [
+                {"from": "src/Cart", "to": "src/Order", "links": 5000, "guessed": 0},
+                {"from": "src/Order", "to": "src/Cart", "links": 300, "guessed": 0}
+            ],
+            "focus": null
+        });
+        let html = canvas(&ring);
+        assert!(html.contains(&format!(
+            "<linearGradient id=\"graph-map-flow-1\" gradientUnits=\"userSpaceOnUse\" x1=\"{end}\" y1=\"0\" x2=\"{start}\""
+        )), "{html}");
+        assert!(html.contains("stroke=\"url(#graph-map-flow-0)\" stroke-width=\"3.5\""));
+        assert!(html.contains(" graph-map-edge-back\""));
+        assert!(html.contains("stroke=\"url(#graph-map-flow-1)\" stroke-width=\"1.8\""));
+        // In a change map a link running back is no finding and is drawn whole.
+        let mut around = ring.clone();
+        around["mode"] = json!("changes");
+        let html = canvas(&around);
+        assert!(!html.contains("graph-map-edge-back"));
+        assert!(html.contains("stroke=\"url(#graph-map-flow-1)\" stroke-width=\"3.5\""));
+    }
+    #[test]
+    fn a_box_is_tinted_by_which_it_does_more_here() {
+        assert_eq!(leaning(0, 0), "");
+        assert_eq!(leaning(3, 0), "uses");
+        assert_eq!(leaning(4, 1), "uses");
+        assert_eq!(leaning(3, 1), "uses-more");
+        assert_eq!(leaning(3, 2), "even");
+        assert_eq!(leaning(1, 1), "even");
+        assert_eq!(leaning(2, 3), "even");
+        assert_eq!(leaning(1, 3), "used-more");
+        assert_eq!(leaning(1, 4), "used");
+        assert_eq!(leaning(0, 7), "used");
+        assert_eq!(leaning(u64::MAX, u64::MAX), "even");
+        // Order only uses here; the folder and the file it uses are only used.
+        // The side links leave from and the side they arrive at say the same.
+        let html = canvas(&view());
+        assert_eq!(
+            html.matches("data-flow=\"uses\" data-out=\"true\" data-in=\"false\"")
+                .count(),
+            1
+        );
+        assert_eq!(
+            html.matches("data-flow=\"used\" data-out=\"false\" data-in=\"true\"")
+                .count(),
+            2
+        );
+        // What a box does elsewhere does not tint it: no link here, no colour.
+        let mut loose = view();
+        loose["edges"] = json!([]);
+        assert_eq!(
+            canvas(&loose)
+                .matches("data-flow=\"\" data-out=\"false\" data-in=\"false\"")
+                .count(),
+            3
+        );
+    }
+    #[test]
+    fn the_legend_shows_both_colours_and_what_is_particular_to_the_picture() {
+        let folder = legend(&view(), false);
+        assert!(folder.starts_with("An arrow runs from what uses <span class=\"graph-map-key graph-map-key-uses\" aria-hidden=\"true\"></span> to what is used <span class=\"graph-map-key graph-map-key-used\" aria-hidden=\"true\"></span>, and a box is tinted by which it does more here. Solid: read from the code."), "{folder}");
+        assert!(folder.ends_with("Dotted: against the main direction, closing a cycle (↻)."));
+        let around = legend(&change(), true);
+        assert!(
+            around.ends_with("Highlighted: changed. The rest use the change or are used by it.")
+        );
+        assert!(!around.contains("Dotted"));
+        let opened = legend(&file(), false);
+        assert!(opened.contains("T type · m method · f function"));
+        assert!(opened.ends_with("for its imports."));
+        assert!(legend(&file(), true).ends_with("Highlighted: touched by the change."));
     }
     #[test]
     fn the_side_panel_lists_both_directions() {
