@@ -59,6 +59,11 @@ const OWN: usize = 20;
 /// linked first, and the links drawn between the two ends.
 pub const LINKED: usize = 150;
 const WIRED: usize = 600;
+/// Places a search of the whole graph lists at once, the best first; the
+/// rest are counted, and a longer search reaches them.
+pub const FOUND: usize = 40;
+/// Words of one search that are read.
+const WORDS: usize = 8;
 /// Folders that hold tests, or what tests are fed with, in the common
 /// languages.
 const TEST_FOLDERS: &[&str] = &[
@@ -905,7 +910,9 @@ impl Index {
     /// One folder of the map, or, where the scope names a file, that file.
     /// `certain` leaves out what the tool inferred, `filter` keeps the
     /// children whose name contains it, and `focus` adds what one child, or
-    /// one place outside the folder, uses and is used by.
+    /// one place outside the folder, uses and is used by. A child that is
+    /// the focus is drawn whatever the filter and the limits say, and the
+    /// view says so (`beyond`) where they would have left it out.
     pub fn view(
         &self,
         project: &str,
@@ -987,11 +994,12 @@ impl Index {
             .collect::<Vec<_>>();
         let total = tallies.values().filter(|tally| tally.inside).count();
         let matching = children.len();
-        children.sort_by(|(left, a), (right, b)| {
+        let busiest = |(left, a): &(&&str, &Tally), (right, b): &(&&str, &Tally)| {
             (b.out + b.into + b.within)
                 .cmp(&(a.out + a.into + a.within))
                 .then(left.cmp(right))
-        });
+        };
+        children.sort_by(busiest);
         // Each folder shows the most linked of what it holds: the open one
         // `SHOWN` of them, a spread-out one `HELD`. What was spread out was
         // asked for, so it is drawn first, and where the picture is full the
@@ -1013,6 +1021,18 @@ impl Index {
             }
         }
         children.retain(|(key, _)| shown.contains(**key));
+        // The selected place is drawn whatever the limits and the filter
+        // say: it is selected to be seen, and a search of the project leads
+        // to places that are not among the most linked of their folder.
+        let mut beyond = false;
+        if let Some(place) = focus.and_then(|path| tallies.get_key_value(path))
+            && place.1.inside
+            && shown.insert(*place.0)
+        {
+            children.push(place);
+            children.sort_by(busiest);
+            beyond = true;
+        }
         // The folders that are spread out and hold something drawn, each
         // with how many places it holds and how many of them are drawn.
         let mut frames: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
@@ -1120,6 +1140,7 @@ impl Index {
             "totals": self.totals(),
             "children": total,
             "matching": matching,
+            "beyond": beyond,
             "nodes": children.iter().map(|(key, tally)| json!({
                 "path": key,
                 "name": name(key),
@@ -2751,19 +2772,24 @@ impl Index {
     /// A symbol as it is shown: a method with its class, `Cart.total()`, and
     /// the node of the file itself under the file's name.
     fn shown(&self, at: u32) -> String {
+        let mut text = String::new();
+        self.show(at, &mut text);
+        text
+    }
+    /// Writes a symbol as it is shown after what `into` holds.
+    fn show(&self, at: u32, into: &mut String) {
         let symbol = &self.symbols[at as usize];
         let label = self.label(at);
         match symbol.kind {
-            Kind::File => name(&self.files[symbol.file as usize]).to_owned(),
+            Kind::File => into.push_str(name(&self.files[symbol.file as usize])),
             Kind::Method if symbol.parent != NONE => {
-                let holder = self.label(symbol.parent);
-                if label.starts_with('.') {
-                    format!("{holder}{label}")
-                } else {
-                    format!("{holder}.{label}")
+                into.push_str(self.label(symbol.parent));
+                if !label.starts_with('.') {
+                    into.push('.');
                 }
+                into.push_str(label);
             }
-            _ => label.to_owned(),
+            _ => into.push_str(label),
         }
     }
     /// What a symbol lies in, outermost first, as one name: `Cart.total()`
@@ -2927,10 +2953,12 @@ impl Index {
                 keys[slot(*at)] == focus && self.symbols[*at as usize].kind != Kind::Note
             })
         });
+        let mut beyond = false;
         if let Some(at) = chosen
             && !listed.contains(&at)
         {
             listed.push(at);
+            beyond = true;
         }
         let mut drawn = vec![false; range.len()];
         for at in &listed {
@@ -3311,6 +3339,7 @@ impl Index {
             },
             "children": children,
             "matching": matching,
+            "beyond": beyond,
             "around": {"files": linked, "shown": around.len()},
             "nodes": nodes,
             "between": between,
@@ -3322,6 +3351,432 @@ impl Index {
                 "guessed": flow.guessed,
             })).collect::<Vec<_>>(),
             "focus": focus,
+        })
+    }
+}
+/// How well a word of a search names a place, the best first: it is the
+/// whole name, the name starts with it, a word inside the name starts with
+/// it, or it only stands somewhere in the name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Named {
+    Whole,
+    Start,
+    Word,
+    Part,
+}
+/// Writes `text` in lower case after what `into` holds: letter by letter,
+/// so that a path and the name it ends in stay alike.
+fn lower_onto(text: &str, into: &mut String) {
+    if text.is_ascii() {
+        let from = into.len();
+        into.push_str(text);
+        into[from..].make_ascii_lowercase();
+    } else {
+        into.extend(text.chars().flat_map(char::to_lowercase));
+    }
+}
+/// Whether a word begins at byte `at` of a name whose lower case is `lower`:
+/// after what is neither a letter nor a digit, or where a capital begins a
+/// word of a name written `likeThis`.
+fn begins(name: &str, lower: &str, at: usize) -> bool {
+    let Some(before) = lower[..at].chars().next_back() else {
+        return true;
+    };
+    if !before.is_alphanumeric() {
+        return true;
+    }
+    // Capitals are told in the name as it is written, which lies letter for
+    // letter over its lower case only where the two are equally long.
+    if name.len() != lower.len() || !name.is_char_boundary(at) {
+        return false;
+    }
+    let mut after = name[at..].chars();
+    let (Some(before), Some(here)) = (name[..at].chars().next_back(), after.next()) else {
+        return false;
+    };
+    here.is_uppercase()
+        && (before.is_lowercase()
+            || before.is_numeric()
+            || after.next().is_some_and(char::is_lowercase))
+}
+/// How well `word` names `name`, whose lower case is `lower`; the word is
+/// in lower case too. `None` where the name does not hold the word.
+fn named(name: &str, lower: &str, word: &str) -> Option<Named> {
+    if word.is_empty() {
+        return None;
+    }
+    let mut best: Option<Named> = None;
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(word) {
+        let at = from + found;
+        let how = if at > 0 {
+            if begins(name, lower, at) {
+                Named::Word
+            } else {
+                Named::Part
+            }
+        } else if lower.len() == word.len() {
+            Named::Whole
+        } else {
+            Named::Start
+        };
+        best = Some(best.map_or(how, |best| best.min(how)));
+        // Further on, the word can at best begin a word again.
+        if how <= Named::Word {
+            break;
+        }
+        from = at + lower[at..].chars().next().map_or(1, char::len_utf8);
+    }
+    best
+}
+/// How well a word with a slash names a place by its path, both in lower
+/// case: what stands before the word's last slash has to end the folder the
+/// place lies in, and the rest to begin the place's name. `src/cart` names
+/// `lib/src/Cart.php` and a folder `lib/src/cart`, and `src/` all that lies
+/// in a folder `src`. A slash at the front is the start of a folder's name.
+fn pathed(path: &str, word: &str) -> Option<Named> {
+    let (folder, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let (head, tail) = word.rsplit_once('/')?;
+    let lies = folder.ends_with(head) || head.strip_prefix('/') == Some(folder);
+    if !lies || !name.starts_with(tail) {
+        return None;
+    }
+    Some(if tail.is_empty() {
+        Named::Part
+    } else if tail.len() == name.len() {
+        Named::Whole
+    } else {
+        Named::Start
+    })
+}
+/// How well a word names a place by its name together with what holds it,
+/// as `cart.to` names `Cart.total()`: the word has to begin in `held`, which
+/// stands before the name, and to end in the name. All are in lower case.
+fn spans(held: &str, lower: &str, word: &str) -> Option<Named> {
+    if held.is_empty() {
+        return None;
+    }
+    if let Some(rest) = word.strip_prefix(held)
+        && !rest.is_empty()
+        && lower.starts_with(rest)
+    {
+        return Some(Named::Start);
+    }
+    word.char_indices()
+        .skip(1)
+        .any(|(at, _)| held.ends_with(&word[..at]) && lower.starts_with(&word[at..]))
+        .then_some(Named::Part)
+}
+/// A place as a search looks at it. All but `name` is in lower case.
+struct Sought<'a> {
+    /// What it is called, as it is written and in lower case.
+    name: &'a str,
+    lower: &'a str,
+    /// Another name it goes by: a file without its ending, a method or a
+    /// function without its brackets.
+    also: Option<&'a str>,
+    /// What stands before the name where it is shown with what holds it:
+    /// `cart.` before the `total()` of `Cart.total()`.
+    held: &'a str,
+    /// Its path, or the path of the file a symbol is in.
+    path: &'a str,
+    /// The path is its own, so that a word with a slash can name it.
+    own: bool,
+}
+/// How well the words of a search name a place: as well as the best of them
+/// does. Each word has to stand in the name or on the way to it, and one at
+/// least in the name; otherwise the place is no answer.
+fn answers(words: &[String], place: &Sought) -> Option<Named> {
+    let mut best: Option<Named> = None;
+    for word in words {
+        let word = word.as_str();
+        let how = if word.contains('/') {
+            place.own.then(|| pathed(place.path, word)).flatten()
+        } else {
+            let other = place.also.and_then(|also| {
+                if also == word {
+                    Some(Named::Whole)
+                } else if also.starts_with(word) {
+                    Some(Named::Start)
+                } else {
+                    None
+                }
+            });
+            match (named(place.name, place.lower, word), other) {
+                (Some(one), Some(other)) => Some(one.min(other)),
+                (one, other) => one
+                    .or(other)
+                    .or_else(|| spans(place.held, place.lower, word)),
+            }
+        };
+        match how {
+            Some(how) => best = Some(best.map_or(how, |best| best.min(how))),
+            None => {
+                // Not its name: it may still say where the place lies.
+                let way = if place.own {
+                    &place.path[..place.path.len() - place.lower.len()]
+                } else {
+                    place.path
+                };
+                if !way.contains(word) && !place.held.contains(word) {
+                    return None;
+                }
+            }
+        }
+    }
+    best
+}
+/// One place a search found: how well it is named, whether it holds what
+/// was typed with capitals as it was typed, how much is linked with it, how
+/// long its name is, and which folder (0), file (1) or symbol (2) it is, by
+/// its number among those.
+struct Hit {
+    how: Named,
+    cased: bool,
+    weight: u64,
+    len: u32,
+    class: u8,
+    id: u32,
+}
+impl Index {
+    /// The folders, the files and the names of the whole graph that a
+    /// search names, whatever folder a picture has open: the `FOUND` best
+    /// of them, and how many there are of each.
+    ///
+    /// A search is a few words. Each has to stand in the name of a place or
+    /// on the way to it, and one at least in the name: `total cart` finds
+    /// `total()` in `Cart.php` and not everything under a folder `cart`. A
+    /// word with a slash is the end of a path, as `pathed` tells. Letters
+    /// match whatever their case.
+    ///
+    /// The best is what is named most exactly: by its whole name, then by
+    /// the start of it, then by the start of a word in it. A file is named
+    /// by its name without the ending too, and a method or a function by
+    /// its name without its class and its brackets. A word typed with a
+    /// capital puts first what holds it as it was typed. Among equals the
+    /// most linked comes first, then the shortest name.
+    pub fn find(&self, query: &str) -> Value {
+        let mut words = Vec::new();
+        for word in query.split_whitespace().take(WORDS) {
+            let mut lower = String::new();
+            lower_onto(word, &mut lower);
+            words.push(lower);
+        }
+        if words.is_empty() {
+            return json!({
+                "mode": "find",
+                "query": "",
+                "found": 0,
+                "folders": 0,
+                "files": 0,
+                "names": 0,
+                "rows": [],
+            });
+        }
+        // How much is linked with each symbol, each file and each folder.
+        let mut linked = vec![0u64; self.symbols.len()];
+        for (from, to, ..) in &self.uses {
+            linked[*from as usize] += 1;
+            linked[*to as usize] += 1;
+        }
+        let busy = (0..self.files.len() as u32)
+            .map(|file| self.range(file).map(|at| linked[at as usize]).sum::<u64>())
+            .collect::<Vec<_>>();
+        // Every folder a file lies in, with its files and their links.
+        let mut folders: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+        for (file, path) in self.files.iter().enumerate() {
+            let mut folder = holder(path);
+            while !folder.is_empty() {
+                let entry = folders.entry(folder).or_default();
+                entry.0 += 1;
+                entry.1 += busy[file];
+                folder = holder(folder);
+            }
+        }
+        let folders = folders.into_iter().collect::<Vec<_>>();
+        // The words typed with a capital, each with its lower case, and
+        // whether a place holds each of them as it was typed: in its name,
+        // where the name holds the word at all, and else on the way to it.
+        let capitals = query
+            .split_whitespace()
+            .take(WORDS)
+            .zip(&words)
+            .filter(|(typed, _)| typed.chars().any(char::is_uppercase))
+            .collect::<Vec<_>>();
+        let cased = |name: &str, lower: &str, ways: [&str; 2]| {
+            !capitals.is_empty()
+                && capitals.iter().all(|(typed, small)| {
+                    if lower.contains(small.as_str()) {
+                        name.contains(typed)
+                    } else {
+                        ways.iter().any(|way| way.contains(typed))
+                    }
+                })
+        };
+        let mut hits = Vec::new();
+        let (mut lower, mut path, mut text) = (String::new(), String::new(), String::new());
+        // How well a folder or a file is named, by its name and its own
+        // path, whether as it was typed, and how long its name is. A file
+        // goes by its name without the ending, too.
+        let mut place = |whole: &str, file: bool| {
+            let called = name(whole);
+            lower.clear();
+            lower_onto(called, &mut lower);
+            path.clear();
+            lower_onto(whole, &mut path);
+            let how = answers(
+                &words,
+                &Sought {
+                    name: called,
+                    lower: &lower,
+                    also: lower
+                        .rsplit_once('.')
+                        .map(|(stem, _)| stem)
+                        .filter(|stem| file && !stem.is_empty()),
+                    held: "",
+                    path: &path,
+                    own: true,
+                },
+            )?;
+            Some((how, cased(called, &lower, [whole, ""]), called.len() as u32))
+        };
+        for (id, (folder, (_, weight))) in folders.iter().enumerate() {
+            if let Some((how, cased, len)) = place(folder, false) {
+                hits.push(Hit {
+                    how,
+                    cased,
+                    weight: *weight,
+                    len,
+                    class: 0,
+                    id: id as u32,
+                });
+            }
+        }
+        let in_folders = hits.len();
+        for (file, whole) in self.files.iter().enumerate() {
+            if let Some((how, cased, len)) = place(whole, true) {
+                hits.push(Hit {
+                    how,
+                    cased,
+                    weight: busy[file],
+                    len,
+                    class: 1,
+                    id: file as u32,
+                });
+            }
+        }
+        let in_files = hits.len() - in_folders;
+        for (file, whole) in self.files.iter().enumerate() {
+            path.clear();
+            lower_onto(whole, &mut path);
+            for at in self.range(file as u32) {
+                if matches!(self.symbols[at as usize].kind, Kind::File | Kind::Note) {
+                    continue;
+                }
+                // A method is shown with its class before it, `Cart.total()`,
+                // and is named by its own name.
+                text.clear();
+                self.show(at, &mut text);
+                let label = self.label(at);
+                let own = label.strip_prefix('.').unwrap_or(label);
+                let cut = text.len() - own.len();
+                lower.clear();
+                lower_onto(&text[..cut], &mut lower);
+                let held = lower.len();
+                lower_onto(own, &mut lower);
+                let (held, called) = lower.split_at(held);
+                let how = answers(
+                    &words,
+                    &Sought {
+                        name: own,
+                        lower: called,
+                        also: called.strip_suffix("()"),
+                        held,
+                        path: &path,
+                        own: false,
+                    },
+                );
+                if let Some(how) = how {
+                    hits.push(Hit {
+                        how,
+                        cased: cased(own, called, [&text[..cut], whole]),
+                        weight: linked[at as usize],
+                        len: own.len() as u32,
+                        class: 2,
+                        id: at,
+                    });
+                }
+            }
+        }
+        let found = hits.len();
+        let before = |a: &Hit, b: &Hit| {
+            a.how
+                .cmp(&b.how)
+                .then(b.cased.cmp(&a.cased))
+                .then(b.weight.cmp(&a.weight))
+                .then(a.len.cmp(&b.len))
+                .then(a.class.cmp(&b.class))
+                .then(a.id.cmp(&b.id))
+        };
+        if hits.len() > FOUND {
+            hits.select_nth_unstable_by(FOUND - 1, before);
+            hits.truncate(FOUND);
+        }
+        hits.sort_by(before);
+        // A symbol is told by the name the picture of its file selects it by.
+        let mut keys: HashMap<u32, Vec<String>> = HashMap::new();
+        let rows = hits
+            .iter()
+            .map(|hit| match hit.class {
+                0 => {
+                    let (path, (files, _)) = folders[hit.id as usize];
+                    json!({
+                        "path": path,
+                        "name": name(path),
+                        "what": "folder",
+                        "in": holder(path),
+                        "files": files,
+                    })
+                }
+                1 => {
+                    let path = self.files[hit.id as usize].as_str();
+                    json!({
+                        "path": path,
+                        "name": name(path),
+                        "what": "file",
+                        "in": holder(path),
+                        "symbols": self.holds(hit.id),
+                    })
+                }
+                _ => {
+                    let symbol = &self.symbols[hit.id as usize];
+                    let slot = (hit.id - self.range(symbol.file).start) as usize;
+                    let selected = keys
+                        .entry(symbol.file)
+                        .or_insert_with(|| self.keys(symbol.file));
+                    // Where its own name begins in the name it is shown by.
+                    let shown = self.shown(hit.id);
+                    let label = self.label(hit.id);
+                    let own = shown.len() - label.strip_prefix('.').unwrap_or(label).len();
+                    json!({
+                        "path": selected[slot],
+                        "name": shown,
+                        "own": own,
+                        "what": symbol.kind.word(),
+                        "file": self.files[symbol.file as usize],
+                        "line": symbol.line,
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "mode": "find",
+            "query": query.trim(),
+            "found": found,
+            "folders": in_folders,
+            "files": in_files,
+            "names": found - in_folders - in_files,
+            "rows": rows,
         })
     }
 }
@@ -5412,6 +5867,14 @@ async fn standalone(
             ]
         );
         assert_eq!(view["focus"]["name"], "format_price()");
+        // The view says that the filter would have left it out, and says
+        // nothing of the kind where the selected symbol is drawn anyway.
+        assert_eq!(view["beyond"], true);
+        let key = format!("{CART}#L10:Status");
+        assert_eq!(
+            shop.view("shop", CART, Some(&key), false, "status")["beyond"],
+            false
+        );
         // A long file keeps its most linked symbols, and at least a few
         // places for the files around.
         let mut nodes = vec![
@@ -5984,5 +6447,364 @@ where
             &changed,
             &maps.index("p", &graph, folder.path()).unwrap()
         ));
+    }
+    /// What a search found, in its order: what each place is, its name and
+    /// where it lies.
+    fn sought(index: &Index, query: &str) -> Vec<String> {
+        index.find(query)["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let text = |key: &str| row[key].as_str().unwrap_or("").to_owned();
+                match row["file"].as_str() {
+                    Some(file) => format!(
+                        "{} {} in {file}:{}",
+                        text("what"),
+                        text("name"),
+                        row["line"]
+                    ),
+                    None => format!("{} {} in {}", text("what"), text("name"), text("in")),
+                }
+            })
+            .collect()
+    }
+    const TOTAL: &str = "method Cart.total() in src/Cart/Cart.php:19";
+    const TEST_TOTAL: &str = "method CartTest.testTotal() in tests/CartTest.php:7";
+    #[test]
+    fn a_search_finds_folders_files_and_names_wherever_they_lie() {
+        let index = store();
+        // The folder, the file without its ending and the class are all
+        // called Cart; what only starts with it comes after them. A method
+        // of Cart is not called Cart, and letters match whatever their case.
+        let cart = [
+            "folder Cart in src",
+            "file Cart.php in src/Cart",
+            "type Cart in src/Cart/Cart.php:12",
+            "file CartTest.php in tests",
+            "type CartTest in tests/CartTest.php:5",
+        ];
+        assert_eq!(sought(&index, "cart"), cart);
+        assert_eq!(sought(&index, "  CART "), cart);
+        let found = index.find("  CART ");
+        assert_eq!(
+            (&found["mode"], &found["query"]),
+            (&json!("find"), &json!("CART"))
+        );
+        assert_eq!(
+            (
+                &found["found"],
+                &found["folders"],
+                &found["files"],
+                &found["names"]
+            ),
+            (&json!(5), &json!(1), &json!(2), &json!(2))
+        );
+        // A method is named without its class and its brackets, and a word
+        // inside a name written likeThis or like_this is found as well.
+        assert_eq!(sought(&index, "total"), [TOTAL, TEST_TOTAL]);
+        assert_eq!(
+            sought(&index, "price"),
+            [
+                "file Price.php in src/Cart",
+                "type Price in src/Cart/Price.php:4",
+                "function format_price() in src/Cart/Cart.php:29",
+            ]
+        );
+        // With its class before it, it is named as it is shown.
+        assert_eq!(sought(&index, "cart.to"), [TOTAL]);
+        assert_eq!(sought(&index, "t.total"), [TOTAL]);
+        // A constant and a case are names; of two called alike the more
+        // linked comes first.
+        assert_eq!(
+            sought(&index, "limit"),
+            ["name LIMIT in src/Cart/Cart.php:5"]
+        );
+        assert_eq!(
+            sought(&index, "paid"),
+            [
+                "method Notifier.paid() in src/Order/Notifier.php:11",
+                "case Paid in src/Cart/Cart.php:10",
+            ]
+        );
+        // The node that stands for a file is the file, found once, and a
+        // comment the tool kept is no name.
+        assert_eq!(sought(&index, "cart.php"), ["file Cart.php in src/Cart"]);
+        assert!(sought(&index, "cents").is_empty());
+        // Nothing is called that, and nothing was asked.
+        assert_eq!(index.find("zzz")["found"], 0);
+        let nothing = index.find("   ");
+        assert_eq!(
+            (&nothing["found"], &nothing["query"], &nothing["rows"]),
+            (&json!(0), &json!(""), &json!([]))
+        );
+    }
+    #[test]
+    fn further_words_of_a_search_say_where_a_place_lies() {
+        let index = store();
+        // Each word stands in the name or on the way to it: in the class of
+        // a method, in the name of its file, in a folder above.
+        assert_eq!(sought(&index, "total cart"), [TOTAL, TEST_TOTAL]);
+        assert_eq!(sought(&index, "total test"), [TEST_TOTAL]);
+        assert_eq!(sought(&index, "total tests"), [TEST_TOTAL]);
+        assert_eq!(sought(&index, "total price.php"), Vec::<String>::new());
+        assert_eq!(
+            sought(&index, "php order"),
+            ["file Notifier.php in src/Order"]
+        );
+        // A word that only says where names nothing by itself.
+        assert_eq!(sought(&index, "order"), ["folder Order in src"]);
+        // A word with a slash is the end of a path: the folder a place lies
+        // in, and the start of its name.
+        assert_eq!(sought(&index, "cart/price"), ["file Price.php in src/Cart"]);
+        assert_eq!(
+            sought(&index, "CART/PRICE.PHP"),
+            ["file Price.php in src/Cart"]
+        );
+        assert_eq!(
+            sought(&index, "src/"),
+            ["folder Cart in src", "folder Order in src"]
+        );
+        assert_eq!(sought(&index, "order/"), ["file Notifier.php in src/Order"]);
+        assert!(
+            sought(&index, "rder/notifier").len() == 1
+                && sought(&index, "/rder/notifier").is_empty()
+        );
+        // At the front it is the start of a folder's name, or the project.
+        assert_eq!(
+            sought(&index, "/cart"),
+            [
+                "folder Cart in src",
+                "file Cart.php in src/Cart",
+                "file CartTest.php in tests",
+            ]
+        );
+        assert_eq!(sought(&index, "/tests"), ["folder tests in "]);
+        // For a name such a word says where its file lies.
+        assert_eq!(sought(&index, "src/cart/ total"), [TOTAL]);
+        assert!(sought(&index, "src/cart/total").is_empty());
+    }
+    #[test]
+    fn a_search_lists_the_best_named_first_and_counts_what_it_does_not_list() {
+        let node = |id: &str, label: &str, file: &str| json!({"id": id, "label": label, "file_type": "code", "source_file": file, "source_location": "L1"});
+        let call = |from: &str, to: &str| json!({"source": from, "target": to, "relation": "calls", "confidence": "EXTRACTED", "source_file": "c.py"});
+        let index = index(json!({
+            "nodes": [
+                node("part", "Reprice", "b.py"),
+                node("snake", "net_price()", "a.py"),
+                node("camel", "netPrice()", "b.py"),
+                node("list", "PriceList", "a.py"),
+                node("plan", "PricePlan", "b.py"),
+                node("whole", "Price", "a.py"),
+                node("one", "one()", "c.py"),
+                node("two", "two()", "c.py"),
+                node("three", "three()", "c.py"),
+                node("small", "index()", "a.py"),
+                node("capital", "Index", "b.py"),
+            ],
+            "links": [
+                call("one", "part"), call("two", "part"), call("three", "part"),
+                call("one", "plan"), call("two", "plan"),
+                call("one", "list"),
+                call("one", "small"), call("two", "small"),
+            ]
+        }));
+        // The whole name, then what starts with it, then a word inside a
+        // name, then any part of one. Reprice is the most linked of all and
+        // comes last; among those that start alike the more linked is first,
+        // and of two equally linked the shorter name.
+        assert_eq!(
+            sought(&index, "price"),
+            [
+                "name Price in a.py:1",
+                "name PricePlan in b.py:1",
+                "name PriceList in a.py:1",
+                "function netPrice() in b.py:1",
+                "function net_price() in a.py:1",
+                "name Reprice in b.py:1",
+            ]
+        );
+        // Both are called index, and the more linked comes first; typed
+        // with a capital, the word puts first what is written that way.
+        assert_eq!(
+            sought(&index, "index"),
+            ["function index() in a.py:1", "name Index in b.py:1"]
+        );
+        assert_eq!(
+            sought(&index, "Index"),
+            ["name Index in b.py:1", "function index() in a.py:1"]
+        );
+        // What a method is called counts, not what its class is called.
+        let classes = self::index(json!({
+            "nodes": [
+                node("tests", "IndexTests", "t.py"),
+                node("method", ".index()", "t.py"),
+                node("other", "user()", "t.py"),
+                node("type", "Index", "i.py"),
+            ],
+            "links": [
+                {"source": "tests", "target": "method", "relation": "method", "source_file": "t.py"},
+                {"source": "other", "target": "method", "relation": "calls", "source_file": "t.py"},
+            ]
+        }));
+        assert_eq!(
+            sought(&classes, "index"),
+            [
+                "method IndexTests.index() in t.py:1",
+                "name Index in i.py:1",
+                "type IndexTests in t.py:1",
+            ]
+        );
+        assert_eq!(
+            sought(&classes, "Index"),
+            [
+                "name Index in i.py:1",
+                "method IndexTests.index() in t.py:1",
+                "type IndexTests in t.py:1",
+            ]
+        );
+        // A word that says where is looked for, as typed, on the way.
+        assert_eq!(
+            sought(&classes, "index Tests")[0],
+            "method IndexTests.index() in t.py:1"
+        );
+        // A capital orders what is found and leaves nothing out.
+        assert_eq!(sought(&index, "Index a.py"), ["function index() in a.py:1"]);
+        // A capital after capitals begins a word where small letters follow.
+        assert_eq!(
+            super::named("XMLParser", "xmlparser", "parser"),
+            Some(Named::Word)
+        );
+        assert_eq!(
+            super::named("XMLParser", "xmlparser", "lparser"),
+            Some(Named::Part)
+        );
+        assert_eq!(super::named("v2Api", "v2api", "api"), Some(Named::Word));
+        // Letters of more than one byte are walked whole.
+        assert_eq!(super::named("Ééé", "ééé", "é"), Some(Named::Start));
+        assert_eq!(super::named("жук", "жук", "ук"), Some(Named::Part));
+        // Where the lower case is longer than the name, capitals are not
+        // looked for: they do not lie where the lower case says.
+        assert_eq!(super::named("aStan", "astan", "stan"), Some(Named::Word));
+        assert_eq!(
+            super::named("İaStan", "i\u{307}astan", "stan"),
+            Some(Named::Part)
+        );
+        assert_eq!(super::named("any", "any", ""), None);
+        // More is found than a list holds: the best are listed, all counted.
+        let wide = office(FOUND + 20);
+        let found = wide.find("r");
+        let rows = found["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), FOUND);
+        // The reports, each a file and a name in it, and their folder; and
+        // `core`, `orders`, `users` and `store` with the files of the four.
+        assert_eq!(found["found"], json!(1 + 2 * (FOUND + 20) + 8));
+        assert_eq!(
+            (&found["folders"], &found["files"], &found["names"]),
+            (&json!(1), &json!(FOUND + 24), &json!(FOUND + 24))
+        );
+        // The folder holds the links of all its files.
+        assert_eq!(sought(&wide, "r")[0], "folder reports in ");
+        assert_eq!(rows[0]["files"], json!(FOUND + 20));
+    }
+    #[test]
+    fn what_a_search_found_is_selected_in_the_picture_it_lies_in() {
+        let index = store();
+        // A name is told by what the picture of its file selects it by.
+        let found = index.find("total");
+        let row = &found["rows"][0];
+        assert_eq!(
+            (&row["path"], &row["file"], &row["what"], &row["line"]),
+            (
+                &json!("src/Cart/Cart.php#L19:.total()"),
+                &json!(CART),
+                &json!("method"),
+                &json!(19)
+            )
+        );
+        // It is shown with its class, and says where its own name begins.
+        assert_eq!(
+            (&row["name"], &row["own"]),
+            (&json!("Cart.total()"), &json!(5))
+        );
+        assert_eq!(index.find("price")["rows"][1]["own"], 0);
+        let view = index.view("shop", CART, row["path"].as_str(), false, "");
+        assert_eq!(view["focus"]["path"], row["path"]);
+        // A file and a folder are told by their paths, with where they lie.
+        let found = index.find("cart");
+        assert_eq!(
+            found["rows"][0],
+            json!({"path": "src/Cart", "name": "Cart", "what": "folder", "in": "src", "files": 2})
+        );
+        assert_eq!(
+            found["rows"][1],
+            json!({"path": CART, "name": "Cart.php", "what": "file", "in": "src/Cart", "symbols": 9})
+        );
+        let view = index.view("shop", "src/Cart", Some(CART), false, "");
+        assert_eq!(view["focus"]["path"], CART);
+        // What is left out with the tests is not found either.
+        let plain = index.plain_with(&|_| None);
+        assert_eq!(sought(&plain, "total"), [TOTAL]);
+        assert_eq!(sought(&plain, "cart").len(), 3);
+    }
+    #[test]
+    fn a_selected_place_is_drawn_whatever_the_limit_and_the_filter_say() {
+        let files = (0..SHOWN + 5)
+            .map(|at| json!({"id": format!("n{at}"), "source_file": format!("lib/f{at:02}.php")}))
+            .collect::<Vec<_>>();
+        let links = (1..SHOWN + 5)
+            .map(|at| json!({"source": format!("n{at}"), "target": "n0", "relation": "imports", "source_file": format!("lib/f{at:02}.php")}))
+            .collect::<Vec<_>>();
+        let wide = index(json!({"nodes": files, "edges": links}));
+        let last = format!("lib/f{:02}.php", SHOWN + 4);
+        let paths = |view: &Value| {
+            view["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| node["path"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        // The last of the files is no one of the most linked.
+        let view = wide.view("wide", "lib", None, false, "");
+        assert!(!paths(&view).contains(&last));
+        assert_eq!(view["beyond"], false);
+        // Selected, it is drawn beside them, with its link, and the view
+        // says that one more is drawn than the limit lets.
+        let view = wide.view("wide", "lib", Some(&last), false, "");
+        assert_eq!(view["beyond"], true);
+        assert_eq!(paths(&view).len(), SHOWN + 1);
+        assert_eq!(paths(&view).last(), Some(&last));
+        assert_eq!(view["focus"]["path"], json!(last));
+        assert!(rows(&view, "edges").contains(&format!("{last} -> lib/f00.php 1/0")));
+        // A filter that leaves it out does not hide it.
+        let view = wide.view("wide", "lib", Some(&last), false, "f0");
+        assert_eq!(paths(&view).len(), 11);
+        assert_eq!(paths(&view).last(), Some(&last));
+        assert_eq!(
+            (&view["matching"], &view["beyond"]),
+            (&json!(10), &json!(true))
+        );
+        // One that is drawn anyway is drawn once.
+        let view = wide.view("wide", "lib", Some("lib/f01.php"), false, "");
+        assert_eq!(paths(&view).len(), SHOWN);
+        assert_eq!(view["beyond"], false);
+        // So it is in a folder that is spread out and shows a part of what
+        // it holds.
+        let index = wheel(1, HELD + 5);
+        let spoke = format!("p0/f{:02}.rs", HELD + 4);
+        let spread = ["p0".to_owned()];
+        let view = index.view_with("wheel", "", &spread, Some(&spoke), false, "");
+        assert!(held(&view).contains(&format!("{spoke} in p0")));
+        assert_eq!(framed(&view), [format!("p0 {}/{}", HELD + 1, HELD + 5)]);
+        // A place outside the open folder is listed, not drawn.
+        let shop = shop();
+        let outside = shop.view("shop", "src", Some("tests"), false, "");
+        assert_eq!(outside["focus"]["path"], "tests");
+        assert_eq!(outside["beyond"], false);
+        assert_eq!(
+            rows(&outside, "nodes"),
+            rows(&shop.view("shop", "src", None, false, ""), "nodes")
+        );
     }
 }

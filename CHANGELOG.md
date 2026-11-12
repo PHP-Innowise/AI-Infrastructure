@@ -24,6 +24,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Search the whole project in the Harness dependency map. The field at the top
+  of the map finds a folder, a file or a name anywhere in the graph, whatever
+  folder is open: what is called that most exactly comes first, further words
+  say where a place lies (`total cart`), and a word with a slash is the end of
+  a path. Choosing a row selects a folder or a file in the folder it lies in,
+  or opens the file of a name on it, scrolls the picture to the box and puts
+  the keyboard on it; `/` leads back to the field. A selected place is now
+  drawn whatever the filter and the limit of its folder say.
+
 - Light what the pointer rests on in the Harness dependency map. A box lights
   its links and the boxes at their other ends, a link its two ends, and the
   rest of the picture is left faint until the pointer has left; a box reached

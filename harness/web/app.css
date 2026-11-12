@@ -158,6 +158,16 @@ svg { flex:none; }
 .graph-link .graph-map-node { width:220px; }
 .graph-map-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .graph-map-head h2 { margin:0; font-size:var(--text-display); }
+/* Search of the whole project: a field in the head of the map and, under it, what was found, walked with the arrow keys. A path too long for its row keeps its end. */
+.graph-find { position:relative; flex:1 1 240px; max-width:440px; min-width:0; margin-left:auto; }
+.graph-find input { width:100%; min-height:var(--control-height-sm); box-sizing:border-box; }
+.graph-find-found { position:absolute; top:calc(100% + 6px); right:0; z-index:6; display:flex; flex-direction:column; gap:8px; width:min(760px,calc(100vw - 140px)); max-height:min(60vh,520px); padding:12px; box-sizing:border-box; border:1px solid var(--field-line); border-radius:var(--radius-md); background:var(--paper); box-shadow:0 12px 40px var(--shadow-strong); }
+.graph-find-found[hidden] { display:none; }
+.graph-find-what { flex:0 0 60px; color:var(--muted); font-size:var(--text-meta); }
+.graph-find-row mark { background:transparent; color:var(--purple); font-weight:var(--weight-strong); }
+.graph-find-where { flex:0 1 52%; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:rtl; text-align:right; color:var(--muted); font-family:var(--font-mono); font-size:var(--text-meta); }
+.graph-find .graph-find-note { flex:none; max-width:none; margin:0; min-height:1.6em; }
+@media (max-width:640px) { .graph-map-head { flex-wrap:wrap; } .graph-find { order:1; flex-basis:100%; max-width:none; } .graph-find-found { left:0; right:auto; width:100%; } .graph-find-row { flex-wrap:wrap; row-gap:0; } .graph-find-where { flex-basis:100%; text-align:left; } }
 .graph-map-pick { position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; }
 .graph-map-target { display:flex; align-items:center; gap:8px; color:var(--ink-2); font-size:var(--text-ui); white-space:nowrap; }
 .graph-map-target select { width:min(440px,60vw); min-height:var(--control-height-sm); }

@@ -1111,6 +1111,9 @@ fn file_note(view: &V) -> String {
         .iter()
         .filter(|node| m::yes(&node["symbol"]))
         .count() as u64;
+    // The selected symbol is drawn whatever the limit and the filter say.
+    let beyond = u64::from(m::yes(&view["beyond"]));
+    let most = shown.saturating_sub(beyond);
     let drawn = m::array(&view["edges"]).len() as u64;
     let mut parts = context(view);
     parts.extend(reach(view));
@@ -1118,12 +1121,15 @@ fn file_note(view: &V) -> String {
         parts.push("The graph names nothing inside this file.".to_owned());
     } else if number(&view["matching"]) == 0 {
         parts.push("No name in this file matches the filter.".to_owned());
-    } else if shown < number(&view["matching"]) {
+    } else if most < number(&view["matching"]) {
         parts.push(format!(
             "Showing the {} most linked of {} symbols in this file; filter by name to reach the rest.",
-            count(shown),
+            count(most),
             count(number(&view["matching"]))
         ));
+    }
+    if beyond > 0 {
+        parts.push("The selected one is drawn as well.".to_owned());
     }
     let around = &view["around"];
     if number(&around["shown"]) < number(&around["files"]) {
@@ -1259,18 +1265,24 @@ pub fn note(view: &V) -> String {
     }
     let number = |key: &str| view[key].as_u64().unwrap_or(0);
     let shown = m::array(&view["nodes"]).len() as u64;
+    // The selected place is drawn whatever the limit and the filter say.
+    let beyond = u64::from(m::yes(&view["beyond"]));
+    let most = shown.saturating_sub(beyond);
     let drawn = m::array(&view["edges"]).len() as u64;
     let mut parts = vec![];
     if number("children") == 0 {
         parts.push("The graph names no files here.".to_owned());
     } else if number("matching") == 0 {
         parts.push("No name here matches the filter.".to_owned());
-    } else if shown < number("matching") {
+    } else if most < number("matching") {
         parts.push(format!(
             "Showing the {} most connected of {} here; filter by name to reach the rest.",
-            count(shown),
+            count(most),
             count(number("matching"))
         ));
+    }
+    if beyond > 0 {
+        parts.push("The selected one is drawn as well.".to_owned());
     }
     if shown > 0 && drawn == 0 {
         parts.push(if m::yes(&view["certain"]) {
@@ -2761,6 +2773,141 @@ pub fn interim(view: &V, phase: &str) -> String {
         _ => String::new(),
     }
 }
+/// A name with what a search typed marked in it: each word once, where the
+/// name first holds it. A folder or a file is named by a word with a slash
+/// too, by what follows the last slash, at the start of its name. For the
+/// name of a symbol `own` says where it begins when it is shown with what
+/// holds it, `total()` in `Cart.total()`: a word is looked for there first.
+/// Letters match whatever their case.
+pub fn marked(name: &str, query: &str, own: Option<usize>) -> String {
+    let lower = name.to_lowercase();
+    // A mark lies where the lower case holds a word, which is where the
+    // name holds it only if the two are equally long.
+    if lower.len() != name.len() {
+        return escape(name);
+    }
+    let start = own.filter(|at| lower.is_char_boundary(*at)).unwrap_or(0);
+    let mut spans = vec![];
+    for word in query.split_whitespace() {
+        let word = word.to_lowercase();
+        let found = match word.rsplit_once('/') {
+            Some((_, tail)) => (own.is_none() && !tail.is_empty() && lower.starts_with(tail))
+                .then_some((0, tail.len())),
+            None => lower[start..]
+                .find(&word)
+                .map(|at| start + at)
+                .or_else(|| lower.find(&word))
+                .map(|at| (at, at + word.len())),
+        };
+        if let Some((from, to)) = found {
+            if name.is_char_boundary(from) && name.is_char_boundary(to) {
+                spans.push((from, to));
+            }
+        }
+    }
+    spans.sort_unstable();
+    let mut html = String::new();
+    let mut at = 0;
+    for (from, to) in spans {
+        if to <= at {
+            continue;
+        }
+        let from = from.max(at);
+        html.push_str(&escape(&name[at..from]));
+        html.push_str(&format!("<mark>{}</mark>", escape(&name[from..to])));
+        at = to;
+    }
+    html.push_str(&escape(&name[at..]));
+    html
+}
+/// What a search of the project found, as rows to choose from: what each
+/// place is, its name with what was typed marked in it, and where it lies,
+/// the folder of a folder or a file and the file and the line of a name.
+pub fn found(finder: &V) -> String {
+    let active = finder["active"].as_u64().unwrap_or(0) as usize;
+    let asked = m::text(finder, "asked");
+    let mut html = String::new();
+    for (index, row) in m::array(&finder["rows"]).iter().enumerate() {
+        let what = m::text(row, "what");
+        let place = match (row["file"].as_str(), row["line"].as_u64()) {
+            (Some(file), Some(line)) if line > 0 => format!("{file}:{line}"),
+            (Some(file), _) => file.to_owned(),
+            _ => m::text(row, "in"),
+        };
+        html.push_str(&format!(
+            "<li class=\"graph-pick-row graph-find-row\" id=\"graph-find-row-{index}\" role=\"option\" aria-selected=\"{}\" data-action=\"graph-find-choose\" data-payload=\"{index}\" title=\"{}\"><span class=\"graph-find-what\">{}</span><span class=\"graph-pick-main\"><span class=\"graph-pick-title\">{}{}</span></span><span class=\"graph-find-where\"><bdi>{}</bdi></span></li>",
+            index == active,
+            escape(&m::text(row, "path")),
+            escape(&what),
+            marked(
+                &m::text(row, "name"),
+                &asked,
+                row["file"]
+                    .is_string()
+                    .then(|| row["own"].as_u64().unwrap_or(0) as usize),
+            ),
+            if what == "folder" { "/" } else { "" },
+            escape(&place),
+        ));
+    }
+    html
+}
+/// The line under what a search found: why there is nothing, or how many
+/// there are and how to walk them.
+pub fn found_note(finder: &V) -> String {
+    if let Some(failed) = finder["failed"].as_str() {
+        return failed.to_owned();
+    }
+    let rows = m::array(&finder["rows"]).len() as u64;
+    if m::yes(&finder["loading"]) && rows == 0 {
+        return "Searching…".to_owned();
+    }
+    if m::yes(&finder["missing"]) {
+        return "There is no graph to search yet.".to_owned();
+    }
+    let tests = if m::yes(&finder["notests"]) {
+        " Tests are left out."
+    } else {
+        ""
+    };
+    let found = finder["found"].as_u64().unwrap_or(0);
+    if found == 0 {
+        return format!("Nothing in the graph is called that.{tests}");
+    }
+    let told = if rows < found {
+        format!(
+            "The {} best of {} found; type more to narrow them.",
+            count(rows),
+            count(found)
+        )
+    } else {
+        format!("{} found.", count(found))
+    };
+    format!("{told}{tests} ↑ ↓ to move · Enter to go there · Esc to close")
+}
+/// The map as it shows a place a search found. A name opens its file on
+/// itself, in the map that is open. A folder or a file that the picture
+/// draws is selected where it is; any other is shown among its own
+/// neighbours, in the folder it lies in, in the whole project, and a folder
+/// that was spread out there is one box again, to be selected.
+pub fn sought(mut state: V, row: &V, drawn: bool) -> V {
+    let path = row["path"].as_str().unwrap_or("");
+    if let Some(file) = row["file"].as_str() {
+        state = unfollowed(state);
+        state["scope"] = json!(file);
+        state["filter"] = json!("");
+    } else if !drawn {
+        state = unfollowed(state);
+        state["target"] = json!("");
+        state["scope"] = json!(parent(path));
+        state["filter"] = json!("");
+        if row["what"] == "folder" {
+            state = spread(state, path, true);
+        }
+    }
+    state["focus"] = json!(path);
+    state
+}
 /// The scale at which a picture lies wholly in the room it has: never
 /// larger than it is drawn, and no smaller than `SMALLEST`. A picture or a
 /// room without a size is left as it is.
@@ -2920,9 +3067,10 @@ fn point(canvas: &str, target: Option<web_sys::Element>) {
     }
     let _ = plane.set_attribute("data-hover", "true");
 }
-/// Fits the picture again when the window changes its size, and lights
-/// what the pointer or the keyboard rests on in the map and in the window
-/// of a link. Asked for each time the map opens, and set up once.
+/// Fits the picture again when the window changes its size, lights what
+/// the pointer or the keyboard rests on in the map and in the window of a
+/// link, and closes what a search found when the keyboard leaves the
+/// search. Asked for each time the map opens, and set up once.
 fn watch() {
     if m::yes(&m::data("graph-map-watched")) {
         return;
@@ -2956,6 +3104,22 @@ fn watch() {
             let _ = element.add_event_listener_with_callback(kind, moved.as_ref().unchecked_ref());
             moved.forget();
         }
+    }
+    // What a search found is closed once the keyboard leaves the search;
+    // moving on into the list keeps it open.
+    if let Some(search) = dom::get("graph-find") {
+        let within = search.clone();
+        let left = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let stays = js_sys::Reflect::get(&event, &"relatedTarget".into())
+                .ok()
+                .and_then(|next| next.dyn_into::<web_sys::Node>().ok())
+                .is_some_and(|next| within.contains(Some(&next)));
+            if !stays {
+                close_found();
+            }
+        });
+        let _ = search.add_event_listener_with_callback("focusout", left.as_ref().unchecked_ref());
+        left.forget();
     }
 }
 fn fresh(target: &str) -> V {
@@ -3091,6 +3255,259 @@ async fn look(from: &str, to: &str) {
         }
     }
 }
+/// The search of the project as it stands: what is typed, what the server
+/// found, for which words and which request, which row is marked, and
+/// whether the list is open.
+fn finder() -> V {
+    let finder = m::data("graph-find");
+    if finder.is_object() {
+        finder
+    } else {
+        json!({"open": false, "query": "", "asked": "", "for": "", "active": 0, "rows": [], "found": 0, "loading": false, "failed": null, "missing": false, "notests": false})
+    }
+}
+/// The request that searches for what is typed in the graph the map is
+/// drawn from; none where nothing is typed.
+fn find_path(finder: &V) -> Option<String> {
+    let state = state();
+    let project = dom::value("project");
+    let query = m::text(finder, "query").trim().to_owned();
+    if project.is_empty() || query.is_empty() {
+        return None;
+    }
+    let mut asked = vec![("query", query)];
+    if !m::text(&state, "target").is_empty() {
+        asked.push(("target", m::text(&state, "target")));
+    }
+    if m::yes(&state["notests"]) {
+        asked.push(("notests", "1".to_owned()));
+    }
+    Some(format!(
+        "/api/projects/{}/graph/find{}",
+        dom::enc(&project),
+        dom::query(&asked)
+    ))
+}
+/// Whether what is listed answers what is typed now, in the graph the map
+/// is drawn from now.
+fn answered(finder: &V) -> bool {
+    find_path(finder).is_some_and(|path| finder["for"] == path.as_str())
+}
+/// Draws the search of the project as it stands.
+fn show_found() {
+    let finder = finder();
+    let opened = m::yes(&finder["open"]);
+    dom::hidden("graph-find-found", !opened);
+    dom::attr(
+        "graph-find-search",
+        "aria-expanded",
+        if opened { "true" } else { "false" },
+    );
+    if let Some(field) = dom::get("graph-find-search") {
+        // The field keeps the keyboard and says which row is marked.
+        let _ = if opened && !m::array(&finder["rows"]).is_empty() {
+            field.set_attribute(
+                "aria-activedescendant",
+                &format!("graph-find-row-{}", finder["active"].as_u64().unwrap_or(0)),
+            )
+        } else {
+            field.remove_attribute("aria-activedescendant")
+        };
+    }
+    if opened {
+        html("graph-find-list", &found(&finder));
+        dom::text("graph-find-note", &found_note(&finder));
+    }
+}
+/// Moves the mark of the search to a row and brings the row into view.
+fn mark_found(next: usize) {
+    let mut finder = finder();
+    let before = finder["active"].as_u64().unwrap_or(0);
+    finder["active"] = json!(next);
+    m::set("graph-find", finder);
+    dom::attr(
+        &format!("graph-find-row-{before}"),
+        "aria-selected",
+        "false",
+    );
+    dom::attr(&format!("graph-find-row-{next}"), "aria-selected", "true");
+    dom::attr(
+        "graph-find-search",
+        "aria-activedescendant",
+        &format!("graph-find-row-{next}"),
+    );
+    into_view("graph-find-list", &format!("graph-find-row-{next}"));
+}
+/// Closes the list of the search; what was typed and found stays.
+fn close_found() {
+    let mut finder = finder();
+    if !m::yes(&finder["open"]) {
+        return;
+    }
+    finder["open"] = json!(false);
+    m::set("graph-find", finder);
+    show_found();
+}
+/// Asks the server for what is typed, in the graph the map is drawn from.
+async fn seek() {
+    let finder = finder();
+    let Some(path) = find_path(&finder) else {
+        return;
+    };
+    let project = dom::value("project");
+    let asked = m::text(&finder, "query").trim().to_owned();
+    let mut reading = finder;
+    reading["loading"] = json!(true);
+    if m::yes(&reading["open"]) {
+        dom::text("graph-find-note", &found_note(&reading));
+    }
+    m::set("graph-find", reading);
+    let found = api::scoped("graph-find", &path).await;
+    let mut finder = self::finder();
+    match found {
+        Ok((epoch, found)) => {
+            if !m::current("graph-find", epoch) || dom::value("project") != project {
+                return;
+            }
+            finder["rows"] = json!(m::array(&found["rows"]));
+            finder["found"] = json!(found["found"].as_u64().unwrap_or(0));
+            finder["missing"] = json!(m::yes(&found["missing"]));
+            finder["notests"] = json!(m::yes(&found["notests"]));
+            finder["asked"] = json!(asked);
+            finder["for"] = json!(path);
+            finder["active"] = json!(0);
+            finder["failed"] = V::Null;
+        }
+        Err(error) if error.aborted => return,
+        Err(error) => {
+            finder["rows"] = json!([]);
+            finder["found"] = json!(0);
+            finder["for"] = json!("");
+            finder["failed"] = json!(error.message);
+        }
+    }
+    finder["loading"] = json!(false);
+    m::set("graph-find", finder);
+    show_found();
+}
+/// Brings the selected box of the map into the middle of what is seen of
+/// the picture, where it is not wholly seen, and puts the keyboard on it.
+fn reveal() {
+    let Some(canvas) = dom::get("graph-map-canvas") else {
+        return;
+    };
+    let Some(node) = canvas
+        .query_selector(".graph-map-node[data-selected=\"true\"]")
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+    let (room, at) = (
+        canvas.get_bounding_client_rect(),
+        node.get_bounding_client_rect(),
+    );
+    let edge = 8.0;
+    if at.left() < room.left() + edge
+        || at.right() > room.right() - edge
+        || at.top() < room.top() + edge
+        || at.bottom() > room.bottom() - edge
+    {
+        let left = f64::from(canvas.scroll_left()) + at.left()
+            - room.left()
+            - (room.width() - at.width()) / 2.0;
+        let top = f64::from(canvas.scroll_top()) + at.top()
+            - room.top()
+            - (room.height() - at.height()) / 2.0;
+        canvas.set_scroll_left(left.max(0.0) as i32);
+        canvas.set_scroll_top(top.max(0.0) as i32);
+    }
+    if let Ok(node) = node.dyn_into::<web_sys::HtmlElement>() {
+        let _ = node.focus();
+    }
+}
+/// Keys of the search of the project. A slash goes to its field from
+/// anywhere in the map but another field. In the field and in the list the
+/// arrows walk what was found, Enter goes to the marked place, and Escape
+/// closes the list, not the map behind it.
+fn find_key(e: &web_sys::KeyboardEvent) -> bool {
+    if !open() {
+        return false;
+    }
+    let target = e
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+    let bare = !e.ctrl_key() && !e.meta_key() && !e.alt_key();
+    if e.key() == "/" && bare {
+        // In a field a slash is a letter; a box to tick takes none.
+        let typing = target
+            .as_ref()
+            .is_some_and(|element| match element.tag_name().as_str() {
+                "TEXTAREA" | "SELECT" => true,
+                "INPUT" => !matches!(
+                    element.get_attribute("type").as_deref(),
+                    Some("checkbox" | "radio")
+                ),
+                _ => false,
+            });
+        // The window of a link lies over the map.
+        let covered = dom::get("graph-link").is_some_and(|window| window.has_attribute("open"));
+        if typing || covered {
+            return false;
+        }
+        dom::focus("graph-find-search");
+        return true;
+    }
+    let within = target.map(|element| element.id()).unwrap_or_default();
+    if !["graph-find-search", "graph-find-list", "graph-find-found"].contains(&within.as_str()) {
+        return false;
+    }
+    let finder = finder();
+    let rows = m::array(&finder["rows"]).len();
+    let active = finder["active"].as_u64().unwrap_or(0) as usize;
+    if !m::yes(&finder["open"]) {
+        // Closed with Escape, the list comes back with an arrow.
+        if e.key() == "ArrowDown" && find_path(&finder).is_some() {
+            spawn_local(async {
+                event("focusin", "graph-find-search", "", &V::Null, "", false).await;
+            });
+            return true;
+        }
+        return false;
+    }
+    match e.key().as_str() {
+        "Escape" => {
+            close_found();
+            dom::focus("graph-find-search");
+            true
+        }
+        "ArrowDown" if rows > 0 => {
+            mark_found((active + 1).min(rows - 1));
+            true
+        }
+        "ArrowUp" if rows > 0 => {
+            mark_found(active.saturating_sub(1));
+            true
+        }
+        "Enter" if bare && !e.shift_key() => {
+            spawn_local(async move {
+                // Typed fast, the list still answers less than was typed:
+                // the first of what the whole of it finds is meant.
+                let mut row = active;
+                if !answered(&self::finder()) {
+                    dom::cancel_timer("graph-find-search");
+                    seek().await;
+                    row = 0;
+                }
+                if answered(&self::finder()) {
+                    event("click", "", "graph-find-choose", &json!(row), "", false).await;
+                }
+            });
+            true
+        }
+        _ => false,
+    }
+}
 fn picker() -> V {
     let pick = m::data("graph-pick");
     if pick.is_object() {
@@ -3166,10 +3583,13 @@ fn mark(next: usize) {
         "false",
     );
     dom::attr(&format!("graph-pick-row-{next}"), "aria-selected", "true");
+    into_view("graph-pick-list", &format!("graph-pick-row-{next}"));
+}
+/// Scrolls a list as far as a row of it needs to be wholly seen.
+fn into_view(list: &str, row: &str) {
     let (Some(list), Some(row)) = (
-        dom::get("graph-pick-list"),
-        dom::get(&format!("graph-pick-row-{next}"))
-            .and_then(|row| row.dyn_into::<web_sys::HtmlElement>().ok()),
+        dom::get(list),
+        dom::get(row).and_then(|row| row.dyn_into::<web_sys::HtmlElement>().ok()),
     ) else {
         return;
     };
@@ -3286,11 +3706,18 @@ fn shut() {
     dom::cancel_timer("graph-pick-search");
     show();
 }
-/// Keys of the open picker: the arrows walk the list, Enter chooses the
-/// marked row and Escape closes the picker, not the map behind it.
+/// Keys of the map: those of the search of the project, and those of the
+/// open picker, where the arrows walk the list, Enter chooses the marked
+/// row and Escape closes the picker, not the map behind it.
 pub fn key(e: &web_sys::KeyboardEvent) -> bool {
+    if e.is_composing() {
+        return false;
+    }
+    if find_key(e) {
+        return true;
+    }
     let pick = picker();
-    if !m::yes(&pick["open"]) || e.is_composing() {
+    if !m::yes(&pick["open"]) {
         return false;
     }
     if e.key() == "Escape" {
@@ -3568,12 +3995,20 @@ pub async fn event(
     let mut state = state();
     // A pull request, a branch or a commit is worked out before it is mapped.
     let mut chosen = false;
+    // A place a search found is brought into view once it is drawn.
+    let mut jumped = false;
     match (kind, id, action) {
         ("click", "graph-view" | "graph-changes", _) => {
             let changes = id == "graph-changes";
             state = anew(if changes { "work" } else { "" });
             m::set("graph-map", state.clone());
             dom::set_value("graph-map-filter", "");
+            // A map begun anew has nothing searched in it.
+            m::next("graph-find");
+            dom::cancel_timer("graph-find-search");
+            m::set("graph-find", V::Null);
+            dom::set_value("graph-find-search", "");
+            show_found();
             dom::error("graph-map-error", "");
             dom::hidden("graph-map-progress", true);
             blank();
@@ -3600,8 +4035,88 @@ pub async fn event(
         ("click", "graph-map-close", _) => {
             dom::cancel_timer("graph-map-poll");
             shut();
+            close_found();
             dom::dialog("graph-map", false);
             return true;
+        }
+        ("input", "graph-find-search", _) => {
+            let mut finder = finder();
+            let empty = value.trim().is_empty();
+            finder["query"] = json!(value);
+            finder["open"] = json!(!empty);
+            finder["loading"] = json!(!empty);
+            if empty {
+                // Nothing is typed: nothing is found, and nothing is asked.
+                for (key, cleared) in [
+                    ("rows", json!([])),
+                    ("found", json!(0)),
+                    ("asked", json!("")),
+                    ("for", json!("")),
+                    ("active", json!(0)),
+                    ("failed", V::Null),
+                ] {
+                    finder[key] = cleared;
+                }
+                dom::cancel_timer("graph-find-search");
+                m::next("graph-find");
+            }
+            m::set("graph-find", finder);
+            show_found();
+            if !empty {
+                // The server searches once the typing pauses.
+                dom::later("graph-find-search", 160, || {
+                    spawn_local(seek());
+                });
+            }
+            return true;
+        }
+        ("focusin", "graph-find-search", _) => {
+            // Back in the field, what was found is offered again, and it is
+            // sought anew where the map has gone to another graph since.
+            shut();
+            let mut finder = finder();
+            if m::yes(&finder["open"]) || find_path(&finder).is_none() {
+                return true;
+            }
+            let stale = !answered(&finder);
+            finder["open"] = json!(true);
+            if stale {
+                for (key, cleared) in [
+                    ("rows", json!([])),
+                    ("found", json!(0)),
+                    ("for", json!("")),
+                    ("failed", V::Null),
+                    ("loading", json!(true)),
+                ] {
+                    finder[key] = cleared;
+                }
+            }
+            m::set("graph-find", finder);
+            show_found();
+            if stale {
+                dom::cancel_timer("graph-find-search");
+                seek().await;
+            }
+            return true;
+        }
+        ("click", _, "graph-find-choose") => {
+            let mut finder = finder();
+            let rows = m::array(&finder["rows"]);
+            let Some(row) = payload.as_u64().and_then(|at| rows.get(at as usize)) else {
+                return true;
+            };
+            // The mark stays on what was chosen, so that the list, opened
+            // again, goes on from there.
+            finder["active"] = payload.clone();
+            m::set("graph-find", finder);
+            close_found();
+            // Whether the picture that is open draws the place.
+            let wanted = row["path"].to_string();
+            let drawn = dom::all("#graph-map-canvas .graph-map-node")
+                .iter()
+                .any(|node| node.get_attribute("data-payload").as_deref() == Some(wanted.as_str()));
+            state = sought(state, row, drawn);
+            jumped = true;
         }
         ("click", "graph-pick-open", _) => {
             let mut pick = picker();
@@ -3831,7 +4346,7 @@ pub async fn event(
     }
     m::set("graph-map", state.clone());
     let target = m::text(&state, "target");
-    if chosen || (kind, action) == ("click", "graph-map-go") {
+    if chosen || (kind == "click" && ["graph-map-go", "graph-find-choose"].contains(&action)) {
         // The filter field follows: it is emptied where the place changed.
         dom::set_value("graph-map-filter", &m::text(&state, "filter"));
         list();
@@ -3840,6 +4355,9 @@ pub async fn event(
         return true;
     }
     load(false).await;
+    if jumped {
+        reveal();
+    }
     true
 }
 #[cfg(test)]
@@ -4442,6 +4960,12 @@ mod tests {
             note(&long),
             "Showing the 5 most linked of 67 symbols in this file; filter by name to reach the rest. Showing the 2 most linked of 15 files around them. Drawing the 3 strongest of 400 links."
         );
+        // The selected symbol is drawn whatever the limit says, and is no
+        // one of the most linked.
+        long["beyond"] = json!(true);
+        assert!(note(&long).starts_with(
+            "Showing the 4 most linked of 67 symbols in this file; filter by name to reach the rest. The selected one is drawn as well. Showing the 2 most linked"
+        ));
         let mut unmatched = file();
         unmatched["matching"] = json!(0);
         unmatched["nodes"] = json!([]);
@@ -4711,6 +5235,14 @@ mod tests {
             note(&capped),
             "Showing the 3 most connected of 178 here; filter by name to reach the rest. Drawing the 2 strongest of 500 links."
         );
+        // The selected place is drawn whatever the limit says: it is no one
+        // of the most connected, and that is said.
+        capped["beyond"] = json!(true);
+        assert_eq!(
+            note(&capped),
+            "Showing the 2 most connected of 178 here; filter by name to reach the rest. The selected one is drawn as well. Drawing the 2 strongest of 500 links."
+        );
+        capped["beyond"] = json!(false);
         capped["backbone"] = json!(true);
         assert!(note(&capped).ends_with(
             "Too many links to draw at once: showing each one's 3 strongest, 2 of 500. Select one to list all of its links."
@@ -4727,6 +5259,14 @@ mod tests {
         unmatched["nodes"] = json!([]);
         unmatched["edges"] = json!([]);
         assert_eq!(note(&unmatched), "No name here matches the filter.");
+        // So it is where the filter leaves the selected place out.
+        let mut kept = view();
+        kept["matching"] = json!(0);
+        kept["beyond"] = json!(true);
+        assert!(note(&kept)
+            .starts_with("No name here matches the filter. The selected one is drawn as well."));
+        kept["matching"] = json!(2);
+        assert!(note(&kept).starts_with("The selected one is drawn as well."));
     }
     #[test]
     fn the_map_marks_the_selection_its_links_and_guesses() {
@@ -5708,5 +6248,203 @@ mod tests {
                 .map(|ends| link.matches(&format!(" data-ends=\"{ends}\" ")).count()),
             [1; 4]
         );
+    }
+    #[test]
+    fn what_a_search_typed_is_marked_in_the_names_it_found() {
+        // Each word once, whatever its case, and nothing else.
+        assert_eq!(marked("Cart.php", "cart", None), "<mark>Cart</mark>.php");
+        assert_eq!(marked("Cart.php", "zzz", None), "Cart.php");
+        assert_eq!(marked("Cart.php", "", None), "Cart.php");
+        assert_eq!(
+            marked("format_price()", "PRICE for", None),
+            "<mark>for</mark>mat_<mark>price</mark>()"
+        );
+        // Words that share letters are marked together.
+        assert_eq!(
+            marked("format_price()", "format mat", None),
+            "<mark>format</mark>_price()"
+        );
+        assert_eq!(
+            marked("abcdef", "abc cde", None),
+            "<mark>abc</mark><mark>de</mark>f"
+        );
+        // A method is shown with its class and found by its own name: the
+        // word is marked there, though the class holds it too.
+        assert_eq!(
+            marked("CartTest.testTotal()", "test total", Some(9)),
+            "CartTest.<mark>test</mark><mark>Total</mark>()"
+        );
+        assert_eq!(
+            marked("Cart.total()", "cart.to", Some(5)),
+            "<mark>Cart.to</mark>tal()"
+        );
+        assert_eq!(
+            marked("Cart.total()", "cart total", Some(5)),
+            "<mark>Cart</mark>.<mark>total</mark>()"
+        );
+        // A word with a slash names a folder or a file by the start of its
+        // name, and says of a symbol only where its file lies.
+        assert_eq!(
+            marked("Price.php", "cart/pri", None),
+            "<mark>Pri</mark>ce.php"
+        );
+        assert_eq!(marked("Price.php", "cart/", None), "Price.php");
+        assert_eq!(marked("price()", "cart/pri", Some(0)), "price()");
+        // What a name holds is written as text.
+        assert_eq!(marked("a<b>&c", "b", None), "a&lt;<mark>b</mark>&gt;&amp;c");
+        // Letters of more than one byte are marked whole, and a name whose
+        // lower case is longer than itself is left unmarked.
+        assert_eq!(marked("Жук.php", "жу", None), "<mark>Жу</mark>к.php");
+        assert_eq!(marked("İx", "x", None), "İx");
+        assert_eq!(marked("éa", "a", Some(1)), "é<mark>a</mark>");
+    }
+    fn searched() -> V {
+        json!({
+            "open": true, "query": "cart", "asked": "cart", "for": "/x", "active": 1, "found": 30,
+            "loading": false, "failed": null, "missing": false, "notests": false,
+            "rows": [
+                {"path": "src/Cart", "name": "Cart", "what": "folder", "in": "src", "files": 2},
+                {"path": "Cart<T>.php", "name": "Cart<T>.php", "what": "file", "in": "", "symbols": 9},
+                {"path": "src/Cart/Cart.php#L12:Cart", "name": "Cart", "own": 0, "what": "type", "file": "src/Cart/Cart.php", "line": 12},
+                {"path": "src/a.md#Cart", "name": "Cart", "own": 0, "what": "heading", "file": "src/a.md", "line": 0}
+            ]
+        })
+    }
+    #[test]
+    fn what_a_search_found_is_listed_with_what_it_is_and_where_it_lies() {
+        let html = found(&searched());
+        assert_eq!(
+            html.matches("<li class=\"graph-pick-row graph-find-row\"")
+                .count(),
+            4
+        );
+        // A folder: its name with a slash, and the folder it lies in.
+        assert!(html.contains("<li class=\"graph-pick-row graph-find-row\" id=\"graph-find-row-0\" role=\"option\" aria-selected=\"false\" data-action=\"graph-find-choose\" data-payload=\"0\" title=\"src/Cart\"><span class=\"graph-find-what\">folder</span><span class=\"graph-pick-main\"><span class=\"graph-pick-title\"><mark>Cart</mark>/</span></span><span class=\"graph-find-where\"><bdi>src</bdi></span></li>"));
+        // The marked row, a file in the project itself; names are text.
+        assert!(html.contains("id=\"graph-find-row-1\" role=\"option\" aria-selected=\"true\" data-action=\"graph-find-choose\" data-payload=\"1\" title=\"Cart&lt;T&gt;.php\"><span class=\"graph-find-what\">file</span><span class=\"graph-pick-main\"><span class=\"graph-pick-title\"><mark>Cart</mark>&lt;T&gt;.php</span></span><span class=\"graph-find-where\"><bdi></bdi></span>"));
+        // A name: its file and its line, where the graph tells one.
+        assert!(html.contains("<span class=\"graph-find-what\">type</span><span class=\"graph-pick-main\"><span class=\"graph-pick-title\"><mark>Cart</mark></span></span><span class=\"graph-find-where\"><bdi>src/Cart/Cart.php:12</bdi></span>"));
+        assert!(html.contains("<span class=\"graph-find-what\">heading</span>"));
+        assert!(html.contains("<bdi>src/a.md</bdi>"));
+        assert_eq!(found(&json!({"rows": []})), "");
+        // The line under them.
+        let mut finder = searched();
+        assert_eq!(
+            found_note(&finder),
+            "The 4 best of 30 found; type more to narrow them. ↑ ↓ to move · Enter to go there · Esc to close"
+        );
+        finder["found"] = json!(1234);
+        assert_eq!(
+            found_note(&finder),
+            "The 4 best of 1,234 found; type more to narrow them. ↑ ↓ to move · Enter to go there · Esc to close"
+        );
+        finder["found"] = json!(4);
+        finder["notests"] = json!(true);
+        assert_eq!(
+            found_note(&finder),
+            "4 found. Tests are left out. ↑ ↓ to move · Enter to go there · Esc to close"
+        );
+        // While the server is asked what was found before stays listed.
+        finder["loading"] = json!(true);
+        assert!(found_note(&finder).starts_with("4 found."));
+        finder["rows"] = json!([]);
+        assert_eq!(found_note(&finder), "Searching…");
+        finder["loading"] = json!(false);
+        finder["found"] = json!(0);
+        assert_eq!(
+            found_note(&finder),
+            "Nothing in the graph is called that. Tests are left out."
+        );
+        finder["notests"] = json!(false);
+        assert_eq!(found_note(&finder), "Nothing in the graph is called that.");
+        finder["missing"] = json!(true);
+        assert_eq!(found_note(&finder), "There is no graph to search yet.");
+        finder["failed"] = json!("This project has no published code graph.");
+        assert_eq!(
+            found_note(&finder),
+            "This project has no published code graph."
+        );
+    }
+    #[test]
+    fn the_map_goes_to_the_place_a_search_found() {
+        let rows = m::array(&searched()["rows"]);
+        // A map of a change with links followed and a folder spread out.
+        let mut state = fresh("pr:7");
+        for (key, value) in [
+            ("scope", json!("lib")),
+            ("focus", json!("lib/a.php")),
+            ("filter", json!("a")),
+            ("follow", json!("lib/a.php")),
+            ("out", json!(["lib/a.php"])),
+            ("into", json!(["lib/a.php"])),
+            (
+                "spread",
+                json!(["src", "src/Cart", "src/Cart/Rules", "lib"]),
+            ),
+            ("certain", json!(true)),
+        ] {
+            state[key] = value;
+        }
+        let kept = |state: &V, keys: &[&str]| {
+            keys.iter()
+                .map(|key| state[*key].clone())
+                .collect::<Vec<_>>()
+        };
+        // A name opens its file on itself, in the map that is open.
+        let name = sought(state.clone(), &rows[2], false);
+        assert_eq!(
+            kept(
+                &name,
+                &["target", "scope", "focus", "filter", "follow", "out", "into", "certain"]
+            ),
+            [
+                json!("pr:7"),
+                json!("src/Cart/Cart.php"),
+                json!("src/Cart/Cart.php#L12:Cart"),
+                json!(""),
+                json!(""),
+                json!([]),
+                json!([]),
+                json!(true)
+            ]
+        );
+        assert_eq!(name["spread"], state["spread"]);
+        // So it does where a picture happens to draw a box of that name.
+        assert_eq!(sought(state.clone(), &rows[2], true), name);
+        // A folder the picture draws is selected where it is, and nothing
+        // else changes.
+        let here = sought(state.clone(), &rows[0], true);
+        let mut selected = state.clone();
+        selected["focus"] = json!("src/Cart");
+        assert_eq!(here, selected);
+        // One it does not draw is shown in the folder it lies in, in the
+        // whole project, as one box: what was spread out of it and in it is
+        // gathered.
+        let there = sought(state.clone(), &rows[0], false);
+        assert_eq!(
+            kept(
+                &there,
+                &["target", "scope", "focus", "filter", "follow", "out", "into", "certain"]
+            ),
+            [
+                json!(""),
+                json!("src"),
+                json!("src/Cart"),
+                json!(""),
+                json!(""),
+                json!([]),
+                json!([]),
+                json!(true)
+            ]
+        );
+        assert_eq!(there["spread"], json!(["src", "lib"]));
+        // A file in the project itself is shown in the project, and no
+        // folder is gathered for a file.
+        let top = sought(state.clone(), &rows[1], false);
+        assert_eq!(
+            kept(&top, &["target", "scope", "focus"]),
+            [json!(""), json!(""), json!("Cart<T>.php")]
+        );
+        assert_eq!(top["spread"], state["spread"]);
     }
 }

@@ -1186,6 +1186,55 @@ impl Graphs {
         told(&mut view);
         Ok(view)
     }
+    /// What a search finds in the graph the map of `target` is drawn from:
+    /// the project's own for the whole project and for the checkout's
+    /// changes, a commit's own once it is built, and the project's until
+    /// then. Without tests, what is a test is not found either. Like the
+    /// map, it reads a graph, so callers keep it off the runtime.
+    pub fn find(
+        &self,
+        project: &str,
+        target: Option<&Target>,
+        query: &str,
+        notests: bool,
+    ) -> Result<Value> {
+        let record = self.store.project(project)?;
+        let root = PathBuf::from(record["path"].as_str().unwrap_or(""));
+        let published = live(&self.store.state, project);
+        let graph = match target {
+            None | Some(Target::Work | Target::Uncommitted) => {
+                Some((project.to_owned(), published, root))
+            }
+            Some(target) => {
+                let resolved = lock(&self.chosen)?
+                    .get(&(project.to_owned(), target.text()))
+                    .cloned()
+                    .ok_or_else(|| HarnessError::conflict("Choose the change again."))?;
+                match self.graph_of(project, &root, &resolved)?.graph {
+                    Some(own) => Some(own),
+                    None if published.is_file() => Some((project.to_owned(), published, root)),
+                    None => None,
+                }
+            }
+        };
+        let mut found = match graph {
+            Some((kept, graph, base)) => {
+                let index = self.maps.index(&kept, &graph, &base)?;
+                if notests {
+                    index.without_tests().find(query)
+                } else {
+                    index.find(query)
+                }
+            }
+            // Neither the commit's own graph nor the project's to search.
+            None => {
+                json!({"mode": "find", "query": query.trim(), "found": 0, "rows": [], "missing": true})
+            }
+        };
+        found["project_id"] = json!(project);
+        found["notests"] = json!(notests);
+        Ok(found)
+    }
     fn setting(&self, project: &str) -> Result<Value> {
         Ok(self
             .store
@@ -2209,6 +2258,35 @@ impl Domain for Graphs {
                         HarnessError::unavailable("The code graph map could not be read.")
                     })??
                 }
+                "graph.find" => {
+                    let query = &request["query"];
+                    // What a person typed into the field: one line of a
+                    // hundred letters at most, of any script.
+                    let wanted = query["query"].as_str().unwrap_or("");
+                    if wanted.len() > 400 || wanted.chars().any(char::is_control) {
+                        return Err(HarnessError::invalid("Invalid search."));
+                    }
+                    let notests = match query["notests"].as_str() {
+                        None | Some("0") => false,
+                        Some("1") => true,
+                        Some(_) => return Err(HarnessError::invalid("Invalid graph filter.")),
+                    };
+                    let target = match query["target"].as_str() {
+                        None | Some("") => None,
+                        Some(text) => Some(Target::parse(text)?),
+                    };
+                    let me = self.me.upgrade().ok_or_else(|| {
+                        HarnessError::unavailable("The code graph is shutting down.")
+                    })?;
+                    let (project, wanted) = (project.to_owned(), wanted.to_owned());
+                    tokio::task::spawn_blocking(move || {
+                        me.find(&project, target.as_ref(), &wanted, notests)
+                    })
+                    .await
+                    .map_err(|_| {
+                        HarnessError::unavailable("The code graph could not be searched.")
+                    })??
+                }
                 _ => return Err(HarnessError::missing("Unknown code graph operation.")),
             };
             Ok(Payload::Json(value))
@@ -2264,6 +2342,19 @@ mod tests {
         ] {
             assert!(route.query.contains(&part), "{part}");
         }
+        // So does the route of the search.
+        let route = crate::http::ROUTES
+            .iter()
+            .find(|route| route.operation == "graph.find")
+            .unwrap();
+        assert_eq!(
+            (route.method, route.pattern, route.query),
+            (
+                "GET",
+                "/api/projects/{project_id}/graph/find",
+                &["query", "target", "notests"][..]
+            )
+        );
         // The folders spread out in a picture come as the same kind of list.
         assert_eq!(
             places("[\"src\",\"src/b, c\"]", "many", "wrong").unwrap(),
@@ -3276,6 +3367,76 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert_eq!(fixture.revisions(), newest);
         }
         #[test]
+        fn a_search_reads_the_graph_the_map_is_drawn_from() {
+            let fixture = Fixture::new();
+            fixture.branched();
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+            let paths = |found: &Value| {
+                found["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["path"].as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            };
+            let find = |target: Option<&Target>, query: &str| {
+                fixture.graphs.find(&fixture.project, target, query, false)
+            };
+            // The whole project and the checkout's own work are searched in
+            // the project's graph, where there is a cart and no order.
+            let own = find(None, "CART").unwrap();
+            assert_eq!(paths(&own), ["cart.php"]);
+            assert_eq!(
+                (&own["mode"], &own["project_id"], &own["notests"]),
+                (&json!("find"), &json!(fixture.project), &json!(false))
+            );
+            for target in [None, Some(Target::Work), Some(Target::Uncommitted)] {
+                let found = find(target.as_ref(), "order").unwrap();
+                assert_eq!(found["found"], 0, "{target:?}");
+            }
+            // A change that was not chosen has no map, and nothing to search.
+            let target = Target::Named("feature".into());
+            assert!(find(Some(&target), "order").is_err());
+            // Chosen, it is searched in the graph of its own commit.
+            fixture.graphs.choose(&fixture.project, &target).unwrap();
+            assert_eq!(fixture.mapped(&target)["state"], "ready");
+            assert_eq!(paths(&find(Some(&target), "order").unwrap()), ["order.php"]);
+            // Whether tests were left out is told back with what was found.
+            let plain = fixture
+                .graphs
+                .find(&fixture.project, None, "cart", true)
+                .unwrap();
+            assert_eq!(
+                (&plain["notests"], &plain["found"]),
+                (&json!(true), &json!(1))
+            );
+            // Where a commit has no graph and the project none either, there
+            // is nothing to search, and that is said.
+            let bare = Fixture::new();
+            bare.branched();
+            bare.git(&["switch", "-q", "-c", "broken"]);
+            bare.write("fail", "");
+            bare.commit("broken");
+            bare.git(&["switch", "-q", "main"]);
+            let target = Target::Named("broken".into());
+            bare.graphs.choose(&bare.project, &target).unwrap();
+            assert_eq!(bare.mapped(&target)["state"], "failed");
+            let none = bare
+                .graphs
+                .find(&bare.project, Some(&target), " cart ", false)
+                .unwrap();
+            assert_eq!(
+                (&none["missing"], &none["found"], &none["query"]),
+                (&json!(true), &json!(0), &json!("cart"))
+            );
+            assert!(
+                bare.graphs
+                    .find(&bare.project, None, "cart", false)
+                    .is_err()
+            );
+        }
+        #[test]
         fn a_picked_commit_is_first_drawn_on_the_projects_graph_while_its_own_is_built() {
             let fixture = Fixture::new();
             fixture.branched();
@@ -3303,6 +3464,12 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert_eq!(view["preliminary"], true);
             assert_eq!(drawn(&view), ["price.php changed M", "cart.php affected"]);
             assert_eq!(view["change"]["files"], 2);
+            // A search reads the project's graph until then, as the map does.
+            let found = fixture
+                .graphs
+                .find(&fixture.project, Some(&target), "cart", false)
+                .unwrap();
+            assert_eq!(found["rows"][0]["path"], "cart.php");
             // The history and the branches are read for the picker.
             let history = fixture
                 .graphs

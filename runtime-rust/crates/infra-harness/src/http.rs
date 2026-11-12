@@ -303,6 +303,14 @@ pub const ROUTES: &[Route] = &[
     },
     Route {
         method: "GET",
+        pattern: "/api/projects/{project_id}/graph/find",
+        operation: "graph.find",
+        status: 200,
+        token: false,
+        query: &["query", "target", "notests"],
+    },
+    Route {
+        method: "GET",
         pattern: "/api/projects/{project_id}/graph/pulls",
         operation: "graph.pulls",
         status: 200,

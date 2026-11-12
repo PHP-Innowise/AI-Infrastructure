@@ -1769,6 +1769,36 @@ a box lights its links and lists, beside the map, everything it uses and everyth
 that uses it, also outside the open folder. A file opens in turn to its classes,
 methods and functions, as described below.
 
+**Search the project**, the field at the top of the map, finds a folder, a file or
+a name anywhere in the graph, whatever folder is open; **Filter names** only
+chooses among what the open folder holds. Type a part of a name, in any case. The
+list puts first what is called that most exactly: by its whole name, then by the
+start of it, then by a word inside a name written `likeThis` or `like_this`, then
+by any part of it. A file also goes by its name without the ending, and a method or
+a function by its name without its class and its brackets. A word typed with a
+capital puts first what is written that way, `Index` before `index()`. Among names
+that match alike the most linked comes first. Further words narrow the search. Each
+has to stand in the name or on the way to it: in the class of a method, in the name
+of its file or in a folder above. So `total cart` finds `total()` of `Cart`, and
+`index.php admin` the `index.php` under `admin`. A word with a slash is the end of
+a path: `src/cart` is what starts with `cart` in a folder `src`, and `src/` is all
+that lies in one. The list holds the 40 best and says how many were found.
+
+Choosing a row, with the pointer or with the arrow keys and Enter, takes the map
+there. A folder or a file is selected in the folder it lies in, among its
+neighbours, and what it uses and what uses it is listed beside the map. A name,
+which is a class, a method, a function, a constant or a heading of a document,
+opens its file on itself. The picture is scrolled to the box and the keyboard is
+put on it. `/` leads back to the field from anywhere in the map, where what was
+found is listed again, and Escape closes the list. A selected place is drawn in its
+folder whatever **Filter names** and the limit of 40 say, so a search also leads to
+what is not among the most linked of its folder, and the note above the picture
+says that the selected one is drawn as well. In a map of changes the search reads
+the graph that map is drawn from, the commit's own once it is built. A name opens
+its file inside the change; a folder or a file that the picture draws is selected
+there, and any other is shown in the whole project, as when it is chosen in the
+list beside the map. With **Without tests** on, tests are not found.
+
 **Open here**, beside a selected folder, or `+` at the corner of its box, opens the
 folder inside the picture instead of in place of it. The folder gives way to a
 frame that holds its folders and files, so what uses them and what they use stays
