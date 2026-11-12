@@ -24,6 +24,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Follow the links of one place step by step in the Harness dependency map.
+  **Follow links**, beside a selected folder or file, draws that place with
+  what it uses and what uses it, wherever in the project they lie. `+` at a
+  box's right corner then shows more of what it uses and `+` at its left
+  corner more of what uses it, twelve at a time and strongest first, and `−`
+  folds a side back with whatever only it had brought. A file is followed
+  among files and a folder among the folders as deep as itself, and a picture
+  holds 60 boxes. A link is drawn where one of its sides is unfolded, so the
+  picture holds the steps that were asked for, and the links that run between
+  its boxes without being drawn are counted. Inside a chosen change the
+  changed files keep their mark, so the picture shows how far a change
+  reaches beyond its direct neighbours.
+
 - Colour the Harness dependency map by direction. An arrow shades from the
   colour of using at its start to the colour of being used at its head, a box
   wears the two colours on the edges where arrows leave it and arrive, and it

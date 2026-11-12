@@ -296,7 +296,9 @@ pub const ROUTES: &[Route] = &[
         operation: "graph.map",
         status: 200,
         token: false,
-        query: &["scope", "focus", "certain", "filter", "target"],
+        query: &[
+            "scope", "focus", "certain", "filter", "target", "follow", "out", "into",
+        ],
     },
     Route {
         method: "GET",

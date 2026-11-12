@@ -38,6 +38,11 @@ const BYTE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 const NAMED: usize = SHOWN - AROUND;
 /// Symbols listed on each side of a selected one.
 const TOLD: usize = 30;
+/// Places one unfolding of a side adds at most to the links followed from a
+/// place, strongest first.
+pub const STEP: usize = 12;
+/// Places a picture of followed links holds.
+pub const FOLLOWED: usize = 60;
 /// Bytes of a symbol's name that are kept.
 const NAME_LIMIT: usize = 160;
 /// Relations that say where a symbol lives or why, not what it needs.
@@ -633,6 +638,15 @@ fn group<'a>(scope: &str, path: &'a str) -> (&'a str, bool) {
 }
 fn name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+/// The part of `path` that stands for it among the links followed from a
+/// place `depth` folders deep: the folder at that depth that holds it, or the
+/// path itself where it lies no deeper.
+fn level(path: &str, depth: usize) -> &str {
+    match path.match_indices('/').nth(depth.saturating_sub(1)) {
+        Some((at, _)) => &path[..at],
+        None => path,
+    }
 }
 #[derive(Default)]
 struct Tally {
@@ -1414,6 +1428,286 @@ impl Index {
             })).collect::<Vec<_>>(),
             "focus": focus,
         })
+    }
+}
+/// A place among followed links: a file, or a folder standing for the files
+/// in it.
+#[derive(Default)]
+struct Stop {
+    files: u64,
+    folder: bool,
+    /// What a file holds: classes, methods, functions.
+    symbols: u64,
+    out: u64,
+    into: u64,
+    /// Files of a chosen change in it, and Git's letter where it is one file.
+    changed: u64,
+    status: Option<char>,
+}
+impl Index {
+    /// The links of one place followed step by step. The picture starts with
+    /// the place alone. `out` names the places whose uses are unfolded and
+    /// `into` those whose users are: each time a place is named there, its
+    /// `STEP` strongest that are not drawn yet join the picture, up to
+    /// `FOLLOWED` places in all. A link is drawn where the side it leaves or
+    /// the side it reaches is unfolded, so the picture holds the steps that
+    /// were asked for and nothing else; how many more links run between its
+    /// places is counted.
+    ///
+    /// A file is followed among files. A folder is followed among what lies
+    /// as deep as itself: the folders of that depth, and the files that lie
+    /// no deeper. `changed` marks the files of a chosen change, and `focus`
+    /// lists both sides of one place drawn. `None` where `root` names
+    /// nothing in the graph.
+    #[allow(clippy::too_many_arguments)]
+    pub fn follow(
+        &self,
+        project: &str,
+        root: &str,
+        out: &[String],
+        into: &[String],
+        changed: &[(String, char)],
+        focus: Option<&str>,
+        certain: bool,
+    ) -> Option<Value> {
+        let root = root.trim_matches('/');
+        let whole = self.opened(root).is_some();
+        if root.is_empty() || !(whole || self.folder(root)) {
+            return None;
+        }
+        let depth = if whole {
+            usize::MAX
+        } else {
+            root.split('/').count()
+        };
+        let letters = changed
+            .iter()
+            .filter(|(_, kind)| *kind != 'D')
+            .map(|(path, kind)| (path.as_str(), *kind))
+            .collect::<HashMap<_, _>>();
+        let mut stops: HashMap<&str, Stop> = HashMap::new();
+        for (id, file) in self.files.iter().enumerate() {
+            let place = level(file, depth);
+            let stop = stops.entry(place).or_default();
+            stop.files += 1;
+            stop.folder |= place.len() < file.len();
+            stop.symbols += self.holds(id as u32);
+            if let Some(kind) = letters.get(file.as_str()) {
+                stop.changed += 1;
+                stop.status = Some(*kind);
+            }
+        }
+        let mut flows: HashMap<(&str, &str), Flow> = HashMap::new();
+        let mut kinds: BTreeMap<u16, u64> = BTreeMap::new();
+        for (from, to, pair) in &self.pairs {
+            let weight = pair.weight(certain);
+            if weight == 0 {
+                continue;
+            }
+            let source = level(&self.files[*from as usize], depth);
+            let target = level(&self.files[*to as usize], depth);
+            if source == target {
+                continue;
+            }
+            if let Some(stop) = stops.get_mut(source) {
+                stop.out += weight;
+            }
+            if let Some(stop) = stops.get_mut(target) {
+                stop.into += weight;
+            }
+            let flow = flows.entry((source, target)).or_default();
+            flow.links += weight;
+            flow.guessed += if certain { 0 } else { pair.guessed };
+            if focus == Some(source) {
+                for (kind, count) in &pair.kinds {
+                    *kinds.entry(*kind).or_default() += count;
+                }
+            }
+        }
+        // Both sides of every place, strongest first.
+        let mut uses: HashMap<&str, Vec<(&str, Flow)>> = HashMap::new();
+        let mut users: HashMap<&str, Vec<(&str, Flow)>> = HashMap::new();
+        for ((source, target), flow) in &flows {
+            uses.entry(*source).or_default().push((*target, *flow));
+            users.entry(*target).or_default().push((*source, *flow));
+        }
+        for rows in uses.values_mut().chain(users.values_mut()) {
+            rows.sort_by(|(a, left), (b, right)| right.links.cmp(&left.links).then(a.cmp(b)));
+        }
+        let root = stops.get_key_value(root).map(|(place, _)| *place)?;
+        let times = |list: &[String], place: &str| {
+            list.iter().filter(|named| named.as_str() == place).count()
+        };
+        // Places join in the order they are reached, the followed one first.
+        let mut shown = vec![root];
+        let mut seen = HashSet::from([root]);
+        let mut full = false;
+        let mut at = 0;
+        while at < shown.len() {
+            let place = shown[at];
+            at += 1;
+            for (list, side) in [(out, &uses), (into, &users)] {
+                let mut left = STEP * times(list, place);
+                for (other, _) in side.get(place).into_iter().flatten() {
+                    if left == 0 {
+                        break;
+                    }
+                    if seen.contains(other) {
+                        continue;
+                    }
+                    if shown.len() == FOLLOWED {
+                        full = true;
+                        break;
+                    }
+                    seen.insert(*other);
+                    shown.push(*other);
+                    left -= 1;
+                }
+            }
+        }
+        // A link between two places drawn is drawn where one of its sides
+        // is unfolded: the uses of its user, or the users of what it uses.
+        let linked = |source: &str, target: &str| {
+            seen.contains(source)
+                && seen.contains(target)
+                && (times(out, source) > 0 || times(into, target) > 0)
+        };
+        let among = flows
+            .keys()
+            .filter(|(source, target)| seen.contains(source) && seen.contains(target))
+            .count();
+        let mut edges = flows
+            .iter()
+            .filter(|((source, target), _)| linked(source, target))
+            .collect::<Vec<_>>();
+        let between = edges.len();
+        edges.sort_by(|((a, b), left), ((c, d), right)| {
+            right.links.cmp(&left.links).then((a, b).cmp(&(c, d)))
+        });
+        edges.truncate(DRAWN);
+        let count = |side: &HashMap<&str, Vec<(&str, Flow)>>, place: &str| {
+            side.get(place).map_or(0, Vec::len)
+        };
+        // How many of what a place uses, or of what uses it, the picture
+        // does not link with it: those not drawn, and those drawn whose link
+        // waits for a side to be unfolded.
+        let hidden = |place: &str, outgoing: bool| {
+            let side = if outgoing { &uses } else { &users };
+            side.get(place).map_or(0, |rows| {
+                rows.iter()
+                    .filter(|(other, _)| {
+                        if outgoing {
+                            !linked(place, other)
+                        } else {
+                            !linked(other, place)
+                        }
+                    })
+                    .count()
+            })
+        };
+        let node = |place: &str| {
+            let stop = &stops[place];
+            json!({
+                "path": place,
+                "name": label(place, &shown),
+                "folder": stop.folder,
+                "files": stop.files,
+                "symbols": stop.symbols,
+                "within": 0,
+                "out": stop.out,
+                "in": stop.into,
+                "start": place == root,
+                "more_out": hidden(place, true),
+                "more_in": hidden(place, false),
+                "unfolded_out": times(out, place) > 0,
+                "unfolded_in": times(into, place) > 0,
+                "changed": stop.changed,
+                "status": stop.status.filter(|_| !stop.folder).map(String::from),
+            })
+        };
+        let focus = focus.filter(|path| seen.contains(path)).map(|path| {
+            // A listed place is named as a drawn one is: by the end of its
+            // path that no other place drawn or listed shares.
+            let mut all = shown.clone();
+            for side in [uses.get(path), users.get(path)] {
+                all.extend(
+                    side.into_iter()
+                        .flatten()
+                        .take(LISTED)
+                        .map(|(other, _)| *other),
+                );
+            }
+            let side = |rows: Option<&Vec<(&str, Flow)>>| {
+                let rows = rows.map(Vec::as_slice).unwrap_or_default();
+                let more = rows.len().saturating_sub(LISTED);
+                let rows = rows
+                    .iter()
+                    .take(LISTED)
+                    .map(|(other, flow)| {
+                        json!({
+                            "path": other,
+                            "name": label(other, &all),
+                            "folder": stops[*other].folder,
+                            "inside": seen.contains(other),
+                            "links": flow.links,
+                            "guessed": flow.guessed,
+                            "changed": stops[*other].changed > 0,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                (rows, more)
+            };
+            let (using, using_more) = side(uses.get(path));
+            let (used_by, used_by_more) = side(users.get(path));
+            let mut kinds = kinds
+                .iter()
+                .map(|(kind, count)| (self.kinds[*kind as usize].as_str(), *count))
+                .collect::<Vec<_>>();
+            kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
+            let mut focus = node(path);
+            focus["name"] = json!(name(path));
+            focus["inside"] = json!(true);
+            focus["uses"] = json!(using);
+            focus["uses_more"] = json!(using_more);
+            focus["used_by"] = json!(used_by);
+            focus["used_by_more"] = json!(used_by_more);
+            focus["kinds"] = kinds
+                .into_iter()
+                .map(|(kind, count)| json!({"kind": kind, "links": count}))
+                .collect();
+            focus
+        });
+        Some(json!({
+            "mode": "follow",
+            "scope": root.rsplit_once('/').map_or("", |(holder, _)| holder),
+            "crumbs": Self::crumbs(project, root),
+            "certain": certain,
+            "totals": self.totals(),
+            "followed": {
+                "path": root,
+                "name": name(root),
+                "folder": !whole,
+                "uses": count(&uses, root),
+                "users": count(&users, root),
+                "shown": shown.len(),
+                "limit": FOLLOWED,
+                "step": STEP,
+                "full": full,
+                "aside": among - between,
+            },
+            "children": shown.len(),
+            "matching": shown.len(),
+            "nodes": shown.iter().map(|place| node(place)).collect::<Vec<_>>(),
+            "between": between,
+            "backbone": false,
+            "edges": edges.iter().map(|((source, target), flow)| json!({
+                "from": source,
+                "to": target,
+                "links": flow.links,
+                "guessed": flow.guessed,
+            })).collect::<Vec<_>>(),
+            "focus": focus,
+        }))
     }
 }
 /// One end of a link drawn in an open file: a symbol of the file, or a file
@@ -2848,6 +3142,387 @@ mod tests {
     }
     /// A small shop as the tool writes it: a file node that holds classes
     /// and functions, classes that hold methods, an enum with its cases.
+    /// An application over a library. `main` uses two handlers and both use
+    /// `core`; `core` uses `db` through two links and a cache through one;
+    /// one handler is only guessed to use `db`; `count` reports use `db`.
+    fn office(count: usize) -> Index {
+        let call = |from: &str, to: &str, file: &str, read: bool| {
+            json!({
+                "source": from, "target": to, "relation": "calls",
+                "confidence": if read { "EXTRACTED" } else { "INFERRED" },
+                "source_file": file
+            })
+        };
+        let mut nodes = vec![
+            json!({"id": "main", "label": "main", "source_file": "app/main.php"}),
+            json!({"id": "users", "label": "users", "source_file": "app/api/users.php"}),
+            json!({"id": "orders", "label": "orders", "source_file": "app/api/orders.php"}),
+            json!({"id": "core", "label": "core", "source_file": "lib/core.php"}),
+            json!({"id": "boot", "label": "boot", "source_file": "lib/core.php"}),
+            json!({"id": "db", "label": "db", "source_file": "lib/db.php"}),
+            json!({"id": "store", "label": "store", "source_file": "lib/deep/cache/store.php"}),
+        ];
+        let mut links = vec![
+            call("main", "users", "app/main.php", true),
+            call("main", "orders", "app/main.php", true),
+            call("users", "core", "app/api/users.php", true),
+            call("orders", "core", "app/api/orders.php", true),
+            call("orders", "db", "app/api/orders.php", false),
+            call("core", "db", "lib/core.php", true),
+            call("boot", "db", "lib/core.php", true),
+            call("core", "store", "lib/core.php", true),
+        ];
+        for at in 1..=count {
+            let (id, file) = (format!("r{at:02}"), format!("reports/r{at:02}.php"));
+            nodes.push(json!({"id": id, "label": id, "source_file": file}));
+            links.push(call(&id, "db", &file, true));
+        }
+        index(json!({"directed": false, "nodes": nodes, "links": links}))
+    }
+    /// Each box of followed links: its name, how many of what it uses and of
+    /// what uses it are not drawn, and which of its sides are unfolded.
+    fn steps(view: &Value) -> Vec<String> {
+        view["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| {
+                format!(
+                    "{}{} +{}/{}{}{}",
+                    node["name"].as_str().unwrap(),
+                    if node["folder"] == true { "/" } else { "" },
+                    node["more_out"],
+                    node["more_in"],
+                    if node["unfolded_out"] == true {
+                        " out"
+                    } else {
+                        ""
+                    },
+                    if node["unfolded_in"] == true {
+                        " in"
+                    } else {
+                        ""
+                    },
+                )
+            })
+            .collect()
+    }
+    fn named(places: &[&str]) -> Vec<String> {
+        places.iter().map(|place| (*place).to_owned()).collect()
+    }
+    #[test]
+    fn the_links_of_a_file_are_followed_step_by_step() {
+        let index = office(14);
+        let follow = |out: &[&str], into: &[&str]| {
+            index
+                .follow(
+                    "office",
+                    "lib/core.php",
+                    &named(out),
+                    &named(into),
+                    &[],
+                    None,
+                    false,
+                )
+                .unwrap()
+        };
+        // The file alone at first, with how many it uses and how many use it.
+        let alone = follow(&[], &[]);
+        assert_eq!(
+            (&alone["mode"], &alone["scope"]),
+            (&json!("follow"), &json!("lib"))
+        );
+        assert_eq!(steps(&alone), ["core.php +2/2"]);
+        assert_eq!(alone["nodes"][0]["start"], true);
+        assert_eq!(rows(&alone, "edges"), Vec::<String>::new());
+        assert_eq!(
+            alone["followed"],
+            json!({
+                "path": "lib/core.php", "name": "core.php", "folder": false, "uses": 2, "users": 2,
+                "shown": 1, "limit": FOLLOWED, "step": STEP, "full": false, "aside": 0
+            })
+        );
+        assert_eq!(
+            alone["crumbs"],
+            json!([
+                {"name": "office", "path": ""},
+                {"name": "lib", "path": "lib"},
+                {"name": "core.php", "path": "lib/core.php"}
+            ])
+        );
+        // What it uses, strongest first: db through two links, then the cache.
+        let uses = follow(&["lib/core.php"], &[]);
+        assert_eq!(
+            steps(&uses),
+            ["core.php +0/2 out", "db.php +0/15", "store.php +0/0"]
+        );
+        assert_eq!(
+            rows(&uses, "edges"),
+            [
+                "lib/core.php -> lib/db.php 2/0",
+                "lib/core.php -> lib/deep/cache/store.php 1/0"
+            ]
+        );
+        // Both ways. orders is guessed to use db and both are drawn, but
+        // neither that side of orders nor that side of db is unfolded: the
+        // link waits, and each of the two counts the other as not shown.
+        let both = follow(&["lib/core.php"], &["lib/core.php"]);
+        assert_eq!(
+            steps(&both),
+            [
+                "core.php +0/0 out in",
+                "db.php +0/15",
+                "store.php +0/0",
+                "orders.php +1/1",
+                "users.php +0/1"
+            ]
+        );
+        assert_eq!(
+            rows(&both, "edges"),
+            [
+                "lib/core.php -> lib/db.php 2/0",
+                "app/api/orders.php -> lib/core.php 1/0",
+                "app/api/users.php -> lib/core.php 1/0",
+                "lib/core.php -> lib/deep/cache/store.php 1/0"
+            ]
+        );
+        assert_eq!(both["followed"]["aside"], 1);
+        // Unfolding what orders uses draws it, and adds no place.
+        let drawn = follow(&["lib/core.php", "app/api/orders.php"], &["lib/core.php"]);
+        assert_eq!(drawn["nodes"].as_array().unwrap().len(), 5);
+        assert!(rows(&drawn, "edges").contains(&"app/api/orders.php -> lib/db.php 1/1".to_owned()));
+        assert_eq!(steps(&drawn)[3], "orders.php +0/1 out");
+        assert_eq!(drawn["followed"]["aside"], 0);
+        // A step is twelve places that are not drawn yet: of the fourteen
+        // reports that use db, twelve come first and the rest with the next.
+        let step = follow(&["lib/core.php"], &["lib/core.php", "lib/db.php"]);
+        assert_eq!(step["nodes"].as_array().unwrap().len(), 5 + STEP);
+        assert_eq!(steps(&step)[1], "db.php +0/2 in");
+        assert_eq!(step["followed"]["shown"], 17);
+        let whole = follow(
+            &["lib/core.php"],
+            &["lib/core.php", "lib/db.php", "lib/db.php"],
+        );
+        assert_eq!(whole["nodes"].as_array().unwrap().len(), 19);
+        assert_eq!(steps(&whole)[1], "db.php +0/0 in");
+        // Folding a side takes away what only it brought: the handlers go,
+        // and orders comes back as one of those that use db, its link to
+        // core waiting again.
+        let folded = follow(&["lib/core.php"], &["lib/db.php", "lib/db.php"]);
+        assert_eq!(steps(&folded)[0], "core.php +0/2 out");
+        assert_eq!(steps(&folded)[3], "orders.php +1/1");
+        assert_eq!(folded["nodes"].as_array().unwrap().len(), 3 + 15);
+        // What is unfolded behind a folded side is not reached.
+        let unreached = follow(&[], &["lib/db.php"]);
+        assert_eq!(steps(&unreached), ["core.php +2/2"]);
+    }
+    #[test]
+    fn followed_links_leave_out_guesses_and_stop_at_a_full_picture() {
+        let index = office(14);
+        let certain = index
+            .follow(
+                "office",
+                "lib/core.php",
+                &named(&["lib/core.php"]),
+                &named(&["lib/core.php"]),
+                &[],
+                None,
+                true,
+            )
+            .unwrap();
+        assert!(
+            !rows(&certain, "edges")
+                .iter()
+                .any(|edge| edge.starts_with("app/api/orders.php -> lib/db.php"))
+        );
+        assert_eq!(rows(&certain, "edges").len(), 4);
+        // Seventy reports use db; however often its side is unfolded, the
+        // picture stops at its limit and says so.
+        let crowd = office(70);
+        let mut into = named(&["lib/core.php"]);
+        into.extend(named(&["lib/db.php"; 8]));
+        let full = crowd
+            .follow(
+                "office",
+                "lib/core.php",
+                &named(&["lib/core.php"]),
+                &into,
+                &[],
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(full["nodes"].as_array().unwrap().len(), FOLLOWED);
+        assert_eq!(full["followed"]["full"], true);
+        assert_eq!(steps(&full)[1], "db.php +0/15 in");
+        // Nothing is followed from what the graph does not know.
+        for unknown in ["", "nowhere.php", "lib/core"] {
+            assert!(
+                index
+                    .follow("office", unknown, &[], &[], &[], None, false)
+                    .is_none(),
+                "{unknown}"
+            );
+        }
+    }
+    #[test]
+    fn a_folder_is_followed_among_what_lies_as_deep_as_itself() {
+        let index = office(14);
+        assert_eq!(level("lib/deep/cache/store.php", 1), "lib");
+        assert_eq!(level("lib/deep/cache/store.php", 2), "lib/deep");
+        assert_eq!(level("lib/db.php", 2), "lib/db.php");
+        assert_eq!(level("lib/db.php", usize::MAX), "lib/db.php");
+        // A top folder among the top folders: the application and the
+        // reports use the library, the reports through more links.
+        let top = index
+            .follow("office", "lib", &[], &named(&["lib"]), &[], None, false)
+            .unwrap();
+        assert_eq!(steps(&top), ["lib/ +0/0 in", "reports/ +0/0", "app/ +0/0"]);
+        assert_eq!(
+            rows(&top, "edges"),
+            ["reports -> lib 14/0", "app -> lib 3/1"]
+        );
+        assert_eq!(
+            (
+                &top["scope"],
+                &top["followed"]["folder"],
+                &top["nodes"][0]["files"]
+            ),
+            (&json!(""), &json!(true), &json!(3))
+        );
+        // A folder two deep: the files that lie no deeper stand for
+        // themselves, and what lies deeper is the folder at that depth.
+        let api = index
+            .follow(
+                "office",
+                "app/api",
+                &named(&["app/api", "lib/core.php"]),
+                &named(&["app/api"]),
+                &[],
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            steps(&api),
+            [
+                "api/ +0/0 out in",
+                "core.php +0/0 out",
+                "db.php +0/14",
+                "main.php +0/0",
+                "deep/ +0/0"
+            ]
+        );
+        assert_eq!(api["nodes"][4]["path"], "lib/deep");
+    }
+    #[test]
+    fn followed_links_mark_a_chosen_change_and_list_both_sides_of_a_place() {
+        let index = office(14);
+        let changed = [
+            ("lib/db.php".to_owned(), 'M'),
+            ("reports/r01.php".to_owned(), 'A'),
+            ("gone.php".to_owned(), 'D'),
+        ];
+        let view = index
+            .follow(
+                "office",
+                "lib/core.php",
+                &named(&["lib/core.php"]),
+                &[],
+                &changed,
+                Some("lib/db.php"),
+                false,
+            )
+            .unwrap();
+        let marks = view["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| (node["changed"].as_u64().unwrap(), node["status"].as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(marks, [(0, None), (1, Some("M")), (0, None)]);
+        // The selected place lists every place on each side, drawn or not.
+        let focus = &view["focus"];
+        assert_eq!(
+            (
+                &focus["path"],
+                &focus["name"],
+                &focus["status"],
+                &focus["start"]
+            ),
+            (
+                &json!("lib/db.php"),
+                &json!("db.php"),
+                &json!("M"),
+                &json!(false)
+            )
+        );
+        assert_eq!(focus["uses"], json!([]));
+        assert_eq!(
+            (&focus["uses_more"], &focus["used_by_more"]),
+            (&json!(0), &json!(4))
+        );
+        let users = focus["used_by"].as_array().unwrap();
+        assert_eq!(users.len(), LISTED);
+        assert_eq!(
+            users[0],
+            json!({"path": "lib/core.php", "name": "core.php", "folder": false, "inside": true, "links": 2, "guessed": 0, "changed": false})
+        );
+        assert_eq!(
+            users[1],
+            json!({"path": "app/api/orders.php", "name": "orders.php", "folder": false, "inside": false, "links": 1, "guessed": 1, "changed": false})
+        );
+        assert_eq!(users[2]["changed"], true);
+        // What the followed place uses, by kind.
+        let core = index
+            .follow(
+                "office",
+                "lib/core.php",
+                &[],
+                &[],
+                &[],
+                Some("lib/core.php"),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            core["focus"]["kinds"],
+            json!([{"kind": "calls", "links": 3}])
+        );
+        assert_eq!(core["focus"]["start"], true);
+        // A folder that holds changed files says how many, not what happened.
+        let top = index
+            .follow(
+                "office",
+                "lib",
+                &[],
+                &named(&["lib"]),
+                &changed,
+                None,
+                false,
+            )
+            .unwrap();
+        let marks = top["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| (node["changed"].as_u64().unwrap(), node["status"].as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(marks, [(1, None), (1, None), (0, None)]);
+        // A place that is not drawn is not selected.
+        let absent = index
+            .follow(
+                "office",
+                "lib/core.php",
+                &[],
+                &[],
+                &[],
+                Some("lib/db.php"),
+                false,
+            )
+            .unwrap();
+        assert_eq!(absent["focus"], Value::Null);
+    }
     fn store() -> Index {
         let cart = "src/Cart/Cart.php";
         let price = "src/Cart/Price.php";

@@ -457,6 +457,10 @@ fn changes(view: &V) -> bool {
 fn symbols(view: &V) -> bool {
     view["mode"] == "file"
 }
+/// The links of one place followed step by step, wherever they lead.
+fn follows(view: &V) -> bool {
+    view["mode"] == "follow"
+}
 /// The letter a symbol's box carries for what it is. The file's own node
 /// and a name the graph says nothing more about carry none.
 fn letter(kind: &str) -> &'static str {
@@ -658,6 +662,28 @@ pub fn summary(view: &V) -> String {
             1 => " · 1 other file uses it".to_owned(),
             users => format!(" · {} other files use it", count(users)),
         });
+        return text;
+    }
+    if follows(view) {
+        let followed = &view["followed"];
+        let number = |key: &str| followed[key].as_u64().unwrap_or(0);
+        // A file is followed among files; a folder among folders and files.
+        let (one, many) = if m::yes(&followed["folder"]) {
+            ("other", "others")
+        } else {
+            ("other file", "other files")
+        };
+        let mut text = format!("Links of {}, step by step", m::text(followed, "name"));
+        text.push_str(&match number("uses") {
+            0 => " · uses nothing else".to_owned(),
+            used => format!(" · uses {}", plural(used, one, many)),
+        });
+        text.push_str(&match number("users") {
+            0 => " · nothing else uses it".to_owned(),
+            1 => format!(" · 1 {one} uses it"),
+            users => format!(" · {} {many} use it", count(users)),
+        });
+        text.push_str(&format!(" · {} drawn", count(number("shown"))));
         return text;
     }
     if changes(view) {
@@ -882,9 +908,51 @@ fn change_note(view: &V) -> String {
     parts.join(" ")
 }
 /// What the map leaves out or has nothing to show for, if anything.
+/// How the links followed from a place are unfolded, and what the picture
+/// leaves out.
+fn follow_note(view: &V) -> String {
+    let followed = &view["followed"];
+    let number = |key: &str| followed[key].as_u64().unwrap_or(0);
+    let mut parts = context(view);
+    parts.push(format!(
+        "+ at the right corner of a box shows more of what it uses, + at the left corner more of what uses it, {} at a time, strongest first; − folds them back.",
+        count(number("step"))
+    ));
+    if m::yes(&followed["full"]) {
+        parts.push(format!(
+            "The picture holds {} boxes: fold something to unfold more.",
+            count(number("limit"))
+        ));
+    }
+    // A link shows where one of its sides is unfolded; the rest are counted.
+    match number("aside") {
+        0 => {}
+        1 => parts.push(
+            "1 more link runs between these boxes; it shows where a side that holds it is unfolded."
+                .to_owned(),
+        ),
+        aside => parts.push(format!(
+            "{} more links run between these boxes; they show where a side that holds them is unfolded.",
+            count(aside)
+        )),
+    }
+    let drawn = m::array(&view["edges"]).len() as u64;
+    let between = view["between"].as_u64().unwrap_or(0);
+    if drawn > 0 && drawn < between {
+        parts.push(format!(
+            "Drawing the {} strongest of {} links.",
+            count(drawn),
+            count(between)
+        ));
+    }
+    parts.join(" ")
+}
 pub fn note(view: &V) -> String {
     if symbols(view) {
         return file_note(view);
+    }
+    if follows(view) {
+        return follow_note(view);
     }
     if changes(view) {
         return change_note(view);
@@ -999,6 +1067,7 @@ pub fn canvas(view: &V) -> String {
     // it, so in a change map a link running back is no finding; nor is it
     // around an opened file.
     let opened = symbols(view);
+    let followed = follows(view);
     let cycles = !changes(view) && !opened;
     let near = |node: usize| {
         chosen.is_some_and(|chosen| {
@@ -1088,6 +1157,10 @@ pub fn canvas(view: &V) -> String {
         if cycle {
             label.push_str(", part of a cycle");
         }
+        let start = m::yes(&node["start"]);
+        if start {
+            label.push_str(", the links are followed from here");
+        }
         let changed = node["changed"].as_u64().unwrap_or(0);
         // What a file around an opened one is to it, or what a place of a
         // change map is to the change.
@@ -1126,8 +1199,9 @@ pub fn canvas(view: &V) -> String {
         };
         label.push_str(&mark);
         let kind = node["kind"].as_str().unwrap_or("");
-        // A folder opens to its files, a file to what it holds.
-        let opens = folder || (!symbol && node["symbols"].as_u64().unwrap_or(0) > 0);
+        // A folder opens to its files, a file to what it holds. Among
+        // followed links a box is only selected: opening it would leave them.
+        let opens = !followed && (folder || (!symbol && node["symbols"].as_u64().unwrap_or(0) > 0));
         let title = match (symbol, line) {
             (true, 0) => format!("{} · {}", m::text(node, "name"), m::text(view, "scope")),
             (true, line) => format!(
@@ -1139,7 +1213,7 @@ pub fn canvas(view: &V) -> String {
         };
         let (out, into) = flow[index];
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
+            "<button type=\"button\" class=\"graph-map-node\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
             payload(&node["path"]),
             escape(kind),
             opened && !symbol,
@@ -1184,8 +1258,63 @@ pub fn canvas(view: &V) -> String {
             ));
         }
         html.push_str("</button>");
+        if followed {
+            html.push_str(&handles(
+                node,
+                placed.x,
+                placed.y,
+                chosen.is_some() && !near(index),
+            ));
+        }
     }
     html.push_str("</div>");
+    html
+}
+/// How far past a corner the second handle of a side hangs.
+const HANDLE_GAP: f64 = 11.0;
+/// The handles at the top corners of a box whose links are followed. The
+/// right corner is for what the box uses and the left one for what uses it,
+/// as the links leave on the right and arrive on the left. A side that is
+/// unfolded has − to fold it back; a side with places not drawn has + with
+/// how many, which unfolds the next of them.
+fn handles(node: &V, x: f64, y: f64, dim: bool) -> String {
+    let name = escape(&m::text(node, "name"));
+    let mut html = String::new();
+    for (side, corner, outward, hang) in [
+        ("out", x + BOX_WIDTH, 1.0, "after"),
+        ("in", x, -1.0, "before"),
+    ] {
+        let what = if side == "out" {
+            format!("what {name} uses")
+        } else {
+            format!("what uses {name}")
+        };
+        let more = node[format!("more_{side}").as_str()].as_u64().unwrap_or(0);
+        let unfolded = m::yes(&node[format!("unfolded_{side}").as_str()]);
+        let asked = payload(&json!({"path": node["path"], "side": side}));
+        if unfolded {
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"graph-map-more\" data-side=\"{side}\" data-dim=\"{dim}\" data-action=\"graph-map-fold\" data-payload=\"{asked}\" style=\"left:{corner:.0}px;top:{y:.0}px\" title=\"Hide {what}\" aria-label=\"Hide {what}\">−</button>"
+            ));
+        }
+        if more > 0 {
+            // Beside a − the + hangs outside the corner, clear of the box.
+            let (at, hang) = if unfolded {
+                (corner + outward * HANDLE_GAP, hang)
+            } else {
+                (corner, "")
+            };
+            let told = if unfolded {
+                format!("Show more of {what}: {} not drawn", count(more))
+            } else {
+                format!("Show {what}: {} not drawn", count(more))
+            };
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"graph-map-more\" data-side=\"{side}\" data-hang=\"{hang}\" data-dim=\"{dim}\" data-action=\"graph-map-unfold\" data-payload=\"{asked}\" style=\"left:{at:.0}px;top:{y:.0}px\" title=\"{told}\" aria-label=\"{told}\">+{}</button>",
+                count(more)
+            ));
+        }
+    }
     html
 }
 fn rows(title: &str, rows: &V, more: &V) -> String {
@@ -1270,6 +1399,13 @@ fn open_file(path: &V) -> String {
         payload(path)
     )
 }
+/// Follows the links of a folder or a file step by step, wherever they lead.
+fn follow_links(path: &V) -> String {
+    format!(
+        "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"{}\">Follow links</button>",
+        payload(path)
+    )
+}
 /// What a symbol is, with what the change did to it: to its own lines, and
 /// to how many symbols inside it.
 fn reached(symbol: &V, mut text: String) -> String {
@@ -1331,6 +1467,7 @@ fn file_side(view: &V) -> String {
     if held > 0 {
         html.push_str(&open_file(&focus["path"]));
     }
+    html.push_str(&follow_links(&focus["path"]));
     // Its own symbols at the other end of the links with this file.
     html.push_str(&rows("Uses this file", &focus["uses"], &focus["uses_more"]));
     html.push_str(&rows(
@@ -1347,8 +1484,11 @@ pub fn side(view: &V) -> String {
         return file_side(view);
     }
     let focus = &view["focus"];
+    let followed = follows(view);
     if !focus.is_object() {
-        return if changes(view) {
+        return if followed {
+            "<p class=\"knowledge-note\">Select a box to see what it uses and what uses it. + at the right corner of a box shows more of what it uses, + at the left corner more of what uses it, and − folds them back.</p>"
+        } else if changes(view) {
             "<p class=\"knowledge-note\">Select a file to see what it uses and what uses it. The highlighted ones changed; the others use them or are used by them. Select a file again to open it to its classes, methods and functions.</p>"
         } else {
             "<p class=\"knowledge-note\">Select a folder or a file to see what it uses and what uses it. Select it again to open it: a folder to what it holds, a file to its classes, methods and functions.</p>"
@@ -1385,6 +1525,30 @@ pub fn side(view: &V) -> String {
                     plural(changed, "changed file", "changed files")
                 ),
             }
+        } else if followed {
+            // Among followed links a place may be one of a chosen change.
+            let mut told = if folder {
+                format!(
+                    "Folder · {}",
+                    plural(focus["files"].as_u64().unwrap_or(0), "file", "files")
+                )
+            } else if held > 0 {
+                format!("File · {}", plural(held, "symbol", "symbols"))
+            } else {
+                "File".to_owned()
+            };
+            match (changed, focus["status"].as_str()) {
+                (0, _) => {}
+                (_, Some(status)) => told.push_str(&format!(" · {}", happened(status))),
+                _ => told.push_str(&format!(
+                    " · {} inside",
+                    plural(changed, "changed file", "changed files")
+                )),
+            }
+            if m::yes(&focus["start"]) {
+                told.push_str(" · the links are followed from here");
+            }
+            told
         } else if folder {
             format!(
                 "Folder · {} · {} inside it",
@@ -1405,6 +1569,10 @@ pub fn side(view: &V) -> String {
     } else if held > 0 {
         html.push_str(&open_file(&focus["path"]));
     }
+    // The place the links are followed from is followed already.
+    if !m::yes(&focus["start"]) {
+        html.push_str(&follow_links(&focus["path"]));
+    }
     let (uses, used) = if beside {
         ("Uses in the change", "Used by the change")
     } else {
@@ -1424,8 +1592,9 @@ fn crumbs(view: &V) -> String {
         .map(|(index, crumb)| {
             if index == last {
                 format!(
-                    "<span class=\"graph-map-crumb\" aria-current=\"location\">{}</span>",
-                    escape(&m::text(crumb, "name"))
+                    "<span class=\"graph-map-crumb\" aria-current=\"location\">{}{}</span>",
+                    escape(&m::text(crumb, "name")),
+                    if follows(view) { ": links" } else { "" }
                 )
             } else {
                 format!(
@@ -1457,6 +1626,10 @@ fn legend(view: &V, change: bool) -> String {
         _ if changes(view) => {
             "Highlighted: changed. The rest use the change or are used by it.".to_owned()
         }
+        _ if follows(view) => format!(
+            "{LEGEND} + and − at the corners of a box unfold and fold what it uses, on the right, and what uses it, on the left.{}",
+            if change { " Highlighted: changed." } else { "" }
+        ),
         _ => LEGEND.to_owned(),
     };
     format!(
@@ -1723,7 +1896,22 @@ pub fn interim(view: &V, phase: &str) -> String {
     }
 }
 fn fresh(target: &str) -> V {
-    json!({"target": target, "scope": "", "focus": "", "certain": false, "filter": ""})
+    json!({"target": target, "scope": "", "focus": "", "certain": false, "filter": "", "follow": "", "out": [], "into": []})
+}
+/// The places whose side `key` (`out` or `into`) is unfolded among followed
+/// links, each named once for every step unfolded.
+fn unfolded(state: &V, key: &str) -> Vec<String> {
+    m::array(&state[key])
+        .iter()
+        .filter_map(|place| place.as_str().map(str::to_owned))
+        .collect()
+}
+/// The state with no place followed.
+fn unfollowed(mut state: V) -> V {
+    state["follow"] = json!("");
+    state["out"] = json!([]);
+    state["into"] = json!([]);
+    state
 }
 fn state() -> V {
     let state = m::data("graph-map");
@@ -2043,6 +2231,7 @@ fn render(view: &V) {
             .as_str(),
     );
     dom::set_checked("graph-map-certain", m::yes(&view["certain"]));
+    dom::disabled("graph-map-filter", follows(view));
     html("graph-map-canvas", &canvas(view));
     html("graph-map-side", &side(view));
     html("graph-map-legend", &legend(view, change));
@@ -2089,6 +2278,17 @@ async fn load(quiet: bool) {
     if m::yes(&state["certain"]) {
         query.push(("certain", "1".to_owned()));
     }
+    // The unfolded places of each side, as a list a URL can carry whatever
+    // the paths hold.
+    for key in ["out", "into"] {
+        let places = unfolded(&state, key);
+        if !m::text(&state, "follow").is_empty() && !places.is_empty() {
+            query.push((key, json!(places).to_string()));
+        }
+    }
+    if !m::text(&state, "follow").is_empty() {
+        query.push(("follow", m::text(&state, "follow")));
+    }
     let path = format!(
         "/api/projects/{}/graph/map{}",
         dom::enc(&project),
@@ -2107,6 +2307,20 @@ async fn load(quiet: bool) {
             let mut state = state;
             if view["scope"].is_string() {
                 state["scope"] = view["scope"].clone();
+            }
+            if follows(&view) {
+                // What is no longer drawn is no longer unfolded.
+                let drawn = m::array(&view["nodes"]);
+                for key in ["out", "into"] {
+                    let kept = unfolded(&state, key)
+                        .into_iter()
+                        .filter(|place| drawn.iter().any(|node| node["path"] == place.as_str()))
+                        .collect::<Vec<_>>();
+                    state[key] = json!(kept);
+                }
+            } else {
+                // The graph does not know the place, or it was left.
+                state = unfollowed(state);
             }
             // A graph that was never started, as after a restart of the
             // Harness, is asked for once more.
@@ -2329,20 +2543,49 @@ pub async fn event(
             }
         }
         ("click", _, "graph-map-open") => {
+            state = unfollowed(state);
             state["scope"] = payload.clone();
             state["focus"] = json!("");
             state["filter"] = json!("");
             dom::set_value("graph-map-filter", "");
         }
+        ("click", _, "graph-map-follow") => {
+            // The first picture is one step each way: what it uses and
+            // what uses it. Nothing is selected, so no box of it is dimmed.
+            state["follow"] = payload.clone();
+            state["out"] = json!([payload]);
+            state["into"] = json!([payload]);
+            state["focus"] = json!("");
+            state["filter"] = json!("");
+            dom::set_value("graph-map-filter", "");
+        }
+        ("click", _, "graph-map-unfold" | "graph-map-fold") => {
+            let key = if payload["side"] == "in" {
+                "into"
+            } else {
+                "out"
+            };
+            let mut places = unfolded(&state, key);
+            let place = payload["path"].as_str().unwrap_or("");
+            if action == "graph-map-fold" {
+                places.retain(|other| other != place);
+            } else {
+                // Named once more, a place shows the next of that side.
+                places.push(place.to_owned());
+            }
+            state[key] = json!(places);
+        }
         ("click", _, "graph-map-go") => {
             let path = payload["path"].as_str().unwrap_or("");
             if let Some(file) = payload["open"].as_str() {
                 // A symbol of another file: that file opens on it.
+                state = unfollowed(state);
                 state["scope"] = json!(file);
                 state["filter"] = json!("");
             } else if !m::yes(&payload["inside"]) {
                 // It is not drawn here: show it among its own neighbours,
                 // in the whole project.
+                state = unfollowed(state);
                 state["target"] = json!("");
                 state["scope"] = json!(parent(path));
                 state["filter"] = json!("");
@@ -3188,7 +3431,7 @@ mod tests {
             "used_by_more": 0, "kinds": []
         });
         let html = side(&view);
-        assert!(html.starts_with("<h3>Price.php</h3><p class=\"graph-map-path\">src/Cart/Price.php</p><p class=\"knowledge-note\">Changed file · added · used by this file · 3 symbols</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-open\" data-payload=\"&quot;src/Cart/Price.php&quot;\">Open file</button><h4>Uses this file <span"), "{html}");
+        assert!(html.starts_with("<h3>Price.php</h3><p class=\"graph-map-path\">src/Cart/Price.php</p><p class=\"knowledge-note\">Changed file · added · used by this file · 3 symbols</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-open\" data-payload=\"&quot;src/Cart/Price.php&quot;\">Open file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Price.php&quot;\">Follow links</button><h4>Uses this file <span"), "{html}");
         assert!(
             html.contains("<h4>Used by this file <span class=\"graph-map-total\">1</span></h4>")
         );
@@ -3205,8 +3448,9 @@ mod tests {
         folder["focus"]["symbols"] = json!(9);
         let html = side(&folder);
         assert!(html.contains("<p class=\"knowledge-note\">File · 9 symbols</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-open\" data-payload=\"&quot;src/Order&quot;\">Open file</button>"), "{html}");
+        // A file the graph names nothing in does not open; it is followed.
         folder["focus"]["symbols"] = json!(0);
-        assert!(side(&folder).contains("<p class=\"knowledge-note\">File</p><h4>"));
+        assert!(side(&folder).contains("<p class=\"knowledge-note\">File</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\""));
         assert_eq!(capital("method of Cart"), "Method of Cart");
         assert_eq!(
             (base("src/Cart/Cart.php"), base("README.md")),
@@ -3361,6 +3605,194 @@ mod tests {
         assert!(opened.contains("T type · m method · f function"));
         assert!(opened.ends_with("for its imports."));
         assert!(legend(&file(), true).ends_with("Highlighted: touched by the change."));
+    }
+    /// The links of `lib/core.php` followed: what it uses is unfolded, and
+    /// so is what uses the changed `lib/db.php`, of which three are not drawn.
+    fn trail() -> V {
+        json!({
+            "mode": "follow", "scope": "lib", "certain": false,
+            "crumbs": [{"name": "office", "path": ""}, {"name": "lib", "path": "lib"}, {"name": "core.php", "path": "lib/core.php"}],
+            "totals": {"files": 21, "symbols": 22, "relations": 22, "links": 22, "read": 21, "guessed": 1, "unplaced": 0},
+            "followed": {"path": "lib/core.php", "name": "core.php", "folder": false, "uses": 2, "users": 2, "shown": 4, "limit": 60, "step": 12, "full": false},
+            "children": 4, "matching": 4,
+            "nodes": [
+                {"path": "lib/core.php", "name": "core.php", "folder": false, "files": 1, "symbols": 2, "within": 0, "out": 3, "in": 2, "start": true, "more_out": 0, "more_in": 2, "unfolded_out": true, "unfolded_in": false, "changed": 0, "status": null},
+                {"path": "lib/db.php", "name": "db.php", "folder": false, "files": 1, "symbols": 1, "within": 0, "out": 0, "in": 17, "start": false, "more_out": 0, "more_in": 3, "unfolded_out": false, "unfolded_in": true, "changed": 1, "status": "M"},
+                {"path": "lib/deep", "name": "deep", "folder": true, "files": 1, "symbols": 1, "within": 0, "out": 0, "in": 1, "start": false, "more_out": 0, "more_in": 0, "unfolded_out": false, "unfolded_in": false, "changed": 0, "status": null},
+                {"path": "reports/r01.php", "name": "r<01>.php", "folder": false, "files": 1, "symbols": 1, "within": 0, "out": 1, "in": 0, "start": false, "more_out": 0, "more_in": 0, "unfolded_out": false, "unfolded_in": false, "changed": 0, "status": null}
+            ],
+            "between": 3, "backbone": false,
+            "edges": [
+                {"from": "lib/core.php", "to": "lib/db.php", "links": 2, "guessed": 0},
+                {"from": "lib/core.php", "to": "lib/deep", "links": 1, "guessed": 0},
+                {"from": "reports/r01.php", "to": "lib/db.php", "links": 1, "guessed": 0}
+            ],
+            "focus": null
+        })
+    }
+    #[test]
+    fn followed_links_say_where_they_start_and_how_they_are_unfolded() {
+        let view = trail();
+        assert_eq!(
+            summary(&view),
+            "Links of core.php, step by step · uses 2 other files · 2 other files use it · 4 drawn"
+        );
+        assert_eq!(
+            note(&view),
+            "+ at the right corner of a box shows more of what it uses, + at the left corner more of what uses it, 12 at a time, strongest first; − folds them back."
+        );
+        // The place they start from closes the path, marked as followed.
+        assert!(crumbs(&view).ends_with(
+            "<span class=\"graph-map-crumb\" aria-current=\"location\">core.php: links</span>"
+        ));
+        assert!(!crumbs(&super::tests::view()).contains(": links"));
+        let told = legend(&view, false);
+        assert!(
+            told.contains("Dotted: against the main direction"),
+            "{told}"
+        );
+        assert!(told.ends_with("+ and − at the corners of a box unfold and fold what it uses, on the right, and what uses it, on the left."));
+        assert!(legend(&view, true).ends_with("on the left. Highlighted: changed."));
+        // A folder is followed among folders and files, a single user is one.
+        let mut folder = trail();
+        folder["followed"] = json!({"path": "lib", "name": "lib", "folder": true, "uses": 0, "users": 1, "shown": 60, "limit": 60, "step": 12, "full": true});
+        folder["between"] = json!(200);
+        assert_eq!(
+            summary(&folder),
+            "Links of lib, step by step · uses nothing else · 1 other uses it · 60 drawn"
+        );
+        folder["followed"]["aside"] = json!(7);
+        assert!(note(&folder).ends_with(
+            "The picture holds 60 boxes: fold something to unfold more. 7 more links run between these boxes; they show where a side that holds them is unfolded. Drawing the 3 strongest of 200 links."
+        ));
+        folder["followed"]["aside"] = json!(1);
+        assert!(note(&folder).contains("1 more link runs between these boxes; it shows where"));
+        // Inside a chosen change the graph may be behind the files.
+        let mut stale = trail();
+        stale["stale"] = json!(true);
+        assert!(note(&stale).starts_with("The graph is older than the files"));
+    }
+    #[test]
+    fn a_box_of_followed_links_has_a_handle_at_each_corner_that_has_more() {
+        let html = canvas(&trail());
+        assert_eq!(
+            html.matches("<button type=\"button\" class=\"graph-map-node\"")
+                .count(),
+            4
+        );
+        // A box is only selected here: opening it would leave the links.
+        assert_eq!(html.matches("data-open=\"true\"").count(), 0);
+        assert_eq!(html.matches("data-start=\"true\"").count(), 1);
+        assert!(html.contains("aria-label=\"core.php, file, uses others through 3 links, is used through 2 links, the links are followed from here\""));
+        // The changed file keeps Git's letter.
+        assert!(html.contains("aria-label=\"db.php, file, uses others through 0 links, is used through 17 links, modified\""));
+        // core.php stands in the first column and db.php in the second.
+        let (core, db) = (MARGIN, MARGIN + BOX_WIDTH + COLUMN_GAP);
+        // What core.php uses is all drawn and can be folded; of what uses it
+        // two are not drawn.
+        assert!(html.contains(&format!(
+            "data-side=\"out\" data-dim=\"false\" data-action=\"graph-map-fold\" data-payload=\"{}\" style=\"left:{}px;top:",
+            payload(&json!({"path": "lib/core.php", "side": "out"})),
+            core + BOX_WIDTH
+        )), "{html}");
+        assert!(html.contains(
+            "title=\"Hide what core.php uses\" aria-label=\"Hide what core.php uses\">−</button>"
+        ));
+        assert!(html.contains(&format!(
+            "data-side=\"in\" data-hang=\"\" data-dim=\"false\" data-action=\"graph-map-unfold\" data-payload=\"{}\" style=\"left:{core}px;top:",
+            payload(&json!({"path": "lib/core.php", "side": "in"}))
+        )), "{html}");
+        assert!(html.contains("title=\"Show what uses core.php: 2 not drawn\" aria-label=\"Show what uses core.php: 2 not drawn\">+2</button>"));
+        // What uses db.php is unfolded and three more are not drawn: the +
+        // hangs outside the corner, beside the −.
+        assert!(html.contains(&format!("style=\"left:{db}px;top:")));
+        assert!(html.contains("title=\"Hide what uses db.php\""));
+        assert!(html.contains(&format!(
+            "data-side=\"in\" data-hang=\"before\" data-dim=\"false\" data-action=\"graph-map-unfold\" data-payload=\"{}\" style=\"left:{}px;top:",
+            payload(&json!({"path": "lib/db.php", "side": "in"})),
+            db - HANDLE_GAP
+        )));
+        assert!(html.contains("title=\"Show more of what uses db.php: 3 not drawn\""));
+        // Two handles to fold, two to unfold, and none where nothing is left.
+        assert_eq!(html.matches("data-action=\"graph-map-fold\"").count(), 2);
+        assert_eq!(html.matches("data-action=\"graph-map-unfold\"").count(), 2);
+        // A name from the project never becomes markup, in a handle either.
+        let mut odd = trail();
+        odd["nodes"][3]["more_out"] = json!(1234);
+        let html = canvas(&odd);
+        assert!(html.contains("title=\"Show what r&lt;01&gt;.php uses: 1,234 not drawn\""));
+        assert!(html.contains(">+1,234</button>"));
+        assert!(!html.contains("r<01>"));
+        // With a box selected, the handles of the boxes away from it dim.
+        let mut selected = trail();
+        selected["focus"] = json!({"path": "lib/deep", "name": "deep"});
+        let html = canvas(&selected);
+        assert_eq!(
+            html.matches("data-dim=\"true\" data-action=\"graph-map-")
+                .count(),
+            2
+        );
+        assert_eq!(
+            html.matches("data-dim=\"false\" data-action=\"graph-map-")
+                .count(),
+            2
+        );
+        // No other map has handles.
+        assert!(!canvas(&super::tests::view()).contains("graph-map-more"));
+    }
+    #[test]
+    fn the_side_panel_offers_to_follow_links_and_tells_a_followed_place() {
+        // A selected folder or file of any map can be followed.
+        let folder = side(&super::tests::view());
+        assert!(
+            folder.contains(&format!(
+                "data-action=\"graph-map-follow\" data-payload=\"{}\">Follow links</button>",
+                payload(&json!("src/Order"))
+            )),
+            "{folder}"
+        );
+        let nothing = side(&trail());
+        assert!(nothing.contains("Select a box to see what it uses and what uses it."));
+        assert!(nothing.contains("+ at the right corner"));
+        // The place the links are followed from is followed already.
+        let mut start = trail();
+        start["focus"] = json!({
+            "path": "lib/core.php", "name": "core.php", "folder": false, "inside": true, "files": 1, "symbols": 2,
+            "start": true, "changed": 0, "status": null,
+            "uses": [{"path": "lib/db.php", "name": "lib/db.php", "folder": false, "inside": true, "links": 2, "guessed": 0, "changed": true}],
+            "uses_more": 0, "used_by": [], "used_by_more": 0, "kinds": [{"kind": "calls", "links": 3}]
+        });
+        let html = side(&start);
+        assert!(
+            html.contains("File · 2 symbols · the links are followed from here"),
+            "{html}"
+        );
+        assert!(html.contains("data-action=\"graph-map-open\""));
+        assert!(!html.contains("graph-map-follow"));
+        assert!(html.contains("<h4>Uses <span class=\"graph-map-total\">1</span></h4>"));
+        assert!(html.contains("Uses by kind: calls 3"));
+        // Another place of the picture, changed, can be followed in turn.
+        let mut other = trail();
+        other["focus"] = json!({
+            "path": "lib/db.php", "name": "db.php", "folder": false, "inside": true, "files": 1, "symbols": 1,
+            "start": false, "changed": 1, "status": "M",
+            "uses": [], "uses_more": 0, "used_by": [], "used_by_more": 0, "kinds": []
+        });
+        let html = side(&other);
+        assert!(html.contains("File · 1 symbol · modified"), "{html}");
+        assert!(html.contains("graph-map-follow"));
+        let mut folder = trail();
+        folder["focus"] = json!({
+            "path": "lib/deep", "name": "deep", "folder": true, "inside": true, "files": 4, "symbols": 9,
+            "start": false, "changed": 2, "status": null,
+            "uses": [], "uses_more": 0, "used_by": [], "used_by_more": 0, "kinds": []
+        });
+        let html = side(&folder);
+        assert!(
+            html.contains("Folder · 4 files · 2 changed files inside"),
+            "{html}"
+        );
+        assert!(html.contains(">Open folder</button>"));
     }
     #[test]
     fn the_side_panel_lists_both_directions() {

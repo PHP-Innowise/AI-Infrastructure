@@ -1779,6 +1779,22 @@ tells the files that use the change from the files it uses. A box that no link i
 the picture touches has no colour. The legend under the map shows both colours;
 they were chosen to stay apart for colour-blind readers in both themes.
 
+**Follow links**, beside a selected folder or file, leaves the open folder and draws
+that one place with its links, step by step, wherever in the project they lead. The
+picture starts with what the place uses and what uses it. Every box then has a
+handle at a top corner where there is more: `+` on the right shows what the box
+uses, `+` on the left what uses it, twelve at a time and strongest first, with the
+number that is not drawn yet. `−` folds a side back, and with it whatever only that
+side had brought. A picture holds 60 boxes. A file is followed among files; a folder
+among the folders as deep as itself and the files that lie no deeper, so a crate is
+followed among crates. A link is drawn where one of its two sides is unfolded, so
+the picture holds the steps that were asked for; the note above it counts the links
+that run between its boxes without being drawn, and unfolding a side that holds one
+draws it. Inside a chosen change the changed files keep their mark, so following
+what uses a changed file shows how far the change reaches beyond its direct
+neighbours. A box is selected as elsewhere; it opens with **Open file** or **Open
+folder**, which leaves the picture.
+
 Between folders and files the map counts the graph's links that cross a file
 boundary; the links inside one file show when that file is opened. The relations
 that only say where a symbol lives (`contains`, `method`, `defines`, `case_of`,

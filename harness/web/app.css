@@ -233,7 +233,16 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-node[data-out="true"]::after,.graph-map-node[data-in="true"]::before { content:""; position:absolute; top:-1px; bottom:-1px; width:4px; }
 .graph-map-node[data-out="true"]::after { right:-1px; border-radius:0 var(--radius) var(--radius) 0; background:var(--map-uses); }
 .graph-map-node[data-in="true"]::before { left:-1px; border-radius:var(--radius) 0 0 var(--radius); background:var(--map-used); }
+/* Among followed links the place they start from is ringed, and a box has a handle at each top corner: the right one unfolds and folds what it uses, the left one what uses it. */
+.graph-map-node[data-start="true"] { outline:2px solid var(--ink-2); outline-offset:1px; font-weight:var(--weight-strong); }
 .graph-map-node[data-selected="true"] { border-color:var(--purple); background:var(--purple-soft); color:var(--purple); outline:2px solid var(--purple); outline-offset:1px; }
+.graph-map-more { position:absolute; z-index:1; min-width:16px; height:16px; padding:0 4px; border:1px solid var(--map-uses); border-radius:8px; background:var(--paper); color:var(--ink); font-size:var(--text-meta); font-weight:var(--weight-strong); line-height:14px; font-variant-numeric:tabular-nums; text-align:center; transform:translate(-50%,-50%); }
+.graph-map-more[data-side="in"] { border-color:var(--map-used); }
+.graph-map-more[data-hang="after"] { transform:translate(0,-50%); }
+.graph-map-more[data-hang="before"] { transform:translate(-100%,-50%); }
+.graph-map-more:hover { background:var(--map-uses-soft); }
+.graph-map-more[data-side="in"]:hover { background:var(--map-used-soft); }
+.graph-map-more[data-dim="true"] { opacity:.45; }
 .graph-map-node[data-changed="true"] { border-color:var(--success-line); background:var(--success-soft); }
 .graph-map-node[data-changed="true"][data-selected="true"] { border-color:var(--purple); background:var(--purple-soft); }
 .graph-map-node[data-dim="true"] { opacity:.45; }

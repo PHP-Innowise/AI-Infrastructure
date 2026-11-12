@@ -850,6 +850,58 @@ fn end(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
+/// How many unfolded places a request may name on one side, and in how
+/// many bytes.
+const UNFOLDED: usize = 256;
+const UNFOLDED_BYTES: usize = 32 * 1024;
+/// A place whose links are followed step by step in the map, with the places
+/// whose uses (`out`) and whose users (`into`) are unfolded, each named once
+/// for every step that is unfolded.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Followed {
+    pub root: String,
+    pub out: Vec<String>,
+    pub into: Vec<String>,
+}
+impl Followed {
+    /// Reads what a request names: the place, and the unfolded places of
+    /// each side as a JSON list of paths, which a URL carries whatever the
+    /// paths hold. `None` where no place is followed.
+    pub fn parse(root: &str, out: &str, into: &str) -> Result<Option<Self>> {
+        if root.is_empty() {
+            return Ok(None);
+        }
+        let list = |text: &str| {
+            if text.is_empty() {
+                return Ok(Vec::new());
+            }
+            if text.len() > UNFOLDED_BYTES {
+                return Err(HarnessError::invalid(
+                    "Too much is unfolded; fold something first.",
+                ));
+            }
+            let places = serde_json::from_str::<Vec<String>>(text)
+                .map_err(|_| HarnessError::invalid("Invalid unfolded places."))?;
+            if places.len() > UNFOLDED {
+                return Err(HarnessError::invalid(
+                    "Too much is unfolded; fold something first.",
+                ));
+            }
+            if places
+                .iter()
+                .any(|place| place.is_empty() || place.len() > 1024)
+            {
+                return Err(HarnessError::invalid("Invalid unfolded places."));
+            }
+            Ok(places)
+        };
+        Ok(Some(Self {
+            root: root.to_owned(),
+            out: list(out)?,
+            into: list(into)?,
+        }))
+    }
+}
 pub struct Graphs {
     me: Weak<Graphs>,
     store: SessionStore,
@@ -905,8 +957,12 @@ impl Graphs {
         })
     }
     /// One folder of the published graph's dependency map, or, with a
-    /// target, the map of what that target changed. Reading a graph of a
-    /// large project takes seconds, so callers keep this off the runtime.
+    /// target, the map of what that target changed. With `followed`, the
+    /// links of one place step by step instead, on the same graph and with
+    /// the same change marked; a place the graph does not know falls back
+    /// to the folder. Reading a graph of a large project takes seconds, so
+    /// callers keep this off the runtime.
+    #[allow(clippy::too_many_arguments)]
     pub fn map(
         &self,
         project: &str,
@@ -915,16 +971,33 @@ impl Graphs {
         focus: Option<&str>,
         certain: bool,
         filter: &str,
+        followed: Option<&Followed>,
     ) -> Result<Value> {
         let record = self.store.project(project)?;
         let root = PathBuf::from(record["path"].as_str().unwrap_or(""));
         let name = record["name"].as_str().unwrap_or("project");
         let built = &self.setting(project)?["built"];
+        // The links followed from a place, where one is followed and the
+        // graph knows it.
+        let follow = |index: &crate::graph_map::Index, changed: &[(String, char)]| {
+            followed.and_then(|asked| {
+                index.follow(
+                    name,
+                    &asked.root,
+                    &asked.out,
+                    &asked.into,
+                    changed,
+                    focus,
+                    certain,
+                )
+            })
+        };
         let Some(target) = target else {
             let index = self
                 .maps
                 .index(project, &live(&self.store.state, project), &root)?;
-            let mut view = index.view(name, scope, focus, certain, filter);
+            let mut view = follow(&index, &[])
+                .unwrap_or_else(|| index.view(name, scope, focus, certain, filter));
             view["project_id"] = json!(project);
             view["built"] = json!({"commit": built["commit"], "at": built["at"]});
             return Ok(view);
@@ -960,36 +1033,40 @@ impl Graphs {
         let mut view = match &found.graph {
             Some((kept, graph, base)) => {
                 let index = self.maps.index(kept, graph, base)?;
-                // An opened file marks the symbols the change touched. They
-                // are told by line, and the lines of a graph older than the
-                // files are not the files' own.
-                let edited = match index.opens(scope) {
-                    Some(path) if !stale => {
-                        graph_changes::edited(&root, &resolved, path).ok().flatten()
+                if let Some(view) = follow(&index, &changed) {
+                    view
+                } else {
+                    // An opened file marks the symbols the change touched.
+                    // They are told by line, and the lines of a graph older
+                    // than the files are not the files' own.
+                    let edited = match index.opens(scope) {
+                        Some(path) if !stale => {
+                            graph_changes::edited(&root, &resolved, path).ok().flatten()
+                        }
+                        _ => None,
+                    };
+                    match index.symbols(
+                        name,
+                        scope,
+                        &changed,
+                        edited.as_ref(),
+                        focus,
+                        certain,
+                        filter,
+                    ) {
+                        Some(view) => view,
+                        None => index.changes(name, &changed, scope, focus, certain, filter),
                     }
-                    _ => None,
-                };
-                match index.symbols(
-                    name,
-                    scope,
-                    &changed,
-                    edited.as_ref(),
-                    focus,
-                    certain,
-                    filter,
-                ) {
-                    Some(view) => view,
-                    None => index.changes(name, &changed, scope, focus, certain, filter),
                 }
             }
             // Until the commit's own graph is there, the project's graph
             // gives a first picture: the files changed are the commit's, the
             // links are those the checkout's files have.
             None if published.is_file() => {
-                let mut view = self
-                    .maps
-                    .index(project, &published, &root)?
-                    .changes(name, &changed, scope, focus, certain, filter);
+                let index = self.maps.index(project, &published, &root)?;
+                let mut view = follow(&index, &changed).unwrap_or_else(|| {
+                    index.changes(name, &changed, scope, focus, certain, filter)
+                });
                 view["preliminary"] = json!(true);
                 view
             }
@@ -1973,13 +2050,26 @@ impl Domain for Graphs {
                         None | Some("") => None,
                         Some(text) => Some(Target::parse(text)?),
                     };
+                    let followed = Followed::parse(
+                        &text("follow")?,
+                        query["out"].as_str().unwrap_or(""),
+                        query["into"].as_str().unwrap_or(""),
+                    )?;
                     let me = self.me.upgrade().ok_or_else(|| {
                         HarnessError::unavailable("The code graph is shutting down.")
                     })?;
                     let project = project.to_owned();
                     tokio::task::spawn_blocking(move || {
                         let focus = (!focus.is_empty()).then_some(focus.as_str());
-                        me.map(&project, target.as_ref(), &scope, focus, certain, &filter)
+                        me.map(
+                            &project,
+                            target.as_ref(),
+                            &scope,
+                            focus,
+                            certain,
+                            &filter,
+                            followed.as_ref(),
+                        )
                     })
                     .await
                     .map_err(|_| {
@@ -1995,6 +2085,52 @@ impl Domain for Graphs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn what_is_followed_is_read_from_a_request() {
+        assert_eq!(Followed::parse("", "[\"src/a.php\"]", "[]").unwrap(), None);
+        // A place named twice is unfolded two steps.
+        assert_eq!(
+            Followed::parse(
+                "src/a.php",
+                "[\"src/a.php\",\"src/b, c.php\",\"src/a.php\"]",
+                ""
+            )
+            .unwrap(),
+            Some(Followed {
+                root: "src/a.php".to_owned(),
+                out: vec![
+                    "src/a.php".to_owned(),
+                    "src/b, c.php".to_owned(),
+                    "src/a.php".to_owned()
+                ],
+                into: vec![],
+            })
+        );
+        let many = serde_json::to_string(&vec!["x"; UNFOLDED + 1]).unwrap();
+        let long = serde_json::to_string(&["x".repeat(1025)]).unwrap();
+        for wrong in [
+            many.as_str(),
+            long.as_str(),
+            "src/a.php",
+            "[1]",
+            "[\"\"]",
+            "{}",
+        ] {
+            assert!(Followed::parse("src/a.php", wrong, "").is_err(), "{wrong}");
+            assert!(Followed::parse("src/a.php", "", wrong).is_err(), "{wrong}");
+        }
+        // The map's route lets through every part of a request its handler
+        // reads; a part it does not name is refused before the handler.
+        let route = crate::http::ROUTES
+            .iter()
+            .find(|route| route.operation == "graph.map")
+            .unwrap();
+        for part in [
+            "scope", "focus", "certain", "filter", "target", "follow", "out", "into",
+        ] {
+            assert!(route.query.contains(&part), "{part}");
+        }
+    }
     #[test]
     fn progress_lines_of_both_releases_are_read() {
         assert_eq!(
@@ -2352,7 +2488,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 loop {
                     let view = self
                         .graphs
-                        .map(&self.project, Some(target), "", None, false, "")
+                        .map(&self.project, Some(target), "", None, false, "", None)
                         .unwrap();
                     if view["state"] != "building" {
                         return view;
@@ -2540,7 +2676,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert!(
                 fixture
                     .graphs
-                    .map(&fixture.project, Some(&target), "", None, false, "")
+                    .map(&fixture.project, Some(&target), "", None, false, "", None)
                     .is_err()
             );
             let before = fixture.said(&["status", "--porcelain=v1"]);
@@ -2607,7 +2743,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             let map = |target: &Target| {
                 fixture
                     .graphs
-                    .map(&fixture.project, Some(target), "", None, false, "")
+                    .map(&fixture.project, Some(target), "", None, false, "", None)
                     .unwrap()
             };
             let work = map(&Target::Work);
@@ -2646,6 +2782,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                     None,
                     false,
                     "",
+                    None,
                 )
                 .unwrap();
             assert_eq!(
@@ -2672,6 +2809,51 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 })
                 .collect::<Vec<_>>();
             assert_eq!(around, ["order.php uses A", "price.php used M"]);
+            // The links of a file are followed on the same graph with the
+            // change still marked. A place the graph does not know falls
+            // back to the change.
+            let follow = |root: &str| {
+                let followed = Followed {
+                    root: root.to_owned(),
+                    out: vec![root.to_owned()],
+                    into: vec![root.to_owned()],
+                };
+                fixture
+                    .graphs
+                    .map(
+                        &fixture.project,
+                        Some(&Target::Work),
+                        "",
+                        None,
+                        false,
+                        "",
+                        Some(&followed),
+                    )
+                    .unwrap()
+            };
+            let followed = follow("cart.php");
+            assert_eq!(
+                (
+                    followed["mode"].as_str(),
+                    followed["chosen"]["kind"].as_str(),
+                    followed["state"].as_str()
+                ),
+                (Some("follow"), Some("work"), Some("ready"))
+            );
+            let places = followed["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| {
+                    format!(
+                        "{} {}",
+                        node["path"].as_str().unwrap(),
+                        node["status"].as_str().unwrap_or("-")
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(places, ["cart.php M", "price.php M", "order.php A"]);
+            assert_eq!(follow("nowhere.php")["mode"], "changes");
             // What the change did to the file is read with it. The graph of
             // this fixture gives its symbols no line, so a changed line
             // marks none of them, and a new file is new throughout.
@@ -2688,6 +2870,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                     None,
                     false,
                     "",
+                    None,
                 )
                 .unwrap();
             assert_eq!(
@@ -2704,6 +2887,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                     None,
                     false,
                     "",
+                    None,
                 )
                 .unwrap();
             assert_eq!(
@@ -2782,7 +2966,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert_eq!(chosen["chosen"]["name"], long[..12]);
             let view = fixture
                 .graphs
-                .map(&fixture.project, Some(&target), "", None, false, "")
+                .map(&fixture.project, Some(&target), "", None, false, "", None)
                 .unwrap();
             // The files are the commit's, the links the checkout's: the
             // cart uses the price in the project's own graph.
@@ -2838,7 +3022,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert!(
                 fixture
                     .graphs
-                    .map(&fixture.project, Some(&target), "", None, false, "")
+                    .map(&fixture.project, Some(&target), "", None, false, "", None)
                     .is_err()
             );
         }
