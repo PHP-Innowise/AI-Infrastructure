@@ -24,6 +24,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Leave tests out of the Harness dependency map. **Without tests** drops the
+  files that are tests by where they lie or how they are named, in the
+  conventions of the common languages, and in a Rust source the items under
+  `#[cfg(test)]` and the `#[test]` functions. The links of what is left are
+  counted anew, so a file no longer uses what only its tests used, in a
+  folder, an opened file, followed links and a change alike. The summary says
+  how much is left out, and the choice is kept in the browser.
+
 - Follow the links of one place step by step in the Harness dependency map.
   **Follow links**, beside a selected folder or file, draws that place with
   what it uses and what uses it, wherever in the project they lie. `+` at a

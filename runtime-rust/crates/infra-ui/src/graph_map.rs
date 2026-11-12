@@ -625,7 +625,35 @@ pub fn chosen(view: &V) -> String {
 }
 /// The sentence above the map: what the graph holds and how sure it is, or,
 /// for a change, how much changed and how far it reaches.
+/// What the map shows, in a line: how much the graph holds, or what the
+/// opened file, the followed place or the change is, and, without tests,
+/// how much that leaves out.
 pub fn summary(view: &V) -> String {
+    format!("{}{}", shown(view), left_out(view))
+}
+/// What a map without tests leaves out: the files that are tests, and the
+/// tests inside the files it keeps. Nothing where tests are not left out.
+fn left_out(view: &V) -> String {
+    let tests = &view["tests"];
+    if !tests.is_object() {
+        return String::new();
+    }
+    let number = |key: &str| tests[key].as_u64().unwrap_or(0);
+    match (number("files"), number("inside")) {
+        (0, 0) => " · no tests found to leave out".to_owned(),
+        (files, 0) => format!(" · without {}", plural(files, "test file", "test files")),
+        (0, inside) => format!(
+            " · without {} inside its files",
+            plural(inside, "test", "tests")
+        ),
+        (files, inside) => format!(
+            " · without {} and {} inside other files",
+            plural(files, "test file", "test files"),
+            plural(inside, "test", "tests")
+        ),
+    }
+}
+fn shown(view: &V) -> String {
     if symbols(view) {
         let file = &view["file"];
         let number = |key: &str| file[key].as_u64().unwrap_or(0);
@@ -1896,7 +1924,15 @@ pub fn interim(view: &V, phase: &str) -> String {
     }
 }
 fn fresh(target: &str) -> V {
-    json!({"target": target, "scope": "", "focus": "", "certain": false, "filter": "", "follow": "", "out": [], "into": []})
+    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "filter": "", "follow": "", "out": [], "into": []})
+}
+/// Where this browser keeps whether the map leaves tests out.
+const NOTESTS: &str = "graph-map-notests";
+/// A map begun anew, with tests left out where they were the last time.
+fn anew(target: &str) -> V {
+    let mut state = fresh(target);
+    state["notests"] = json!(dom::storage(NOTESTS).as_deref() == Some("1"));
+    state
 }
 /// The places whose side `key` (`out` or `into`) is unfolded among followed
 /// links, each named once for every step unfolded.
@@ -2231,6 +2267,7 @@ fn render(view: &V) {
             .as_str(),
     );
     dom::set_checked("graph-map-certain", m::yes(&view["certain"]));
+    dom::set_checked("graph-map-notests", m::yes(&view["notests"]));
     dom::disabled("graph-map-filter", follows(view));
     html("graph-map-canvas", &canvas(view));
     html("graph-map-side", &side(view));
@@ -2275,8 +2312,10 @@ async fn load(quiet: bool) {
             query.push((key, m::text(&state, key)));
         }
     }
-    if m::yes(&state["certain"]) {
-        query.push(("certain", "1".to_owned()));
+    for key in ["certain", "notests"] {
+        if m::yes(&state[key]) {
+            query.push((key, "1".to_owned()));
+        }
     }
     // The unfolded places of each side, as a list a URL can carry whatever
     // the paths hold.
@@ -2393,7 +2432,7 @@ pub async fn event(
     match (kind, id, action) {
         ("click", "graph-view" | "graph-changes", _) => {
             let changes = id == "graph-changes";
-            state = fresh(if changes { "work" } else { "" });
+            state = anew(if changes { "work" } else { "" });
             m::set("graph-map", state.clone());
             dom::set_value("graph-map-filter", "");
             dom::error("graph-map-error", "");
@@ -2518,12 +2557,12 @@ pub async fn event(
                 return true;
             };
             shut();
-            state = fresh(target);
+            state = anew(target);
             chosen = true;
         }
         ("change", "graph-map-target", _) => {
             shut();
-            state = fresh(value);
+            state = anew(value);
             chosen = true;
         }
         ("click", _, "graph-map-node") => {
@@ -2593,6 +2632,11 @@ pub async fn event(
             state["focus"] = json!(path);
         }
         ("change", "graph-map-certain", _) => state["certain"] = json!(checked),
+        ("change", "graph-map-notests", _) => {
+            // The choice is the viewer's and holds for the next map too.
+            state["notests"] = json!(checked);
+            dom::save(NOTESTS, checked.then_some("1"));
+        }
         ("input", "graph-map-filter", _) => state["filter"] = json!(value),
         _ => return false,
     }
@@ -3739,6 +3783,37 @@ mod tests {
         );
         // No other map has handles.
         assert!(!canvas(&super::tests::view()).contains("graph-map-more"));
+    }
+    #[test]
+    fn a_map_without_tests_says_what_it_leaves_out() {
+        let mut view = super::tests::view();
+        let whole = summary(&view);
+        assert_eq!(left_out(&view), "");
+        view["tests"] = json!({"files": 397, "inside": 1208});
+        assert_eq!(
+            summary(&view),
+            format!("{whole} · without 397 test files and 1,208 tests inside other files")
+        );
+        view["tests"] = json!({"files": 1, "inside": 0});
+        assert_eq!(summary(&view), format!("{whole} · without 1 test file"));
+        view["tests"] = json!({"files": 0, "inside": 1});
+        assert_eq!(
+            summary(&view),
+            format!("{whole} · without 1 test inside its files")
+        );
+        view["tests"] = json!({"files": 0, "inside": 0});
+        assert_eq!(
+            summary(&view),
+            format!("{whole} · no tests found to leave out")
+        );
+        // A change, an opened file and followed links say it as a folder does.
+        for mut other in [change(), file(), trail()] {
+            let whole = summary(&other);
+            other["tests"] = json!({"files": 2, "inside": 0});
+            assert_eq!(summary(&other), format!("{whole} · without 2 test files"));
+        }
+        // A map begins with its tests, until the viewer chose otherwise.
+        assert_eq!(fresh("work")["notests"], false);
     }
     #[test]
     fn the_side_panel_offers_to_follow_links_and_tells_a_followed_place() {

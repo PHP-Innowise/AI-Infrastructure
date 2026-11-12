@@ -1779,6 +1779,19 @@ tells the files that use the change from the files it uses. A box that no link i
 the picture touches has no colour. The legend under the map shows both colours;
 they were chosen to stay apart for colour-blind readers in both themes.
 
+**Without tests** leaves the tests out of every picture: the folders, an opened
+file, followed links and a change. A file is a test by where it lies or how it is
+named, by the conventions of the common languages: a folder of tests or of what
+tests are fed with (`tests/`, `__tests__/`, `spec/`, `fixtures/`, `App.Tests/`), or
+a name such as `CartTest.php`, `cart.test.ts`, `cart.spec.js`, `test_cart.py`,
+`cart_test.go` and `tests.rs`. In a Rust source the tests inside it go too: an item
+under `#[cfg(test)]`, most often `mod tests`, and a `#[test]` function. They are
+found in the file as it stands, so a source that cannot be read keeps them. The
+links of what is left are counted anew: a file no longer uses what only its tests
+used. The summary says how much is left out, and the choice is kept
+in this browser. With it on, a folder or a file of tests is not there to open or to
+follow, and the project opens in its place.
+
 **Follow links**, beside a selected folder or file, leaves the open folder and draws
 that one place with its links, step by step, wherever in the project they lead. The
 picture starts with what the place uses and what uses it. Every box then has a

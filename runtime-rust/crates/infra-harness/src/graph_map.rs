@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
-    path::Path,
-    sync::{Arc, Mutex},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
 /// Children of one folder drawn at once; the rest are reached by the filter.
@@ -43,6 +43,22 @@ const TOLD: usize = 30;
 pub const STEP: usize = 12;
 /// Places a picture of followed links holds.
 pub const FOLLOWED: usize = 60;
+/// Folders that hold tests, or what tests are fed with, in the common
+/// languages.
+const TEST_FOLDERS: &[&str] = &[
+    "test",
+    "tests",
+    "__tests__",
+    "spec",
+    "testdata",
+    "fixtures",
+    "__fixtures__",
+    "__mocks__",
+    "e2e",
+    "cypress",
+];
+/// The largest source that is read to find the tests inside it.
+const SOURCE_LIMIT: u64 = 4 * 1024 * 1024;
 /// Bytes of a symbol's name that are kept.
 const NAME_LIMIT: usize = 160;
 /// Relations that say where a symbol lives or why, not what it needs.
@@ -598,6 +614,13 @@ impl<'de> Visitor<'de> for Links<'_, '_> {
 /// the symbols of each file with the links between symbols.
 #[derive(Debug)]
 pub struct Index {
+    /// Where the files of the graph lie, to read a source for its tests.
+    root: PathBuf,
+    /// The same graph without its tests, once it was asked for.
+    plain: OnceLock<Arc<Index>>,
+    /// What a graph without tests leaves out: test files, and tests inside
+    /// the files it keeps.
+    left: (u64, u64),
     files: Vec<String>,
     pairs: Vec<(u32, u32, Pair)>,
     /// Ordered by file: the symbols of file `n` are `first[n]..first[n + 1]`.
@@ -668,6 +691,7 @@ impl Index {
     /// Reads a node-link graph without holding it in memory: nodes become a
     /// table from symbol to file, links are counted as they pass.
     pub fn read(source: impl std::io::Read, root: &Path) -> Result<Self> {
+        let base = root.to_path_buf();
         let root = root.to_string_lossy().replace('\\', "/");
         let mut builder = Builder {
             root: root.trim_end_matches('/'),
@@ -754,6 +778,9 @@ impl Index {
             })
             .collect();
         Ok(Self {
+            root: base,
+            plain: OnceLock::new(),
+            left: (0, 0),
             files: builder.files,
             pairs,
             symbols,
@@ -1023,6 +1050,442 @@ impl Index {
             })).collect::<Vec<_>>(),
             "focus": focus,
         })
+    }
+}
+/// Whether a folder is one of tests: by its name, or named for tests after
+/// something else, as `App.Tests`, `integration-tests`, `unit_tests` and
+/// `UnitTests` are.
+fn test_folder(part: &str) -> bool {
+    if TEST_FOLDERS.contains(&part) {
+        return true;
+    }
+    ["tests", "test"].iter().any(|end| {
+        let Some(at) = part.len().checked_sub(end.len()) else {
+            return false;
+        };
+        if !part.is_char_boundary(at) || !part[at..].eq_ignore_ascii_case(end) {
+            return false;
+        }
+        let before = &part[..at];
+        before.is_empty()
+            || before.ends_with(['.', '-', '_'])
+            || (part[at..].starts_with('T')
+                && before.ends_with(|letter: char| {
+                    letter.is_ascii_lowercase() || letter.is_ascii_digit()
+                }))
+    })
+}
+/// Whether a file is a test by where it lies or how it is named, by the
+/// conventions of the common languages: in a folder of tests or of what
+/// tests are fed with (`tests/`, `__tests__/`, `spec/`, `fixtures/`,
+/// `App.Tests/`), or named as `CartTest.php`, `cart.test.ts`,
+/// `cart.spec.js`, `test_cart.py`, `cart_test.go`, `conftest.py`,
+/// `tests.rs` and `cart_fixture.rs` are.
+fn is_test(path: &str) -> bool {
+    let (folders, name) = path.rsplit_once('/').unwrap_or(("", path));
+    if folders.split('/').any(test_folder) {
+        return true;
+    }
+    let mut dotted = name.split('.');
+    let stem = dotted.next().unwrap_or("");
+    let rest = dotted.collect::<Vec<_>>();
+    // Between the name and its extension: `cart.test.ts`, `app.e2e-spec.ts`.
+    let marked = rest.len() > 1
+        && rest[..rest.len() - 1].iter().any(|part| {
+            ["test", "tests", "spec", "specs", "cy", "e2e"].contains(part)
+                || part.ends_with("-spec")
+                || part.ends_with("-test")
+        });
+    marked
+        || ["test", "tests", "conftest", "fixture", "fixtures"].contains(&stem)
+        || stem.starts_with("test_")
+        || ["_test", "_tests", "_spec", "_fixture", "_fixtures"]
+            .iter()
+            .any(|end| stem.ends_with(end))
+        // A capitalised word that ends a name: `CartTest`, `UserFixtures`.
+        || ["TestCase", "Tests", "Test", "Fixtures", "Fixture"]
+            .iter()
+            .any(|end| {
+                stem.strip_suffix(end).is_some_and(|before| {
+                    before.ends_with(|letter: char| {
+                        letter.is_ascii_lowercase() || letter.is_ascii_digit()
+                    })
+                })
+            })
+}
+/// The attributes a line of Rust begins with, and what follows them on the
+/// line: whether one of them marks test code, and the rest of the line.
+/// `#[test]`, a test macro of a runtime or a crate (`#[tokio::test]`,
+/// `#[rstest]`) and `#[cfg(test)]` with its combinations mark test code;
+/// `#[cfg(not(test))]` and a feature that is merely named `test` do not.
+fn attributes(line: &str) -> (bool, &str) {
+    let mut rest = line.trim_start();
+    let mut marked = false;
+    while let Some(inner) = rest.strip_prefix("#[") {
+        // The attribute ends at the bracket that closes it; brackets inside
+        // a string do not count.
+        let (mut depth, mut quoted, mut end) = (1usize, false, None);
+        for (at, letter) in inner.char_indices() {
+            match letter {
+                '"' => quoted = !quoted,
+                '[' if !quoted => depth += 1,
+                ']' if !quoted => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(at);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            // It goes on over the next lines.
+            return (marked || marks_test(inner), "");
+        };
+        marked |= marks_test(&inner[..end]);
+        rest = inner[end + 1..].trim_start();
+    }
+    (marked, rest)
+}
+/// Whether the inside of a Rust attribute marks what follows as a test.
+fn marks_test(inner: &str) -> bool {
+    let named = inner
+        .find(|letter: char| !(letter.is_ascii_alphanumeric() || letter == '_' || letter == ':'))
+        .unwrap_or(inner.len());
+    let (name, told) = inner.split_at(named);
+    match name.rsplit("::").next().unwrap_or(name) {
+        "test" | "rstest" | "test_case" | "bench" | "wasm_bindgen_test" => true,
+        "cfg" => {
+            // What a string says is a name of a feature, not the word.
+            let mut quoted = false;
+            let plain = told
+                .chars()
+                .filter(|letter| {
+                    if *letter == '"' {
+                        quoted = !quoted;
+                    }
+                    !quoted && *letter != '"' && *letter != ' '
+                })
+                .collect::<String>();
+            !plain.contains("not(test")
+                && plain
+                    .split(|letter: char| !(letter.is_ascii_alphanumeric() || letter == '_'))
+                    .any(|word| word == "test")
+        }
+        _ => false,
+    }
+}
+/// Where the Rust item that begins at byte `from` ends: at the `;` that
+/// ends it, or at the brace that closes its body. What stands in a string,
+/// a character or a comment does not count: a test often holds a source of
+/// its own. The last byte of the text where the item is never closed.
+fn item_end(text: &str, from: usize) -> usize {
+    let bytes = text.as_bytes();
+    let (mut braces, mut groups) = (0usize, 0usize);
+    let mut at = from;
+    while at < bytes.len() {
+        let next = bytes.get(at + 1).copied();
+        match bytes[at] {
+            b'/' if next == Some(b'/') => {
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+                continue;
+            }
+            b'/' if next == Some(b'*') => {
+                // Block comments nest.
+                let mut depth = 1usize;
+                at += 2;
+                while at < bytes.len() && depth > 0 {
+                    match (bytes[at], bytes.get(at + 1)) {
+                        (b'/', Some(b'*')) => {
+                            depth += 1;
+                            at += 2;
+                        }
+                        (b'*', Some(b'/')) => {
+                            depth -= 1;
+                            at += 2;
+                        }
+                        _ => at += 1,
+                    }
+                }
+                continue;
+            }
+            b'"' => {
+                at += 1;
+                while at < bytes.len() && bytes[at] != b'"' {
+                    at += if bytes[at] == b'\\' { 2 } else { 1 };
+                }
+            }
+            // A raw string: `r"…"`, `r#"…"#`. It is no part of a name, and
+            // `r#name` is a name.
+            b'r' if at == 0
+                || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_') =>
+            {
+                let hashes = bytes[at + 1..]
+                    .iter()
+                    .take_while(|byte| **byte == b'#')
+                    .count();
+                if bytes.get(at + 1 + hashes) == Some(&b'"') {
+                    let mut close = at + 2 + hashes;
+                    while close < bytes.len()
+                        && !(bytes[close] == b'"'
+                            && bytes[close + 1..]
+                                .iter()
+                                .take(hashes)
+                                .filter(|byte| **byte == b'#')
+                                .count()
+                                == hashes)
+                    {
+                        close += 1;
+                    }
+                    at = close + hashes;
+                }
+            }
+            b'\'' => {
+                if next == Some(b'\\') {
+                    // An escaped character: to the quote that closes it.
+                    at += 3;
+                    while at < bytes.len() && bytes[at] != b'\'' {
+                        at += 1;
+                    }
+                } else {
+                    // One character between quotes; else a lifetime.
+                    let wide = match next {
+                        Some(byte) if byte >= 0xf0 => 4,
+                        Some(byte) if byte >= 0xe0 => 3,
+                        Some(byte) if byte >= 0xc0 => 2,
+                        _ => 1,
+                    };
+                    if bytes.get(at + 1 + wide) == Some(&b'\'') {
+                        at += 1 + wide;
+                    }
+                }
+            }
+            b'{' => braces += 1,
+            b'}' => {
+                braces = braces.saturating_sub(1);
+                if braces == 0 {
+                    return at;
+                }
+            }
+            b'(' | b'[' => groups += 1,
+            b')' | b']' => groups = groups.saturating_sub(1),
+            b';' if braces == 0 && groups == 0 => return at,
+            _ => {}
+        }
+        at += 1;
+    }
+    bytes.len().saturating_sub(1)
+}
+/// The runs of lines of a Rust source that are tests: an item marked as
+/// one, most often `#[cfg(test)] mod tests { … }` or a `#[test]` function,
+/// from its attribute to where it ends. Lines count from 1.
+fn rust_tests(text: &str) -> Vec<(u32, u32)> {
+    let rows = lines(text);
+    // Where each line begins, to tell the line of a place in the text.
+    let mut starts = Vec::with_capacity(rows.len());
+    let mut begun = 0;
+    for line in text.split_inclusive('\n') {
+        starts.push(begun);
+        begun += line.len();
+    }
+    let raw = text.lines().map(str::trim).collect::<Vec<_>>();
+    let mut spans = Vec::new();
+    // The line of the attribute that marked what comes next.
+    let mut marked: Option<usize> = None;
+    let mut at = 0;
+    while at < raw.len() {
+        let (marks, rest) = attributes(raw[at]);
+        if marks && marked.is_none() {
+            marked = Some(at);
+        }
+        // The item itself: what follows the attributes of a line, or a
+        // line of code. Comments and other attributes may stand between.
+        let item = if raw[at].starts_with("#[") {
+            rest
+        } else if rows[at].kind == Row::Code {
+            raw[at]
+        } else {
+            if rows[at].kind == Row::Closer {
+                marked = None;
+            }
+            ""
+        };
+        let Some(first) = marked.filter(|_| !item.is_empty()) else {
+            if !item.is_empty() {
+                marked = None;
+            }
+            at += 1;
+            continue;
+        };
+        marked = None;
+        // The item is a part of the text, so it says where it stands in it.
+        let from = item.as_ptr() as usize - text.as_ptr() as usize;
+        let close = item_end(text, from);
+        let end = starts
+            .partition_point(|start| *start <= close)
+            .saturating_sub(1)
+            .max(at);
+        spans.push((first as u32 + 1, end as u32 + 1));
+        at = end + 1;
+    }
+    spans
+}
+impl Index {
+    /// The same graph without its tests: without the files that are tests
+    /// by where they lie or how they are named, and, in a Rust source that
+    /// can be read, without the symbols of its test modules and test
+    /// functions. The links of what is left are counted anew, so a link
+    /// that only a test made is gone from its file too. It is made once and
+    /// kept with the graph.
+    pub fn without_tests(&self) -> Arc<Index> {
+        self.plain
+            .get_or_init(|| {
+                Arc::new(self.plain_with(&|path| {
+                    // A path of the graph is never followed out of the root.
+                    if path.split('/').any(|part| part == "..") {
+                        return None;
+                    }
+                    let file = self.root.join(path);
+                    std::fs::metadata(&file)
+                        .is_ok_and(|meta| meta.is_file() && meta.len() <= SOURCE_LIMIT)
+                        .then(|| std::fs::read_to_string(&file).ok())
+                        .flatten()
+                }))
+            })
+            .clone()
+    }
+    /// What a graph without tests leaves out: how many files that are
+    /// tests, and how many tests inside the files it keeps.
+    pub fn left_out(&self) -> (u64, u64) {
+        self.left
+    }
+    /// The graph without its tests, with `source` giving the text of a file
+    /// where it can be read.
+    fn plain_with(&self, source: &dyn Fn(&str) -> Option<String>) -> Index {
+        let gone = self
+            .files
+            .iter()
+            .map(|path| is_test(path))
+            .collect::<Vec<_>>();
+        // A symbol goes with its file, with the test it is, or with the
+        // test that holds it.
+        let mut out = vec![false; self.symbols.len()];
+        for (file, path) in self.files.iter().enumerate() {
+            let own = self.first[file] as usize..self.first[file + 1] as usize;
+            if gone[file] {
+                out[own].fill(true);
+                continue;
+            }
+            if !path.ends_with(".rs") || own.is_empty() {
+                continue;
+            }
+            let spans = source(path)
+                .map(|text| rust_tests(&text))
+                .unwrap_or_default();
+            for at in own {
+                let line = self.symbols[at].line;
+                out[at] = line > 0 && spans.iter().any(|(from, to)| (*from..=*to).contains(&line));
+            }
+        }
+        for at in 0..self.symbols.len() {
+            let mut holder = self.symbols[at].parent;
+            // A graph may hold two symbols in each other; the walk is short.
+            for _ in 0..32 {
+                if holder == NONE || out[at] {
+                    break;
+                }
+                out[at] = out[holder as usize];
+                holder = self.symbols[holder as usize].parent;
+            }
+        }
+        let mut files = Vec::new();
+        let mut file_at = vec![NONE; self.files.len()];
+        for (file, path) in self.files.iter().enumerate() {
+            if !gone[file] {
+                file_at[file] = files.len() as u32;
+                files.push(path.clone());
+            }
+        }
+        let mut symbols = Vec::new();
+        let mut symbol_at = vec![NONE; self.symbols.len()];
+        let mut first = vec![0u32; files.len() + 1];
+        let mut inside = 0u64;
+        for (at, symbol) in self.symbols.iter().enumerate() {
+            if out[at] {
+                inside += u64::from(!gone[symbol.file as usize]);
+                continue;
+            }
+            symbol_at[at] = symbols.len() as u32;
+            first[file_at[symbol.file as usize] as usize + 1] += 1;
+            symbols.push(*symbol);
+        }
+        for file in 0..files.len() {
+            first[file + 1] += first[file];
+        }
+        for symbol in &mut symbols {
+            symbol.file = file_at[symbol.file as usize];
+            if symbol.parent != NONE {
+                symbol.parent = symbol_at[symbol.parent as usize];
+            }
+        }
+        let uses = self
+            .uses
+            .iter()
+            .filter(|(from, to, ..)| !out[*from as usize] && !out[*to as usize])
+            .map(|(from, to, kind, guessed)| {
+                (
+                    symbol_at[*from as usize],
+                    symbol_at[*to as usize],
+                    *kind,
+                    *guessed,
+                )
+            })
+            .collect::<Vec<Use>>();
+        // Between files only what crosses a file boundary counts, as when
+        // the graph was read.
+        let mut pairs: HashMap<(u32, u32), Pair> = HashMap::new();
+        for (from, to, kind, guessed) in &uses {
+            let (from, to) = (symbols[*from as usize].file, symbols[*to as usize].file);
+            if from == to {
+                continue;
+            }
+            let pair = pairs.entry((from, to)).or_default();
+            if *guessed {
+                pair.guessed += 1;
+            } else {
+                pair.read += 1;
+            }
+            match pair.kinds.iter_mut().find(|(known, _)| known == kind) {
+                Some((_, count)) => *count += 1,
+                None => pair.kinds.push((*kind, 1)),
+            }
+        }
+        let mut pairs = pairs
+            .into_iter()
+            .map(|((from, to), pair)| (from, to, pair))
+            .collect::<Vec<_>>();
+        pairs.sort_by_key(|(from, to, _)| (*from, *to));
+        let dropped = self.symbols.len() - symbols.len();
+        Index {
+            root: self.root.clone(),
+            plain: OnceLock::new(),
+            left: (gone.iter().filter(|gone| **gone).count() as u64, inside),
+            files,
+            pairs,
+            symbols,
+            first,
+            names: self.names.clone(),
+            nodes: self.nodes.saturating_sub(dropped as u64),
+            links: self
+                .links
+                .saturating_sub((self.uses.len() - uses.len()) as u64),
+            uses,
+            kinds: self.kinds.clone(),
+            unplaced: self.unplaced,
+        }
     }
 }
 /// A place of the change map: one changed file, a folder of them, or a file
@@ -3522,6 +3985,253 @@ mod tests {
             )
             .unwrap();
         assert_eq!(absent["focus"], Value::Null);
+    }
+    #[test]
+    fn a_test_is_told_by_where_a_file_lies_and_how_it_is_named() {
+        for path in [
+            "tests/CartTest.php",
+            "tests/Feature/checkout.php",
+            "src/Cart/Tests/CartHelper.php",
+            "packages/cart/__tests__/total.js",
+            "spec/models/cart_spec.rb",
+            "internal/cart/testdata/order.go",
+            "src/DataFixtures/UserFixtures.php",
+            "database/fixtures/users.php",
+            "web/__mocks__/api.ts",
+            "e2e/login.ts",
+            "cypress/support/commands.js",
+            "App.Tests/CartTests.cs",
+            "services/integration-tests/run.py",
+            "crates/core/unit_tests/mod.rs",
+            "src/UnitTests/Cart.cs",
+            "src/Cart/CartTest.php",
+            "src/Cart/CartTests.cs",
+            "src/Cart/CartTestCase.php",
+            "web/cart.test.tsx",
+            "web/cart.spec.js",
+            "api/app.e2e-spec.ts",
+            "web/cart.cy.ts",
+            "shop/test_cart.py",
+            "shop/cart_test.py",
+            "shop/conftest.py",
+            "cart/cart_test.go",
+            "src/cart_tests.rs",
+            "src/cart/tests.rs",
+            "src/cart_fixture.rs",
+            "lib/cart_spec.rb",
+        ] {
+            assert!(is_test(path), "{path}");
+        }
+        for path in [
+            "src/Cart/Cart.php",
+            "src/Latest/News.php",
+            "src/Contest/Entry.php",
+            "src/Contest.php",
+            "src/Attest.php",
+            "src/LatestNews.php",
+            "src/Protest/Vote.php",
+            "specs/MANIFEST.md",
+            "Task/Epics/Epic-01_Users_SPEC.md",
+            "docs/testing.md",
+            "web/jquery.min.js",
+            "web/vite.config.ts",
+            "src/Inspector.php",
+            "src/TestimonialController.php",
+            "src/fixture_loader.rs",
+            "README.md",
+            "",
+        ] {
+            assert!(!is_test(path), "{path}");
+        }
+    }
+    /// A Rust source with what a build keeps and what only tests use.
+    const SOURCE: &str = "\
+pub fn run() -> u32 {
+    helper() + tool()
+}
+
+fn helper() -> u32 {
+    1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Checks the sum.
+    #[test]
+    fn checks() {
+        assert_eq!(run(), probe());
+    }
+
+    struct Fake;
+    impl Fake {
+        fn new() -> Self {
+            Fake
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn live() {}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn standalone(
+    seed: u32,
+) {
+    run();
+}
+
+#[cfg(test)] mod extra;
+";
+    #[test]
+    fn the_tests_inside_a_rust_source_are_its_marked_items() {
+        // The module from its attribute to its closing brace, the function
+        // whose signature runs over lines, and the module on one line.
+        assert_eq!(rust_tests(SOURCE), [(9, 25), (30, 36), (38, 38)]);
+        assert_eq!(rust_tests("fn plain() {}\n"), Vec::<(u32, u32)>::new());
+        assert_eq!(rust_tests(""), Vec::<(u32, u32)>::new());
+        // An item that is never closed runs to the end of the text.
+        assert_eq!(rust_tests("#[test]\nfn open() {\n    run();\n"), [(1, 3)]);
+        // A test often holds a source of its own: a brace in a string, in a
+        // raw string, in a character or in a comment is not the module's.
+        let holding = "#[cfg(test)]\nmod tests {\n    const A: &str = \"\n}\n\";\n    const B: &str = r#\"\n}\"#;\n    const C: char = '}';\n    const D: char = '\\'';\n    // }\n    /* } /* } */ } */\n    fn f<'a>(x: &'a [u8; 2]) -> &'a [u8; 2] { x }\n}\nfn after() {}\n";
+        assert_eq!(rust_tests(holding), [(1, 13)]);
+        assert_eq!(item_end("fn a() { b(\"}\"); }", 0), 17);
+        assert_eq!(item_end("static X: [u8; 2] = [1, 2]; fn b() {}", 0), 26);
+        assert_eq!(item_end("mod r#type;", 0), 10);
+        for attribute in [
+            "test",
+            "tokio::test",
+            "tokio::test(flavor = \"multi_thread\")",
+            "rstest",
+            "test_case(1, 2)",
+            "bench",
+            "wasm_bindgen_test",
+            "cfg(test)",
+            "cfg(all(test, feature = \"slow\"))",
+            "cfg(any(test, debug_assertions))",
+        ] {
+            assert!(marks_test(attribute), "{attribute}");
+        }
+        for attribute in [
+            "cfg(not(test))",
+            "cfg(all(not(test), unix))",
+            "cfg(feature = \"test\")",
+            "cfg(feature = \"test-utils\")",
+            "cfg_attr(test, derive(Debug))",
+            "derive(Debug)",
+            "testing",
+            "allow(dead_code)",
+            "",
+        ] {
+            assert!(!marks_test(attribute), "{attribute}");
+        }
+        assert_eq!(attributes("#[cfg(test)] mod extra;"), (true, "mod extra;"));
+        assert_eq!(
+            attributes("#[doc = \"a ] b\"] #[test] fn x() {}"),
+            (true, "fn x() {}")
+        );
+        assert_eq!(attributes("    fn plain() {}"), (false, "fn plain() {}"));
+        assert_eq!(attributes("#[allow("), (false, ""));
+    }
+    #[test]
+    fn a_graph_without_tests_drops_test_files_and_counts_its_links_anew() {
+        let index = shop();
+        let plain = index.plain_with(&|_| None);
+        // The one test file goes, with the two links it made.
+        assert_eq!(plain.left_out(), (1, 0));
+        assert_eq!(index.left_out(), (0, 0));
+        assert_eq!(plain.files.len(), 5);
+        assert!(!plain.files.iter().any(|file| file.starts_with("tests/")));
+        let view = plain.view("shop", "", None, false, "");
+        assert_eq!(
+            view["totals"],
+            json!({"files": 5, "symbols": 8, "relations": 10, "links": 4, "read": 2, "guessed": 2, "unplaced": 1})
+        );
+        assert_eq!(
+            rows(&view, "nodes"),
+            [
+                "src folder files=4 out=0 in=0 within=4",
+                "README.md file files=1 out=0 in=0 within=0"
+            ]
+        );
+        // What is left reads as it did: the folder of the cart, its two links.
+        let folder = plain.view("shop", "src/Cart", None, false, "");
+        assert_eq!(
+            rows(&folder, "edges"),
+            ["src/Cart/Cart.php -> src/Cart/Price.php 2/1"]
+        );
+        // A folder of tests is not there to open: the project opens.
+        assert_eq!(plain.view("shop", "tests", None, false, "")["scope"], "");
+        assert_eq!(
+            index.view("shop", "tests", None, false, "")["scope"],
+            "tests"
+        );
+        assert!(
+            plain
+                .follow("shop", "tests/CartTest.php", &[], &[], &[], None, false)
+                .is_none()
+        );
+        // The graph without tests is made once and kept.
+        assert!(Arc::ptr_eq(&index.without_tests(), &index.without_tests()));
+        assert_eq!(index.without_tests().left_out(), (1, 0));
+    }
+    #[test]
+    fn a_graph_without_tests_drops_the_tests_inside_a_rust_source() {
+        let index = index(json!({
+            "directed": false,
+            "nodes": [
+                {"id": "run", "label": "run()", "source_file": "src/lib.rs", "source_location": "L1"},
+                {"id": "helper", "label": "helper()", "source_file": "src/lib.rs", "source_location": "L5"},
+                {"id": "checks", "label": "checks()", "source_file": "src/lib.rs", "source_location": "L15"},
+                {"id": "fake", "label": "Fake", "source_file": "src/lib.rs", "source_location": "L19"},
+                {"id": "fake_new", "label": ".new()", "source_file": "src/lib.rs"},
+                {"id": "live", "label": "live()", "source_file": "src/lib.rs", "source_location": "L28"},
+                {"id": "standalone", "label": "standalone()", "source_file": "src/lib.rs", "source_location": "L32"},
+                {"id": "tool", "label": "tool()", "source_file": "src/util.rs", "source_location": "L1"},
+                {"id": "probe", "label": "probe()", "source_file": "src/util.rs", "source_location": "L5"}
+            ],
+            "links": [
+                {"source": "run", "target": "helper", "relation": "calls", "confidence": "EXTRACTED", "source_file": "src/lib.rs"},
+                {"source": "run", "target": "tool", "relation": "calls", "confidence": "EXTRACTED", "source_file": "src/lib.rs"},
+                {"source": "live", "target": "tool", "relation": "calls", "confidence": "EXTRACTED", "source_file": "src/lib.rs"},
+                {"source": "checks", "target": "run", "relation": "calls", "confidence": "EXTRACTED", "source_file": "src/lib.rs"},
+                {"source": "checks", "target": "probe", "relation": "calls", "confidence": "EXTRACTED", "source_file": "src/lib.rs"},
+                {"source": "standalone", "target": "run", "relation": "calls", "confidence": "INFERRED", "source_file": "src/lib.rs"},
+                {"source": "fake", "target": "fake_new", "relation": "method", "confidence": "EXTRACTED", "source_file": "src/lib.rs"}
+            ]
+        }));
+        let edges = |index: &Index| rows(&index.view("lib", "src", None, false, ""), "edges");
+        assert_eq!(edges(&index), ["src/lib.rs -> src/util.rs 3/0"]);
+        // A source that cannot be read keeps everything it holds.
+        let unread = index.plain_with(&|_| None);
+        assert_eq!(unread.left_out(), (0, 0));
+        assert_eq!(edges(&unread), ["src/lib.rs -> src/util.rs 3/0"]);
+        // Read, it loses the test, the test's type with its method, which
+        // has no line of its own, and the test outside the module; the link
+        // only the test made is gone from the file.
+        let plain = index.plain_with(&|path| (path == "src/lib.rs").then(|| SOURCE.to_owned()));
+        assert_eq!(plain.left_out(), (0, 4));
+        assert_eq!(edges(&plain), ["src/lib.rs -> src/util.rs 2/0"]);
+        let opened = plain.view("lib", "src/lib.rs", None, false, "");
+        assert_eq!(opened["mode"], "file");
+        let names = opened["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["symbol"] == true)
+            .map(|node| node["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["run()", "helper()", "live()"]);
+        assert_eq!(
+            (&opened["file"]["functions"], &opened["file"]["types"]),
+            (&json!(3), &json!(0))
+        );
+        // probe() is used by nothing that is left.
+        let util = plain.view("lib", "src/util.rs", None, false, "");
+        assert_eq!(util["file"]["used_by"], 1);
     }
     fn store() -> Index {
         let cart = "src/Cart/Cart.php";

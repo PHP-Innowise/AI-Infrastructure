@@ -850,6 +850,22 @@ fn end(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
+/// What of a graph a request for the map asks to see.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Shown<'a> {
+    /// The folder or the file that is open; the project where it is empty.
+    pub scope: &'a str,
+    /// The place whose two sides are listed.
+    pub focus: Option<&'a str>,
+    /// Only the links the tool read from the code.
+    pub certain: bool,
+    /// Only the names that hold this.
+    pub filter: &'a str,
+    /// A place whose links are followed step by step, instead of a folder.
+    pub followed: Option<&'a Followed>,
+    /// Without tests: the files that are tests, and the tests inside others.
+    pub notests: bool,
+}
 /// How many unfolded places a request may name on one side, and in how
 /// many bytes.
 const UNFOLDED: usize = 256;
@@ -957,26 +973,37 @@ impl Graphs {
         })
     }
     /// One folder of the published graph's dependency map, or, with a
-    /// target, the map of what that target changed. With `followed`, the
-    /// links of one place step by step instead, on the same graph and with
-    /// the same change marked; a place the graph does not know falls back
-    /// to the folder. Reading a graph of a large project takes seconds, so
-    /// callers keep this off the runtime.
-    #[allow(clippy::too_many_arguments)]
-    pub fn map(
-        &self,
-        project: &str,
-        target: Option<&Target>,
-        scope: &str,
-        focus: Option<&str>,
-        certain: bool,
-        filter: &str,
-        followed: Option<&Followed>,
-    ) -> Result<Value> {
+    /// target, the map of what that target changed. With a place followed,
+    /// the links of that place step by step instead, on the same graph and
+    /// with the same change marked; a place the graph does not know falls
+    /// back to the folder. Without tests, all of it is read from the graph
+    /// as it is without them. Reading a graph of a large project takes
+    /// seconds, so callers keep this off the runtime.
+    pub fn map(&self, project: &str, target: Option<&Target>, shown: &Shown) -> Result<Value> {
         let record = self.store.project(project)?;
         let root = PathBuf::from(record["path"].as_str().unwrap_or(""));
         let name = record["name"].as_str().unwrap_or("project");
         let built = &self.setting(project)?["built"];
+        let Shown {
+            scope,
+            focus,
+            certain,
+            filter,
+            followed,
+            notests,
+        } = *shown;
+        // The graph as it was read, or as it is without its tests, with how
+        // much that leaves out.
+        let left = std::cell::Cell::new(None);
+        let asked = |index: Arc<crate::graph_map::Index>| {
+            if notests {
+                let plain = index.without_tests();
+                left.set(Some(plain.left_out()));
+                plain
+            } else {
+                index
+            }
+        };
         // The links followed from a place, where one is followed and the
         // graph knows it.
         let follow = |index: &crate::graph_map::Index, changed: &[(String, char)]| {
@@ -992,14 +1019,25 @@ impl Graphs {
                 )
             })
         };
+        // What every answer says of the tests: whether they are left out,
+        // and how many that is.
+        let told = |view: &mut Value| {
+            view["notests"] = json!(notests);
+            if let Some((files, inside)) = left.get() {
+                view["tests"] = json!({"files": files, "inside": inside});
+            }
+        };
         let Some(target) = target else {
-            let index = self
-                .maps
-                .index(project, &live(&self.store.state, project), &root)?;
+            let index = asked(self.maps.index(
+                project,
+                &live(&self.store.state, project),
+                &root,
+            )?);
             let mut view = follow(&index, &[])
                 .unwrap_or_else(|| index.view(name, scope, focus, certain, filter));
             view["project_id"] = json!(project);
             view["built"] = json!({"commit": built["commit"], "at": built["at"]});
+            told(&mut view);
             return Ok(view);
         };
         let resolved = match target {
@@ -1032,7 +1070,7 @@ impl Graphs {
         }
         let mut view = match &found.graph {
             Some((kept, graph, base)) => {
-                let index = self.maps.index(kept, graph, base)?;
+                let index = asked(self.maps.index(kept, graph, base)?);
                 if let Some(view) = follow(&index, &changed) {
                     view
                 } else {
@@ -1063,7 +1101,7 @@ impl Graphs {
             // gives a first picture: the files changed are the commit's, the
             // links are those the checkout's files have.
             None if published.is_file() => {
-                let index = self.maps.index(project, &published, &root)?;
+                let index = asked(self.maps.index(project, &published, &root)?);
                 let mut view = follow(&index, &changed).unwrap_or_else(|| {
                     index.changes(name, &changed, scope, focus, certain, filter)
                 });
@@ -1083,6 +1121,7 @@ impl Graphs {
             view["rebuilding"] = json!(lock(&self.jobs)?.contains_key(project));
             view["built"] = json!({"commit": built["commit"], "at": built["at"]});
         }
+        told(&mut view);
         Ok(view)
     }
     fn setting(&self, project: &str) -> Result<Value> {
@@ -2041,11 +2080,12 @@ impl Domain for Graphs {
                             .ok_or_else(|| HarnessError::invalid("Invalid code graph place."))
                     };
                     let (scope, focus, filter) = (text("scope")?, text("focus")?, text("filter")?);
-                    let certain = match query["certain"].as_str() {
-                        None | Some("0") => false,
-                        Some("1") => true,
-                        Some(_) => return Err(HarnessError::invalid("Invalid graph filter.")),
+                    let flag = |name: &str| match query[name].as_str() {
+                        None | Some("0") => Ok(false),
+                        Some("1") => Ok(true),
+                        Some(_) => Err(HarnessError::invalid("Invalid graph filter.")),
                     };
+                    let (certain, notests) = (flag("certain")?, flag("notests")?);
                     let target = match query["target"].as_str() {
                         None | Some("") => None,
                         Some(text) => Some(Target::parse(text)?),
@@ -2060,15 +2100,17 @@ impl Domain for Graphs {
                     })?;
                     let project = project.to_owned();
                     tokio::task::spawn_blocking(move || {
-                        let focus = (!focus.is_empty()).then_some(focus.as_str());
                         me.map(
                             &project,
                             target.as_ref(),
-                            &scope,
-                            focus,
-                            certain,
-                            &filter,
-                            followed.as_ref(),
+                            &Shown {
+                                scope: &scope,
+                                focus: (!focus.is_empty()).then_some(focus.as_str()),
+                                certain,
+                                filter: &filter,
+                                followed: followed.as_ref(),
+                                notests,
+                            },
                         )
                     })
                     .await
@@ -2126,7 +2168,7 @@ mod tests {
             .find(|route| route.operation == "graph.map")
             .unwrap();
         for part in [
-            "scope", "focus", "certain", "filter", "target", "follow", "out", "into",
+            "scope", "focus", "certain", "filter", "target", "follow", "out", "into", "notests",
         ] {
             assert!(route.query.contains(&part), "{part}");
         }
@@ -2488,7 +2530,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 loop {
                     let view = self
                         .graphs
-                        .map(&self.project, Some(target), "", None, false, "", None)
+                        .map(&self.project, Some(target), &Shown::default())
                         .unwrap();
                     if view["state"] != "building" {
                         return view;
@@ -2676,7 +2718,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert!(
                 fixture
                     .graphs
-                    .map(&fixture.project, Some(&target), "", None, false, "", None)
+                    .map(&fixture.project, Some(&target), &Shown::default())
                     .is_err()
             );
             let before = fixture.said(&["status", "--porcelain=v1"]);
@@ -2743,7 +2785,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             let map = |target: &Target| {
                 fixture
                     .graphs
-                    .map(&fixture.project, Some(target), "", None, false, "", None)
+                    .map(&fixture.project, Some(target), &Shown::default())
                     .unwrap()
             };
             let work = map(&Target::Work);
@@ -2778,11 +2820,10 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 .map(
                     &fixture.project,
                     Some(&Target::Work),
-                    "cart.php",
-                    None,
-                    false,
-                    "",
-                    None,
+                    &Shown {
+                        scope: "cart.php",
+                        ..Shown::default()
+                    },
                 )
                 .unwrap();
             assert_eq!(
@@ -2823,11 +2864,10 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                     .map(
                         &fixture.project,
                         Some(&Target::Work),
-                        "",
-                        None,
-                        false,
-                        "",
-                        Some(&followed),
+                        &Shown {
+                            followed: Some(&followed),
+                            ..Shown::default()
+                        },
                     )
                     .unwrap()
             };
@@ -2854,6 +2894,28 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 .collect::<Vec<_>>();
             assert_eq!(places, ["cart.php M", "price.php M", "order.php A"]);
             assert_eq!(follow("nowhere.php")["mode"], "changes");
+            // Every answer says whether the tests are left out, and where
+            // they are, how many that is. This project has none.
+            assert_eq!(
+                (&work["notests"], &work["tests"]),
+                (&json!(false), &Value::Null)
+            );
+            let plain = fixture
+                .graphs
+                .map(
+                    &fixture.project,
+                    Some(&Target::Work),
+                    &Shown {
+                        notests: true,
+                        ..Shown::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                (&plain["notests"], &plain["tests"]),
+                (&json!(true), &json!({"files": 0, "inside": 0}))
+            );
+            assert_eq!(drawn(&plain), drawn(&work));
             // What the change did to the file is read with it. The graph of
             // this fixture gives its symbols no line, so a changed line
             // marks none of them, and a new file is new throughout.
@@ -2866,11 +2928,10 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 .map(
                     &fixture.project,
                     Some(&Target::Work),
-                    "order.php",
-                    None,
-                    false,
-                    "",
-                    None,
+                    &Shown {
+                        scope: "order.php",
+                        ..Shown::default()
+                    },
                 )
                 .unwrap();
             assert_eq!(
@@ -2883,11 +2944,10 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 .map(
                     &fixture.project,
                     Some(&Target::Uncommitted),
-                    "cart.php",
-                    None,
-                    false,
-                    "",
-                    None,
+                    &Shown {
+                        scope: "cart.php",
+                        ..Shown::default()
+                    },
                 )
                 .unwrap();
             assert_eq!(
@@ -2966,7 +3026,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert_eq!(chosen["chosen"]["name"], long[..12]);
             let view = fixture
                 .graphs
-                .map(&fixture.project, Some(&target), "", None, false, "", None)
+                .map(&fixture.project, Some(&target), &Shown::default())
                 .unwrap();
             // The files are the commit's, the links the checkout's: the
             // cart uses the price in the project's own graph.
@@ -3022,7 +3082,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert!(
                 fixture
                     .graphs
-                    .map(&fixture.project, Some(&target), "", None, false, "", None)
+                    .map(&fixture.project, Some(&target), &Shown::default())
                     .is_err()
             );
         }
