@@ -1064,23 +1064,28 @@ impl Graphs {
             }
         };
         // The links followed from a place, where one is followed and the
-        // graph knows it; or, before that, one link looked into.
-        let follow = |index: &crate::graph_map::Index, changed: &[(String, char)]| {
-            if let Some((from, to)) = link {
-                return Some(index.link(from, to, certain));
-            }
-            followed.and_then(|asked| {
-                index.follow(
-                    name,
-                    &asked.root,
-                    &asked.out,
-                    &asked.into,
-                    changed,
-                    focus,
-                    certain,
-                )
-            })
-        };
+        // graph knows it; or, before that, one link looked into. `edited`
+        // gives what the chosen change did to a file, where that can be told.
+        let follow =
+            |index: &crate::graph_map::Index,
+             changed: &[(String, char)],
+             edited: &dyn Fn(&str) -> Option<crate::graph_map::Edited>| {
+                if let Some((from, to)) = link {
+                    return Some(index.link(from, to, certain));
+                }
+                followed.and_then(|asked| {
+                    index.follow_with(
+                        name,
+                        &asked.root,
+                        &asked.out,
+                        &asked.into,
+                        changed,
+                        edited,
+                        focus,
+                        certain,
+                    )
+                })
+            };
         // What every answer says of the tests: whether they are left out,
         // and how many that is.
         let told = |view: &mut Value| {
@@ -1095,7 +1100,7 @@ impl Graphs {
                 &live(&self.store.state, project),
                 &root,
             )?);
-            let mut view = follow(&index, &[])
+            let mut view = follow(&index, &[], &|_| None)
                 .unwrap_or_else(|| index.view_with(name, scope, spread, focus, certain, filter));
             view["project_id"] = json!(project);
             view["built"] = json!({"commit": built["commit"], "at": built["at"]});
@@ -1133,7 +1138,16 @@ impl Graphs {
         let mut view = match &found.graph {
             Some((kept, graph, base)) => {
                 let index = asked(self.maps.index(kept, graph, base)?);
-                if let Some(view) = follow(&index, &changed) {
+                // The symbols a change touched are told by line, and the
+                // lines of a graph older than the files are not the files'
+                // own: then links are followed without those marks.
+                let touched = |path: &str| {
+                    if stale {
+                        return None;
+                    }
+                    graph_changes::edited(&root, &resolved, path).ok().flatten()
+                };
+                if let Some(view) = follow(&index, &changed, &touched) {
                     view
                 } else {
                     // An opened file marks the symbols the change touched.
@@ -1164,7 +1178,7 @@ impl Graphs {
             // links are those the checkout's files have.
             None if published.is_file() => {
                 let index = asked(self.maps.index(project, &published, &root)?);
-                let mut view = follow(&index, &changed).unwrap_or_else(|| {
+                let mut view = follow(&index, &changed, &|_| None).unwrap_or_else(|| {
                     index.changes(name, &changed, scope, focus, certain, filter)
                 });
                 view["preliminary"] = json!(true);
@@ -3254,6 +3268,56 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 .collect::<Vec<_>>();
             assert_eq!(places, ["cart.php M", "price.php M", "order.php A"]);
             assert_eq!(follow("nowhere.php")["mode"], "changes");
+            // The links of a symbol are followed among symbols, and what
+            // the change did to each is read with them. This fixture gives
+            // its symbols neither a name nor a line: one is told by its
+            // file alone, that of the new file is new, and a changed line
+            // marks none.
+            let traced = follow("order.php#");
+            assert_eq!(
+                (
+                    traced["mode"].as_str(),
+                    traced["followed"]["symbol"].as_bool(),
+                    traced["scope"].as_str(),
+                    traced["chosen"]["kind"].as_str()
+                ),
+                (Some("follow"), Some(true), Some("order.php"), Some("work"))
+            );
+            let symbols = traced["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| {
+                    format!(
+                        "{} {} {}",
+                        node["path"].as_str().unwrap(),
+                        node["changed"],
+                        node["status"].as_str().unwrap_or("-")
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(symbols, ["order.php# 1 A", "cart.php# 0 -"]);
+            // On the whole project the same links carry no mark.
+            let whole = fixture
+                .graphs
+                .map(
+                    &fixture.project,
+                    None,
+                    &Shown {
+                        followed: Some(&Followed {
+                            root: "order.php#".to_owned(),
+                            out: vec!["order.php#".to_owned()],
+                            into: vec![],
+                        }),
+                        ..Shown::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                (&whole["mode"], &whole["nodes"][0]["changed"]),
+                (&json!("follow"), &json!(0))
+            );
+            assert_eq!(whole["nodes"].as_array().unwrap().len(), 2);
             // Every answer says whether the tests are left out, and where
             // they are, how many that is. This project has none.
             assert_eq!(

@@ -24,6 +24,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Follow the links of a class, a method or a function in the Harness
+  dependency map. **Follow links** beside a selected symbol of an opened file
+  draws what it uses and what uses it among symbols, in whatever files they
+  lie, and unfolds either side of any box twelve at a time, as it does for
+  files and folders. A selected box lists both sides with the file of each,
+  leads to its file and starts again from itself. Inside a chosen change the
+  symbols the change touched are marked in every file the picture reaches.
+
 - Search the whole project in the Harness dependency map. The field at the top
   of the map finds a folder, a file or a name anywhere in the graph, whatever
   folder is open: what is called that most exactly comes first, further words

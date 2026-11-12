@@ -17,9 +17,11 @@ use crate::{HarnessError, Result, graph_crates::Crates};
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::{Value, json};
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
@@ -613,6 +615,18 @@ impl<'de> Visitor<'de> for Links<'_, '_> {
         Ok(())
     }
 }
+/// The links of a graph by the symbol at each end, to walk from one symbol
+/// to those it uses and to those that use it without reading every link:
+/// the numbers of the links, in the order of what uses and in the order of
+/// what is used. Those of symbol `n` are `out[out_first[n]..out_first[n + 1]]`
+/// and `into[into_first[n]..into_first[n + 1]]`.
+#[derive(Debug)]
+struct Wires {
+    out: Vec<u32>,
+    out_first: Vec<u32>,
+    into: Vec<u32>,
+    into_first: Vec<u32>,
+}
 /// Files of a graph and the links between them, each pair counted once, and
 /// the symbols of each file with the links between symbols.
 #[derive(Debug)]
@@ -621,6 +635,8 @@ pub struct Index {
     root: PathBuf,
     /// The same graph without its tests, once it was asked for.
     plain: OnceLock<Arc<Index>>,
+    /// The links of each symbol, once the links of one were followed.
+    wires: OnceLock<Wires>,
     /// What a graph without tests leaves out: test files, and tests inside
     /// the files it keeps.
     left: (u64, u64),
@@ -818,6 +834,7 @@ impl Index {
         Ok(Self {
             root: base,
             plain: OnceLock::new(),
+            wires: OnceLock::new(),
             left: (0, 0),
             ruled,
             files: builder.files,
@@ -1797,6 +1814,7 @@ impl Index {
         Index {
             root: self.root.clone(),
             plain: OnceLock::new(),
+            wires: OnceLock::new(),
             left: (gone.iter().filter(|gone| **gone).count() as u64, inside),
             ruled,
             files,
@@ -2243,9 +2261,11 @@ impl Index {
     ///
     /// A file is followed among files. A folder is followed among what lies
     /// as deep as itself: the folders of that depth, and the files that lie
-    /// no deeper. `changed` marks the files of a chosen change, and `focus`
-    /// lists both sides of one place drawn. `None` where `root` names
-    /// nothing in the graph.
+    /// no deeper. A class, a method or a function, named as the picture of
+    /// its file selects it, is followed among symbols, as `trace` tells.
+    /// `changed` marks the files of a chosen change, and `focus` lists both
+    /// sides of one place drawn. `None` where `root` names nothing in the
+    /// graph.
     #[allow(clippy::too_many_arguments)]
     pub fn follow(
         &self,
@@ -2257,6 +2277,26 @@ impl Index {
         focus: Option<&str>,
         certain: bool,
     ) -> Option<Value> {
+        self.follow_with(project, root, out, into, changed, &|_| None, focus, certain)
+    }
+    /// The links of one place followed step by step, with `edited` giving
+    /// what a chosen change did to one of its files, where that is known:
+    /// among symbols it marks the ones the change touched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn follow_with(
+        &self,
+        project: &str,
+        root: &str,
+        out: &[String],
+        into: &[String],
+        changed: &[(String, char)],
+        edited: &dyn Fn(&str) -> Option<Edited>,
+        focus: Option<&str>,
+        certain: bool,
+    ) -> Option<Value> {
+        if let Some(Reach::Symbol(at)) = self.reach(root) {
+            return Some(self.trace(project, at, out, into, changed, edited, focus, certain));
+        }
         let root = root.trim_matches('/');
         let whole = self.opened(root).is_some();
         if root.is_empty() || !(whole || self.folder(root)) {
@@ -2495,6 +2535,378 @@ impl Index {
             })).collect::<Vec<_>>(),
             "focus": focus,
         }))
+    }
+}
+/// One side of a symbol: each symbol it uses, or each that uses it, with
+/// the links between the two and the relation of the first of them.
+type Side = Rc<Vec<(u32, Flow, u16)>>;
+impl Index {
+    /// The links of the graph by the symbol at each end.
+    fn wires(&self) -> &Wires {
+        self.wires.get_or_init(|| {
+            let grouped = |end: fn(&Use) -> u32| {
+                let mut first = vec![0u32; self.symbols.len() + 1];
+                for link in &self.uses {
+                    first[end(link) as usize + 1] += 1;
+                }
+                for at in 0..self.symbols.len() {
+                    first[at + 1] += first[at];
+                }
+                let mut next = first.clone();
+                let mut links = vec![0u32; self.uses.len()];
+                for (number, link) in self.uses.iter().enumerate() {
+                    let slot = &mut next[end(link) as usize];
+                    links[*slot as usize] = number as u32;
+                    *slot += 1;
+                }
+                (links, first)
+            };
+            let (out, out_first) = grouped(|link| link.0);
+            let (into, into_first) = grouped(|link| link.1);
+            Wires {
+                out,
+                out_first,
+                into,
+                into_first,
+            }
+        })
+    }
+    /// The links of one symbol: those through which it uses others, or
+    /// those through which others use it. `certain` leaves out what the
+    /// tool inferred.
+    fn wired(&self, at: u32, outgoing: bool, certain: bool) -> impl Iterator<Item = &Use> {
+        let wires = self.wires();
+        let (links, first) = if outgoing {
+            (&wires.out, &wires.out_first)
+        } else {
+            (&wires.into, &wires.into_first)
+        };
+        links[first[at as usize] as usize..first[at as usize + 1] as usize]
+            .iter()
+            .map(|number| &self.uses[*number as usize])
+            .filter(move |link| !(certain && link.3))
+    }
+    /// What a symbol uses, or what uses it: each other symbol once. What
+    /// was read from the code comes before what was only guessed, the
+    /// symbol's own file before the others, and then the order is that of
+    /// the files and of the lines in them.
+    fn beside(&self, at: u32, outgoing: bool, certain: bool) -> Vec<(u32, Flow, u16)> {
+        let mut found: Vec<(u32, Flow, u16)> = Vec::new();
+        let mut places: HashMap<u32, usize> = HashMap::new();
+        for (from, to, kind, guessed) in self.wired(at, outgoing, certain) {
+            let other = if outgoing { *to } else { *from };
+            // A comment the tool kept is never shown.
+            if self.symbols[other as usize].kind == Kind::Note {
+                continue;
+            }
+            let place = *places.entry(other).or_insert_with(|| {
+                found.push((other, Flow::default(), *kind));
+                found.len() - 1
+            });
+            found[place].1.links += 1;
+            found[place].1.guessed += u64::from(*guessed);
+        }
+        let home = self.symbols[at as usize].file;
+        found.sort_by(|a, b| {
+            let key = |(other, flow, _): &(u32, Flow, u16)| {
+                let symbol = &self.symbols[*other as usize];
+                (
+                    flow.guessed == flow.links,
+                    symbol.file != home,
+                    self.files[symbol.file as usize].as_str(),
+                    symbol.line,
+                    *other,
+                )
+            };
+            key(a).cmp(&key(b))
+        });
+        found
+    }
+    /// The links of one symbol followed step by step among symbols: what a
+    /// method calls and what calls it, then the same for any of those, as
+    /// `follow` does it for files. `at` is the symbol. `out`, `into` and
+    /// `focus` name symbols as the pictures of their files select them, and
+    /// so are the places of the answer named. Each time a symbol is named
+    /// in `out` or `into`, the next `STEP` of that side join the picture, in
+    /// the order `beside` gives them, up to `FOLLOWED` in all, and a link is
+    /// drawn where one of its sides is unfolded.
+    ///
+    /// A class is followed by its own links, not by those of its methods.
+    /// Inside a chosen change, `edited` tells what the change did to a file,
+    /// and the symbols it touched are marked as in the picture of that file.
+    #[allow(clippy::too_many_arguments)]
+    fn trace(
+        &self,
+        project: &str,
+        at: u32,
+        out: &[String],
+        into: &[String],
+        changed: &[(String, char)],
+        edited: &dyn Fn(&str) -> Option<Edited>,
+        focus: Option<&str>,
+        certain: bool,
+    ) -> Value {
+        let letters = changed
+            .iter()
+            .filter(|(_, kind)| *kind != 'D')
+            .map(|(path, kind)| (path.as_str(), *kind))
+            .collect::<HashMap<_, _>>();
+        // The names the pictures of files select their symbols by, the sides
+        // of a symbol and what the change did to a file are worked out as
+        // they are asked for, each once.
+        let named = RefCell::new(HashMap::<u32, Rc<Vec<String>>>::new());
+        let key = |at: u32| {
+            let file = self.symbols[at as usize].file;
+            let keys = named
+                .borrow_mut()
+                .entry(file)
+                .or_insert_with(|| Rc::new(self.keys(file)))
+                .clone();
+            keys[(at - self.first[file as usize]) as usize].clone()
+        };
+        let sides = RefCell::new(HashMap::<(u32, bool), Side>::new());
+        let side = |at: u32, outgoing: bool| {
+            sides
+                .borrow_mut()
+                .entry((at, outgoing))
+                .or_insert_with(|| Rc::new(self.beside(at, outgoing, certain)))
+                .clone()
+        };
+        let marked = RefCell::new(HashMap::<u32, Option<Rc<Marks>>>::new());
+        let marks = |file: u32| {
+            marked
+                .borrow_mut()
+                .entry(file)
+                .or_insert_with(|| {
+                    let path = self.files[file as usize].as_str();
+                    letters
+                        .contains_key(path)
+                        .then(|| edited(path))
+                        .flatten()
+                        .map(|edited| Rc::new(self.marks(file, &edited)))
+                })
+                .clone()
+        };
+        let times = |list: &[String], place: &str| {
+            list.iter().filter(|named| named.as_str() == place).count()
+        };
+        // Symbols join in the order they are reached, the followed one first.
+        let mut shown = vec![at];
+        let mut keys = vec![key(at)];
+        let mut seen = HashSet::from([at]);
+        let mut full = false;
+        let mut next = 0;
+        while next < shown.len() {
+            let place = shown[next];
+            for (list, outgoing) in [(out, true), (into, false)] {
+                let mut left = STEP * times(list, &keys[next]);
+                if left == 0 {
+                    continue;
+                }
+                for (other, ..) in side(place, outgoing).iter() {
+                    if left == 0 {
+                        break;
+                    }
+                    if seen.contains(other) {
+                        continue;
+                    }
+                    if shown.len() == FOLLOWED {
+                        full = true;
+                        break;
+                    }
+                    seen.insert(*other);
+                    shown.push(*other);
+                    keys.push(key(*other));
+                    left -= 1;
+                }
+            }
+            next += 1;
+        }
+        let slot = shown
+            .iter()
+            .enumerate()
+            .map(|(index, at)| (*at, index))
+            .collect::<HashMap<_, _>>();
+        let unfolded = |list: &[String]| {
+            keys.iter()
+                .map(|key| times(list, key) > 0)
+                .collect::<Vec<_>>()
+        };
+        let (unfolded_out, unfolded_in) = (unfolded(out), unfolded(into));
+        // A link between two symbols drawn is drawn where one of its sides
+        // is unfolded: the uses of its user, or the users of what it uses.
+        let mut edges = Vec::new();
+        let mut among = 0;
+        for (index, source) in shown.iter().enumerate() {
+            for (target, flow, _) in side(*source, true).iter() {
+                let Some(other) = slot.get(target) else {
+                    continue;
+                };
+                among += 1;
+                if unfolded_out[index] || unfolded_in[*other] {
+                    edges.push((index, *other, *flow));
+                }
+            }
+        }
+        let between = edges.len();
+        edges.sort_by(|a, b| {
+            b.2.links
+                .cmp(&a.2.links)
+                .then((&keys[a.0], &keys[a.1]).cmp(&(&keys[b.0], &keys[b.1])))
+        });
+        edges.truncate(DRAWN);
+        // How many of what a symbol uses, or of what uses it, the picture
+        // does not link with it.
+        let hidden = |index: usize, outgoing: bool| {
+            side(shown[index], outgoing)
+                .iter()
+                .filter(|(other, ..)| match slot.get(other) {
+                    None => true,
+                    Some(there) if outgoing => !(unfolded_out[index] || unfolded_in[*there]),
+                    Some(there) => !(unfolded_out[*there] || unfolded_in[index]),
+                })
+                .count()
+        };
+        let links = |at: u32, outgoing: bool| {
+            side(at, outgoing)
+                .iter()
+                .map(|(_, flow, _)| flow.links)
+                .sum::<u64>()
+        };
+        // What the change did to a symbol: Git's letter where its own lines
+        // changed, and how many symbols changed inside it.
+        let touched = |at: u32| {
+            let symbol = &self.symbols[at as usize];
+            let place = (at - self.first[symbol.file as usize]) as usize;
+            let marks = marks(symbol.file);
+            (
+                marks.as_ref().and_then(|marks| marks.status[place]),
+                marks.as_ref().map_or(0, |marks| marks.inside[place]),
+            )
+        };
+        let node = |index: usize| {
+            let at = shown[index];
+            let symbol = &self.symbols[at as usize];
+            let (status, inside) = touched(at);
+            json!({
+                "path": keys[index],
+                "name": self.shown(at),
+                "kind": symbol.kind.word(),
+                "line": symbol.line,
+                "owner": self.owner(at),
+                "file": self.files[symbol.file as usize],
+                "symbol": true,
+                "folder": false,
+                "files": 1,
+                "within": 0,
+                "out": links(at, true),
+                "in": links(at, false),
+                "start": index == 0,
+                "more_out": hidden(index, true),
+                "more_in": hidden(index, false),
+                "unfolded_out": unfolded_out[index],
+                "unfolded_in": unfolded_in[index],
+                "changed": u64::from(status.is_some() || inside > 0),
+                "status": status.map(String::from),
+                "touched": inside,
+            })
+        };
+        let focus = focus
+            .and_then(|path| keys.iter().position(|key| key == path))
+            .map(|index| {
+                let at = shown[index];
+                let rows = |outgoing: bool| {
+                    let all = side(at, outgoing);
+                    let rows = all
+                        .iter()
+                        .take(TOLD)
+                        .map(|(other, flow, kind)| {
+                            let symbol = &self.symbols[*other as usize];
+                            let file = self.files[symbol.file as usize].as_str();
+                            let (status, inside) = touched(*other);
+                            json!({
+                                "path": key(*other),
+                                "name": self.shown(*other),
+                                "kind": symbol.kind.word(),
+                                "line": symbol.line,
+                                "owner": self.owner(*other),
+                                "file": file,
+                                "symbol": true,
+                                "folder": false,
+                                "inside": seen.contains(other),
+                                "relation": (flow.links == 1)
+                                    .then(|| self.kinds[*kind as usize].as_str()),
+                                "links": flow.links,
+                                "guessed": flow.guessed,
+                                "changed": status.is_some() || inside > 0,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    (rows, all.len().saturating_sub(TOLD))
+                };
+                let (uses, uses_more) = rows(true);
+                let (used_by, used_by_more) = rows(false);
+                let mut kinds: BTreeMap<u16, u64> = BTreeMap::new();
+                for (_, _, kind, _) in self.wired(at, true, certain) {
+                    *kinds.entry(*kind).or_default() += 1;
+                }
+                let mut kinds = kinds
+                    .iter()
+                    .map(|(kind, count)| (self.kinds[*kind as usize].as_str(), *count))
+                    .collect::<Vec<_>>();
+                kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
+                let mut focus = node(index);
+                focus["inside"] = json!(true);
+                focus["uses"] = json!(uses);
+                focus["uses_more"] = json!(uses_more);
+                focus["used_by"] = json!(used_by);
+                focus["used_by_more"] = json!(used_by_more);
+                focus["kinds"] = kinds
+                    .into_iter()
+                    .map(|(kind, count)| json!({"kind": kind, "links": count}))
+                    .collect();
+                focus
+            });
+        let symbol = &self.symbols[at as usize];
+        let file = self.files[symbol.file as usize].as_str();
+        // The way back leads to the file, and the symbol stands after it.
+        let mut crumbs = Self::crumbs(project, file);
+        crumbs.push(json!({"name": self.shown(at), "path": keys[0]}));
+        json!({
+            "mode": "follow",
+            "scope": file,
+            "crumbs": crumbs,
+            "certain": certain,
+            "totals": self.totals(),
+            "followed": {
+                "path": keys[0],
+                "name": self.shown(at),
+                "folder": false,
+                "symbol": true,
+                "kind": symbol.kind.word(),
+                "file": file,
+                "line": symbol.line,
+                "uses": side(at, true).len(),
+                "users": side(at, false).len(),
+                "shown": shown.len(),
+                "limit": FOLLOWED,
+                "step": STEP,
+                "full": full,
+                "aside": among - between,
+            },
+            "children": shown.len(),
+            "matching": shown.len(),
+            "nodes": (0..shown.len()).map(node).collect::<Vec<_>>(),
+            "between": between,
+            "backbone": false,
+            "edges": edges.iter().map(|(source, target, flow)| json!({
+                "from": keys[*source],
+                "to": keys[*target],
+                "links": flow.links,
+                "guessed": flow.guessed,
+            })).collect::<Vec<_>>(),
+            "focus": focus,
+        })
     }
 }
 /// One end of a link drawn in an open file: a symbol of the file, or a file
@@ -6447,6 +6859,404 @@ where
             &changed,
             &maps.index("p", &graph, folder.path()).unwrap()
         ));
+    }
+    /// The links drawn among followed symbols, by the names of their ends.
+    fn calls(view: &Value) -> Vec<String> {
+        let name = |key: &Value| {
+            view["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|node| &node["path"] == key)
+                .map(|node| node["name"].as_str().unwrap().to_owned())
+                .unwrap()
+        };
+        view["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|edge| {
+                format!(
+                    "{} -> {} {}/{}",
+                    name(&edge["from"]),
+                    name(&edge["to"]),
+                    edge["links"],
+                    edge["guessed"]
+                )
+            })
+            .collect()
+    }
+    const TOTAL_KEY: &str = "src/Cart/Cart.php#L19:.total()";
+    const CHECKOUT_KEY: &str = "src/Cart/Cart.php#L26:.checkout()";
+    #[test]
+    fn the_links_of_a_method_are_followed_among_symbols() {
+        let index = store();
+        let follow = |out: &[&str], into: &[&str], focus: Option<&str>, certain: bool| {
+            index
+                .follow(
+                    "shop",
+                    TOTAL_KEY,
+                    &named(out),
+                    &named(into),
+                    &[],
+                    focus,
+                    certain,
+                )
+                .unwrap()
+        };
+        // The method alone at first, with how many it uses and how many use
+        // it. The way back leads to its file, where it lies.
+        let alone = follow(&[], &[], None, false);
+        assert_eq!(
+            (&alone["mode"], &alone["scope"]),
+            (&json!("follow"), &json!(CART))
+        );
+        assert_eq!(steps(&alone), ["Cart.total() +2/3"]);
+        assert_eq!(
+            alone["followed"],
+            json!({
+                "path": TOTAL_KEY, "name": "Cart.total()", "folder": false, "symbol": true,
+                "kind": "method", "file": CART, "line": 19, "uses": 2, "users": 3,
+                "shown": 1, "limit": FOLLOWED, "step": STEP, "full": false, "aside": 0
+            })
+        );
+        assert_eq!(
+            alone["crumbs"],
+            json!([
+                {"name": "shop", "path": ""},
+                {"name": "src", "path": "src"},
+                {"name": "Cart", "path": "src/Cart"},
+                {"name": "Cart.php", "path": CART},
+                {"name": "Cart.total()", "path": TOTAL_KEY}
+            ])
+        );
+        let start = &alone["nodes"][0];
+        assert_eq!(
+            (
+                &start["path"],
+                &start["symbol"],
+                &start["kind"],
+                &start["line"]
+            ),
+            (
+                &json!(TOTAL_KEY),
+                &json!(true),
+                &json!("method"),
+                &json!(19)
+            )
+        );
+        assert_eq!(
+            (
+                &start["file"],
+                &start["owner"],
+                &start["start"],
+                &start["changed"]
+            ),
+            (&json!(CART), &json!("Cart"), &json!(true), &json!(0))
+        );
+        assert_eq!((&start["out"], &start["in"]), (&json!(2), &json!(3)));
+        assert_eq!(calls(&alone), Vec::<String>::new());
+        // One step each way: what it calls, in the order of their lines, and
+        // what calls it. What was read from the code comes before what was
+        // guessed, and its own file before the others.
+        let both = follow(&[TOTAL_KEY], &[TOTAL_KEY], None, false);
+        assert_eq!(
+            steps(&both),
+            [
+                "Cart.total() +0/0 out in",
+                "Price.of() +0/0",
+                "Price.plus() +0/1",
+                "Cart.checkout() +2/0",
+                "CartTest.testTotal() +1/0",
+                "CartTest.testEmpty() +0/0",
+            ]
+        );
+        assert_eq!(
+            sorted(calls(&both)),
+            [
+                "Cart.checkout() -> Cart.total() 1/0",
+                "Cart.total() -> Price.of() 1/0",
+                "Cart.total() -> Price.plus() 1/0",
+                "CartTest.testEmpty() -> Cart.total() 1/1",
+                "CartTest.testTotal() -> Cart.total() 1/0",
+            ]
+        );
+        assert_eq!(both["followed"]["shown"], 6);
+        // Each symbol is named as the picture of its own file selects it.
+        assert_eq!(both["nodes"][1]["path"], "src/Cart/Price.php#L9:.of()");
+        assert_eq!(both["nodes"][1]["file"], "src/Cart/Price.php");
+        // A step further from one of them: what checkout uses besides joins
+        // after what was there, its own file first and the guess last.
+        let further = follow(&[TOTAL_KEY, CHECKOUT_KEY], &[TOTAL_KEY], None, false);
+        assert_eq!(
+            steps(&further)[3..],
+            [
+                "Cart.checkout() +0/0 out",
+                "CartTest.testTotal() +1/0",
+                "CartTest.testEmpty() +0/0",
+                "Status +0/0",
+                "Notifier.paid() +1/0",
+            ]
+        );
+        assert!(calls(&further).contains(&"Cart.checkout() -> Notifier.paid() 1/1".to_owned()));
+        assert!(calls(&further).contains(&"Cart.checkout() -> Status 1/0".to_owned()));
+        // Without what the tool inferred the guessed caller is not there.
+        let read = follow(&[TOTAL_KEY], &[TOTAL_KEY], None, true);
+        assert_eq!(read["followed"]["users"], 2);
+        assert!(!steps(&read).iter().any(|step| step.contains("testEmpty")));
+        // A selected symbol lists both sides, each with how it is linked,
+        // where it lies and whether the picture draws it.
+        let chosen = follow(&[TOTAL_KEY], &[], Some(TOTAL_KEY), false);
+        let focus = &chosen["focus"];
+        assert_eq!(
+            (
+                &focus["name"],
+                &focus["kind"],
+                &focus["file"],
+                &focus["start"]
+            ),
+            (
+                &json!("Cart.total()"),
+                &json!("method"),
+                &json!(CART),
+                &json!(true)
+            )
+        );
+        let told = |side: &str| {
+            focus[side]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    format!(
+                        "{} {} in {}{}{}",
+                        row["relation"].as_str().unwrap(),
+                        row["name"].as_str().unwrap(),
+                        row["file"].as_str().unwrap(),
+                        if row["inside"] == true { " drawn" } else { "" },
+                        if row["guessed"] == 1 { " guessed" } else { "" },
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            told("uses"),
+            [
+                "calls Price.of() in src/Cart/Price.php drawn",
+                "calls Price.plus() in src/Cart/Price.php drawn",
+            ]
+        );
+        assert_eq!(
+            told("used_by"),
+            [
+                "calls Cart.checkout() in src/Cart/Cart.php",
+                "calls CartTest.testTotal() in tests/CartTest.php",
+                "calls CartTest.testEmpty() in tests/CartTest.php guessed",
+            ]
+        );
+        assert_eq!(focus["used_by"][0]["path"], CHECKOUT_KEY);
+        assert_eq!(focus["kinds"], json!([{"kind": "calls", "links": 2}]));
+        // A symbol the picture does not draw is not selected.
+        assert_eq!(
+            follow(&[], &[], Some(CHECKOUT_KEY), false)["focus"],
+            Value::Null
+        );
+        // A class is followed by its own links, not by those of its methods,
+        // and the node of a file stands for what the file imports.
+        let class = index
+            .follow(
+                "shop",
+                "src/Order/Notifier.php#L8:Notifier",
+                &[],
+                &named(&["src/Order/Notifier.php#L8:Notifier"]),
+                &[],
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(steps(&class), ["Notifier +0/0 in", "Cart.php +0/0"]);
+        assert_eq!(calls(&class), ["Cart.php -> Notifier 1/0"]);
+        assert_eq!(class["nodes"][1]["kind"], "file");
+        // What names no symbol is followed as a file or a folder, or not at
+        // all.
+        let none = |root: &str| index.follow("shop", root, &[], &[], &[], None, false);
+        assert_eq!(none(CART).unwrap()["followed"]["folder"], false);
+        assert!(none(CART).unwrap()["followed"].get("symbol").is_none());
+        assert!(none("src/Cart/Cart.php#L19:.gone()").is_none());
+        assert!(none("src/Cart/Nothing.php#L1:x").is_none());
+    }
+    #[test]
+    fn followed_symbols_stop_at_a_full_picture_and_count_the_links_left_aside() {
+        // One function that a hundred others call, each from a file of its
+        // own, and that calls two.
+        let mut nodes = vec![
+            json!({"id": "hub", "label": "hub()", "source_file": "lib/hub.py", "source_location": "L1"}),
+            json!({"id": "left", "label": "left()", "source_file": "lib/hub.py", "source_location": "L5"}),
+            json!({"id": "right", "label": "right()", "source_file": "lib/hub.py", "source_location": "L9"}),
+        ];
+        let call = |from: &str, to: &str, file: &str| json!({"source": from, "target": to, "relation": "calls", "confidence": "EXTRACTED", "source_file": file});
+        let mut links = vec![
+            call("hub", "left", "lib/hub.py"),
+            call("hub", "right", "lib/hub.py"),
+            call("left", "right", "lib/hub.py"),
+        ];
+        for at in 0..100 {
+            let (id, file) = (format!("u{at:03}"), format!("users/u{at:03}.py"));
+            nodes.push(json!({"id": id, "label": format!("user{at:03}()"), "source_file": file, "source_location": "L1"}));
+            links.push(call(&id, "hub", &file));
+        }
+        let index = index(json!({"nodes": nodes, "links": links}));
+        let hub = "lib/hub.py#L1:hub()";
+        let follow = |out: &[&str], into: &[&str]| {
+            index
+                .follow("hub", hub, &named(out), &named(into), &[], None, false)
+                .unwrap()
+        };
+        // A step shows the next twelve of a side, and says how many wait.
+        let once = follow(&[], &[hub]);
+        assert_eq!(steps(&once)[0], format!("hub() +2/{} in", 100 - STEP));
+        assert_eq!(once["nodes"].as_array().unwrap().len(), 1 + STEP);
+        assert_eq!(once["nodes"][1]["name"], "user000()");
+        // Named twice, the side shows twelve more.
+        let twice = follow(&[], &[hub, hub]);
+        assert_eq!(twice["nodes"].as_array().unwrap().len(), 1 + 2 * STEP);
+        // The picture holds so many boxes and says that it is full.
+        let all = vec![hub; 10];
+        let full = follow(&[hub], &all);
+        assert_eq!(full["nodes"].as_array().unwrap().len(), FOLLOWED);
+        assert_eq!(full["followed"]["full"], true);
+        assert_eq!(full["followed"]["users"], 100);
+        // What it calls joined first; the link between the two it calls is
+        // not one of its own, and waits for a side that holds it.
+        assert_eq!(steps(&full)[1], "left() +1/0");
+        assert_eq!(steps(&full)[2], "right() +0/1");
+        assert_eq!(full["followed"]["aside"], 1);
+        let opened = follow(&[hub, "lib/hub.py#L5:left()"], &[]);
+        assert!(calls(&opened).contains(&"left() -> right() 1/0".to_owned()));
+        assert_eq!(opened["followed"]["aside"], 0);
+    }
+    #[test]
+    fn followed_symbols_carry_what_a_chosen_change_did_to_them() {
+        let index = basket();
+        let format = "src/Cart.php#L35:format_price()";
+        let changed = [
+            ("src/Cart.php".to_owned(), 'M'),
+            ("src/other.php".to_owned(), 'A'),
+        ];
+        let asked = RefCell::new(Vec::new());
+        let edited = |path: &str| {
+            asked.borrow_mut().push(path.to_owned());
+            Some(match path {
+                // The lines of the function replaced others.
+                "src/Cart.php" => Edited {
+                    new: false,
+                    text: BASKET.to_owned(),
+                    hunks: vec![hunk(34, 5, 2)],
+                },
+                _ => Edited {
+                    new: true,
+                    ..Edited::default()
+                },
+            })
+        };
+        let view = index
+            .follow_with(
+                "shop",
+                format,
+                &[],
+                &named(&[format]),
+                &changed,
+                &edited,
+                Some(format),
+                false,
+            )
+            .unwrap();
+        let marks = view["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| {
+                format!(
+                    "{} {} {}",
+                    node["name"].as_str().unwrap(),
+                    node["changed"],
+                    node["status"].as_str().unwrap_or("-")
+                )
+            })
+            .collect::<Vec<_>>();
+        // The function is modified, and its caller lies in a new file.
+        assert_eq!(marks, ["format_price() 1 M", "user() 1 A"]);
+        assert_eq!(view["focus"]["status"], "M");
+        // A row beside it says the same of the symbol it names.
+        assert_eq!(view["focus"]["used_by"][0]["changed"], true);
+        // Each file of the change is asked for once, however many of its
+        // symbols are drawn and listed.
+        assert_eq!(
+            sorted(asked.borrow().clone()),
+            ["src/Cart.php", "src/other.php"]
+        );
+        // A function the change left as it was carries no mark, though its
+        // file changed; and a file outside the change is not asked for.
+        let asked = RefCell::new(Vec::new());
+        let elsewhere = |path: &str| {
+            asked.borrow_mut().push(path.to_owned());
+            Some(Edited {
+                new: false,
+                text: BASKET.to_owned(),
+                hunks: vec![hunk(22, 1, 1)],
+            })
+        };
+        let view = index
+            .follow_with(
+                "shop",
+                format,
+                &[],
+                &named(&[format]),
+                &changed[..1],
+                &elsewhere,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            (&view["nodes"][0]["changed"], &view["nodes"][0]["status"]),
+            (&json!(0), &Value::Null)
+        );
+        assert_eq!(view["nodes"][1]["changed"], 0);
+        assert_eq!(*asked.borrow(), ["src/Cart.php"]);
+        // Nor does a row that names it, from the other end of the link.
+        let from_user = index
+            .follow_with(
+                "shop",
+                "src/other.php#L3:user()",
+                &[],
+                &[],
+                &changed[..1],
+                &elsewhere,
+                Some("src/other.php#L3:user()"),
+                false,
+            )
+            .unwrap();
+        let row = &from_user["focus"]["uses"][0];
+        assert_eq!(
+            (&row["name"], &row["changed"], &row["inside"]),
+            (&json!("format_price()"), &json!(false), &json!(false))
+        );
+        // Where the change cannot be told, as with a graph older than the
+        // files, links are followed without marks.
+        let plain = index
+            .follow(
+                "shop",
+                format,
+                &[],
+                &named(&[format]),
+                &changed,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(plain["nodes"][0]["changed"], 0);
+        assert_eq!(steps(&plain), ["format_price() +0/0 in", "user() +0/1"]);
     }
     /// What a search found, in its order: what each place is, its name and
     /// where it lies.

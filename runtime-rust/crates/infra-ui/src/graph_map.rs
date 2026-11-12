@@ -725,6 +725,11 @@ fn spreads(view: &V) -> bool {
 fn follows(view: &V) -> bool {
     view["mode"] == "follow"
 }
+/// The links followed are those of a class, a method or a function, and
+/// the boxes are symbols of whatever files they lead to.
+fn names(view: &V) -> bool {
+    follows(view) && m::yes(&view["followed"]["symbol"])
+}
 /// The letter a symbol's box carries for what it is. The file's own node
 /// and a name the graph says nothing more about carry none.
 fn letter(kind: &str) -> &'static str {
@@ -959,8 +964,11 @@ fn shown(view: &V) -> String {
     if follows(view) {
         let followed = &view["followed"];
         let number = |key: &str| followed[key].as_u64().unwrap_or(0);
-        // A file is followed among files; a folder among folders and files.
-        let (one, many) = if m::yes(&followed["folder"]) {
+        // A file is followed among files, a folder among folders and
+        // files, and a symbol among symbols.
+        let (one, many) = if m::yes(&followed["symbol"]) {
+            ("other name", "other names")
+        } else if m::yes(&followed["folder"]) {
             ("other", "others")
         } else {
             ("other file", "other files")
@@ -1220,9 +1228,16 @@ fn follow_note(view: &V) -> String {
     let followed = &view["followed"];
     let number = |key: &str| followed[key].as_u64().unwrap_or(0);
     let mut parts = context(view);
+    // Two symbols are linked once: there the order is what was read from
+    // the code, then where it lies.
     parts.push(format!(
-        "+ at the right corner of a box shows more of what it uses, + at the left corner more of what uses it, {} at a time, strongest first; − folds them back.",
-        count(number("step"))
+        "+ at the right corner of a box shows more of what it uses, + at the left corner more of what uses it, {} at a time, {}; − folds them back.",
+        count(number("step")),
+        if names(view) {
+            "what was read from the code first"
+        } else {
+            "strongest first"
+        }
     ));
     if m::yes(&followed["full"]) {
         parts.push(format!(
@@ -1396,9 +1411,16 @@ pub fn canvas(view: &V) -> String {
                     .any(|pair| *pair == (chosen, node) || *pair == (node, chosen))
         })
     };
+    // Among followed symbols a name too long for its box keeps its end,
+    // where the method stands after its class.
+    let named = names(view);
     let mut html = format!(
-        "<div class=\"graph-map-plane\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>",
-        plan.width, plan.height, plan.width, plan.height
+        "<div class=\"graph-map-plane\"{} style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>",
+        if named { " data-names=\"true\"" } else { "" },
+        plan.width,
+        plan.height,
+        plan.width,
+        plan.height
     );
     // The head of an arrow lies at what is used.
     html.push_str("<marker id=\"graph-map-arrow\" class=\"graph-map-arrow\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\"/></marker>");
@@ -1508,7 +1530,7 @@ pub fn canvas(view: &V) -> String {
         let changed = node["changed"].as_u64().unwrap_or(0);
         // What a file around an opened one is to it, or what a place of a
         // change map is to the change.
-        let mark = if opened {
+        let mark = if opened || symbol {
             let mut mark = match node["role"].as_str() {
                 Some("uses") => ", uses this file",
                 Some("used") => ", used by this file",
@@ -1546,13 +1568,15 @@ pub fn canvas(view: &V) -> String {
         // A folder opens to its files, a file to what it holds. Among
         // followed links a box is only selected: opening it would leave them.
         let opens = !followed && (folder || (!symbol && node["symbols"].as_u64().unwrap_or(0) > 0));
+        // A symbol lies in the open file, or, among followed symbols, in
+        // the file it says.
+        let home = match node["file"].as_str() {
+            Some(file) => file.to_owned(),
+            None => m::text(view, "scope"),
+        };
         let title = match (symbol, line) {
-            (true, 0) => format!("{} · {}", m::text(node, "name"), m::text(view, "scope")),
-            (true, line) => format!(
-                "{} · {}:{line}",
-                m::text(node, "name"),
-                m::text(view, "scope")
-            ),
+            (true, 0) => format!("{} · {home}", m::text(node, "name")),
+            (true, line) => format!("{} · {home}:{line}", m::text(node, "name")),
             _ => m::text(node, "path"),
         };
         let (out, into) = flow[index];
@@ -1578,7 +1602,11 @@ pub fn canvas(view: &V) -> String {
                     "<span class=\"graph-map-node-kind\" aria-hidden=\"true\">{letter}</span>"
                 ),
             },
-            escape(&m::text(node, "name")),
+            if named {
+                format!("<bdi>{}</bdi>", escape(&m::text(node, "name")))
+            } else {
+                escape(&m::text(node, "name"))
+            },
         ));
         if cycle {
             html.push_str("<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻</span>");
@@ -2155,8 +2183,11 @@ fn rows(title: &str, rows: &V, more: &V, look: Option<(&V, bool)>) -> String {
     }
     html.push_str("<ul class=\"graph-map-rows\">");
     for row in &rows {
-        // A symbol of another file is reached by opening that file.
-        let elsewhere = row["file"].as_str().filter(|_| m::yes(&row["symbol"]));
+        // A symbol says which file it lies in where that is another than
+        // the open one, and is reached by opening that file unless the
+        // picture draws it, as among followed symbols.
+        let home = row["file"].as_str().filter(|_| m::yes(&row["symbol"]));
+        let elsewhere = home.filter(|_| !m::yes(&row["inside"]));
         let guessed = row["guessed"].as_u64().unwrap_or(0);
         // Two symbols are linked once, in one way; a place stands for many
         // links; what a type holds has a line.
@@ -2179,7 +2210,7 @@ fn rows(title: &str, rows: &V, more: &V, look: Option<(&V, bool)>) -> String {
             escape(&m::text(row, "path")),
             escape(&m::text(row, "name")),
             if m::yes(&row["folder"]) { "/" } else { "" },
-            match elsewhere {
+            match home {
                 Some(file) => format!(
                     "<span class=\"graph-map-row-file\">{}</span>",
                     escape(base(file))
@@ -2240,7 +2271,8 @@ fn open_file(path: &V) -> String {
         payload(path)
     )
 }
-/// Follows the links of a folder or a file step by step, wherever they lead.
+/// Follows the links of a folder, a file or a symbol step by step, wherever
+/// they lead.
 fn follow_links(path: &V) -> String {
     format!(
         "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"{}\">Follow links</button>",
@@ -2266,7 +2298,7 @@ fn reached(symbol: &V, mut text: String) -> String {
 fn file_side(view: &V) -> String {
     let focus = &view["focus"];
     if !focus.is_object() {
-        return "<p class=\"knowledge-note\">Select a class, a method or a function to see what it uses and what uses it. A box without a letter is another file that this one uses or is used by: select it again to open it.</p>".to_owned();
+        return "<p class=\"knowledge-note\">Select a class, a method or a function to see what it uses and what uses it; Follow links then walks on from it, a step at a time, into whatever files they lead to. A box without a letter is another file that this one uses or is used by: select it again to open it.</p>".to_owned();
     }
     if m::yes(&focus["symbol"]) {
         let line = focus["line"].as_u64().unwrap_or(0);
@@ -2281,6 +2313,10 @@ fn file_side(view: &V) -> String {
             },
             escape(&reached(focus, capital(&what(focus)))),
         );
+        // What is linked with nothing has no links to follow.
+        if focus["out"].as_u64().unwrap_or(0) + focus["in"].as_u64().unwrap_or(0) > 0 {
+            html.push_str(&follow_links(&focus["path"]));
+        }
         if !m::array(&focus["members"]).is_empty() {
             html.push_str(&rows(
                 "Members",
@@ -2335,6 +2371,43 @@ fn file_side(view: &V) -> String {
     html.push_str(&kinds(focus));
     html
 }
+/// The side panel of a symbol selected among followed symbols: what it is
+/// and where it lies, the way to its file and to its own links, and what it
+/// uses and what uses it, each with the file it lies in.
+fn name_side(focus: &V) -> String {
+    let line = focus["line"].as_u64().unwrap_or(0);
+    let mut told = reached(focus, capital(&what(focus)));
+    if m::yes(&focus["start"]) {
+        told.push_str(" · the links are followed from here");
+    }
+    let mut html = format!(
+        "<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-go\" data-payload=\"{}\">Open in its file</button>",
+        escape(&m::text(focus, "name")),
+        escape(&m::text(focus, "file")),
+        if line > 0 {
+            format!(":{line}")
+        } else {
+            String::new()
+        },
+        escape(&told),
+        // The keys stand as the alphabet has them, which is how a payload
+        // is written whether or not the build's JSON keeps their order.
+        payload(&json!({"open": focus["file"], "path": focus["path"]})),
+    );
+    // The symbol the links are followed from is followed already.
+    if !m::yes(&focus["start"]) {
+        html.push_str(&follow_links(&focus["path"]));
+    }
+    html.push_str(&rows("Uses", &focus["uses"], &focus["uses_more"], None));
+    html.push_str(&rows(
+        "Used by",
+        &focus["used_by"],
+        &focus["used_by_more"],
+        None,
+    ));
+    html.push_str(&kinds(focus));
+    html
+}
 /// The side panel: what the selected place uses and what uses it.
 pub fn side(view: &V) -> String {
     if symbols(view) {
@@ -2342,6 +2415,9 @@ pub fn side(view: &V) -> String {
     }
     let focus = &view["focus"];
     let followed = follows(view);
+    if followed && m::yes(&focus["symbol"]) {
+        return name_side(focus);
+    }
     if !focus.is_object() {
         return if followed {
             "<p class=\"knowledge-note\">Select a box to see what it uses and what uses it. + at the right corner of a box shows more of what it uses, + at the left corner more of what uses it, and − folds them back. Select a link to see what makes it up.</p>"
@@ -2488,6 +2564,7 @@ fn html(id: &str, markup: &str) {
 }
 const LEGEND: &str = "Dotted: against the main direction, closing a cycle (↻).";
 const FILE_LEGEND: &str = "T type · m method · f function · c case · # heading. A box without a letter is another file, a plain name, or the open file itself for its imports.";
+const NAME_LEGEND: &str = "T type · m method · f function · c case · # heading. A box without a letter is a plain name, or a file itself for its imports.";
 /// What the colours and the lines of the map mean, each colour beside a
 /// patch of it, then what is particular to the picture: a folder, an opened
 /// file, or a change (`change` says a change is chosen).
@@ -2501,6 +2578,14 @@ fn legend(view: &V, change: bool) -> String {
         _ if changes(view) => {
             "Highlighted: changed. The rest use the change or are used by it.".to_owned()
         }
+        _ if names(view) => format!(
+            "{LEGEND} + and − at the corners of a box unfold and fold what it uses, on the right, and what uses it, on the left. {NAME_LEGEND}{}",
+            if change {
+                " Highlighted: touched by the change."
+            } else {
+                ""
+            }
+        ),
         _ if follows(view) => format!(
             "{LEGEND} + and − at the corners of a box unfold and fold what it uses, on the right, and what uses it, on the left.{}",
             if change { " Highlighted: changed." } else { "" }
@@ -5145,7 +5230,9 @@ mod tests {
             "kinds": [{"kind": "calls", "links": 2}]
         });
         let html = side(&view);
-        assert!(html.starts_with("<h3>Cart.total()</h3><p class=\"graph-map-path\">src/Cart/Cart.php:19</p><p class=\"knowledge-note\">Method of Cart</p><h4>Uses <span class=\"graph-map-total\">1</span></h4>"), "{html}");
+        // What is linked with something offers to follow its links, among
+        // symbols and into other files.
+        assert!(html.starts_with("<h3>Cart.total()</h3><p class=\"graph-map-path\">src/Cart/Cart.php:19</p><p class=\"knowledge-note\">Method of Cart</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Cart.php#L19:.total()&quot;\">Follow links</button><h4>Uses <span class=\"graph-map-total\">1</span></h4>"), "{html}");
         // A symbol of another file carries the file and opens it; one of
         // this file is only selected. Each is linked once, in one way. The
         // keys of a payload stand in the order the build's JSON keeps.
@@ -5175,7 +5262,9 @@ mod tests {
             "members_more": 2, "uses": [], "uses_more": 0, "used_by": [], "used_by_more": 0, "kinds": []
         });
         let html = side(&view);
+        // It is linked with nothing, so there are no links to follow.
         assert!(html.contains("<p class=\"knowledge-note\">Type</p><h4>Members <span class=\"graph-map-total\">3</span></h4>"), "{html}");
+        assert!(!html.contains("graph-map-follow"));
         assert!(html.contains(".total()</span><span class=\"graph-map-row-links\">line 19</span>"));
         assert!(!html.contains("Uses by kind"));
         // A file around lists its own symbols at the other end, and opens.
@@ -6248,6 +6337,210 @@ mod tests {
                 .map(|ends| link.matches(&format!(" data-ends=\"{ends}\" ")).count()),
             [1; 4]
         );
+    }
+    const TOTAL: &str = "src/Cart/Cart.php#L19:.total()";
+    const PRICE_OF: &str = "src/Cart/Price.php#L9:.of()";
+    const TEST_TOTAL: &str = "tests/CartTest.php#L7:.testTotal()";
+    /// The links of a method followed one step each way: what it calls and
+    /// what calls it, in other files, and a file that imports its class.
+    fn traced() -> V {
+        let node = |path: &str,
+                    name: &str,
+                    kind: &str,
+                    line: u64,
+                    owner: Option<&str>,
+                    file: &str| {
+            json!({
+                "path": path, "name": name, "kind": kind, "line": line, "owner": owner, "file": file,
+                "symbol": true, "folder": false, "files": 1, "within": 0, "out": 0, "in": 0, "start": false,
+                "more_out": 0, "more_in": 0, "unfolded_out": false, "unfolded_in": false,
+                "changed": 0, "status": null, "touched": 0
+            })
+        };
+        let mut start = node(TOTAL, "Cart.total()", "method", 19, Some("Cart"), CART);
+        for (key, value) in [
+            ("out", json!(2)),
+            ("in", json!(3)),
+            ("start", json!(true)),
+            ("more_in", json!(1)),
+            ("unfolded_out", json!(true)),
+            ("unfolded_in", json!(true)),
+            ("changed", json!(1)),
+            ("status", json!("M")),
+        ] {
+            start[key] = value;
+        }
+        let mut caller = node(
+            TEST_TOTAL,
+            "CartTest.testTotal()",
+            "method",
+            7,
+            Some("CartTest"),
+            "tests/CartTest.php",
+        );
+        caller["out"] = json!(2);
+        caller["more_out"] = json!(1);
+        json!({
+            "mode": "follow", "scope": CART, "certain": false,
+            "crumbs": [
+                {"name": "shop", "path": ""}, {"name": "src", "path": "src"}, {"name": "Cart", "path": "src/Cart"},
+                {"name": "Cart.php", "path": CART}, {"name": "Cart.total()", "path": TOTAL}
+            ],
+            "totals": {"files": 21, "symbols": 22, "relations": 22, "links": 22, "read": 21, "guessed": 1, "unplaced": 0},
+            "followed": {"path": TOTAL, "name": "Cart.total()", "folder": false, "symbol": true, "kind": "method", "file": CART, "line": 19,
+                "uses": 2, "users": 3, "shown": 4, "limit": 60, "step": 12, "full": false, "aside": 0},
+            "children": 4, "matching": 4,
+            "nodes": [
+                start,
+                node(PRICE_OF, "Price.of()", "method", 9, Some("Price"), "src/Cart/Price.php"),
+                caller,
+                node("src/Order/Notifier.php#L1:Notifier.php", "Notifier<T>.php", "file", 0, None, "src/Order/Notifier.php")
+            ],
+            "between": 3, "backbone": false,
+            "edges": [
+                {"from": TOTAL, "to": PRICE_OF, "links": 1, "guessed": 0},
+                {"from": TEST_TOTAL, "to": TOTAL, "links": 1, "guessed": 1},
+                {"from": "src/Order/Notifier.php#L1:Notifier.php", "to": TOTAL, "links": 1, "guessed": 0}
+            ],
+            "focus": null
+        })
+    }
+    #[test]
+    fn followed_symbols_say_what_they_are_and_which_file_each_lies_in() {
+        let view = traced();
+        assert_eq!(
+            summary(&view),
+            "Links of Cart.total(), step by step · uses 2 other names · 3 other names use it · 4 drawn"
+        );
+        // Two symbols are linked once, so no link is stronger than another.
+        assert_eq!(
+            note(&view),
+            "+ at the right corner of a box shows more of what it uses, + at the left corner more of what uses it, 12 at a time, what was read from the code first; − folds them back."
+        );
+        // The way back leads to the file the symbol lies in.
+        let path = crumbs(&view);
+        assert!(path.ends_with("<button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-open\" data-payload=\"&quot;src/Cart/Cart.php&quot;\">Cart.php</button><span aria-hidden=\"true\">/</span><span class=\"graph-map-crumb\" aria-current=\"location\">Cart.total(): links</span>"), "{path}");
+        let told = legend(&view, false);
+        assert!(told.ends_with("on the left. T type · m method · f function · c case · # heading. A box without a letter is a plain name, or a file itself for its imports."), "{told}");
+        assert!(
+            legend(&view, true).ends_with("for its imports. Highlighted: touched by the change.")
+        );
+        // A box carries the letter of what it is and its name, which keeps
+        // its end where it is too long; its title tells its own file.
+        let html = canvas(&view);
+        assert!(html.starts_with("<div class=\"graph-map-plane\" data-names=\"true\" style=\""));
+        assert_eq!(html.matches("<bdi>").count(), 4);
+        assert!(html.contains("title=\"Price.of() · src/Cart/Price.php:9\" aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Price.of()</bdi></span></button>"), "{html}");
+        // The node of a file has no letter and no line, and its name is text.
+        assert!(html.contains("title=\"Notifier&lt;T&gt;.php · src/Order/Notifier.php\" aria-label=\"Notifier&lt;T&gt;.php, the file itself, for what belongs to no symbol in it, such as its imports, uses others"), "{html}");
+        assert!(html.contains(
+            "<span class=\"graph-map-node-name\"><bdi>Notifier&lt;T&gt;.php</bdi></span>"
+        ));
+        // The symbol they start from, with what the change did to it. No
+        // box opens: selecting one again would leave the followed links.
+        assert!(html.contains("data-payload=\"&quot;src/Cart/Cart.php#L19:.total()&quot;\" data-folder=\"false\" data-kind=\"method\" data-open=\"false\" data-outside=\"false\" data-changed=\"true\""), "{html}");
+        assert!(html.contains("aria-label=\"Cart.total(), method of Cart, line 19, uses others through 2 links, is used through 3 links, the links are followed from here, modified\""), "{html}");
+        assert!(
+            html.contains("<span class=\"graph-map-node-status\" aria-hidden=\"true\">M</span>")
+        );
+        assert_eq!(html.matches("data-open=\"true\"").count(), 0);
+        // The handles unfold and fold by the name of the symbol.
+        assert!(html.contains("data-action=\"graph-map-unfold\" data-payload=\"{&quot;path&quot;:&quot;tests/CartTest.php#L7:.testTotal()&quot;,&quot;side&quot;:&quot;out&quot;}\""), "{html}");
+        assert_eq!(html.matches("data-action=\"graph-map-fold\"").count(), 2);
+        // A type that holds what the change touched says how many.
+        let mut holder = traced();
+        holder["nodes"][1]["kind"] = json!("type");
+        holder["nodes"][1]["changed"] = json!(1);
+        holder["nodes"][1]["touched"] = json!(2);
+        let html = canvas(&holder);
+        assert!(
+            html.contains("is used through 0 links, 2 changed inside\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"graph-map-node-status\" aria-hidden=\"true\">2</span>")
+        );
+        // Files that are followed are drawn as before.
+        let files = canvas(&trail());
+        assert!(!files.contains("data-names") && !files.contains("<bdi>"));
+    }
+    #[test]
+    fn the_side_panel_of_a_followed_symbol_leads_to_its_file_and_to_its_own_links() {
+        let row = |path: &str, name: &str, file: &str, inside: bool, guessed: u64| {
+            json!({
+                "path": path, "name": name, "kind": "method", "line": 9, "owner": null, "file": file,
+                "symbol": true, "folder": false, "inside": inside, "relation": "calls", "links": 1, "guessed": guessed, "changed": false
+            })
+        };
+        let mut view = traced();
+        let mut focus = view["nodes"][0].clone();
+        for (key, value) in [
+            ("inside", json!(true)),
+            (
+                "uses",
+                json!([row(PRICE_OF, "Price.of()", "src/Cart/Price.php", true, 0)]),
+            ),
+            ("uses_more", json!(1)),
+            (
+                "used_by",
+                json!([row(
+                    TEST_TOTAL,
+                    "CartTest.testTotal()",
+                    "tests/CartTest.php",
+                    false,
+                    1
+                )]),
+            ),
+            ("used_by_more", json!(0)),
+            ("kinds", json!([{"kind": "calls", "links": 2}])),
+        ] {
+            focus[key] = value;
+        }
+        view["focus"] = focus;
+        let html = side(&view);
+        // What it is, where it lies and what the change did to it; the way
+        // to its file. The links are followed from it already.
+        assert!(html.starts_with("<h3>Cart.total()</h3><p class=\"graph-map-path\">src/Cart/Cart.php:19</p><p class=\"knowledge-note\">Method of Cart · modified by the change · the links are followed from here</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-go\" data-payload=\"{&quot;open&quot;:&quot;src/Cart/Cart.php&quot;,&quot;path&quot;:&quot;src/Cart/Cart.php#L19:.total()&quot;}\">Open in its file</button><h4>Uses <span class=\"graph-map-total\">2</span></h4>"), "{html}");
+        assert!(!html.contains("graph-map-follow"));
+        // A symbol the picture draws is selected in it and says its file;
+        // one it does not draw opens its file. A payload is read as the
+        // page reads it: the order of its keys is the build's.
+        let asked = html
+            .split("class=\"graph-map-row\" data-action=\"graph-map-go\"")
+            .skip(1)
+            .map(|row| {
+                let text = row.split("data-payload=\"").nth(1).unwrap();
+                let text = text.split('"').next().unwrap().replace("&quot;", "\"");
+                serde_json::from_str::<V>(&text).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            asked,
+            [
+                json!({"path": PRICE_OF, "inside": true, "open": null}),
+                json!({"path": TEST_TOTAL, "inside": false, "open": "tests/CartTest.php"}),
+            ]
+        );
+        assert!(html.contains("title=\"src/Cart/Price.php#L9:.of()\"><span class=\"graph-map-row-name\">Price.of()<span class=\"graph-map-row-file\">Price.php</span></span><span class=\"graph-map-row-links\">calls</span>"), "{html}");
+        assert!(html.contains("CartTest.testTotal()<span class=\"graph-map-row-file\">CartTest.php</span></span><span class=\"graph-map-row-links\">calls, guessed</span>"));
+        assert!(html.contains("<p class=\"knowledge-note\">and 1 more</p>"));
+        assert!(html.contains("Uses by kind: calls 2"));
+        // A link of two symbols says it all: no row looks into it.
+        assert!(!html.contains("graph-map-row-look"));
+        // Another symbol of the picture offers to follow its own links.
+        let mut other = view["nodes"][1].clone();
+        for key in ["uses", "used_by"] {
+            other[key] = json!([]);
+        }
+        other["inside"] = json!(true);
+        view["focus"] = other;
+        let html = side(&view);
+        assert!(html.starts_with("<h3>Price.of()</h3><p class=\"graph-map-path\">src/Cart/Price.php:9</p><p class=\"knowledge-note\">Method of Price</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-go\" data-payload=\"{&quot;open&quot;:&quot;src/Cart/Price.php&quot;,&quot;path&quot;:&quot;src/Cart/Price.php#L9:.of()&quot;}\">Open in its file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Price.php#L9:.of()&quot;\">Follow links</button>"), "{html}");
+        // Nothing selected: the hint of followed links.
+        view["focus"] = V::Null;
+        assert!(side(&view).starts_with(
+            "<p class=\"knowledge-note\">Select a box to see what it uses and what uses it."
+        ));
     }
     #[test]
     fn what_a_search_typed_is_marked_in_the_names_it_found() {

@@ -1935,6 +1935,24 @@ Up to 32 symbols are drawn, the most linked first, with at least 8 places for th
 files around them. **Filter names** reaches the rest and matches a method by its
 type as well, so `Cart.` keeps the methods of `Cart`.
 
+**Follow links**, beside a selected symbol, walks on from it among symbols, as it
+does from a file among files. The picture starts with what the method calls and
+what calls it, in whatever files they lie, and `+` at a corner of any box shows the
+next twelve of that side. What was read from the code joins before what was
+guessed, and what lies in the symbol's own file before the rest, in the order of
+the files and of their lines: two symbols are linked once, so no link is stronger
+than another. Each box carries the letter of what it is; a name too long for its
+box keeps its end, where the method stands after its class, and its title tells its
+file and line. A class is followed by its own links, such as a reference, an import
+or an inheritance, not by those of its methods. Selecting a box lists both of its
+sides with the file of each. A row the picture draws is selected in it, another
+opens its file on that symbol, and so does **Open in its file**; **Follow links**
+beside it starts again from that symbol, and the path above the picture leads back
+to the file. Inside a chosen change the symbols the change touched are marked as in
+an opened file, in every file the picture reaches, so following what calls a
+changed method shows which of its callers changed with it. A graph older than the
+files marks none.
+
 What a symbol is comes from the graph, and so do its limits. Graphify does not tell
 a class from an interface, a trait or an enum, so all are types. It marks them in
 PHP, Python, TypeScript and Go; where it does not, as for Rust, whatever has methods

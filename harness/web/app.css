@@ -275,6 +275,8 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-node-status { flex:none; color:var(--success); font-size:var(--text-meta); font-weight:var(--weight-strong); font-variant-numeric:tabular-nums; }
 .graph-map-row[data-changed="true"] .graph-map-row-name { color:var(--success); }
 .graph-map-node-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* Among followed symbols a name too long for its box keeps its end: the method stands after its class. */
+.graph-map-plane[data-names="true"] .graph-map-node-name { direction:rtl; text-align:left; }
 .graph-map-node-count { color:var(--muted); font-size:var(--text-meta); font-variant-numeric:tabular-nums; }
 .graph-map-node-kind { flex:none; width:12px; color:var(--muted); font-family:var(--font-mono); font-size:var(--text-meta); font-weight:var(--weight-strong); text-align:center; }
 .graph-map-node[data-selected="true"] .graph-map-node-kind { color:inherit; }
