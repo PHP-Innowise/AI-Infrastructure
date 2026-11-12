@@ -24,6 +24,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Find the path between two places in the Harness dependency map. **Path to…**
+  beside a selected folder, file or symbol asks for the other end, a box of
+  any picture or a place the search finds, and draws the shortest ways from
+  the first to the second: every chain of the fewest links in which each box
+  uses the next, among files or, where an end is a symbol, among symbols.
+  Where nothing leads that way the ways back are drawn and said to be, and
+  **The other way** asks for them on purpose.
+
 - Follow the links of a class, a method or a function in the Harness
   dependency map. **Follow links** beside a selected symbol of an opened file
   draws what it uses and what uses it among symbols, in whatever files they

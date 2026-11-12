@@ -725,10 +725,16 @@ fn spreads(view: &V) -> bool {
 fn follows(view: &V) -> bool {
     view["mode"] == "follow"
 }
-/// The links followed are those of a class, a method or a function, and
-/// the boxes are symbols of whatever files they lead to.
+/// The shortest ways from one place to another.
+fn paths(view: &V) -> bool {
+    view["mode"] == "path"
+}
+/// The boxes are symbols of whatever files they lie in: the links of a
+/// class, a method or a function are followed, or a path runs from or to
+/// one.
 fn names(view: &V) -> bool {
-    follows(view) && m::yes(&view["followed"]["symbol"])
+    (follows(view) && m::yes(&view["followed"]["symbol"]))
+        || (paths(view) && m::yes(&view["path"]["names"]))
 }
 /// The letter a symbol's box carries for what it is. The file's own node
 /// and a name the graph says nothing more about carry none.
@@ -959,6 +965,30 @@ fn shown(view: &V) -> String {
             1 => " · 1 other file uses it".to_owned(),
             users => format!(" · {} other files use it", count(users)),
         });
+        return text;
+    }
+    if paths(view) {
+        let path = &view["path"];
+        let number = |key: &str| path[key].as_u64().unwrap_or(0);
+        let (from, to) = (m::text(&path["from"], "name"), m::text(&path["to"], "name"));
+        if !m::yes(&path["found"]) {
+            return format!("No path between {from} and {to}");
+        }
+        // Where nothing leads from the first to the second, the way that
+        // is drawn runs from the second to the first.
+        let (first, last) = if m::yes(&path["reversed"]) {
+            (to, from)
+        } else {
+            (from, to)
+        };
+        let mut text = format!(
+            "Path from {first} to {last} · {} · {} places on the shortest ways",
+            plural(number("steps"), "link", "links"),
+            count(number("places"))
+        );
+        if number("shown") < number("places") {
+            text.push_str(&format!(", {} drawn", count(number("shown"))));
+        }
         return text;
     }
     if follows(view) {
@@ -1268,9 +1298,65 @@ fn follow_note(view: &V) -> String {
     }
     parts.join(" ")
 }
+/// What a path is made of, which way it runs, and what the picture
+/// leaves out; or why there is none.
+fn path_note(view: &V) -> String {
+    let path = &view["path"];
+    let number = |key: &str| path[key].as_u64().unwrap_or(0);
+    let (from, to) = (m::text(&path["from"], "name"), m::text(&path["to"], "name"));
+    let mut parts = context(view);
+    if m::yes(&path["within"]) {
+        parts.push(format!(
+            "One of {from} and {to} lies in the other, so no path runs between them. Choose two places that lie apart."
+        ));
+        return parts.join(" ");
+    }
+    if !m::yes(&path["found"]) {
+        parts.push(format!(
+            "No chain of links leads from {from} to {to}, nor back. The two may still share something that both use, or that uses both."
+        ));
+        if m::yes(&view["certain"]) {
+            parts.push(
+                "Links guessed by name are left out; with them there may be a way.".to_owned(),
+            );
+        }
+        return parts.join(" ");
+    }
+    if m::yes(&path["reversed"]) {
+        parts.push(format!(
+            "Nothing leads from {from} to {to}: this is the way from {to} to {from}."
+        ));
+    }
+    parts.push(
+        "Each box uses the next: these are the ways that take the fewest links. Select a link to see what makes it up."
+            .to_owned(),
+    );
+    if number("shown") < number("places") {
+        parts.push(format!(
+            "{} places lie on such ways; each step shows its {} most linked.",
+            count(number("places")),
+            count(number("wide"))
+        ));
+    }
+    let drawn = m::array(&view["edges"]).len() as u64;
+    let between = view["between"].as_u64().unwrap_or(0);
+    if drawn > 0 && drawn < between {
+        // No box is left without its way: the strongest link into each and
+        // out of each is drawn first.
+        parts.push(format!(
+            "Drawing {} of {} links: the strongest into each box and out of it, then the strongest of the rest.",
+            count(drawn),
+            count(between)
+        ));
+    }
+    parts.join(" ")
+}
 pub fn note(view: &V) -> String {
     if symbols(view) {
         return file_note(view);
+    }
+    if paths(view) {
+        return path_note(view);
     }
     if follows(view) {
         return follow_note(view);
@@ -1402,6 +1488,7 @@ pub fn canvas(view: &V) -> String {
     // around an opened file.
     let opened = symbols(view);
     let followed = follows(view);
+    let pathed = paths(view);
     let cycles = !changes(view) && !opened;
     let near = |node: usize| {
         chosen.is_some_and(|chosen| {
@@ -1523,9 +1610,17 @@ pub fn canvas(view: &V) -> String {
         if cycle {
             label.push_str(", part of a cycle");
         }
-        let start = m::yes(&node["start"]);
+        // Where followed links start, or where a path starts and ends.
+        let (start, end) = (m::yes(&node["start"]), pathed && m::yes(&node["end"]));
         if start {
-            label.push_str(", the links are followed from here");
+            label.push_str(if pathed {
+                ", the path starts here"
+            } else {
+                ", the links are followed from here"
+            });
+        }
+        if end {
+            label.push_str(", the path ends here");
         }
         let changed = node["changed"].as_u64().unwrap_or(0);
         // What a file around an opened one is to it, or what a place of a
@@ -1566,8 +1661,11 @@ pub fn canvas(view: &V) -> String {
         label.push_str(&mark);
         let kind = node["kind"].as_str().unwrap_or("");
         // A folder opens to its files, a file to what it holds. Among
-        // followed links a box is only selected: opening it would leave them.
-        let opens = !followed && (folder || (!symbol && node["symbols"].as_u64().unwrap_or(0) > 0));
+        // followed links and on a path a box is only selected: opening it
+        // would leave them.
+        let opens = !followed
+            && !pathed
+            && (folder || (!symbol && node["symbols"].as_u64().unwrap_or(0) > 0));
         // A symbol lies in the open file, or, among followed symbols, in
         // the file it says.
         let home = match node["file"].as_str() {
@@ -1581,7 +1679,7 @@ pub fn canvas(view: &V) -> String {
         };
         let (out, into) = flow[index];
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{} style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
             payload(&node["path"]),
             escape(kind),
             opened && !symbol,
@@ -1592,6 +1690,7 @@ pub fn canvas(view: &V) -> String {
             leaning(out, into),
             out > 0,
             into > 0,
+            if end { " data-end=\"true\"" } else { "" },
             placed.x,
             placed.y,
             escape(&title),
@@ -2279,6 +2378,16 @@ fn follow_links(path: &V) -> String {
         payload(path)
     )
 }
+/// Asks for the shortest ways from a place to another, which is chosen
+/// next: a box of any picture, or a place the search finds.
+fn path_to(place: &V) -> String {
+    // The keys stand as the alphabet has them, which is how a payload is
+    // written whether or not the build's JSON keeps their order.
+    format!(
+        "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{}\">Path to…</button>",
+        payload(&json!({"name": place["name"], "path": place["path"]}))
+    )
+}
 /// What a symbol is, with what the change did to it: to its own lines, and
 /// to how many symbols inside it.
 fn reached(symbol: &V, mut text: String) -> String {
@@ -2313,9 +2422,11 @@ fn file_side(view: &V) -> String {
             },
             escape(&reached(focus, capital(&what(focus)))),
         );
-        // What is linked with nothing has no links to follow.
+        // What is linked with nothing has no links to follow, and no path
+        // leads from it.
         if focus["out"].as_u64().unwrap_or(0) + focus["in"].as_u64().unwrap_or(0) > 0 {
             html.push_str(&follow_links(&focus["path"]));
+            html.push_str(&path_to(focus));
         }
         if !m::array(&focus["members"]).is_empty() {
             html.push_str(&rows(
@@ -2355,6 +2466,7 @@ fn file_side(view: &V) -> String {
         html.push_str(&open_file(&focus["path"]));
     }
     html.push_str(&follow_links(&focus["path"]));
+    html.push_str(&path_to(focus));
     // Its own symbols at the other end of the links with this file.
     html.push_str(&rows(
         "Uses this file",
@@ -2371,13 +2483,24 @@ fn file_side(view: &V) -> String {
     html.push_str(&kinds(focus));
     html
 }
-/// The side panel of a symbol selected among followed symbols: what it is
-/// and where it lies, the way to its file and to its own links, and what it
-/// uses and what uses it, each with the file it lies in.
-fn name_side(focus: &V) -> String {
+/// What a selected box of a path is to the path: its start or its end.
+fn path_end(focus: &V) -> &'static str {
+    match (m::yes(&focus["start"]), m::yes(&focus["end"])) {
+        (true, _) => " · the path starts here",
+        (_, true) => " · the path ends here",
+        _ => "",
+    }
+}
+/// The side panel of a symbol selected among followed symbols or on a path:
+/// what it is and where it lies, the way to its file, to its own links and
+/// to a path from it, and what it uses and what uses it, each with the file
+/// it lies in. On a path (`pathed`) those are the next and the one before.
+fn name_side(focus: &V, pathed: bool) -> String {
     let line = focus["line"].as_u64().unwrap_or(0);
     let mut told = reached(focus, capital(&what(focus)));
-    if m::yes(&focus["start"]) {
+    if pathed {
+        told.push_str(path_end(focus));
+    } else if m::yes(&focus["start"]) {
         told.push_str(" · the links are followed from here");
     }
     let mut html = format!(
@@ -2395,19 +2518,49 @@ fn name_side(focus: &V) -> String {
         payload(&json!({"open": focus["file"], "path": focus["path"]})),
     );
     // The symbol the links are followed from is followed already.
-    if !m::yes(&focus["start"]) {
+    if pathed || !m::yes(&focus["start"]) {
         html.push_str(&follow_links(&focus["path"]));
     }
-    html.push_str(&rows("Uses", &focus["uses"], &focus["uses_more"], None));
-    html.push_str(&rows(
-        "Used by",
-        &focus["used_by"],
-        &focus["used_by_more"],
-        None,
-    ));
+    html.push_str(&path_to(focus));
+    let (uses, used) = if pathed { WAY } else { ("Uses", "Used by") };
+    html.push_str(&rows(uses, &focus["uses"], &focus["uses_more"], None));
+    html.push_str(&rows(used, &focus["used_by"], &focus["used_by_more"], None));
     html.push_str(&kinds(focus));
     html
 }
+/// Beside a path that draws nothing, because no chain of links joins its
+/// two ends or one of them lies in the other: the two ends, each with the
+/// way to its own links and to a path from it to another place.
+fn apart(path: &V) -> String {
+    let mut html = "<p class=\"knowledge-note\">Nothing is drawn. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p>".to_owned();
+    for end in [&path["from"], &path["to"]] {
+        // A symbol lies at a line of its file; a file or a folder is its path.
+        let lies = if m::yes(&end["symbol"]) {
+            let line = end["line"].as_u64().unwrap_or(0);
+            format!(
+                "{}{}",
+                m::text(end, "file"),
+                if line > 0 {
+                    format!(":{line}")
+                } else {
+                    String::new()
+                }
+            )
+        } else {
+            m::text(end, "path")
+        };
+        html.push_str(&format!(
+            "<h4>{}</h4><p class=\"graph-map-path\">{}</p>{}{}",
+            escape(&m::text(end, "name")),
+            escape(&lies),
+            follow_links(&end["path"]),
+            path_to(end)
+        ));
+    }
+    html
+}
+/// What the two lists beside a selected box of a path are called.
+const WAY: (&str, &str) = ("Next on the way", "Before it on the way");
 /// The side panel: what the selected place uses and what uses it.
 pub fn side(view: &V) -> String {
     if symbols(view) {
@@ -2415,8 +2568,16 @@ pub fn side(view: &V) -> String {
     }
     let focus = &view["focus"];
     let followed = follows(view);
-    if followed && m::yes(&focus["symbol"]) {
-        return name_side(focus);
+    let pathed = paths(view);
+    if (followed || pathed) && m::yes(&focus["symbol"]) {
+        return name_side(focus, pathed);
+    }
+    if !focus.is_object() && pathed {
+        // A path that draws nothing leaves its two ends to go on from.
+        if !m::yes(&view["path"]["found"]) {
+            return apart(&view["path"]);
+        }
+        return "<p class=\"knowledge-note\">Select a box to see what it leads to on the way and what leads to it. Select a link to see what makes it up. The path above the picture leads back, and The other way beside it asks for the ways from the second place to the first.</p>".to_owned();
     }
     if !focus.is_object() {
         return if followed {
@@ -2458,8 +2619,9 @@ pub fn side(view: &V) -> String {
                     plural(changed, "changed file", "changed files")
                 ),
             }
-        } else if followed {
-            // Among followed links a place may be one of a chosen change.
+        } else if followed || pathed {
+            // Among followed links and on a path a place may be one of a
+            // chosen change.
             let mut told = if folder {
                 format!(
                     "Folder · {}",
@@ -2478,7 +2640,9 @@ pub fn side(view: &V) -> String {
                     plural(changed, "changed file", "changed files")
                 )),
             }
-            if m::yes(&focus["start"]) {
+            if pathed {
+                told.push_str(path_end(focus));
+            } else if m::yes(&focus["start"]) {
                 told.push_str(" · the links are followed from here");
             }
             told
@@ -2509,10 +2673,13 @@ pub fn side(view: &V) -> String {
         html.push_str(&open_file(&focus["path"]));
     }
     // The place the links are followed from is followed already.
-    if !m::yes(&focus["start"]) {
+    if pathed || !m::yes(&focus["start"]) {
         html.push_str(&follow_links(&focus["path"]));
     }
-    let (uses, used) = if beside {
+    html.push_str(&path_to(focus));
+    let (uses, used) = if pathed {
+        WAY
+    } else if beside {
         ("Uses in the change", "Used by the change")
     } else {
         ("Uses", "Used by")
@@ -2537,7 +2704,7 @@ pub fn side(view: &V) -> String {
 fn crumbs(view: &V) -> String {
     let crumbs = m::array(&view["crumbs"]);
     let last = crumbs.len().saturating_sub(1);
-    crumbs
+    let mut html = crumbs
         .iter()
         .enumerate()
         .map(|(index, crumb)| {
@@ -2545,7 +2712,13 @@ fn crumbs(view: &V) -> String {
                 format!(
                     "<span class=\"graph-map-crumb\" aria-current=\"location\">{}{}</span>",
                     escape(&m::text(crumb, "name")),
-                    if follows(view) { ": links" } else { "" }
+                    if follows(view) {
+                        ": links"
+                    } else if paths(view) {
+                        ": path"
+                    } else {
+                        ""
+                    }
                 )
             } else {
                 format!(
@@ -2555,7 +2728,13 @@ fn crumbs(view: &V) -> String {
                 )
             }
         })
-        .collect()
+        .collect::<String>();
+    // A path that was found can be asked for the other way round, whatever
+    // is selected in it: two places of a cycle lead to each other.
+    if paths(view) && m::yes(&view["path"]["found"]) {
+        html.push_str("<span aria-hidden=\"true\">·</span><button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-path-swap\">The other way</button>");
+    }
+    html
 }
 fn html(id: &str, markup: &str) {
     if let Some(element) = dom::get(id) {
@@ -2578,6 +2757,19 @@ fn legend(view: &V, change: bool) -> String {
         _ if changes(view) => {
             "Highlighted: changed. The rest use the change or are used by it.".to_owned()
         }
+        _ if paths(view) => format!(
+            "The ringed boxes are the two ends of the path.{}{}",
+            if names(view) {
+                format!(" {NAME_LEGEND}")
+            } else {
+                String::new()
+            },
+            match (change, names(view)) {
+                (true, true) => " Highlighted: touched by the change.",
+                (true, false) => " Highlighted: changed.",
+                _ => "",
+            }
+        ),
         _ if names(view) => format!(
             "{LEGEND} + and − at the corners of a box unfold and fold what it uses, on the right, and what uses it, on the left. {NAME_LEGEND}{}",
             if change {
@@ -2968,7 +3160,13 @@ pub fn found_note(finder: &V) -> String {
     } else {
         format!("{} found.", count(found))
     };
-    format!("{told}{tests} ↑ ↓ to move · Enter to go there · Esc to close")
+    // While the other end of a path is chosen, a row is that end.
+    let enter = if m::yes(&finder["choosing"]) {
+        "Enter to lead the path there"
+    } else {
+        "Enter to go there"
+    };
+    format!("{told}{tests} ↑ ↓ to move · {enter} · Esc to close")
 }
 /// The map as it shows a place a search found. A name opens its file on
 /// itself, in the map that is open. A folder or a file that the picture
@@ -3208,7 +3406,7 @@ fn watch() {
     }
 }
 fn fresh(target: &str) -> V {
-    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "filter": "", "follow": "", "out": [], "into": [], "spread": []})
+    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "filter": "", "follow": "", "out": [], "into": [], "spread": [], "path": [], "pick": null})
 }
 /// How many folders a picture keeps spread out; the oldest gives way.
 const SPREAD: usize = 32;
@@ -3251,12 +3449,41 @@ fn unfolded(state: &V, key: &str) -> Vec<String> {
         .filter_map(|place| place.as_str().map(str::to_owned))
         .collect()
 }
-/// The state with no place followed.
+/// The state with no place followed and no path shown: what a folder or a
+/// file is drawn with. A path that is still being asked for stays asked for.
 fn unfollowed(mut state: V) -> V {
     state["follow"] = json!("");
     state["out"] = json!([]);
     state["into"] = json!([]);
+    state["path"] = json!([]);
     state
+}
+/// The map as it shows the shortest ways from the place a path is being
+/// asked from to the place `to`. `None` where no path is being asked for,
+/// or `to` is that place itself.
+pub fn led(state: V, to: &str) -> Option<V> {
+    let from = state["pick"]["path"].as_str()?.to_owned();
+    if from.is_empty() || to.is_empty() || from == to {
+        return None;
+    }
+    let mut state = unfollowed(state);
+    state["path"] = json!([from, to]);
+    state["pick"] = V::Null;
+    state["focus"] = json!("");
+    state["filter"] = json!("");
+    Some(state)
+}
+/// What stands above the side panel while the other end of a path is being
+/// chosen: where the path leads from, what to do, and the way out.
+pub fn choosing(state: &V) -> String {
+    let pick = &state["pick"];
+    if !pick.is_object() {
+        return String::new();
+    }
+    format!(
+        "<div class=\"graph-map-picking\" role=\"status\"><p>Path from <strong>{}</strong>: select the place it should lead to, a box of any picture or a place the search finds.</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path-cancel\">Cancel</button></div>",
+        escape(&m::text(pick, "name"))
+    )
 }
 fn state() -> V {
     let state = m::data("graph-map");
@@ -3400,6 +3627,8 @@ fn show_found() {
         };
     }
     if opened {
+        let mut finder = finder;
+        finder["choosing"] = json!(state()["pick"].is_object());
         html("graph-find-list", &found(&finder));
         dom::text("graph-find-note", &found_note(&finder));
     }
@@ -3803,6 +4032,16 @@ pub fn key(e: &web_sys::KeyboardEvent) -> bool {
     }
     let pick = picker();
     if !m::yes(&pick["open"]) {
+        // While the other end of a path is chosen, Escape gives that up
+        // and leaves the map open. The window of a link lies over the map
+        // and closes first.
+        let covered = dom::get("graph-link").is_some_and(|window| window.has_attribute("open"));
+        if e.key() == "Escape" && open() && !covered && state()["pick"].is_object() {
+            spawn_local(async {
+                event("click", "", "graph-map-path-cancel", &V::Null, "", false).await;
+            });
+            return true;
+        }
         return false;
     }
     if e.key() == "Escape" {
@@ -3915,10 +4154,24 @@ fn render(view: &V) {
     dom::set_checked("graph-map-certain", m::yes(&view["certain"]));
     dom::set_checked("graph-map-notests", m::yes(&view["notests"]));
     dom::set_checked("graph-map-fit", m::yes(&state()["fit"]));
-    dom::disabled("graph-map-filter", follows(view));
+    dom::disabled("graph-map-filter", follows(view) || paths(view));
     html("graph-map-canvas", &canvas(view));
     fit();
-    html("graph-map-side", &side(view));
+    // While the other end of a path is chosen, a box is that end.
+    let state = state();
+    dom::attr(
+        "graph-map-canvas",
+        "data-picking",
+        if state["pick"].is_object() {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    html(
+        "graph-map-side",
+        &format!("{}{}", choosing(&state), side(view)),
+    );
     html("graph-map-legend", &legend(view, change));
 }
 /// Asks the server to work out a pull request, a branch or a commit, which
@@ -3967,13 +4220,18 @@ async fn load(quiet: bool) {
     }
     // The unfolded places of each side, as a list a URL can carry whatever
     // the paths hold.
+    // The two ends of a path come before a followed place.
+    let ends = unfolded(&state, "path");
+    let pathed = ends.len() == 2;
     for key in ["out", "into"] {
         let places = unfolded(&state, key);
-        if !m::text(&state, "follow").is_empty() && !places.is_empty() {
+        if !pathed && !m::text(&state, "follow").is_empty() && !places.is_empty() {
             query.push((key, json!(places).to_string()));
         }
     }
-    if !m::text(&state, "follow").is_empty() {
+    if pathed {
+        query.push(("path", json!(ends).to_string()));
+    } else if !m::text(&state, "follow").is_empty() {
         query.push(("follow", m::text(&state, "follow")));
     } else if !unfolded(&state, "spread").is_empty() {
         // The folders spread out in the picture of the open one.
@@ -4008,8 +4266,9 @@ async fn load(quiet: bool) {
                         .collect::<Vec<_>>();
                     state[key] = json!(kept);
                 }
-            } else {
-                // The graph does not know the place, or it was left.
+            } else if !paths(&view) {
+                // The graph does not know the place or an end of the path,
+                // or they were left.
                 state = unfollowed(state);
             }
             // A graph that was never started, as after a restart of the
@@ -4195,13 +4454,24 @@ pub async fn event(
             finder["active"] = payload.clone();
             m::set("graph-find", finder);
             close_found();
-            // Whether the picture that is open draws the place.
-            let wanted = row["path"].to_string();
-            let drawn = dom::all("#graph-map-canvas .graph-map-node")
-                .iter()
-                .any(|node| node.get_attribute("data-payload").as_deref() == Some(wanted.as_str()));
-            state = sought(state, row, drawn);
-            jumped = true;
+            if state["pick"].is_object() {
+                // The other end of a path is being chosen: this place is it.
+                match led(state.clone(), row["path"].as_str().unwrap_or("")) {
+                    Some(shown) => state = shown,
+                    None => return true,
+                }
+                dom::set_value("graph-map-filter", "");
+            } else {
+                // Whether the picture that is open draws the place.
+                let wanted = row["path"].to_string();
+                let drawn = dom::all("#graph-map-canvas .graph-map-node")
+                    .iter()
+                    .any(|node| {
+                        node.get_attribute("data-payload").as_deref() == Some(wanted.as_str())
+                    });
+                state = sought(state, row, drawn);
+                jumped = true;
+            }
         }
         ("click", "graph-pick-open", _) => {
             let mut pick = picker();
@@ -4305,6 +4575,28 @@ pub async fn event(
             state = anew(value);
             chosen = true;
         }
+        ("click", _, "graph-map-path") => {
+            // The other end is chosen next. The picture stays as it is.
+            state["pick"] = json!({"path": payload["path"], "name": payload["name"]});
+        }
+        ("click", _, "graph-map-path-cancel") => {
+            state["pick"] = V::Null;
+        }
+        ("click", _, "graph-map-path-swap") => {
+            let mut ends = unfolded(&state, "path");
+            ends.reverse();
+            state["path"] = json!(ends);
+            state["focus"] = json!("");
+        }
+        ("click", _, "graph-map-node") if state["pick"].is_object() => {
+            // The other end of a path is being chosen: this box is it. The
+            // place the path is asked from is no end for it.
+            match led(state.clone(), payload.as_str().unwrap_or("")) {
+                Some(shown) => state = shown,
+                None => return true,
+            }
+            dom::set_value("graph-map-filter", "");
+        }
         ("click", _, "graph-map-node") => {
             let path = payload.as_str().unwrap_or("");
             let wanted = payload.to_string();
@@ -4334,6 +4626,7 @@ pub async fn event(
             state["follow"] = payload.clone();
             state["out"] = json!([payload]);
             state["into"] = json!([payload]);
+            state["path"] = json!([]);
             state["focus"] = json!("");
             state["filter"] = json!("");
             dom::set_value("graph-map-filter", "");
@@ -5232,7 +5525,7 @@ mod tests {
         let html = side(&view);
         // What is linked with something offers to follow its links, among
         // symbols and into other files.
-        assert!(html.starts_with("<h3>Cart.total()</h3><p class=\"graph-map-path\">src/Cart/Cart.php:19</p><p class=\"knowledge-note\">Method of Cart</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Cart.php#L19:.total()&quot;\">Follow links</button><h4>Uses <span class=\"graph-map-total\">1</span></h4>"), "{html}");
+        assert!(html.starts_with("<h3>Cart.total()</h3><p class=\"graph-map-path\">src/Cart/Cart.php:19</p><p class=\"knowledge-note\">Method of Cart</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Cart.php#L19:.total()&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;Cart.total()&quot;,&quot;path&quot;:&quot;src/Cart/Cart.php#L19:.total()&quot;}\">Path to…</button><h4>Uses <span class=\"graph-map-total\">1</span></h4>"), "{html}");
         // A symbol of another file carries the file and opens it; one of
         // this file is only selected. Each is linked once, in one way. The
         // keys of a payload stand in the order the build's JSON keeps.
@@ -5277,7 +5570,7 @@ mod tests {
             "used_by_more": 0, "kinds": []
         });
         let html = side(&view);
-        assert!(html.starts_with("<h3>Price.php</h3><p class=\"graph-map-path\">src/Cart/Price.php</p><p class=\"knowledge-note\">Changed file · added · used by this file · 3 symbols</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-open\" data-payload=\"&quot;src/Cart/Price.php&quot;\">Open file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Price.php&quot;\">Follow links</button><h4>Uses this file <span"), "{html}");
+        assert!(html.starts_with("<h3>Price.php</h3><p class=\"graph-map-path\">src/Cart/Price.php</p><p class=\"knowledge-note\">Changed file · added · used by this file · 3 symbols</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-open\" data-payload=\"&quot;src/Cart/Price.php&quot;\">Open file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Price.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;Price.php&quot;,&quot;path&quot;:&quot;src/Cart/Price.php&quot;}\">Path to…</button><h4>Uses this file <span"), "{html}");
         assert!(
             html.contains("<h4>Used by this file <span class=\"graph-map-total\">1</span></h4>")
         );
@@ -6500,7 +6793,7 @@ mod tests {
         let html = side(&view);
         // What it is, where it lies and what the change did to it; the way
         // to its file. The links are followed from it already.
-        assert!(html.starts_with("<h3>Cart.total()</h3><p class=\"graph-map-path\">src/Cart/Cart.php:19</p><p class=\"knowledge-note\">Method of Cart · modified by the change · the links are followed from here</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-go\" data-payload=\"{&quot;open&quot;:&quot;src/Cart/Cart.php&quot;,&quot;path&quot;:&quot;src/Cart/Cart.php#L19:.total()&quot;}\">Open in its file</button><h4>Uses <span class=\"graph-map-total\">2</span></h4>"), "{html}");
+        assert!(html.starts_with("<h3>Cart.total()</h3><p class=\"graph-map-path\">src/Cart/Cart.php:19</p><p class=\"knowledge-note\">Method of Cart · modified by the change · the links are followed from here</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-go\" data-payload=\"{&quot;open&quot;:&quot;src/Cart/Cart.php&quot;,&quot;path&quot;:&quot;src/Cart/Cart.php#L19:.total()&quot;}\">Open in its file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;Cart.total()&quot;,&quot;path&quot;:&quot;src/Cart/Cart.php#L19:.total()&quot;}\">Path to…</button><h4>Uses <span class=\"graph-map-total\">2</span></h4>"), "{html}");
         assert!(!html.contains("graph-map-follow"));
         // A symbol the picture draws is selected in it and says its file;
         // one it does not draw opens its file. A payload is read as the
@@ -6535,12 +6828,357 @@ mod tests {
         other["inside"] = json!(true);
         view["focus"] = other;
         let html = side(&view);
-        assert!(html.starts_with("<h3>Price.of()</h3><p class=\"graph-map-path\">src/Cart/Price.php:9</p><p class=\"knowledge-note\">Method of Price</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-go\" data-payload=\"{&quot;open&quot;:&quot;src/Cart/Price.php&quot;,&quot;path&quot;:&quot;src/Cart/Price.php#L9:.of()&quot;}\">Open in its file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Price.php#L9:.of()&quot;\">Follow links</button>"), "{html}");
+        assert!(html.starts_with("<h3>Price.of()</h3><p class=\"graph-map-path\">src/Cart/Price.php:9</p><p class=\"knowledge-note\">Method of Price</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-go\" data-payload=\"{&quot;open&quot;:&quot;src/Cart/Price.php&quot;,&quot;path&quot;:&quot;src/Cart/Price.php#L9:.of()&quot;}\">Open in its file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Price.php#L9:.of()&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;Price.of()&quot;,&quot;path&quot;:&quot;src/Cart/Price.php#L9:.of()&quot;}\">Path to…</button>"), "{html}");
         // Nothing selected: the hint of followed links.
         view["focus"] = V::Null;
         assert!(side(&view).starts_with(
             "<p class=\"knowledge-note\">Select a box to see what it uses and what uses it."
         ));
+    }
+    /// The shortest ways from the entry point to the database: through
+    /// either file of the API, then the core.
+    fn routed() -> V {
+        let node = |path: &str, name: &str, step: u64| {
+            json!({
+                "path": path, "name": name, "folder": false, "files": 1, "symbols": 2, "within": 0,
+                "out": 2, "in": 1, "start": step == 0, "end": step == 3, "step": step,
+                "changed": 0, "status": null
+            })
+        };
+        json!({
+            "mode": "path", "scope": "app", "certain": false,
+            "crumbs": [{"name": "office", "path": ""}, {"name": "app", "path": "app"}, {"name": "main.php → db<1>.php", "path": ""}],
+            "totals": {"files": 21, "symbols": 22, "relations": 22, "links": 22, "read": 21, "guessed": 1, "unplaced": 0},
+            "path": {
+                "from": {"path": "app/main.php", "name": "main.php", "what": "file"},
+                "to": {"path": "lib/db.php", "name": "db<1>.php", "what": "file"},
+                "names": false, "found": true, "reversed": false, "within": false,
+                "steps": 3, "places": 5, "shown": 5, "links": 5, "wide": 8
+            },
+            "children": 5, "matching": 5,
+            "nodes": [
+                node("app/main.php", "main.php", 0),
+                node("app/api/orders.php", "orders.php", 1),
+                node("app/api/users.php", "users.php", 1),
+                node("lib/core.php", "core.php", 2),
+                node("lib/db.php", "db<1>.php", 3)
+            ],
+            "between": 5, "backbone": false,
+            "edges": [
+                {"from": "lib/core.php", "to": "lib/db.php", "links": 2, "guessed": 0},
+                {"from": "app/api/orders.php", "to": "lib/core.php", "links": 1, "guessed": 0},
+                {"from": "app/api/users.php", "to": "lib/core.php", "links": 1, "guessed": 0},
+                {"from": "app/main.php", "to": "app/api/orders.php", "links": 1, "guessed": 0},
+                {"from": "app/main.php", "to": "app/api/users.php", "links": 1, "guessed": 1}
+            ],
+            "focus": null
+        })
+    }
+    #[test]
+    fn a_path_says_which_way_it_runs_how_long_it_is_and_what_it_leaves_out() {
+        let view = routed();
+        assert_eq!(
+            summary(&view),
+            "Path from main.php to db<1>.php · 3 links · 5 places on the shortest ways"
+        );
+        assert_eq!(
+            note(&view),
+            "Each box uses the next: these are the ways that take the fewest links. Select a link to see what makes it up."
+        );
+        // The two ends close the path above the picture, and beside them
+        // stands the way to ask for the other direction.
+        assert!(crumbs(&view).ends_with(
+            "<span class=\"graph-map-crumb\" aria-current=\"location\">main.php → db&lt;1&gt;.php: path</span><span aria-hidden=\"true\">·</span><button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-path-swap\">The other way</button>"
+        ));
+        let told = legend(&view, false);
+        assert!(
+            told.ends_with("Thicker: more links. The ringed boxes are the two ends of the path."),
+            "{told}"
+        );
+        assert!(legend(&view, true).ends_with("the two ends of the path. Highlighted: changed."));
+        // More places lie on such ways than a step shows.
+        let mut wide = routed();
+        wide["path"]["places"] = json!(1031);
+        wide["between"] = json!(400);
+        assert_eq!(
+            summary(&wide),
+            "Path from main.php to db<1>.php · 3 links · 1,031 places on the shortest ways, 5 drawn"
+        );
+        assert!(note(&wide).ends_with(
+            "1,031 places lie on such ways; each step shows its 8 most linked. Drawing 5 of 400 links: the strongest into each box and out of it, then the strongest of the rest."
+        ));
+        // Nothing leads the way that was asked for: the picture runs the
+        // other way round and says so, first of all.
+        let mut turned = routed();
+        turned["path"]["reversed"] = json!(true);
+        turned["path"]["from"]["name"] = json!("db.php");
+        turned["path"]["to"]["name"] = json!("main.php");
+        turned["path"]["steps"] = json!(1);
+        assert_eq!(
+            summary(&turned),
+            "Path from main.php to db.php · 1 link · 5 places on the shortest ways"
+        );
+        assert!(note(&turned).starts_with(
+            "Nothing leads from db.php to main.php: this is the way from main.php to db.php. Each box uses the next"
+        ));
+        // No way either way, with a hint where guesses are left out.
+        let mut none = routed();
+        none["path"]["found"] = json!(false);
+        none["nodes"] = json!([]);
+        none["edges"] = json!([]);
+        assert_eq!(summary(&none), "No path between main.php and db<1>.php");
+        assert_eq!(
+            note(&none),
+            "No chain of links leads from main.php to db<1>.php, nor back. The two may still share something that both use, or that uses both."
+        );
+        none["certain"] = json!(true);
+        assert!(note(&none)
+            .ends_with("Links guessed by name are left out; with them there may be a way."));
+        // Where there is no path there is no other way to ask for.
+        assert!(crumbs(&none).ends_with(": path</span>"));
+        // One end in the other.
+        none["path"]["within"] = json!(true);
+        assert_eq!(summary(&none), "No path between main.php and db<1>.php");
+        assert_eq!(
+            note(&none),
+            "One of main.php and db<1>.php lies in the other, so no path runs between them. Choose two places that lie apart."
+        );
+        // Inside a chosen change the graph may be behind the files.
+        let mut stale = routed();
+        stale["stale"] = json!(true);
+        assert!(note(&stale).starts_with("The graph is older than the files"));
+    }
+    #[test]
+    fn the_boxes_of_a_path_are_ringed_at_its_two_ends_and_do_not_open() {
+        let html = canvas(&routed());
+        assert_eq!(
+            html.matches("<button type=\"button\" class=\"graph-map-node\"")
+                .count(),
+            5
+        );
+        // The start and the end, each said in words too.
+        assert!(html.contains("data-payload=\"&quot;app/main.php&quot;\" data-folder=\"false\" data-kind=\"\" data-open=\"false\""), "{html}");
+        assert!(html.contains("data-start=\"true\" style="));
+        assert!(
+            html.contains("is used through 1 link, the path starts here\""),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("data-start=\"false\" data-end=\"true\" style=")
+                .count(),
+            1
+        );
+        assert!(html.contains("aria-label=\"db&lt;1&gt;.php, file, uses others through 2 links, is used through 1 link, the path ends here\""), "{html}");
+        // A box is only selected, and has no handles: nothing is unfolded.
+        assert_eq!(html.matches("data-open=\"true\"").count(), 0);
+        assert!(!html.contains("graph-map-more"));
+        assert!(!html.contains("data-names"));
+        // Every link can be looked into.
+        assert_eq!(html.matches("data-action=\"graph-map-link\"").count(), 5);
+        // Among symbols the boxes carry their letters and keep the ends of
+        // their names, and the legend tells the letters.
+        let mut named = traced();
+        named["mode"] = json!("path");
+        named["path"] = json!({
+            "from": {"path": TEST_TOTAL, "name": "CartTest.testTotal()", "what": "method", "symbol": true},
+            "to": {"path": PRICE_OF, "name": "Price.of()", "what": "method", "symbol": true},
+            "names": true, "found": true, "reversed": false, "within": false,
+            "steps": 2, "places": 3, "shown": 3, "links": 2, "wide": 8
+        });
+        named["nodes"] = json!([named["nodes"][2], named["nodes"][0], named["nodes"][1]]);
+        named["nodes"][0]["start"] = json!(true);
+        named["nodes"][1]["start"] = json!(false);
+        named["nodes"][2]["end"] = json!(true);
+        named["edges"] = json!([
+            {"from": TEST_TOTAL, "to": TOTAL, "links": 1, "guessed": 0},
+            {"from": TOTAL, "to": PRICE_OF, "links": 1, "guessed": 0}
+        ]);
+        let html = canvas(&named);
+        assert!(html.starts_with("<div class=\"graph-map-plane\" data-names=\"true\" style=\""));
+        assert!(html.contains("title=\"Price.of() · src/Cart/Price.php:9\" aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links, the path ends here\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Price.of()</bdi></span></button>"), "{html}");
+        assert!(html.contains("the path starts here\""));
+        assert!(!html.contains("graph-map-more"));
+        assert!(legend(&named, true).ends_with("the two ends of the path. T type · m method · f function · c case · # heading. A box without a letter is a plain name, or a file itself for its imports. Highlighted: touched by the change."));
+        assert_eq!(
+            summary(&named),
+            "Path from CartTest.testTotal() to Price.of() · 2 links · 3 places on the shortest ways"
+        );
+    }
+    #[test]
+    fn the_side_panel_of_a_path_lists_the_next_and_the_one_before() {
+        // Nothing selected: how to read the picture.
+        let mut view = routed();
+        let idle = side(&view);
+        assert!(idle.starts_with("<p class=\"knowledge-note\">Select a box to see what it leads to on the way and what leads to it."));
+        assert!(idle.ends_with("asks for the ways from the second place to the first.</p>"));
+        // A file of the way: what it is, the ways on from it, and the two
+        // lists, each row a link that can be looked into.
+        let row = |path: &str, name: &str, links: u64| json!({"path": path, "name": name, "folder": false, "inside": true, "links": links, "guessed": 0, "changed": false});
+        let mut focus = view["nodes"][3].clone();
+        for (key, value) in [
+            ("inside", json!(true)),
+            ("uses", json!([row("lib/db.php", "db<1>.php", 2)])),
+            ("uses_more", json!(0)),
+            (
+                "used_by",
+                json!([
+                    row("app/api/users.php", "users.php", 1),
+                    row("app/api/orders.php", "orders.php", 1)
+                ]),
+            ),
+            ("used_by_more", json!(3)),
+            ("kinds", json!([{"kind": "calls", "links": 2}])),
+        ] {
+            focus[key] = value;
+        }
+        view["focus"] = focus;
+        let html = side(&view);
+        assert!(html.starts_with("<h3>core.php</h3><p class=\"graph-map-path\">lib/core.php</p><p class=\"knowledge-note\">File · 2 symbols</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-open\" data-payload=\"&quot;lib/core.php&quot;\">Open file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;lib/core.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;core.php&quot;,&quot;path&quot;:&quot;lib/core.php&quot;}\">Path to…</button><h4>Next on the way <span class=\"graph-map-total\">1</span></h4>"), "{html}");
+        assert!(
+            html.contains("<h4>Before it on the way <span class=\"graph-map-total\">5</span></h4>")
+        );
+        assert!(html.contains("<p class=\"knowledge-note\">and 3 more</p>"));
+        assert_eq!(html.matches("class=\"graph-map-row-look\"").count(), 3);
+        assert!(html.contains("Uses by kind: calls 2"));
+        // The ends say what they are to the path, and the first one can
+        // be followed like any other.
+        view["focus"]["start"] = json!(true);
+        let html = side(&view);
+        assert!(html
+            .contains("<p class=\"knowledge-note\">File · 2 symbols · the path starts here</p>"));
+        assert!(html.contains("data-action=\"graph-map-follow\""));
+        view["focus"]["start"] = json!(false);
+        view["focus"]["end"] = json!(true);
+        assert!(side(&view).contains("File · 2 symbols · the path ends here</p>"));
+        // A symbol of the way leads to its file, to its links and to a
+        // path from it.
+        let mut named = traced();
+        named["mode"] = json!("path");
+        named["path"] = json!({"names": true, "found": true});
+        let mut focus = named["nodes"][0].clone();
+        for (key, value) in [
+            ("inside", json!(true)),
+            ("uses", json!([])),
+            ("used_by", json!([])),
+            ("end", json!(false)),
+        ] {
+            focus[key] = value;
+        }
+        named["focus"] = focus;
+        let html = side(&named);
+        assert!(html.starts_with("<h3>Cart.total()</h3><p class=\"graph-map-path\">src/Cart/Cart.php:19</p><p class=\"knowledge-note\">Method of Cart · modified by the change · the path starts here</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-go\" data-payload=\"{&quot;open&quot;:&quot;src/Cart/Cart.php&quot;,&quot;path&quot;:&quot;src/Cart/Cart.php#L19:.total()&quot;}\">Open in its file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Cart.php#L19:.total()&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;Cart.total()&quot;,&quot;path&quot;:&quot;src/Cart/Cart.php#L19:.total()&quot;}\">Path to…</button><h4>Next on the way <span"), "{html}");
+        assert!(html.contains("<h4>Before it on the way <span"));
+        // A selected folder of the whole project offers a path from it.
+        let mut folder = super::tests::view();
+        folder["focus"]["name"] = json!("Order");
+        assert!(side(&folder).contains("data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;Order&quot;,&quot;path&quot;:&quot;src/Order&quot;}\">Path to…</button>"));
+    }
+    #[test]
+    fn a_path_that_draws_nothing_leaves_its_two_ends_to_go_on_from() {
+        // No chain of links joins the two files: each is named with where it
+        // lies, and its links and a path to another place start beside it.
+        let mut none = routed();
+        none["path"]["found"] = json!(false);
+        none["nodes"] = json!([]);
+        none["edges"] = json!([]);
+        assert_eq!(
+            side(&none),
+            "<p class=\"knowledge-note\">Nothing is drawn. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p><h4>main.php</h4><p class=\"graph-map-path\">app/main.php</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;app/main.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;main.php&quot;,&quot;path&quot;:&quot;app/main.php&quot;}\">Path to…</button><h4>db&lt;1&gt;.php</h4><p class=\"graph-map-path\">lib/db.php</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;lib/db.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;db&lt;1&gt;.php&quot;,&quot;path&quot;:&quot;lib/db.php&quot;}\">Path to…</button>"
+        );
+        // One end in the other draws nothing either. A symbol lies at a line
+        // of its file, and a folder is its path.
+        none["path"]["within"] = json!(true);
+        none["path"]["from"] = json!({"path": "src/Cart", "name": "Cart", "what": "folder"});
+        none["path"]["to"] = json!({
+            "path": TOTAL, "name": "Cart.total()", "what": "method", "symbol": true,
+            "file": "src/Cart/Cart.php", "line": 19
+        });
+        let html = side(&none);
+        assert!(
+            html.contains("<h4>Cart</h4><p class=\"graph-map-path\">src/Cart</p>"),
+            "{html}"
+        );
+        assert!(html.contains("<h4>Cart.total()</h4><p class=\"graph-map-path\">src/Cart/Cart.php:19</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Cart.php#L19:.total()&quot;\">Follow links</button>"), "{html}");
+        // A path that is drawn says how to read it instead.
+        assert!(side(&routed()).starts_with("<p class=\"knowledge-note\">Select a box"));
+    }
+    #[test]
+    fn the_other_end_of_a_path_is_chosen_after_the_first() {
+        // Nothing is asked for: nothing stands above the side panel, and a
+        // box that is selected is no end of a path.
+        let state = fresh("pr:7");
+        assert_eq!(choosing(&state), "");
+        assert_eq!(led(state.clone(), "lib/db.php"), None);
+        // A path is asked from a place: the note says from where, what to
+        // do, and how to leave it.
+        let mut asked = state;
+        for (key, value) in [
+            ("scope", json!("lib")),
+            ("focus", json!("lib/a<b>.php")),
+            ("filter", json!("a")),
+            ("follow", json!("lib/core.php")),
+            ("out", json!(["lib/core.php"])),
+            ("into", json!(["lib/core.php"])),
+            ("spread", json!(["src"])),
+            ("pick", json!({"path": "lib/a<b>.php", "name": "a<b>.php"})),
+        ] {
+            asked[key] = value;
+        }
+        assert_eq!(
+            choosing(&asked),
+            "<div class=\"graph-map-picking\" role=\"status\"><p>Path from <strong>a&lt;b&gt;.php</strong>: select the place it should lead to, a box of any picture or a place the search finds.</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path-cancel\">Cancel</button></div>"
+        );
+        // The place itself is no other end, nor is nothing.
+        assert_eq!(led(asked.clone(), "lib/a<b>.php"), None);
+        assert_eq!(led(asked.clone(), ""), None);
+        // Another place is: the path takes the place of what was followed,
+        // in the map that is open, and nothing is selected in it.
+        let shown = led(asked.clone(), "lib/db.php").unwrap();
+        let kept = |state: &V, keys: &[&str]| {
+            keys.iter()
+                .map(|key| state[*key].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kept(
+                &shown,
+                &["path", "pick", "follow", "out", "into", "focus", "filter"]
+            ),
+            [
+                json!(["lib/a<b>.php", "lib/db.php"]),
+                V::Null,
+                json!(""),
+                json!([]),
+                json!([]),
+                json!(""),
+                json!("")
+            ]
+        );
+        assert_eq!(
+            kept(&shown, &["target", "scope", "spread"]),
+            kept(&asked, &["target", "scope", "spread"])
+        );
+        assert_eq!(choosing(&shown), "");
+        // Leaving a path for a folder or a file drops the path, and keeps
+        // one that is still being asked for.
+        let mut both = shown.clone();
+        both["pick"] = json!({"path": "lib/db.php", "name": "db.php"});
+        let left = unfollowed(both);
+        assert_eq!(left["path"], json!([]));
+        assert_eq!(left["pick"]["path"], "lib/db.php");
+        // A place the search found leaves a shown path as well.
+        let rows = m::array(&searched()["rows"]);
+        assert_eq!(sought(shown, &rows[0], false)["path"], json!([]));
+        // While an end is chosen the search says what a row is for.
+        let mut finder = searched();
+        finder["found"] = json!(4);
+        finder["choosing"] = json!(true);
+        assert_eq!(
+            found_note(&finder),
+            "4 found. ↑ ↓ to move · Enter to lead the path there · Esc to close"
+        );
+        assert_eq!(fresh("")["path"], json!([]));
+        assert_eq!(fresh("")["pick"], V::Null);
     }
     #[test]
     fn what_a_search_typed_is_marked_in_the_names_it_found() {

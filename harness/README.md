@@ -1880,6 +1880,30 @@ what uses a changed file shows how far the change reaches beyond its direct
 neighbours. A box is selected as elsewhere; it opens with **Open file** or **Open
 folder**, which leaves the picture.
 
+**Path to…**, beside a selected folder, file or symbol, asks how that place depends
+on another. The other end is chosen next: a box of any picture, also after walking
+to another folder, or a place the search finds. A note above the side panel says
+what is being asked, and **Cancel** or Escape leaves it. The picture then shows the
+shortest ways from the first place to the second: every chain of the fewest links
+in which each box uses the next, the first place on the left and the second on the
+right, both ringed. Between folders and files it is a chain of files, a folder
+standing for every file in it, so the boxes at the two ends are the files of those
+folders that the ways start and end at. Where an end is a class, a method or a
+function it is a chain of symbols, and a file or a folder at the other end stands
+for every symbol in it. Where nothing leads from the first to the second, the ways
+from the second to the first are drawn and said to run the other way round; **The
+other way** asks for them on purpose, which shows both halves of a cycle. Where
+nothing leads either way the note says so: the two may still share something that
+both use. Nothing is drawn then, and the two places stand beside the empty picture,
+each with **Follow links** and another **Path to…**. A step shows its 8 most linked
+places, fewer on a long way, each drawn box on a way that is drawn whole, and the
+summary counts all that lie on such ways. Selecting a box lists the next and the one
+before it on the way; a link opens as in any picture, and a box leads on with **Open
+file**, **Follow links** or another **Path to…**. Inside a chosen change the changed
+files and the touched symbols keep their marks, and with **Only links read from the
+code** the ways are found without the guessed links, which a dashed arrow marks: a
+chain is as true as its weakest link.
+
 Between folders and files the map counts the graph's links that cross a file
 boundary; the links inside one file show when that file is opened. The relations
 that only say where a symbol lives (`contains`, `method`, `defines`, `case_of`,

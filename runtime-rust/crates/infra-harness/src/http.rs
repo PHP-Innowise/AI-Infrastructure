@@ -298,7 +298,7 @@ pub const ROUTES: &[Route] = &[
         token: false,
         query: &[
             "scope", "focus", "certain", "filter", "target", "follow", "out", "into", "notests",
-            "spread", "from", "to",
+            "spread", "from", "to", "path",
         ],
     },
     Route {

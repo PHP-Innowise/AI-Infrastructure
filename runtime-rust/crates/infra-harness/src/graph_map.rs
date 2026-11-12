@@ -61,6 +61,9 @@ const OWN: usize = 20;
 /// linked first, and the links drawn between the two ends.
 pub const LINKED: usize = 150;
 const WIRED: usize = 600;
+/// Places one step of a path shows at most, the most linked first; a long
+/// path shows fewer, so that the picture holds no more than `FOLLOWED`.
+pub const WAY: usize = 8;
 /// Places a search of the whole graph lists at once, the best first; the
 /// rest are counted, and a longer search reaches them.
 pub const FOUND: usize = 40;
@@ -2537,6 +2540,116 @@ impl Index {
         }))
     }
 }
+/// What a picture of symbols from many files is drawn with: the names the
+/// pictures of their files select them by, and what a chosen change did to
+/// each. Both are worked out file by file as they are asked for, each once.
+struct Names<'a> {
+    index: &'a Index,
+    /// The files of the change, with Git's letter for each.
+    letters: HashMap<&'a str, char>,
+    /// What the change did to one of its files, where that can be told.
+    edited: &'a dyn Fn(&str) -> Option<Edited>,
+    keys: RefCell<HashMap<u32, Rc<Vec<String>>>>,
+    marks: RefCell<HashMap<u32, Option<Rc<Marks>>>>,
+}
+impl<'a> Names<'a> {
+    fn new(
+        index: &'a Index,
+        changed: &'a [(String, char)],
+        edited: &'a dyn Fn(&str) -> Option<Edited>,
+    ) -> Self {
+        Self {
+            index,
+            letters: changed
+                .iter()
+                .filter(|(_, kind)| *kind != 'D')
+                .map(|(path, kind)| (path.as_str(), *kind))
+                .collect(),
+            edited,
+            keys: RefCell::new(HashMap::new()),
+            marks: RefCell::new(HashMap::new()),
+        }
+    }
+    /// The name the picture of its file selects a symbol by.
+    fn key(&self, at: u32) -> String {
+        let index = self.index;
+        let file = index.symbols[at as usize].file;
+        let keys = self
+            .keys
+            .borrow_mut()
+            .entry(file)
+            .or_insert_with(|| Rc::new(index.keys(file)))
+            .clone();
+        keys[(at - index.first[file as usize]) as usize].clone()
+    }
+    /// What the change did to a symbol: Git's letter where its own lines
+    /// changed, and how many symbols changed inside it.
+    fn touched(&self, at: u32) -> (Option<char>, u64) {
+        let index = self.index;
+        let file = index.symbols[at as usize].file;
+        let marks = self
+            .marks
+            .borrow_mut()
+            .entry(file)
+            .or_insert_with(|| {
+                let path = index.files[file as usize].as_str();
+                self.letters
+                    .contains_key(path)
+                    .then(|| (self.edited)(path))
+                    .flatten()
+                    .map(|edited| Rc::new(index.marks(file, &edited)))
+            })
+            .clone();
+        let place = (at - index.first[file as usize]) as usize;
+        (
+            marks.as_ref().and_then(|marks| marks.status[place]),
+            marks.as_ref().map_or(0, |marks| marks.inside[place]),
+        )
+    }
+    /// A symbol as a picture tells it: by the name its file selects it by,
+    /// with what it is and where it lies.
+    fn told(&self, at: u32, key: &str) -> Value {
+        let index = self.index;
+        let symbol = &index.symbols[at as usize];
+        json!({
+            "path": key,
+            "name": index.shown(at),
+            "kind": symbol.kind.word(),
+            "line": symbol.line,
+            "owner": index.owner(at),
+            "file": index.files[symbol.file as usize],
+            "symbol": true,
+            "folder": false,
+        })
+    }
+    /// A symbol as a box of a picture, with what the change did to it.
+    fn node(&self, at: u32, key: &str) -> Value {
+        let (status, inside) = self.touched(at);
+        let mut node = self.told(at, key);
+        node["files"] = json!(1);
+        node["within"] = json!(0);
+        node["changed"] = json!(u64::from(status.is_some() || inside > 0));
+        node["status"] = json!(status.map(String::from));
+        node["touched"] = json!(inside);
+        node
+    }
+    /// Git's letter for a file of the change.
+    fn letter(&self, path: &str) -> Option<char> {
+        self.letters.get(path).copied()
+    }
+    /// A symbol as a row beside a selected one: `drawn` says the picture
+    /// draws it, and `flow` and `kind` how the two are linked.
+    fn row(&self, at: u32, drawn: bool, flow: Flow, kind: Option<u16>) -> Value {
+        let (status, inside) = self.touched(at);
+        let mut row = self.told(at, &self.key(at));
+        row["inside"] = json!(drawn);
+        row["relation"] = json!(kind.map(|kind| self.index.kinds[kind as usize].as_str()));
+        row["links"] = json!(flow.links);
+        row["guessed"] = json!(flow.guessed);
+        row["changed"] = json!(status.is_some() || inside > 0);
+        row
+    }
+}
 /// One side of a symbol: each symbol it uses, or each that uses it, with
 /// the links between the two and the relation of the first of them.
 type Side = Rc<Vec<(u32, Flow, u16)>>;
@@ -2646,45 +2759,15 @@ impl Index {
         focus: Option<&str>,
         certain: bool,
     ) -> Value {
-        let letters = changed
-            .iter()
-            .filter(|(_, kind)| *kind != 'D')
-            .map(|(path, kind)| (path.as_str(), *kind))
-            .collect::<HashMap<_, _>>();
-        // The names the pictures of files select their symbols by, the sides
-        // of a symbol and what the change did to a file are worked out as
-        // they are asked for, each once.
-        let named = RefCell::new(HashMap::<u32, Rc<Vec<String>>>::new());
-        let key = |at: u32| {
-            let file = self.symbols[at as usize].file;
-            let keys = named
-                .borrow_mut()
-                .entry(file)
-                .or_insert_with(|| Rc::new(self.keys(file)))
-                .clone();
-            keys[(at - self.first[file as usize]) as usize].clone()
-        };
+        let names = Names::new(self, changed, edited);
+        let key = |at: u32| names.key(at);
+        // The sides of a symbol are worked out as they are asked for, once.
         let sides = RefCell::new(HashMap::<(u32, bool), Side>::new());
         let side = |at: u32, outgoing: bool| {
             sides
                 .borrow_mut()
                 .entry((at, outgoing))
                 .or_insert_with(|| Rc::new(self.beside(at, outgoing, certain)))
-                .clone()
-        };
-        let marked = RefCell::new(HashMap::<u32, Option<Rc<Marks>>>::new());
-        let marks = |file: u32| {
-            marked
-                .borrow_mut()
-                .entry(file)
-                .or_insert_with(|| {
-                    let path = self.files[file as usize].as_str();
-                    letters
-                        .contains_key(path)
-                        .then(|| edited(path))
-                        .flatten()
-                        .map(|edited| Rc::new(self.marks(file, &edited)))
-                })
                 .clone()
         };
         let times = |list: &[String], place: &str| {
@@ -2773,43 +2856,21 @@ impl Index {
                 .map(|(_, flow, _)| flow.links)
                 .sum::<u64>()
         };
-        // What the change did to a symbol: Git's letter where its own lines
-        // changed, and how many symbols changed inside it.
-        let touched = |at: u32| {
-            let symbol = &self.symbols[at as usize];
-            let place = (at - self.first[symbol.file as usize]) as usize;
-            let marks = marks(symbol.file);
-            (
-                marks.as_ref().and_then(|marks| marks.status[place]),
-                marks.as_ref().map_or(0, |marks| marks.inside[place]),
-            )
-        };
         let node = |index: usize| {
             let at = shown[index];
-            let symbol = &self.symbols[at as usize];
-            let (status, inside) = touched(at);
-            json!({
-                "path": keys[index],
-                "name": self.shown(at),
-                "kind": symbol.kind.word(),
-                "line": symbol.line,
-                "owner": self.owner(at),
-                "file": self.files[symbol.file as usize],
-                "symbol": true,
-                "folder": false,
-                "files": 1,
-                "within": 0,
-                "out": links(at, true),
-                "in": links(at, false),
-                "start": index == 0,
-                "more_out": hidden(index, true),
-                "more_in": hidden(index, false),
-                "unfolded_out": unfolded_out[index],
-                "unfolded_in": unfolded_in[index],
-                "changed": u64::from(status.is_some() || inside > 0),
-                "status": status.map(String::from),
-                "touched": inside,
-            })
+            let mut node = names.node(at, &keys[index]);
+            for (key, value) in [
+                ("out", json!(links(at, true))),
+                ("in", json!(links(at, false))),
+                ("start", json!(index == 0)),
+                ("more_out", json!(hidden(index, true))),
+                ("more_in", json!(hidden(index, false))),
+                ("unfolded_out", json!(unfolded_out[index])),
+                ("unfolded_in", json!(unfolded_in[index])),
+            ] {
+                node[key] = value;
+            }
+            node
         };
         let focus = focus
             .and_then(|path| keys.iter().position(|key| key == path))
@@ -2821,25 +2882,8 @@ impl Index {
                         .iter()
                         .take(TOLD)
                         .map(|(other, flow, kind)| {
-                            let symbol = &self.symbols[*other as usize];
-                            let file = self.files[symbol.file as usize].as_str();
-                            let (status, inside) = touched(*other);
-                            json!({
-                                "path": key(*other),
-                                "name": self.shown(*other),
-                                "kind": symbol.kind.word(),
-                                "line": symbol.line,
-                                "owner": self.owner(*other),
-                                "file": file,
-                                "symbol": true,
-                                "folder": false,
-                                "inside": seen.contains(other),
-                                "relation": (flow.links == 1)
-                                    .then(|| self.kinds[*kind as usize].as_str()),
-                                "links": flow.links,
-                                "guessed": flow.guessed,
-                                "changed": status.is_some() || inside > 0,
-                            })
+                            let relation = (flow.links == 1).then_some(*kind);
+                            names.row(*other, seen.contains(other), *flow, relation)
                         })
                         .collect::<Vec<_>>();
                     (rows, all.len().saturating_sub(TOLD))
@@ -2907,6 +2951,525 @@ impl Index {
             })).collect::<Vec<_>>(),
             "focus": focus,
         })
+    }
+}
+impl Index {
+    /// One end of a path, as the pictures name it.
+    fn end(&self, place: &str, reach: Reach) -> Value {
+        match reach {
+            Reach::Symbol(at) => {
+                let symbol = &self.symbols[at as usize];
+                json!({
+                    "path": place,
+                    "name": self.shown(at),
+                    "what": symbol.kind.word(),
+                    "symbol": true,
+                    "file": self.files[symbol.file as usize],
+                    "line": symbol.line,
+                })
+            }
+            Reach::File(_) => json!({"path": place, "name": name(place), "what": "file"}),
+            Reach::Folder(folder) => {
+                json!({"path": folder, "name": name(folder), "what": "folder"})
+            }
+        }
+    }
+    /// The shortest ways from one place to another along the links: every
+    /// chain of the fewest links in which each place uses the next. Either
+    /// end is a folder, a file or a symbol. Between folders and files the
+    /// chain is one of files, a folder standing for every file in it. Where
+    /// an end is a symbol the chain is one of symbols, and a file or a
+    /// folder at the other end stands for every symbol in it.
+    ///
+    /// Where nothing leads from `from` to `to`, the ways from `to` to `from`
+    /// are given and said to run the other way round; where nothing leads
+    /// either way, or one end lies in the other, the answer says so and
+    /// draws nothing. A step shows its `WAY` most linked places, fewer on a
+    /// long way; each place drawn keeps the strongest of what leads to it,
+    /// so every box lies on a way that is drawn whole, and the answer counts
+    /// all the places and links that lie on such ways.
+    ///
+    /// `changed` marks the files of a chosen change and `edited` the symbols
+    /// it touched, as among followed links; `focus` lists what one place
+    /// drawn leads to on the way and what leads to it. `None` where an end
+    /// names nothing in the graph.
+    #[allow(clippy::too_many_arguments)]
+    pub fn path(
+        &self,
+        project: &str,
+        from: &str,
+        to: &str,
+        changed: &[(String, char)],
+        edited: &dyn Fn(&str) -> Option<Edited>,
+        focus: Option<&str>,
+        certain: bool,
+    ) -> Option<Value> {
+        let (start, end) = (self.reach(from)?, self.reach(to)?);
+        let symbols = matches!(start, Reach::Symbol(_)) || matches!(end, Reach::Symbol(_));
+        // What an end stands for: files, or, among symbols, symbols.
+        let members = |reach: Reach| {
+            let files = self
+                .files
+                .iter()
+                .enumerate()
+                .filter(|(id, file)| match reach {
+                    Reach::Folder(folder) => file
+                        .strip_prefix(folder)
+                        .is_some_and(|rest| rest.starts_with('/')),
+                    Reach::File(own) => *id as u32 == own,
+                    Reach::Symbol(at) => *id as u32 == self.symbols[at as usize].file,
+                })
+                .map(|(id, _)| id as u32);
+            match (symbols, reach) {
+                (true, Reach::Symbol(at)) => vec![at],
+                (true, _) => files
+                    .flat_map(|file| self.range(file))
+                    .filter(|at| self.symbols[*at as usize].kind != Kind::Note)
+                    .collect(),
+                (false, _) => files.collect::<Vec<_>>(),
+            }
+        };
+        let (starts, ends) = (members(start), members(end));
+        // Between files a link is a pair of files that are linked.
+        let mut uses: HashMap<u32, Vec<(u32, Flow)>> = HashMap::new();
+        let mut users: HashMap<u32, Vec<(u32, Flow)>> = HashMap::new();
+        if !symbols {
+            for (user, used, pair) in &self.pairs {
+                let links = pair.weight(certain);
+                if links == 0 {
+                    continue;
+                }
+                let flow = Flow {
+                    links,
+                    guessed: if certain { 0 } else { pair.guessed },
+                };
+                uses.entry(*user).or_default().push((*used, flow));
+                users.entry(*used).or_default().push((*user, flow));
+            }
+        }
+        // What a place uses, or what uses it, with the links between the two.
+        let beside = |place: u32, outgoing: bool| {
+            if symbols {
+                self.beside(place, outgoing, certain)
+                    .into_iter()
+                    .map(|(other, flow, _)| (other, flow))
+                    .collect::<Vec<_>>()
+            } else {
+                let side = if outgoing { &uses } else { &users };
+                side.get(&place).cloned().unwrap_or_default()
+            }
+        };
+        // How far every place lies from the nearest of `first`, as far as
+        // the nearest of `last`, and how far that is: the whole graph is
+        // walked a step at a time. `None` where nothing leads there.
+        let count = if symbols {
+            self.symbols.len()
+        } else {
+            self.files.len()
+        };
+        let walk = |first: &[u32], last: &[u32]| {
+            let goal = last.iter().copied().collect::<HashSet<_>>();
+            let mut far = vec![u32::MAX; count];
+            for place in first {
+                far[*place as usize] = 0;
+            }
+            let mut front = first.to_vec();
+            let mut steps = 0u32;
+            while !front.is_empty() {
+                steps += 1;
+                let mut next = Vec::new();
+                let mut there = false;
+                let mut reach = |other: u32| {
+                    if far[other as usize] == u32::MAX {
+                        far[other as usize] = steps;
+                        next.push(other);
+                        there |= goal.contains(&other);
+                    }
+                };
+                for place in &front {
+                    if symbols {
+                        for (_, used, ..) in self.wired(*place, true, certain) {
+                            if self.symbols[*used as usize].kind != Kind::Note {
+                                reach(*used);
+                            }
+                        }
+                    } else {
+                        for (used, _) in uses.get(place).into_iter().flatten() {
+                            reach(*used);
+                        }
+                    }
+                }
+                if there {
+                    return Some((far, steps as usize));
+                }
+                front = next;
+            }
+            None
+        };
+        // One end that lies in the other is no way from the one to the other.
+        let within = {
+            let inside = starts.iter().copied().collect::<HashSet<_>>();
+            ends.iter().any(|place| inside.contains(place))
+        };
+        let found = if within {
+            None
+        } else {
+            walk(&starts, &ends)
+                .map(|way| (way, false))
+                .or_else(|| walk(&ends, &starts).map(|way| (way, true)))
+        };
+        let names = Names::new(self, changed, edited);
+        // The way back leads to where the first end lies.
+        let scope = match start {
+            Reach::Symbol(at) => self.files[self.symbols[at as usize].file as usize].as_str(),
+            Reach::File(file) => holder(&self.files[file as usize]),
+            Reach::Folder(folder) => holder(folder),
+        };
+        let (first, last) = (self.end(from, start), self.end(to, end));
+        let mut crumbs = Self::crumbs(project, scope);
+        crumbs.push(json!({
+            "name": format!(
+                "{} → {}",
+                first["name"].as_str().unwrap_or(""),
+                last["name"].as_str().unwrap_or("")
+            ),
+            "path": "",
+        }));
+        let mut view = json!({
+            "mode": "path",
+            "scope": scope,
+            "crumbs": crumbs,
+            "certain": certain,
+            "totals": self.totals(),
+            "path": {
+                "from": first,
+                "to": last,
+                "names": symbols,
+                "found": false,
+                "reversed": false,
+                "within": within,
+                "steps": 0,
+                "places": 0,
+                "shown": 0,
+                "links": 0,
+                "wide": WAY,
+            },
+            "children": 0,
+            "matching": 0,
+            "nodes": [],
+            "between": 0,
+            "backbone": false,
+            "edges": [],
+            "focus": null,
+        });
+        let Some(((far, steps), reversed)) = found else {
+            return Some(view);
+        };
+        let goal = if reversed { &starts } else { &ends };
+        // Every place on a shortest way, a step at a time from the far end
+        // back, each with what leads to it on such a way.
+        let mut levels = vec![Vec::new(); steps + 1];
+        levels[steps] = goal
+            .iter()
+            .copied()
+            .filter(|place| far[*place as usize] == steps as u32)
+            .collect();
+        let mut before: HashMap<u32, Vec<(u32, Flow)>> = HashMap::new();
+        let mut links = 0;
+        for step in (1..=steps).rev() {
+            let (earlier, later) = levels.split_at_mut(step);
+            let mut seen = HashSet::new();
+            for place in &later[0] {
+                let leading = beside(*place, false)
+                    .into_iter()
+                    .filter(|(other, _)| far[*other as usize] == step as u32 - 1)
+                    .collect::<Vec<_>>();
+                links += leading.len();
+                for (other, _) in &leading {
+                    if seen.insert(*other) {
+                        earlier[step - 1].push(*other);
+                    }
+                }
+                before.insert(*place, leading);
+            }
+        }
+        let places = levels.iter().map(Vec::len).sum::<usize>();
+        // Places are told apart by where they lie: the file, then the line.
+        let tag = |place: u32| {
+            if symbols {
+                let symbol = &self.symbols[place as usize];
+                (
+                    self.files[symbol.file as usize].as_str(),
+                    symbol.line,
+                    place,
+                )
+            } else {
+                (self.files[place as usize].as_str(), 0, place)
+            }
+        };
+        let per = WAY.min(FOLLOWED / (steps + 1)).max(1);
+        let mut kept = vec![Vec::new(); steps + 1];
+        // The far end keeps the places most linked with the step before.
+        let mut ending = levels[steps]
+            .iter()
+            .map(|place| {
+                let links = before[place]
+                    .iter()
+                    .map(|(_, flow)| flow.links)
+                    .sum::<u64>();
+                (*place, links)
+            })
+            .collect::<Vec<_>>();
+        ending.sort_by(|a, b| b.1.cmp(&a.1).then(tag(a.0).cmp(&tag(b.0))));
+        kept[steps] = ending
+            .into_iter()
+            .take(per)
+            .map(|(place, _)| place)
+            .collect();
+        for step in (1..=steps).rev() {
+            // Each place kept keeps the strongest of what leads to it, and
+            // the room that is left goes to the most linked of the rest.
+            let mut chosen: Vec<u32> = Vec::new();
+            let mut strength: HashMap<u32, u64> = HashMap::new();
+            for place in &kept[step] {
+                let mut best: Option<(u32, u64)> = None;
+                for (other, flow) in &before[place] {
+                    *strength.entry(*other).or_default() += flow.links;
+                    if best.is_none_or(|(known, links)| {
+                        flow.links > links || (flow.links == links && tag(*other) < tag(known))
+                    }) {
+                        best = Some((*other, flow.links));
+                    }
+                }
+                if let Some((other, _)) = best
+                    && !chosen.contains(&other)
+                {
+                    chosen.push(other);
+                }
+            }
+            let mut rest = strength
+                .into_iter()
+                .filter(|(other, _)| !chosen.contains(other))
+                .collect::<Vec<_>>();
+            rest.sort_by(|a, b| b.1.cmp(&a.1).then(tag(a.0).cmp(&tag(b.0))));
+            let room = per.saturating_sub(chosen.len());
+            chosen.extend(rest.into_iter().take(room).map(|(other, _)| other));
+            kept[step - 1] = chosen;
+        }
+        for level in &mut kept {
+            level.sort_by(|a, b| tag(*a).cmp(&tag(*b)));
+        }
+        let shown = kept
+            .iter()
+            .enumerate()
+            .flat_map(|(step, level)| level.iter().map(move |place| (*place, step)))
+            .collect::<Vec<_>>();
+        let keys = shown
+            .iter()
+            .map(|(place, _)| {
+                if symbols {
+                    names.key(*place)
+                } else {
+                    self.files[*place as usize].clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let slot = shown
+            .iter()
+            .enumerate()
+            .map(|(index, (place, _))| (*place, index))
+            .collect::<HashMap<_, _>>();
+        let mut edges = Vec::new();
+        for place in kept.iter().skip(1).flatten() {
+            for (other, flow) in &before[place] {
+                if let Some(index) = slot.get(other) {
+                    edges.push((*index, slot[place], *flow));
+                }
+            }
+        }
+        let between = edges.len();
+        let stronger = |a: &(usize, usize, Flow), b: &(usize, usize, Flow)| {
+            b.2.links
+                .cmp(&a.2.links)
+                .then((&keys[a.0], &keys[a.1]).cmp(&(&keys[b.0], &keys[b.1])))
+        };
+        edges.sort_by(stronger);
+        // Where there are more links than a picture draws, the strongest
+        // into each box and the strongest out of it come before the rest:
+        // every box still lies on a way that is drawn whole.
+        if edges.len() > DRAWN {
+            let (mut led, mut leads) = (HashSet::new(), HashSet::new());
+            let (mut needed, mut rest) = (Vec::new(), Vec::new());
+            for edge in edges {
+                let (into, out) = (led.insert(edge.1), leads.insert(edge.0));
+                if into || out {
+                    needed.push(edge);
+                } else {
+                    rest.push(edge);
+                }
+            }
+            let room = DRAWN.saturating_sub(needed.len());
+            needed.extend(rest.into_iter().take(room));
+            needed.sort_by(stronger);
+            edges = needed;
+        }
+        // A file is named by the end of its path that no other drawn shares.
+        let paths = keys.iter().map(String::as_str).collect::<Vec<_>>();
+        let weight = |place: u32, outgoing: bool| {
+            beside(place, outgoing)
+                .iter()
+                .map(|(_, flow)| flow.links)
+                .sum::<u64>()
+        };
+        let node = |index: usize| {
+            let (place, step) = shown[index];
+            let mut node = if symbols {
+                names.node(place, &keys[index])
+            } else {
+                let path = keys[index].as_str();
+                let status = names.letter(path);
+                json!({
+                    "path": path,
+                    "name": label(path, &paths),
+                    "folder": false,
+                    "files": 1,
+                    "symbols": self.holds(place),
+                    "within": 0,
+                    "changed": u64::from(status.is_some()),
+                    "status": status.map(String::from),
+                })
+            };
+            for (key, value) in [
+                ("out", json!(weight(place, true))),
+                ("in", json!(weight(place, false))),
+                ("start", json!(step == 0)),
+                ("end", json!(step == steps)),
+                ("step", json!(step)),
+            ] {
+                node[key] = value;
+            }
+            node
+        };
+        // A place of the way as a row beside a selected one.
+        let row = |other: u32, flow: Flow, user: u32, used: u32| {
+            if symbols {
+                // Two symbols linked once are linked in one way.
+                let relation = (flow.links == 1)
+                    .then(|| {
+                        self.wired(user, true, certain)
+                            .find(|link| link.1 == used)
+                            .map(|link| link.2)
+                    })
+                    .flatten();
+                names.row(other, true, flow, relation)
+            } else {
+                let path = self.files[other as usize].as_str();
+                json!({
+                    "path": path,
+                    "name": label(path, &paths),
+                    "folder": false,
+                    "inside": true,
+                    "links": flow.links,
+                    "guessed": flow.guessed,
+                    "changed": names.letter(path).is_some(),
+                })
+            }
+        };
+        let focus = focus
+            .and_then(|path| keys.iter().position(|key| key == path))
+            .map(|index| {
+                let (place, step) = shown[index];
+                // What the place leads to on the way, and what leads to it:
+                // those drawn, and how many more lie on such ways.
+                let onward = |level: &[u32]| {
+                    level
+                        .iter()
+                        .filter_map(|other| {
+                            before[other]
+                                .iter()
+                                .find(|(known, _)| *known == place)
+                                .map(|(_, flow)| (*other, *flow))
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let (next, further) = if step < steps {
+                    (onward(&kept[step + 1]), onward(&levels[step + 1]).len())
+                } else {
+                    (Vec::new(), 0)
+                };
+                let leading = before.get(&place).map(Vec::as_slice).unwrap_or_default();
+                let prior = leading
+                    .iter()
+                    .filter(|(other, _)| slot.contains_key(other))
+                    .copied()
+                    .collect::<Vec<_>>();
+                let mut kinds: BTreeMap<u16, u64> = BTreeMap::new();
+                if symbols {
+                    for (_, used, kind, _) in self.wired(place, true, certain) {
+                        if next.iter().any(|(other, _)| other == used) {
+                            *kinds.entry(*kind).or_default() += 1;
+                        }
+                    }
+                } else {
+                    for (user, used, pair) in &self.pairs {
+                        if *user == place && next.iter().any(|(other, _)| other == used) {
+                            for (kind, count) in &pair.kinds {
+                                *kinds.entry(*kind).or_default() += count;
+                            }
+                        }
+                    }
+                }
+                let mut kinds = kinds
+                    .iter()
+                    .map(|(kind, count)| (self.kinds[*kind as usize].as_str(), *count))
+                    .collect::<Vec<_>>();
+                kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
+                let mut focus = node(index);
+                focus["inside"] = json!(true);
+                focus["uses"] = next
+                    .iter()
+                    .map(|(other, flow)| row(*other, *flow, place, *other))
+                    .collect();
+                focus["uses_more"] = json!(further - next.len());
+                focus["used_by"] = prior
+                    .iter()
+                    .map(|(other, flow)| row(*other, *flow, *other, place))
+                    .collect();
+                focus["used_by_more"] = json!(leading.len() - prior.len());
+                focus["kinds"] = kinds
+                    .into_iter()
+                    .map(|(kind, count)| json!({"kind": kind, "links": count}))
+                    .collect();
+                focus
+            });
+        for (key, value) in [
+            ("found", json!(true)),
+            ("reversed", json!(reversed)),
+            ("steps", json!(steps)),
+            ("places", json!(places)),
+            ("shown", json!(shown.len())),
+            ("links", json!(links)),
+            ("wide", json!(per)),
+        ] {
+            view["path"][key] = value;
+        }
+        view["children"] = json!(shown.len());
+        view["matching"] = json!(shown.len());
+        view["nodes"] = (0..shown.len()).map(node).collect();
+        view["between"] = json!(between);
+        view["edges"] = edges
+            .iter()
+            .map(|(source, target, flow)| {
+                json!({
+                    "from": keys[*source],
+                    "to": keys[*target],
+                    "links": flow.links,
+                    "guessed": flow.guessed,
+                })
+            })
+            .collect();
+        view["focus"] = json!(focus);
+        Some(view)
     }
 }
 /// One end of a link drawn in an open file: a symbol of the file, or a file
@@ -7257,6 +7820,850 @@ where
             .unwrap();
         assert_eq!(plain["nodes"][0]["changed"], 0);
         assert_eq!(steps(&plain), ["format_price() +0/0 in", "user() +0/1"]);
+    }
+    /// The places of a path as they are drawn: the step each stands at, its
+    /// name, and whether the path starts or ends there.
+    fn way(view: &Value) -> Vec<String> {
+        view["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| {
+                format!(
+                    "{} {}{}{}",
+                    node["step"],
+                    node["name"].as_str().unwrap(),
+                    if node["start"] == true { " start" } else { "" },
+                    if node["end"] == true { " end" } else { "" },
+                )
+            })
+            .collect()
+    }
+    /// What a path says of itself: whether one was found and which way it
+    /// runs, its steps, the places and links on such ways and how many are
+    /// drawn.
+    fn told_of(view: &Value) -> String {
+        let path = &view["path"];
+        format!(
+            "{}{}{} steps={} places={} links={} shown={}",
+            if path["found"] == true {
+                "found"
+            } else {
+                "none"
+            },
+            if path["reversed"] == true {
+                " reversed"
+            } else {
+                ""
+            },
+            if path["within"] == true {
+                " within"
+            } else {
+                ""
+            },
+            path["steps"],
+            path["places"],
+            path["links"],
+            path["shown"],
+        )
+    }
+    #[test]
+    fn the_shortest_ways_between_two_files_are_chains_of_files() {
+        let index = office(3);
+        let path = |from: &str, to: &str, focus: Option<&str>, certain: bool| {
+            index
+                .path("office", from, to, &[], &|_| None, focus, certain)
+                .unwrap()
+        };
+        // The entry point reaches the database in two links, through the
+        // orders, whose link was only guessed.
+        let short = path("app/main.php", "lib/db.php", None, false);
+        assert_eq!(short["mode"], "path");
+        assert_eq!(told_of(&short), "found steps=2 places=3 links=2 shown=3");
+        assert_eq!(
+            way(&short),
+            ["0 main.php start", "1 orders.php", "2 db.php end"]
+        );
+        assert_eq!(
+            sorted(calls(&short)),
+            ["main.php -> orders.php 1/0", "orders.php -> db.php 1/1"]
+        );
+        // The ends are told as they were asked for, and the way back leads
+        // to where the first of them lies.
+        assert_eq!(
+            short["path"]["from"],
+            json!({"path": "app/main.php", "name": "main.php", "what": "file"})
+        );
+        assert_eq!(short["path"]["to"]["name"], "db.php");
+        assert_eq!(short["path"]["names"], false);
+        assert_eq!(short["scope"], "app");
+        assert_eq!(
+            short["crumbs"],
+            json!([
+                {"name": "office", "path": ""},
+                {"name": "app", "path": "app"},
+                {"name": "main.php → db.php", "path": ""}
+            ])
+        );
+        // Without what the tool guessed the way takes three links, and both
+        // files of the API lie on a shortest one.
+        let read = path("app/main.php", "lib/db.php", None, true);
+        assert_eq!(told_of(&read), "found steps=3 places=5 links=5 shown=5");
+        assert_eq!(
+            way(&read),
+            [
+                "0 main.php start",
+                "1 orders.php",
+                "1 users.php",
+                "2 core.php",
+                "3 db.php end"
+            ]
+        );
+        assert_eq!(
+            sorted(calls(&read)),
+            [
+                "core.php -> db.php 2/0",
+                "main.php -> orders.php 1/0",
+                "main.php -> users.php 1/0",
+                "orders.php -> core.php 1/0",
+                "users.php -> core.php 1/0",
+            ]
+        );
+        // A place drawn lists what it leads to on the way and what leads to
+        // it, and how it uses the next.
+        let chosen = path("app/main.php", "lib/db.php", Some("lib/core.php"), true);
+        let focus = &chosen["focus"];
+        assert_eq!(
+            (&focus["path"], &focus["step"]),
+            (&json!("lib/core.php"), &json!(2))
+        );
+        let rows = |side: &str| {
+            focus[side]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    format!(
+                        "{} {}{}",
+                        row["name"].as_str().unwrap(),
+                        row["links"],
+                        if row["inside"] == true { " drawn" } else { "" }
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rows("uses"), ["db.php 2 drawn"]);
+        assert_eq!(rows("used_by"), ["users.php 1 drawn", "orders.php 1 drawn"]);
+        assert_eq!(
+            (&focus["uses_more"], &focus["used_by_more"]),
+            (&json!(0), &json!(0))
+        );
+        assert_eq!(focus["kinds"], json!([{"kind": "calls", "links": 2}]));
+        // Nothing leads from the database to the entry point: the way that
+        // is there runs the other way round, and is said to.
+        let back = path("lib/db.php", "app/main.php", None, false);
+        assert_eq!(
+            told_of(&back),
+            "found reversed steps=2 places=3 links=2 shown=3"
+        );
+        assert_eq!(way(&back), way(&short));
+        assert_eq!(back["path"]["from"]["name"], "db.php");
+        // Two files that neither way leads between have no path.
+        let none = path("lib/db.php", "lib/deep/cache/store.php", None, false);
+        assert_eq!(told_of(&none), "none steps=0 places=0 links=0 shown=0");
+        assert_eq!(none["nodes"], json!([]));
+        assert_eq!(none["mode"], "path");
+        // An end the graph does not know is no path at all.
+        assert!(
+            index
+                .path(
+                    "office",
+                    "app/main.php",
+                    "lib/gone.php",
+                    &[],
+                    &|_| None,
+                    None,
+                    false
+                )
+                .is_none()
+        );
+    }
+    #[test]
+    fn a_folder_at_an_end_of_a_path_stands_for_every_file_in_it() {
+        let index = office(3);
+        let path = |from: &str, to: &str| {
+            index
+                .path("office", from, to, &[], &|_| None, None, false)
+                .unwrap()
+        };
+        // The application uses the library directly, through two of its
+        // files; the entry point does not, and is on no shortest way.
+        let direct = path("app", "lib");
+        assert_eq!(told_of(&direct), "found steps=1 places=4 links=3 shown=4");
+        assert_eq!(
+            way(&direct),
+            [
+                "0 orders.php start",
+                "0 users.php start",
+                "1 core.php end",
+                "1 db.php end"
+            ]
+        );
+        assert_eq!(
+            direct["path"]["from"],
+            json!({"path": "app", "name": "app", "what": "folder"})
+        );
+        assert_eq!(direct["scope"], "");
+        // A folder and a file further on: both files of the API reach the
+        // cache through the core.
+        let cache = path("app", "lib/deep/cache/store.php");
+        assert_eq!(told_of(&cache), "found steps=2 places=4 links=3 shown=4");
+        assert_eq!(
+            way(&cache),
+            [
+                "0 orders.php start",
+                "0 users.php start",
+                "1 core.php",
+                "2 store.php end"
+            ]
+        );
+        // What lies in the other end is no way to it.
+        let inside = path("lib", "lib/db.php");
+        assert_eq!(
+            told_of(&inside),
+            "none within steps=0 places=0 links=0 shown=0"
+        );
+        assert_eq!(told_of(&path("lib/db.php", "lib/db.php")), told_of(&inside));
+        // More files start a shortest way than a step shows: the most
+        // linked are drawn, by their paths where they are linked alike, and
+        // all are counted.
+        let wide = office(30);
+        let many = wide
+            .path(
+                "office",
+                "reports",
+                "lib/db.php",
+                &[],
+                &|_| None,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            told_of(&many),
+            format!("found steps=1 places=31 links=30 shown={}", WAY + 1)
+        );
+        assert_eq!(many["path"]["wide"], json!(WAY));
+        assert_eq!(way(&many)[0], "0 r01.php start");
+        assert_eq!(way(&many)[WAY], "1 db.php end");
+        assert_eq!(calls(&many).len(), WAY);
+        // A place of the picture says how many more lie on such ways.
+        let end = wide
+            .path(
+                "office",
+                "reports",
+                "lib/db.php",
+                &[],
+                &|_| None,
+                Some("lib/db.php"),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                end["focus"]["used_by"].as_array().unwrap().len(),
+                &end["focus"]["used_by_more"]
+            ),
+            (WAY, &json!(30 - WAY))
+        );
+        // A long way shows fewer at a step, and at least one.
+        let mut nodes = Vec::new();
+        let mut links = Vec::new();
+        for at in 0..40 {
+            nodes.push(json!({"id": format!("n{at}"), "label": format!("n{at}"), "source_file": format!("chain/f{at:02}.py")}));
+            if at > 0 {
+                links.push(json!({"source": format!("n{}", at - 1), "target": format!("n{at}"), "relation": "calls", "source_file": format!("chain/f{:02}.py", at - 1)}));
+            }
+        }
+        // A second way of the same length for the first step.
+        nodes.push(json!({"id": "side", "label": "side", "source_file": "chain/side.py"}));
+        links.push(json!({"source": "n0", "target": "side", "relation": "calls", "source_file": "chain/f00.py"}));
+        links.push(json!({"source": "side", "target": "n2", "relation": "calls", "source_file": "chain/side.py"}));
+        let chain = self::index(json!({"nodes": nodes, "links": links}));
+        let long = chain
+            .path(
+                "chain",
+                "chain/f00.py",
+                "chain/f39.py",
+                &[],
+                &|_| None,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(told_of(&long), "found steps=39 places=41 links=41 shown=40");
+        assert_eq!(long["path"]["wide"], 1);
+    }
+    #[test]
+    fn a_path_from_or_to_a_symbol_is_a_chain_of_symbols() {
+        let index = store();
+        let path = |from: &str, to: &str, focus: Option<&str>, certain: bool| {
+            index
+                .path("shop", from, to, &[], &|_| None, focus, certain)
+                .unwrap()
+        };
+        let test_total = "tests/CartTest.php#L7:.testTotal()";
+        let price_of = "src/Cart/Price.php#L9:.of()";
+        // The test reaches the price through the total of the cart.
+        let chain = path(test_total, price_of, Some(TOTAL_KEY), false);
+        assert_eq!(told_of(&chain), "found steps=2 places=3 links=2 shown=3");
+        assert_eq!(chain["path"]["names"], true);
+        assert_eq!(
+            way(&chain),
+            [
+                "0 CartTest.testTotal() start",
+                "1 Cart.total()",
+                "2 Price.of() end"
+            ]
+        );
+        assert_eq!(
+            sorted(calls(&chain)),
+            [
+                "Cart.total() -> Price.of() 1/0",
+                "CartTest.testTotal() -> Cart.total() 1/0"
+            ]
+        );
+        // Each is a symbol of its own file, told as that file's picture
+        // selects it, and the ends say what they are.
+        let middle = &chain["nodes"][1];
+        assert_eq!(
+            (
+                &middle["path"],
+                &middle["symbol"],
+                &middle["kind"],
+                &middle["file"]
+            ),
+            (
+                &json!(TOTAL_KEY),
+                &json!(true),
+                &json!("method"),
+                &json!(CART)
+            )
+        );
+        assert_eq!(
+            chain["path"]["from"],
+            json!({
+                "path": test_total, "name": "CartTest.testTotal()", "what": "method",
+                "symbol": true, "file": "tests/CartTest.php", "line": 7
+            })
+        );
+        assert_eq!(chain["scope"], "tests/CartTest.php");
+        assert_eq!(
+            chain["crumbs"].as_array().unwrap().last().unwrap()["name"],
+            "CartTest.testTotal() → Price.of()"
+        );
+        // The selected one lists the next and the one before, each with how
+        // the two are linked.
+        let focus = &chain["focus"];
+        assert_eq!(
+            (
+                &focus["uses"][0]["name"],
+                &focus["uses"][0]["relation"],
+                &focus["uses"][0]["inside"]
+            ),
+            (&json!("Price.of()"), &json!("calls"), &json!(true))
+        );
+        assert_eq!(focus["used_by"][0]["path"], test_total);
+        assert_eq!(focus["kinds"], json!([{"kind": "calls", "links": 1}]));
+        // A file at the other end stands for every symbol in it: checkout
+        // reaches two methods of the price, both through the total.
+        let file = path(CHECKOUT_KEY, "src/Cart/Price.php", None, false);
+        assert_eq!(told_of(&file), "found steps=2 places=4 links=3 shown=4");
+        assert_eq!(
+            way(&file),
+            [
+                "0 Cart.checkout() start",
+                "1 Cart.total()",
+                "2 Price.of() end",
+                "2 Price.plus() end"
+            ]
+        );
+        assert_eq!(file["path"]["to"]["what"], "file");
+        // So does a folder, and a file at the start: something in the tests
+        // reaches the limit through the adding.
+        let folder = path("tests", "src/Cart/Cart.php#L5:LIMIT", None, false);
+        assert_eq!(
+            way(&folder),
+            [
+                "0 CartTest.testTotal() start",
+                "1 Cart.add()",
+                "2 LIMIT end"
+            ]
+        );
+        // The way that is there runs from the second end to the first.
+        let back = path("src/Cart/Price.php#L10:.plus()", CHECKOUT_KEY, None, true);
+        assert_eq!(
+            told_of(&back),
+            "found reversed steps=2 places=3 links=2 shown=3"
+        );
+        assert_eq!(
+            way(&back),
+            [
+                "0 Cart.checkout() start",
+                "1 Cart.total()",
+                "2 Price.plus() end"
+            ]
+        );
+        // A guess is a way too, until only what was read is asked for.
+        let guessed = path(
+            CHECKOUT_KEY,
+            "src/Order/Notifier.php#L11:.paid()",
+            None,
+            false,
+        );
+        assert_eq!(calls(&guessed), ["Cart.checkout() -> Notifier.paid() 1/1"]);
+        let read = path(
+            CHECKOUT_KEY,
+            "src/Order/Notifier.php#L11:.paid()",
+            None,
+            true,
+        );
+        assert_eq!(told_of(&read), "none steps=0 places=0 links=0 shown=0");
+        // A symbol of the file at the other end lies in it.
+        let own = path(TOTAL_KEY, CART, None, false);
+        assert_eq!(own["path"]["within"], true);
+    }
+    #[test]
+    fn a_path_carries_what_a_chosen_change_did_to_its_places() {
+        // Among symbols: the caller lies in a new file, and the lines of
+        // the function replaced others.
+        let index = basket();
+        let changed = [
+            ("src/Cart.php".to_owned(), 'M'),
+            ("src/other.php".to_owned(), 'A'),
+        ];
+        let edited = |path: &str| {
+            Some(match path {
+                "src/Cart.php" => Edited {
+                    new: false,
+                    text: BASKET.to_owned(),
+                    hunks: vec![hunk(34, 5, 2)],
+                },
+                _ => Edited {
+                    new: true,
+                    ..Edited::default()
+                },
+            })
+        };
+        let view = index
+            .path(
+                "shop",
+                "src/other.php#L3:user()",
+                "src/Cart.php#L35:format_price()",
+                &changed,
+                &edited,
+                None,
+                false,
+            )
+            .unwrap();
+        let marks = |view: &Value| {
+            view["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| {
+                    format!(
+                        "{} {} {}",
+                        node["name"].as_str().unwrap(),
+                        node["changed"],
+                        node["status"].as_str().unwrap_or("-")
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(marks(&view), ["user() 1 A", "format_price() 1 M"]);
+        // Among files: a file of the change carries Git's letter.
+        let files = index
+            .path(
+                "shop",
+                "src/other.php",
+                "src/Cart.php",
+                &changed[..1],
+                &edited,
+                Some("src/other.php"),
+                false,
+            )
+            .unwrap();
+        assert_eq!(marks(&files), ["other.php 0 -", "Cart.php 1 M"]);
+        assert_eq!(files["focus"]["uses"][0]["changed"], true);
+    }
+    /// The boxes of a path that no drawn link leads to, and those that none
+    /// leads on from, the two ends apart.
+    fn loose(view: &Value) -> Vec<String> {
+        let steps = view["path"]["steps"].as_u64().unwrap();
+        let ends = |key: &str| {
+            view["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|edge| edge[key].as_str().unwrap())
+                .collect::<HashSet<_>>()
+        };
+        let (leads, led) = (ends("from"), ends("to"));
+        view["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| {
+                let (path, step) = (
+                    node["path"].as_str().unwrap(),
+                    node["step"].as_u64().unwrap(),
+                );
+                (step > 0 && !led.contains(path)) || (step < steps && !leads.contains(path))
+            })
+            .map(|node| node["path"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    #[test]
+    fn a_path_with_more_links_than_are_drawn_leaves_no_box_without_its_way() {
+        // Four layers of ten files between two files, each file of a layer
+        // using every file of the next: more links than a picture draws.
+        let layer = |at: usize| -> Vec<String> {
+            match at {
+                0 => vec!["a.py".to_owned()],
+                5 => vec!["z.py".to_owned()],
+                _ => (0..10).map(|file| format!("l{at}/f{file}.py")).collect(),
+            }
+        };
+        let id = |path: &str| path.replace(['/', '.'], "_");
+        let (mut nodes, mut links) = (Vec::new(), Vec::new());
+        for at in 0..6 {
+            for path in layer(at) {
+                nodes.push(json!({"id": id(&path), "label": id(&path), "source_file": path}));
+                if at == 5 {
+                    continue;
+                }
+                for next in layer(at + 1) {
+                    links.push(json!({"source": id(&path), "target": id(&next), "relation": "calls", "source_file": path}));
+                }
+            }
+        }
+        let index = self::index(json!({"nodes": nodes, "links": links}));
+        let view = index
+            .path("layers", "a.py", "z.py", &[], &|_| None, None, false)
+            .unwrap();
+        // Eight of each layer are drawn, with 8 + 3 × 64 + 8 links between
+        // them, of which the picture draws its limit.
+        assert_eq!(told_of(&view), "found steps=5 places=42 links=320 shown=34");
+        assert_eq!(view["between"], 208);
+        assert_eq!(view["edges"].as_array().unwrap().len(), DRAWN);
+        // The links are alike, so their order is that of their files: the
+        // last of it alone would leave the far end with nothing leading to
+        // it. Each box keeps a link into it and a link out of it.
+        assert_eq!(loose(&view), Vec::<String>::new());
+        assert_eq!(
+            calls(&view)
+                .iter()
+                .filter(|link| link.ends_with("-> z.py 1/0"))
+                .count(),
+            8
+        );
+    }
+    /// Graphs made at random, and every path asked between their places
+    /// checked against distances worked out apart: the fewest links, the way
+    /// that exists, every place and link on such ways counted, and a picture
+    /// in which each box stands at its step and lies on a way drawn whole.
+    #[test]
+    fn a_path_on_a_graph_made_at_random_is_as_short_as_its_links_allow() {
+        const FAR: usize = usize::MAX;
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut below = move |limit: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % limit as u64) as usize
+        };
+        // How far every place lies from every other along the links.
+        let apart = |uses: &[Vec<bool>]| {
+            let count = uses.len();
+            let mut far = vec![vec![FAR; count]; count];
+            for (user, row) in uses.iter().enumerate() {
+                far[user][user] = 0;
+                for (used, linked) in row.iter().enumerate() {
+                    if *linked && user != used {
+                        far[user][used] = 1;
+                    }
+                }
+            }
+            for through in 0..count {
+                let onward = far[through].clone();
+                for row in &mut far {
+                    let first = row[through];
+                    if first == FAR {
+                        continue;
+                    }
+                    for (to, second) in onward.iter().enumerate() {
+                        if *second != FAR && first + second < row[to] {
+                            row[to] = first + second;
+                        }
+                    }
+                }
+            }
+            far
+        };
+        // One path against the distances: `starts` and `ends` are what its
+        // two ends stand for, and `ids` tells a drawn place by its name.
+        let check = |view: &Value,
+                     starts: &[usize],
+                     ends: &[usize],
+                     uses: &[Vec<bool>],
+                     far: &[Vec<usize>],
+                     ids: &HashMap<String, usize>,
+                     what: &str| {
+            let path = &view["path"];
+            let within = starts.iter().any(|place| ends.contains(place));
+            assert_eq!(path["within"], within, "{what}");
+            let nearest = |from: &[usize], to: &[usize]| {
+                from.iter()
+                    .flat_map(|a| to.iter().map(move |b| far[*a][*b]))
+                    .min()
+                    .unwrap()
+            };
+            let (forward, back) = (nearest(starts, ends), nearest(ends, starts));
+            if within || (forward == FAR && back == FAR) {
+                assert_eq!(path["found"], false, "{what}");
+                assert_eq!(view["nodes"], json!([]), "{what}");
+                assert_eq!(view["edges"], json!([]), "{what}");
+                return;
+            }
+            let reversed = forward == FAR;
+            let (first, last, steps) = if reversed {
+                (ends, starts, back)
+            } else {
+                (starts, ends, forward)
+            };
+            assert_eq!(
+                (&path["found"], &path["reversed"], &path["steps"]),
+                (&json!(true), &json!(reversed), &json!(steps)),
+                "{what}"
+            );
+            let from = |place: usize| first.iter().map(|a| far[*a][place]).min().unwrap();
+            let to = |place: usize| last.iter().map(|b| far[place][*b]).min().unwrap();
+            let on = |place: usize| {
+                from(place) != FAR && to(place) != FAR && from(place) + to(place) == steps
+            };
+            let count = uses.len();
+            let places = (0..count).filter(|place| on(*place)).count();
+            let links = (0..count)
+                .flat_map(|user| (0..count).map(move |used| (user, used)))
+                .filter(|(user, used)| {
+                    uses[*user][*used]
+                        && from(*user) != FAR
+                        && to(*used) != FAR
+                        && from(*user) + 1 + to(*used) == steps
+                })
+                .count();
+            assert_eq!(
+                (&path["places"], &path["links"]),
+                (&json!(places), &json!(links)),
+                "{what}"
+            );
+            // Each box stands at its step of a shortest way, and the ends
+            // are the first step and the last.
+            let mut drawn = HashMap::new();
+            for node in view["nodes"].as_array().unwrap() {
+                let place = ids[node["path"].as_str().unwrap()];
+                let step = node["step"].as_u64().unwrap() as usize;
+                assert!(on(place) && from(place) == step, "{what}: {node}");
+                assert_eq!(
+                    (&node["start"], &node["end"]),
+                    (&json!(step == 0), &json!(step == steps)),
+                    "{what}"
+                );
+                assert!(drawn.insert(place, step).is_none(), "{what}: {node}");
+            }
+            assert_eq!(path["shown"], json!(drawn.len()), "{what}");
+            let wide = WAY.min(FOLLOWED / (steps + 1)).max(1);
+            assert_eq!(path["wide"], json!(wide), "{what}");
+            let mut whole = true;
+            for step in 0..=steps {
+                let here = drawn.values().filter(|at| **at == step).count();
+                let all = (0..count)
+                    .filter(|place| on(*place) && from(*place) == step)
+                    .count();
+                assert!((1..=wide.min(all)).contains(&here), "{what}: step {step}");
+                whole &= all <= wide;
+            }
+            // Where every step has room for all of its places, all are drawn.
+            if whole {
+                assert_eq!(drawn.len(), places, "{what}");
+            }
+            // Each link drawn is a link, from a box to one a step further.
+            for edge in view["edges"].as_array().unwrap() {
+                let (user, used) = (
+                    ids[edge["from"].as_str().unwrap()],
+                    ids[edge["to"].as_str().unwrap()],
+                );
+                assert!(uses[user][used], "{what}: {edge}");
+                assert_eq!(drawn[&user] + 1, drawn[&used], "{what}: {edge}");
+            }
+            assert_eq!(loose(view), Vec::<String>::new(), "{what}");
+        };
+        let (mut found, mut turned, mut none, mut capped) = (0, 0, 0, 0);
+        for round in 0..60 {
+            // A few folders of files, some names in each file, and links
+            // between the names wherever they fall.
+            let count = 6 + below(40);
+            let files = 2 + below(count.min(16) - 1);
+            let folders = 1 + below(4);
+            let file_of = |name: usize| name % files;
+            let path_of = |file: usize| format!("d{}/f{file:02}.py", file % folders);
+            let nodes = (0..count)
+                .map(|name| json!({"id": format!("n{name}"), "label": format!("n{name}"), "source_file": path_of(file_of(name))}))
+                .collect::<Vec<_>>();
+            let mut pairs = (0..below(count * 3 + 1))
+                .map(|_| (below(count), below(count)))
+                .collect::<Vec<_>>();
+            // Every third graph has a name that many use and that uses
+            // many, and every third one two names with many ways of two
+            // links between them: more places on the ways than a step shows.
+            let (hub, beyond) = (below(count), below(count));
+            match round % 3 {
+                0 => {
+                    for _ in 0..30 {
+                        pairs.push((below(count), hub));
+                        pairs.push((hub, below(count)));
+                    }
+                }
+                1 => {
+                    for _ in 0..16 {
+                        let between = below(count);
+                        pairs.push((hub, between));
+                        pairs.push((between, beyond));
+                    }
+                }
+                _ => {}
+            }
+            let mut links = Vec::new();
+            let mut uses = vec![vec![false; count]; count];
+            let mut file_uses = vec![vec![false; files]; files];
+            for (user, used) in pairs {
+                if user == used {
+                    continue;
+                }
+                uses[user][used] = true;
+                if file_of(user) != file_of(used) {
+                    file_uses[file_of(user)][file_of(used)] = true;
+                }
+                links.push(json!({"source": format!("n{user}"), "target": format!("n{used}"), "relation": "calls", "source_file": path_of(file_of(user))}));
+            }
+            let index = self::index(json!({"nodes": nodes, "links": links}));
+            // Each name as a picture selects it, and each file by its path.
+            let mut keys = vec![String::new(); count];
+            for file in 0..index.files.len() as u32 {
+                for (key, at) in index.keys(file).into_iter().zip(index.range(file)) {
+                    let name: usize = index.label(at)[1..].parse().unwrap();
+                    keys[name] = key;
+                }
+            }
+            let names = keys
+                .iter()
+                .enumerate()
+                .map(|(name, key)| (key.clone(), name))
+                .collect::<HashMap<_, _>>();
+            let paths = (0..files)
+                .map(|file| (path_of(file), file))
+                .collect::<HashMap<_, _>>();
+            let (far, file_far) = (apart(&uses), apart(&file_uses));
+            // What an end stands for among files, and among names.
+            let in_folder = |folder: usize| {
+                (0..files)
+                    .filter(|file| file % folders == folder)
+                    .collect::<Vec<_>>()
+            };
+            let names_of = |held: &[usize]| {
+                (0..count)
+                    .filter(|name| held.contains(&file_of(*name)))
+                    .collect::<Vec<_>>()
+            };
+            for turn in 0..40 {
+                // The two names that were given many ways are asked first.
+                let (a, b) = if turn == 0 {
+                    (hub, beyond)
+                } else {
+                    (below(count), below(count))
+                };
+                let (file_a, file_b) = (file_of(a), file_of(b));
+                let (folder_a, folder_b) = (file_a % folders, file_b % folders);
+                let asked = [
+                    // Among files: two files, a folder and a file, two folders.
+                    (
+                        path_of(file_a),
+                        path_of(file_b),
+                        vec![file_a],
+                        vec![file_b],
+                        false,
+                    ),
+                    (
+                        format!("d{folder_a}"),
+                        path_of(file_b),
+                        in_folder(folder_a),
+                        vec![file_b],
+                        false,
+                    ),
+                    (
+                        format!("d{folder_a}"),
+                        format!("d{folder_b}"),
+                        in_folder(folder_a),
+                        in_folder(folder_b),
+                        false,
+                    ),
+                    // Among names: two names, a name and a file, a folder and a name.
+                    (keys[a].clone(), keys[b].clone(), vec![a], vec![b], true),
+                    (
+                        keys[a].clone(),
+                        path_of(file_b),
+                        vec![a],
+                        names_of(&[file_b]),
+                        true,
+                    ),
+                    (
+                        format!("d{folder_a}"),
+                        keys[b].clone(),
+                        names_of(&in_folder(folder_a)),
+                        vec![b],
+                        true,
+                    ),
+                ];
+                for (from, to, starts, ends, named) in &asked {
+                    let what = format!("round {round}: {from} → {to}");
+                    let view = index
+                        .path("random", from, to, &[], &|_| None, None, false)
+                        .unwrap_or_else(|| panic!("{what}"));
+                    assert_eq!(view["path"]["names"], *named, "{what}");
+                    if *named {
+                        check(&view, starts, ends, &uses, &far, &names, &what);
+                    } else {
+                        check(&view, starts, ends, &file_uses, &file_far, &paths, &what);
+                    }
+                    let path = &view["path"];
+                    match (path["found"] == true, path["reversed"] == true) {
+                        (true, false) => found += 1,
+                        (true, true) => turned += 1,
+                        _ => none += 1,
+                    }
+                    if path["shown"].as_u64() < path["places"].as_u64() {
+                        capped += 1;
+                    }
+                }
+            }
+        }
+        // The graphs are of every sort: ways forward, ways back, none at
+        // all, and more places on the ways than a step shows.
+        assert!(
+            found > 5000 && turned > 500 && none > 4000 && capped > 30,
+            "{found} {turned} {none} {capped}"
+        );
     }
     /// What a search found, in its order: what each place is, its name and
     /// where it lies.

@@ -918,6 +918,9 @@ pub struct Shown<'a> {
     /// One link of a picture to look into, instead of a picture: the place
     /// that uses and the place that is used.
     pub link: Option<(&'a str, &'a str)>,
+    /// Two places to find the shortest ways between, instead of a folder:
+    /// the one they lead from and the one they lead to.
+    pub path: Option<(&'a str, &'a str)>,
 }
 /// How many places a request may name in one list, and in how many bytes.
 const UNFOLDED: usize = 256;
@@ -1050,6 +1053,7 @@ impl Graphs {
             notests,
             spread,
             link,
+            path,
         } = *shown;
         // The graph as it was read, or as it is without its tests, with how
         // much that leaves out.
@@ -1072,6 +1076,13 @@ impl Graphs {
              edited: &dyn Fn(&str) -> Option<crate::graph_map::Edited>| {
                 if let Some((from, to)) = link {
                     return Some(index.link(from, to, certain));
+                }
+                // The ways between two places come before a followed place;
+                // an end the graph does not know leaves what else was asked.
+                if let Some((from, to)) = path
+                    && let Some(view) = index.path(name, from, to, changed, edited, focus, certain)
+                {
+                    return Some(view);
                 }
                 followed.and_then(|asked| {
                     index.follow_with(
@@ -2247,6 +2258,16 @@ impl Domain for Graphs {
                     if from.is_empty() != to.is_empty() {
                         return Err(HarnessError::invalid("Invalid code graph link."));
                     }
+                    // So is a path: a list of the place it leads from and
+                    // the place it leads to.
+                    let ends = places(
+                        query["path"].as_str().unwrap_or(""),
+                        "Invalid code graph path.",
+                        "Invalid code graph path.",
+                    )?;
+                    if !ends.is_empty() && ends.len() != 2 {
+                        return Err(HarnessError::invalid("Invalid code graph path."));
+                    }
                     let me = self.me.upgrade().ok_or_else(|| {
                         HarnessError::unavailable("The code graph is shutting down.")
                     })?;
@@ -2264,6 +2285,10 @@ impl Domain for Graphs {
                                 notests,
                                 spread: &spread,
                                 link: (!from.is_empty()).then_some((from.as_str(), to.as_str())),
+                                path: match ends.as_slice() {
+                                    [from, to] => Some((from.as_str(), to.as_str())),
+                                    _ => None,
+                                },
                             },
                         )
                     })
@@ -2352,7 +2377,7 @@ mod tests {
             .unwrap();
         for part in [
             "scope", "focus", "certain", "filter", "target", "follow", "out", "into", "notests",
-            "spread", "from", "to",
+            "spread", "from", "to", "path",
         ] {
             assert!(route.query.contains(&part), "{part}");
         }
@@ -3297,6 +3322,47 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 })
                 .collect::<Vec<_>>();
             assert_eq!(symbols, ["order.php# 1 A", "cart.php# 0 -"]);
+            // The shortest ways between two places are found on the same
+            // graph, with the change marked: the order reaches the price
+            // through the cart. An end the graph does not know leaves the
+            // change as it is drawn.
+            let ways = |from: &str, to: &str| {
+                fixture
+                    .graphs
+                    .map(
+                        &fixture.project,
+                        Some(&Target::Work),
+                        &Shown {
+                            path: Some((from, to)),
+                            ..Shown::default()
+                        },
+                    )
+                    .unwrap()
+            };
+            let way = ways("order.php", "price.php");
+            assert_eq!(
+                (
+                    way["mode"].as_str(),
+                    way["path"]["steps"].as_u64(),
+                    way["path"]["reversed"].as_bool(),
+                    way["chosen"]["kind"].as_str()
+                ),
+                (Some("path"), Some(2), Some(false), Some("work"))
+            );
+            let places = way["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| {
+                    format!(
+                        "{} {}",
+                        node["path"].as_str().unwrap(),
+                        node["status"].as_str().unwrap_or("-")
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(places, ["order.php A", "cart.php M", "price.php M"]);
+            assert_eq!(ways("order.php", "nowhere.php")["mode"], "changes");
             // On the whole project the same links carry no mark.
             let whole = fixture
                 .graphs
