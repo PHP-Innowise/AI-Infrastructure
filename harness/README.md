@@ -1797,6 +1797,13 @@ opened or opened here, shows the rest. The window reads the graph the map is
 drawn from, the commit's own in a map of changes, and keeps to **Only links read
 from the code** and **Without tests**.
 
+**Fit to window** scales a picture down until all of it is in sight, so a map
+wider than the window is seen whole and not a part at a time; a picture that has
+room is drawn as it is. It is fitted again when the window changes its size. A
+picture is made no smaller than a quarter of its size: beyond that the rest of it
+is scrolled to. Boxes and links are selected at any scale, and a box tells its
+name when the pointer rests on it. The choice is kept in this browser.
+
 Colour tells the direction. An arrow shades from the colour of using, where it
 leaves a box, to the colour of being used, where its head arrives, and every box
 wears the same two colours on its edges: one on the side arrows leave from, the

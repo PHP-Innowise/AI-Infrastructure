@@ -5,7 +5,7 @@
 use crate::{api, dom, model as m};
 use serde_json::{json, Value as V};
 use std::collections::BTreeMap;
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::spawn_local;
 const BOX_WIDTH: f64 = 164.0;
 const BOX_HEIGHT: f64 = 30.0;
@@ -26,6 +26,9 @@ const LINK_BOX: f64 = 220.0;
 const LINK_GAP: f64 = 220.0;
 const LINK_ROW: f64 = 6.0;
 const LINK_BETWEEN: f64 = 10.0;
+/// How small a picture is made to fit its room. Smaller than this its boxes
+/// cannot be told apart, and the rest of it is scrolled to.
+const SMALLEST: f64 = 0.25;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placed {
     pub x: f64,
@@ -2757,8 +2760,79 @@ pub fn interim(view: &V, phase: &str) -> String {
         _ => String::new(),
     }
 }
+/// The scale at which a picture lies wholly in the room it has: never
+/// larger than it is drawn, and no smaller than `SMALLEST`. A picture or a
+/// room without a size is left as it is.
+pub fn scale(picture: (f64, f64), room: (f64, f64)) -> f64 {
+    if picture.0 <= 0.0 || picture.1 <= 0.0 || room.0 <= 0.0 || room.1 <= 0.0 {
+        return 1.0;
+    }
+    (room.0 / picture.0)
+        .min(room.1 / picture.1)
+        .clamp(SMALLEST, 1.0)
+}
+/// The style of a picture of one size drawn at a scale. A smaller picture
+/// takes the room of its smaller size, so nothing is scrolled to but it.
+pub fn scaled(size: (f64, f64), scale: f64) -> String {
+    let plain = format!("width:{:.0}px;height:{:.0}px", size.0, size.1);
+    if scale >= 1.0 {
+        return plain;
+    }
+    format!(
+        "{plain};transform:scale({scale:.4});transform-origin:0 0;margin:0 -{:.0}px -{:.0}px 0",
+        size.0 * (1.0 - scale),
+        size.1 * (1.0 - scale)
+    )
+}
+/// Draws the picture of the map at the scale the viewer asked for: fitted
+/// to the room it has, or as it is.
+fn fit() {
+    let Some(canvas) = dom::get("graph-map-canvas") else {
+        return;
+    };
+    let Some(plane) = canvas
+        .query_selector(".graph-map-plane")
+        .ok()
+        .flatten()
+        .and_then(|plane| plane.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+        return;
+    };
+    // A box is as large as it is laid out, whatever scale it is drawn at.
+    let size = (plane.offset_width() as f64, plane.offset_height() as f64);
+    let scale = if m::yes(&state()["fit"]) {
+        // A little less than the room, so that no rounding brings up a
+        // scroll bar.
+        scale(
+            size,
+            (
+                canvas.client_width() as f64 - 2.0,
+                canvas.client_height() as f64 - 2.0,
+            ),
+        )
+    } else {
+        1.0
+    };
+    let _ = plane.set_attribute("style", &scaled(size, scale));
+}
+/// Fits the picture again when the window changes its size. Asked for each
+/// time the map opens, and set up once.
+fn watch() {
+    if m::yes(&m::data("graph-map-watched")) {
+        return;
+    }
+    m::set("graph-map-watched", json!(true));
+    let resized = Closure::<dyn FnMut()>::new(|| {
+        if open() {
+            fit();
+        }
+    });
+    let _ =
+        dom::window().add_event_listener_with_callback("resize", resized.as_ref().unchecked_ref());
+    resized.forget();
+}
 fn fresh(target: &str) -> V {
-    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "filter": "", "follow": "", "out": [], "into": [], "spread": []})
+    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "filter": "", "follow": "", "out": [], "into": [], "spread": []})
 }
 /// How many folders a picture keeps spread out; the oldest gives way.
 const SPREAD: usize = 32;
@@ -2780,12 +2854,16 @@ fn spread(mut state: V, folder: &str, gather: bool) -> V {
     state["spread"] = json!(folders);
     state
 }
-/// Where this browser keeps whether the map leaves tests out.
+/// Where this browser keeps whether the map leaves tests out, and whether
+/// it fits its pictures to the window.
 const NOTESTS: &str = "graph-map-notests";
-/// A map begun anew, with tests left out where they were the last time.
+const FIT: &str = "graph-map-fit";
+/// A map begun anew, with tests left out and pictures fitted where they
+/// were the last time.
 fn anew(target: &str) -> V {
     let mut state = fresh(target);
     state["notests"] = json!(dom::storage(NOTESTS).as_deref() == Some("1"));
+    state["fit"] = json!(dom::storage(FIT).as_deref() == Some("1"));
     state
 }
 /// The places a list of the state names: those whose side `key` (`out` or
@@ -3197,8 +3275,10 @@ fn render(view: &V) {
     );
     dom::set_checked("graph-map-certain", m::yes(&view["certain"]));
     dom::set_checked("graph-map-notests", m::yes(&view["notests"]));
+    dom::set_checked("graph-map-fit", m::yes(&state()["fit"]));
     dom::disabled("graph-map-filter", follows(view));
     html("graph-map-canvas", &canvas(view));
+    fit();
     html("graph-map-side", &side(view));
     html("graph-map-legend", &legend(view, change));
 }
@@ -3382,6 +3462,7 @@ pub async fn event(
             shut();
             list();
             dom::dialog("graph-map", true);
+            watch();
             if changes {
                 // The open pull requests say what the branch is stacked on.
                 place().await;
@@ -3608,6 +3689,15 @@ pub async fn event(
             // The choice is the viewer's and holds for the next map too.
             state["notests"] = json!(checked);
             dom::save(NOTESTS, checked.then_some("1"));
+        }
+        ("change", "graph-map-fit", _) => {
+            // So does this one, and it asks the server for nothing: the
+            // picture that is there is drawn at another scale.
+            state["fit"] = json!(checked);
+            dom::save(FIT, checked.then_some("1"));
+            m::set("graph-map", state);
+            fit();
+            return true;
         }
         ("input", "graph-map-filter", _) => state["filter"] = json!(value),
         _ => return false,
@@ -5398,5 +5488,29 @@ mod tests {
             link_note(&early),
             "The links are those the files have in the checkout, not in that commit."
         );
+    }
+    #[test]
+    fn a_picture_is_fitted_to_the_room_it_has() {
+        // Too wide by half: it is drawn at half its size, and takes the
+        // room of that size.
+        assert_eq!(scale((2000.0, 400.0), (1000.0, 600.0)), 0.5);
+        assert_eq!(
+            scaled((2000.0, 400.0), 0.5),
+            "width:2000px;height:400px;transform:scale(0.5000);transform-origin:0 0;margin:0 -1000px -200px 0"
+        );
+        // The tighter of the two sides decides.
+        assert_eq!(scale((1000.0, 1200.0), (1000.0, 300.0)), 0.25);
+        assert_eq!(scale((1500.0, 900.0), (1000.0, 300.0)), 1.0 / 3.0);
+        // A picture that has room is drawn as it is, never larger.
+        assert_eq!(scale((700.0, 300.0), (1000.0, 600.0)), 1.0);
+        assert_eq!(scaled((700.0, 300.0), 1.0), "width:700px;height:300px");
+        // One far too large is made no smaller than can be read at all,
+        // and the rest of it is scrolled to.
+        assert_eq!(scale((9000.0, 400.0), (900.0, 600.0)), SMALLEST);
+        // Nothing is asked of a picture or a room that has no size yet.
+        assert_eq!(scale((0.0, 400.0), (900.0, 600.0)), 1.0);
+        assert_eq!(scale((900.0, 400.0), (-2.0, 600.0)), 1.0);
+        // A map begins as it is drawn, until the viewer chose otherwise.
+        assert_eq!(fresh("work")["fit"], false);
     }
 }

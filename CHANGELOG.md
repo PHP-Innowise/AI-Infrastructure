@@ -24,6 +24,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Fit the picture of the Harness dependency map to the window. **Fit to
+  window** scales a picture down until all of it is in sight, so a map wider
+  than the window is seen whole, and fits it again when the window changes its
+  size. Boxes and links are selected at any scale, and the choice is kept in
+  the browser.
+
 - Look into a link of the Harness dependency map. Selecting an arrow, or `↗`
   beside a row of a selected place, opens a window with only what makes up
   that link: the names that use on the left, the names that are used on the
