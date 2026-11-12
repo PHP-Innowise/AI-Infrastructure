@@ -24,6 +24,74 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Mark the symbols a change touched in an opened file of the Harness map of
+  changes. A method, a function or a type whose own lines changed is
+  highlighted with `A` when all of it is new and `M` otherwise, a type shows
+  how many symbols changed inside it, the touched ones are drawn first and the
+  note counts them. Git gives the changed lines; whose they are is read from
+  the file's text by indentation, with the comments and attributes above a
+  symbol counted as its own, because the graph records only where a symbol
+  starts. The marks wait while the graph is older than the files.
+
+- Open a file of the Harness dependency map to its classes, methods and
+  functions. A file selected twice, or **Open file**, shows what Graphify names
+  inside it: types, methods under the name of their type, functions, enum
+  cases, headings and other names, with the links between them and the other
+  files they use or are used by. Selecting a symbol lists each symbol it uses
+  and each that uses it with the recorded relation, marked when it was only
+  guessed, and a symbol of another file opens that file. A type lists its
+  members, **Filter names** matches a method by its type, and a file opens the
+  same way inside a map of changes, where the changed files around it stay
+  marked.
+
+- Add a picker of commits, pull requests and branches to the Harness map of
+  changes. **Commits and pull requests…** lists the history with each commit's
+  branches and tags, author, age and hash, searched by message or by the start
+  of a hash; the open, merged or closed pull requests, searched on the forge;
+  and the branches, filtered as they are typed. The arrow keys walk a list,
+  Enter chooses and Escape closes the picker. A commit picked from the history
+  is drawn as its own change against its parent, and while the graph of its
+  code is built the map already shows a first picture on the project's graph.
+
+- Add a dependency map of a change to the Harness code graph. **Map of changes**
+  in the Graph panel shows what a pull request, a branch, a commit or the work
+  in the checkout changed: the changed files, the files that use them and the
+  files they use, with a count of each side. Current work is measured against
+  the base of the branch's open pull request, so a stacked branch shows its own
+  change. A pull request is chosen from the list of open ones or typed as a
+  number, and is looked up with the GitHub CLI when it is installed. A commit
+  that is not the checkout gets a graph of its own code: its files are written
+  out under the Harness state without touching the checkout, Graphify reads
+  them, and the window shows percent and time left. The three newest such
+  graphs are kept for a project.
+
+- Add a dependency map of the Harness code graph. **View map** in the Graph
+  panel draws one folder at a time: its folders and files, and the links between
+  them from what uses to what is used. Links the tool only inferred are dashed
+  and can be hidden, and the weaker direction of a cycle runs back. Selecting a
+  box lists what it uses and what uses it, inside and outside the folder. The
+  server reads `graph.json` in one streaming pass, so a graph of hundreds of
+  megabytes opens in seconds.
+
+- Add an optional code graph to the Harness, off by default. The **Graph** chip
+  switches it on per project: an installed Graphify builds the graph in the
+  Harness state directory with its model-free `update` pass, and the chip shows
+  percent and time left from the tool's file count plus the length of the
+  project's previous build. Each build starts clean and replaces the published
+  graph only after it succeeds. It runs when the graph is switched on, on
+  request, and when files changed and the project is opened or a run starts or
+  ends; it never holds a run. Agents are told about the graph only where
+  **Tell agents about the graph** is switched on beside it, which is off by
+  default: the map needs no agent, the lines cost tokens on every call of the
+  model, and an agent that was only offered the graph did not ask it in the
+  runs this was checked with. With it on, a launch in a project with a
+  published graph is told the three commands that query it, nothing from the
+  graph enters the prompt, and the run receipt counts those commands. That
+  switch also permits them: Claude Code in Edit mode refused the commands its
+  prompt offered, so a session's launch carries permission rules for exactly
+  these three on the project's published graph, and the agent's shell gets the
+  setting that keeps a newer Graphify from rewriting installed skills.
+
 - Add an opt-in maintainer Run Working Memory pilot with receipt-linked
   observations, hypotheses and open questions. Its private journal precedes
   disposable SQLite/Redis views, and snapshots recheck scope, canonical sources,

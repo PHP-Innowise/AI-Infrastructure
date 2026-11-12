@@ -387,6 +387,8 @@ pub struct RunLedger {
     failed_steps: u64,
     searched: u64,
     commands: u64,
+    /// Commands that asked the project's code graph.
+    graph: u64,
     failed: u64,
     not_run: u64,
     opened: Vec<(String, Option<String>)>,
@@ -415,6 +417,7 @@ impl RunLedger {
             failed_steps: 0,
             searched: 0,
             commands: 0,
+            graph: 0,
             failed: 0,
             not_run: 0,
             opened: vec![],
@@ -527,6 +530,9 @@ impl RunLedger {
             }
         } else if command(&kind) {
             self.commands += 1;
+            if crate::graph::asked(fields["detail"].as_str().unwrap_or("")) {
+                self.graph += 1;
+            }
             self.command_id += 1;
             entry.command = Some(self.command_id);
             self.last_commands.push_back((self.command_id,object!({"command":fields["detail"].as_str().unwrap_or(""),"ok":null,"outcome":null,"exit_code":null})));
@@ -672,7 +678,7 @@ impl RunLedger {
                 .take(40)
                 .collect::<Vec<_>>()
         };
-        let mut receipt = object!({"steps":self.steps,"opened":self.opened.len(),"opened_paths":listed(&self.opened),"edited":self.edited.len(),"edited_paths":listed(&self.edited),"created":self.created.len(),"deleted":self.deleted.len(),"searched":self.searched,"patterns":self.patterns.iter().take(12).collect::<Vec<_>>(),"commands":self.commands,"failed":self.failed,"not_run":self.not_run,"failed_steps":self.failed_steps,"last_commands":self.last_commands.iter().map(|(_,value)|value.clone()).collect::<Vec<_>>(),"plan":self.plan,"helpers":self.helpers,"limited":self.limited});
+        let mut receipt = object!({"steps":self.steps,"opened":self.opened.len(),"opened_paths":listed(&self.opened),"edited":self.edited.len(),"edited_paths":listed(&self.edited),"created":self.created.len(),"deleted":self.deleted.len(),"searched":self.searched,"patterns":self.patterns.iter().take(12).collect::<Vec<_>>(),"commands":self.commands,"graph":self.graph,"failed":self.failed,"not_run":self.not_run,"failed_steps":self.failed_steps,"last_commands":self.last_commands.iter().map(|(_,value)|value.clone()).collect::<Vec<_>>(),"plan":self.plan,"helpers":self.helpers,"limited":self.limited});
         if let Some(memory) = self.memory() {
             receipt["memory"] = memory;
         }

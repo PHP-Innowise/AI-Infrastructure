@@ -1683,6 +1683,222 @@ require an independent reviewer and keep the runtime's source revision checks.
 Prompts, transcripts and free assistant output never reach durable memory; only the
 fields of a memory draft do.
 
+### Code graph
+
+The **Graph** chip switches on an optional code graph for the selected project. It
+is off by default. [Graphify](https://github.com/Graphify-Labs/graphify) builds the
+graph on this machine with its `update` pass, which parses files and calls no
+model; the Harness also removes model provider keys from the tool's environment and
+sets `GRAPHIFY_NO_AUTO_REFRESH=1`, so a Graphify newer than the assistant skills
+installed in your home directory does not rewrite them from a build.
+The Harness does not install Graphify. It looks for `graphify` on `PATH`
+(`HARNESS_GRAPHIFY` names another executable), and the panel says how to install it
+when it is missing.
+
+The graph lives in the Harness state directory under `graphs/<project id>/`, not in
+the project. Graphify releases before 0.9 still write a manifest into the project's
+own `graphify-out/`; the Harness puts back the manifest that was there, or removes
+the file and the folder it created, when the build ends. Each build starts without
+the previous graph, so a deleted file leaves
+no nodes behind; it keeps the tool's file cache and replaces the published graph
+only after it succeeds. A failed or interrupted build leaves the previous graph in
+use, and the panel shows the tool's last line.
+
+A build starts when the graph is switched on, when **Rebuild** is pressed, and when
+the project's files changed since the last build and the project is opened, a run
+starts or a run ends. Changed means another commit or another set, size or time of
+uncommitted files; a folder outside Git is rebuilt only on request. A run is never
+held for a build. Automatic builds of one project keep 30 seconds apart, and none
+starts while another run is still active in the project, except at a run's launch.
+
+While a build runs, the chip and the panel show percent and time left. Graphify
+counts only the files it reads; assembling and clustering print nothing and take
+most of the time. The estimate therefore adds the length that silent part had in the
+project's previous build by the same Graphify release. A first build has no such
+history: it shows no estimate until two file counts were seen, then assumes the
+silent part takes 4.5 times as long as reading and gives the time left in coarse
+steps. The percent never goes back and stops at 99 when a build outlasts its
+estimate.
+
+The graph is built for the dependency map below, and agents are not told about it.
+**Tell agents about the graph** in the same panel is a switch of its own, off until
+it is asked for, and switching the graph off or on keeps it; **Delete graph**
+forgets it. The map needs no agent. The lines cost about 220 tokens on every call
+of the model, and an agent that was only offered the graph did not ask it in the
+runs this was checked with, none of three on Claude Code and Codex; asked to start
+from the graph, Codex asked it four times and read the same files as without it.
+
+With that switch on and a graph published, each launch in the project adds a few
+lines to its instructions: that the graph exists, the commit it was built from and
+the three commands that query it (`graphify query`, `explain` and `path` with the
+graph's path). Nothing from the graph or its report is put into the prompt, and the
+lines count as instructions in **Context window**. The run receipt counts the
+commands that asked the graph (`graph`), whether or not agents were told about it.
+**Delete graph** switches the graph off and removes its folder.
+
+The same switch permits those three commands, and the panel says so.
+Claude Code launched without a terminal has nobody to ask: in Edit mode it refused
+the commands its prompt offered ("This command requires approval"), and in Plan
+mode it spent a call of its own safety classifier on each. A session's launch
+therefore adds three permission rules to Claude Code's `--settings`, beside the
+rules of an attached edition: `graphify query`, `explain` and `path`, any
+arguments, then this project's published graph as the last word. Options such as
+`--budget` go before `--graph`, and the prompt's lines say so: asked to start from
+the graph, Codex put `--budget` after it. The rules are written with the same spelling of the
+tool and the graph file as the prompt's lines, because Claude Code compares a rule
+with the command as written. They permit nothing else. Offline, with a scripted
+model, Claude Code 2.1.278 ran the three commands in both modes, also piped into
+`head` or with `2>/dev/null`, and refused another graph file, a second `--graph`
+after this one, a command joined with `&&`, `;` or a new line, a command
+substitution, output redirected to a file, a variable set in front of the command
+and every other `graphify` subcommand. Codex runs the commands inside its sandbox
+and needs no rule; Cursor was not checked. A system run's dispatch gets neither the
+lines nor the rules.
+
+A question reads the graph and writes one time stamp beside it, in the Harness
+state. Where agents are told about the graph, their shell gets
+`GRAPHIFY_NO_AUTO_REFRESH=1`, as the build does, so a question does not rewrite the
+assistant skills in your home directory either.
+
+**View map** in the Graph panel opens a dependency map of the published graph. It
+shows one folder at a time: its folders and files as boxes, and the links between
+them as arrows from what uses to what is used, so what depends on others stands on
+the left and what others depend on stands on the right. A folder opens when it is
+selected twice or with **Open folder**; the path above the map leads back. Selecting
+a box lights its links and lists, beside the map, everything it uses and everything
+that uses it, also outside the open folder. A file opens in turn to its classes,
+methods and functions, as described below.
+
+Between folders and files the map counts the graph's links that cross a file
+boundary; the links inside one file show when that file is opened. The relations
+that only say where a symbol lives (`contains`, `method`, `defines`, `case_of`,
+`rationale_for`) are no links: they say what holds what. A link points from the file
+Graphify found it in. A solid arrow has at least one link Graphify read from the
+code; a dashed arrow has only links it inferred, usually by matching a name, and
+those can be wrong. **Only links read from the code** hides the inferred ones. A link
+whose file is neither of its two symbols' files is skipped and counted above the
+map; it comes from two symbols that share an id.
+
+A file opens as a folder does, when it is selected twice or with **Open file**, in
+the project's map and in a map of changes. The window then shows what Graphify names
+inside the file, each box with a letter for what it is: `T` a type, `m` a method
+under the name of its type (`Cart.total()`), `f` a function, `c` a case of an enum,
+`#` a heading of a document, and no letter for other names such as constants. The
+arrows between them are the links inside the file. Around them, without a letter,
+stand the other files those symbols use or are used by, and one of them opens when
+it is selected twice. A box named after the open file itself stands for its imports
+and the code outside any function.
+
+Selecting a symbol lists every symbol it uses and every symbol that uses it, each
+with the relation Graphify recorded (`calls`, `references`, `inherits`, `imports`),
+marked when it was only guessed, and with its file when that is another one; such a
+row opens that file on that symbol. A type also lists its members. Selecting a file
+around lists which of its symbols use the open file and which the open file uses.
+Up to 32 symbols are drawn, the most linked first, with at least 8 places for the
+files around them. **Filter names** reaches the rest and matches a method by its
+type as well, so `Cart.` keeps the methods of `Cart`.
+
+What a symbol is comes from the graph, and so do its limits. Graphify does not tell
+a class from an interface, a trait or an enum, so all are types. It marks them in
+PHP, Python, TypeScript and Go; where it does not, as for Rust, whatever has methods
+or cases is a type and a struct without them is a plain name. It links two symbols
+at most once, so three calls of one method from another are one link. It records
+where a symbol starts, not where it ends. Something outside the project, such as a
+class of the language, has no file and is not drawn.
+
+In a map of changes an opened file also marks what the change touched. A symbol
+whose own lines changed is highlighted and carries `A` when every line of it is new
+and `M` otherwise; a type whose own lines stand as they were shows how many symbols
+changed inside it; the touched symbols are drawn first, and the note above the map
+counts them. Git says which lines differ. Whose lines they are is read from the
+file's text, because the graph knows only where a symbol starts: blank lines,
+comments and attributes right above a symbol are its own, a symbol ends where the
+text returns to its indentation with something that does not close it, a line past
+that end belongs to the symbol that holds it, and a line outside every symbol to
+the box of the file itself. A blank line touches nothing. Lines removed between two
+symbols are counted in the note, and a removed symbol is not drawn, since the graph
+is of the new code. This reads indentation and is no parser: code that is not
+indented by its nesting can be given to the wrong symbol, and a method Git shows as
+a rewrite of a removed one counts as modified. The marks need a graph of the same
+lines, so they wait while the checkout's graph is older than its files and until a
+commit's own graph is built.
+
+**Map of changes** opens the same window on a change instead of the whole project:
+the work in the checkout, a pull request, a branch or a commit, chosen under
+**Show**. The map draws the changed files, highlighted and marked with Git's letter
+for what happened to them (`A` added, `M` modified, `R` renamed), the files that use
+them on their left and the files they use on their right. The line above counts both
+sides: how many other files use the change, and so may be affected by it, and how
+many it relies on. Selecting a file lists its links; for a file beside the change,
+the links it has with the change.
+
+- **Current work** is everything in the checkout that the branch it left does not
+  have: the branch's commits and what is not committed, untracked files included. A
+  branch with an open pull request is measured against that request's base, because
+  in a stack of branches the default branch is several requests away; otherwise
+  against the remote's default branch. **Uncommitted changes only** leaves the
+  commits out. Both use the project's own graph, which is rebuilt when its files
+  changed; until then the window says that it is older than the files.
+- **Commits and pull requests…** opens a picker with three lists, as an editor's
+  history and pull request views have them. **Commits** is the history of the
+  checked-out branch, of every branch or of one local branch: message, the branches
+  and tags a commit carries, author, how long ago and hash, fifty at a time. The
+  search keeps the commits whose message contains the typed text, whatever the case,
+  and the start of a hash finds its commit on any branch. **Pull requests** lists
+  the open, merged or closed ones with their branches, author and last update; the
+  search is the forge's own, and a typed number is offered even when the list does
+  not hold it. **Branches** lists the local branches, then the remote ones no local
+  branch stands at, and marks the checked-out one and those with an open request;
+  typing filters them by name. The arrow keys walk a list, reading older commits at
+  its end, Enter chooses, and Escape closes the picker, not the map.
+- A commit picked from the history is its own change, against its parent. A branch
+  is everything since it left its base, and one with an open request is measured
+  against that request's base, as the current work is. A request is looked up with
+  the GitHub CLI (`gh`) when it is installed and signed in, which gives its title
+  and its base. Without it the Pull requests list says why, a number can still be
+  typed, and the head is fetched under the name GitHub, GitLab or Bitbucket
+  publishes it by and compared with the default branch. A fetch brings objects only
+  and moves no branch.
+- The links of a change are those of its own code, so a commit that is not the
+  checkout gets a graph of its own. Its files are written out under the Harness
+  state through an index of their own, so the checkout, its index and its branch
+  are not touched and large-file pointers stay pointers; Graphify reads them as it
+  reads the project, and only the graph is kept. The window shows percent and time
+  left, estimated from the project's own build, and meanwhile draws a first picture
+  on the project's graph: the files changed are the commit's, the links are those
+  the files have in the checkout, and the note says so until the commit's own graph
+  replaces it. On the development machine such a
+  graph took 40 seconds for 3,800 files and 55 MB on disk. The three newest are
+  kept for a project and **Delete graph** removes them. A commit the project's
+  graph was built from, with nothing uncommitted, needs none. One graph is built for
+  a project at a time: a commit's graph waits for the project's own build, and
+  choosing another commit ends the build of the previous one.
+- Up to 24 changed files are drawn one by one. A wider change is drawn by folder,
+  each with the number of files changed in it; a folder opens as in the project map,
+  and a folder whose changes all lie in one folder below it is passed through. The
+  files around the change are the most linked ones, up to 40 boxes in all, and
+  **Filter names** reaches the rest. Deleted files and files Graphify finds no code
+  in are counted, not drawn. A folder of changed files both uses and is used by the
+  files around it, so this map does not mark cycles.
+
+A folder shows its 40 most connected children, and **Filter names** reaches the
+rest. Where a folder has more than two links per child, each child keeps its three
+strongest uses on the map and the side panel still lists all of them. A cycle cannot
+be drawn left to right: its members carry ↻, and its weaker direction runs back,
+right to left, in the warning colour. The server reads `graph.json` in one streaming
+pass and keeps the last four graphs it read. On the development machine a 500 MB
+graph of 545,000 symbols took two seconds to read and 10 ms per folder after that.
+
+Whether a graph makes an agent cheaper or better is not established: published
+measurements show smaller answers per query, not better sessions. Compare runs with
+and without it before relying on it. On this repository, with the graph only
+offered, neither Codex nor Claude Code asked it in three Plan runs, and they answered
+correctly from the files; asked to start from it, both did, and Claude Code ran the
+commands in Edit mode as well, with no saving in time or tokens. The graph can also
+be incomplete: for a Rust function called from other crates by its path, Graphify
+0.9.105 listed the callers inside its own file and none of the four outside it, so
+an answer about what uses something still has to be confirmed in the files.
+
 ### Fleet review setup and use
 
 Use the same native `infra-engine` and generated UI assets as the browser server. Fleet's durable workflow, provider workers and checkpoints are implemented in Rust; no separate Python environment or `HARNESS_FLEET_PYTHON` selection is used.

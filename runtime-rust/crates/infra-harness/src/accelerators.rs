@@ -417,6 +417,8 @@ impl Domain for Accelerators {
 pub struct ProjectLaunchAdapter {
     pub accelerators: Arc<Accelerators>,
     pub project_id: String,
+    /// The Harness session this launch serves; a system dispatch has none.
+    pub session_id: Option<String>,
 }
 impl infra_host::provider::LaunchAdapter for ProjectLaunchAdapter {
     fn adapt(
@@ -460,6 +462,16 @@ impl infra_host::provider::LaunchAdapter for ProjectLaunchAdapter {
                 }
             }
             command.environment.extend(overlay.environment);
+        }
+        if self.session_id.is_some() {
+            // A session's prompt offers the project's published code graph as
+            // three commands; the launch lets the host run exactly those.
+            crate::graph::prepare(
+                &self.accelerators.store,
+                &self.project_id,
+                &input.provider,
+                &mut command,
+            )?;
         }
         if input.provider == "claude" && input.session.is_none() {
             let db = self.accelerators.store.connection()?;
@@ -511,6 +523,7 @@ impl infra_host::provider::LaunchAdapter for SystemLaunchAdapter {
                 return ProjectLaunchAdapter {
                     accelerators: self.accelerators.clone(),
                     project_id: id.into(),
+                    session_id: None,
                 }
                 .adapt(input, command);
             }
@@ -597,6 +610,60 @@ mod system_launch_tests {
             readable: vec![],
             remove: vec![],
         }
+    }
+    /// A session's prompt offers the project's published code graph as three
+    /// commands. Claude Code in Edit mode refused them, a launch without a
+    /// terminal having nobody to ask, so a session's launch permits exactly
+    /// those. A system dispatch, whose prompt offers no graph, is left alone.
+    #[test]
+    fn a_session_launch_permits_the_graph_questions_its_prompt_offers() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let project_id = store.register(&project).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        crate::graph::publish_for_tests(&store, &project_id, &root.path().join("graphify-tool"));
+        let rules = crate::graph::grant(&store, &project_id)
+            .unwrap()
+            .unwrap()
+            .rules;
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(RwLock::new(BTreeMap::new())),
+        });
+        let accelerators =
+            Arc::new(Accelerators::new(store, root.path().into(), providers, Weak::new()).unwrap());
+        let prepared = |session: Option<&str>, provider: &str| {
+            let mut command = command();
+            command.argv = vec![provider.into(), "--settings".into(), "{}".into()];
+            ProjectLaunchAdapter {
+                accelerators: accelerators.clone(),
+                project_id: project_id.clone(),
+                session_id: session.map(String::from),
+            }
+            .adapt(
+                &Launch {
+                    provider: provider.into(),
+                    mode: "edit".into(),
+                    ..launch(&project)
+                },
+                command,
+            )
+            .unwrap()
+        };
+        let claude = prepared(Some("chat"), "claude");
+        let settings: Value = serde_json::from_str(&claude.argv[2]).unwrap();
+        assert_eq!(settings["permissions"]["allow"], json!(rules));
+        assert_eq!(claude.environment["GRAPHIFY_NO_AUTO_REFRESH"], "1");
+        // Codex runs what its sandbox allows: the switch only.
+        let codex = prepared(Some("chat"), "codex");
+        assert_eq!(codex.argv[2], "{}");
+        assert_eq!(codex.environment["GRAPHIFY_NO_AUTO_REFRESH"], "1");
+        let dispatch = prepared(None, "claude");
+        assert_eq!(dispatch.argv[2], "{}");
+        assert!(dispatch.environment.is_empty());
     }
     #[test]
     fn a_system_run_launches_in_every_registered_service_folder() {
