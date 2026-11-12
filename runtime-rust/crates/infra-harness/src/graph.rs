@@ -323,6 +323,54 @@ fn revision(state: &Path, project: &str, commit: &str) -> PathBuf {
         .join(commit)
         .join("graph.json")
 }
+/// Removes the written-out files of a commit but for what says which links
+/// of its graph cannot be: its Cargo manifests, and of each Rust source the
+/// places where it names other sources, in a file beside where the source
+/// stood. Both are small. A link is removed and never followed.
+fn thin(tree: &Path) {
+    let mut folders = vec![tree.to_path_buf()];
+    let mut at = 0;
+    while at < folders.len() {
+        // The folder is listed before anything is written into it.
+        let entries = std::fs::read_dir(&folders[at])
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect::<Vec<_>>();
+        at += 1;
+        let mut kept = Vec::new();
+        for entry in entries {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => {
+                    folders.push(path);
+                    continue;
+                }
+                Ok(kind) if kind.is_file() && entry.file_name() == "Cargo.toml" => continue,
+                Ok(kind) if kind.is_file() && path.extension().is_some_and(|end| end == "rs") => {
+                    if let Some(modules) = crate::graph_crates::kept(&path) {
+                        let mut name = path.clone().into_os_string();
+                        name.push(".");
+                        name.push(crate::graph_crates::MODULES);
+                        kept.push((PathBuf::from(name), modules));
+                    }
+                }
+                _ => {}
+            }
+            // A link to a folder is removed as a folder on Windows.
+            if std::fs::remove_file(&path).is_err() {
+                let _ = std::fs::remove_dir(&path);
+            }
+        }
+        for (path, modules) in kept {
+            let _ = std::fs::write(path, modules);
+        }
+    }
+    // The deepest first: a folder that kept nothing goes too.
+    for folder in folders.iter().rev() {
+        let _ = std::fs::remove_dir(folder);
+    }
+}
 /// What was chosen, for the interface: the two sides and how many files.
 fn chosen(resolved: &Resolved) -> Value {
     let mut chosen = resolved.json();
@@ -1708,8 +1756,8 @@ impl Graphs {
         }
     }
     /// Builds the graph of one commit: its files are written out beside the
-    /// project's graph, the tool reads them as it reads the project, and only
-    /// the graph is kept.
+    /// project's graph, the tool reads them as it reads the project, and of
+    /// them only what the graph is read with is kept: see `thin`.
     fn grow(
         &self,
         project: &str,
@@ -1768,10 +1816,12 @@ impl Graphs {
             }
             Outcome::Built(ran.record(ran.bytes))
         })();
-        // The files and the tool's cache are as large as the project.
-        let _ = std::fs::remove_dir_all(&tree);
+        // The files and the tool's cache are as large as the project. What
+        // the graph is read with is not.
         let _ = std::fs::remove_dir_all(&out);
-        if !matches!(outcome, Outcome::Built(_)) {
+        if matches!(outcome, Outcome::Built(_)) {
+            thin(&tree);
+        } else {
             let _ = std::fs::remove_dir_all(&home);
         }
         outcome
@@ -2773,6 +2823,127 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert_eq!(own["state"], "ready");
             assert_eq!(fixture.runs(), 2);
             assert_eq!(fixture.revisions(), [feature]);
+        }
+        /// The files under a folder, by their paths from it.
+        fn held(home: &Path) -> Vec<String> {
+            let mut found = Vec::new();
+            let mut folders = vec![home.to_path_buf()];
+            while let Some(folder) = folders.pop() {
+                for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+                    if entry.file_type().unwrap().is_dir() {
+                        folders.push(entry.path());
+                    } else {
+                        found.push(
+                            entry
+                                .path()
+                                .strip_prefix(home)
+                                .unwrap()
+                                .to_string_lossy()
+                                .replace('\\', "/"),
+                        );
+                    }
+                }
+            }
+            found.sort();
+            found
+        }
+        #[test]
+        fn the_graph_of_a_commit_is_read_with_what_is_kept_of_its_files() {
+            let fixture = Fixture::new();
+            let write = |name: &str, text: &str| {
+                let path = fixture.folder.join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, text).unwrap();
+            };
+            fixture.git(&["init", "-q", "--initial-branch=main"]);
+            write("Cargo.toml", "[workspace]\nmembers = [\"app\", \"core\"]\n");
+            write(
+                "app/Cargo.toml",
+                "[package]\nname = \"shop-app\"\n[dependencies]\nshop-core = { path = \"../core\" }\n",
+            );
+            write("core/Cargo.toml", "[package]\nname = \"shop-core\"\n");
+            write("app/src/main.rs", "fn main() {}\n");
+            write("core/src/lib.rs", "pub fn run() {}\n");
+            // The tool has the core use the app, which is built the other
+            // way round.
+            write(
+                "graph.fixture",
+                r#"{"nodes":[{"id":"main","source_file":"app/src/main.rs"},{"id":"run","source_file":"core/src/lib.rs"}],"links":[{"source":"main","target":"run","relation":"calls","source_file":"app/src/main.rs"},{"source":"run","target":"main","relation":"imports_from","source_file":"core/src/lib.rs"}]}"#,
+            );
+            fixture.commit("one");
+            fixture.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+            fixture.git(&["switch", "-q", "-c", "feature"]);
+            // On the branch neither is built with the other, and the core
+            // takes one source of the app by its path.
+            write("app/Cargo.toml", "[package]\nname = \"shop-app\"\n");
+            write("app/src/shared/util.rs", "pub fn helper() {}\n");
+            write(
+                "core/src/lib.rs",
+                "#[path = \"../../app/src/shared/util.rs\"]\nmod util;\npub fn run() {}\n",
+            );
+            write(
+                "graph.fixture",
+                r#"{"nodes":[{"id":"main","source_file":"app/src/main.rs"},{"id":"run","source_file":"core/src/lib.rs"},{"id":"helper","source_file":"app/src/shared/util.rs"}],"links":[{"source":"main","target":"run","relation":"calls","source_file":"app/src/main.rs"},{"source":"run","target":"main","relation":"imports_from","source_file":"core/src/lib.rs"},{"source":"run","target":"helper","relation":"calls","source_file":"core/src/lib.rs"}]}"#,
+            );
+            let feature = fixture.commit("two");
+            fixture.git(&["switch", "-q", "main"]);
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+            let arrows = |view: &Value| {
+                view["edges"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|edge| {
+                        format!(
+                            "{} -> {}",
+                            edge["from"].as_str().unwrap(),
+                            edge["to"].as_str().unwrap()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            // The project's own graph is read with the files of the
+            // checkout: the app is built with the core.
+            let own = fixture
+                .graphs
+                .map(&fixture.project, None, &Shown::default())
+                .unwrap();
+            assert_eq!(
+                (&own["totals"]["links"], &own["totals"]["ruled_out"]),
+                (&json!(1), &json!(1))
+            );
+            assert_eq!(arrows(&own), ["app -> core"]);
+            // The graph of the commit is read with the manifests of the
+            // commit, which rule out both links between the two, and with
+            // what its sources say: the helper is compiled into the core.
+            let target = Target::Named("feature".into());
+            fixture.graphs.choose(&fixture.project, &target).unwrap();
+            let view = fixture.mapped(&target);
+            assert_eq!(view["state"], "ready", "{view}");
+            assert_eq!(
+                (&view["totals"]["links"], &view["totals"]["ruled_out"]),
+                (&json!(1), &json!(2))
+            );
+            assert_eq!(arrows(&view), ["core/src/lib.rs -> app/src/shared/util.rs"]);
+            // Of the files of the commit that much is kept, and no source.
+            let home = folder(&fixture.store.state, &fixture.project)
+                .join("revisions")
+                .join(&feature);
+            assert_eq!(
+                held(&home),
+                [
+                    "graph.json",
+                    "tree/Cargo.toml",
+                    "tree/app/Cargo.toml",
+                    "tree/core/Cargo.toml",
+                    "tree/core/src/lib.rs.modules"
+                ]
+            );
+            assert_eq!(
+                std::fs::read_to_string(home.join("tree/core/src/lib.rs.modules")).unwrap(),
+                "#[path = \"../../app/src/shared/util.rs\"\nmod util;"
+            );
         }
         #[test]
         fn the_current_work_is_mapped_on_the_projects_own_graph() {

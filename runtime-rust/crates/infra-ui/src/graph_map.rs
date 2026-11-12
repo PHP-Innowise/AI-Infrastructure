@@ -752,6 +752,14 @@ fn shown(view: &V) -> String {
             count(number("unplaced"))
         ));
     }
+    // Links from a Rust crate into one it is not built with: the graph
+    // holds them, and no map draws or counts them.
+    if number("ruled_out") > 0 {
+        text.push_str(&format!(
+            " · {} ruled out by Cargo manifests",
+            count(number("ruled_out"))
+        ));
+    }
     text
 }
 /// What the map of a change says first: the notes of the change, and
@@ -3508,6 +3516,13 @@ mod tests {
             "1,115 files · 4,165 links between files: 115 read from the code, 4,050 guessed by name · 270 skipped, their file is unclear"
         );
         assert_eq!(note(&view()), "");
+        // What the manifests of Rust crates rule out is said after it.
+        let mut ruled = view();
+        ruled["totals"]["ruled_out"] = json!(1157);
+        assert!(summary(&ruled)
+            .ends_with("270 skipped, their file is unclear · 1,157 ruled out by Cargo manifests"));
+        ruled["totals"]["ruled_out"] = json!(0);
+        assert_eq!(summary(&ruled), summary(&view()));
         let mut capped = view();
         capped["matching"] = json!(178);
         capped["between"] = json!(500);

@@ -17,6 +17,7 @@ pub mod desktop;
 pub mod fleet;
 pub mod graph;
 pub mod graph_changes;
+pub mod graph_crates;
 pub mod graph_map;
 pub mod http;
 mod inbox;

@@ -24,6 +24,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Leave out of the Harness dependency map the links between Rust crates that
+  cannot be. Graphify matches names across a project, so `use std::fs` became
+  a link to another crate's `fs.rs`, marked as read from the code. A crate can
+  use only what its `Cargo.toml` names, for any target, for its tests and its
+  build script, and what that is built with in turn; a link into any other
+  crate is no longer drawn or counted, and the summary says how many the
+  manifests ruled out. A source one crate takes from another's folder by
+  `#[path]`, `include!` or a target's `path` keeps the links of both. The
+  graph of another commit is read with that commit's manifests, which are now
+  kept beside it with the lines of its Rust sources that name other sources.
+  A manifest that cannot be read, a source under no package and every other
+  language are left as they were.
+
 - Leave tests out of the Harness dependency map. **Without tests** drops the
   files that are tests by where they lie or how they are named, in the
   conventions of the common languages, and in a Rust source the items under

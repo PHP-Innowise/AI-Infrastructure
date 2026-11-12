@@ -8,7 +8,12 @@
 //! Of each symbol it keeps a name, a line and what holds it, so one file can
 //! be opened in turn: its classes, methods and functions, and the files they
 //! use or are used by.
-use crate::{HarnessError, Result};
+//!
+//! The graph is the tool's, and the tool matches names across the whole
+//! project. Where the build says otherwise the build is believed: a link
+//! from one Rust crate into a crate it is not built with is left out, as
+//! `graph_crates` tells.
+use crate::{HarnessError, Result, graph_crates::Crates};
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::{Value, json};
 use std::{
@@ -57,8 +62,9 @@ const TEST_FOLDERS: &[&str] = &[
     "e2e",
     "cypress",
 ];
-/// The largest source that is read to find the tests inside it.
-const SOURCE_LIMIT: u64 = 4 * 1024 * 1024;
+/// The largest source that is read: for the tests inside it, and for the
+/// other sources it names.
+pub(crate) const SOURCE_LIMIT: u64 = 4 * 1024 * 1024;
 /// Bytes of a symbol's name that are kept.
 const NAME_LIMIT: usize = 160;
 /// Relations that say where a symbol lives or why, not what it needs.
@@ -364,7 +370,6 @@ struct Builder<'a> {
     uses: Vec<Use>,
     kinds: Vec<String>,
     kind_ids: HashMap<String, u16>,
-    pairs: HashMap<(u32, u32), Pair>,
     nodes: u64,
     links: u64,
     unplaced: u64,
@@ -500,10 +505,6 @@ impl Builder<'_> {
                 return;
             }
         };
-        let (from, to) = (
-            self.symbols[source as usize].file,
-            self.symbols[target as usize].file,
-        );
         let kind = match self.kind_ids.get(&relation) {
             Some(kind) => *kind,
             None => {
@@ -517,20 +518,6 @@ impl Builder<'_> {
             .confidence
             .is_none_or(|text| text.0.eq_ignore_ascii_case("EXTRACTED"));
         self.uses.push((source, target, kind, !read));
-        // Between files only what crosses a file boundary counts.
-        if from == to {
-            return;
-        }
-        let pair = self.pairs.entry((from, to)).or_default();
-        if read {
-            pair.read += 1;
-        } else {
-            pair.guessed += 1;
-        }
-        match pair.kinds.iter_mut().find(|(known, _)| *known == kind) {
-            Some((_, count)) => *count += 1,
-            None => pair.kinds.push((kind, 1)),
-        }
     }
 }
 struct Whole<'a, 'b>(&'a mut Builder<'b>);
@@ -621,6 +608,10 @@ pub struct Index {
     /// What a graph without tests leaves out: test files, and tests inside
     /// the files it keeps.
     left: (u64, u64),
+    /// Links the graph holds that cannot be: between two Rust crates of
+    /// which the first is not built with the second. They are kept out of
+    /// everything that is counted and drawn.
+    ruled: Vec<Use>,
     files: Vec<String>,
     pairs: Vec<(u32, u32, Pair)>,
     /// Ordered by file: the symbols of file `n` are `first[n]..first[n + 1]`.
@@ -689,8 +680,18 @@ struct Flow {
 }
 impl Index {
     /// Reads a node-link graph without holding it in memory: nodes become a
-    /// table from symbol to file, links are counted as they pass.
+    /// table from symbol to file, links are counted as they pass. The
+    /// manifests of the tree under `root` say which links cannot be.
     pub fn read(source: impl std::io::Read, root: &Path) -> Result<Self> {
+        Self::read_with(source, root, &|path| text_at(root, path))
+    }
+    /// Reads a graph, with `text` giving a file of its tree where it can be
+    /// read.
+    fn read_with(
+        source: impl std::io::Read,
+        root: &Path,
+        text: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
         let base = root.to_path_buf();
         let root = root.to_string_lossy().replace('\\', "/");
         let mut builder = Builder {
@@ -703,7 +704,6 @@ impl Index {
             uses: Vec::new(),
             kinds: Vec::new(),
             kind_ids: HashMap::new(),
-            pairs: HashMap::new(),
             nodes: 0,
             links: 0,
             unplaced: 0,
@@ -717,12 +717,6 @@ impl Index {
         for link in std::mem::take(&mut builder.early) {
             builder.link(link);
         }
-        let mut pairs = builder
-            .pairs
-            .into_iter()
-            .map(|((from, to), pair)| (from, to, pair))
-            .collect::<Vec<_>>();
-        pairs.sort_by_key(|(from, to, _)| (*from, *to));
         // The node that stands for a file is named after it, by its name or
         // by the end of its path, and what it holds is the top of the file.
         let mut symbols = builder.symbols;
@@ -770,19 +764,25 @@ impl Index {
         for file in 0..builder.files.len() {
             first[file + 1] += first[file];
         }
-        let uses = builder
+        // A crate is built with the crates its manifest names and with no
+        // other, so a link into any other crate is one the tool made up.
+        let crates = Crates::find(&builder.files, text);
+        let (uses, ruled): (Vec<Use>, Vec<Use>) = builder
             .uses
             .into_iter()
             .map(|(from, to, kind, guessed)| {
                 (place[from as usize], place[to as usize], kind, guessed)
             })
-            .collect();
+            .partition(|(from, to, ..)| {
+                !crates.rules_out(symbols[*from as usize].file, symbols[*to as usize].file)
+            });
         Ok(Self {
             root: base,
             plain: OnceLock::new(),
             left: (0, 0),
+            ruled,
             files: builder.files,
-            pairs,
+            pairs: pairs_of(&symbols, &uses),
             symbols,
             first,
             names: builder.names,
@@ -853,6 +853,7 @@ impl Index {
             "read": read,
             "guessed": guessed,
             "unplaced": self.unplaced,
+            "ruled_out": self.ruled.len(),
         })
     }
     fn crumbs(project: &str, scope: &str) -> Vec<Value> {
@@ -1052,6 +1053,46 @@ impl Index {
         })
     }
 }
+/// The text of a file of the graph's tree: one that lies inside the tree
+/// and is no larger than a source worth reading.
+fn text_at(root: &Path, path: &str) -> Option<String> {
+    if path.split('/').any(|part| part == "..") {
+        return None;
+    }
+    let file = root.join(path);
+    std::fs::metadata(&file)
+        .is_ok_and(|meta| meta.is_file() && meta.len() <= SOURCE_LIMIT)
+        .then(|| std::fs::read_to_string(&file).ok())
+        .flatten()
+}
+/// The links between files: of the links between symbols, those that cross
+/// a file boundary, each pair of files once, with how its links were found
+/// and of which kinds they are.
+fn pairs_of(symbols: &[Symbol], uses: &[Use]) -> Vec<(u32, u32, Pair)> {
+    let mut pairs: HashMap<(u32, u32), Pair> = HashMap::new();
+    for (from, to, kind, guessed) in uses {
+        let (from, to) = (symbols[*from as usize].file, symbols[*to as usize].file);
+        if from == to {
+            continue;
+        }
+        let pair = pairs.entry((from, to)).or_default();
+        if *guessed {
+            pair.guessed += 1;
+        } else {
+            pair.read += 1;
+        }
+        match pair.kinds.iter_mut().find(|(known, _)| known == kind) {
+            Some((_, count)) => *count += 1,
+            None => pair.kinds.push((*kind, 1)),
+        }
+    }
+    let mut pairs = pairs
+        .into_iter()
+        .map(|((from, to), pair)| (from, to, pair))
+        .collect::<Vec<_>>();
+    pairs.sort_by_key(|(from, to, _)| (*from, *to));
+    pairs
+}
 /// Whether a folder is one of tests: by its name, or named for tests after
 /// something else, as `App.Tests`, `integration-tests`, `unit_tests` and
 /// `UnitTests` are.
@@ -1176,6 +1217,91 @@ fn marks_test(inner: &str) -> bool {
         _ => false,
     }
 }
+/// Where a comment, a string or a character that begins at byte `at` ends:
+/// the byte after its last. None where none of them begins there.
+pub(crate) fn quiet_end(bytes: &[u8], at: usize) -> Option<usize> {
+    let next = bytes.get(at + 1).copied();
+    // Whether what stands before a byte is no part of a name.
+    let free =
+        |at: usize| at == 0 || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+    match bytes[at] {
+        b'/' if next == Some(b'/') => Some(
+            bytes[at..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |line| at + line),
+        ),
+        b'/' if next == Some(b'*') => {
+            // Block comments nest.
+            let mut depth = 1usize;
+            let mut end = at + 2;
+            while end < bytes.len() && depth > 0 {
+                match (bytes[end], bytes.get(end + 1)) {
+                    (b'/', Some(b'*')) => {
+                        depth += 1;
+                        end += 2;
+                    }
+                    (b'*', Some(b'/')) => {
+                        depth -= 1;
+                        end += 2;
+                    }
+                    _ => end += 1,
+                }
+            }
+            Some(end)
+        }
+        b'"' => {
+            let mut end = at + 1;
+            while end < bytes.len() && bytes[end] != b'"' {
+                end += if bytes[end] == b'\\' { 2 } else { 1 };
+            }
+            Some(end + 1)
+        }
+        // A raw string: `r"…"`, `r#"…"#`, also of bytes and for C, `br"…"`
+        // and `cr"…"`. It is no part of a name, and `r#name` is a name.
+        b'r' if free(at) || (matches!(bytes[at - 1], b'b' | b'c') && free(at - 1)) => {
+            let hashes = bytes[at + 1..]
+                .iter()
+                .take_while(|byte| **byte == b'#')
+                .count();
+            if bytes.get(at + 1 + hashes) != Some(&b'"') {
+                return None;
+            }
+            let mut close = at + 2 + hashes;
+            while close < bytes.len()
+                && !(bytes[close] == b'"'
+                    && bytes[close + 1..]
+                        .iter()
+                        .take(hashes)
+                        .filter(|byte| **byte == b'#')
+                        .count()
+                        == hashes)
+            {
+                close += 1;
+            }
+            Some(close + hashes + 1)
+        }
+        b'\'' if next == Some(b'\\') => {
+            // An escaped character: to the quote that closes it.
+            let mut end = at + 3;
+            while end < bytes.len() && bytes[end] != b'\'' {
+                end += 1;
+            }
+            Some(end + 1)
+        }
+        b'\'' => {
+            // One character between quotes; else a lifetime.
+            let wide = match next {
+                Some(byte) if byte >= 0xf0 => 4,
+                Some(byte) if byte >= 0xe0 => 3,
+                Some(byte) if byte >= 0xc0 => 2,
+                _ => 1,
+            };
+            (bytes.get(at + 1 + wide) == Some(&b'\'')).then_some(at + 2 + wide)
+        }
+        _ => None,
+    }
+}
 /// Where the Rust item that begins at byte `from` ends: at the `;` that
 /// ends it, or at the brace that closes its body. What stands in a string,
 /// a character or a comment does not count: a test often holds a source of
@@ -1185,84 +1311,11 @@ fn item_end(text: &str, from: usize) -> usize {
     let (mut braces, mut groups) = (0usize, 0usize);
     let mut at = from;
     while at < bytes.len() {
-        let next = bytes.get(at + 1).copied();
+        if let Some(end) = quiet_end(bytes, at) {
+            at = end;
+            continue;
+        }
         match bytes[at] {
-            b'/' if next == Some(b'/') => {
-                while at < bytes.len() && bytes[at] != b'\n' {
-                    at += 1;
-                }
-                continue;
-            }
-            b'/' if next == Some(b'*') => {
-                // Block comments nest.
-                let mut depth = 1usize;
-                at += 2;
-                while at < bytes.len() && depth > 0 {
-                    match (bytes[at], bytes.get(at + 1)) {
-                        (b'/', Some(b'*')) => {
-                            depth += 1;
-                            at += 2;
-                        }
-                        (b'*', Some(b'/')) => {
-                            depth -= 1;
-                            at += 2;
-                        }
-                        _ => at += 1,
-                    }
-                }
-                continue;
-            }
-            b'"' => {
-                at += 1;
-                while at < bytes.len() && bytes[at] != b'"' {
-                    at += if bytes[at] == b'\\' { 2 } else { 1 };
-                }
-            }
-            // A raw string: `r"…"`, `r#"…"#`. It is no part of a name, and
-            // `r#name` is a name.
-            b'r' if at == 0
-                || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_') =>
-            {
-                let hashes = bytes[at + 1..]
-                    .iter()
-                    .take_while(|byte| **byte == b'#')
-                    .count();
-                if bytes.get(at + 1 + hashes) == Some(&b'"') {
-                    let mut close = at + 2 + hashes;
-                    while close < bytes.len()
-                        && !(bytes[close] == b'"'
-                            && bytes[close + 1..]
-                                .iter()
-                                .take(hashes)
-                                .filter(|byte| **byte == b'#')
-                                .count()
-                                == hashes)
-                    {
-                        close += 1;
-                    }
-                    at = close + hashes;
-                }
-            }
-            b'\'' => {
-                if next == Some(b'\\') {
-                    // An escaped character: to the quote that closes it.
-                    at += 3;
-                    while at < bytes.len() && bytes[at] != b'\'' {
-                        at += 1;
-                    }
-                } else {
-                    // One character between quotes; else a lifetime.
-                    let wide = match next {
-                        Some(byte) if byte >= 0xf0 => 4,
-                        Some(byte) if byte >= 0xe0 => 3,
-                        Some(byte) if byte >= 0xc0 => 2,
-                        _ => 1,
-                    };
-                    if bytes.get(at + 1 + wide) == Some(&b'\'') {
-                        at += 1 + wide;
-                    }
-                }
-            }
             b'{' => braces += 1,
             b'}' => {
                 braces = braces.saturating_sub(1);
@@ -1342,19 +1395,7 @@ impl Index {
     /// kept with the graph.
     pub fn without_tests(&self) -> Arc<Index> {
         self.plain
-            .get_or_init(|| {
-                Arc::new(self.plain_with(&|path| {
-                    // A path of the graph is never followed out of the root.
-                    if path.split('/').any(|part| part == "..") {
-                        return None;
-                    }
-                    let file = self.root.join(path);
-                    std::fs::metadata(&file)
-                        .is_ok_and(|meta| meta.is_file() && meta.len() <= SOURCE_LIMIT)
-                        .then(|| std::fs::read_to_string(&file).ok())
-                        .flatten()
-                }))
-            })
+            .get_or_init(|| Arc::new(self.plain_with(&|path| text_at(&self.root, path))))
             .clone()
     }
     /// What a graph without tests leaves out: how many files that are
@@ -1431,57 +1472,37 @@ impl Index {
                 symbol.parent = symbol_at[symbol.parent as usize];
             }
         }
-        let uses = self
-            .uses
-            .iter()
-            .filter(|(from, to, ..)| !out[*from as usize] && !out[*to as usize])
-            .map(|(from, to, kind, guessed)| {
-                (
-                    symbol_at[*from as usize],
-                    symbol_at[*to as usize],
-                    *kind,
-                    *guessed,
-                )
-            })
-            .collect::<Vec<Use>>();
-        // Between files only what crosses a file boundary counts, as when
-        // the graph was read.
-        let mut pairs: HashMap<(u32, u32), Pair> = HashMap::new();
-        for (from, to, kind, guessed) in &uses {
-            let (from, to) = (symbols[*from as usize].file, symbols[*to as usize].file);
-            if from == to {
-                continue;
-            }
-            let pair = pairs.entry((from, to)).or_default();
-            if *guessed {
-                pair.guessed += 1;
-            } else {
-                pair.read += 1;
-            }
-            match pair.kinds.iter_mut().find(|(known, _)| known == kind) {
-                Some((_, count)) => *count += 1,
-                None => pair.kinds.push((*kind, 1)),
-            }
-        }
-        let mut pairs = pairs
-            .into_iter()
-            .map(|((from, to), pair)| (from, to, pair))
-            .collect::<Vec<_>>();
-        pairs.sort_by_key(|(from, to, _)| (*from, *to));
+        // Of the links, those between what is left, the ones ruled out as
+        // the ones that stand.
+        let left = |links: &[Use]| {
+            links
+                .iter()
+                .filter(|(from, to, ..)| !out[*from as usize] && !out[*to as usize])
+                .map(|(from, to, kind, guessed)| {
+                    (
+                        symbol_at[*from as usize],
+                        symbol_at[*to as usize],
+                        *kind,
+                        *guessed,
+                    )
+                })
+                .collect::<Vec<Use>>()
+        };
+        let (uses, ruled) = (left(&self.uses), left(&self.ruled));
+        let unlinked = (self.uses.len() - uses.len()) + (self.ruled.len() - ruled.len());
         let dropped = self.symbols.len() - symbols.len();
         Index {
             root: self.root.clone(),
             plain: OnceLock::new(),
             left: (gone.iter().filter(|gone| **gone).count() as u64, inside),
+            ruled,
             files,
-            pairs,
+            pairs: pairs_of(&symbols, &uses),
             symbols,
             first,
             names: self.names.clone(),
             nodes: self.nodes.saturating_sub(dropped as u64),
-            links: self
-                .links
-                .saturating_sub((self.uses.len() - uses.len()) as u64),
+            links: self.links.saturating_sub(unlinked as u64),
             uses,
             kinds: self.kinds.clone(),
             unplaced: self.unplaced,
@@ -3147,7 +3168,7 @@ mod tests {
         let view = index.view("shop", "", None, false, "");
         assert_eq!(
             view["totals"],
-            json!({"files": 6, "symbols": 9, "relations": 12, "links": 6, "read": 3, "guessed": 3, "unplaced": 1})
+            json!({"files": 6, "symbols": 9, "relations": 12, "links": 6, "read": 3, "guessed": 3, "unplaced": 1, "ruled_out": 0})
         );
         assert_eq!(
             rows(&view, "nodes"),
@@ -4148,7 +4169,7 @@ async fn standalone(
         let view = plain.view("shop", "", None, false, "");
         assert_eq!(
             view["totals"],
-            json!({"files": 5, "symbols": 8, "relations": 10, "links": 4, "read": 2, "guessed": 2, "unplaced": 1})
+            json!({"files": 5, "symbols": 8, "relations": 10, "links": 4, "read": 2, "guessed": 2, "unplaced": 1, "ruled_out": 0})
         );
         assert_eq!(
             rows(&view, "nodes"),
@@ -4232,6 +4253,117 @@ async fn standalone(
         // probe() is used by nothing that is left.
         let util = plain.view("lib", "src/util.rs", None, false, "");
         assert_eq!(util["file"]["used_by"], 1);
+    }
+    #[test]
+    fn a_link_between_crates_that_are_not_built_together_is_left_out() {
+        let graph = json!({
+            "directed": false,
+            "nodes": [
+                {"id": "main", "label": "main()", "source_file": "crates/app/src/main.rs"},
+                {"id": "core", "label": "Core", "source_file": "crates/core/src/lib.rs"},
+                {"id": "core_run", "label": ".run()", "source_file": "crates/core/src/lib.rs"},
+                {"id": "tool", "label": "tool()", "source_file": "crates/tool/src/lib.rs"},
+                {"id": "check", "label": "check()", "source_file": "crates/core/tests/it.rs"},
+                {"id": "cart", "label": "Cart", "source_file": "web/cart.php"},
+                {"id": "gen", "label": "gen()", "source_file": "scripts/gen.rs"}
+            ],
+            "links": [
+                {"source": "core", "target": "core_run", "relation": "method", "confidence": "EXTRACTED", "source_file": "crates/core/src/lib.rs"},
+                {"source": "main", "target": "core", "relation": "imports_from", "confidence": "EXTRACTED", "source_file": "crates/app/src/main.rs"},
+                {"source": "main", "target": "tool", "relation": "calls", "confidence": "INFERRED", "source_file": "crates/app/src/main.rs"},
+                {"source": "core", "target": "main", "relation": "imports_from", "confidence": "EXTRACTED", "source_file": "crates/core/src/lib.rs"},
+                {"source": "core_run", "target": "tool", "relation": "calls", "confidence": "INFERRED", "source_file": "crates/core/src/lib.rs"},
+                {"source": "tool", "target": "main", "relation": "calls", "confidence": "EXTRACTED", "source_file": "crates/tool/src/lib.rs"},
+                {"source": "tool", "target": "core", "relation": "references", "confidence": "EXTRACTED", "source_file": "crates/tool/src/lib.rs"},
+                {"source": "check", "target": "main", "relation": "calls", "confidence": "INFERRED", "source_file": "crates/core/tests/it.rs"},
+                {"source": "check", "target": "core", "relation": "calls", "confidence": "EXTRACTED", "source_file": "crates/core/tests/it.rs"},
+                {"source": "cart", "target": "core", "relation": "calls", "confidence": "INFERRED", "source_file": "web/cart.php"},
+                {"source": "gen", "target": "tool", "relation": "calls", "confidence": "INFERRED", "source_file": "scripts/gen.rs"}
+            ]
+        })
+        .to_string();
+        // The app is built with the core; the tool's tests with the app.
+        let manifests = [
+            ("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n"),
+            (
+                "crates/app/Cargo.toml",
+                "[package]\nname = \"shop-app\"\n[dependencies]\nshop-core = { path = \"../core\" }\n",
+            ),
+            (
+                "crates/core/Cargo.toml",
+                "[package]\nname = \"shop-core\"\n",
+            ),
+            (
+                "crates/tool/Cargo.toml",
+                "[package]\nname = \"shop-tool\"\n[dev-dependencies]\nshop-app = { path = \"../app\" }\n",
+            ),
+        ];
+        let read = |manifests: &[(&str, &str)]| {
+            Index::read_with(graph.as_bytes(), Path::new("/work/shop"), &|path| {
+                manifests
+                    .iter()
+                    .find(|(at, _)| *at == path)
+                    .map(|(_, text)| (*text).to_owned())
+            })
+            .unwrap()
+        };
+        // The arrows of a folder, in the order of their names.
+        let edges = |index: &Index, scope: &str| {
+            let mut edges = rows(&index.view("shop", scope, None, false, ""), "edges");
+            edges.sort();
+            edges
+        };
+        // As the tool gave it: the core uses the app and the tool, which no
+        // build of it could.
+        let whole = read(&[]);
+        assert_eq!(
+            whole.view("shop", "", None, false, "")["totals"],
+            json!({"files": 6, "symbols": 7, "relations": 11, "links": 10, "read": 5, "guessed": 5, "unplaced": 0, "ruled_out": 0})
+        );
+        assert_eq!(
+            edges(&whole, "crates"),
+            [
+                "crates/app -> crates/core 1/0",
+                "crates/app -> crates/tool 1/1",
+                "crates/core -> crates/app 2/1",
+                "crates/core -> crates/tool 1/1",
+                "crates/tool -> crates/app 1/0",
+                "crates/tool -> crates/core 1/0",
+            ]
+        );
+        // With the manifests, four links cannot be: the app's into the
+        // tool, and the three out of the core, one of them from its test.
+        // What is not Rust, and the source of no crate, keep theirs.
+        let index = read(&manifests);
+        assert_eq!(
+            index.view("shop", "", None, false, "")["totals"],
+            json!({"files": 6, "symbols": 7, "relations": 11, "links": 6, "read": 4, "guessed": 2, "unplaced": 0, "ruled_out": 4})
+        );
+        assert_eq!(
+            edges(&index, "crates"),
+            [
+                "crates/app -> crates/core 1/0",
+                "crates/tool -> crates/app 1/0",
+                "crates/tool -> crates/core 1/0",
+            ]
+        );
+        assert_eq!(
+            edges(&index, ""),
+            ["scripts -> crates 1/1", "web -> crates 1/1"]
+        );
+        // The file that was said to use two others uses none.
+        let core = index.view("shop", "crates/core/src/lib.rs", None, false, "");
+        assert_eq!(
+            (&core["file"]["uses"], &core["file"]["used_by"]),
+            (&json!(0), &json!(4))
+        );
+        // Without tests, the link ruled out of a test is not counted twice.
+        let plain = index.plain_with(&|_| None);
+        assert_eq!(plain.left_out(), (1, 0));
+        assert_eq!(
+            plain.view("shop", "", None, false, "")["totals"],
+            json!({"files": 5, "symbols": 6, "relations": 9, "links": 5, "read": 3, "guessed": 2, "unplaced": 0, "ruled_out": 3})
+        );
     }
     fn store() -> Index {
         let cart = "src/Cart/Cart.php";

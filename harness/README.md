@@ -1818,6 +1818,32 @@ those can be wrong. **Only links read from the code** hides the inferred ones. A
 whose file is neither of its two symbols' files is skipped and counted above the
 map; it comes from two symbols that share an id.
 
+A link from one Rust crate into another is left out where the first cannot be built
+with the second. Graphify matches names across the whole project: `use std::fs`
+becomes a link to a file `fs.rs` of another crate and `anyhow::Result` a link to
+that crate's own `Result`, and both count as read from the code. Cargo settles it.
+A crate can use itself, the packages its `Cargo.toml` names, for any target, for
+its tests and its build script and under a feature that is off, and what those are
+built with in turn. A link into any other crate of the project cannot be, so the
+map neither draws nor counts it, and the summary says how many links the manifests
+ruled out. A source that a crate takes from the folder of another, by the `#[path]`
+of a module, an `include!` or the `path` of a target, is compiled into both and
+keeps the links of both; where it declares modules of its own, so does its folder.
+The manifests and sources are the checkout's. The graph of another commit is read
+with that commit's: its manifests, and of each Rust source the lines that name
+other sources, are kept beside the graph when the rest of its files is removed, so
+a graph built before this was kept rules nothing out. Where the build is not known
+for certain, the link stays. A manifest that is not TOML 1.0, as a newer Cargo may
+write it, lets its crate and every crate built with it use any; one that names no
+package either switches the rule off for the project. A crate that leaves a
+dependency to its workspace (`workspace = true`) may use any where that workspace
+lies outside the project's folder. A source under no package is left alone, and so
+is everything that is not Rust: a Composer or npm manifest does not stop one
+package from using another when the code runs. What a source names is read from
+its text, without expanding macros: a path that only a macro or an environment
+variable spells out is not seen, and neither is a source that a symbolic link
+brings into the folder of another crate.
+
 A file opens as a folder does, when it is selected twice or with **Open file**, in
 the project's map and in a map of changes. The window then shows what Graphify names
 inside the file, each box with a letter for what it is: `T` a type, `m` a method
@@ -1902,7 +1928,9 @@ the links it has with the change.
   checkout gets a graph of its own. Its files are written out under the Harness
   state through an index of their own, so the checkout, its index and its branch
   are not touched and large-file pointers stay pointers; Graphify reads them as it
-  reads the project, and only the graph is kept. The window shows percent and time
+  reads the project. Of the files only what the graph is read with is kept beside
+  it, and that is small: the Cargo manifests and, of each Rust source, the lines
+  that name other sources. The window shows percent and time
   left, estimated from the project's own build, and meanwhile draws a first picture
   on the project's graph: the files changed are the commit's, the links are those
   the files have in the checkout, and the note says so until the commit's own graph
