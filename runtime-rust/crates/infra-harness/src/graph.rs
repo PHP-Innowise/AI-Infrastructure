@@ -2490,7 +2490,22 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                     .to_owned();
                 let tool = root.path().join("tool").join("graphify");
                 std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
-                std::fs::write(&tool, TOOL).unwrap();
+                // The tests run on threads of one process, and a child that
+                // another test starts meanwhile inherits whatever is open
+                // here until it execs. Were the tool written here, such a
+                // child could hold it open for writing, and starting the
+                // tool then fails with "Text file busy". So its text is
+                // written beside it, and a process of its own makes the
+                // tool of that.
+                let text = tool.with_extension("text");
+                std::fs::write(&text, TOOL).unwrap();
+                let copied = Command::new("cp")
+                    .arg("--")
+                    .arg(&text)
+                    .arg(&tool)
+                    .status()
+                    .unwrap();
+                assert!(copied.success());
                 std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
                 let graphs = Graphs::with(store.clone(), Some(tool.clone()), Duration::ZERO);
                 Self {
