@@ -67,3 +67,8 @@ workspace source-input policy scanner. No policy scanner settings are changed.
 
 Strict workspace linting: use Option::unwrap_or for the existing scientific
 mantissa fallback instead of an identity map_or closure. Output is unchanged.
+
+Strict workspace linting, Rust 1.100: the two loops that collect a fraction's
+denominator walk the parts with iter().enumerate().skip(start) instead of
+indexing them by a range. They visit the same parts and collect the same
+indices. Output is unchanged.
