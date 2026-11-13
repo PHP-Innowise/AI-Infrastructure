@@ -7,6 +7,7 @@
 use crate::{
     HarnessError, Result,
     graph_changes::{self, Pull, Resolved, Target},
+    graph_map::Sharing,
     projects,
     services::{Domain, Payload, Reply},
     store::{self, SessionStore},
@@ -921,17 +922,9 @@ pub struct Shown<'a> {
     /// Two places to find the shortest ways between, instead of a folder:
     /// the one they lead from and the one they lead to.
     pub path: Option<(&'a str, &'a str)>,
-    /// Two places to find what they share, instead of a folder.
+    /// Two places to find what they share, instead of a folder, with
+    /// which part of that to draw.
     pub shared: Option<Sharing<'a>>,
-}
-/// Two places asked what they share, and which kind of it to draw.
-#[derive(Clone, Copy, Debug)]
-pub struct Sharing<'a> {
-    pub from: &'a str,
-    pub to: &'a str,
-    /// What uses both, or what both use. Where it is not said, what both
-    /// use, unless only the other kind has anything.
-    pub users: Option<bool>,
 }
 /// How many places a request may name in one list, and in how many bytes.
 const UNFOLDED: usize = 256;
@@ -1097,9 +1090,9 @@ impl Graphs {
                 {
                     return Some(view);
                 }
-                if let Some(Sharing { from, to, users }) = shared
+                if let Some(asked) = shared
                     && let Some(view) =
-                        index.shared(name, from, to, users, changed, edited, focus, certain)
+                        index.shared(name, asked, changed, edited, focus, certain, filter)
                 {
                     return Some(view);
                 }
@@ -2307,6 +2300,19 @@ impl Domain for Graphs {
                             return Err(HarnessError::invalid("Invalid code graph places."));
                         }
                     };
+                    // The picture begins after as many of the nearest as
+                    // a request says.
+                    let skip = match query["skip"].as_str() {
+                        None | Some("") => 0,
+                        Some(text) if !sharing.is_empty() => text
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|skip| *skip <= 1_000_000)
+                            .ok_or_else(|| HarnessError::invalid("Invalid code graph places."))?,
+                        Some(_) => {
+                            return Err(HarnessError::invalid("Invalid code graph places."));
+                        }
+                    };
                     let me = self.me.upgrade().ok_or_else(|| {
                         HarnessError::unavailable("The code graph is shutting down.")
                     })?;
@@ -2329,7 +2335,12 @@ impl Domain for Graphs {
                                     _ => None,
                                 },
                                 shared: match sharing.as_slice() {
-                                    [from, to] => Some(Sharing { from, to, users }),
+                                    [from, to] => Some(Sharing {
+                                        from,
+                                        to,
+                                        users,
+                                        skip,
+                                    }),
                                     _ => None,
                                 },
                             },
@@ -2420,7 +2431,7 @@ mod tests {
             .unwrap();
         for part in [
             "scope", "focus", "certain", "filter", "target", "follow", "out", "into", "notests",
-            "spread", "from", "to", "path", "shared", "side",
+            "spread", "from", "to", "path", "shared", "side", "skip",
         ] {
             assert!(route.query.contains(&part), "{part}");
         }
@@ -3417,7 +3428,12 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                         &fixture.project,
                         Some(&Target::Work),
                         &Shown {
-                            shared: Some(Sharing { from, to, users }),
+                            shared: Some(Sharing {
+                                from,
+                                to,
+                                users,
+                                skip: 0,
+                            }),
                             ..Shown::default()
                         },
                     )

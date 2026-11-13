@@ -1906,25 +1906,30 @@ code** the ways are found without the guessed links, which a dashed arrow marks:
 chain is as true as its weakest link.
 
 **What they share**, beside the path above a picture of two places, asks what ties
-the two together apart from the way between them: what both use, and what uses
-both. It is there whether or not a path was found. Both use a place where a chain
-of links leads to it from each of the two without passing through the other; what
-one of them reaches only through the other is what the path shows. A place uses
-both where such chains lead from it to each of them. The line above the picture
-counts both kinds, and the picture draws one of them: what both use, to the right
-of the two, or, where they use nothing in common, what uses both, to their left.
-**What uses both** and **What both use** beside the path change between the two
-pictures, and **The path between them** leads back. Each of the two is one ringed
-box, a folder as well, and all its links with another box are one link. The
-picture shows the 12 nearest places of its kind, those with the fewest links to
-the two taken together and, among those as near, the most linked. Each is drawn
-with one shortest way between it and either of the two, the strongest where
-several are as short: what is shared carries its name in bold, and a box with a
-plain name lies on such a way. Selecting a box says how many links each of the two
-is away, and lists the next and the one before it on the way; it leads on with
-**Open file**, **Follow links** or **Path to…** like a box of a path. A chosen
-change, **Only links read from the code** and **Without tests** hold here as they
-do for a path.
+the two together apart from the way between them: what both use, and what uses both.
+It is there whether or not a path was found. Both use a place where a chain of links
+leads to it from each of the two without passing through the other; what one of them
+reaches only through the other is what the path shows. A place uses both where such
+chains lead from it to each of them. The line above the picture counts both kinds,
+and the picture draws one of them: what both use, to the right of the two, or, where
+they use nothing in common, what uses both, to their left. **What uses both** and
+**What both use** beside the path change between the two pictures, and **The path
+between them** leads back. Each of the two is one ringed box, a folder as well, and
+all its links with another box are one link. The places of a kind stand in the order
+of nearness: the fewest links to the two taken together first and, among those as
+near, the most linked. A picture shows 12 of them, the nearest first. Where there
+are more, a strip above the side panel says which places the picture shows, and
+**Further** and **Nearer** in it lead to the next ones and back: each picture begins
+where the one before ended, so one after another they show every place once.
+**Filter names** keeps the places whose name holds what is typed, a file being named
+by its path and a symbol as it is shown; what it leaves is counted above the picture
+and gone through the same way. Each place is drawn with one shortest way between it
+and either of the two, the strongest where several are as short: what is shared
+carries its name in bold, and a box with a plain name lies on such a way. Selecting
+a box says how many links each of the two is away, and lists the next and the one
+before it on the way; it leads on with **Open file**, **Follow links** or **Path
+to…** like a box of a path. A chosen change, **Only links read from the code** and
+**Without tests** hold here as they do for a path.
 
 Between folders and files the map counts the graph's links that cross a file
 boundary; the links inside one file show when that file is opened. The relations

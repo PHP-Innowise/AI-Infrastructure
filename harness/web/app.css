@@ -260,6 +260,9 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-canvas[data-picking="true"] .graph-map-node { cursor:crosshair; }
 .graph-map-picking { margin:0 0 12px; padding:8px 10px; border:1px solid var(--purple-line); border-radius:var(--radius); background:var(--purple-soft); }
 .graph-map-picking p { margin:0 0 8px; }
+/* Where two places share more than one picture shows, a strip above the side panel says which of the places this picture shows and leads to those before and after. */
+.graph-map-paging { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:0 0 12px; padding:8px 10px; border:1px solid var(--line); border-radius:var(--radius); }
+.graph-map-paging p { flex:1 1 100%; margin:0 0 2px; color:var(--ink-2); font-size:var(--text-ui); }
 .graph-map-node[data-selected="true"] { border-color:var(--purple); background:var(--purple-soft); color:var(--purple); outline:2px solid var(--purple); outline-offset:1px; }
 .graph-map-more { position:absolute; z-index:1; min-width:16px; height:16px; padding:0 4px; border:1px solid var(--map-uses); border-radius:8px; background:var(--paper); color:var(--ink); font-size:var(--text-meta); font-weight:var(--weight-strong); line-height:14px; font-variant-numeric:tabular-nums; text-align:center; transform:translate(-50%,-50%); }
 .graph-map-more[data-side="in"] { border-color:var(--map-used); }

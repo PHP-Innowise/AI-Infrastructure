@@ -1056,21 +1056,37 @@ fn shown(view: &V) -> String {
         } else {
             ("other file", "other files")
         };
-        // The kind that is drawn comes first, with the two by name and
-        // how many of it are drawn where that is not all.
+        // The kind that is drawn comes first, with the two by name, how
+        // many of it a filter leaves, and which of those are drawn where
+        // that is not all: so many of the nearest, or the places after
+        // those that were passed over.
         let drawn = |all: u64| {
-            if number("shown") < all {
-                format!(", {} drawn", count(number("shown")))
-            } else {
-                String::new()
+            let (matching, skip, shown) = (number("matching"), number("skip"), number("shown"));
+            let mut text = match matching {
+                left if left == all => String::new(),
+                0 => ", none matches the filter".to_owned(),
+                1 => ", 1 matches the filter".to_owned(),
+                left => format!(", {} match the filter", count(left)),
+            };
+            if skip > 0 && shown == 1 {
+                text.push_str(&format!(", place {} drawn", count(skip + 1)));
+            } else if skip > 0 {
+                text.push_str(&format!(
+                    ", places {} to {} drawn",
+                    count(skip + 1),
+                    count(skip + shown)
+                ));
+            } else if shown < matching {
+                text.push_str(&format!(", {} drawn", count(shown)));
             }
+            text
         };
         return if above(view) {
             format!(
                 "{} · {}",
                 match users {
                     0 => format!("Nothing uses both {from} and {to}"),
-                    1 => format!("1 {one} uses both {from} and {to}"),
+                    1 => format!("1 {one} uses both {from} and {to}{}", drawn(1)),
                     users => format!(
                         "{} {many} use both {from} and {to}{}",
                         count(users),
@@ -1462,8 +1478,8 @@ fn path_note(view: &V) -> String {
     parts.join(" ")
 }
 /// What the picture of what two places share shows and what counts as
-/// shared, what it leaves out, and that the other kind is there to see; or
-/// why there is nothing.
+/// shared, and, where there is more than it shows, in what order; or why
+/// there is nothing.
 fn shared_note(view: &V) -> String {
     let shared = &view["shared"];
     let number = |key: &str| shared[key].as_u64().unwrap_or(0);
@@ -1505,20 +1521,36 @@ fn shared_note(view: &V) -> String {
         });
         return parts.join(" ");
     }
-    parts.push(format!(
-        "{} {through} Select a link to see what makes it up.",
-        if above {
-            "What uses both stands to the left of the two, each with one shortest way from it to either of them: the strongest where several are as short."
+    let (matching, skip, shown) = (number("matching"), number("skip"), number("shown"));
+    if matching == 0 {
+        // There are places of the kind, and the filter leaves none.
+        parts.push(if above {
+            format!(
+                "None of the {} that use both matches the filter.",
+                count(users)
+            )
         } else {
-            "What both use stands to the right of the two, each with one shortest way to it from either of them: the strongest where several are as short."
+            format!(
+                "None of the {} that both use matches the filter.",
+                count(used)
+            )
+        });
+        return parts.join(" ");
+    }
+    parts.push(format!(
+        "{} {through}",
+        if above {
+            "What uses both stands to the left of the two, each with one shortest way to either of them, the strongest of those as short."
+        } else {
+            "What both use stands to the right of the two, each with one shortest way from either of them, the strongest of those as short."
         }
     ));
-    let here = if above { users } else { used };
-    if number("shown") < here {
+    // Where one picture does not show them all, the line above and the
+    // strip beside the picture say which it shows, and this in what order
+    // they stand and how one of them is reached.
+    if skip > 0 || shown < matching {
         parts.push(format!(
-            "Only the nearest are drawn, {} of {}: those with the fewest links {} the two taken together, and among those as near the most linked.",
-            count(number("shown")),
-            count(here),
+            "The nearest come first: the fewest links {} the two taken together, then the most linked. Filter names reaches a place by its name.",
             if above { "to" } else { "from" }
         ));
     }
@@ -2825,8 +2857,8 @@ fn apart(view: &V) -> String {
     let mut html = "<p class=\"knowledge-note\">Nothing is drawn.".to_owned();
     for ask in &asks {
         html.push_str(match (ask.as_str(), ask.as_bool()) {
-            (Some("uses_both"), _) => " What uses both shows what does.",
-            (Some(_), _) => " What both use shows what they do.",
+            (Some("uses_both"), _) => " What uses both is another picture.",
+            (Some(_), _) => " What both use is another picture.",
             (None, Some(true)) => " What they share shows what both use and what uses both.",
             _ => " The path between them asks how one of the two reaches the other.",
         });
@@ -3736,7 +3768,7 @@ fn watch() {
     }
 }
 fn fresh(target: &str) -> V {
-    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "filter": "", "follow": "", "out": [], "into": [], "spread": [], "path": [], "shared": false, "side": "", "pick": null})
+    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "filter": "", "follow": "", "out": [], "into": [], "spread": [], "path": [], "shared": false, "side": "", "skip": [], "pick": null})
 }
 /// How many folders a picture keeps spread out; the oldest gives way.
 const SPREAD: usize = 32;
@@ -3789,12 +3821,15 @@ fn unfollowed(mut state: V) -> V {
     state["path"] = json!([]);
     state["shared"] = json!(false);
     state["side"] = json!("");
+    state["skip"] = json!([]);
     state
 }
 /// The map as it answers another question of the two places it shows:
 /// `true` asks what they share, a kind of that by its name (`both_use`,
 /// `uses_both`) asks for that kind, and anything else for the path between
-/// them again. `None` where no two places are shown.
+/// them again. Either kind begins with its nearest places; a filter holds
+/// for both kinds, and is dropped with them. `None` where no two places are
+/// shown.
 pub fn sharing(mut state: V, asked: &V) -> Option<V> {
     if unfolded(&state, "path").len() != 2 {
         return None;
@@ -3803,10 +3838,50 @@ pub fn sharing(mut state: V, asked: &V) -> Option<V> {
         .as_str()
         .filter(|side| ["both_use", "uses_both"].contains(side))
         .unwrap_or("");
-    state["shared"] = json!(asked == &json!(true) || !side.is_empty());
+    let shared = asked == &json!(true) || !side.is_empty();
+    state["shared"] = json!(shared);
     state["side"] = json!(side);
+    state["skip"] = json!([]);
     state["focus"] = json!("");
+    if !shared {
+        state["filter"] = json!("");
+    }
     Some(state)
+}
+/// After how many of the nearest places each picture of what two places
+/// share began, on the way to the one that is shown: none for the first.
+fn begun(state: &V) -> Vec<u64> {
+    m::array(&state["skip"])
+        .iter()
+        .filter_map(V::as_u64)
+        .collect()
+}
+/// The map as it shows other places that two places share: those after
+/// `next` of the nearest, or, with none, those of the picture before.
+/// Nothing stays selected.
+pub fn paged(mut state: V, next: Option<u64>) -> V {
+    let mut starts = begun(&state);
+    match next {
+        Some(next) if next > starts.last().copied().unwrap_or(0) => starts.push(next),
+        Some(_) => {}
+        None => {
+            starts.pop();
+        }
+    }
+    state["skip"] = json!(starts);
+    state["focus"] = json!("");
+    state
+}
+/// The state once the server said where the picture begins: it begins
+/// where it can, which is earlier where places went since.
+pub fn begins(mut state: V, at: u64) -> V {
+    let mut starts = begun(&state);
+    starts.retain(|start| *start < at);
+    if at > 0 {
+        starts.push(at);
+    }
+    state["skip"] = json!(starts);
+    state
 }
 /// The map as it shows the shortest ways from the place a path is being
 /// asked from to the place `to`. `None` where no path is being asked for,
@@ -3822,6 +3897,47 @@ pub fn led(state: V, to: &str) -> Option<V> {
     state["focus"] = json!("");
     state["filter"] = json!("");
     Some(state)
+}
+/// What stands above the side panel where two places share more than one
+/// picture shows: which of the places, in the order of nearness, this one
+/// shows, and the ways to the ones before and to the ones after. Nothing
+/// where one picture shows them all.
+pub fn paging(view: &V) -> String {
+    if !shares(view) {
+        return String::new();
+    }
+    let shared = &view["shared"];
+    let number = |key: &str| shared[key].as_u64().unwrap_or(0);
+    let (matching, skip, shown) = (number("matching"), number("skip"), number("shown"));
+    let more = skip + shown < matching;
+    if shown == 0 || (skip == 0 && !more) {
+        return String::new();
+    }
+    let all = number(if above(view) { "uses_both" } else { "both_use" });
+    // A way that leads nowhere stays where it is, and cannot be taken.
+    let turn = |label: &str, to: V, open: bool| {
+        format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared-page\" data-payload=\"{}\"{}>{label}</button>",
+            payload(&to),
+            if open { "" } else { " disabled" }
+        )
+    };
+    format!(
+        "<div class=\"graph-map-paging\"><p>{} of {}{}, the nearest first.</p>{}{}</div>",
+        if shown == 1 {
+            format!("Place {}", count(skip + 1))
+        } else {
+            format!("Places {} to {}", count(skip + 1), count(skip + shown))
+        },
+        count(matching),
+        if matching < all {
+            " that match the filter"
+        } else {
+            ""
+        },
+        turn("Nearer", V::Null, skip > 0),
+        turn("Further", json!(skip + shown), more),
+    )
 }
 /// What stands above the side panel while the other end of a path is being
 /// chosen: where the path leads from, what to do, and the way out.
@@ -4504,10 +4620,8 @@ fn render(view: &V) {
     dom::set_checked("graph-map-certain", m::yes(&view["certain"]));
     dom::set_checked("graph-map-notests", m::yes(&view["notests"]));
     dom::set_checked("graph-map-fit", m::yes(&state()["fit"]));
-    dom::disabled(
-        "graph-map-filter",
-        follows(view) || paths(view) || shares(view),
-    );
+    // Of what two places share, the filter keeps the names that hold it.
+    dom::disabled("graph-map-filter", follows(view) || paths(view));
     html("graph-map-canvas", &canvas(view));
     fit();
     // While the other end of a path is chosen, a box is that end.
@@ -4523,7 +4637,7 @@ fn render(view: &V) {
     );
     html(
         "graph-map-side",
-        &format!("{}{}", choosing(&state), side(view)),
+        &format!("{}{}{}", choosing(&state), paging(view), side(view)),
     );
     html("graph-map-legend", &legend(view, change));
 }
@@ -4595,6 +4709,10 @@ async fn load(quiet: bool) {
         if asked == "shared" && !m::text(&state, "side").is_empty() {
             query.push(("side", m::text(&state, "side")));
         }
+        // It begins with the nearest, or after those that were passed.
+        if let Some(skip) = begun(&state).last().filter(|_| asked == "shared") {
+            query.push(("skip", skip.to_string()));
+        }
     } else if !m::text(&state, "follow").is_empty() {
         query.push(("follow", m::text(&state, "follow")));
     } else if !unfolded(&state, "spread").is_empty() {
@@ -4630,7 +4748,9 @@ async fn load(quiet: bool) {
                         .collect::<Vec<_>>();
                     state[key] = json!(kept);
                 }
-            } else if !paths(&view) && !shares(&view) {
+            } else if shares(&view) {
+                state = begins(state, view["shared"]["skip"].as_u64().unwrap_or(0));
+            } else if !paths(&view) {
                 // The graph does not know the place, or one of the two
                 // places, or they were left.
                 state = unfollowed(state);
@@ -4959,6 +5079,7 @@ pub async fn event(
                 Some(shown) => state = shown,
                 None => return true,
             }
+            dom::set_value("graph-map-filter", &m::text(&state, "filter"));
         }
         ("click", _, "graph-map-node") if state["pick"].is_object() => {
             // The other end of a path is being chosen: this box is it. The
@@ -5078,10 +5199,20 @@ pub async fn event(
             }
             state["focus"] = json!(path);
         }
-        ("change", "graph-map-certain", _) => state["certain"] = json!(checked),
+        ("click", _, "graph-map-shared-page") => {
+            // Further on among what the two share, or back to the picture
+            // before.
+            state = paged(state, payload.as_u64());
+        }
+        ("change", "graph-map-certain", _) => {
+            // Another set of links: what two places share begins anew.
+            state["certain"] = json!(checked);
+            state["skip"] = json!([]);
+        }
         ("change", "graph-map-notests", _) => {
             // The choice is the viewer's and holds for the next map too.
             state["notests"] = json!(checked);
+            state["skip"] = json!([]);
             dom::save(NOTESTS, checked.then_some("1"));
         }
         ("change", "graph-map-fit", _) => {
@@ -5093,7 +5224,11 @@ pub async fn event(
             fit();
             return true;
         }
-        ("input", "graph-map-filter", _) => state["filter"] = json!(value),
+        ("input", "graph-map-filter", _) => {
+            // What a filter leaves begins with its nearest.
+            state["filter"] = json!(value);
+            state["skip"] = json!([]);
+        }
         _ => return false,
     }
     m::set("graph-map", state.clone());
@@ -7626,7 +7761,7 @@ mod tests {
                 "from": {"path": "app/api/users.php", "name": "users.php", "what": "file"},
                 "to": {"path": "app/api/orders.php", "name": "orders<1>.php", "what": "file"},
                 "names": false, "within": false, "side": "both_use",
-                "both_use": 2, "uses_both": 1, "shown": 2, "wide": 12
+                "both_use": 2, "uses_both": 1, "matching": 2, "skip": 0, "shown": 2, "wide": 12
             },
             "children": 4, "matching": 4,
             "nodes": [
@@ -7656,6 +7791,7 @@ mod tests {
         main["path"] = json!("app/main.php");
         main["name"] = json!("main.php");
         view["shared"]["side"] = json!("uses_both");
+        view["shared"]["matching"] = json!(1);
         view["shared"]["shown"] = json!(1);
         view["nodes"] = json!([view["nodes"][0], view["nodes"][1], main]);
         view["edges"] = json!([
@@ -7681,7 +7817,7 @@ mod tests {
         );
         assert_eq!(
             note(&view),
-            format!("What both use stands to the right of the two, each with one shortest way to it from either of them: the strongest where several are as short. {THROUGH} Select a link to see what makes it up.")
+            format!("What both use stands to the right of the two, each with one shortest way from either of them, the strongest of those as short. {THROUGH}")
         );
         // The two close the path above the picture, with the kind that is
         // drawn; beside them stand the other kind and the way back to the
@@ -7708,7 +7844,7 @@ mod tests {
         );
         assert_eq!(
             note(&users),
-            format!("What uses both stands to the left of the two, each with one shortest way from it to either of them: the strongest where several are as short. {THROUGH} Select a link to see what makes it up.")
+            format!("What uses both stands to the left of the two, each with one shortest way to either of them, the strongest of those as short. {THROUGH}")
         );
         assert!(
             crumbs(&users).ends_with(&format!(": what uses both</span>{ASK_USED}{ASK_PATH}")),
@@ -7716,27 +7852,102 @@ mod tests {
             crumbs(&users)
         );
         assert!(legend(&users, false).ends_with("closing a cycle (↻). The ringed boxes are the two places. A name in bold is what uses both; a box with a plain name lies on its way to them."));
-        // More is shared than a picture shows.
+        // More is shared than a picture shows: the nearest are drawn, and
+        // the note says how the rest is reached.
         let mut wide = common();
-        wide["shared"]["both_use"] = json!(1037);
-        wide["shared"]["shown"] = json!(12);
+        for (key, value) in [("both_use", 1037), ("matching", 1037), ("shown", 12)] {
+            wide["shared"][key] = json!(value);
+        }
         assert_eq!(
             summary(&wide),
             "users.php and orders<1>.php both use 1,037 other files, 12 drawn · 1 other file uses both"
         );
-        assert!(note(&wide).ends_with(
-            " Select a link to see what makes it up. Only the nearest are drawn, 12 of 1,037: those with the fewest links from the two taken together, and among those as near the most linked."
-        ), "{}", note(&wide));
+        let order = " The nearest come first: the fewest links from the two taken together, then the most linked. Filter names reaches a place by its name.";
+        assert_eq!(note(&wide), format!("{}{order}", note(&common())));
+        // A picture further on says which places it shows.
+        wide["shared"]["skip"] = json!(12);
+        assert_eq!(
+            summary(&wide),
+            "users.php and orders<1>.php both use 1,037 other files, places 13 to 24 drawn · 1 other file uses both"
+        );
+        assert_eq!(note(&wide), format!("{}{order}", note(&common())));
+        wide["shared"]["skip"] = json!(1036);
+        wide["shared"]["shown"] = json!(1);
+        assert_eq!(
+            summary(&wide),
+            "users.php and orders<1>.php both use 1,037 other files, place 1,037 drawn · 1 other file uses both"
+        );
+        assert_eq!(note(&wide), format!("{}{order}", note(&common())));
+        // A filter leaves some of them: the nearest of those are drawn.
+        for (key, value) in [("matching", 31), ("skip", 0), ("shown", 12)] {
+            wide["shared"][key] = json!(value);
+        }
+        assert_eq!(
+            summary(&wide),
+            "users.php and orders<1>.php both use 1,037 other files, 31 match the filter, 12 drawn · 1 other file uses both"
+        );
+        assert_eq!(note(&wide), format!("{}{order}", note(&common())));
+        wide["shared"]["skip"] = json!(24);
+        wide["shared"]["shown"] = json!(7);
+        assert_eq!(
+            summary(&wide),
+            "users.php and orders<1>.php both use 1,037 other files, 31 match the filter, places 25 to 31 drawn · 1 other file uses both"
+        );
+        assert_eq!(note(&wide), format!("{}{order}", note(&common())));
+        // It leaves few enough for one picture, one, or none.
+        for (key, value) in [("matching", 5), ("skip", 0), ("shown", 5)] {
+            wide["shared"][key] = json!(value);
+        }
+        assert_eq!(
+            summary(&wide),
+            "users.php and orders<1>.php both use 1,037 other files, 5 match the filter · 1 other file uses both"
+        );
+        // One picture shows them all: the line above says how many.
+        assert_eq!(note(&wide), note(&common()));
+        wide["shared"]["matching"] = json!(1);
+        wide["shared"]["shown"] = json!(1);
+        assert!(summary(&wide).contains(" other files, 1 matches the filter · 1 other"));
+        wide["shared"]["matching"] = json!(0);
+        wide["shared"]["shown"] = json!(0);
+        wide["nodes"] = json!([]);
+        wide["edges"] = json!([]);
+        assert_eq!(
+            summary(&wide),
+            "users.php and orders<1>.php both use 1,037 other files, none matches the filter · 1 other file uses both"
+        );
+        assert_eq!(
+            note(&wide),
+            "None of the 1,037 that both use matches the filter."
+        );
+        // What uses both says the same the other way round.
         let mut wide = common_users();
-        wide["shared"]["uses_both"] = json!(20);
-        wide["shared"]["shown"] = json!(9);
+        for (key, value) in [("uses_both", 20), ("matching", 20), ("shown", 9)] {
+            wide["shared"][key] = json!(value);
+        }
         assert_eq!(
             summary(&wide),
             "20 other files use both users.php and orders<1>.php, 9 drawn · both use 2 other files"
         );
-        assert!(note(&wide).ends_with(
-            " Select a link to see what makes it up. Only the nearest are drawn, 9 of 20: those with the fewest links to the two taken together, and among those as near the most linked."
-        ), "{}", note(&wide));
+        assert_eq!(
+            note(&wide),
+            format!("{} The nearest come first: the fewest links to the two taken together, then the most linked. Filter names reaches a place by its name.", note(&common_users()))
+        );
+        wide["shared"]["matching"] = json!(0);
+        wide["shared"]["shown"] = json!(0);
+        assert_eq!(
+            summary(&wide),
+            "20 other files use both users.php and orders<1>.php, none matches the filter · both use 2 other files"
+        );
+        assert_eq!(
+            note(&wide),
+            "None of the 20 that use both matches the filter."
+        );
+        // One alone that uses both and that a filter leaves out.
+        wide["shared"]["uses_both"] = json!(1);
+        assert_eq!(
+            summary(&wide),
+            "1 other file uses both users.php and orders<1>.php, none matches the filter · both use 2 other files"
+        );
         // One kind alone: the other has no picture to go to.
         let mut alone = common();
         alone["shared"]["uses_both"] = json!(0);
@@ -7744,13 +7955,14 @@ mod tests {
             summary(&alone),
             "users.php and orders<1>.php both use 2 other files · nothing uses both"
         );
-        assert!(note(&alone).ends_with("Select a link to see what makes it up."));
+        assert_eq!(note(&alone), note(&common()));
         assert!(crumbs(&alone).ends_with(&format!(": what both use</span>{ASK_PATH}")));
         // A kind that was asked for and has nothing: nothing is drawn, and
         // the other kind is said to be there.
         let mut asked = common();
         asked["shared"]["both_use"] = json!(0);
         asked["shared"]["uses_both"] = json!(3);
+        asked["shared"]["matching"] = json!(0);
         asked["shared"]["shown"] = json!(0);
         asked["nodes"] = json!([]);
         asked["edges"] = json!([]);
@@ -7901,7 +8113,7 @@ mod tests {
             "from": {"path": TEST_TOTAL, "name": "CartTest.testTotal()", "what": "method", "symbol": true},
             "to": {"path": PRICE_OF, "name": "Price.of()", "what": "method", "symbol": true},
             "names": true, "within": false, "side": "both_use",
-            "both_use": 1, "uses_both": 0, "shown": 1, "wide": 12
+            "both_use": 1, "uses_both": 0, "matching": 1, "skip": 0, "shown": 1, "wide": 12
         });
         named["nodes"] = json!([named["nodes"][2], named["nodes"][1], named["nodes"][0]]);
         named["nodes"][0]["start"] = json!(true);
@@ -8010,17 +8222,18 @@ mod tests {
         let ends = "<h4>users.php</h4><p class=\"graph-map-path\">app/api/users.php</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;app/api/users.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;users.php&quot;,&quot;path&quot;:&quot;app/api/users.php&quot;}\">Path to…</button><h4>orders&lt;1&gt;.php</h4><p class=\"graph-map-path\">app/api/orders.php</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;app/api/orders.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;orders&lt;1&gt;.php&quot;,&quot;path&quot;:&quot;app/api/orders.php&quot;}\">Path to…</button>";
         let mut none = common();
         none["shared"]["both_use"] = json!(0);
+        none["shared"]["matching"] = json!(0);
         none["shared"]["shown"] = json!(0);
         none["nodes"] = json!([]);
         none["edges"] = json!([]);
         assert_eq!(
             side(&none),
-            format!("<p class=\"knowledge-note\">Nothing is drawn. What uses both shows what does. The path between them asks how one of the two reaches the other. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"&quot;uses_both&quot;\">What uses both</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"false\">The path between them</button>{ends}")
+            format!("<p class=\"knowledge-note\">Nothing is drawn. What uses both is another picture. The path between them asks how one of the two reaches the other. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"&quot;uses_both&quot;\">What uses both</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"false\">The path between them</button>{ends}")
         );
         none["shared"]["side"] = json!("uses_both");
         none["shared"]["both_use"] = json!(4);
         none["shared"]["uses_both"] = json!(0);
-        assert!(side(&none).starts_with("<p class=\"knowledge-note\">Nothing is drawn. What both use shows what they do. The path between them asks how one of the two reaches the other. Follow links shows"));
+        assert!(side(&none).starts_with("<p class=\"knowledge-note\">Nothing is drawn. What both use is another picture. The path between them asks how one of the two reaches the other. Follow links shows"));
         // Two places that share nothing are left with the path alone.
         none["shared"]["both_use"] = json!(0);
         assert_eq!(
@@ -8033,6 +8246,124 @@ mod tests {
             side(&none),
             format!("<p class=\"knowledge-note\">Nothing is drawn. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p>{ends}")
         );
+    }
+    #[test]
+    fn what_two_places_share_is_gone_through_a_picture_at_a_time() {
+        let turn = |label: &str, to: &str, open: bool| {
+            format!(
+                "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared-page\" data-payload=\"{to}\"{}>{label}</button>",
+                if open { "" } else { " disabled" }
+            )
+        };
+        let strip = |told: &str, near: bool, next: &str, far: bool| {
+            format!(
+                "<div class=\"graph-map-paging\"><p>{told}, the nearest first.</p>{}{}</div>",
+                turn("Nearer", "null", near),
+                turn("Further", next, far)
+            )
+        };
+        // One picture shows all there is: nothing to go through. Nor is
+        // there in a picture that is none of what two places share.
+        let mut view = common();
+        assert_eq!(paging(&view), "");
+        assert_eq!(paging(&routed()), "");
+        // More than a picture shows: the first one leads further only.
+        for (key, value) in [("both_use", 1037), ("matching", 1037), ("shown", 12)] {
+            view["shared"][key] = json!(value);
+        }
+        assert_eq!(
+            paging(&view),
+            strip("Places 1 to 12 of 1,037", false, "12", true)
+        );
+        // One in the middle leads both ways, and the next begins after
+        // what this one shows, however many that is.
+        view["shared"]["skip"] = json!(12);
+        view["shared"]["shown"] = json!(9);
+        assert_eq!(
+            paging(&view),
+            strip("Places 13 to 21 of 1,037", true, "21", true)
+        );
+        // The last leads back only, and may show one place.
+        view["shared"]["skip"] = json!(1036);
+        view["shared"]["shown"] = json!(1);
+        assert_eq!(
+            paging(&view),
+            strip("Place 1,037 of 1,037", true, "1037", false)
+        );
+        // What a filter leaves is gone through the same way.
+        for (key, value) in [("matching", 31), ("skip", 24), ("shown", 7)] {
+            view["shared"][key] = json!(value);
+        }
+        assert_eq!(
+            paging(&view),
+            strip(
+                "Places 25 to 31 of 31 that match the filter",
+                true,
+                "31",
+                false
+            )
+        );
+        // Few enough for one picture, or nothing at all: no strip.
+        for (key, value) in [("matching", 5), ("skip", 0), ("shown", 5)] {
+            view["shared"][key] = json!(value);
+        }
+        assert_eq!(paging(&view), "");
+        view["shared"]["matching"] = json!(0);
+        view["shared"]["shown"] = json!(0);
+        assert_eq!(paging(&view), "");
+        // What uses both counts its own kind.
+        let mut users = common_users();
+        for (key, value) in [("uses_both", 20), ("matching", 20), ("shown", 12)] {
+            users["shared"][key] = json!(value);
+        }
+        assert_eq!(
+            paging(&users),
+            strip("Places 1 to 12 of 20", false, "12", true)
+        );
+        // The state behind it: each step further remembers where it began,
+        // so that the way back shows the pictures as they were, and
+        // nothing stays selected.
+        let mut state = fresh("");
+        state["path"] = json!(["lib/a.php", "lib/db.php"]);
+        state["shared"] = json!(true);
+        state["focus"] = json!("lib/core.php");
+        assert_eq!(state["skip"], json!([]));
+        let second = paged(state.clone(), Some(12));
+        assert_eq!(
+            (&second["skip"], &second["focus"]),
+            (&json!([12]), &json!(""))
+        );
+        let third = paged(second.clone(), Some(21));
+        assert_eq!(third["skip"], json!([12, 21]));
+        // A step that leads no further is none.
+        assert_eq!(paged(third.clone(), Some(21))["skip"], json!([12, 21]));
+        assert_eq!(paged(third.clone(), None)["skip"], json!([12]));
+        assert_eq!(paged(paged(third.clone(), None), None)["skip"], json!([]));
+        assert_eq!(paged(state.clone(), None)["skip"], json!([]));
+        // The server begins where it can: the way back keeps the pictures
+        // that still lie before that.
+        assert_eq!(begins(third.clone(), 21)["skip"], json!([12, 21]));
+        assert_eq!(begins(third.clone(), 17)["skip"], json!([12, 17]));
+        assert_eq!(begins(third.clone(), 12)["skip"], json!([12]));
+        assert_eq!(begins(third.clone(), 5)["skip"], json!([5]));
+        assert_eq!(begins(third.clone(), 0)["skip"], json!([]));
+        assert_eq!(begins(state.clone(), 7)["skip"], json!([7]));
+        assert_eq!(begins(third.clone(), 21)["focus"], "");
+        // The other kind, and the path between the two, begin anew; the
+        // filter holds for both kinds and goes with them.
+        let mut far = third;
+        far["filter"] = json!("core");
+        let other = sharing(far.clone(), &json!("uses_both")).unwrap();
+        assert_eq!(
+            (&other["skip"], &other["filter"], &other["shared"]),
+            (&json!([]), &json!("core"), &json!(true))
+        );
+        let path = sharing(far.clone(), &json!(false)).unwrap();
+        assert_eq!(
+            (&path["skip"], &path["filter"], &path["shared"]),
+            (&json!([]), &json!(""), &json!(false))
+        );
+        assert_eq!(unfollowed(far)["skip"], json!([]));
     }
     #[test]
     fn two_places_are_asked_what_they_share_and_for_the_path_again() {

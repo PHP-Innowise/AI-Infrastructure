@@ -741,6 +741,18 @@ struct Flow {
     links: u64,
     guessed: u64,
 }
+/// Two places asked what they share, and which part of that to draw.
+#[derive(Clone, Copy, Debug)]
+pub struct Sharing<'a> {
+    pub from: &'a str,
+    pub to: &'a str,
+    /// What uses both, or what both use. Where it is not said, what both
+    /// use, unless only the other kind has anything.
+    pub users: Option<bool>,
+    /// How many of the nearest places of that kind are passed over: the
+    /// picture begins with the one after them.
+    pub skip: usize,
+}
 impl Index {
     /// Reads a node-link graph without holding it in memory: nodes become a
     /// table from symbol to file, links are counted as they pass. The
@@ -3131,6 +3143,18 @@ impl<'a> Net<'a> {
         }
         links
     }
+    /// Whether the name of a place holds `needle`, which is in small
+    /// letters: a file is named by its path, as where a change is drawn,
+    /// and a symbol as it is shown, as in its file.
+    fn named(&self, place: u32, needle: &str) -> bool {
+        if self.symbols {
+            self.index.shown(place).to_lowercase().contains(needle)
+        } else {
+            self.index.files[place as usize]
+                .to_lowercase()
+                .contains(needle)
+        }
+    }
     /// The name a picture selects a place by: a file by its path, a symbol
     /// as the picture of its file names it.
     fn key(&self, names: &Names, place: u32) -> String {
@@ -3622,15 +3646,21 @@ impl Index {
     /// two without passing through the other: what one of them reaches only
     /// through the other is what the path between them shows. A place uses
     /// both where such chains lead from it to each of them. Both kinds are
-    /// counted and one is drawn: `users` asks for what uses both, or for
-    /// what both use; where it does not ask, what both use is drawn, unless
+    /// counted and one is drawn: `asked` says whether what uses both or
+    /// what both use; where it does not say, what both use is drawn, unless
     /// only the other kind has anything.
     ///
-    /// The picture shows the `SHARED` nearest places of its kind, those
-    /// with the fewest links to the two taken together, and among those as
-    /// near the most linked. Each is drawn with one shortest way between it
-    /// and either of the two, the strongest where several are as short.
-    /// Where the ways fill the picture, fewer places are shown.
+    /// The places of a kind stand in the order of nearness: the fewest
+    /// links to the two taken together first, and among those as near the
+    /// most linked. `filter` keeps those whose name holds it, a file being
+    /// named by its path and a symbol as it is shown. Of what is left the
+    /// picture passes over as many as `asked` says and shows the next
+    /// `SHARED`, so that one picture after another shows them all; a
+    /// beginning past the last of them is the last. Each place is drawn
+    /// with one shortest way between it and either of the two, the
+    /// strongest where several are as short. Where the ways fill the
+    /// picture, fewer places are shown, and the next picture begins after
+    /// those.
     ///
     /// Where one of the two lies in the other, or there is nothing of the
     /// kind, the answer says so and draws nothing. `changed`, `edited` and
@@ -3640,14 +3670,19 @@ impl Index {
     pub fn shared(
         &self,
         project: &str,
-        from: &str,
-        to: &str,
-        users: Option<bool>,
+        asked: Sharing,
         changed: &[(String, char)],
         edited: &dyn Fn(&str) -> Option<Edited>,
         focus: Option<&str>,
         certain: bool,
+        filter: &str,
     ) -> Option<Value> {
+        let Sharing {
+            from,
+            to,
+            users,
+            skip,
+        } = asked;
         let ends = [self.reach(from)?, self.reach(to)?];
         let symbols = ends.iter().any(|end| matches!(end, Reach::Symbol(_)));
         let net = Net::new(self, symbols, certain);
@@ -3689,6 +3724,8 @@ impl Index {
                 "side": side(users == Some(true)),
                 "both_use": 0,
                 "uses_both": 0,
+                "matching": 0,
+                "skip": 0,
                 "shown": 0,
                 "wide": SHARED,
             },
@@ -3746,10 +3783,21 @@ impl Index {
         view["shared"]["uses_both"] = json!(using.1.len());
         let outgoing = !users;
         let (far, mut near) = if users { using } else { used };
+        // Of that kind, only the places whose name holds what the filter
+        // says.
+        let needle = filter.trim().to_lowercase();
+        if !needle.is_empty() {
+            near.retain(|(_, place)| net.named(*place, &needle));
+        }
+        let matching = near.len();
+        // A beginning past the last place is the last place.
+        let skip = skip.min(matching.saturating_sub(1));
+        view["shared"]["matching"] = json!(matching);
+        view["shared"]["skip"] = json!(skip);
         // Only the nearest are looked at more closely: those as near as the
-        // last that has room.
-        if near.len() > SHARED {
-            let cut = near.select_nth_unstable(SHARED - 1).1.0;
+        // last that has room in this picture.
+        if near.len() > skip + SHARED {
+            let cut = near.select_nth_unstable(skip + SHARED - 1).1.0;
             near.retain(|(links, _)| *links <= cut);
         }
         // Among those as near, the most linked with what leads to them.
@@ -3775,7 +3823,7 @@ impl Index {
         let mut on: [HashMap<u32, (Option<u32>, Flow)>; 2] = [HashMap::new(), HashMap::new()];
         let mut boxes: HashSet<u32> = HashSet::new();
         let mut shown = Vec::new();
-        for (_, _, place) in near.into_iter().take(SHARED) {
+        for (_, _, place) in near.into_iter().skip(skip).take(SHARED) {
             // The way to it from each of the two, back from it a step at a
             // time: the strongest of what leads on, and no further than a
             // box that such a way is drawn through already.
@@ -9193,11 +9241,23 @@ where
             "{found} {turned} {none} {capped}"
         );
     }
+    /// Two places asked what they share, from the nearest on.
+    fn asking<'a>(from: &'a str, to: &'a str, users: Option<bool>) -> Sharing<'a> {
+        Sharing {
+            from,
+            to,
+            users,
+            skip: 0,
+        }
+    }
     /// What two places are said to share: which kind is drawn and how many
-    /// places of it, then how many places both use and how many use both.
+    /// places of it, then how many places both use and how many use both;
+    /// and, where it is so, after how many the picture begins and how many
+    /// of the kind a filter left.
     fn shared_of(view: &Value) -> String {
         let shared = &view["shared"];
-        format!(
+        let users = shared["side"] == "uses_both";
+        let mut told = format!(
             "{}{} drawn of what {} · both use {} · {} use both",
             if shared["within"] == true {
                 "within · "
@@ -9205,14 +9265,17 @@ where
                 ""
             },
             shared["shown"],
-            if shared["side"] == "uses_both" {
-                "uses both"
-            } else {
-                "both use"
-            },
+            if users { "uses both" } else { "both use" },
             shared["both_use"],
             shared["uses_both"],
-        )
+        );
+        if shared["skip"] != 0 {
+            told.push_str(&format!(" · after {}", shared["skip"]));
+        }
+        if shared["matching"] != shared[if users { "uses_both" } else { "both_use" }] {
+            told.push_str(&format!(" · {} match", shared["matching"]));
+        }
+        told
     }
     /// The boxes of what two places share: which of the two a box is, and
     /// for what they share how many links each of the two is away.
@@ -9242,7 +9305,15 @@ where
         let shared =
             |from: &str, to: &str, users: Option<bool>, focus: Option<&str>, certain: bool| {
                 index
-                    .shared("office", from, to, users, &[], &|_| None, focus, certain)
+                    .shared(
+                        "office",
+                        asking(from, to, users),
+                        &[],
+                        &|_| None,
+                        focus,
+                        certain,
+                        "",
+                    )
                     .unwrap()
             };
         let (users, orders) = ("app/api/users.php", "app/api/orders.php");
@@ -9456,13 +9527,12 @@ where
             index
                 .shared(
                     "office",
-                    users,
-                    "lib/gone.php",
-                    None,
+                    asking(users, "lib/gone.php", None),
                     &[],
                     &|_| None,
                     None,
-                    false
+                    false,
+                    ""
                 )
                 .is_none()
         );
@@ -9472,7 +9542,15 @@ where
         let index = office(3);
         let shared = |from: &str, to: &str, focus: Option<&str>| {
             index
-                .shared("office", from, to, None, &[], &|_| None, focus, false)
+                .shared(
+                    "office",
+                    asking(from, to, None),
+                    &[],
+                    &|_| None,
+                    focus,
+                    false,
+                    "",
+                )
                 .unwrap()
         };
         // The API and the reports both use the database: the API through
@@ -9569,7 +9647,15 @@ where
         let shared =
             |from: &str, to: &str, users: Option<bool>, focus: Option<&str>, certain: bool| {
                 index
-                    .shared("shop", from, to, users, &[], &|_| None, focus, certain)
+                    .shared(
+                        "shop",
+                        asking(from, to, users),
+                        &[],
+                        &|_| None,
+                        focus,
+                        certain,
+                        "",
+                    )
                     .unwrap()
             };
         let format = "src/Cart/Cart.php#L29:format_price()";
@@ -9708,6 +9794,29 @@ where
         // A symbol of the file at the other end lies in it.
         let own = shared(TOTAL_KEY, CART, None, None, false);
         assert_eq!(own["shared"]["within"], true);
+        // A filter is held against a symbol's name as it is shown, with
+        // its class, and not against the path of its file.
+        let named = |filter: &str| {
+            index
+                .shared(
+                    "shop",
+                    asking(TOTAL_KEY, format, None),
+                    &[],
+                    &|_| None,
+                    None,
+                    false,
+                    filter,
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            shared_of(&named("PRICE.PL")),
+            "1 drawn of what both use · both use 1 · 1 use both"
+        );
+        assert_eq!(
+            shared_of(&named("src/cart")),
+            "0 drawn of what both use · both use 1 · 1 use both · 0 match"
+        );
     }
     #[test]
     fn what_two_places_share_is_shown_nearest_first_as_far_as_a_picture_has_room() {
@@ -9738,18 +9847,22 @@ where
             links.push(call(&id, "b", &file));
         }
         let wide = self::index(json!({"nodes": nodes, "links": links}));
-        let shared = |users: Option<bool>| {
-            wide.shared(
-                "wide",
-                "src/a.py",
-                "src/b.py",
-                users,
-                &[],
-                &|_| None,
-                None,
-                false,
-            )
-            .unwrap()
+        let part = |users: Option<bool>, skip: usize, filter: &str| {
+            let asked = Sharing {
+                skip,
+                ..asking("src/a.py", "src/b.py", users)
+            };
+            wide.shared("wide", asked, &[], &|_| None, None, false, filter)
+                .unwrap()
+        };
+        let shared = |users: Option<bool>| part(users, 0, "");
+        // The names of what a picture shows as shared, as they are drawn:
+        // by their paths.
+        let drawn = |view: &Value| {
+            boxes(view)[2..]
+                .iter()
+                .map(|name| name[..3].to_owned())
+                .collect::<Vec<_>>()
         };
         // All fifteen are one link from either file: the most linked are
         // drawn, by their paths where they are linked alike.
@@ -9777,6 +9890,70 @@ where
             "5 drawn of what uses both · both use 15 · 5 use both"
         );
         assert_eq!(calls(&above).len(), 10);
+        // The picture after the first begins where that one ended, and
+        // shows the three it had no room for.
+        let next = part(None, SHARED, "");
+        assert_eq!(
+            shared_of(&next),
+            "3 drawn of what both use · both use 15 · 5 use both · after 12"
+        );
+        assert_eq!(drawn(&next), ["u02", "u03", "u04"]);
+        assert_eq!(calls(&next).len(), 6);
+        // A picture may begin anywhere in the order of nearness: after the
+        // five most linked come the five with two links, then five with one.
+        let later = part(None, 5, "");
+        assert_eq!(
+            shared_of(&later),
+            "10 drawn of what both use · both use 15 · 5 use both · after 5"
+        );
+        assert_eq!(
+            drawn(&later),
+            [
+                "u00", "u01", "u02", "u03", "u04", "u05", "u06", "u07", "u08", "u09"
+            ]
+        );
+        // A beginning past the last place is the last place.
+        let past = part(None, 100, "");
+        assert_eq!(
+            shared_of(&past),
+            "1 drawn of what both use · both use 15 · 5 use both · after 14"
+        );
+        assert_eq!(drawn(&past), ["u04"]);
+        // A filter keeps the places whose path holds it, whatever the case
+        // and the blanks around it; both kinds are counted as they were.
+        let some = part(None, 0, " U1 ");
+        assert_eq!(
+            shared_of(&some),
+            "5 drawn of what both use · both use 15 · 5 use both · 5 match"
+        );
+        assert_eq!(drawn(&some), ["u10", "u11", "u12", "u13", "u14"]);
+        let folder = part(None, 0, "lib/u");
+        assert_eq!(folder["shared"]["matching"], 15);
+        assert_eq!(drawn(&folder), drawn(&view));
+        // What a filter left is passed over like the rest: the ten with a
+        // nought in their names, in their order of nearness.
+        let tail = part(None, 8, "u0");
+        assert_eq!(
+            shared_of(&tail),
+            "2 drawn of what both use · both use 15 · 5 use both · after 8 · 10 match"
+        );
+        assert_eq!(drawn(&tail), ["u03", "u04"]);
+        // A filter that nothing matches draws nothing, and does not change
+        // which kind is drawn where none was asked for.
+        let none = part(None, 0, "top/");
+        assert_eq!(
+            shared_of(&none),
+            "0 drawn of what both use · both use 15 · 5 use both · 0 match"
+        );
+        assert_eq!(
+            (&none["nodes"], &none["edges"], &none["shared"]["skip"]),
+            (&json!([]), &json!([]), &json!(0))
+        );
+        let users = part(Some(true), 3, "top/");
+        assert_eq!(
+            shared_of(&users),
+            "2 drawn of what uses both · both use 15 · 5 use both · after 3"
+        );
         // Where several ways to a place are as short, the strongest is the
         // one drawn, and the first by its path where they are as strong.
         let ways = |twice: bool| {
@@ -9801,13 +9978,12 @@ where
             let view = self::index(json!({"nodes": nodes, "links": links}))
                 .shared(
                     "ways",
-                    "src/a.py",
-                    "src/b.py",
-                    None,
+                    asking("src/a.py", "src/b.py", None),
                     &[],
                     &|_| None,
                     None,
                     false,
+                    "",
                 )
                 .unwrap();
             assert_eq!(
@@ -9870,13 +10046,12 @@ where
         let view = self::index(json!({"nodes": nodes, "links": links}))
             .shared(
                 "one",
-                "src/a.py",
-                "src/b.py",
-                None,
+                asking("src/a.py", "src/b.py", None),
                 &[],
                 &|_| None,
                 None,
                 false,
+                "",
             )
             .unwrap();
         assert_eq!(
@@ -9917,13 +10092,12 @@ where
         let view = long
             .shared(
                 "long",
-                "src/a.py",
-                "src/b.py",
-                None,
+                asking("src/a.py", "src/b.py", None),
                 &[],
                 &|_| None,
                 None,
                 false,
+                "",
             )
             .unwrap();
         // Five boxes for each: eleven of the twelve fit a picture.
@@ -9936,6 +10110,20 @@ where
         assert_eq!(boxes(&view)[2], "f00.py shared 5+1");
         assert_eq!(view["edges"].as_array().unwrap().len(), 11 * 6);
         assert!(!boxes(&view).iter().any(|name| name.starts_with("f11")));
+        // The next picture begins after those eleven, with the twelfth.
+        let asked = Sharing {
+            skip: 11,
+            ..asking("src/a.py", "src/b.py", None)
+        };
+        let next = long
+            .shared("long", asked, &[], &|_| None, None, false, "")
+            .unwrap();
+        assert_eq!(
+            shared_of(&next),
+            "1 drawn of what both use · both use 12 · 0 use both · after 11"
+        );
+        assert_eq!(next["nodes"].as_array().unwrap().len(), 2 + 5);
+        assert_eq!(boxes(&next)[2], "f11.py shared 5+1");
     }
     #[test]
     fn what_two_places_share_carries_what_a_chosen_change_did() {
@@ -9965,13 +10153,12 @@ where
         let folders = office
             .shared(
                 "office",
-                "app/api",
-                "reports",
-                None,
+                asking("app/api", "reports", None),
                 &altered,
                 &|_| None,
                 Some("reports"),
                 false,
+                "",
             )
             .unwrap();
         assert_eq!(marks(&folders), ["api 0 -", "reports 1 -", "db.php 1 A"]);
@@ -10010,13 +10197,16 @@ where
         let view = index
             .shared(
                 "shop",
-                "src/other.php#L3:user()",
-                "src/second.php#L3:second()",
-                None,
+                asking(
+                    "src/other.php#L3:user()",
+                    "src/second.php#L3:second()",
+                    None,
+                ),
                 &changed,
                 &edited,
                 Some(format),
                 false,
+                "",
             )
             .unwrap();
         assert_eq!(
@@ -10041,7 +10231,9 @@ where
     /// many places both use and how many use both, which kind is drawn,
     /// that the nearest are the ones drawn, how far each is said to be, and
     /// a picture in which every box lies on a shortest way drawn whole,
-    /// one from each of the two.
+    /// one from each of the two. One picture after another shows every
+    /// place once, the nearest first, and a filter keeps the places whose
+    /// name holds it.
     #[test]
     fn what_two_places_share_on_a_graph_made_at_random_is_what_its_links_allow() {
         const FAR: usize = usize::MAX;
@@ -10062,6 +10254,10 @@ where
             capped: bool,
             through: bool,
             turned: bool,
+            /// Pictures after the first that were needed to show a kind.
+            further: usize,
+            /// A filter kept some places of a kind and left some out.
+            narrowed: bool,
         }
         // How far every place lies from every other along the links, by
         // ways that pass none of `closed`.
@@ -10097,20 +10293,27 @@ where
         };
         // The answers for two places against the distances: `asked` gives
         // the answer where nothing is asked for (`None`), for what both use
-        // and for what uses both; `first` and `second` are what the two
-        // places stand for, `whole` is how far the places lie from each
-        // other by any way, and `ids` tells a drawn place by its name.
-        let check = |asked: &dyn Fn(Option<bool>) -> Value,
+        // and for what uses both, after as many places as it is told and
+        // with the filter it is given; `first` and `second` are what the
+        // two places stand for, `whole` is how far the places lie from each
+        // other by any way, `ids` tells a drawn place by its name, `labels`
+        // are the names a filter is held against, and `needle` is a filter,
+        // which is tried, with the pictures after the first, where there is
+        // one.
+        #[allow(clippy::too_many_arguments)]
+        let check = |asked: &dyn Fn(Option<bool>, usize, &str) -> Value,
                      first: &[usize],
                      second: &[usize],
                      uses: &[Vec<bool>],
                      whole: &[Vec<usize>],
                      ids: &HashMap<String, usize>,
+                     labels: &[String],
+                     needle: Option<&str>,
                      what: &str| {
             let count = uses.len();
             if first.iter().any(|place| second.contains(place)) {
                 for users in [None, Some(false), Some(true)] {
-                    let view = asked(users);
+                    let view = asked(users, 0, "");
                     assert_eq!(view["shared"]["within"], true, "{what}");
                     assert_eq!(view["nodes"], json!([]), "{what}");
                 }
@@ -10120,6 +10323,8 @@ where
                     capped: false,
                     through: false,
                     turned: false,
+                    further: 0,
+                    narrowed: false,
                 };
             }
             // No way to what is shared passes what the two hold.
@@ -10186,9 +10391,23 @@ where
             // Unasked, what both use is drawn, unless only the other kind
             // has anything.
             let turned = kinds[0].is_empty() && !kinds[1].is_empty();
-            let views = [asked(Some(false)), asked(Some(true))];
-            assert_eq!(asked(None), views[usize::from(turned)], "{what}");
-            let mut capped = false;
+            let views = [asked(Some(false), 0, ""), asked(Some(true), 0, "")];
+            assert_eq!(asked(None, 0, ""), views[usize::from(turned)], "{what}");
+            // What a picture shows as shared: each place with the links to
+            // the two taken together, as its box says them.
+            let shown_in = |view: &Value| {
+                view["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|node| {
+                        let far = node["shares"].as_array()?;
+                        let links = far.iter().map(|far| far.as_u64().unwrap()).sum::<u64>();
+                        Some((ids[node["path"].as_str().unwrap()], links as usize))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (mut capped, mut further, mut narrowed) = (false, 0, false);
             for (back, shared) in [false, true].iter().zip(&kinds) {
                 let back = *back;
                 let view = &views[usize::from(back)];
@@ -10334,6 +10553,92 @@ where
                         nodes[*used]["path"]
                     );
                 }
+                let Some(needle) = needle else {
+                    continue;
+                };
+                // One picture after another shows every place of the kind
+                // once, the nearest first: each begins where the one before
+                // it ended.
+                let mut order = shared.iter().map(|(_, a, b)| a + b).collect::<Vec<_>>();
+                order.sort_unstable();
+                let (mut met, mut links, mut skip) = (HashSet::new(), Vec::new(), 0);
+                while skip < shared.len() {
+                    // The first of them is the picture that was checked.
+                    let page = match skip {
+                        0 => view.clone(),
+                        skip => asked(Some(back), skip, ""),
+                    };
+                    let mut part = shown_in(&page);
+                    assert_eq!(
+                        (
+                            &page["shared"]["skip"],
+                            &page["shared"]["matching"],
+                            &page["shared"]["shown"]
+                        ),
+                        (&json!(skip), &json!(shared.len()), &json!(part.len())),
+                        "{what}: {role} after {skip}"
+                    );
+                    assert_eq!(
+                        part.len(),
+                        SHARED.min(shared.len() - skip),
+                        "{what}: {role} after {skip}"
+                    );
+                    part.sort_by_key(|(_, links)| *links);
+                    for (at, far) in part {
+                        assert!(met.insert(at), "{what}: {role} after {skip}");
+                        links.push(far);
+                        skip += 1;
+                    }
+                    further += usize::from(skip < shared.len());
+                }
+                assert_eq!(links, order, "{what}: {role}");
+                // A beginning past the last place is the last place.
+                let past = asked(Some(back), shared.len() + 2, "");
+                assert_eq!(
+                    (
+                        &past["shared"]["skip"],
+                        shown_in(&past).iter().map(|(_, links)| *links).max()
+                    ),
+                    (&json!(shared.len() - 1), order.last().copied()),
+                    "{what}: {role}"
+                );
+                // A filter keeps the places whose name holds it, and leaves
+                // what both kinds count as it was.
+                let kept = shared
+                    .iter()
+                    .filter(|(at, ..)| labels[*at].contains(needle))
+                    .map(|(at, ..)| *at)
+                    .collect::<HashSet<_>>();
+                let some = asked(Some(back), 0, needle);
+                assert_eq!(
+                    (
+                        &some["shared"]["matching"],
+                        &some["shared"]["both_use"],
+                        &some["shared"]["uses_both"]
+                    ),
+                    (
+                        &json!(kept.len()),
+                        &json!(kinds[0].len()),
+                        &json!(kinds[1].len())
+                    ),
+                    "{what}: {role} with {needle}"
+                );
+                let part = shown_in(&some);
+                assert_eq!(
+                    part.len(),
+                    SHARED.min(kept.len()),
+                    "{what}: {role} with {needle}"
+                );
+                assert!(
+                    part.iter().all(|(at, _)| kept.contains(at)),
+                    "{what}: {role} with {needle}"
+                );
+                assert_eq!(
+                    some["nodes"].as_array().unwrap().is_empty(),
+                    kept.is_empty(),
+                    "{what}: {role} with {needle}"
+                );
+                narrowed |= !kept.is_empty() && kept.len() < shared.len();
             }
             Told {
                 apart: true,
@@ -10341,10 +10646,13 @@ where
                 capped,
                 through,
                 turned,
+                further,
+                narrowed,
             }
         };
         let (mut some, mut none, mut within) = (0, 0, 0);
         let (mut capped, mut through, mut turned) = (0, 0, 0);
+        let (mut further, mut narrowed) = (0, 0);
         for round in 0..60 {
             // A few folders of files, some names in each file, and links
             // between the names wherever they fall.
@@ -10410,6 +10718,10 @@ where
                 .map(|file| (path_of(file), file))
                 .collect::<HashMap<_, _>>();
             let (far, file_far) = (apart(&uses, &|_| false), apart(&file_uses, &|_| false));
+            let file_labels = (0..files).map(path_of).collect::<Vec<_>>();
+            let name_labels = (0..count)
+                .map(|name| format!("n{name}"))
+                .collect::<Vec<_>>();
             // What a place stands for among files, and among names.
             let in_folder = |folder: usize| {
                 (0..files)
@@ -10470,19 +10782,50 @@ where
                         true,
                     ),
                 ];
+                // What a filter is held against: the path of a file, and a
+                // name as it is shown. The filters are a part of some. They
+                // are tried for the first pairs of a graph, with the
+                // pictures after the first.
+                let (file_needle, name_needle) =
+                    (format!("f{}", below(2)), format!("{}", 1 + below(3)));
+                let tried = turn < 2;
                 for (from, to, first, second, named) in &asked {
                     let what = format!("round {round}: {from} and {to}");
-                    let answer = |users: Option<bool>| {
+                    let answer = |users: Option<bool>, skip: usize, filter: &str| {
+                        let asked = Sharing {
+                            skip,
+                            ..asking(from, to, users)
+                        };
                         let view = index
-                            .shared("random", from, to, users, &[], &|_| None, None, false)
+                            .shared("random", asked, &[], &|_| None, None, false, filter)
                             .unwrap_or_else(|| panic!("{what}"));
                         assert_eq!(view["shared"]["names"], *named, "{what}");
                         view
                     };
                     let told = if *named {
-                        check(&answer, first, second, &uses, &far, &names, &what)
+                        check(
+                            &answer,
+                            first,
+                            second,
+                            &uses,
+                            &far,
+                            &names,
+                            &name_labels,
+                            tried.then_some(name_needle.as_str()),
+                            &what,
+                        )
                     } else {
-                        check(&answer, first, second, &file_uses, &file_far, &paths, &what)
+                        check(
+                            &answer,
+                            first,
+                            second,
+                            &file_uses,
+                            &file_far,
+                            &paths,
+                            &file_labels,
+                            tried.then_some(file_needle.as_str()),
+                            &what,
+                        )
                     };
                     match (told.apart, told.shared) {
                         (false, _) => within += 1,
@@ -10492,21 +10835,26 @@ where
                     capped += usize::from(told.capped);
                     through += usize::from(told.through);
                     turned += usize::from(told.turned);
+                    further += told.further;
+                    narrowed += usize::from(told.narrowed);
                 }
             }
         }
         // The graphs are of every sort: places that share something, that
         // share nothing and that lie in each other, more shared than a
         // picture shows, places one reaches only through the other, and
-        // places that nothing but their users ties together.
+        // places that nothing but their users ties together; pictures that
+        // go on after the first, and filters that keep a part.
         assert!(
             some > 1500
                 && none > 300
                 && within > 900
                 && capped > 300
                 && through > 600
-                && turned > 150,
-            "{some} {none} {within} {capped} {through} {turned}"
+                && turned > 150
+                && further > 120
+                && narrowed > 150,
+            "{some} {none} {within} {capped} {through} {turned} {further} {narrowed}"
         );
     }
     /// What a search found, in its order: what each place is, its name and

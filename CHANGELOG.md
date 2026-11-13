@@ -24,6 +24,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Go through all that two places share in the Harness dependency map. Where
+  the two share more than the 12 nearest places a picture shows, a strip above
+  the side panel says which places it shows, and **Further** and **Nearer**
+  lead to the next ones and back: each picture begins where the one before
+  ended, so one after another they show every place once. **Filter names**
+  keeps the shared places whose name holds what is typed, a file by its path
+  and a symbol as it is shown.
+
 - Show what two places share in the Harness dependency map. **What they
   share**, beside the path between two places and beside a picture that found
   none, asks what both use and what uses both: a place that a chain of links
