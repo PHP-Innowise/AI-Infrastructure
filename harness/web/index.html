@@ -67,6 +67,7 @@
             <button class="chip" type="button" id="option-clash" aria-expanded="false" aria-controls="panel-clash">Clash<span class="chip-value" id="option-clash-value"></span><span class="chip-caret" aria-hidden="true"></span></button>
             <button class="chip" type="button" id="option-workspace" aria-expanded="false" aria-controls="panel-workspace">Run in<span class="chip-value" id="option-workspace-value"></span><span class="chip-caret" aria-hidden="true"></span></button>
             <button class="chip" type="button" id="option-brain" aria-expanded="false" aria-controls="panel-brain">Memory<span class="chip-value" id="brain-link-summary"></span><span class="chip-caret" aria-hidden="true"></span></button>
+            <button class="chip" type="button" id="option-graph" aria-expanded="false" aria-controls="panel-graph">Graph<span class="chip-value" id="option-graph-value"></span><span class="chip-caret" aria-hidden="true"></span></button>
             <button class="chip" type="button" id="option-budgets" aria-expanded="false" aria-controls="panel-budgets">Budgets<span class="chip-value" id="option-budgets-value"></span><span class="chip-caret" aria-hidden="true"></span></button>
             <button class="chip" type="button" id="option-models" aria-expanded="false" aria-controls="panel-models">Models<span class="chip-value" id="model-routing-summary"></span><span class="chip-caret" aria-hidden="true"></span></button>
           </div>
@@ -98,6 +99,18 @@
           <div class="option-panel-body" id="brain-link-config">
             <p class="knowledge-note" id="brain-link-mode-note"></p>
             <div id="brain-link-fields"><div class="knowledge-form-grid"><label class="field">Knowledge root<select id="brain-link-bank" disabled></select></label><label class="field">Brain task<select id="brain-link-kind"><option value="auto">New task from the first message</option><option value="existing">Existing task</option><option value="create">New task with an ID</option></select></label><label class="field wide" id="brain-link-existing-field" hidden>Existing task<select id="brain-link-task" disabled></select></label><label class="field" id="brain-link-id-field" hidden>New task ID<input id="brain-link-task-id" type="text" maxlength="200" placeholder="TASK-123"></label><label class="field wide" id="brain-link-goal-field" hidden>Task goal<textarea id="brain-link-goal" maxlength="12000" rows="2" placeholder="What should this task achieve?"></textarea></label></div><label class="checkbox brain-link-review"><input id="brain-link-review" type="checkbox">Review context by hand</label><div class="knowledge-form-grid" id="brain-link-query-field" hidden><label class="field wide">Context query<textarea id="brain-link-query" maxlength="4000" rows="2" placeholder="A concise topic, files, or question for retrieval"></textarea></label></div><button class="button" id="brain-link-refresh" type="button">Refresh tasks</button><p class="knowledge-note" id="brain-link-availability" role="status"></p></div><p class="error-text" id="brain-link-error" role="alert" hidden></p>
+          </div>
+          </div>
+          <div class="option-panel" id="panel-graph" role="region" aria-labelledby="option-graph" hidden>
+          <div class="option-panel-body">
+            <label class="checkbox"><input id="graph-enabled" type="checkbox" aria-describedby="graph-note" disabled>Use a code graph for this project</label>
+            <p class="knowledge-note" id="graph-note"></p>
+            <div class="graph-progress" id="graph-progress" hidden><progress id="graph-progress-bar" max="100" aria-label="Code graph build"></progress><span class="graph-progress-amount" id="graph-progress-amount"></span><span class="graph-progress-left" id="graph-progress-left"></span></div>
+            <p class="knowledge-note" id="graph-detail" hidden></p>
+            <label class="checkbox graph-offer"><input id="graph-agents" type="checkbox" aria-describedby="graph-agents-note" disabled>Tell agents about the graph</label>
+            <p class="knowledge-note" id="graph-agents-note"></p>
+            <div class="graph-actions"><button class="button compact" id="graph-view" type="button" hidden>View map</button><button class="button compact" id="graph-changes" type="button" hidden>Map of changes</button><button class="button compact" id="graph-rebuild" type="button" hidden>Rebuild</button><button class="button compact" id="graph-delete" type="button" hidden>Delete graph</button></div>
+            <p class="error-text" id="graph-error" role="alert" hidden></p>
           </div>
           </div>
           <div class="option-panel" id="panel-budgets" role="region" aria-labelledby="option-budgets" hidden>
@@ -372,6 +385,32 @@
     <fieldset class="merge-list" id="merge-options"><legend class="sr-only">Chats to merge</legend></fieldset>
     <p class="knowledge-note" id="merge-selection-count" role="status">No chats selected</p>
     <div class="folder-picker-actions"><button class="button" type="button" id="merge-picker-cancel">Cancel</button><button class="button primary" type="button" id="merge-picker-continue" disabled>Continue with selected chats</button></div>
+  </dialog>
+  <dialog class="graph-map" id="graph-map" aria-labelledby="graph-map-title">
+    <div class="graph-map-head"><h2 id="graph-map-title">Dependency map</h2><div class="graph-find" id="graph-find"><input id="graph-find-search" type="search" maxlength="100" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="graph-find-list" aria-autocomplete="list" aria-label="Search the project" placeholder="Search the project: a folder, a file, a class, a function" title="Search the whole project, whatever folder is open. Press / to come here."><div class="graph-find-found" id="graph-find-found" tabindex="-1" hidden><ul class="graph-pick-list" id="graph-find-list" role="listbox" aria-label="Found in the project" tabindex="-1"></ul><p class="knowledge-note graph-find-note" id="graph-find-note" role="status"></p></div></div><button class="button" id="graph-map-close" type="button">Close</button></div>
+    <div class="graph-map-pick"><label class="graph-map-target">Show<select id="graph-map-target"><option value="">The whole project</option></select></label><button class="button compact" id="graph-pick-open" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="graph-pick">Commits and pull requests…</button><p class="knowledge-note" id="graph-map-chosen"></p>
+      <div class="graph-pick" id="graph-pick" role="dialog" aria-label="Choose a commit, a pull request or a branch" hidden>
+        <div class="graph-pick-head"><div class="graph-pick-tabs" role="tablist" aria-label="What to choose"><button class="graph-pick-tab" id="graph-pick-tab-commits" type="button" role="tab" aria-selected="true" aria-controls="graph-pick-list">Commits</button><button class="graph-pick-tab" id="graph-pick-tab-pulls" type="button" role="tab" aria-selected="false" aria-controls="graph-pick-list">Pull requests</button><button class="graph-pick-tab" id="graph-pick-tab-branches" type="button" role="tab" aria-selected="false" aria-controls="graph-pick-list">Branches</button></div><button class="button compact" id="graph-pick-close" type="button">Cancel</button></div>
+        <div class="graph-pick-bar"><input id="graph-pick-search" type="search" maxlength="200" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="graph-pick-list" aria-autocomplete="list" aria-label="Search"><select id="graph-pick-scope" aria-label="History of"></select><select id="graph-pick-state" aria-label="State of the pull requests" hidden><option value="open">Open</option><option value="merged">Merged</option><option value="closed">Closed</option><option value="all">All</option></select></div>
+        <ul class="graph-pick-list" id="graph-pick-list" role="listbox" aria-label="Results" tabindex="-1"></ul>
+        <p class="knowledge-note graph-pick-note" id="graph-pick-note" role="status"></p>
+      </div>
+    </div>
+    <div class="graph-progress" id="graph-map-progress" hidden><progress id="graph-map-progress-bar" max="100" aria-label="Graph of the chosen commit"></progress><span class="graph-progress-amount" id="graph-map-progress-amount"></span><span class="graph-progress-left" id="graph-map-progress-left"></span></div>
+    <nav class="graph-map-crumbs" id="graph-map-crumbs" aria-label="Open folder"></nav>
+    <div class="graph-map-bar"><p class="knowledge-note" id="graph-map-summary" role="status" tabindex="-1"></p><label class="checkbox"><input id="graph-map-certain" type="checkbox">Only links read from the code</label><label class="checkbox"><input id="graph-map-notests" type="checkbox">Without tests</label><label class="checkbox"><input id="graph-map-fit" type="checkbox">Fit to window</label><label class="graph-map-filter">Filter names<input id="graph-map-filter" type="search" maxlength="100" autocomplete="off" spellcheck="false"></label></div>
+    <p class="knowledge-note" id="graph-map-note" role="status"></p>
+    <p class="error-text" id="graph-map-error" role="alert" hidden></p>
+    <div class="graph-map-body"><div class="graph-map-canvas" id="graph-map-canvas" aria-busy="false"></div><aside class="graph-map-side" id="graph-map-side" aria-label="Selected place"></aside></div>
+    <p class="graph-map-legend" id="graph-map-legend">An arrow runs from what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span> to what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, and a box is tinted by which it does more here. Solid: read from the code. Dashed: guessed by name. Thicker: more links. Dotted: against the main direction, closing a cycle (↻).</p>
+  </dialog>
+  <dialog class="graph-map graph-link" id="graph-link" aria-labelledby="graph-link-title">
+    <div class="graph-map-head"><h2 id="graph-link-title">Link</h2><button class="button" id="graph-link-close" type="button">Close</button></div>
+    <p class="knowledge-note" id="graph-link-summary"></p>
+    <p class="knowledge-note" id="graph-link-note" role="status"></p>
+    <p class="error-text" id="graph-link-error" role="alert" hidden></p>
+    <div class="graph-map-body"><div class="graph-map-canvas" id="graph-link-canvas"></div><aside class="graph-map-side" id="graph-link-side" aria-label="Selected name"></aside></div>
+    <p class="graph-map-legend">On the left what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span>, on the right what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, each name in the frame of its file. Solid: read from the code. Dashed: guessed by name.</p>
   </dialog>
   <div class="run-file-card" id="run-file-card" role="dialog" aria-label="File details" hidden></div>
   <script type="module" src="/boot.js"></script>

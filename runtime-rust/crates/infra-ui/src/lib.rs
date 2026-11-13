@@ -9,6 +9,8 @@ mod classify;
 mod commands;
 mod dom;
 mod eval_viewer;
+mod graph;
+mod graph_map;
 mod inbox;
 mod knowledge;
 mod management;
@@ -71,7 +73,7 @@ pub fn start() -> Result<(), JsValue> {
                     });
                     return;
                 }
-                if commands::key(key) || knowledge::key_event(key) {
+                if commands::key(key) || knowledge::key_event(key) || graph_map::key(key) {
                     event.prevent_default();
                     return;
                 }
@@ -219,6 +221,12 @@ async fn dispatch(
     }
     if !field.is_empty() && (kind == "input" || kind == "change") {
         systems::edit_field(field, &value, checked);
+        return;
+    }
+    if graph::event(kind, id, checked).await {
+        return;
+    }
+    if graph_map::event(kind, id, action, &payload, &value, checked).await {
         return;
     }
     if session::event(kind, id, action, &payload, &value, checked).await {

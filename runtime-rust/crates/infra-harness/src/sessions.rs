@@ -79,6 +79,7 @@ pub struct Sessions {
     accelerators: Mutex<Option<Arc<crate::accelerators::Accelerators>>>,
     commands: Mutex<Option<Arc<crate::commands::CommandCatalog>>>,
     results: Mutex<Option<Arc<crate::results::Results>>>,
+    graphs: Mutex<Option<Arc<crate::graph::Graphs>>>,
     lifecycle: Arc<crate::lifecycle::RunnerLifecycle>,
     pub default_seconds: u64,
 }
@@ -373,6 +374,7 @@ impl Sessions {
             accelerators: Mutex::new(None),
             commands: Mutex::new(None),
             results: Mutex::new(None),
+            graphs: Mutex::new(None),
             lifecycle,
             default_seconds: limits.seconds,
         });
@@ -785,6 +787,23 @@ impl Sessions {
         *slot = Some(value);
         Ok(())
     }
+    /// The code graph is optional: a session queue without one runs unchanged.
+    pub fn install_graphs(&self, value: Arc<crate::graph::Graphs>) -> Result<()> {
+        *lock(&self.graphs)? = Some(value);
+        Ok(())
+    }
+    /// A run starting or ending is when the project's graph is brought up to
+    /// date; the build runs beside the session and never holds it.
+    fn graph_moment(&self, sid: &str, trigger: crate::graph::Trigger) {
+        let Some(graphs) = lock(&self.graphs).ok().and_then(|slot| slot.clone()) else {
+            return;
+        };
+        if let Ok(session) = self.store.get(sid)
+            && let Some(project) = session["project_id"].as_str()
+        {
+            let _ = graphs.refresh(project, trigger);
+        }
+    }
     pub fn install_results(&self, value: Arc<crate::results::Results>) -> Result<()> {
         let mut slot = lock(&self.results)?;
         if slot.is_some() {
@@ -815,6 +834,7 @@ impl Sessions {
         Ok(Arc::new(crate::accelerators::ProjectLaunchAdapter {
             accelerators,
             project_id: project.into(),
+            session_id: session["id"].as_str().map(String::from),
         }))
     }
     /// The adapter of a system run, which dispatches into several registered
@@ -1283,6 +1303,7 @@ impl Sessions {
                 self.stop_failed(&cancel);
             }
         }
+        self.graph_moment(&job.sid, crate::graph::Trigger::Finish);
         self.remove_active(&job.sid, &cancel);
         self.inbox_wake.notify_one();
     }
@@ -1538,6 +1559,7 @@ impl Sessions {
             return Ok(json!({"kind":"awaiting_context"}));
         }
         session = binding.session.clone();
+        self.graph_moment(&job.sid, crate::graph::Trigger::Launch);
         let configured = (|| -> Result<Launch> {
             let mut launch = self.configure_launch(&session, &route.text)?;
             let prepared = crate::prompt::build(
@@ -2181,6 +2203,7 @@ pub(crate) mod generation_completion_tests {
                 accelerators: Mutex::new(None),
                 commands: Mutex::new(None),
                 results: Mutex::new(Some(results.clone())),
+                graphs: Mutex::new(None),
                 lifecycle: Arc::new(crate::lifecycle::RunnerLifecycle::new(
                     store, knowledge, source,
                 )),

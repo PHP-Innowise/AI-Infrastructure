@@ -166,6 +166,8 @@ impl ServicesFactory for NativeFactory {
                 providers.providers.clone(),
             ));
             sessions.install_commands(commands.clone())?;
+            let graphs = crate::graph::Graphs::new(store.clone());
+            sessions.install_graphs(graphs.clone())?;
             let backend = Arc::new(ResultsBridge {
                 links: links.clone(),
                 knowledge: knowledge.clone(),
@@ -246,6 +248,7 @@ impl ServicesFactory for NativeFactory {
             }
             domains.insert("updates".into(), updates.clone());
             domains.insert("providers".into(), providers.clone());
+            domains.insert("graph".into(), graphs.clone());
             let mut overrides: BTreeMap<String, Arc<dyn Domain>> = BTreeMap::new();
             overrides.insert("context.project".into(), knowledge.clone());
             overrides.insert("memory.save".into(), sessions.clone());
@@ -265,8 +268,10 @@ impl ServicesFactory for NativeFactory {
                 let updates = update_close.clone();
                 let systems = systems.clone();
                 let setup = setup.clone();
+                let graphs = graphs.clone();
                 Box::pin(async move {
                     updates.close();
+                    graphs.close();
                     let requested = closing.close();
                     setup.close().await;
                     systems.close().await;

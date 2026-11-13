@@ -199,6 +199,9 @@ pub fn build(
     {
         add(&mut text, &mut ledger, "instructions", &context);
     }
+    if let Some(graph) = crate::graph::prompt_line(store, session)? {
+        add(&mut text, &mut ledger, "instructions", &graph);
+    }
     add(&mut text, &mut ledger, "message", &route.text);
     add(
         &mut text,

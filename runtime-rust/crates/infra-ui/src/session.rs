@@ -1216,6 +1216,7 @@ pub async fn poll(epoch: u64) {
             }
             history();
             controls();
+            crate::graph::run_state(m::read(|s| m::active(&s.selected)));
             dom::error("events-error", "");
             if length == 250 || m::read(|s| m::active(&s.selected)) || inbox::watching(&sid) {
                 dom::later(
@@ -1624,6 +1625,7 @@ pub async fn load_git() {
     }
     knowledge::load_brain_link().await;
     management::load_attachment().await;
+    crate::graph::load(true).await;
 }
 pub async fn sign_in(refresh: bool) {
     if m::read(|s| s.boot.is_null() || s.auth_failed) || m::yes(&m::data("sign-in-pending")) {
@@ -2859,6 +2861,7 @@ pub async fn event(
                 "clash",
                 "workspace",
                 "brain",
+                "graph",
                 "budgets",
                 "models",
             ] {
@@ -2878,6 +2881,9 @@ pub async fn event(
                 dom::focus(&format!("panel-{panel}"));
                 if panel == "project" {
                     management::load_attachment().await;
+                }
+                if panel == "graph" {
+                    crate::graph::load(true).await;
                 }
             }
             return true;

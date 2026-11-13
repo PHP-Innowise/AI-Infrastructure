@@ -24,6 +24,212 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- View the existing cycle at the base of a pull request in Harness, inspect its
+  links at that revision, and switch back to the PR cycle.
+
+- Compare a selected pull request's dependency cycle with its base in Harness
+  and highlight links in the displayed chain that the base lacks.
+
+- Return from a dependency cycle to the preceding Harness map with its
+  page, filters and selection restored.
+
+- Show the shortest directed cycle through a marked place in the Harness
+  dependency map. The view follows the current link and test filters.
+
+- Highlight both paths when a shared place is selected in the Harness
+  dependency map. Inferred links stay dashed. Selecting the place again
+  clears the highlight.
+
+- Go through all that two places share in the Harness dependency map. Where
+  the two share more than the 12 nearest places a picture shows, a strip above
+  the side panel says which places it shows, and **Further** and **Nearer**
+  lead to the next ones and back: each picture begins where the one before
+  ended, so one after another they show every place once. **Filter names**
+  keeps the shared places whose name holds what is typed, a file by its path
+  and a symbol as it is shown.
+
+- Show what two places share in the Harness dependency map. **What they
+  share**, beside the path between two places and beside a picture that found
+  none, asks what both use and what uses both: a place that a chain of links
+  reaches from each of the two without passing through the other, or that
+  reaches each of them so. Both kinds are counted and one is drawn, what both
+  use first: its 12 nearest places, each with one shortest way between it and
+  either of the two, and each of the two as one ringed box, a folder as well.
+  **What uses both**, **What both use** and **The path between them** change
+  between the pictures of the same two places.
+
+- Find the path between two places in the Harness dependency map. **Path to…**
+  beside a selected folder, file or symbol asks for the other end, a box of
+  any picture or a place the search finds, and draws the shortest ways from
+  the first to the second: every chain of the fewest links in which each box
+  uses the next, among files or, where an end is a symbol, among symbols.
+  Where nothing leads that way the ways back are drawn and said to be, and
+  **The other way** asks for them on purpose.
+
+- Follow the links of a class, a method or a function in the Harness
+  dependency map. **Follow links** beside a selected symbol of an opened file
+  draws what it uses and what uses it among symbols, in whatever files they
+  lie, and unfolds either side of any box twelve at a time, as it does for
+  files and folders. A selected box lists both sides with the file of each,
+  leads to its file and starts again from itself. Inside a chosen change the
+  symbols the change touched are marked in every file the picture reaches.
+
+- Search the whole project in the Harness dependency map. The field at the top
+  of the map finds a folder, a file or a name anywhere in the graph, whatever
+  folder is open: what is called that most exactly comes first, further words
+  say where a place lies (`total cart`), and a word with a slash is the end of
+  a path. Choosing a row selects a folder or a file in the folder it lies in,
+  or opens the file of a name on it, scrolls the picture to the box and puts
+  the keyboard on it; `/` leads back to the field. A selected place is now
+  drawn whatever the filter and the limit of its folder say.
+
+- Light what the pointer rests on in the Harness dependency map. A box lights
+  its links and the boxes at their other ends, a link its two ends, and the
+  rest of the picture is left faint until the pointer has left; a box reached
+  with the keyboard is lit the same way, and so are the names in the window
+  of a link. Nothing is selected by it and the picture is not drawn again.
+
+- Fit the picture of the Harness dependency map to the window. **Fit to
+  window** scales a picture down until all of it is in sight, so a map wider
+  than the window is seen whole, and fits it again when the window changes its
+  size. Boxes and links are selected at any scale, and the choice is kept in
+  the browser.
+
+- Look into a link of the Harness dependency map. Selecting an arrow, or `↗`
+  beside a row of a selected place, opens a window with only what makes up
+  that link: the names that use on the left, the names that are used on the
+  right, each in the frame of its file, and every link of the graph between
+  two of them. Selecting a name lights its links and lists them, and selecting
+  it again opens its file on it in the map.
+
+- Open a folder inside the picture of the Harness dependency map. **Open
+  here**, or `+` at the corner of a folder, draws the folder as a frame around
+  its folders and files, among everything else, so opening a folder no longer
+  loses what is around it. What a frame holds stands in the same columns as
+  the rest and keeps its direction; a folder in a frame opens into a frame
+  inside it, and `−` at the corner of a frame draws the folder as one box
+  again. A frame draws the 20 most linked places of its folder and says how
+  many it holds.
+
+- Delete the Harness code graph while the graph of a chosen commit is being
+  built. The folder was removed at once, under a build that was still writing
+  into it, so now and then the removal failed, the request was answered with
+  an error and the build went on. That build is now told to end first and
+  removes the folder when it has ended.
+
+- Leave out of the Harness dependency map the links between Rust crates that
+  cannot be. Graphify matches names across a project, so `use std::fs` became
+  a link to another crate's `fs.rs`, marked as read from the code. A crate can
+  use only what its `Cargo.toml` names, for any target, for its tests and its
+  build script, and what that is built with in turn; a link into any other
+  crate is no longer drawn or counted, and the summary says how many the
+  manifests ruled out. A source one crate takes from another's folder by
+  `#[path]`, `include!` or a target's `path` keeps the links of both. The
+  graph of another commit is read with that commit's manifests, which are now
+  kept beside it with the lines of its Rust sources that name other sources.
+  A manifest that cannot be read, a source under no package and every other
+  language are left as they were.
+
+- Leave tests out of the Harness dependency map. **Without tests** drops the
+  files that are tests by where they lie or how they are named, in the
+  conventions of the common languages, and in a Rust source the items under
+  `#[cfg(test)]` and the `#[test]` functions. The links of what is left are
+  counted anew, so a file no longer uses what only its tests used, in a
+  folder, an opened file, followed links and a change alike. The summary says
+  how much is left out, and the choice is kept in the browser.
+
+- Follow the links of one place step by step in the Harness dependency map.
+  **Follow links**, beside a selected folder or file, draws that place with
+  what it uses and what uses it, wherever in the project they lie. `+` at a
+  box's right corner then shows more of what it uses and `+` at its left
+  corner more of what uses it, twelve at a time and strongest first, and `−`
+  folds a side back with whatever only it had brought. A file is followed
+  among files and a folder among the folders as deep as itself, and a picture
+  holds 60 boxes. A link is drawn where one of its sides is unfolded, so the
+  picture holds the steps that were asked for, and the links that run between
+  its boxes without being drawn are counted. Inside a chosen change the
+  changed files keep their mark, so the picture shows how far a change
+  reaches beyond its direct neighbours.
+
+- Colour the Harness dependency map by direction. An arrow shades from the
+  colour of using at its start to the colour of being used at its head, a box
+  wears the two colours on the edges where arrows leave it and arrive, and it
+  is tinted by which it does more through the links drawn. So what uses stands
+  out from what is leaned on in a folder, in an opened file and around a
+  change, where the tint tells the files that use the change from the files it
+  uses. The weaker direction of a cycle is now a thin row of dots: its warning
+  colour would be mistaken for the colour of using. Links that are only guessed
+  are lighter, and the legend shows both colours. The pair was checked for
+  colour-blind readers and for contrast on the map's surface in both themes.
+
+- Mark the symbols a change touched in an opened file of the Harness map of
+  changes. A method, a function or a type whose own lines changed is
+  highlighted with `A` when all of it is new and `M` otherwise, a type shows
+  how many symbols changed inside it, the touched ones are drawn first and the
+  note counts them. Git gives the changed lines; whose they are is read from
+  the file's text by indentation, with the comments and attributes above a
+  symbol counted as its own, because the graph records only where a symbol
+  starts. The marks wait while the graph is older than the files.
+
+- Open a file of the Harness dependency map to its classes, methods and
+  functions. A file selected twice, or **Open file**, shows what Graphify names
+  inside it: types, methods under the name of their type, functions, enum
+  cases, headings and other names, with the links between them and the other
+  files they use or are used by. Selecting a symbol lists each symbol it uses
+  and each that uses it with the recorded relation, marked when it was only
+  guessed, and a symbol of another file opens that file. A type lists its
+  members, **Filter names** matches a method by its type, and a file opens the
+  same way inside a map of changes, where the changed files around it stay
+  marked.
+
+- Add a picker of commits, pull requests and branches to the Harness map of
+  changes. **Commits and pull requests…** lists the history with each commit's
+  branches and tags, author, age and hash, searched by message or by the start
+  of a hash; the open, merged or closed pull requests, searched on the forge;
+  and the branches, filtered as they are typed. The arrow keys walk a list,
+  Enter chooses and Escape closes the picker. A commit picked from the history
+  is drawn as its own change against its parent, and while the graph of its
+  code is built the map already shows a first picture on the project's graph.
+
+- Add a dependency map of a change to the Harness code graph. **Map of changes**
+  in the Graph panel shows what a pull request, a branch, a commit or the work
+  in the checkout changed: the changed files, the files that use them and the
+  files they use, with a count of each side. Current work is measured against
+  the base of the branch's open pull request, so a stacked branch shows its own
+  change. A pull request is chosen from the list of open ones or typed as a
+  number, and is looked up with the GitHub CLI when it is installed. A commit
+  that is not the checkout gets a graph of its own code: its files are written
+  out under the Harness state without touching the checkout, Graphify reads
+  them, and the window shows percent and time left. The three newest such
+  graphs are kept for a project.
+
+- Add a dependency map of the Harness code graph. **View map** in the Graph
+  panel draws one folder at a time: its folders and files, and the links between
+  them from what uses to what is used. Links the tool only inferred are dashed
+  and can be hidden, and the weaker direction of a cycle runs back. Selecting a
+  box lists what it uses and what uses it, inside and outside the folder. The
+  server reads `graph.json` in one streaming pass, so a graph of hundreds of
+  megabytes opens in seconds.
+
+- Add an optional code graph to the Harness, off by default. The **Graph** chip
+  switches it on per project: an installed Graphify builds the graph in the
+  Harness state directory with its model-free `update` pass, and the chip shows
+  percent and time left from the tool's file count plus the length of the
+  project's previous build. Each build starts clean and replaces the published
+  graph only after it succeeds. It runs when the graph is switched on, on
+  request, and when files changed and the project is opened or a run starts or
+  ends; it never holds a run. Agents are told about the graph only where
+  **Tell agents about the graph** is switched on beside it, which is off by
+  default: the map needs no agent, the lines cost tokens on every call of the
+  model, and an agent that was only offered the graph did not ask it in the
+  runs this was checked with. With it on, a launch in a project with a
+  published graph is told the three commands that query it, nothing from the
+  graph enters the prompt, and the run receipt counts those commands. That
+  switch also permits them: Claude Code in Edit mode refused the commands its
+  prompt offered, so a session's launch carries permission rules for exactly
+  these three on the project's published graph, and the agent's shell gets the
+  setting that keeps a newer Graphify from rewriting installed skills.
+
 - Add an opt-in maintainer Run Working Memory pilot with receipt-linked
   observations, hypotheses and open questions. Its private journal precedes
   disposable SQLite/Redis views, and snapshots recheck scope, canonical sources,

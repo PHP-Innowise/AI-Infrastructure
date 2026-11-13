@@ -62,6 +62,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 flate2 = "1"
 tar = "0.4"
 serde_yaml = "0.9"
+toml = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_System_Com"] }

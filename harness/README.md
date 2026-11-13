@@ -1683,6 +1683,452 @@ require an independent reviewer and keep the runtime's source revision checks.
 Prompts, transcripts and free assistant output never reach durable memory; only the
 fields of a memory draft do.
 
+### Code graph
+
+The **Graph** chip switches on an optional code graph for the selected project. It
+is off by default. [Graphify](https://github.com/Graphify-Labs/graphify) builds the
+graph on this machine with its `update` pass, which parses files and calls no
+model; the Harness also removes model provider keys from the tool's environment and
+sets `GRAPHIFY_NO_AUTO_REFRESH=1`, so a Graphify newer than the assistant skills
+installed in your home directory does not rewrite them from a build.
+The Harness does not install Graphify. It looks for `graphify` on `PATH`
+(`HARNESS_GRAPHIFY` names another executable), and the panel says how to install it
+when it is missing.
+
+The graph lives in the Harness state directory under `graphs/<project id>/`, not in
+the project. Graphify releases before 0.9 still write a manifest into the project's
+own `graphify-out/`; the Harness puts back the manifest that was there, or removes
+the file and the folder it created, when the build ends. Each build starts without
+the previous graph, so a deleted file leaves
+no nodes behind; it keeps the tool's file cache and replaces the published graph
+only after it succeeds. A failed or interrupted build leaves the previous graph in
+use, and the panel shows the tool's last line.
+
+A build starts when the graph is switched on, when **Rebuild** is pressed, and when
+the project's files changed since the last build and the project is opened, a run
+starts or a run ends. Changed means another commit or another set, size or time of
+uncommitted files; a folder outside Git is rebuilt only on request. A run is never
+held for a build. Automatic builds of one project keep 30 seconds apart, and none
+starts while another run is still active in the project, except at a run's launch.
+
+While a build runs, the chip and the panel show percent and time left. Graphify
+counts only the files it reads; assembling and clustering print nothing and take
+most of the time. The estimate therefore adds the length that silent part had in the
+project's previous build by the same Graphify release. A first build has no such
+history: it shows no estimate until two file counts were seen, then assumes the
+silent part takes 4.5 times as long as reading and gives the time left in coarse
+steps. The percent never goes back and stops at 99 when a build outlasts its
+estimate.
+
+The graph is built for the dependency map below, and agents are not told about it.
+**Tell agents about the graph** in the same panel is a switch of its own, off until
+it is asked for, and switching the graph off or on keeps it; **Delete graph**
+forgets it. The map needs no agent. The lines cost about 220 tokens on every call
+of the model, and an agent that was only offered the graph did not ask it in the
+runs this was checked with, none of three on Claude Code and Codex; asked to start
+from the graph, Codex asked it four times and read the same files as without it.
+
+With that switch on and a graph published, each launch in the project adds a few
+lines to its instructions: that the graph exists, the commit it was built from and
+the three commands that query it (`graphify query`, `explain` and `path` with the
+graph's path). Nothing from the graph or its report is put into the prompt, and the
+lines count as instructions in **Context window**. The run receipt counts the
+commands that asked the graph (`graph`), whether or not agents were told about it.
+**Delete graph** switches the graph off and removes its folder.
+
+The same switch permits those three commands, and the panel says so.
+Claude Code launched without a terminal has nobody to ask: in Edit mode it refused
+the commands its prompt offered ("This command requires approval"), and in Plan
+mode it spent a call of its own safety classifier on each. A session's launch
+therefore adds three permission rules to Claude Code's `--settings`, beside the
+rules of an attached edition: `graphify query`, `explain` and `path`, any
+arguments, then this project's published graph as the last word. Options such as
+`--budget` go before `--graph`, and the prompt's lines say so: asked to start from
+the graph, Codex put `--budget` after it. The rules are written with the same spelling of the
+tool and the graph file as the prompt's lines, because Claude Code compares a rule
+with the command as written. They permit nothing else. Offline, with a scripted
+model, Claude Code 2.1.278 ran the three commands in both modes, also piped into
+`head` or with `2>/dev/null`, and refused another graph file, a second `--graph`
+after this one, a command joined with `&&`, `;` or a new line, a command
+substitution, output redirected to a file, a variable set in front of the command
+and every other `graphify` subcommand. Codex runs the commands inside its sandbox
+and needs no rule; Cursor was not checked. A system run's dispatch gets neither the
+lines nor the rules.
+
+A question reads the graph and writes one time stamp beside it, in the Harness
+state. Where agents are told about the graph, their shell gets
+`GRAPHIFY_NO_AUTO_REFRESH=1`, as the build does, so a question does not rewrite the
+assistant skills in your home directory either.
+
+**View map** in the Graph panel opens a dependency map of the published graph. It
+shows one folder at a time: its folders and files as boxes, and the links between
+them as arrows from what uses to what is used, so what depends on others stands on
+the left and what others depend on stands on the right. A folder opens when it is
+selected twice or with **Open folder**; the path above the map leads back. Selecting
+a box lights its links and lists, beside the map, everything it uses and everything
+that uses it, also outside the open folder. A file opens in turn to its classes,
+methods and functions, as described below.
+
+**Search the project**, the field at the top of the map, finds a folder, a file or
+a name anywhere in the graph, whatever folder is open; **Filter names** only
+chooses among what the open folder holds. Type a part of a name, in any case. The
+list puts first what is called that most exactly: by its whole name, then by the
+start of it, then by a word inside a name written `likeThis` or `like_this`, then
+by any part of it. A file also goes by its name without the ending, and a method or
+a function by its name without its class and its brackets. A word typed with a
+capital puts first what is written that way, `Index` before `index()`. Among names
+that match alike the most linked comes first. Further words narrow the search. Each
+has to stand in the name or on the way to it: in the class of a method, in the name
+of its file or in a folder above. So `total cart` finds `total()` of `Cart`, and
+`index.php admin` the `index.php` under `admin`. A word with a slash is the end of
+a path: `src/cart` is what starts with `cart` in a folder `src`, and `src/` is all
+that lies in one. The list holds the 40 best and says how many were found.
+
+Choosing a row, with the pointer or with the arrow keys and Enter, takes the map
+there. A folder or a file is selected in the folder it lies in, among its
+neighbours, and what it uses and what uses it is listed beside the map. A name,
+which is a class, a method, a function, a constant or a heading of a document,
+opens its file on itself. The picture is scrolled to the box and the keyboard is
+put on it. `/` leads back to the field from anywhere in the map, where what was
+found is listed again, and Escape closes the list. A selected place is drawn in its
+folder whatever **Filter names** and the limit of 40 say, so a search also leads to
+what is not among the most linked of its folder, and the note above the picture
+says that the selected one is drawn as well. In a map of changes the search reads
+the graph that map is drawn from, the commit's own once it is built. A name opens
+its file inside the change; a folder or a file that the picture draws is selected
+there, and any other is shown in the whole project, as when it is chosen in the
+list beside the map. With **Without tests** on, tests are not found.
+
+**Open here**, beside a selected folder, or `+` at the corner of its box, opens the
+folder inside the picture instead of in place of it. The folder gives way to a
+frame that holds its folders and files, so what uses them and what they use stays
+in view. What a frame holds stands in the same columns as everything else and
+still shows which way each part depends; the frames lie above the rest of the
+picture, and a folder in a frame opens in turn into a frame inside it. A frame
+draws the 20 most linked places of its folder and says how many it holds when
+that is more; **Filter names** reaches the others. A picture with frames holds up
+to 100 boxes, of which at least 20 are left to the open folder itself. `−` at the
+corner of a frame draws the folder as one box again, with whatever was opened
+inside it. What is open here is remembered while the folders are walked, until a
+change is chosen or the map is opened anew. Frames are for the map of the whole
+project: a map of changes and the links followed from a place have none.
+
+A link opens too. Selecting an arrow, or `↗` beside a row of a selected place,
+opens a window over the map with only what makes up that link: on the left the
+names that use, on the right the names that are used, each in the frame of its
+file, and every link of the graph between two of them. A link between two folders
+shows the classes, methods and functions at both ends, with a file's own name
+where the link is one of its imports; a link in an opened file shows the symbols
+at its two ends. Selecting a name lights its links and lists them, each with the
+way it was found; selecting it again, or **Open in the map**, closes the window
+and opens the name's file on it. An end shows its 150 most linked names, and
+where a link has more the window says how many: a narrower link, of a folder
+opened or opened here, shows the rest. The window reads the graph the map is
+drawn from, the commit's own in a map of changes, and keeps to **Only links read
+from the code** and **Without tests**.
+
+**Fit to window** scales a picture down until all of it is in sight, so a map
+wider than the window is seen whole and not a part at a time; a picture that has
+room is drawn as it is. It is fitted again when the window changes its size. A
+picture is made no smaller than a quarter of its size: beyond that the rest of it
+is scrolled to. Boxes and links are selected at any scale, and a box tells its
+name when the pointer rests on it. The choice is kept in this browser.
+
+Resting the pointer on a box lights its links and the boxes at their other ends
+and leaves the rest of the picture faint; resting it on a link lights the link and
+its two ends. So what a box is linked with is seen before anything is selected. A
+box reached with the keyboard is lit the same way. Nothing is selected by it, and
+once the pointer has left, the picture is as it was, with what was selected in it.
+The window of a link does the same for its names.
+
+Colour tells the direction. An arrow shades from the colour of using, where it
+leaves a box, to the colour of being used, where its head arrives, and every box
+wears the same two colours on its edges: one on the side arrows leave from, the
+other on the side they arrive at. A box is also tinted by which it does more
+through the links in the picture, in five steps from only using to only being used,
+so what uses stands out from what is leaned on. In a map of changes the same tint
+tells the files that use the change from the files it uses. A box that no link in
+the picture touches has no colour. The legend under the map shows both colours;
+they were chosen to stay apart for colour-blind readers in both themes.
+
+**Without tests** leaves the tests out of every picture: the folders, an opened
+file, followed links and a change. A file is a test by where it lies or how it is
+named, by the conventions of the common languages: a folder of tests or of what
+tests are fed with (`tests/`, `__tests__/`, `spec/`, `fixtures/`, `App.Tests/`), or
+a name such as `CartTest.php`, `cart.test.ts`, `cart.spec.js`, `test_cart.py`,
+`cart_test.go` and `tests.rs`. In a Rust source the tests inside it go too: an item
+under `#[cfg(test)]`, most often `mod tests`, and a `#[test]` function. They are
+found in the file as it stands, so a source that cannot be read keeps them. The
+links of what is left are counted anew: a file no longer uses what only its tests
+used. The summary says how much is left out, and the choice is kept
+in this browser. With it on, a folder or a file of tests is not there to open or to
+follow, and the project opens in its place.
+
+**Follow links**, beside a selected folder or file, leaves the open folder and draws
+that one place with its links, step by step, wherever in the project they lead. The
+picture starts with what the place uses and what uses it. Every box then has a
+handle at a top corner where there is more: `+` on the right shows what the box
+uses, `+` on the left what uses it, twelve at a time and strongest first, with the
+number that is not drawn yet. `−` folds a side back, and with it whatever only that
+side had brought. A picture holds 60 boxes. A file is followed among files; a folder
+among the folders as deep as itself and the files that lie no deeper, so a crate is
+followed among crates. A link is drawn where one of its two sides is unfolded, so
+the picture holds the steps that were asked for; the note above it counts the links
+that run between its boxes without being drawn, and unfolding a side that holds one
+draws it. Inside a chosen change the changed files keep their mark, so following
+what uses a changed file shows how far the change reaches beyond its direct
+neighbours. A box is selected as elsewhere; it opens with **Open file** or **Open
+folder**, which leaves the picture.
+
+**Path to…**, beside a selected folder, file or symbol, asks how that place depends
+on another. The other end is chosen next: a box of any picture, also after walking
+to another folder, or a place the search finds. A note above the side panel says
+what is being asked, and **Cancel** or Escape leaves it. The picture then shows the
+shortest ways from the first place to the second: every chain of the fewest links
+in which each box uses the next, the first place on the left and the second on the
+right, both ringed. Between folders and files it is a chain of files, a folder
+standing for every file in it, so the boxes at the two ends are the files of those
+folders that the ways start and end at. Where an end is a class, a method or a
+function it is a chain of symbols, and a file or a folder at the other end stands
+for every symbol in it. Where nothing leads from the first to the second, the ways
+from the second to the first are drawn and said to run the other way round; **The
+other way** asks for them on purpose, which shows both halves of a cycle. Where
+nothing leads either way the note says so, and nothing is drawn: the two places
+stand beside the empty picture, each with **Follow links** and another **Path
+to…**, under **What they share**, which asks what ties them together all the
+same. A step shows its 8 most linked
+places, fewer on a long way, each drawn box on a way that is drawn whole, and the
+summary counts all that lie on such ways. Selecting a box lists the next and the one
+before it on the way; a link opens as in any picture, and a box leads on with **Open
+file**, **Follow links** or another **Path to…**. Inside a chosen change the changed
+files and the touched symbols keep their marks, and with **Only links read from the
+code** the ways are found without the guessed links, which a dashed arrow marks: a
+chain is as true as its weakest link.
+
+**What they share**, beside the path above a picture of two places, asks what ties
+the two together apart from the way between them: what both use, and what uses both.
+It is there whether or not a path was found. Both use a place where a chain of links
+leads to it from each of the two without passing through the other; what one of them
+reaches only through the other is what the path shows. A place uses both where such
+chains lead from it to each of them. The line above the picture counts both kinds,
+and the picture draws one of them: what both use, to the right of the two, or, where
+they use nothing in common, what uses both, to their left. **What uses both** and
+**What both use** beside the path change between the two pictures, and **The path
+between them** leads back. Each of the two is one ringed box, a folder as well, and
+all its links with another box are one link. The places of a kind stand in the order
+of nearness: the fewest links to the two taken together first and, among those as
+near, the most linked. A picture shows 12 of them, the nearest first. Where there
+are more, a strip above the side panel says which places the picture shows, and
+**Further** and **Nearer** in it lead to the next ones and back: each picture begins
+where the one before ended, so one after another they show every place once.
+**Filter names** keeps the places whose name holds what is typed, a file being named
+by its path and a symbol as it is shown; what it leaves is counted above the picture
+and gone through the same way. Each place is drawn with one shortest way between it
+and either of the two, the strongest where several are as short: what is shared
+carries its name in bold, and a box with a plain name lies on such a way. Select a
+shared place to highlight both paths. Inferred links stay dashed. Select the same
+place again to clear the selection. The side panel gives the distances and lists
+the links next to the selected place. It offers **Open file**, **Follow links** and
+**Path to…** as for a box on a path. A chosen change, **Only links read from the
+code** and **Without tests** hold here as they do for a path.
+
+Between folders and files the map counts the graph's links that cross a file
+boundary; the links inside one file show when that file is opened. The relations
+that only say where a symbol lives (`contains`, `method`, `defines`, `case_of`,
+`rationale_for`) are no links: they say what holds what. A link points from the file
+Graphify found it in. A solid arrow has at least one link Graphify read from the
+code; a dashed arrow has only links it inferred, usually by matching a name, and
+those can be wrong. **Only links read from the code** hides the inferred ones. A link
+whose file is neither of its two symbols' files is skipped and counted above the
+map; it comes from two symbols that share an id.
+
+A link from one Rust crate into another is left out where the first cannot be built
+with the second. Graphify matches names across the whole project: `use std::fs`
+becomes a link to a file `fs.rs` of another crate and `anyhow::Result` a link to
+that crate's own `Result`, and both count as read from the code. Cargo settles it.
+A crate can use itself, the packages its `Cargo.toml` names, for any target, for
+its tests and its build script and under a feature that is off, and what those are
+built with in turn. A link into any other crate of the project cannot be, so the
+map neither draws nor counts it, and the summary says how many links the manifests
+ruled out. A source that a crate takes from the folder of another, by the `#[path]`
+of a module, an `include!` or the `path` of a target, is compiled into both and
+keeps the links of both; where it declares modules of its own, so does its folder.
+The manifests and sources are the checkout's. The graph of another commit is read
+with that commit's: its manifests, and of each Rust source the lines that name
+other sources, are kept beside the graph when the rest of its files is removed, so
+a graph built before this was kept rules nothing out. Where the build is not known
+for certain, the link stays. A manifest that is not TOML 1.0, as a newer Cargo may
+write it, lets its crate and every crate built with it use any; one that names no
+package either switches the rule off for the project. A crate that leaves a
+dependency to its workspace (`workspace = true`) may use any where that workspace
+lies outside the project's folder. A source under no package is left alone, and so
+is everything that is not Rust: a Composer or npm manifest does not stop one
+package from using another when the code runs. What a source names is read from
+its text, without expanding macros: a path that only a macro or an environment
+variable spells out is not seen, and neither is a source that a symbolic link
+brings into the folder of another crate.
+
+A file opens as a folder does, when it is selected twice or with **Open file**, in
+the project's map and in a map of changes. The window then shows what Graphify names
+inside the file, each box with a letter for what it is: `T` a type, `m` a method
+under the name of its type (`Cart.total()`), `f` a function, `c` a case of an enum,
+`#` a heading of a document, and no letter for other names such as constants. The
+arrows between them are the links inside the file. Around them, without a letter,
+stand the other files those symbols use or are used by, and one of them opens when
+it is selected twice. A box named after the open file itself stands for its imports
+and the code outside any function.
+
+Selecting a symbol lists every symbol it uses and every symbol that uses it, each
+with the relation Graphify recorded (`calls`, `references`, `inherits`, `imports`),
+marked when it was only guessed, and with its file when that is another one; such a
+row opens that file on that symbol. A type also lists its members. Selecting a file
+around lists which of its symbols use the open file and which the open file uses.
+Up to 32 symbols are drawn, the most linked first, with at least 8 places for the
+files around them. **Filter names** reaches the rest and matches a method by its
+type as well, so `Cart.` keeps the methods of `Cart`.
+
+**Follow links**, beside a selected symbol, walks on from it among symbols, as it
+does from a file among files. The picture starts with what the method calls and
+what calls it, in whatever files they lie, and `+` at a corner of any box shows the
+next twelve of that side. What was read from the code joins before what was
+guessed, and what lies in the symbol's own file before the rest, in the order of
+the files and of their lines: two symbols are linked once, so no link is stronger
+than another. Each box carries the letter of what it is; a name too long for its
+box keeps its end, where the method stands after its class, and its title tells its
+file and line. A class is followed by its own links, such as a reference, an import
+or an inheritance, not by those of its methods. Selecting a box lists both of its
+sides with the file of each. A row the picture draws is selected in it, another
+opens its file on that symbol, and so does **Open in its file**; **Follow links**
+beside it starts again from that symbol, and the path above the picture leads back
+to the file. Inside a chosen change the symbols the change touched are marked as in
+an opened file, in every file the picture reaches, so following what calls a
+changed method shows which of its callers changed with it. A graph older than the
+files marks none.
+
+What a symbol is comes from the graph, and so do its limits. Graphify does not tell
+a class from an interface, a trait or an enum, so all are types. It marks them in
+PHP, Python, TypeScript and Go; where it does not, as for Rust, whatever has methods
+or cases is a type and a struct without them is a plain name. It links two symbols
+at most once, so three calls of one method from another are one link. It records
+where a symbol starts, not where it ends. Something outside the project, such as a
+class of the language, has no file and is not drawn.
+
+In a map of changes an opened file also marks what the change touched. A symbol
+whose own lines changed is highlighted and carries `A` when every line of it is new
+and `M` otherwise; a type whose own lines stand as they were shows how many symbols
+changed inside it; the touched symbols are drawn first, and the note above the map
+counts them. Git says which lines differ. Whose lines they are is read from the
+file's text, because the graph knows only where a symbol starts: blank lines,
+comments and attributes right above a symbol are its own, a symbol ends where the
+text returns to its indentation with something that does not close it, a line past
+that end belongs to the symbol that holds it, and a line outside every symbol to
+the box of the file itself. A blank line touches nothing. Lines removed between two
+symbols are counted in the note, and a removed symbol is not drawn, since the graph
+is of the new code. This reads indentation and is no parser: code that is not
+indented by its nesting can be given to the wrong symbol, and a method Git shows as
+a rewrite of a removed one counts as modified. The marks need a graph of the same
+lines, so they wait while the checkout's graph is older than its files and until a
+commit's own graph is built.
+
+**Map of changes** opens the same window on a change instead of the whole project:
+the work in the checkout, a pull request, a branch or a commit, chosen under
+**Show**. The map draws the changed files, highlighted and marked with Git's letter
+for what happened to them (`A` added, `M` modified, `R` renamed), the files that use
+them on their left and the files they use on their right. The line above counts both
+sides: how many other files use the change, and so may be affected by it, and how
+many it relies on. Selecting a file lists its links; for a file beside the change,
+the links it has with the change.
+
+- **Current work** is everything in the checkout that the branch it left does not
+  have: the branch's commits and what is not committed, untracked files included. A
+  branch with an open pull request is measured against that request's base, because
+  in a stack of branches the default branch is several requests away; otherwise
+  against the remote's default branch. **Uncommitted changes only** leaves the
+  commits out. Both use the project's own graph, which is rebuilt when its files
+  changed; until then the window says that it is older than the files.
+- **Commits and pull requests…** opens a picker with three lists, as an editor's
+  history and pull request views have them. **Commits** is the history of the
+  checked-out branch, of every branch or of one local branch: message, the branches
+  and tags a commit carries, author, how long ago and hash, fifty at a time. The
+  search keeps the commits whose message contains the typed text, whatever the case,
+  and the start of a hash finds its commit on any branch. **Pull requests** lists
+  the open, merged or closed ones with their branches, author and last update; the
+  search is the forge's own, and a typed number is offered even when the list does
+  not hold it. **Branches** lists the local branches, then the remote ones no local
+  branch stands at, and marks the checked-out one and those with an open request;
+  typing filters them by name. The arrow keys walk a list, reading older commits at
+  its end, Enter chooses, and Escape closes the picker, not the map.
+- A commit picked from the history is its own change, against its parent. A branch
+  is everything since it left its base, and one with an open request is measured
+  against that request's base, as the current work is. A request is looked up with
+  the GitHub CLI (`gh`) when it is installed and signed in, which gives its title
+  and its base. Without it the Pull requests list says why, a number can still be
+  typed, and the head is fetched under the name GitHub, GitLab or Bitbucket
+  publishes it by and compared with the default branch. A fetch brings objects only
+  and moves no branch.
+- The links of a change are those of its own code, so a commit that is not the
+  checkout gets a graph of its own. Its files are written out under the Harness
+  state through an index of their own, so the checkout, its index and its branch
+  are not touched and large-file pointers stay pointers; Graphify reads them as it
+  reads the project. Of the files only what the graph is read with is kept beside
+  it, and that is small: the Cargo manifests and, of each Rust source, the lines
+  that name other sources. The window shows percent and time
+  left, estimated from the project's own build, and meanwhile draws a first picture
+  on the project's graph: the files changed are the commit's, the links are those
+  the files have in the checkout, and the note says so until the commit's own graph
+  replaces it. On the development machine such a
+  graph took 40 seconds for 3,800 files and 55 MB on disk. The three newest are
+  kept for a project and **Delete graph** removes them. A commit the project's
+  graph was built from, with nothing uncommitted, needs none. One graph is built for
+  a project at a time: a commit's graph waits for the project's own build, and
+  choosing another commit ends the build of the previous one.
+- Up to 24 changed files are drawn one by one. A wider change is drawn by folder,
+  each with the number of files changed in it; a folder opens as in the project map,
+  and a folder whose changes all lie in one folder below it is passed through. The
+  files around the change are the most linked ones, up to 40 boxes in all, and
+  **Filter names** reaches the rest. Deleted files and files Graphify finds no code
+  in are counted, not drawn. A folder of changed files both uses and is used by the
+  files around it, so this map does not mark cycles.
+
+A folder shows its 40 most connected children, and **Filter names** reaches the
+rest. Where a folder has more than two links per child, each child keeps its three
+strongest uses on the map and the side panel still lists all of them. A cycle cannot
+be drawn left to right: its members carry ↻, and its weaker direction runs back,
+right to left, as a thin row of dots. Select a marked box and choose **Show cycle**
+to see the shortest chain that returns to it. Inferred links in that chain are
+dashed. **Only links read from the code** recomputes the chain and reports when no
+cycle remains. A folder-level cycle crosses the folder boundary and can leave and
+return through different files. Grouped folders can make a loop on the overview
+when the underlying links do not connect into a chain. When a cycle is too long
+to draw, the side panel lists every step and marks inferred links. **Back to map**
+restores the previous view, including its page, filters and selected place.
+
+After choosing a pull request, select a place and choose **Show cycle** to check
+whether a cycle through it already existed at the base shown for that PR. The
+PR's cycle remains visible while the base graph is built. Green links in the
+drawing and marked links in a long chain show dependencies absent from the base
+under the active filters. File and symbol matching accounts for Git-detected
+file renames, and moving a symbol to a different line does not change its identity.
+Folder comparisons use the folder path.
+When the base also has a cycle, **Show base cycle** draws its shortest chain
+using the current filters. Open a link to inspect its details at the base
+revision. **Back to PR cycle** returns to the PR's chain, and **Back to map**
+returns to the map you started from.
+
+The server reads `graph.json` in one streaming
+pass and keeps the last four graphs it read. On the development machine a 500 MB
+graph of 545,000 symbols took two seconds to read and 10 ms per folder after that.
+
+Whether a graph makes an agent cheaper or better is not established: published
+measurements show smaller answers per query, not better sessions. Compare runs with
+and without it before relying on it. On this repository, with the graph only
+offered, neither Codex nor Claude Code asked it in three Plan runs, and they answered
+correctly from the files; asked to start from it, both did, and Claude Code ran the
+commands in Edit mode as well, with no saving in time or tokens. The graph can also
+be incomplete: for a Rust function called from other crates by its path, Graphify
+0.9.105 listed the callers inside its own file and none of the four outside it, so
+an answer about what uses something still has to be confirmed in the files.
+
 ### Fleet review setup and use
 
 Use the same native `infra-engine` and generated UI assets as the browser server. Fleet's durable workflow, provider workers and checkpoints are implemented in Rust; no separate Python environment or `HARNESS_FLEET_PYTHON` selection is used.
