@@ -24,6 +24,27 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Add an opt-in maintainer Run Working Memory pilot with receipt-linked
+  observations, hypotheses and open questions. Its private journal precedes
+  disposable SQLite/Redis views, and snapshots recheck scope, canonical sources,
+  receipt identity, dispatch order and expiry. The native pilot prompt includes
+  the bounded untrusted view inside the existing prompt budget; ordinary runs
+  and worker-report schemas stay unchanged. The rehearsal checks transport and
+  recovery mechanics, not real-agent task efficacy. A separate real-worker
+  development example imports bounded annotations from completed native receipts
+  and delivers them through an opt-in dispatch context policy; exact input custody
+  and ordinary execution remain unchanged. Experimental runs keep worker claims
+  out of verified Brain outcomes and promotion; the real Codex example fixes model
+  settings explicitly and serves the native process supervisor before Tokio. Experimental
+  reports are screened before receipt persistence and rejection diagnostics do
+  not echo worker data.
+
+- Local Context Engine: reuse a thread-local tokenizer workspace for missing
+  evidence term forms instead of creating FTS tables for every batch. Each
+  batch clears its scratch rows transactionally; failures discard the workspace
+  and preserve the existing folded fallback. Warm results, cache eviction,
+  oversized-batch behavior and the public retrieval interface stay the same.
+
 - Memory Bank: a record with a long title can be promoted. A chunk took its
   file name from the whole title, and publication writes `.{name}.{uuid}.tmp`
   beside it, so any title over about 190 characters failed with `File name too
