@@ -592,7 +592,11 @@ fn entities_behind_a_shared_interface_are_no_strategy() {
         ]),
         none
     );
-    // A test double beside them changes nothing.
+    // A test double beside them changes nothing, however few they are.
+    assert_eq!(
+        built(&[invoice, ("FakeOwned", "tests/Support/FakeOwned.php")]),
+        none
+    );
     assert_eq!(
         built(&[invoice, order, ("FakeOwned", "tests/Support/FakeOwned.php")]),
         none
@@ -628,6 +632,57 @@ fn entities_behind_a_shared_interface_are_no_strategy() {
         ]),
         ["strategy"]
     );
+}
+#[test]
+fn messages_behind_a_shared_interface_are_no_strategy() {
+    // Every command implements one interface so that a bus can take any of
+    // them. A command that has a handler of its own is data.
+    let built = |handled: &[&str], plain: &[&str]| {
+        let mut graph = Graph::default();
+        graph
+            .class(
+                "Command",
+                "src/Application/Command.php",
+                "interface Command",
+            )
+            .method("Command", "id")
+            .class("Bus", "src/Infrastructure/Bus.php", "class Bus")
+            .method("Bus", "dispatch")
+            .names("Bus.dispatch", "Command", "parameter_type");
+        for name in handled.iter().chain(plain) {
+            graph
+                .class(
+                    name,
+                    &format!("src/Application/Command/{name}.php"),
+                    &format!("class {name} implements Command"),
+                )
+                .link(name, "Command", "implements");
+        }
+        for name in handled {
+            let handler = format!("{name}Handler");
+            graph
+                .class(
+                    &handler,
+                    &format!("src/Application/Handler/{handler}.php"),
+                    &format!("class {handler}"),
+                )
+                .method(&handler, "__invoke")
+                .names(&format!("{handler}.__invoke"), name, "parameter_type");
+        }
+        let index = graph.index();
+        graph
+            .found(&index, false)
+            .found
+            .iter()
+            .filter(|found| SORTS[found.sort].id == "strategy")
+            .count()
+    };
+    assert_eq!(built(&["PlaceOrder", "CancelOrder"], &[]), 0);
+    // Most of them are handled: the one that is not changes nothing.
+    assert_eq!(built(&["PlaceOrder", "CancelOrder"], &["ArchiveOrder"]), 0);
+    // Half of them is not most of them.
+    assert_eq!(built(&["PlaceOrder"], &["ArchiveOrder"]), 1);
+    assert_eq!(built(&[], &["PlaceOrder", "CancelOrder"]), 1);
 }
 #[test]
 fn names_alone_tell_what_links_cannot() {

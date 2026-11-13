@@ -177,6 +177,46 @@ fn a_file_is_filed_by_its_name_or_by_the_folder_it_lies_in() {
         ("app/Events/OrderSubscriber.php", Some("Services")),
         ("src/Security/Sso/OidcClient.php", Some("Data access")),
         ("src/Service/Client.php", Some("Data access")),
+        // A folder of wide meaning files what no narrower one does, and the
+        // outermost of them speaks: one inside it is as often named for
+        // what the code is about.
+        (
+            "src/Application/Command/Domain/RegisterDomain.php",
+            Some("Services"),
+        ),
+        ("src/Domain/Application/Line.php", Some("Model")),
+        ("src/Infrastructure/Bus/CommandBus.php", Some("Data access")),
+        (
+            "src/Infrastructure/Controller/Orders.php",
+            Some("Entry points"),
+        ),
+        ("src/Service/Domain/Pricing.php", Some("Services")),
+        ("src/Domain/ValueObject/Money.php", Some("Model")),
+        ("src/Domain/ValueObject/Client.php", Some("Model")),
+        // What passes between the layers is of none, wherever it lies.
+        ("src/Service/Bank/Request/SubmitRequest.php", None),
+        ("src/Service/Bank/Exception/TokenException.php", None),
+        ("src/Service/Bank/Exception/Retry.php", None),
+        ("src/Service/OrderResponse.php", None),
+        ("src/Api/order_response.py", None),
+        // Not among the model's own classes: there it is a thing of the
+        // model, as any other noun.
+        ("src/Entity/OrderResponse.php", Some("Model")),
+        ("src/Entity/AccessRequest.php", Some("Model")),
+        ("app/Models/Request.php", Some("Model")),
+        ("app/Http/Controllers/Requests.php", Some("Entry points")),
+        ("src/Service/Exceptional.php", Some("Services")),
+        // An ending that names a thing as often gives way to a folder that
+        // says another layer, and to no other.
+        (
+            "src/GraphQL/Operation/Query/FindPhoneModel.php",
+            Some("Entry points"),
+        ),
+        ("src/Service/LegalEntity.php", Some("Services")),
+        ("src/GraphQL/Type/PhoneModel.php", Some("Model")),
+        ("src/Billing/PhoneModel.php", Some("Model")),
+        ("src/Domain/Billing/PhoneModel.php", Some("Model")),
+        ("src/Controller/Dto/OrderDto.php", Some("Model")),
         // After a dot `client` says where a file runs, not what it is.
         ("plugins/analytics.client.ts", None),
         ("src/api/http.client.ts", None),
@@ -265,6 +305,353 @@ fn a_file_is_one_of_the_models_own_classes_by_its_name_or_its_folder() {
     ] {
         assert_eq!(own(path), expected, "{path}");
     }
+}
+#[test]
+fn a_file_lies_in_the_ring_of_the_outermost_folder_named_for_one() {
+    let named = |path: &str| ring(path).map(|ring| RINGS[ring].name);
+    for (path, expected) in [
+        ("src/Domain/Entity/Order.php", Some("Domain")),
+        (
+            "src/Domain/Repository/OrderRepositoryInterface.php",
+            Some("Domain"),
+        ),
+        ("src/Domain/Exception/OrderNotFound.php", Some("Domain")),
+        (
+            "src/Application/Command/CreateOrder.php",
+            Some("Application"),
+        ),
+        ("src/Application/DTO/OrderDto.php", Some("Application")),
+        (
+            "src/Infrastructure/Controller/OrderController.php",
+            Some("Adapters"),
+        ),
+        (
+            "src/Infrastructure/Repository/OrderRepository.php",
+            Some("Adapters"),
+        ),
+        ("src/UI/Http/OrderController.php", Some("Adapters")),
+        ("src/Presentation/Cli/ImportOrders.php", Some("Adapters")),
+        ("app/infra/db/orders.ts", Some("Adapters")),
+        // The outermost speaks: a folder inside is named for what the code
+        // is about.
+        (
+            "src/Application/Command/Domain/RegisterDomain.php",
+            Some("Application"),
+        ),
+        ("src/Domain/Infrastructure/Line.php", Some("Domain")),
+        ("src/Billing/Domain/Invoice.php", Some("Domain")),
+        (
+            "src/Billing/Infrastructure/Application/Mailer.php",
+            Some("Adapters"),
+        ),
+        // Outside the rings, a test, and what is no code.
+        ("src/Kernel.php", None),
+        ("src/Command/ImportOrders.php", None),
+        ("migrations/Version1.php", None),
+        ("domain.php", None),
+        ("tests/Domain/OrderTest.php", None),
+        ("src/Domain/readme.md", None),
+    ] {
+        assert_eq!(named(path), expected, "{path}");
+    }
+}
+/// A shop that keeps its domain at the heart: a domain with the interfaces
+/// of its repositories, an application of commands and their handlers, and
+/// adapters around them.
+fn rings() -> Graph {
+    let mut graph = Graph::default();
+    for path in [
+        "src/Domain/Entity/Order.php",
+        "src/Domain/Entity/Line.php",
+        "src/Domain/Repository/OrderRepositoryInterface.php",
+        "src/Domain/Factory/OrderFactory.php",
+        "src/Domain/Exception/OrderNotFound.php",
+        "src/Application/Command/Order/PlaceOrder.php",
+        "src/Application/Command/Domain/RenameDomain.php",
+        "src/Application/CommandHandler/PlaceOrderHandler.php",
+        "src/Application/Bus/CommandBusInterface.php",
+        "src/Infrastructure/Controller/OrderController.php",
+        "src/Infrastructure/Repository/OrderRepository.php",
+        "src/Infrastructure/Bus/CommandBus.php",
+        "src/Kernel.php",
+        "tests/Domain/OrderTest.php",
+    ] {
+        graph.file(path);
+    }
+    graph
+        // An adapter implements what the domain and the application ask
+        // for, and calls into them.
+        .link(
+            "src/Infrastructure/Repository/OrderRepository.php",
+            "src/Domain/Repository/OrderRepositoryInterface.php",
+            "implements",
+            None,
+        )
+        .link(
+            "src/Infrastructure/Repository/OrderRepository.php",
+            "src/Domain/Entity/Order.php",
+            "references",
+            Some("return_type"),
+        )
+        .link(
+            "src/Infrastructure/Bus/CommandBus.php",
+            "src/Application/Bus/CommandBusInterface.php",
+            "implements",
+            None,
+        )
+        .link(
+            "src/Infrastructure/Controller/OrderController.php",
+            "src/Application/Command/Order/PlaceOrder.php",
+            "calls",
+            None,
+        )
+        .link(
+            "src/Infrastructure/Controller/OrderController.php",
+            "src/Infrastructure/Bus/CommandBus.php",
+            "calls",
+            None,
+        )
+        // The application works with the domain, through the interface of
+        // its repository.
+        .link(
+            "src/Application/CommandHandler/PlaceOrderHandler.php",
+            "src/Domain/Repository/OrderRepositoryInterface.php",
+            "references",
+            Some("field"),
+        )
+        .link(
+            "src/Application/CommandHandler/PlaceOrderHandler.php",
+            "src/Domain/Factory/OrderFactory.php",
+            "calls",
+            None,
+        )
+        .link(
+            "src/Application/CommandHandler/PlaceOrderHandler.php",
+            "src/Application/Command/Order/PlaceOrder.php",
+            "references",
+            Some("parameter_type"),
+        )
+        // Inside the domain a factory asks the repository for what it needs.
+        .link(
+            "src/Domain/Factory/OrderFactory.php",
+            "src/Domain/Repository/OrderRepositoryInterface.php",
+            "references",
+            Some("field"),
+        )
+        .link(
+            "src/Domain/Entity/Order.php",
+            "src/Domain/Entity/Line.php",
+            "references",
+            Some("field"),
+        )
+        // And once the domain reaches out of itself.
+        .link(
+            "src/Domain/Entity/Order.php",
+            "src/Infrastructure/Bus/CommandBus.php",
+            "calls",
+            None,
+        )
+        .guessed(
+            "src/Application/Command/Domain/RenameDomain.php",
+            "src/Infrastructure/Controller/OrderController.php",
+        );
+    graph
+}
+#[test]
+fn a_folder_that_keeps_its_code_in_rings_is_read_by_them() {
+    let index = rings().index();
+    let view = index
+        .pattern("demo", "layers@src", &[], &|_| None, None, false)
+        .unwrap();
+    let pattern = &view["pattern"];
+    assert_eq!(pattern["rings"], true);
+    assert_eq!(pattern["tells"], TELLS[RINGED]);
+    assert_eq!(
+        pattern["layers"],
+        json!([
+            {"id": "adapters", "name": "Adapters", "files": 3},
+            {"id": "application", "name": "Application", "files": 4},
+            {"id": "domain", "name": "Domain", "files": 5},
+        ])
+    );
+    // What lies in no ring is left apart: the kernel, and not the test.
+    assert_eq!(pattern["apart"], 1);
+    assert_eq!(
+        view["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["path"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["layer:adapters", "layer:application", "layer:domain"]
+    );
+    // An adapter may use the application and the domain, the application
+    // the domain. What a ring has inside itself is no link between rings:
+    // the factory and the repository of the domain, the controller and the
+    // bus among the adapters.
+    assert_eq!(
+        view["edges"],
+        json!([
+            {"from": "layer:adapters", "to": "layer:application", "links": 2, "guessed": 0, "against": false},
+            {"from": "layer:adapters", "to": "layer:domain", "links": 2, "guessed": 0, "against": false},
+            {"from": "layer:application", "to": "layer:adapters", "links": 1, "guessed": 1, "against": true},
+            {"from": "layer:application", "to": "layer:domain", "links": 2, "guessed": 0, "against": false},
+            {"from": "layer:domain", "to": "layer:adapters", "links": 1, "guessed": 0, "against": true},
+        ])
+    );
+    let against = &pattern["against"];
+    assert_eq!(
+        (&against["links"], &against["pairs"]),
+        (&json!(2), &json!(2))
+    );
+    assert_eq!(
+        against["rows"][0],
+        json!({
+            "from": {
+                "path": "src/Application/Command/Domain/RenameDomain.php",
+                "name": "RenameDomain.php", "layer": "Application",
+            },
+            "to": {
+                "path": "src/Infrastructure/Controller/OrderController.php",
+                "name": "OrderController.php", "layer": "Adapters",
+            },
+            "links": 1, "guessed": 1,
+        })
+    );
+    assert_eq!(against["rows"][1]["from"]["layer"], "Domain");
+    // Read by the four layers the same shop would have its adapters run
+    // against the order wherever they do what they are for.
+    let layered = Way::read(&index, false, &layer);
+    let back = layered
+        .cross
+        .iter()
+        .filter(|(from, to, _)| layered.of[*from as usize] > layered.of[*to as usize])
+        .count();
+    assert!(back > 2, "{back}");
+    // The list says so in the words of the rings, and a selected ring says
+    // what files a file in it.
+    let mut listed = index.view("demo", "src", None, false, "");
+    index.mark_patterns(&mut listed, false);
+    let kind = &listed["patterns"]["kinds"][0];
+    assert_eq!(kind["tells"], TELLS[RINGED]);
+    assert_eq!(
+        kind["instances"][0]["parts"],
+        "3 layers · 12 files · 2 links against their order"
+    );
+    let ring = index
+        .pattern(
+            "demo",
+            "layers@src",
+            &[],
+            &|_| None,
+            Some("layer:domain"),
+            false,
+        )
+        .unwrap();
+    assert_eq!(ring["focus"]["name"], "Domain");
+    assert_eq!(ring["focus"]["signs"], "the outermost folder named domain");
+    assert_eq!(ring["focus"]["members"].as_array().unwrap().len(), 5);
+    let outer = index
+        .pattern(
+            "demo",
+            "layers@src",
+            &[],
+            &|_| None,
+            Some("layer:adapters"),
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        outer["focus"]["signs"],
+        "the outermost folder named infrastructure, infra, presentation, ui, adapters, adapter"
+    );
+    let link = index
+        .pattern(
+            "demo",
+            "layers@src",
+            &[],
+            &|_| None,
+            Some("layer:domain>layer:adapters"),
+            false,
+        )
+        .unwrap();
+    assert_eq!(link["focus"]["against"], true);
+    assert_eq!(link["focus"]["pairs"], 1);
+    // The whole project is read the same way, and without what the tool
+    // only inferred one link back is gone.
+    let whole = index
+        .pattern("demo", "layers@", &[], &|_| None, None, true)
+        .unwrap();
+    assert_eq!(whole["pattern"]["rings"], true);
+    assert_eq!(whole["pattern"]["against"]["links"], 1);
+}
+#[test]
+fn inside_one_ring_and_where_rings_hold_little_a_folder_is_read_by_the_four_layers() {
+    let index = rings().index();
+    let way = |scope: &str| {
+        index
+            .pattern(
+                "demo",
+                &format!("layers@{scope}"),
+                &[],
+                &|_| None,
+                None,
+                false,
+            )
+            .map(|view| view["pattern"]["rings"] == true)
+    };
+    // Inside the domain there is one ring. By the four layers its factory
+    // is of the model and the interface of its repository of data access,
+    // but four files in layers are wanted, and here are five.
+    let domain = index
+        .pattern("demo", "layers@src/Domain", &[], &|_| None, None, false)
+        .unwrap();
+    assert_eq!(domain["pattern"]["rings"], false);
+    assert_eq!(
+        domain["pattern"]["layers"],
+        json!([
+            {"id": "data", "name": "Data access", "files": 1},
+            {"id": "model", "name": "Model", "files": 3},
+        ])
+    );
+    // The exception passes between the layers and is of none.
+    assert_eq!(domain["pattern"]["apart"], 1);
+    assert_eq!(way("src/Infrastructure"), None);
+    // Rings that hold less than half of the code do not speak for it: the
+    // folder is read by the four layers, as any other.
+    let mut graph = rings();
+    let mut classic = Vec::new();
+    for at in 0..8 {
+        classic.push(format!("src/Controller/Page{at}Controller.php"));
+        classic.push(format!("src/Entity/Page{at}.php"));
+    }
+    for path in &classic {
+        graph.file(path);
+    }
+    for pair in classic.chunks(2) {
+        graph.link(&pair[0], &pair[1], "calls", None);
+    }
+    let index = graph.index();
+    let view = index
+        .pattern("demo", "layers@src", &[], &|_| None, None, false)
+        .unwrap();
+    assert_eq!(view["pattern"]["rings"], false);
+    assert_eq!(view["pattern"]["tells"], TELLS[LAYERED]);
+    assert_eq!(view["pattern"]["layers"][0]["name"], "Entry points");
+    // As many files in the rings as outside them, and they speak.
+    let mut graph = rings();
+    for path in classic.iter().take(11) {
+        graph.file(path);
+    }
+    for pair in classic.chunks(2).take(5) {
+        graph.link(&pair[0], &pair[1], "calls", None);
+    }
+    let index = graph.index();
+    let view = index
+        .pattern("demo", "layers@src", &[], &|_| None, None, false)
+        .unwrap();
+    assert_eq!(view["pattern"]["rings"], true);
+    assert_eq!(view["pattern"]["apart"], 12);
 }
 #[test]
 fn the_layers_of_a_folder_say_what_needs_what_and_what_runs_against_their_order() {
@@ -398,7 +785,7 @@ fn a_selected_layer_lists_its_files_and_what_it_has_with_the_others() {
     assert_eq!(focus["files"], 2);
     assert_eq!(
         focus["signs"],
-        "a name that ends in model, entity, dto, valueobject, or a folder named models, model, entities, entity, domain, dto, dtos, valueobjects, events, event"
+        "a name that ends in model, entity, dto, valueobject, or a folder named models, model, entities, entity, domain, dto, dtos, valueobject, valueobjects, events, event"
     );
     // The entry points also say what files an operation of a GraphQL API.
     let entry = index
@@ -639,7 +1026,7 @@ fn layers_are_those_of_the_folder_that_is_open() {
     assert_eq!(
         view["patterns"]["kinds"][0],
         json!({
-            "id": "layers", "name": "Layers", "family": "architecture", "tells": TELLS,
+            "id": "layers", "name": "Layers", "family": "architecture", "tells": TELLS[LAYERED],
             "found": 1, "more": 0,
             "instances": [{
                 "id": "layers@app", "sort": "layers", "name": "Layers", "of": "app",

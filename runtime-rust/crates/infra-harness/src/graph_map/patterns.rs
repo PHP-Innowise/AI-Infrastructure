@@ -526,21 +526,27 @@ impl<'a> Read<'a> {
         })
         .map(|(_, guessed)| guessed)
     }
-    fn strategies(&self, found: &mut Vec<Found>) {
+    /// `handled` are the messages that have a handler of their own.
+    fn strategies(&self, found: &mut Vec<Found>, handled: &BTreeSet<u32>) {
         for (abstraction, under) in &self.subs {
             if under.len() < 2 || !self.above(*abstraction) {
                 continue;
             }
             // Entities behind a shared interface are data that something
-            // takes, not ways of doing one thing: where every type under
-            // the abstraction is one of the model's own classes, a test
-            // double aside, there is no strategy.
-            let mut made = under
+            // takes, not ways of doing one thing, and so are the commands
+            // and queries a bus takes. Where most of the types under the
+            // abstraction are the model's own classes or messages with a
+            // handler, a test double aside, there is no strategy.
+            let made = under
                 .iter()
-                .map(|(sub, ..)| self.path(*sub))
-                .filter(|path| !is_test(path))
-                .peekable();
-            if made.peek().is_some() && made.all(layers::own) {
+                .map(|(sub, ..)| *sub)
+                .filter(|sub| !is_test(self.path(*sub)))
+                .collect::<Vec<_>>();
+            let data = made
+                .iter()
+                .filter(|sub| layers::own(self.path(**sub)) || handled.contains(sub))
+                .count();
+            if data * 2 > made.len() {
                 continue;
             }
             let users = self
@@ -823,7 +829,9 @@ impl<'a> Read<'a> {
     }
     /// Events with their listeners, and messages with the handler named
     /// after each.
-    fn messages(&self, found: &mut Vec<Found>) {
+    /// Finds events with their listeners and commands with their handlers,
+    /// and gives the messages that have a handler of their own.
+    fn messages(&self, found: &mut Vec<Found>) -> BTreeSet<u32> {
         let mut events: BTreeMap<u32, Vec<(u32, bool)>> = BTreeMap::new();
         let mut commands: BTreeMap<u32, (u32, bool)> = BTreeMap::new();
         for at in self.types() {
@@ -893,6 +901,7 @@ impl<'a> Read<'a> {
             ));
             found.push(finding.done(true));
         }
+        let handled = commands.keys().copied().collect();
         for (message, (handler, guessed)) in commands {
             let mut finding = Finding::new(self, COMMANDS, message, MESSAGE);
             finding.part(handler, HANDLER);
@@ -910,6 +919,7 @@ impl<'a> Read<'a> {
             ));
             found.push(finding.done(true));
         }
+        handled
     }
     fn repositories(&self, found: &mut Vec<Found>) {
         for (at, &typed) in self.typed.iter().enumerate() {
@@ -1063,8 +1073,8 @@ impl Patterns {
         let read = Read::new(index, certain, text);
         let mut found = Vec::new();
         read.repositories(&mut found);
-        read.messages(&mut found);
-        read.strategies(&mut found);
+        let handled = read.messages(&mut found);
+        read.strategies(&mut found, &handled);
         read.decorators(&mut found);
         read.factories(&mut found);
         read.templates(&mut found);
@@ -1192,11 +1202,11 @@ impl Index {
         let mut kinds = Vec::new();
         let mut total = 0;
         // The layers of the open folder are one finding, and come first.
-        if let Some(row) = patterns.layers.row(self, &scope) {
+        if let Some((row, tells)) = patterns.layers.row(self, &scope) {
             total += 1;
             kinds.push(json!({
                 "id": "layers", "name": "Layers", "family": "architecture",
-                "tells": layers::TELLS, "found": 1, "more": 0, "instances": [row],
+                "tells": tells, "found": 1, "more": 0, "instances": [row],
             }));
         }
         for (sort, told) in SORTS.iter().enumerate() {

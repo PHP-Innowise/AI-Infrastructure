@@ -14,6 +14,14 @@
 //! inheritance, or the type of a field, a parameter or a result says that it
 //! needs it. Only the second kind is counted, or every entity that names its
 //! repository in an attribute would run against the order.
+//!
+//! There are two ways of filing. Most projects are read by the four layers
+//! above. A design that keeps its domain at the heart is laid out in rings
+//! instead, each a folder: what faces the outside, then the application,
+//! then the domain. There a repository's interface lies in the domain and
+//! what implements it outside, so the four layers would call its every
+//! adapter a link against the order. A folder that keeps most of its code
+//! in such rings is read by them.
 use super::*;
 
 /// One layer, with what places a file in it: an ending of its name, or the
@@ -100,12 +108,67 @@ pub(super) const LAYERS: &[Layer] = &[
             "domain",
             "dto",
             "dtos",
+            "valueobject",
             "valueobjects",
             "events",
             "event",
         ],
     },
 ];
+/// The rings of a design that keeps its domain at the heart, from the
+/// outermost: each may use those after it. A file is filed by the outermost
+/// folder on its way that is named for a ring, whatever it is called itself
+/// and whatever a folder inside is called: `Application/Command/Domain/` is
+/// of the application, where `Domain` is what the commands are about.
+pub(super) const RINGS: &[Layer] = &[
+    Layer {
+        id: "adapters",
+        name: "Adapters",
+        ends: &[],
+        folders: &[
+            "infrastructure",
+            "infra",
+            "presentation",
+            "ui",
+            "adapters",
+            "adapter",
+        ],
+    },
+    Layer {
+        id: "application",
+        name: "Application",
+        ends: &[],
+        folders: &["application"],
+    },
+    Layer {
+        id: "domain",
+        name: "Domain",
+        ends: &[],
+        folders: &["domain"],
+    },
+];
+/// The two ways of filing the files of a folder.
+const LAYERED: usize = 0;
+const RINGED: usize = 1;
+const WAYS: [&[Layer]; 2] = [LAYERS, RINGS];
+/// A folder is read by its rings where they hold no less than one in this
+/// many of the files of its code, and by the four layers where those do.
+const SHARES: [u64; 2] = [10, 2];
+/// Folders of wide meaning: among the four layers one files what lies in it
+/// only where no folder of a narrower meaning does, and the outermost of
+/// them speaks, for one inside it is as often named for what the code is
+/// about.
+const WIDE: &[&str] = &["application", "domain", "infrastructure"];
+/// Names of what passes between the layers and belongs to none of the four:
+/// an exception thrown, a request or a response handed on. Without this the
+/// folder they lie in would file them, and a client would run against the
+/// order by taking the request it sends. Among the model's own classes they
+/// are things of the model, as any other noun.
+const PASSED: &[&str] = &["exception", "request", "response"];
+/// Endings that name a thing as often as a layer: `FindPhoneModel` among the
+/// operations of an API is an operation. They file a file only where no
+/// folder of a narrower meaning says another layer.
+const THINGS: &[&str] = &["model", "entity"];
 /// Files of these kinds are code that can be filed in a layer.
 const CODE: &[&str] = &[
     "php", "py", "rb", "java", "kt", "cs", "ts", "tsx", "js", "jsx", "go", "rs", "swift", "scala",
@@ -145,6 +208,7 @@ const MODEL_OWN: &[&str] = &[
     "models",
     "dto",
     "dtos",
+    "valueobject",
     "valueobjects",
 ];
 /// Endings that are plain nouns as well. In a folder of the model's own
@@ -164,13 +228,15 @@ const NOUNS: &[&str] = &[
 /// listed at once: the most linked first.
 pub const LISTED: usize = 30;
 /// A folder is said to be in layers where they hold no fewer files than
-/// this, and no less than one in this many of the files of its code: a few
-/// files that happen to be named like a layer are no layered design.
+/// this, and no less of its code than `SHARES` says: a few files that happen
+/// to be named like a layer are no layered design.
 const FEWEST: u64 = 4;
-const SHARE: u64 = 10;
 /// No layer.
 const NO: u8 = u8::MAX;
-pub(super) const TELLS: &str = "Files filed as entry points, services, data access and model by their names and folders. A layer may use those after it; a link back runs against their order. Counted: calls, inheritance and the types of fields, parameters and results.";
+pub(super) const TELLS: [&str; 2] = [
+    "Files filed as entry points, services, data access and model by their names and folders. A layer may use those after it; a link back runs against their order. Counted: calls, inheritance and the types of fields, parameters and results.",
+    "Files filed by the ring they lie in: adapters outside, then the application, then the domain at the heart. A ring may use those inside it; a link out of an inner ring runs against their order. Counted: calls, inheritance and the types of fields, parameters and results.",
+];
 /// Whether a file is code a layer can hold: no test, and no template that
 /// only wears the ending of a language, as `home.blade.php` does.
 fn code(path: &str) -> bool {
@@ -208,12 +274,30 @@ fn filed(path: &str) -> Option<(usize, bool)> {
         .find_map(|end| stem.strip_suffix(end).filter(|rest| !rest.is_empty()))
         .unwrap_or(stem);
     let low = stem.to_lowercase();
-    // The nearest folder named for a layer, and whether it is one of the
-    // model's own classes. Inside `graphql` a folder of operations is named
-    // for the entry points.
     let parts = folders.split('/').collect::<Vec<_>>();
-    let nearest = parts.iter().enumerate().rev().find_map(|(at, folder)| {
+    // An ending is a word of the name: `OrderService`, `order_service`,
+    // `orders.service`, and not `Remodel` for `model`. After a dot `client`
+    // says where a file runs, as in `analytics.client.ts`, not what it is.
+    let worded = |end: &str| {
+        let Some(at) = stem.len().checked_sub(end.len()) else {
+            return false;
+        };
+        stem.get(at..).is_some_and(|tail| {
+            tail.eq_ignore_ascii_case(end)
+                && (at == 0
+                    || stem[..at].ends_with(['_', '-'])
+                    || (stem[..at].ends_with('.') && end != "client")
+                    || tail.starts_with(|first: char| first.is_uppercase()))
+        })
+    };
+    // The nearest folder of a narrow meaning that is named for a layer, and
+    // whether it is one of the model's own classes. Inside `graphql` a
+    // folder of operations is named for the entry points.
+    let narrow = parts.iter().enumerate().rev().find_map(|(at, folder)| {
         let folder = folder.to_lowercase();
+        if WIDE.contains(&folder.as_str()) {
+            return None;
+        }
         if let Some(layer) = LAYERS
             .iter()
             .position(|layer| layer.folders.contains(&folder.as_str()))
@@ -226,27 +310,28 @@ fn filed(path: &str) -> Option<(usize, bool)> {
                 .any(|above| above.eq_ignore_ascii_case("graphql")))
         .then_some((ENTRY, false))
     });
-    let noun = |word: &str| nearest.is_some_and(|(_, own)| own) && NOUNS.contains(&word);
-    // An ending is a word of the name: `OrderService`, `order_service`,
-    // `orders.service`, and not `Remodel` for `model`. After a dot `client`
-    // says where a file runs, as in `analytics.client.ts`, not what it is.
-    let ends = |end: &str| {
-        let Some(at) = stem.len().checked_sub(end.len()) else {
-            return false;
-        };
-        !noun(end)
-            && stem.get(at..).is_some_and(|tail| {
-                tail.eq_ignore_ascii_case(end)
-                    && (at == 0
-                        || stem[..at].ends_with(['_', '-'])
-                        || (stem[..at].ends_with('.') && end != "client")
-                        || tail.starts_with(|first: char| first.is_uppercase()))
-            })
-    };
-    if let Some(found) = LAYERS
-        .iter()
-        .position(|layer| layer.ends.iter().any(|end| ends(end)))
+    // What passes between the layers is of none, wherever it lies; but
+    // among the model's own classes `AccessRequest` is a thing of the model.
+    if !narrow.is_some_and(|(_, own)| own)
+        && (PASSED.iter().any(|end| worded(end))
+            || parts.last().is_some_and(|folder| {
+                ["exception", "exceptions"].contains(&folder.to_lowercase().as_str())
+            }))
     {
+        return None;
+    }
+    let noun = |word: &str| narrow.is_some_and(|(_, own)| own) && NOUNS.contains(&word);
+    // A name that is as often a thing gives way to a folder that says
+    // another layer.
+    let thing = |layer: usize, end: &str| {
+        THINGS.contains(&end) && narrow.is_some_and(|(folder, _)| folder != layer)
+    };
+    if let Some(found) = LAYERS.iter().enumerate().position(|(at, layer)| {
+        layer
+            .ends
+            .iter()
+            .any(|end| !noun(end) && !thing(at, end) && worded(end))
+    }) {
         return Some((found, found == MODEL));
     }
     let whole = !FOLDERS_ONLY.contains(&low.as_str()) && !noun(&low);
@@ -257,10 +342,43 @@ fn filed(path: &str) -> Option<(usize, bool)> {
     {
         return Some((found, MODEL_OWN.contains(&low.as_str())));
     }
-    nearest
+    // Then the outermost folder of a wide meaning.
+    narrow.or_else(|| {
+        parts.iter().find_map(|folder| {
+            let folder = folder.to_lowercase();
+            WIDE.contains(&folder.as_str())
+                .then(|| {
+                    LAYERS
+                        .iter()
+                        .position(|layer| layer.folders.contains(&folder.as_str()))
+                })
+                .flatten()
+                .map(|layer| (layer, false))
+        })
+    })
+}
+/// The ring a file lies in: that of the outermost folder on its way that is
+/// named for one. A test lies in none, nor does what is no code.
+pub(super) fn ring(path: &str) -> Option<usize> {
+    if !code(path) {
+        return None;
+    }
+    let (folders, _) = path.rsplit_once('/')?;
+    folders.split('/').find_map(|folder| {
+        let folder = folder.to_lowercase();
+        RINGS
+            .iter()
+            .position(|ring| ring.folders.contains(&folder.as_str()))
+    })
 }
 /// What places a file in a layer, in words.
-fn signs(layer: usize) -> String {
+fn signs(way: usize, layer: usize) -> String {
+    if way == RINGED {
+        return format!(
+            "the outermost folder named {}",
+            RINGS[layer].folders.join(", ")
+        );
+    }
     let mut signs = format!(
         "a name that ends in {}, or a folder named {}",
         LAYERS[layer].ends.join(", "),
@@ -274,26 +392,34 @@ fn signs(layer: usize) -> String {
     }
     signs
 }
-/// The layers of a graph: the layer of each file, and every pair of files of
-/// two layers of which the first needs the second, with through how many
-/// links.
+/// One way of filing the files of a graph: the layer of each file, and every
+/// pair of files of two layers of which the first needs the second, with
+/// through how many links.
 #[derive(Default)]
-pub(super) struct Layers {
+struct Way {
     of: Vec<u8>,
     cross: Vec<(u32, u32, Flow)>,
+}
+/// The layers of a graph, by the four layers and by the rings.
+#[derive(Default)]
+pub(super) struct Layers {
+    ways: [Way; 2],
 }
 impl fmt::Debug for Layers {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         write!(
             formatter,
-            "layers of {} files, {} pairs across them",
-            self.of.len(),
-            self.cross.len()
+            "layers of {} files, {} and {} pairs across them",
+            self.ways[LAYERED].of.len(),
+            self.ways[LAYERED].cross.len(),
+            self.ways[RINGED].cross.len()
         )
     }
 }
 /// The layers of one folder.
 struct Held {
+    /// The way its files are filed: by the four layers, or by the rings.
+    way: usize,
     /// How many files each layer holds.
     files: [u64; 4],
     /// Code under the folder that no layer holds.
@@ -314,10 +440,22 @@ impl Layers {
     /// Reads the layers of a graph. `certain` leaves out the links the tool
     /// only inferred.
     pub(super) fn read(index: &Index, certain: bool) -> Self {
+        Self {
+            ways: [
+                Way::read(index, certain, &layer),
+                Way::read(index, certain, &ring),
+            ],
+        }
+    }
+}
+impl Way {
+    /// Files every file of a graph and counts what the files of one layer
+    /// need of those of another.
+    fn read(index: &Index, certain: bool, filed: &dyn Fn(&str) -> Option<usize>) -> Self {
         let of = index
             .files
             .iter()
-            .map(|path| layer(path).map_or(NO, |layer| layer as u8))
+            .map(|path| filed(path).map_or(NO, |layer| layer as u8))
             .collect::<Vec<_>>();
         let needing = ["calls", "inherits", "extends", "implements"]
             .iter()
@@ -357,12 +495,22 @@ impl Layers {
         });
         Self { of, cross }
     }
+}
+impl Layers {
     /// The layers of a folder: `None` where no file of one layer needs a
     /// file of another, which takes two layers, or the layers hold too
     /// little of the folder to say it is built in them. So it is for what
-    /// is no folder: nothing lies under it.
+    /// is no folder: nothing lies under it. A folder that keeps most of its
+    /// code in rings is read by them, any other by the four layers.
     fn held(&self, index: &Index, scope: &str) -> Option<Held> {
+        [RINGED, LAYERED]
+            .into_iter()
+            .find_map(|way| self.held_by(index, scope, way))
+    }
+    fn held_by(&self, index: &Index, scope: &str, way: usize) -> Option<Held> {
+        let Way { of, cross } = &self.ways[way];
         let mut held = Held {
+            way,
             files: [0; 4],
             apart: 0,
             needs: [[Flow::default(); 4]; 4],
@@ -372,32 +520,32 @@ impl Layers {
             if !under(scope, path) {
                 continue;
             }
-            match self.of[file] {
+            match of[file] {
                 NO => held.apart += u64::from(code(path)),
                 layer => held.files[layer as usize] += 1,
             }
         }
-        for (from, to, flow) in &self.cross {
+        for (from, to, flow) in cross {
             if under(scope, &index.files[*from as usize])
                 && under(scope, &index.files[*to as usize])
             {
-                let needs = &mut held.needs[self.of[*from as usize] as usize]
-                    [self.of[*to as usize] as usize];
+                let needs = &mut held.needs[of[*from as usize] as usize][of[*to as usize] as usize];
                 needs.links += flow.links;
                 needs.guessed += flow.guessed;
                 held.pairs.push((*from, *to, *flow));
             }
         }
         let filed = held.files.iter().sum::<u64>();
-        (!held.pairs.is_empty() && filed >= FEWEST && filed * SHARE >= filed + held.apart)
+        (!held.pairs.is_empty() && filed >= FEWEST && filed * SHARES[way] >= filed + held.apart)
             .then_some(held)
     }
     /// The layers of the open folder as a row of the list of found
-    /// patterns.
-    pub(super) fn row(&self, index: &Index, scope: &str) -> Option<Value> {
+    /// patterns, with what tells them: that differs by the way the folder
+    /// is filed.
+    pub(super) fn row(&self, index: &Index, scope: &str) -> Option<(Value, &'static str)> {
         let held = self.held(index, scope)?;
         let against = held.against().links;
-        Some(json!({
+        let row = json!({
             "id": format!("layers@{scope}"),
             "sort": "layers",
             "name": "Layers",
@@ -416,7 +564,8 @@ impl Layers {
                     many => format!("{many} links against their order"),
                 },
             ),
-        }))
+        });
+        Some((row, TELLS[held.way]))
     }
     /// The picture of the layers of a folder: each layer that holds files
     /// as one box, and between them through how many links the files of the
@@ -434,8 +583,9 @@ impl Layers {
         certain: bool,
     ) -> Option<Value> {
         let held = self.held(index, scope)?;
-        let key = |layer: usize| format!("layer:{}", LAYERS[layer].id);
-        let present = (0..LAYERS.len())
+        let (table, of) = (WAYS[held.way], &self.ways[held.way].of);
+        let key = |layer: usize| format!("layer:{}", table[layer].id);
+        let present = (0..table.len())
             .filter(|layer| held.files[*layer] > 0)
             .collect::<Vec<_>>();
         let sum = |flows: &mut dyn Iterator<Item = Flow>| {
@@ -446,7 +596,7 @@ impl Layers {
         };
         let node = |layer: usize| {
             json!({
-                "path": key(layer), "name": LAYERS[layer].name, "folder": true, "layer": true,
+                "path": key(layer), "name": table[layer].name, "folder": true, "layer": true,
                 "files": held.files[layer], "symbols": 0, "within": 0, "changed": 0,
                 "out": sum(&mut held.needs[layer].iter().copied()).links,
                 "in": sum(&mut held.needs.iter().map(|row| row[layer])).links,
@@ -457,12 +607,12 @@ impl Layers {
                 let path = index.files[file as usize].as_str();
                 json!({
                     "path": path, "name": name(path),
-                    "layer": LAYERS[self.of[file as usize] as usize].name,
+                    "layer": table[of[file as usize] as usize].name,
                 })
             };
             json!({"from": end(from), "to": end(to), "links": flow.links, "guessed": flow.guessed})
         };
-        let back = |from: u32, to: u32| self.of[from as usize] > self.of[to as usize];
+        let back = |from: u32, to: u32| of[from as usize] > of[to as usize];
         let against = held
             .pairs
             .iter()
@@ -490,7 +640,8 @@ impl Layers {
                 "sort": "layers",
                 "name": "Layers",
                 "family": "architecture",
-                "tells": TELLS,
+                "tells": TELLS[held.way],
+                "rings": held.way == RINGED,
                 "named": true,
                 "guessed": total.guessed > 0,
                 "of": if scope.is_empty() {
@@ -502,7 +653,7 @@ impl Layers {
                 "layers": present
                     .iter()
                     .map(|layer| json!({
-                        "id": LAYERS[*layer].id, "name": LAYERS[*layer].name,
+                        "id": table[*layer].id, "name": table[*layer].name,
                         "files": held.files[*layer],
                     }))
                     .collect::<Vec<_>>(),
@@ -548,15 +699,14 @@ impl Layers {
                     .pairs
                     .iter()
                     .filter(|(user, used, _)| {
-                        self.of[*user as usize] as usize == from
-                            && self.of[*used as usize] as usize == to
+                        of[*user as usize] as usize == from && of[*used as usize] as usize == to
                     })
                     .collect::<Vec<_>>();
                 view["focus"] = json!({
                     "path": format!("{}>{}", key(from), key(to)),
                     "link": true,
-                    "from": {"path": key(from), "name": LAYERS[from].name},
-                    "to": {"path": key(to), "name": LAYERS[to].name},
+                    "from": {"path": key(from), "name": table[from].name},
+                    "to": {"path": key(to), "name": table[to].name},
                     "links": flow.links,
                     "guessed": flow.guessed,
                     "against": from > to,
@@ -578,7 +728,7 @@ impl Layers {
         let mut members: HashMap<u32, Flow> = HashMap::new();
         for (from, to, flow) in &held.pairs {
             for file in [from, to] {
-                if self.of[*file as usize] as usize == chosen {
+                if of[*file as usize] as usize == chosen {
                     let own = members.entry(*file).or_default();
                     own.links += flow.links;
                     own.guessed += flow.guessed;
@@ -589,7 +739,7 @@ impl Layers {
             .files
             .iter()
             .enumerate()
-            .filter(|(file, path)| self.of[*file] as usize == chosen && under(scope, path))
+            .filter(|(file, path)| of[*file] as usize == chosen && under(scope, path))
             .map(|(file, path)| {
                 (
                     path.as_str(),
@@ -600,14 +750,14 @@ impl Layers {
         members.sort_by(|a, b| b.1.links.cmp(&a.1.links).then(a.0.cmp(b.0)));
         let beside = |other: usize, flow: Flow, back: bool| {
             json!({
-                "path": key(other), "name": LAYERS[other].name, "folder": false, "inside": true,
+                "path": key(other), "name": table[other].name, "folder": false, "inside": true,
                 "links": flow.links, "guessed": flow.guessed, "changed": false,
                 "against": back,
             })
         };
         let mut focus = node(chosen);
         focus["inside"] = json!(true);
-        focus["signs"] = json!(signs(chosen));
+        focus["signs"] = json!(signs(held.way, chosen));
         focus["uses"] = present
             .iter()
             .filter(|other| held.needs[chosen][**other].links > 0)
@@ -632,7 +782,7 @@ impl Layers {
         // What this layer needs of the layers before it.
         let own = against
             .iter()
-            .filter(|(from, ..)| self.of[*from as usize] as usize == chosen)
+            .filter(|(from, ..)| of[*from as usize] as usize == chosen)
             .collect::<Vec<_>>();
         focus["against"] = json!({
             "rows": own

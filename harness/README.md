@@ -2133,7 +2133,7 @@ parameter, returns it, makes it.
 
 | Pattern | What tells it |
 | --- | --- |
-| Strategy | An abstraction with two implementations or more, which another type holds or takes as the abstraction. State and Bridge are built the same way. Entities behind a shared interface are no strategy: where every implementation, a test double aside, is one of the model's own classes (named `…Entity`, `…Dto`, `…Model` or `…ValueObject`, or lying in a folder of them), they are data that something takes, not ways of doing one thing. |
+| Strategy | An abstraction with two implementations or more, which another type holds or takes as the abstraction. State and Bridge are built the same way. Data behind a shared interface is no strategy: where most implementations, test doubles aside, are the model's own classes (named `…Entity`, `…Dto`, `…Model` or `…ValueObject`, or lying in a folder of them) or messages that have a handler of their own, as the commands a bus takes, they are what something takes, not ways of doing one thing. |
 | Decorator | A type that stands under an abstraction and keeps one of it, in a field or taken where it is built. Proxy and Composite are built the same way. |
 | Factory | A method that returns an abstraction and makes the types that implement it. A type named `…Factory` that makes other types is found by its name. |
 | Template method | A method of a base type that calls other methods of that type, which the types under it define. |
@@ -2165,7 +2165,7 @@ nearest folder named for a layer, and the finding says **by name**:
 | Entry points | `Controller`, `Middleware`, `Endpoint` | `controller`, `controllers`, `console`, `middleware`, `resolver`, `resolvers`, `views`, `routes` |
 | Services | `Service`, `Manager`, `UseCase`, `Interactor`, `Handler`, `Listener`, `Subscriber`, `Job` | `service`, `services`, `usecase`, `usecases`, `handler`, `handlers`, `listener`, `listeners`, `subscribers`, `eventsubscriber`, `eventlistener`, `jobs`, `manager`, `managers`, `application` |
 | Data access | `Repository`, `Gateway`, `Mapper`, `Dao`, `Client` | `repository`, `repositories`, `gateways`, `mappers`, `persistence`, `infrastructure`, `dao`, `clients` |
-| Model | `Model`, `Entity`, `Dto`, `ValueObject` | `model`, `models`, `entity`, `entities`, `domain`, `dto`, `dtos`, `valueobjects`, `event`, `events` |
+| Model | `Model`, `Entity`, `Dto`, `ValueObject` | `model`, `models`, `entity`, `entities`, `domain`, `dto`, `dtos`, `valueobject`, `valueobjects`, `event`, `events` |
 
 Inside a folder named `graphql` a folder of operations holds entry points too:
 `mutation`, `mutations`, `operation`, `operations`, `query`, `queries`,
@@ -2178,15 +2178,40 @@ The ending is a word of the name, in whatever case: `OrderService`,
 such a folder is filed too (`models.py`, `routes.rs`), except by the names that
 mean a folder only: `application`, `console`, `domain`, `infrastructure` and
 `persistence`. A name says more than a folder, and the nearest folder more than
-one above it, with one exception: in a folder of the model's own classes
-(`entity`, `entities`, `model`, `models`, `dto`, `dtos`, `valueobjects`) an ending
-that is a plain noun as well (`Client`, `Endpoint`, `Gateway`, `Job`, `Manager`,
-`Service`, `Subscriber`) says nothing, because `Entity/OAuthClient` and `Models/Job`
-are things of the model, called after what they are. After a dot `client` says
-where a file runs, as in `analytics.client.ts`, and files nothing either. A test,
-a template (`*.blade.php`) and what is no code are filed in no layer. A folder is said to be in layers where they hold four files or more and
+one above it, with these exceptions:
+
+- In a folder of the model's own classes (`entity`, `entities`, `model`, `models`,
+  `dto`, `dtos`, `valueobject`, `valueobjects`) an ending that is a plain noun as
+  well (`Client`, `Endpoint`, `Gateway`, `Job`, `Manager`, `Service`,
+  `Subscriber`) says nothing, because `Entity/OAuthClient` and `Models/Job` are
+  things of the model, called after what they are.
+- `Model` and `Entity` name a thing as often as a layer. They file a file only
+  where no folder says another layer: `GraphQL/Query/FindPhoneModel` is an
+  operation.
+- `application`, `domain` and `infrastructure` are folders of wide meaning. One
+  files what lies in it only where no narrower folder does, and the outermost
+  of them speaks: in `Application/Command/Domain/` the inner folder is named for
+  what the commands are about.
+- What passes between the layers is of none: a name that ends in `Exception`,
+  `Request` or `Response`, and what lies in a folder `exception` or
+  `exceptions`. Among the model's own classes such a name is a thing of the
+  model.
+- After a dot `client` says where a file runs, as in `analytics.client.ts`, and
+  files nothing.
+
+A test, a template (`*.blade.php`) and what is no code are filed in no layer. A folder is said to be in layers where they hold four files or more and
 a tenth of its code or more, and a file of one layer needs a file of another: a
 few files that happen to be named like a layer are no layered design.
+
+A design that keeps its domain at the heart is read by its rings instead of the
+four layers: **Adapters** (a folder named `infrastructure`, `infra`,
+`presentation`, `ui`, `adapters` or `adapter`), then **Application**, then
+**Domain**. A file lies in the ring of the outermost folder on its way that is
+named for one, whatever it is called itself, so the interface of a repository in
+`Domain/` is of the domain and what implements it in `Infrastructure/` is an
+adapter. A ring may use those inside it, and a link out of an inner ring runs
+against the order. A folder is read by its rings where they hold half of its code
+or more; inside one ring, and anywhere else, it is read by the four layers.
 
 Select the finding to draw the layers: one box a layer, in their order from left
 to right, each with how many files it holds. A layer may use those after it. A
