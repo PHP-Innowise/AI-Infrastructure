@@ -64,6 +64,11 @@ const WIRED: usize = 600;
 /// Places one step of a path shows at most, the most linked first; a long
 /// path shows fewer, so that the picture holds no more than `FOLLOWED`.
 pub const WAY: usize = 8;
+/// Places that two places share which one picture shows at most, the
+/// nearest first: of what both use, or of what uses both. With the ways to
+/// them and the two themselves a picture holds no more than `FOLLOWED`.
+pub const SHARED: usize = 12;
+const SIDE: usize = FOLLOWED - 2;
 /// Places a search of the whole graph lists at once, the best first; the
 /// rest are counted, and a longer search reaches them.
 pub const FOUND: usize = 40;
@@ -2953,6 +2958,310 @@ impl Index {
         })
     }
 }
+/// What the ways between two places are worked out among: the files of a
+/// graph and the pairs of them that are linked, or, where one of the two is
+/// a symbol, its symbols and the links between them.
+struct Net<'a> {
+    index: &'a Index,
+    symbols: bool,
+    certain: bool,
+    /// Between files: what each uses and what uses each, with the links
+    /// between the two.
+    uses: HashMap<u32, Vec<(u32, Flow)>>,
+    users: HashMap<u32, Vec<(u32, Flow)>>,
+}
+impl<'a> Net<'a> {
+    /// `symbols` says the places are symbols, and `certain` leaves out what
+    /// the tool inferred.
+    fn new(index: &'a Index, symbols: bool, certain: bool) -> Self {
+        let mut uses: HashMap<u32, Vec<(u32, Flow)>> = HashMap::new();
+        let mut users: HashMap<u32, Vec<(u32, Flow)>> = HashMap::new();
+        if !symbols {
+            // Between files a link is a pair of files that are linked.
+            for (user, used, pair) in &index.pairs {
+                let links = pair.weight(certain);
+                if links == 0 {
+                    continue;
+                }
+                let flow = Flow {
+                    links,
+                    guessed: if certain { 0 } else { pair.guessed },
+                };
+                uses.entry(*user).or_default().push((*used, flow));
+                users.entry(*used).or_default().push((*user, flow));
+            }
+        }
+        Self {
+            index,
+            symbols,
+            certain,
+            uses,
+            users,
+        }
+    }
+    /// How many places there are.
+    fn count(&self) -> usize {
+        if self.symbols {
+            self.index.symbols.len()
+        } else {
+            self.index.files.len()
+        }
+    }
+    /// What an end stands for: files, or, among symbols, symbols. A folder
+    /// is every file under it, and among symbols a file or a folder is every
+    /// symbol in it.
+    fn members(&self, reach: Reach) -> Vec<u32> {
+        let index = self.index;
+        let files = index
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(id, file)| match reach {
+                Reach::Folder(folder) => file
+                    .strip_prefix(folder)
+                    .is_some_and(|rest| rest.starts_with('/')),
+                Reach::File(own) => *id as u32 == own,
+                Reach::Symbol(at) => *id as u32 == index.symbols[at as usize].file,
+            })
+            .map(|(id, _)| id as u32);
+        match (self.symbols, reach) {
+            (true, Reach::Symbol(at)) => vec![at],
+            (true, _) => files
+                .flat_map(|file| index.range(file))
+                .filter(|at| index.symbols[*at as usize].kind != Kind::Note)
+                .collect(),
+            (false, _) => files.collect(),
+        }
+    }
+    /// What a place uses, or what uses it, with the links between the two.
+    fn beside(&self, place: u32, outgoing: bool) -> Vec<(u32, Flow)> {
+        if self.symbols {
+            self.index
+                .beside(place, outgoing, self.certain)
+                .into_iter()
+                .map(|(other, flow, _)| (other, flow))
+                .collect()
+        } else {
+            let side = if outgoing { &self.uses } else { &self.users };
+            side.get(&place).cloned().unwrap_or_default()
+        }
+    }
+    /// Names to `reach` what a place uses, or what uses it: every one, and
+    /// one more than once where more than one link joins the two.
+    fn each(&self, place: u32, outgoing: bool, reach: &mut dyn FnMut(u32)) {
+        if self.symbols {
+            for (user, used, ..) in self.index.wired(place, outgoing, self.certain) {
+                let other = if outgoing { *used } else { *user };
+                // A comment the tool kept is no place.
+                if self.index.symbols[other as usize].kind != Kind::Note {
+                    reach(other);
+                }
+            }
+        } else {
+            let side = if outgoing { &self.uses } else { &self.users };
+            for (other, _) in side.get(&place).into_iter().flatten() {
+                reach(*other);
+            }
+        }
+    }
+    /// How many links every place lies from the nearest of `first`, along
+    /// the links or, where `outgoing` is not set, against them; `u32::MAX`
+    /// where nothing leads. A place that has an `owner` is not walked into,
+    /// so no way passes through one, and none of them is told how far it is.
+    fn far(&self, first: &[u32], owner: &[u8], outgoing: bool) -> Vec<u32> {
+        let mut far = vec![u32::MAX; self.count()];
+        let mut front = first.to_vec();
+        let mut steps = 0u32;
+        while !front.is_empty() {
+            steps += 1;
+            let mut next = Vec::new();
+            for place in &front {
+                self.each(*place, outgoing, &mut |other| {
+                    if owner[other as usize] == 0 && far[other as usize] == u32::MAX {
+                        far[other as usize] = steps;
+                        next.push(other);
+                    }
+                });
+            }
+            front = next;
+        }
+        far
+    }
+    /// Places are told apart by where they lie: the file, then the line.
+    fn tag(&self, place: u32) -> (&'a str, u32, u32) {
+        let index = self.index;
+        if self.symbols {
+            let symbol = &index.symbols[place as usize];
+            (
+                index.files[symbol.file as usize].as_str(),
+                symbol.line,
+                place,
+            )
+        } else {
+            (index.files[place as usize].as_str(), 0, place)
+        }
+    }
+    /// Through how many links a place uses others, or others use it.
+    fn weight(&self, place: u32, outgoing: bool) -> u64 {
+        self.beside(place, outgoing)
+            .iter()
+            .map(|(_, flow)| flow.links)
+            .sum()
+    }
+    /// Through how many links the places `held` use what is `apart` from
+    /// them, or are used by it.
+    fn crossing(&self, held: &[u32], outgoing: bool, apart: &dyn Fn(u32) -> bool) -> u64 {
+        let mut links = 0u64;
+        for place in held {
+            if self.symbols {
+                // Two symbols are linked once.
+                self.each(*place, outgoing, &mut |other| {
+                    links += u64::from(apart(other))
+                });
+            } else {
+                let side = if outgoing { &self.uses } else { &self.users };
+                links += side
+                    .get(place)
+                    .into_iter()
+                    .flatten()
+                    .filter(|(other, _)| apart(*other))
+                    .map(|(_, flow)| flow.links)
+                    .sum::<u64>();
+            }
+        }
+        links
+    }
+    /// The name a picture selects a place by: a file by its path, a symbol
+    /// as the picture of its file names it.
+    fn key(&self, names: &Names, place: u32) -> String {
+        if self.symbols {
+            names.key(place)
+        } else {
+            self.index.files[place as usize].clone()
+        }
+    }
+    /// A place as a box of a picture, with what a chosen change did to it
+    /// and how much it uses and is used. `key` is the name it is selected
+    /// by; a file is named by the end of its path that none of `paths`
+    /// shares.
+    fn node(&self, names: &Names, place: u32, key: &str, paths: &[&str]) -> Value {
+        let mut node = if self.symbols {
+            names.node(place, key)
+        } else {
+            let status = names.letter(key);
+            json!({
+                "path": key,
+                "name": label(key, paths),
+                "folder": false,
+                "files": 1,
+                "symbols": self.index.holds(place),
+                "within": 0,
+                "changed": u64::from(status.is_some()),
+                "status": status.map(String::from),
+            })
+        };
+        node["out"] = json!(self.weight(place, true));
+        node["in"] = json!(self.weight(place, false));
+        node
+    }
+    /// A place drawn as a row beside a selected one, with the links between
+    /// the two. Two symbols linked once are linked in one way, which
+    /// `linked` asks for: the one that uses and the one that is used.
+    fn row(
+        &self,
+        names: &Names,
+        paths: &[&str],
+        other: u32,
+        flow: Flow,
+        linked: Option<(u32, u32)>,
+    ) -> Value {
+        if self.symbols {
+            let relation = linked
+                .filter(|_| flow.links == 1)
+                .and_then(|(user, used)| {
+                    self.index
+                        .wired(user, true, self.certain)
+                        .find(|link| link.1 == used)
+                })
+                .map(|link| link.2);
+            names.row(other, true, flow, relation)
+        } else {
+            let path = self.index.files[other as usize].as_str();
+            json!({
+                "path": path,
+                "name": label(path, paths),
+                "folder": false,
+                "inside": true,
+                "links": flow.links,
+                "guessed": flow.guessed,
+                "changed": names.letter(path).is_some(),
+            })
+        }
+    }
+    /// How the places `users` use the places `used`: each kind of link with
+    /// how many there are of it, the most first.
+    fn kinds(&self, users: &[u32], used: &HashSet<u32>) -> Value {
+        let index = self.index;
+        let mut kinds: BTreeMap<u16, u64> = BTreeMap::new();
+        if self.symbols {
+            for user in users {
+                for (_, other, kind, _) in index.wired(*user, true, self.certain) {
+                    if used.contains(other) {
+                        *kinds.entry(*kind).or_default() += 1;
+                    }
+                }
+            }
+        } else {
+            let users = users.iter().copied().collect::<HashSet<_>>();
+            for (user, other, pair) in &index.pairs {
+                if users.contains(user) && used.contains(other) {
+                    for (kind, count) in &pair.kinds {
+                        *kinds.entry(*kind).or_default() += count;
+                    }
+                }
+            }
+        }
+        let mut kinds = kinds
+            .iter()
+            .map(|(kind, count)| (index.kinds[*kind as usize].as_str(), *count))
+            .collect::<Vec<_>>();
+        kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
+        kinds
+            .into_iter()
+            .map(|(kind, count)| json!({"kind": kind, "links": count}))
+            .collect()
+    }
+}
+/// The links a picture of ways draws, the strongest first, each from the
+/// box numbered first to the box numbered second; `keys` names the boxes.
+/// Where there are more links than a picture draws, the strongest into each
+/// box and the strongest out of it come before the rest: every box still
+/// lies on a way that is drawn whole.
+fn ways_drawn(mut edges: Vec<(usize, usize, Flow)>, keys: &[String]) -> Vec<(usize, usize, Flow)> {
+    let stronger = |a: &(usize, usize, Flow), b: &(usize, usize, Flow)| {
+        b.2.links
+            .cmp(&a.2.links)
+            .then((&keys[a.0], &keys[a.1]).cmp(&(&keys[b.0], &keys[b.1])))
+    };
+    edges.sort_by(stronger);
+    if edges.len() > DRAWN {
+        let (mut led, mut leads) = (HashSet::new(), HashSet::new());
+        let (mut needed, mut rest) = (Vec::new(), Vec::new());
+        for edge in edges {
+            let (into, out) = (led.insert(edge.1), leads.insert(edge.0));
+            if into || out {
+                needed.push(edge);
+            } else {
+                rest.push(edge);
+            }
+        }
+        let room = DRAWN.saturating_sub(needed.len());
+        needed.extend(rest.into_iter().take(room));
+        needed.sort_by(stronger);
+        edges = needed;
+    }
+    edges
+}
 impl Index {
     /// One end of a path, as the pictures name it.
     fn end(&self, place: &str, reach: Reach) -> Value {
@@ -2972,6 +3281,15 @@ impl Index {
             Reach::Folder(folder) => {
                 json!({"path": folder, "name": name(folder), "what": "folder"})
             }
+        }
+    }
+    /// Where a place lies, which is where the way back from a picture of two
+    /// places leads: the file of a symbol, the folder of a file or a folder.
+    fn lies<'a>(&'a self, reach: Reach<'a>) -> &'a str {
+        match reach {
+            Reach::Symbol(at) => self.files[self.symbols[at as usize].file as usize].as_str(),
+            Reach::File(file) => holder(&self.files[file as usize]),
+            Reach::Folder(folder) => holder(folder),
         }
     }
     /// The shortest ways from one place to another along the links: every
@@ -3006,67 +3324,12 @@ impl Index {
     ) -> Option<Value> {
         let (start, end) = (self.reach(from)?, self.reach(to)?);
         let symbols = matches!(start, Reach::Symbol(_)) || matches!(end, Reach::Symbol(_));
-        // What an end stands for: files, or, among symbols, symbols.
-        let members = |reach: Reach| {
-            let files = self
-                .files
-                .iter()
-                .enumerate()
-                .filter(|(id, file)| match reach {
-                    Reach::Folder(folder) => file
-                        .strip_prefix(folder)
-                        .is_some_and(|rest| rest.starts_with('/')),
-                    Reach::File(own) => *id as u32 == own,
-                    Reach::Symbol(at) => *id as u32 == self.symbols[at as usize].file,
-                })
-                .map(|(id, _)| id as u32);
-            match (symbols, reach) {
-                (true, Reach::Symbol(at)) => vec![at],
-                (true, _) => files
-                    .flat_map(|file| self.range(file))
-                    .filter(|at| self.symbols[*at as usize].kind != Kind::Note)
-                    .collect(),
-                (false, _) => files.collect::<Vec<_>>(),
-            }
-        };
-        let (starts, ends) = (members(start), members(end));
-        // Between files a link is a pair of files that are linked.
-        let mut uses: HashMap<u32, Vec<(u32, Flow)>> = HashMap::new();
-        let mut users: HashMap<u32, Vec<(u32, Flow)>> = HashMap::new();
-        if !symbols {
-            for (user, used, pair) in &self.pairs {
-                let links = pair.weight(certain);
-                if links == 0 {
-                    continue;
-                }
-                let flow = Flow {
-                    links,
-                    guessed: if certain { 0 } else { pair.guessed },
-                };
-                uses.entry(*user).or_default().push((*used, flow));
-                users.entry(*used).or_default().push((*user, flow));
-            }
-        }
-        // What a place uses, or what uses it, with the links between the two.
-        let beside = |place: u32, outgoing: bool| {
-            if symbols {
-                self.beside(place, outgoing, certain)
-                    .into_iter()
-                    .map(|(other, flow, _)| (other, flow))
-                    .collect::<Vec<_>>()
-            } else {
-                let side = if outgoing { &uses } else { &users };
-                side.get(&place).cloned().unwrap_or_default()
-            }
-        };
+        let net = Net::new(self, symbols, certain);
+        let (starts, ends) = (net.members(start), net.members(end));
         // How far every place lies from the nearest of `first`, as far as
         // the nearest of `last`, and how far that is: the whole graph is
         // walked a step at a time. `None` where nothing leads there.
-        let count = if symbols {
-            self.symbols.len()
-        } else {
-            self.files.len()
-        };
+        let count = net.count();
         let walk = |first: &[u32], last: &[u32]| {
             let goal = last.iter().copied().collect::<HashSet<_>>();
             let mut far = vec![u32::MAX; count];
@@ -3087,17 +3350,7 @@ impl Index {
                     }
                 };
                 for place in &front {
-                    if symbols {
-                        for (_, used, ..) in self.wired(*place, true, certain) {
-                            if self.symbols[*used as usize].kind != Kind::Note {
-                                reach(*used);
-                            }
-                        }
-                    } else {
-                        for (used, _) in uses.get(place).into_iter().flatten() {
-                            reach(*used);
-                        }
-                    }
+                    net.each(*place, true, &mut reach);
                 }
                 if there {
                     return Some((far, steps as usize));
@@ -3120,11 +3373,7 @@ impl Index {
         };
         let names = Names::new(self, changed, edited);
         // The way back leads to where the first end lies.
-        let scope = match start {
-            Reach::Symbol(at) => self.files[self.symbols[at as usize].file as usize].as_str(),
-            Reach::File(file) => holder(&self.files[file as usize]),
-            Reach::Folder(folder) => holder(folder),
-        };
+        let scope = self.lies(start);
         let (first, last) = (self.end(from, start), self.end(to, end));
         let mut crumbs = Self::crumbs(project, scope);
         crumbs.push(json!({
@@ -3180,7 +3429,8 @@ impl Index {
             let (earlier, later) = levels.split_at_mut(step);
             let mut seen = HashSet::new();
             for place in &later[0] {
-                let leading = beside(*place, false)
+                let leading = net
+                    .beside(*place, false)
                     .into_iter()
                     .filter(|(other, _)| far[*other as usize] == step as u32 - 1)
                     .collect::<Vec<_>>();
@@ -3194,19 +3444,7 @@ impl Index {
             }
         }
         let places = levels.iter().map(Vec::len).sum::<usize>();
-        // Places are told apart by where they lie: the file, then the line.
-        let tag = |place: u32| {
-            if symbols {
-                let symbol = &self.symbols[place as usize];
-                (
-                    self.files[symbol.file as usize].as_str(),
-                    symbol.line,
-                    place,
-                )
-            } else {
-                (self.files[place as usize].as_str(), 0, place)
-            }
-        };
+        let tag = |place: u32| net.tag(place);
         let per = WAY.min(FOLLOWED / (steps + 1)).max(1);
         let mut kept = vec![Vec::new(); steps + 1];
         // The far end keeps the places most linked with the step before.
@@ -3266,13 +3504,7 @@ impl Index {
             .collect::<Vec<_>>();
         let keys = shown
             .iter()
-            .map(|(place, _)| {
-                if symbols {
-                    names.key(*place)
-                } else {
-                    self.files[*place as usize].clone()
-                }
-            })
+            .map(|(place, _)| net.key(&names, *place))
             .collect::<Vec<_>>();
         let slot = shown
             .iter()
@@ -3288,60 +3520,13 @@ impl Index {
             }
         }
         let between = edges.len();
-        let stronger = |a: &(usize, usize, Flow), b: &(usize, usize, Flow)| {
-            b.2.links
-                .cmp(&a.2.links)
-                .then((&keys[a.0], &keys[a.1]).cmp(&(&keys[b.0], &keys[b.1])))
-        };
-        edges.sort_by(stronger);
-        // Where there are more links than a picture draws, the strongest
-        // into each box and the strongest out of it come before the rest:
-        // every box still lies on a way that is drawn whole.
-        if edges.len() > DRAWN {
-            let (mut led, mut leads) = (HashSet::new(), HashSet::new());
-            let (mut needed, mut rest) = (Vec::new(), Vec::new());
-            for edge in edges {
-                let (into, out) = (led.insert(edge.1), leads.insert(edge.0));
-                if into || out {
-                    needed.push(edge);
-                } else {
-                    rest.push(edge);
-                }
-            }
-            let room = DRAWN.saturating_sub(needed.len());
-            needed.extend(rest.into_iter().take(room));
-            needed.sort_by(stronger);
-            edges = needed;
-        }
+        let edges = ways_drawn(edges, &keys);
         // A file is named by the end of its path that no other drawn shares.
         let paths = keys.iter().map(String::as_str).collect::<Vec<_>>();
-        let weight = |place: u32, outgoing: bool| {
-            beside(place, outgoing)
-                .iter()
-                .map(|(_, flow)| flow.links)
-                .sum::<u64>()
-        };
         let node = |index: usize| {
             let (place, step) = shown[index];
-            let mut node = if symbols {
-                names.node(place, &keys[index])
-            } else {
-                let path = keys[index].as_str();
-                let status = names.letter(path);
-                json!({
-                    "path": path,
-                    "name": label(path, &paths),
-                    "folder": false,
-                    "files": 1,
-                    "symbols": self.holds(place),
-                    "within": 0,
-                    "changed": u64::from(status.is_some()),
-                    "status": status.map(String::from),
-                })
-            };
+            let mut node = net.node(&names, place, &keys[index], &paths);
             for (key, value) in [
-                ("out", json!(weight(place, true))),
-                ("in", json!(weight(place, false))),
                 ("start", json!(step == 0)),
                 ("end", json!(step == steps)),
                 ("step", json!(step)),
@@ -3352,28 +3537,7 @@ impl Index {
         };
         // A place of the way as a row beside a selected one.
         let row = |other: u32, flow: Flow, user: u32, used: u32| {
-            if symbols {
-                // Two symbols linked once are linked in one way.
-                let relation = (flow.links == 1)
-                    .then(|| {
-                        self.wired(user, true, certain)
-                            .find(|link| link.1 == used)
-                            .map(|link| link.2)
-                    })
-                    .flatten();
-                names.row(other, true, flow, relation)
-            } else {
-                let path = self.files[other as usize].as_str();
-                json!({
-                    "path": path,
-                    "name": label(path, &paths),
-                    "folder": false,
-                    "inside": true,
-                    "links": flow.links,
-                    "guessed": flow.guessed,
-                    "changed": names.letter(path).is_some(),
-                })
-            }
+            net.row(&names, &paths, other, flow, Some((user, used)))
         };
         let focus = focus
             .and_then(|path| keys.iter().position(|key| key == path))
@@ -3403,27 +3567,7 @@ impl Index {
                     .filter(|(other, _)| slot.contains_key(other))
                     .copied()
                     .collect::<Vec<_>>();
-                let mut kinds: BTreeMap<u16, u64> = BTreeMap::new();
-                if symbols {
-                    for (_, used, kind, _) in self.wired(place, true, certain) {
-                        if next.iter().any(|(other, _)| other == used) {
-                            *kinds.entry(*kind).or_default() += 1;
-                        }
-                    }
-                } else {
-                    for (user, used, pair) in &self.pairs {
-                        if *user == place && next.iter().any(|(other, _)| other == used) {
-                            for (kind, count) in &pair.kinds {
-                                *kinds.entry(*kind).or_default() += count;
-                            }
-                        }
-                    }
-                }
-                let mut kinds = kinds
-                    .iter()
-                    .map(|(kind, count)| (self.kinds[*kind as usize].as_str(), *count))
-                    .collect::<Vec<_>>();
-                kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
+                let used = next.iter().map(|(other, _)| *other).collect();
                 let mut focus = node(index);
                 focus["inside"] = json!(true);
                 focus["uses"] = next
@@ -3436,10 +3580,7 @@ impl Index {
                     .map(|(other, flow)| row(*other, *flow, *other, place))
                     .collect();
                 focus["used_by_more"] = json!(leading.len() - prior.len());
-                focus["kinds"] = kinds
-                    .into_iter()
-                    .map(|(kind, count)| json!({"kind": kind, "links": count}))
-                    .collect();
+                focus["kinds"] = net.kinds(&[place], &used);
                 focus
             });
         for (key, value) in [
@@ -3456,6 +3597,390 @@ impl Index {
         view["children"] = json!(shown.len());
         view["matching"] = json!(shown.len());
         view["nodes"] = (0..shown.len()).map(node).collect();
+        view["between"] = json!(between);
+        view["edges"] = edges
+            .iter()
+            .map(|(source, target, flow)| {
+                json!({
+                    "from": keys[*source],
+                    "to": keys[*target],
+                    "links": flow.links,
+                    "guessed": flow.guessed,
+                })
+            })
+            .collect();
+        view["focus"] = json!(focus);
+        Some(view)
+    }
+    /// What two places share: what both use, or what uses both. Either
+    /// place is a folder, a file or a symbol, and what the two stand for is
+    /// told as for a path: files, or, where one of them is a symbol,
+    /// symbols. Each of the two is one box of the picture, whatever it
+    /// holds.
+    ///
+    /// Both use a place where a chain of links leads to it from each of the
+    /// two without passing through the other: what one of them reaches only
+    /// through the other is what the path between them shows. A place uses
+    /// both where such chains lead from it to each of them. Both kinds are
+    /// counted and one is drawn: `users` asks for what uses both, or for
+    /// what both use; where it does not ask, what both use is drawn, unless
+    /// only the other kind has anything.
+    ///
+    /// The picture shows the `SHARED` nearest places of its kind, those
+    /// with the fewest links to the two taken together, and among those as
+    /// near the most linked. Each is drawn with one shortest way between it
+    /// and either of the two, the strongest where several are as short.
+    /// Where the ways fill the picture, fewer places are shown.
+    ///
+    /// Where one of the two lies in the other, or there is nothing of the
+    /// kind, the answer says so and draws nothing. `changed`, `edited` and
+    /// `focus` are as for a path. `None` where a place names nothing in the
+    /// graph.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shared(
+        &self,
+        project: &str,
+        from: &str,
+        to: &str,
+        users: Option<bool>,
+        changed: &[(String, char)],
+        edited: &dyn Fn(&str) -> Option<Edited>,
+        focus: Option<&str>,
+        certain: bool,
+    ) -> Option<Value> {
+        let ends = [self.reach(from)?, self.reach(to)?];
+        let symbols = ends.iter().any(|end| matches!(end, Reach::Symbol(_)));
+        let net = Net::new(self, symbols, certain);
+        let held = [net.members(ends[0]), net.members(ends[1])];
+        // Which of the two a place belongs to, the first or the second; 0
+        // for every other place.
+        let mut owner = vec![0u8; net.count()];
+        let mut within = false;
+        for (end, places) in held.iter().enumerate() {
+            for place in places {
+                within |= owner[*place as usize] != 0;
+                owner[*place as usize] = end as u8 + 1;
+            }
+        }
+        let names = Names::new(self, changed, edited);
+        let scope = self.lies(ends[0]);
+        let told = [self.end(from, ends[0]), self.end(to, ends[1])];
+        let mut crumbs = Self::crumbs(project, scope);
+        crumbs.push(json!({
+            "name": format!(
+                "{} and {}",
+                told[0]["name"].as_str().unwrap_or(""),
+                told[1]["name"].as_str().unwrap_or("")
+            ),
+            "path": "",
+        }));
+        let side = |users: bool| if users { "uses_both" } else { "both_use" };
+        let mut view = json!({
+            "mode": "shared",
+            "scope": scope,
+            "crumbs": crumbs,
+            "certain": certain,
+            "totals": self.totals(),
+            "shared": {
+                "from": told[0],
+                "to": told[1],
+                "names": symbols,
+                "within": within,
+                "side": side(users == Some(true)),
+                "both_use": 0,
+                "uses_both": 0,
+                "shown": 0,
+                "wide": SHARED,
+            },
+            "children": 0,
+            "matching": 0,
+            "nodes": [],
+            "between": 0,
+            "backbone": false,
+            "edges": [],
+            "focus": null,
+        });
+        // One of the two that lies in the other is not apart from it.
+        if within {
+            return Some(view);
+        }
+        // How many links a place lies from one of the two on the ways walked
+        // from it: none for what that one holds itself, and nothing for what
+        // the other holds, which no way passes.
+        let level = |far: &[Vec<u32>; 2], end: usize, place: u32| match owner[place as usize] {
+            0 => Some(far[end][place as usize]).filter(|far| *far != u32::MAX),
+            own if own as usize == end + 1 => Some(0),
+            _ => None,
+        };
+        // What leads to a place on a shortest way from one of the two, with
+        // the links between them. For what both use that is what uses the
+        // place; for what uses both, what the place uses.
+        let toward = |far: &[Vec<u32>; 2], end: usize, place: u32, outgoing: bool| {
+            let step = far[end][place as usize];
+            net.beside(place, !outgoing)
+                .into_iter()
+                .filter(|(other, _)| level(far, end, *other).is_some_and(|near| near + 1 == step))
+                .collect::<Vec<_>>()
+        };
+        // One kind of what the two share: how far every place lies from
+        // each of them, along the links for what both use and against them
+        // for what uses both, and every place that both are linked with so,
+        // with the links to the two taken together.
+        let reached = |outgoing: bool| {
+            let far = [
+                net.far(&held[0], &owner, outgoing),
+                net.far(&held[1], &owner, outgoing),
+            ];
+            let near = (0..net.count() as u32)
+                .filter(|place| far.iter().all(|far| far[*place as usize] != u32::MAX))
+                .map(|place| (far[0][place as usize] + far[1][place as usize], place))
+                .collect::<Vec<_>>();
+            (far, near)
+        };
+        let (used, using) = (reached(true), reached(false));
+        // What both use is drawn, unless what uses both was asked for or is
+        // all there is.
+        let users = users.unwrap_or(used.1.is_empty() && !using.1.is_empty());
+        view["shared"]["side"] = json!(side(users));
+        view["shared"]["both_use"] = json!(used.1.len());
+        view["shared"]["uses_both"] = json!(using.1.len());
+        let outgoing = !users;
+        let (far, mut near) = if users { using } else { used };
+        // Only the nearest are looked at more closely: those as near as the
+        // last that has room.
+        if near.len() > SHARED {
+            let cut = near.select_nth_unstable(SHARED - 1).1.0;
+            near.retain(|(links, _)| *links <= cut);
+        }
+        // Among those as near, the most linked with what leads to them.
+        let mut near = near
+            .into_iter()
+            .map(|(links, place)| {
+                let strength = (0..2)
+                    .flat_map(|end| toward(&far, end, place, outgoing))
+                    .map(|(_, flow)| flow.links)
+                    .sum::<u64>();
+                (links, strength, place)
+            })
+            .collect::<Vec<_>>();
+        near.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(b.1.cmp(&a.1))
+                .then(net.tag(a.2).cmp(&net.tag(b.2)))
+        });
+        // The boxes on the ways drawn from each of the two, the shared
+        // places among them: each with what leads to it on its way, none
+        // where that is the one of the two itself, and the links between
+        // them.
+        let mut on: [HashMap<u32, (Option<u32>, Flow)>; 2] = [HashMap::new(), HashMap::new()];
+        let mut boxes: HashSet<u32> = HashSet::new();
+        let mut shown = Vec::new();
+        for (_, _, place) in near.into_iter().take(SHARED) {
+            // The way to it from each of the two, back from it a step at a
+            // time: the strongest of what leads on, and no further than a
+            // box that such a way is drawn through already.
+            let mut ways = [Vec::new(), Vec::new()];
+            for (end, way) in ways.iter_mut().enumerate() {
+                let mut at = place;
+                while !on[end].contains_key(&at) {
+                    let leading = toward(&far, end, at, outgoing);
+                    if far[end][at as usize] == 1 {
+                        // What the one of the two holds leads here, and
+                        // all its links are one link of the picture.
+                        let whole = leading
+                            .iter()
+                            .fold(Flow::default(), |whole, (_, flow)| Flow {
+                                links: whole.links + flow.links,
+                                guessed: whole.guessed + flow.guessed,
+                            });
+                        way.push((at, None, whole));
+                        break;
+                    }
+                    let strongest = leading.into_iter().max_by(|a, b| {
+                        a.1.links
+                            .cmp(&b.1.links)
+                            .then(net.tag(b.0).cmp(&net.tag(a.0)))
+                    });
+                    let Some((before, flow)) = strongest else {
+                        break;
+                    };
+                    way.push((at, Some(before), flow));
+                    at = before;
+                }
+            }
+            let new = ways
+                .iter()
+                .flatten()
+                .map(|(at, ..)| *at)
+                .filter(|at| !boxes.contains(at))
+                .collect::<HashSet<_>>()
+                .len();
+            // A picture that is full shows no more: the nearest stand.
+            if !shown.is_empty() && boxes.len() + new > SIDE {
+                break;
+            }
+            for (end, way) in ways.into_iter().enumerate() {
+                for (at, before, flow) in way {
+                    boxes.insert(at);
+                    on[end].insert(at, (before, flow));
+                }
+            }
+            shown.push(place);
+        }
+        view["shared"]["shown"] = json!(shown.len());
+        if shown.is_empty() {
+            return Some(view);
+        }
+        // The two come first, then the rest by where they lie.
+        let mut drawn = boxes.into_iter().collect::<Vec<_>>();
+        drawn.sort_by(|a, b| net.tag(*a).cmp(&net.tag(*b)));
+        let mut keys = told
+            .iter()
+            .map(|end| end["path"].as_str().unwrap_or("").to_owned())
+            .collect::<Vec<_>>();
+        keys.extend(drawn.iter().map(|place| net.key(&names, *place)));
+        let slot = drawn
+            .iter()
+            .enumerate()
+            .map(|(index, place)| (*place, index + 2))
+            .collect::<HashMap<_, _>>();
+        // The links of the picture are those of the ways, each once: a way
+        // from the first of the two and a way from the second may share one.
+        let mut links: HashMap<(usize, usize), Flow> = HashMap::new();
+        for (end, way) in on.iter().enumerate() {
+            for (at, (before, flow)) in way {
+                let near = before.map_or(end, |before| slot[&before]);
+                let pair = if outgoing {
+                    (near, slot[at])
+                } else {
+                    (slot[at], near)
+                };
+                links.insert(pair, *flow);
+            }
+        }
+        let edges = links
+            .into_iter()
+            .map(|((from, to), flow)| (from, to, flow))
+            .collect::<Vec<_>>();
+        let between = edges.len();
+        let edges = ways_drawn(edges, &keys);
+        // A file is named by the end of its path that no other drawn shares.
+        let paths = keys.iter().map(String::as_str).collect::<Vec<_>>();
+        // What a box stands for: one of the two is all it holds.
+        let members = |index: usize| match index.checked_sub(2) {
+            Some(place) => vec![drawn[place]],
+            None => held[index].clone(),
+        };
+        // The one place a box is, where it is one: a folder is none, nor is
+        // a file among symbols.
+        let one = |index: usize| match (index.checked_sub(2), ends.get(index)) {
+            (Some(place), _) => Some(drawn[place]),
+            (None, Some(Reach::Symbol(at))) => Some(*at),
+            (None, Some(Reach::File(file))) if !symbols => Some(*file),
+            _ => None,
+        };
+        let node = |index: usize| {
+            let key = keys[index].as_str();
+            let mut node = match (one(index), ends.get(index)) {
+                (Some(place), _) => net.node(&names, place, key, &paths),
+                // A file among symbols, or a folder: what it holds, and what
+                // leads out of it and into it.
+                (None, end) => {
+                    let folder = matches!(end, Some(Reach::Folder(_)));
+                    let (mut files, mut inside, mut altered, mut status) = (0u64, 0u64, 0u64, None);
+                    for (id, file) in self.files.iter().enumerate() {
+                        let own = if folder {
+                            file.strip_prefix(key)
+                                .is_some_and(|rest| rest.starts_with('/'))
+                        } else {
+                            file == key
+                        };
+                        if own {
+                            files += 1;
+                            inside += self.holds(id as u32);
+                            if let Some(letter) = names.letter(file) {
+                                altered += 1;
+                                status = Some(letter);
+                            }
+                        }
+                    }
+                    let apart = |other: u32| owner[other as usize] as usize != index + 1;
+                    json!({
+                        "path": key,
+                        "name": if folder { name(key) } else { label(key, &paths) },
+                        "folder": folder,
+                        "files": files,
+                        "symbols": inside,
+                        "within": 0,
+                        "changed": altered,
+                        "status": status.filter(|_| !folder).map(String::from),
+                        "out": net.crossing(&held[index], true, &apart),
+                        "in": net.crossing(&held[index], false, &apart),
+                    })
+                }
+            };
+            // What the two share says how many links each of them is away.
+            let shares = index
+                .checked_sub(2)
+                .map(|place| drawn[place])
+                .filter(|place| shown.contains(place))
+                .map(|place| [far[0][place as usize], far[1][place as usize]]);
+            node["start"] = json!(index == 0);
+            node["end"] = json!(index == 1);
+            node["shares"] = json!(shares);
+            node
+        };
+        // A box as a row beside a selected one.
+        let row = |other: usize, flow: Flow, user: usize, used: usize| match one(other) {
+            Some(place) => net.row(&names, &paths, place, flow, one(user).zip(one(used))),
+            None => {
+                let told = node(other);
+                json!({
+                    "path": told["path"],
+                    "name": told["name"],
+                    "folder": told["folder"],
+                    "inside": true,
+                    "links": flow.links,
+                    "guessed": flow.guessed,
+                    "changed": told["changed"].as_u64().unwrap_or(0) > 0,
+                })
+            }
+        };
+        let focus = focus
+            .and_then(|path| keys.iter().position(|key| key == path))
+            .map(|index| {
+                // What the box leads to on the ways drawn, and what leads to
+                // it.
+                let next = edges
+                    .iter()
+                    .filter(|edge| edge.0 == index)
+                    .collect::<Vec<_>>();
+                let prior = edges
+                    .iter()
+                    .filter(|edge| edge.1 == index)
+                    .collect::<Vec<_>>();
+                let used = next
+                    .iter()
+                    .flat_map(|edge| members(edge.1))
+                    .collect::<HashSet<_>>();
+                let mut focus = node(index);
+                focus["inside"] = json!(true);
+                focus["uses"] = next
+                    .iter()
+                    .map(|edge| row(edge.1, edge.2, index, edge.1))
+                    .collect();
+                focus["uses_more"] = json!(0);
+                focus["used_by"] = prior
+                    .iter()
+                    .map(|edge| row(edge.0, edge.2, edge.0, index))
+                    .collect();
+                focus["used_by_more"] = json!(0);
+                focus["kinds"] = net.kinds(&members(index), &used);
+                focus
+            });
+        view["children"] = json!(keys.len());
+        view["matching"] = json!(keys.len());
+        view["nodes"] = (0..keys.len()).map(node).collect();
         view["between"] = json!(between);
         view["edges"] = edges
             .iter()
@@ -6996,10 +7521,13 @@ function format_price(Price $price): string
 echo format_price(new Price(1));
 ";
     fn basket() -> Index {
+        index(basket_graph())
+    }
+    fn basket_graph() -> Value {
         let file = "src/Cart.php";
         let node = |id: &str, label: &str, line: u32| json!({"id": id, "label": label, "file_type": "code", "source_file": file, "source_location": format!("L{line}")});
         let holds = |holder: &str, relation: &str, held: &str| json!({"source": holder, "target": held, "relation": relation, "source_file": file});
-        index(json!({
+        json!({
             "nodes": [
                 node("file", "Cart.php", 1),
                 node("cart", "Cart", 8),
@@ -7020,7 +7548,7 @@ echo format_price(new Price(1));
                 {"source": "user", "target": "format", "relation": "calls", "source_file": "src/other.php"},
                 {"source": "file", "target": "user", "relation": "imports", "source_file": file}
             ]
-        }))
+        })
     }
     fn hunk(at: u32, added: u32, removed: u32) -> Hunk {
         Hunk {
@@ -8663,6 +9191,1322 @@ where
         assert!(
             found > 5000 && turned > 500 && none > 4000 && capped > 30,
             "{found} {turned} {none} {capped}"
+        );
+    }
+    /// What two places are said to share: which kind is drawn and how many
+    /// places of it, then how many places both use and how many use both.
+    fn shared_of(view: &Value) -> String {
+        let shared = &view["shared"];
+        format!(
+            "{}{} drawn of what {} · both use {} · {} use both",
+            if shared["within"] == true {
+                "within · "
+            } else {
+                ""
+            },
+            shared["shown"],
+            if shared["side"] == "uses_both" {
+                "uses both"
+            } else {
+                "both use"
+            },
+            shared["both_use"],
+            shared["uses_both"],
+        )
+    }
+    /// The boxes of what two places share: which of the two a box is, and
+    /// for what they share how many links each of the two is away.
+    fn boxes(view: &Value) -> Vec<String> {
+        view["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| {
+                format!(
+                    "{}{}{}{}{}",
+                    node["name"].as_str().unwrap(),
+                    if node["folder"] == true { "/" } else { "" },
+                    if node["start"] == true { " first" } else { "" },
+                    if node["end"] == true { " second" } else { "" },
+                    match node["shares"].as_array() {
+                        Some(far) => format!(" shared {}+{}", far[0], far[1]),
+                        None => String::new(),
+                    },
+                )
+            })
+            .collect()
+    }
+    #[test]
+    fn two_files_share_what_both_use_and_what_uses_both() {
+        let index = office(3);
+        let shared =
+            |from: &str, to: &str, users: Option<bool>, focus: Option<&str>, certain: bool| {
+                index
+                    .shared("office", from, to, users, &[], &|_| None, focus, certain)
+                    .unwrap()
+            };
+        let (users, orders) = ("app/api/users.php", "app/api/orders.php");
+        // The two files of the API both use the core, the database and the
+        // cache, and the entry point uses both. What both use is drawn where
+        // nothing else is asked: the database is one link from the orders,
+        // which was guessed, and two from the users.
+        let api = shared(users, orders, None, None, false);
+        assert_eq!(api["mode"], "shared");
+        assert_eq!(
+            shared_of(&api),
+            "3 drawn of what both use · both use 3 · 1 use both"
+        );
+        assert_eq!(
+            boxes(&api),
+            [
+                "users.php first",
+                "orders.php second",
+                "core.php shared 1+1",
+                "db.php shared 2+1",
+                "store.php shared 2+2",
+            ]
+        );
+        // Each is drawn with one shortest way from either file: the users
+        // reach the database through the core, and both reach the cache so.
+        assert_eq!(
+            sorted(calls(&api)),
+            [
+                "core.php -> db.php 2/0",
+                "core.php -> store.php 1/0",
+                "orders.php -> core.php 1/0",
+                "orders.php -> db.php 1/1",
+                "users.php -> core.php 1/0",
+            ]
+        );
+        assert_eq!(api["between"], 5);
+        assert_eq!(shared(users, orders, Some(false), None, false), api);
+        // The two are told as they were asked for, and the way back leads to
+        // where the first of them lies.
+        assert_eq!(
+            api["shared"]["from"],
+            json!({"path": users, "name": "users.php", "what": "file"})
+        );
+        assert_eq!(api["shared"]["to"]["name"], "orders.php");
+        assert_eq!(
+            (&api["shared"]["names"], &api["shared"]["wide"]),
+            (&json!(false), &json!(SHARED))
+        );
+        assert_eq!(api["scope"], "app/api");
+        assert_eq!(
+            api["crumbs"],
+            json!([
+                {"name": "office", "path": ""},
+                {"name": "app", "path": "app"},
+                {"name": "api", "path": "app/api"},
+                {"name": "users.php and orders.php", "path": ""}
+            ])
+        );
+        // What uses both is drawn where it is asked for: the links run from
+        // it to the two.
+        let above = shared(users, orders, Some(true), None, false);
+        assert_eq!(
+            shared_of(&above),
+            "1 drawn of what uses both · both use 3 · 1 use both"
+        );
+        assert_eq!(
+            boxes(&above),
+            [
+                "users.php first",
+                "orders.php second",
+                "main.php shared 1+1"
+            ]
+        );
+        assert_eq!(
+            sorted(calls(&above)),
+            ["main.php -> orders.php 1/0", "main.php -> users.php 1/0"]
+        );
+        // Without what the tool guessed the orders reach the database
+        // through the core as well, and it stands before the cache, being
+        // the more linked of two that are as near.
+        let read = shared(users, orders, None, None, true);
+        assert_eq!(
+            boxes(&read)[2..],
+            [
+                "core.php shared 1+1",
+                "db.php shared 2+2",
+                "store.php shared 2+2",
+            ]
+        );
+        assert_eq!(calls(&read).len(), 4);
+        // A box lists what it leads to on the ways drawn and what leads to
+        // it, and how it uses the next.
+        let chosen = shared(users, orders, None, Some("lib/core.php"), false);
+        let focus = &chosen["focus"];
+        assert_eq!(
+            (&focus["path"], &focus["shares"]),
+            (&json!("lib/core.php"), &json!([1, 1]))
+        );
+        let rows = |focus: &Value, side: &str| {
+            focus[side]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    format!(
+                        "{}{} {}{}",
+                        row["name"].as_str().unwrap(),
+                        if row["folder"] == true { "/" } else { "" },
+                        row["links"],
+                        if row["inside"] == true { " drawn" } else { "" }
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rows(focus, "uses"), ["db.php 2 drawn", "store.php 1 drawn"]);
+        assert_eq!(
+            rows(focus, "used_by"),
+            ["orders.php 1 drawn", "users.php 1 drawn"]
+        );
+        assert_eq!(
+            (&focus["uses_more"], &focus["used_by_more"]),
+            (&json!(0), &json!(0))
+        );
+        assert_eq!(focus["kinds"], json!([{"kind": "calls", "links": 3}]));
+        // So does one of the two: nothing leads to it where what both use
+        // is drawn, and nothing on from it where what uses both is.
+        let first = shared(users, orders, None, Some(users), false);
+        assert_eq!(
+            (&first["focus"]["start"], &first["focus"]["shares"]),
+            (&json!(true), &Value::Null)
+        );
+        assert_eq!(rows(&first["focus"], "uses"), ["core.php 1 drawn"]);
+        assert_eq!(rows(&first["focus"], "used_by"), Vec::<String>::new());
+        let second = shared(users, orders, Some(true), Some(orders), false);
+        assert_eq!(rows(&second["focus"], "uses"), Vec::<String>::new());
+        assert_eq!(rows(&second["focus"], "used_by"), ["main.php 1 drawn"]);
+        // What one of the two reaches only through the other is not shared:
+        // the entry point reaches the cache through the core alone, and the
+        // database through the orders too.
+        let through = shared("app/main.php", "lib/core.php", None, None, false);
+        assert_eq!(
+            shared_of(&through),
+            "1 drawn of what both use · both use 1 · 0 use both"
+        );
+        assert_eq!(
+            boxes(&through),
+            [
+                "main.php first",
+                "core.php second",
+                "orders.php",
+                "db.php shared 2+1",
+            ]
+        );
+        assert_eq!(
+            sorted(calls(&through)),
+            [
+                "core.php -> db.php 2/0",
+                "main.php -> orders.php 1/0",
+                "orders.php -> db.php 1/1",
+            ]
+        );
+        // Without that guess the two share nothing, and nothing is drawn.
+        let nothing = shared("app/main.php", "lib/core.php", None, None, true);
+        assert_eq!(
+            shared_of(&nothing),
+            "0 drawn of what both use · both use 0 · 0 use both"
+        );
+        assert_eq!(
+            (&nothing["nodes"], &nothing["edges"], &nothing["mode"]),
+            (&json!([]), &json!([]), &json!("shared"))
+        );
+        // Where the two use nothing in common and something uses both, that
+        // is what is drawn; what both use is still answered where it is
+        // asked for, with nothing to draw.
+        let (db, cache) = ("lib/db.php", "lib/deep/cache/store.php");
+        let leaves = shared(db, cache, None, None, false);
+        assert_eq!(
+            shared_of(&leaves),
+            "4 drawn of what uses both · both use 0 · 4 use both"
+        );
+        assert_eq!(
+            boxes(&leaves),
+            [
+                "db.php first",
+                "store.php second",
+                "orders.php shared 1+2",
+                "users.php shared 2+2",
+                "main.php shared 2+3",
+                "core.php shared 1+1",
+            ]
+        );
+        assert_eq!(
+            sorted(calls(&leaves)),
+            [
+                "core.php -> db.php 2/0",
+                "core.php -> store.php 1/0",
+                "main.php -> orders.php 1/0",
+                "orders.php -> core.php 1/0",
+                "orders.php -> db.php 1/1",
+                "users.php -> core.php 1/0",
+            ]
+        );
+        let asked = shared(db, cache, Some(false), None, false);
+        assert_eq!(
+            shared_of(&asked),
+            "0 drawn of what both use · both use 0 · 4 use both"
+        );
+        assert_eq!(asked["nodes"], json!([]));
+        // A place the graph does not know shares nothing at all.
+        assert!(
+            index
+                .shared(
+                    "office",
+                    users,
+                    "lib/gone.php",
+                    None,
+                    &[],
+                    &|_| None,
+                    None,
+                    false
+                )
+                .is_none()
+        );
+    }
+    #[test]
+    fn a_folder_that_shares_is_one_box_with_all_its_links() {
+        let index = office(3);
+        let shared = |from: &str, to: &str, focus: Option<&str>| {
+            index
+                .shared("office", from, to, None, &[], &|_| None, focus, false)
+                .unwrap()
+        };
+        // The API and the reports both use the database: the API through
+        // one link that was guessed, the reports through one from each of
+        // their three files. Only the API has something that uses it.
+        let folders = shared("app/api", "reports/", Some("reports"));
+        assert_eq!(
+            shared_of(&folders),
+            "1 drawn of what both use · both use 1 · 0 use both"
+        );
+        assert_eq!(
+            boxes(&folders),
+            ["api/ first", "reports/ second", "db.php shared 1+1"]
+        );
+        assert_eq!(
+            sorted(calls(&folders)),
+            ["api -> db.php 1/1", "reports -> db.php 3/0"]
+        );
+        let api = &folders["nodes"][0];
+        assert_eq!(
+            (
+                &api["path"],
+                &api["files"],
+                &api["symbols"],
+                &api["out"],
+                &api["in"]
+            ),
+            (
+                &json!("app/api"),
+                &json!(2),
+                &json!(2),
+                &json!(3),
+                &json!(2)
+            )
+        );
+        assert_eq!(
+            folders["shared"]["to"],
+            json!({"path": "reports", "name": "reports", "what": "folder"})
+        );
+        assert_eq!(folders["scope"], "app");
+        // A folder that is selected lists its links as one, and says how
+        // its files use what it leads to.
+        let focus = &folders["focus"];
+        assert_eq!(
+            (&focus["path"], &focus["folder"], &focus["end"]),
+            (&json!("reports"), &json!(true), &json!(true))
+        );
+        assert_eq!(
+            (&focus["uses"][0]["path"], &focus["uses"][0]["links"]),
+            (&json!("lib/db.php"), &json!(3))
+        );
+        assert_eq!(focus["kinds"], json!([{"kind": "calls", "links": 3}]));
+        // And it is a row beside what it leads to.
+        let used = shared("app/api", "reports", Some("lib/db.php"));
+        let rows = used["focus"]["used_by"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                format!(
+                    "{} {} {}/{}",
+                    row["path"].as_str().unwrap(),
+                    row["folder"],
+                    row["links"],
+                    row["guessed"]
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows, ["reports true 3/0", "app/api true 1/1"]);
+        // A folder that holds the entry point as well: what the API uses is
+        // reached from inside it, and the database alone is shared with the
+        // reports.
+        let whole = shared("app", "reports", None);
+        assert_eq!(
+            boxes(&whole),
+            ["app/ first", "reports/ second", "db.php shared 1+1"]
+        );
+        // What lies in the other is not apart from it, nor is a place from
+        // itself.
+        let inside = shared("lib", "lib/db.php", None);
+        assert_eq!(
+            shared_of(&inside),
+            "within · 0 drawn of what both use · both use 0 · 0 use both"
+        );
+        assert_eq!(inside["nodes"], json!([]));
+        assert_eq!(
+            shared_of(&shared("lib/db.php", "lib/db.php", None)),
+            shared_of(&inside)
+        );
+    }
+    #[test]
+    fn what_two_symbols_share_is_told_among_symbols() {
+        let index = store();
+        let shared =
+            |from: &str, to: &str, users: Option<bool>, focus: Option<&str>, certain: bool| {
+                index
+                    .shared("shop", from, to, users, &[], &|_| None, focus, certain)
+                    .unwrap()
+            };
+        let format = "src/Cart/Cart.php#L29:format_price()";
+        let paid = "src/Order/Notifier.php#L11:.paid()";
+        // The total and the formatting both call the adding of a price, the
+        // formatting by a guess.
+        let both = shared(TOTAL_KEY, format, None, None, false);
+        assert_eq!(
+            shared_of(&both),
+            "1 drawn of what both use · both use 1 · 1 use both"
+        );
+        assert_eq!(both["shared"]["names"], true);
+        assert_eq!(
+            boxes(&both),
+            [
+                "Cart.total() first",
+                "format_price() second",
+                "Price.plus() shared 1+1",
+            ]
+        );
+        assert_eq!(
+            sorted(calls(&both)),
+            [
+                "Cart.total() -> Price.plus() 1/0",
+                "format_price() -> Price.plus() 1/1",
+            ]
+        );
+        // Each is a symbol of its own file, and the two say what they are.
+        let plus = &both["nodes"][2];
+        assert_eq!(
+            (&plus["symbol"], &plus["kind"], &plus["file"], &plus["line"]),
+            (
+                &json!(true),
+                &json!("method"),
+                &json!("src/Cart/Price.php"),
+                &json!(10)
+            )
+        );
+        assert_eq!(both["shared"]["from"]["what"], "method");
+        assert_eq!(both["scope"], CART);
+        assert_eq!(
+            both["crumbs"].as_array().unwrap().last().unwrap()["name"],
+            "Cart.total() and format_price()"
+        );
+        // Checkout uses both: the total itself, and the formatting through
+        // the notifier, which it is only guessed to call.
+        let above = shared(TOTAL_KEY, format, Some(true), Some(paid), false);
+        assert_eq!(
+            boxes(&above),
+            [
+                "Cart.total() first",
+                "format_price() second",
+                "Cart.checkout() shared 1+2",
+                "Notifier.paid()",
+            ]
+        );
+        assert_eq!(
+            sorted(calls(&above)),
+            [
+                "Cart.checkout() -> Cart.total() 1/0",
+                "Cart.checkout() -> Notifier.paid() 1/1",
+                "Notifier.paid() -> format_price() 1/0",
+            ]
+        );
+        // A box on the way lists the next and the one before, each with how
+        // the two are linked.
+        let focus = &above["focus"];
+        assert_eq!(focus["shares"], Value::Null);
+        assert_eq!(
+            (
+                &focus["uses"][0]["name"],
+                &focus["uses"][0]["relation"],
+                &focus["uses"][0]["guessed"]
+            ),
+            (&json!("format_price()"), &json!("calls"), &json!(0))
+        );
+        assert_eq!(
+            (
+                &focus["used_by"][0]["path"],
+                &focus["used_by"][0]["guessed"]
+            ),
+            (&json!(CHECKOUT_KEY), &json!(1))
+        );
+        assert_eq!(focus["kinds"], json!([{"kind": "calls", "links": 1}]));
+        // Without what the tool guessed nothing is left of either kind.
+        let read = shared(TOTAL_KEY, format, None, None, true);
+        assert_eq!(
+            shared_of(&read),
+            "0 drawn of what both use · both use 0 · 0 use both"
+        );
+        // A file stands for every symbol in it, and is one box among the
+        // symbols: the notifier reaches the adding through the formatting.
+        let file = shared(TOTAL_KEY, "src/Order/Notifier.php", None, None, false);
+        assert_eq!(
+            boxes(&file),
+            [
+                "Cart.total() first",
+                "Notifier.php second",
+                "format_price()",
+                "Price.plus() shared 1+2",
+            ]
+        );
+        assert_eq!(
+            sorted(calls(&file)),
+            [
+                "Cart.total() -> Price.plus() 1/0",
+                "Notifier.php -> format_price() 1/0",
+                "format_price() -> Price.plus() 1/1",
+            ]
+        );
+        let notifier = &file["nodes"][1];
+        assert_eq!(
+            (
+                &notifier["path"],
+                &notifier["symbol"],
+                &notifier["folder"],
+                &notifier["symbols"]
+            ),
+            (
+                &json!("src/Order/Notifier.php"),
+                &Value::Null,
+                &json!(false),
+                &json!(2)
+            )
+        );
+        assert_eq!(file["shared"]["to"]["what"], "file");
+        // Checkout uses the total and something of the notifier.
+        let users = shared(TOTAL_KEY, "src/Order/Notifier.php", Some(true), None, false);
+        assert_eq!(
+            sorted(calls(&users)),
+            [
+                "Cart.checkout() -> Cart.total() 1/0",
+                "Cart.checkout() -> Notifier.php 1/1",
+            ]
+        );
+        // A symbol of the file at the other end lies in it.
+        let own = shared(TOTAL_KEY, CART, None, None, false);
+        assert_eq!(own["shared"]["within"], true);
+    }
+    #[test]
+    fn what_two_places_share_is_shown_nearest_first_as_far_as_a_picture_has_room() {
+        // Two files that both use fifteen others, the later ones through
+        // more links, and that five others use.
+        let node = |id: &str, file: &str| json!({"id": id, "label": id, "source_file": file});
+        let call = |from: &str, to: &str, file: &str| json!({"source": from, "target": to, "relation": "calls", "source_file": file});
+        let (mut nodes, mut links) = (
+            vec![node("a", "src/a.py"), node("b", "src/b.py")],
+            Vec::new(),
+        );
+        for at in 0..15 {
+            let (id, file) = (format!("u{at:02}"), format!("lib/u{at:02}.py"));
+            nodes.push(node(&id, &file));
+            for copy in 0..=at / 5 {
+                // More names of a file that use the same one are more links.
+                let (a, b) = (format!("a{at}_{copy}"), format!("b{at}_{copy}"));
+                nodes.push(node(&a, "src/a.py"));
+                nodes.push(node(&b, "src/b.py"));
+                links.push(call(&a, &id, "src/a.py"));
+                links.push(call(&b, &id, "src/b.py"));
+            }
+        }
+        for at in 0..5 {
+            let (id, file) = (format!("t{at}"), format!("top/t{at}.py"));
+            nodes.push(node(&id, &file));
+            links.push(call(&id, "a", &file));
+            links.push(call(&id, "b", &file));
+        }
+        let wide = self::index(json!({"nodes": nodes, "links": links}));
+        let shared = |users: Option<bool>| {
+            wide.shared(
+                "wide",
+                "src/a.py",
+                "src/b.py",
+                users,
+                &[],
+                &|_| None,
+                None,
+                false,
+            )
+            .unwrap()
+        };
+        // All fifteen are one link from either file: the most linked are
+        // drawn, by their paths where they are linked alike.
+        let view = shared(None);
+        assert_eq!(
+            shared_of(&view),
+            format!("{SHARED} drawn of what both use · both use 15 · 5 use both")
+        );
+        let used = boxes(&view)[2..].to_vec();
+        // Three links from each file lead to the last five and two to the
+        // five before them; of the first five, with one, two have room.
+        assert_eq!(
+            used.iter().map(|name| &name[..3]).collect::<Vec<_>>(),
+            [
+                "u00", "u01", "u05", "u06", "u07", "u08", "u09", "u10", "u11", "u12", "u13", "u14"
+            ]
+        );
+        assert!(used.iter().all(|name| name.ends_with(".py shared 1+1")));
+        assert_eq!(calls(&view).len(), 2 * SHARED);
+        assert!(calls(&view).contains(&"a.py -> u14.py 3/0".to_owned()));
+        // What uses both is another picture, with all five of it.
+        let above = shared(Some(true));
+        assert_eq!(
+            shared_of(&above),
+            "5 drawn of what uses both · both use 15 · 5 use both"
+        );
+        assert_eq!(calls(&above).len(), 10);
+        // Where several ways to a place are as short, the strongest is the
+        // one drawn, and the first by its path where they are as strong.
+        let ways = |twice: bool| {
+            let mut nodes = vec![
+                node("a", "src/a.py"),
+                node("b", "src/b.py"),
+                node("m1", "mid/m1.py"),
+                node("m2", "mid/m2.py"),
+                node("x", "lib/x.py"),
+            ];
+            let mut links = vec![
+                call("a", "m1", "src/a.py"),
+                call("a", "m2", "src/a.py"),
+                call("m1", "x", "mid/m1.py"),
+                call("m2", "x", "mid/m2.py"),
+                call("b", "x", "src/b.py"),
+            ];
+            if twice {
+                nodes.push(node("m2b", "mid/m2.py"));
+                links.push(call("m2b", "x", "mid/m2.py"));
+            }
+            let view = self::index(json!({"nodes": nodes, "links": links}))
+                .shared(
+                    "ways",
+                    "src/a.py",
+                    "src/b.py",
+                    None,
+                    &[],
+                    &|_| None,
+                    None,
+                    false,
+                )
+                .unwrap();
+            assert_eq!(
+                shared_of(&view),
+                "1 drawn of what both use · both use 1 · 0 use both"
+            );
+            (boxes(&view), sorted(calls(&view)))
+        };
+        assert_eq!(
+            ways(false),
+            (
+                vec![
+                    "a.py first".to_owned(),
+                    "b.py second".to_owned(),
+                    "x.py shared 2+1".to_owned(),
+                    "m1.py".to_owned(),
+                ],
+                vec![
+                    "a.py -> m1.py 1/0".to_owned(),
+                    "b.py -> x.py 1/0".to_owned(),
+                    "m1.py -> x.py 1/0".to_owned(),
+                ]
+            )
+        );
+        assert_eq!(
+            ways(true),
+            (
+                vec![
+                    "a.py first".to_owned(),
+                    "b.py second".to_owned(),
+                    "x.py shared 2+1".to_owned(),
+                    "m2.py".to_owned(),
+                ],
+                vec![
+                    "a.py -> m2.py 1/0".to_owned(),
+                    "b.py -> x.py 1/0".to_owned(),
+                    "m2.py -> x.py 2/0".to_owned(),
+                ]
+            )
+        );
+        // Another way of the same length that happens to pass a box drawn
+        // is not drawn with it: a place keeps one way from each of the two.
+        let nodes = vec![
+            node("a", "src/a.py"),
+            node("b", "src/b.py"),
+            node("p", "lib/p.py"),
+            node("q", "lib/q.py"),
+            node("q2", "lib/q.py"),
+            node("x", "lib/x.py"),
+        ];
+        let links = vec![
+            call("a", "p", "src/a.py"),
+            call("b", "p", "src/b.py"),
+            call("a", "q", "src/a.py"),
+            call("b", "q", "src/b.py"),
+            call("p", "x", "lib/p.py"),
+            call("q", "x", "lib/q.py"),
+            call("q2", "x", "lib/q.py"),
+        ];
+        let view = self::index(json!({"nodes": nodes, "links": links}))
+            .shared(
+                "one",
+                "src/a.py",
+                "src/b.py",
+                None,
+                &[],
+                &|_| None,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            boxes(&view)[2..],
+            ["p.py shared 1+1", "q.py shared 1+1", "x.py shared 2+2"]
+        );
+        assert_eq!(
+            sorted(calls(&view)),
+            [
+                "a.py -> p.py 1/0",
+                "a.py -> q.py 1/0",
+                "b.py -> p.py 1/0",
+                "b.py -> q.py 1/0",
+                "q.py -> x.py 2/0",
+            ]
+        );
+        // Places that the two reach only by long ways fill a picture before
+        // it shows as many: each needs the boxes of its ways.
+        let (mut nodes, mut links) = (
+            vec![node("a", "src/a.py"), node("b", "src/b.py")],
+            Vec::new(),
+        );
+        for at in 0..12 {
+            // Each of twelve is five links from a.py and one from b.py.
+            let last = format!("far/f{at:02}.py");
+            nodes.push(node(&format!("f{at}"), &last));
+            links.push(call("b", &format!("f{at}"), "src/b.py"));
+            let (mut before, mut from) = ("a".to_owned(), "src/a.py".to_owned());
+            for step in 0..4 {
+                let (id, file) = (format!("w{at}_{step}"), format!("way/w{at:02}_{step}.py"));
+                nodes.push(node(&id, &file));
+                links.push(call(&before, &id, &from));
+                (before, from) = (id, file);
+            }
+            links.push(call(&before, &format!("f{at}"), &from));
+        }
+        let long = self::index(json!({"nodes": nodes, "links": links}));
+        let view = long
+            .shared(
+                "long",
+                "src/a.py",
+                "src/b.py",
+                None,
+                &[],
+                &|_| None,
+                None,
+                false,
+            )
+            .unwrap();
+        // Five boxes for each: eleven of the twelve fit a picture.
+        assert_eq!((SIDE, FOLLOWED), (58, 60));
+        assert_eq!(
+            shared_of(&view),
+            "11 drawn of what both use · both use 12 · 0 use both"
+        );
+        assert_eq!(view["nodes"].as_array().unwrap().len(), 2 + 55);
+        assert_eq!(boxes(&view)[2], "f00.py shared 5+1");
+        assert_eq!(view["edges"].as_array().unwrap().len(), 11 * 6);
+        assert!(!boxes(&view).iter().any(|name| name.starts_with("f11")));
+    }
+    #[test]
+    fn what_two_places_share_carries_what_a_chosen_change_did() {
+        let marks = |view: &Value| {
+            view["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| {
+                    format!(
+                        "{} {} {}",
+                        node["name"].as_str().unwrap(),
+                        node["changed"],
+                        node["status"].as_str().unwrap_or("-")
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        // Among files: a folder says how many of its files changed, a
+        // deleted one apart, and a file of the change carries Git's letter.
+        let office = office(2);
+        let altered = [
+            ("reports/r01.php".to_owned(), 'M'),
+            ("reports/r02.php".to_owned(), 'D'),
+            ("lib/db.php".to_owned(), 'A'),
+        ];
+        let folders = office
+            .shared(
+                "office",
+                "app/api",
+                "reports",
+                None,
+                &altered,
+                &|_| None,
+                Some("reports"),
+                false,
+            )
+            .unwrap();
+        assert_eq!(marks(&folders), ["api 0 -", "reports 1 -", "db.php 1 A"]);
+        assert_eq!(folders["focus"]["uses"][0]["changed"], true);
+        // Among symbols: one caller lies in a new file, the other in a file
+        // the change left alone, and the lines of the function they both
+        // call replaced others.
+        let mut graph = basket_graph();
+        graph["nodes"].as_array_mut().unwrap().push(json!({
+            "id": "second", "label": "second()",
+            "source_file": "src/second.php", "source_location": "L3"
+        }));
+        graph["links"].as_array_mut().unwrap().push(json!({
+            "source": "second", "target": "format", "relation": "calls",
+            "source_file": "src/second.php"
+        }));
+        let index = self::index(graph);
+        let changed = [
+            ("src/Cart.php".to_owned(), 'M'),
+            ("src/other.php".to_owned(), 'A'),
+        ];
+        let edited = |path: &str| {
+            Some(match path {
+                "src/Cart.php" => Edited {
+                    new: false,
+                    text: BASKET.to_owned(),
+                    hunks: vec![hunk(34, 5, 2)],
+                },
+                _ => Edited {
+                    new: true,
+                    ..Edited::default()
+                },
+            })
+        };
+        let format = "src/Cart.php#L35:format_price()";
+        let view = index
+            .shared(
+                "shop",
+                "src/other.php#L3:user()",
+                "src/second.php#L3:second()",
+                None,
+                &changed,
+                &edited,
+                Some(format),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            marks(&view),
+            ["user() 1 A", "second() 0 -", "format_price() 1 M"]
+        );
+        assert_eq!(
+            (&view["focus"]["status"], &view["focus"]["shares"]),
+            (&json!("M"), &json!([1, 1]))
+        );
+        // A row beside it says the same of the symbol it names.
+        let rows = view["focus"]["used_by"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| format!("{} {}", row["name"].as_str().unwrap(), row["changed"]))
+            .collect::<Vec<_>>();
+        assert_eq!(rows, ["user() true", "second() false"]);
+    }
+    /// Graphs made at random, and what two of their places share checked
+    /// against distances worked out apart, on a graph without the two: how
+    /// many places both use and how many use both, which kind is drawn,
+    /// that the nearest are the ones drawn, how far each is said to be, and
+    /// a picture in which every box lies on a shortest way drawn whole,
+    /// one from each of the two.
+    #[test]
+    fn what_two_places_share_on_a_graph_made_at_random_is_what_its_links_allow() {
+        const FAR: usize = usize::MAX;
+        let mut seed = 0xD1B5_4A32_D192_ED03_u64;
+        let mut below = move |limit: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % limit as u64) as usize
+        };
+        // What the answers for two places were: whether the two lie apart,
+        // how many places they share, whether fewer are drawn than there
+        // are, whether leaving out the ways through the other left a place
+        // out, and whether what uses both was drawn unasked.
+        struct Told {
+            apart: bool,
+            shared: usize,
+            capped: bool,
+            through: bool,
+            turned: bool,
+        }
+        // How far every place lies from every other along the links, by
+        // ways that pass none of `closed`.
+        let apart = |uses: &[Vec<bool>], closed: &dyn Fn(usize) -> bool| {
+            let count = uses.len();
+            let mut far = vec![vec![FAR; count]; count];
+            for (user, row) in uses.iter().enumerate() {
+                if closed(user) {
+                    continue;
+                }
+                far[user][user] = 0;
+                for (used, linked) in row.iter().enumerate() {
+                    if *linked && user != used && !closed(used) {
+                        far[user][used] = 1;
+                    }
+                }
+            }
+            for through in 0..count {
+                let onward = far[through].clone();
+                for row in &mut far {
+                    let before = row[through];
+                    if before == FAR {
+                        continue;
+                    }
+                    for (to, after) in onward.iter().enumerate() {
+                        if *after != FAR && before + after < row[to] {
+                            row[to] = before + after;
+                        }
+                    }
+                }
+            }
+            far
+        };
+        // The answers for two places against the distances: `asked` gives
+        // the answer where nothing is asked for (`None`), for what both use
+        // and for what uses both; `first` and `second` are what the two
+        // places stand for, `whole` is how far the places lie from each
+        // other by any way, and `ids` tells a drawn place by its name.
+        let check = |asked: &dyn Fn(Option<bool>) -> Value,
+                     first: &[usize],
+                     second: &[usize],
+                     uses: &[Vec<bool>],
+                     whole: &[Vec<usize>],
+                     ids: &HashMap<String, usize>,
+                     what: &str| {
+            let count = uses.len();
+            if first.iter().any(|place| second.contains(place)) {
+                for users in [None, Some(false), Some(true)] {
+                    let view = asked(users);
+                    assert_eq!(view["shared"]["within"], true, "{what}");
+                    assert_eq!(view["nodes"], json!([]), "{what}");
+                }
+                return Told {
+                    apart: false,
+                    shared: 0,
+                    capped: false,
+                    through: false,
+                    turned: false,
+                };
+            }
+            // No way to what is shared passes what the two hold.
+            let own = |place: usize| first.contains(&place) || second.contains(&place);
+            let far = apart(uses, &own);
+            // How many links a place lies from one of the two along the
+            // links, or, with `back`, against them: one link out of what
+            // the one holds, and then a way among the rest.
+            let near = |end: &[usize], place: usize, back: bool| {
+                (0..count)
+                    .filter(|next| {
+                        !own(*next)
+                            && end.iter().any(|held| {
+                                if back {
+                                    uses[*next][*held]
+                                } else {
+                                    uses[*held][*next]
+                                }
+                            })
+                    })
+                    .map(|next| {
+                        if back {
+                            far[place][next]
+                        } else {
+                            far[next][place]
+                        }
+                    })
+                    .filter(|far| *far != FAR)
+                    .min()
+                    .map(|far| far + 1)
+            };
+            // What one of the two reaches at all, by whatever way.
+            let loose = |end: &[usize], place: usize, back: bool| {
+                end.iter().any(|held| {
+                    if back {
+                        whole[place][*held] != FAR
+                    } else {
+                        whole[*held][place] != FAR
+                    }
+                })
+            };
+            // Each kind: every place of it with how far the two are.
+            let kinds = [false, true].map(|back| {
+                (0..count)
+                    .filter(|at| !own(*at))
+                    .filter_map(|at| {
+                        near(first, at, back)
+                            .zip(near(second, at, back))
+                            .map(|(a, b)| (at, a, b))
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let all = kinds[0].len() + kinds[1].len();
+            // A place that both reach, but one of them only through the
+            // other, is not shared.
+            let through = [false, true].iter().zip(&kinds).any(|(back, shared)| {
+                (0..count).any(|at| {
+                    !own(at)
+                        && !shared.iter().any(|(known, ..)| *known == at)
+                        && loose(first, at, *back)
+                        && loose(second, at, *back)
+                })
+            });
+            // Unasked, what both use is drawn, unless only the other kind
+            // has anything.
+            let turned = kinds[0].is_empty() && !kinds[1].is_empty();
+            let views = [asked(Some(false)), asked(Some(true))];
+            assert_eq!(asked(None), views[usize::from(turned)], "{what}");
+            let mut capped = false;
+            for (back, shared) in [false, true].iter().zip(&kinds) {
+                let back = *back;
+                let view = &views[usize::from(back)];
+                let told = &view["shared"];
+                let role = if back { "uses_both" } else { "both_use" };
+                assert_eq!(
+                    (
+                        &told["within"],
+                        &told["side"],
+                        &told["both_use"],
+                        &told["uses_both"]
+                    ),
+                    (
+                        &json!(false),
+                        &json!(role),
+                        &json!(kinds[0].len()),
+                        &json!(kinds[1].len())
+                    ),
+                    "{what}: {role}"
+                );
+                let nodes = view["nodes"].as_array().unwrap();
+                let edges = view["edges"].as_array().unwrap();
+                if shared.is_empty() {
+                    assert_eq!(
+                        (nodes.len(), edges.len(), &told["shown"]),
+                        (0, 0, &json!(0)),
+                        "{what}: {role}"
+                    );
+                    continue;
+                }
+                // The links drawn, by the numbers of the boxes at their ends.
+                let place =
+                    |path: &Value| nodes.iter().position(|node| &node["path"] == path).unwrap();
+                let drawn = edges
+                    .iter()
+                    .map(|edge| (place(&edge["from"]), place(&edge["to"])))
+                    .collect::<Vec<_>>();
+                assert_eq!(view["between"], json!(drawn.len()), "{what}: {role}");
+                // How many links drawn lead from one box to another.
+                let steps = |from: usize, to: usize| {
+                    let mut far = vec![FAR; nodes.len()];
+                    far[from] = 0;
+                    let mut front = vec![from];
+                    while let Some(at) = front.pop() {
+                        for (user, used) in &drawn {
+                            if *user == at && far[at] + 1 < far[*used] {
+                                far[*used] = far[at] + 1;
+                                front.push(*used);
+                            }
+                        }
+                    }
+                    far[to]
+                };
+                let shown = nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, node)| node["shares"].is_array())
+                    .collect::<Vec<_>>();
+                assert_eq!(told["shown"], json!(shown.len()), "{what}: {role}");
+                assert!(
+                    (1..=SHARED.min(shared.len())).contains(&shown.len()),
+                    "{what}: {role}"
+                );
+                let mut furthest = 0;
+                for (index, node) in &shown {
+                    let at = ids[node["path"].as_str().unwrap()];
+                    let (_, a, b) = shared
+                        .iter()
+                        .find(|(known, ..)| *known == at)
+                        .unwrap_or_else(|| panic!("{what}: {node}"));
+                    // It says how far each of the two is, and a way of
+                    // that many links is drawn between it and each.
+                    assert_eq!(node["shares"], json!([a, b]), "{what}: {node}");
+                    let ways = if back {
+                        (steps(*index, 0), steps(*index, 1))
+                    } else {
+                        (steps(0, *index), steps(1, *index))
+                    };
+                    assert_eq!(ways, (*a, *b), "{what}: {node}");
+                    furthest = furthest.max(a + b);
+                }
+                // The nearest are the ones drawn, and where fewer are
+                // drawn than have room the picture is full.
+                let rest = shared
+                    .iter()
+                    .filter(|(at, ..)| {
+                        !shown
+                            .iter()
+                            .any(|(_, node)| ids[node["path"].as_str().unwrap()] == *at)
+                    })
+                    .map(|(_, a, b)| a + b)
+                    .min();
+                if let Some(next) = rest {
+                    assert!(furthest <= next, "{what}: {role}");
+                    capped = true;
+                    if shown.len() < SHARED {
+                        assert!(nodes.len() - 2 + next - 1 > SIDE, "{what}: {role}");
+                    }
+                }
+                // The two come first, each once, and no place is drawn
+                // twice.
+                assert!(nodes.len() <= FOLLOWED, "{what}: {role}");
+                let mut seen = HashSet::new();
+                for (index, node) in nodes.iter().enumerate() {
+                    assert!(
+                        seen.insert(node["path"].as_str().unwrap()),
+                        "{what}: {node}"
+                    );
+                    assert_eq!(
+                        (&node["start"], &node["end"]),
+                        (&json!(index == 0), &json!(index == 1)),
+                        "{what}: {role}"
+                    );
+                    // The links run from the two to what both use, and to
+                    // the two from what uses both: nothing drawn leads
+                    // back to them. A box has one way from each of the two
+                    // at most, and one that is neither of the two nor
+                    // shared lies on a way.
+                    let into = drawn.iter().filter(|(_, used)| *used == index).count();
+                    let out = drawn.iter().filter(|(user, _)| *user == index).count();
+                    let (towards, onward) = if back { (out, into) } else { (into, out) };
+                    if index < 2 {
+                        assert!(towards == 0 && onward > 0, "{what}: {node}");
+                    } else {
+                        assert!((1..=2).contains(&towards), "{what}: {node}");
+                        assert!(node["shares"].is_array() || onward > 0, "{what}: {node}");
+                    }
+                }
+                // Each link drawn is a link of the graph, or, at one of
+                // the two, a link of something it holds.
+                for (user, used) in &drawn {
+                    let held = |index: usize| match index {
+                        0 => first.to_vec(),
+                        1 => second.to_vec(),
+                        _ => vec![ids[nodes[index]["path"].as_str().unwrap()]],
+                    };
+                    assert!(
+                        held(*user)
+                            .iter()
+                            .any(|from| held(*used).iter().any(|to| uses[*from][*to])),
+                        "{what}: {} -> {}",
+                        nodes[*user]["path"],
+                        nodes[*used]["path"]
+                    );
+                }
+            }
+            Told {
+                apart: true,
+                shared: all,
+                capped,
+                through,
+                turned,
+            }
+        };
+        let (mut some, mut none, mut within) = (0, 0, 0);
+        let (mut capped, mut through, mut turned) = (0, 0, 0);
+        for round in 0..60 {
+            // A few folders of files, some names in each file, and links
+            // between the names wherever they fall.
+            let count = 6 + below(26);
+            let files = 2 + below(count.min(16) - 1);
+            let folders = 1 + below(4);
+            let file_of = |name: usize| name % files;
+            let path_of = |file: usize| format!("d{}/f{file:02}.py", file % folders);
+            let nodes = (0..count)
+                .map(|name| json!({"id": format!("n{name}"), "label": format!("n{name}"), "source_file": path_of(file_of(name))}))
+                .collect::<Vec<_>>();
+            let mut pairs = (0..below(count * 3 + 1))
+                .map(|_| (below(count), below(count)))
+                .collect::<Vec<_>>();
+            // Every third graph has two names that many others use, and
+            // that use many: more is shared than a picture shows. Every
+            // third one has two names with long ways to what they share.
+            let (one, other) = (below(count), below(count));
+            match round % 3 {
+                0 => {
+                    for _ in 0..30 {
+                        let (above, under) = (below(count), below(count));
+                        pairs.extend([(above, one), (above, other), (one, under), (other, under)]);
+                    }
+                }
+                1 => {
+                    for _ in 0..6 {
+                        let way = [below(count), below(count), below(count), below(count)];
+                        pairs.extend([(one, way[0]), (way[0], way[1]), (way[1], way[2])]);
+                        pairs.extend([(other, way[3]), (way[3], way[2])]);
+                    }
+                }
+                _ => {}
+            }
+            let mut links = Vec::new();
+            let mut uses = vec![vec![false; count]; count];
+            let mut file_uses = vec![vec![false; files]; files];
+            for (user, used) in pairs {
+                if user == used {
+                    continue;
+                }
+                uses[user][used] = true;
+                if file_of(user) != file_of(used) {
+                    file_uses[file_of(user)][file_of(used)] = true;
+                }
+                links.push(json!({"source": format!("n{user}"), "target": format!("n{used}"), "relation": "calls", "source_file": path_of(file_of(user))}));
+            }
+            let index = self::index(json!({"nodes": nodes, "links": links}));
+            // Each name as a picture selects it, and each file by its path.
+            let mut keys = vec![String::new(); count];
+            for file in 0..index.files.len() as u32 {
+                for (key, at) in index.keys(file).into_iter().zip(index.range(file)) {
+                    let name: usize = index.label(at)[1..].parse().unwrap();
+                    keys[name] = key;
+                }
+            }
+            let names = keys
+                .iter()
+                .enumerate()
+                .map(|(name, key)| (key.clone(), name))
+                .collect::<HashMap<_, _>>();
+            let paths = (0..files)
+                .map(|file| (path_of(file), file))
+                .collect::<HashMap<_, _>>();
+            let (far, file_far) = (apart(&uses, &|_| false), apart(&file_uses, &|_| false));
+            // What a place stands for among files, and among names.
+            let in_folder = |folder: usize| {
+                (0..files)
+                    .filter(|file| file % folders == folder)
+                    .collect::<Vec<_>>()
+            };
+            let names_of = |held: &[usize]| {
+                (0..count)
+                    .filter(|name| held.contains(&file_of(*name)))
+                    .collect::<Vec<_>>()
+            };
+            for turn in 0..10 {
+                // The two names that were given much to share come first.
+                let (a, b) = if turn == 0 {
+                    (one, other)
+                } else {
+                    (below(count), below(count))
+                };
+                let (file_a, file_b) = (file_of(a), file_of(b));
+                let (folder_a, folder_b) = (file_a % folders, file_b % folders);
+                let asked = [
+                    // Among files: two files, a folder and a file, two folders.
+                    (
+                        path_of(file_a),
+                        path_of(file_b),
+                        vec![file_a],
+                        vec![file_b],
+                        false,
+                    ),
+                    (
+                        format!("d{folder_a}"),
+                        path_of(file_b),
+                        in_folder(folder_a),
+                        vec![file_b],
+                        false,
+                    ),
+                    (
+                        format!("d{folder_a}"),
+                        format!("d{folder_b}"),
+                        in_folder(folder_a),
+                        in_folder(folder_b),
+                        false,
+                    ),
+                    // Among names: two names, a name and a file, a folder and a name.
+                    (keys[a].clone(), keys[b].clone(), vec![a], vec![b], true),
+                    (
+                        keys[a].clone(),
+                        path_of(file_b),
+                        vec![a],
+                        names_of(&[file_b]),
+                        true,
+                    ),
+                    (
+                        format!("d{folder_a}"),
+                        keys[b].clone(),
+                        names_of(&in_folder(folder_a)),
+                        vec![b],
+                        true,
+                    ),
+                ];
+                for (from, to, first, second, named) in &asked {
+                    let what = format!("round {round}: {from} and {to}");
+                    let answer = |users: Option<bool>| {
+                        let view = index
+                            .shared("random", from, to, users, &[], &|_| None, None, false)
+                            .unwrap_or_else(|| panic!("{what}"));
+                        assert_eq!(view["shared"]["names"], *named, "{what}");
+                        view
+                    };
+                    let told = if *named {
+                        check(&answer, first, second, &uses, &far, &names, &what)
+                    } else {
+                        check(&answer, first, second, &file_uses, &file_far, &paths, &what)
+                    };
+                    match (told.apart, told.shared) {
+                        (false, _) => within += 1,
+                        (true, 0) => none += 1,
+                        _ => some += 1,
+                    }
+                    capped += usize::from(told.capped);
+                    through += usize::from(told.through);
+                    turned += usize::from(told.turned);
+                }
+            }
+        }
+        // The graphs are of every sort: places that share something, that
+        // share nothing and that lie in each other, more shared than a
+        // picture shows, places one reaches only through the other, and
+        // places that nothing but their users ties together.
+        assert!(
+            some > 1500
+                && none > 300
+                && within > 900
+                && capped > 300
+                && through > 600
+                && turned > 150,
+            "{some} {none} {within} {capped} {through} {turned}"
         );
     }
     /// What a search found, in its order: what each place is, its name and

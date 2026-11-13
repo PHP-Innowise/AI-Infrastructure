@@ -254,6 +254,8 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-node[data-in="true"]::before { left:-1px; border-radius:var(--radius) 0 0 var(--radius); background:var(--map-used); }
 /* Among followed links the place they start from is ringed, and a box has a handle at each top corner: the right one unfolds and folds what it uses, the left one what uses it. */
 .graph-map-node[data-start="true"],.graph-map-node[data-end="true"] { outline:2px solid var(--ink-2); outline-offset:1px; font-weight:var(--weight-strong); }
+/* Of two places that share something both are ringed, and what they share carries its name in bold; a box with a plain name lies on the way to it. */
+.graph-map-node[data-shared="true"] { font-weight:var(--weight-strong); }
 /* While the other end of a path is being chosen, a box is that end: the pointer says so, and a note above the side panel says what is asked and how to leave it. */
 .graph-map-canvas[data-picking="true"] .graph-map-node { cursor:crosshair; }
 .graph-map-picking { margin:0 0 12px; padding:8px 10px; border:1px solid var(--purple-line); border-radius:var(--radius); background:var(--purple-soft); }

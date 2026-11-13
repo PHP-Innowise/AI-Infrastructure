@@ -24,6 +24,16 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Show what two places share in the Harness dependency map. **What they
+  share**, beside the path between two places and beside a picture that found
+  none, asks what both use and what uses both: a place that a chain of links
+  reaches from each of the two without passing through the other, or that
+  reaches each of them so. Both kinds are counted and one is drawn, what both
+  use first: its 12 nearest places, each with one shortest way between it and
+  either of the two, and each of the two as one ringed box, a folder as well.
+  **What uses both**, **What both use** and **The path between them** change
+  between the pictures of the same two places.
+
 - Find the path between two places in the Harness dependency map. **Path to…**
   beside a selected folder, file or symbol asks for the other end, a box of
   any picture or a place the search finds, and draws the shortest ways from

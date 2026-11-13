@@ -204,6 +204,11 @@ fn curve(path: &mut String, from: (f64, f64), to: (f64, f64)) {
 pub fn plan(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
     plan_with(count, edges, &Frames::default())
 }
+/// A picture in which every node stands where its links put it.
+#[cfg(test)]
+pub fn plan_with(count: usize, edges: &[(usize, usize, u64)], frames: &Frames) -> Plan {
+    plan_beside(count, edges, frames, None)
+}
 /// Places `count` nodes and routes `edges` (user, used, weight) between them.
 /// Layers run left to right along the links; a link that skips a layer bends
 /// through a slot of its own there, so it does not cross a box. A cycle cannot
@@ -215,7 +220,18 @@ pub fn plan(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
 /// frames lie one under another above what is in no frame, a frame inside
 /// its holder, and no other box stands in a band. A link between two frames
 /// passes outside both.
-pub fn plan_with(count: usize, edges: &[(usize, usize, u64)], frames: &Frames) -> Plan {
+///
+/// With `pair`, two nodes stand side by side whatever their links say: in
+/// the first layer, or, with the flag, in the last. They are the two places
+/// of a picture whose links all lead on from them, or all lead to them; one
+/// that a link drawn here leads to, or leads on from, is left where its
+/// links put it.
+pub fn plan_beside(
+    count: usize,
+    edges: &[(usize, usize, u64)],
+    frames: &Frames,
+    pair: Option<([usize; 2], bool)>,
+) -> Plan {
     let mut links: BTreeMap<(usize, usize), u64> = BTreeMap::new();
     let mut out = vec![vec![]; count];
     let mut linked = vec![false; count];
@@ -269,6 +285,29 @@ pub fn plan_with(count: usize, edges: &[(usize, usize, u64)], frames: &Frames) -
             .min();
         if let Some(nearest) = nearest {
             layer[*node] = layer[*node].max(nearest - 1);
+        }
+    }
+    // Two places shown side by side stand in one layer: the first where
+    // their links lead on from them, the last where they lead to them.
+    if let Some((pair, last)) = pair {
+        let end = if last {
+            order.iter().map(|node| layer[*node]).max().unwrap_or(0)
+        } else {
+            0
+        };
+        for node in pair {
+            let held = wired.iter().any(
+                |(near, far, ..)| {
+                    if last {
+                        *near == node
+                    } else {
+                        *far == node
+                    }
+                },
+            );
+            if node < count && linked[node] && !held {
+                layer[node] = end;
+            }
         }
     }
     let layers = order
@@ -729,12 +768,21 @@ fn follows(view: &V) -> bool {
 fn paths(view: &V) -> bool {
     view["mode"] == "path"
 }
+/// What two places share: what both use, or what uses both.
+fn shares(view: &V) -> bool {
+    view["mode"] == "shared"
+}
+/// Of what two places share, what uses both is drawn, not what both use.
+fn above(view: &V) -> bool {
+    view["shared"]["side"] == "uses_both"
+}
 /// The boxes are symbols of whatever files they lie in: the links of a
-/// class, a method or a function are followed, or a path runs from or to
-/// one.
+/// class, a method or a function are followed, a path runs from or to one,
+/// or one of two places that share something is one.
 fn names(view: &V) -> bool {
     (follows(view) && m::yes(&view["followed"]["symbol"]))
         || (paths(view) && m::yes(&view["path"]["names"]))
+        || (shares(view) && m::yes(&view["shared"]["names"]))
 }
 /// The letter a symbol's box carries for what it is. The file's own node
 /// and a name the graph says nothing more about carry none.
@@ -990,6 +1038,68 @@ fn shown(view: &V) -> String {
             text.push_str(&format!(", {} drawn", count(number("shown"))));
         }
         return text;
+    }
+    if shares(view) {
+        let shared = &view["shared"];
+        let number = |key: &str| shared[key].as_u64().unwrap_or(0);
+        let (from, to) = (
+            m::text(&shared["from"], "name"),
+            m::text(&shared["to"], "name"),
+        );
+        let (used, users) = (number("both_use"), number("uses_both"));
+        if used + users == 0 {
+            return format!("{from} and {to} share nothing");
+        }
+        // Among symbols the others are names, else files.
+        let (one, many) = if names(view) {
+            ("other name", "other names")
+        } else {
+            ("other file", "other files")
+        };
+        // The kind that is drawn comes first, with the two by name and
+        // how many of it are drawn where that is not all.
+        let drawn = |all: u64| {
+            if number("shown") < all {
+                format!(", {} drawn", count(number("shown")))
+            } else {
+                String::new()
+            }
+        };
+        return if above(view) {
+            format!(
+                "{} · {}",
+                match users {
+                    0 => format!("Nothing uses both {from} and {to}"),
+                    1 => format!("1 {one} uses both {from} and {to}"),
+                    users => format!(
+                        "{} {many} use both {from} and {to}{}",
+                        count(users),
+                        drawn(users)
+                    ),
+                },
+                match used {
+                    0 => "they use nothing in common".to_owned(),
+                    used => format!("both use {}", plural(used, one, many)),
+                }
+            )
+        } else {
+            format!(
+                "{} · {}",
+                match used {
+                    0 => format!("{from} and {to} use nothing in common"),
+                    used => format!(
+                        "{from} and {to} both use {}{}",
+                        plural(used, one, many),
+                        drawn(used)
+                    ),
+                },
+                match users {
+                    0 => "nothing uses both".to_owned(),
+                    1 => format!("1 {one} uses both"),
+                    users => format!("{} {many} use both", count(users)),
+                }
+            )
+        };
     }
     if follows(view) {
         let followed = &view["followed"];
@@ -1313,7 +1423,7 @@ fn path_note(view: &V) -> String {
     }
     if !m::yes(&path["found"]) {
         parts.push(format!(
-            "No chain of links leads from {from} to {to}, nor back. The two may still share something that both use, or that uses both."
+            "No chain of links leads from {from} to {to}, nor back. The two may still share something that both use, or that uses both: What they share, beside the path above the picture, shows it."
         ));
         if m::yes(&view["certain"]) {
             parts.push(
@@ -1351,12 +1461,78 @@ fn path_note(view: &V) -> String {
     }
     parts.join(" ")
 }
+/// What the picture of what two places share shows and what counts as
+/// shared, what it leaves out, and that the other kind is there to see; or
+/// why there is nothing.
+fn shared_note(view: &V) -> String {
+    let shared = &view["shared"];
+    let number = |key: &str| shared[key].as_u64().unwrap_or(0);
+    let (from, to) = (
+        m::text(&shared["from"], "name"),
+        m::text(&shared["to"], "name"),
+    );
+    let mut parts = context(view);
+    if m::yes(&shared["within"]) {
+        parts.push(format!(
+            "One of {from} and {to} lies in the other, so the two are not apart. Choose two places that lie apart."
+        ));
+        return parts.join(" ");
+    }
+    // What one of the two reaches only through the other is the path's to
+    // show.
+    let through =
+        "A way that passes the other of the two does not count: the path between them shows those.";
+    let (used, users) = (number("both_use"), number("uses_both"));
+    if used + users == 0 {
+        parts.push(format!(
+            "Nothing is used by both {from} and {to}, and nothing uses both. {through}"
+        ));
+        if m::yes(&view["certain"]) {
+            parts.push(
+                "Links guessed by name are left out; with them there may be something.".to_owned(),
+            );
+        }
+        return parts.join(" ");
+    }
+    let above = above(view);
+    if (if above { users } else { used }) == 0 {
+        // The kind that was asked for has nothing, and the other has: the
+        // line above says how much, and this where it is shown.
+        parts.push(if above {
+            format!("Nothing uses both {from} and {to}. {through} What they use in common is another picture: What both use, beside the path above this one.")
+        } else {
+            format!("{from} and {to} use nothing in common. {through} What uses both is another picture: What uses both, beside the path above this one.")
+        });
+        return parts.join(" ");
+    }
+    parts.push(format!(
+        "{} {through} Select a link to see what makes it up.",
+        if above {
+            "What uses both stands to the left of the two, each with one shortest way from it to either of them: the strongest where several are as short."
+        } else {
+            "What both use stands to the right of the two, each with one shortest way to it from either of them: the strongest where several are as short."
+        }
+    ));
+    let here = if above { users } else { used };
+    if number("shown") < here {
+        parts.push(format!(
+            "Only the nearest are drawn, {} of {}: those with the fewest links {} the two taken together, and among those as near the most linked.",
+            count(number("shown")),
+            count(here),
+            if above { "to" } else { "from" }
+        ));
+    }
+    parts.join(" ")
+}
 pub fn note(view: &V) -> String {
     if symbols(view) {
         return file_note(view);
     }
     if paths(view) {
         return path_note(view);
+    }
+    if shares(view) {
+        return shared_note(view);
     }
     if follows(view) {
         return follow_note(view);
@@ -1457,7 +1633,14 @@ pub fn canvas(view: &V) -> String {
         of: nodes.iter().map(|node| frame(&node["holder"])).collect(),
         holder: frames.iter().map(|held| frame(&held["holder"])).collect(),
     };
-    let plan = plan_with(nodes.len(), &weighted, &framed);
+    // The two places that share what else is drawn stand side by side:
+    // before what both use, or after what uses both.
+    let two = |key: &str| nodes.iter().position(|node| m::yes(&node[key]));
+    let pair = two("start")
+        .zip(two("end"))
+        .filter(|_| shares(view))
+        .map(|(first, second)| ([first, second], above(view)));
+    let plan = plan_beside(nodes.len(), &weighted, &framed, pair);
     // How much each box uses and is used through the links drawn here.
     let mut flow = vec![(0u64, 0u64); nodes.len()];
     for (from, to, links) in &weighted {
@@ -1489,6 +1672,7 @@ pub fn canvas(view: &V) -> String {
     let opened = symbols(view);
     let followed = follows(view);
     let pathed = paths(view);
+    let shared = shares(view);
     let cycles = !changes(view) && !opened;
     let near = |node: usize| {
         chosen.is_some_and(|chosen| {
@@ -1610,17 +1794,36 @@ pub fn canvas(view: &V) -> String {
         if cycle {
             label.push_str(", part of a cycle");
         }
-        // Where followed links start, or where a path starts and ends.
-        let (start, end) = (m::yes(&node["start"]), pathed && m::yes(&node["end"]));
+        // Where followed links start, where a path starts and ends, or
+        // which the two places are that share the rest.
+        let (start, end) = (
+            m::yes(&node["start"]),
+            (pathed || shared) && m::yes(&node["end"]),
+        );
         if start {
-            label.push_str(if pathed {
+            label.push_str(if shared {
+                ", the first of the two places"
+            } else if pathed {
                 ", the path starts here"
             } else {
                 ", the links are followed from here"
             });
         }
         if end {
-            label.push_str(", the path ends here");
+            label.push_str(if shared {
+                ", the second of the two places"
+            } else {
+                ", the path ends here"
+            });
+        }
+        // What the two share: what both use, or what uses both.
+        let both = shared && node["shares"].is_array();
+        if both {
+            label.push_str(if above(view) {
+                ", uses both"
+            } else {
+                ", both use it"
+            });
         }
         let changed = node["changed"].as_u64().unwrap_or(0);
         // What a file around an opened one is to it, or what a place of a
@@ -1661,10 +1864,11 @@ pub fn canvas(view: &V) -> String {
         label.push_str(&mark);
         let kind = node["kind"].as_str().unwrap_or("");
         // A folder opens to its files, a file to what it holds. Among
-        // followed links and on a path a box is only selected: opening it
-        // would leave them.
+        // followed links, on a path and in what two places share a box is
+        // only selected: opening it would leave them.
         let opens = !followed
             && !pathed
+            && !shared
             && (folder || (!symbol && node["symbols"].as_u64().unwrap_or(0) > 0));
         // A symbol lies in the open file, or, among followed symbols, in
         // the file it says.
@@ -1679,7 +1883,7 @@ pub fn canvas(view: &V) -> String {
         };
         let (out, into) = flow[index];
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{} style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{} style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
             payload(&node["path"]),
             escape(kind),
             opened && !symbol,
@@ -1691,6 +1895,7 @@ pub fn canvas(view: &V) -> String {
             out > 0,
             into > 0,
             if end { " data-end=\"true\"" } else { "" },
+            if both { " data-shared=\"true\"" } else { "" },
             placed.x,
             placed.y,
             escape(&title),
@@ -2491,18 +2696,56 @@ fn path_end(focus: &V) -> &'static str {
         _ => "",
     }
 }
-/// The side panel of a symbol selected among followed symbols or on a path:
-/// what it is and where it lies, the way to its file, to its own links and
-/// to a path from it, and what it uses and what uses it, each with the file
-/// it lies in. On a path (`pathed`) those are the next and the one before.
-fn name_side(focus: &V, pathed: bool) -> String {
+/// What a selected box is to the picture it is selected in: where followed
+/// links start, an end of a path, or, of two places that share something,
+/// one of the two or what they share, with how many links each of them is
+/// away.
+fn role(view: &V, focus: &V) -> String {
+    if paths(view) {
+        return path_end(focus).to_owned();
+    }
+    if !shares(view) {
+        return if m::yes(&focus["start"]) {
+            " · the links are followed from here".to_owned()
+        } else {
+            String::new()
+        };
+    }
+    if m::yes(&focus["start"]) {
+        return " · the first of the two places".to_owned();
+    }
+    if m::yes(&focus["end"]) {
+        return " · the second of the two places".to_owned();
+    }
+    let shared = &view["shared"];
+    let far = m::array(&focus["shares"]);
+    let [first, second] = far.as_slice() else {
+        return String::new();
+    };
+    let links = |far: &V| plural(far.as_u64().unwrap_or(0), "link", "links");
+    let (told, joined) = if above(view) {
+        ("uses both", "to")
+    } else {
+        ("both use it", "from")
+    };
+    format!(
+        " · {told}: {} {joined} {}, {} {joined} {}",
+        links(first),
+        m::text(&shared["from"], "name"),
+        links(second),
+        m::text(&shared["to"], "name")
+    )
+}
+/// The side panel of a symbol selected among followed symbols, on a path or
+/// in what two places share: what it is and where it lies, with what `role`
+/// says it is to the picture, the way to its file, to its own links and to
+/// a path from it, and what it uses and what uses it, each with the file it
+/// lies in. Where the boxes lie on ways (`ways`) those are the next and the
+/// one before.
+fn name_side(focus: &V, ways: bool, role: &str) -> String {
     let line = focus["line"].as_u64().unwrap_or(0);
     let mut told = reached(focus, capital(&what(focus)));
-    if pathed {
-        told.push_str(path_end(focus));
-    } else if m::yes(&focus["start"]) {
-        told.push_str(" · the links are followed from here");
-    }
+    told.push_str(role);
     let mut html = format!(
         "<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-go\" data-payload=\"{}\">Open in its file</button>",
         escape(&m::text(focus, "name")),
@@ -2518,22 +2761,81 @@ fn name_side(focus: &V, pathed: bool) -> String {
         payload(&json!({"open": focus["file"], "path": focus["path"]})),
     );
     // The symbol the links are followed from is followed already.
-    if pathed || !m::yes(&focus["start"]) {
+    if ways || !m::yes(&focus["start"]) {
         html.push_str(&follow_links(&focus["path"]));
     }
     html.push_str(&path_to(focus));
-    let (uses, used) = if pathed { WAY } else { ("Uses", "Used by") };
+    let (uses, used) = if ways { WAY } else { ("Uses", "Used by") };
     html.push_str(&rows(uses, &focus["uses"], &focus["uses_more"], None));
     html.push_str(&rows(used, &focus["used_by"], &focus["used_by_more"], None));
     html.push_str(&kinds(focus));
     html
 }
-/// Beside a path that draws nothing, because no chain of links joins its
-/// two ends or one of them lies in the other: the two ends, each with the
-/// way to its own links and to a path from it to another place.
-fn apart(path: &V) -> String {
-    let mut html = "<p class=\"knowledge-note\">Nothing is drawn. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p>".to_owned();
-    for end in [&path["from"], &path["to"]] {
+/// Asks another question of the same two places: what they share (`true`),
+/// one kind of it by its name, or the path between them again (`false`).
+fn ask_shared(asked: V, class: &str) -> String {
+    format!(
+        "<button type=\"button\" class=\"{class}\" data-action=\"graph-map-shared\" data-payload=\"{}\">{}</button>",
+        payload(&asked),
+        match (asked.as_str(), asked.as_bool()) {
+            (Some("uses_both"), _) => "What uses both",
+            (Some(_), _) => "What both use",
+            (None, Some(true)) => "What they share",
+            _ => "The path between them",
+        }
+    )
+}
+/// The other questions that two places shown can be asked, as their
+/// payloads: of a path, what the two share; of what they share, the other
+/// kind where there is any of it, and the path between them. Two places of
+/// which one lies in the other can be asked nothing more.
+fn asks(view: &V) -> Vec<V> {
+    if paths(view) {
+        return if m::yes(&view["path"]["within"]) {
+            vec![]
+        } else {
+            vec![json!(true)]
+        };
+    }
+    let shared = &view["shared"];
+    if !shares(view) || m::yes(&shared["within"]) {
+        return vec![];
+    }
+    let other = if above(view) { "both_use" } else { "uses_both" };
+    let mut asks = vec![];
+    if shared[other].as_u64().unwrap_or(0) > 0 {
+        asks.push(json!(other));
+    }
+    asks.push(json!(false));
+    asks
+}
+/// Beside a picture of two places that draws nothing: a path, because no
+/// chain of links joins its two ends; what the two share, because there is
+/// nothing of the kind; or either, because one of the two lies in the
+/// other. The other questions that can be asked of the two come first,
+/// then each of the two with the way to its own links and to a path from
+/// it to another place.
+fn apart(view: &V) -> String {
+    let asks = asks(view);
+    let ends = if paths(view) {
+        &view["path"]
+    } else {
+        &view["shared"]
+    };
+    let mut html = "<p class=\"knowledge-note\">Nothing is drawn.".to_owned();
+    for ask in &asks {
+        html.push_str(match (ask.as_str(), ask.as_bool()) {
+            (Some("uses_both"), _) => " What uses both shows what does.",
+            (Some(_), _) => " What both use shows what they do.",
+            (None, Some(true)) => " What they share shows what both use and what uses both.",
+            _ => " The path between them asks how one of the two reaches the other.",
+        });
+    }
+    html.push_str(" Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p>");
+    for ask in asks {
+        html.push_str(&ask_shared(ask, "button compact"));
+    }
+    for end in [&ends["from"], &ends["to"]] {
         // A symbol lies at a line of its file; a file or a folder is its path.
         let lies = if m::yes(&end["symbol"]) {
             let line = end["line"].as_u64().unwrap_or(0);
@@ -2569,15 +2871,25 @@ pub fn side(view: &V) -> String {
     let focus = &view["focus"];
     let followed = follows(view);
     let pathed = paths(view);
-    if (followed || pathed) && m::yes(&focus["symbol"]) {
-        return name_side(focus, pathed);
+    let shared = shares(view);
+    // On a path and in what two places share a box lies on a way.
+    let ways = pathed || shared;
+    if (followed || ways) && m::yes(&focus["symbol"]) {
+        return name_side(focus, ways, &role(view, focus));
     }
     if !focus.is_object() && pathed {
         // A path that draws nothing leaves its two ends to go on from.
         if !m::yes(&view["path"]["found"]) {
-            return apart(&view["path"]);
+            return apart(view);
         }
-        return "<p class=\"knowledge-note\">Select a box to see what it leads to on the way and what leads to it. Select a link to see what makes it up. The path above the picture leads back, and The other way beside it asks for the ways from the second place to the first.</p>".to_owned();
+        return "<p class=\"knowledge-note\">Select a box to see what it leads to on the way and what leads to it. Select a link to see what makes it up. The path above the picture leads back; beside it, The other way asks for the ways from the second place to the first, and What they share for what both use and what uses both.</p>".to_owned();
+    }
+    if !focus.is_object() && shared {
+        // So does a picture of what two places share with nothing in it.
+        if m::array(&view["nodes"]).is_empty() {
+            return apart(view);
+        }
+        return "<p class=\"knowledge-note\">Select a box to see what it leads to on the way and what leads to it. Select a link to see what makes it up. The path above the picture leads back; beside it stand the other kind of what the two share, where there is any, and the path between them.</p>".to_owned();
     }
     if !focus.is_object() {
         return if followed {
@@ -2594,69 +2906,68 @@ pub fn side(view: &V) -> String {
     let held = focus["symbols"].as_u64().unwrap_or(0);
     // Beside a change, a file's links are the ones it has with the change.
     let beside = changes(view) && changed == 0;
-    let mut html = format!(
-        "<h3>{}</h3><p class=\"graph-map-path\">{}</p><p class=\"knowledge-note\">{}</p>",
-        escape(&m::text(focus, "name")),
-        escape(&m::text(focus, "path")),
-        if changes(view) {
-            match (changed, focus["status"].as_str(), focus["role"].as_str()) {
-                (0, _, role) => format!(
-                    "{} · {}",
-                    if m::yes(&focus["altered"]) {
-                        "Changed too, outside the open folder"
-                    } else {
-                        "Not changed"
-                    },
-                    match role {
-                        Some("affected") => "uses the change",
-                        Some("needed") => "used by the change",
-                        _ => "uses the change and is used by it",
-                    }
-                ),
-                (_, Some(status), _) => format!("Changed file · {}", happened(status)),
-                _ => format!(
-                    "Folder · {}",
-                    plural(changed, "changed file", "changed files")
-                ),
-            }
-        } else if followed || pathed {
-            // Among followed links and on a path a place may be one of a
-            // chosen change.
-            let mut told = if folder {
-                format!(
-                    "Folder · {}",
-                    plural(focus["files"].as_u64().unwrap_or(0), "file", "files")
-                )
-            } else if held > 0 {
-                format!("File · {}", plural(held, "symbol", "symbols"))
-            } else {
-                "File".to_owned()
-            };
-            match (changed, focus["status"].as_str()) {
-                (0, _) => {}
-                (_, Some(status)) => told.push_str(&format!(" · {}", happened(status))),
-                _ => told.push_str(&format!(
-                    " · {} inside",
-                    plural(changed, "changed file", "changed files")
-                )),
-            }
-            if pathed {
-                told.push_str(path_end(focus));
-            } else if m::yes(&focus["start"]) {
-                told.push_str(" · the links are followed from here");
-            }
-            told
-        } else if folder {
+    // What the place is, and what it is to the picture: that may name the
+    // two places that share it, so it is text like the name above it.
+    let told = if changes(view) {
+        match (changed, focus["status"].as_str(), focus["role"].as_str()) {
+            (0, _, role) => format!(
+                "{} · {}",
+                if m::yes(&focus["altered"]) {
+                    "Changed too, outside the open folder"
+                } else {
+                    "Not changed"
+                },
+                match role {
+                    Some("affected") => "uses the change",
+                    Some("needed") => "used by the change",
+                    _ => "uses the change and is used by it",
+                }
+            ),
+            (_, Some(status), _) => format!("Changed file · {}", happened(status)),
+            _ => format!(
+                "Folder · {}",
+                plural(changed, "changed file", "changed files")
+            ),
+        }
+    } else if followed || ways {
+        // Among followed links, on a path and in what two places share
+        // a place may be one of a chosen change.
+        let mut told = if folder {
             format!(
-                "Folder · {} · {} inside it",
-                plural(focus["files"].as_u64().unwrap_or(0), "file", "files"),
-                plural(focus["within"].as_u64().unwrap_or(0), "link", "links")
+                "Folder · {}",
+                plural(focus["files"].as_u64().unwrap_or(0), "file", "files")
             )
         } else if held > 0 {
             format!("File · {}", plural(held, "symbol", "symbols"))
         } else {
             "File".to_owned()
+        };
+        match (changed, focus["status"].as_str()) {
+            (0, _) => {}
+            (_, Some(status)) => told.push_str(&format!(" · {}", happened(status))),
+            _ => told.push_str(&format!(
+                " · {} inside",
+                plural(changed, "changed file", "changed files")
+            )),
         }
+        told.push_str(&role(view, focus));
+        told
+    } else if folder {
+        format!(
+            "Folder · {} · {} inside it",
+            plural(focus["files"].as_u64().unwrap_or(0), "file", "files"),
+            plural(focus["within"].as_u64().unwrap_or(0), "link", "links")
+        )
+    } else if held > 0 {
+        format!("File · {}", plural(held, "symbol", "symbols"))
+    } else {
+        "File".to_owned()
+    };
+    let mut html = format!(
+        "<h3>{}</h3><p class=\"graph-map-path\">{}</p><p class=\"knowledge-note\">{}</p>",
+        escape(&m::text(focus, "name")),
+        escape(&m::text(focus, "path")),
+        escape(&told),
     );
     if folder {
         html.push_str(&format!(
@@ -2673,11 +2984,11 @@ pub fn side(view: &V) -> String {
         html.push_str(&open_file(&focus["path"]));
     }
     // The place the links are followed from is followed already.
-    if pathed || !m::yes(&focus["start"]) {
+    if ways || !m::yes(&focus["start"]) {
         html.push_str(&follow_links(&focus["path"]));
     }
     html.push_str(&path_to(focus));
-    let (uses, used) = if pathed {
+    let (uses, used) = if ways {
         WAY
     } else if beside {
         ("Uses in the change", "Used by the change")
@@ -2716,8 +3027,12 @@ fn crumbs(view: &V) -> String {
                         ": links"
                     } else if paths(view) {
                         ": path"
-                    } else {
+                    } else if !shares(view) {
                         ""
+                    } else if above(view) {
+                        ": what uses both"
+                    } else {
+                        ": what both use"
                     }
                 )
             } else {
@@ -2733,6 +3048,13 @@ fn crumbs(view: &V) -> String {
     // is selected in it: two places of a cycle lead to each other.
     if paths(view) && m::yes(&view["path"]["found"]) {
         html.push_str("<span aria-hidden=\"true\">·</span><button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-path-swap\">The other way</button>");
+    }
+    // Two places that lie apart can be asked what they share, whether or
+    // not a path joins them, and from there for the other kind of it and
+    // for the path again.
+    for ask in asks(view) {
+        html.push_str("<span aria-hidden=\"true\">·</span>");
+        html.push_str(&ask_shared(ask, "graph-map-crumb"));
     }
     html
 }
@@ -2757,8 +3079,16 @@ fn legend(view: &V, change: bool) -> String {
         _ if changes(view) => {
             "Highlighted: changed. The rest use the change or are used by it.".to_owned()
         }
-        _ if paths(view) => format!(
-            "The ringed boxes are the two ends of the path.{}{}",
+        // What two places share can use each other, which a path cannot.
+        _ if paths(view) || shares(view) => format!(
+            "{}{}{}",
+            if !shares(view) {
+                "The ringed boxes are the two ends of the path.".to_owned()
+            } else if above(view) {
+                format!("{LEGEND} The ringed boxes are the two places. A name in bold is what uses both; a box with a plain name lies on its way to them.")
+            } else {
+                format!("{LEGEND} The ringed boxes are the two places. A name in bold is what both use; a box with a plain name lies on the way to it.")
+            },
             if names(view) {
                 format!(" {NAME_LEGEND}")
             } else {
@@ -3406,7 +3736,7 @@ fn watch() {
     }
 }
 fn fresh(target: &str) -> V {
-    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "filter": "", "follow": "", "out": [], "into": [], "spread": [], "path": [], "pick": null})
+    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "filter": "", "follow": "", "out": [], "into": [], "spread": [], "path": [], "shared": false, "side": "", "pick": null})
 }
 /// How many folders a picture keeps spread out; the oldest gives way.
 const SPREAD: usize = 32;
@@ -3449,14 +3779,34 @@ fn unfolded(state: &V, key: &str) -> Vec<String> {
         .filter_map(|place| place.as_str().map(str::to_owned))
         .collect()
 }
-/// The state with no place followed and no path shown: what a folder or a
-/// file is drawn with. A path that is still being asked for stays asked for.
+/// The state with no place followed and no two places shown, neither the
+/// path between them nor what they share: what a folder or a file is drawn
+/// with. A path that is still being asked for stays asked for.
 fn unfollowed(mut state: V) -> V {
     state["follow"] = json!("");
     state["out"] = json!([]);
     state["into"] = json!([]);
     state["path"] = json!([]);
+    state["shared"] = json!(false);
+    state["side"] = json!("");
     state
+}
+/// The map as it answers another question of the two places it shows:
+/// `true` asks what they share, a kind of that by its name (`both_use`,
+/// `uses_both`) asks for that kind, and anything else for the path between
+/// them again. `None` where no two places are shown.
+pub fn sharing(mut state: V, asked: &V) -> Option<V> {
+    if unfolded(&state, "path").len() != 2 {
+        return None;
+    }
+    let side = asked
+        .as_str()
+        .filter(|side| ["both_use", "uses_both"].contains(side))
+        .unwrap_or("");
+    state["shared"] = json!(asked == &json!(true) || !side.is_empty());
+    state["side"] = json!(side);
+    state["focus"] = json!("");
+    Some(state)
 }
 /// The map as it shows the shortest ways from the place a path is being
 /// asked from to the place `to`. `None` where no path is being asked for,
@@ -4154,7 +4504,10 @@ fn render(view: &V) {
     dom::set_checked("graph-map-certain", m::yes(&view["certain"]));
     dom::set_checked("graph-map-notests", m::yes(&view["notests"]));
     dom::set_checked("graph-map-fit", m::yes(&state()["fit"]));
-    dom::disabled("graph-map-filter", follows(view) || paths(view));
+    dom::disabled(
+        "graph-map-filter",
+        follows(view) || paths(view) || shares(view),
+    );
     html("graph-map-canvas", &canvas(view));
     fit();
     // While the other end of a path is chosen, a box is that end.
@@ -4220,7 +4573,8 @@ async fn load(quiet: bool) {
     }
     // The unfolded places of each side, as a list a URL can carry whatever
     // the paths hold.
-    // The two ends of a path come before a followed place.
+    // Two places, asked for the path between them or for what they share,
+    // come before a followed place.
     let ends = unfolded(&state, "path");
     let pathed = ends.len() == 2;
     for key in ["out", "into"] {
@@ -4230,7 +4584,17 @@ async fn load(quiet: bool) {
         }
     }
     if pathed {
-        query.push(("path", json!(ends).to_string()));
+        let asked = if m::yes(&state["shared"]) {
+            "shared"
+        } else {
+            "path"
+        };
+        query.push((asked, json!(ends).to_string()));
+        // Of what they share one kind is drawn: the one that was asked
+        // for, or, unasked, whichever there is.
+        if asked == "shared" && !m::text(&state, "side").is_empty() {
+            query.push(("side", m::text(&state, "side")));
+        }
     } else if !m::text(&state, "follow").is_empty() {
         query.push(("follow", m::text(&state, "follow")));
     } else if !unfolded(&state, "spread").is_empty() {
@@ -4266,9 +4630,9 @@ async fn load(quiet: bool) {
                         .collect::<Vec<_>>();
                     state[key] = json!(kept);
                 }
-            } else if !paths(&view) {
-                // The graph does not know the place or an end of the path,
-                // or they were left.
+            } else if !paths(&view) && !shares(&view) {
+                // The graph does not know the place, or one of the two
+                // places, or they were left.
                 state = unfollowed(state);
             }
             // A graph that was never started, as after a restart of the
@@ -4588,6 +4952,14 @@ pub async fn event(
             state["path"] = json!(ends);
             state["focus"] = json!("");
         }
+        ("click", _, "graph-map-shared") => {
+            // The same two places, asked what they share, for one kind of
+            // it, or again for the path between them.
+            match sharing(state.clone(), payload) {
+                Some(shown) => state = shown,
+                None => return true,
+            }
+        }
         ("click", _, "graph-map-node") if state["pick"].is_object() => {
             // The other end of a path is being chosen: this box is it. The
             // place the path is asked from is no end for it.
@@ -4627,6 +4999,8 @@ pub async fn event(
             state["out"] = json!([payload]);
             state["into"] = json!([payload]);
             state["path"] = json!([]);
+            state["shared"] = json!(false);
+            state["side"] = json!("");
             state["focus"] = json!("");
             state["filter"] = json!("");
             dom::set_value("graph-map-filter", "");
@@ -4774,6 +5148,50 @@ mod tests {
             height < top || height > bottom,
             "{height} in {top}..{bottom}"
         );
+    }
+    #[test]
+    fn two_places_stand_side_by_side_before_or_after_the_rest() {
+        let layers = |plan: &Plan| {
+            (0..plan.nodes.len())
+                .map(|node| layer(plan, node))
+                .collect::<Vec<_>>()
+        };
+        let none = Frames::default();
+        // 0 reaches 3 through 2, and 1 uses 3 itself. Left to its links, 1
+        // stands a layer in, next to what it uses.
+        let below = [(0, 2, 1), (2, 3, 1), (1, 3, 1)];
+        assert_eq!(layers(&plan(4, &below)), [0, 1, 1, 2]);
+        // Side by side the two stand in the first layer, and the longer
+        // link of 1 passes the layer between in a slot of its own.
+        let beside = plan_beside(4, &below, &none, Some(([0, 1], false)));
+        assert_eq!(layers(&beside), [0, 0, 1, 2]);
+        assert_eq!(beside.nodes[0].x, beside.nodes[1].x);
+        assert!(beside.wires.iter().all(|wire| !wire.back));
+        let long = beside.wires.iter().find(|wire| wire.edge == 2).unwrap();
+        assert!(long.path.contains(" L"), "{}", long.path);
+        // 3 reaches 0 through 2 and uses 1 itself: the two stand in the
+        // last layer, where their links lead to them.
+        let above = [(3, 2, 1), (2, 0, 1), (3, 1, 1)];
+        assert_eq!(layers(&plan(4, &above)), [2, 1, 1, 0]);
+        let beside = plan_beside(4, &above, &none, Some(([0, 1], true)));
+        assert_eq!(layers(&beside), [2, 2, 1, 0]);
+        assert_eq!(beside.nodes[0].x, beside.nodes[1].x);
+        assert!(beside.nodes[0].x > beside.nodes[2].x);
+        // One of the two that a link leads to is left where its links put
+        // it, and so is one that no link touches or that is not there.
+        let held = [(0, 2, 1), (2, 1, 1), (1, 3, 1)];
+        assert_eq!(layers(&plan(4, &held)), [0, 2, 1, 3]);
+        assert_eq!(
+            layers(&plan_beside(4, &held, &none, Some(([0, 1], false)))),
+            [0, 2, 1, 3]
+        );
+        let apart = plan_beside(3, &[(0, 2, 1)], &none, Some(([1, 9], false)));
+        assert_eq!(
+            (apart.nodes[1].layer, layer(&apart, 0), layer(&apart, 2)),
+            (None, 0, 1)
+        );
+        // Nothing asked for is the picture as it was.
+        assert_eq!(plan_beside(4, &below, &none, None), plan(4, &below));
     }
     #[test]
     fn the_weaker_direction_of_a_cycle_runs_back() {
@@ -6886,9 +7304,10 @@ mod tests {
             "Each box uses the next: these are the ways that take the fewest links. Select a link to see what makes it up."
         );
         // The two ends close the path above the picture, and beside them
-        // stands the way to ask for the other direction.
+        // stand the way to ask for the other direction and the way to ask
+        // what the two share.
         assert!(crumbs(&view).ends_with(
-            "<span class=\"graph-map-crumb\" aria-current=\"location\">main.php → db&lt;1&gt;.php: path</span><span aria-hidden=\"true\">·</span><button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-path-swap\">The other way</button>"
+            "<span class=\"graph-map-crumb\" aria-current=\"location\">main.php → db&lt;1&gt;.php: path</span><span aria-hidden=\"true\">·</span><button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-path-swap\">The other way</button><span aria-hidden=\"true\">·</span><button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-shared\" data-payload=\"true\">What they share</button>"
         ));
         let told = legend(&view, false);
         assert!(
@@ -6929,15 +7348,20 @@ mod tests {
         assert_eq!(summary(&none), "No path between main.php and db<1>.php");
         assert_eq!(
             note(&none),
-            "No chain of links leads from main.php to db<1>.php, nor back. The two may still share something that both use, or that uses both."
+            "No chain of links leads from main.php to db<1>.php, nor back. The two may still share something that both use, or that uses both: What they share, beside the path above the picture, shows it."
         );
         none["certain"] = json!(true);
         assert!(note(&none)
             .ends_with("Links guessed by name are left out; with them there may be a way."));
-        // Where there is no path there is no other way to ask for.
-        assert!(crumbs(&none).ends_with(": path</span>"));
-        // One end in the other.
+        // Where there is no path there is no other way to ask for, but
+        // what the two share can be asked all the same.
+        assert!(crumbs(&none).ends_with(
+            ": path</span><span aria-hidden=\"true\">·</span><button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-shared\" data-payload=\"true\">What they share</button>"
+        ));
+        // One end in the other: the two are not apart, and share nothing
+        // as two.
         none["path"]["within"] = json!(true);
+        assert!(crumbs(&none).ends_with(": path</span>"));
         assert_eq!(summary(&none), "No path between main.php and db<1>.php");
         assert_eq!(
             note(&none),
@@ -7010,7 +7434,7 @@ mod tests {
         let mut view = routed();
         let idle = side(&view);
         assert!(idle.starts_with("<p class=\"knowledge-note\">Select a box to see what it leads to on the way and what leads to it."));
-        assert!(idle.ends_with("asks for the ways from the second place to the first.</p>"));
+        assert!(idle.ends_with("The other way asks for the ways from the second place to the first, and What they share for what both use and what uses both.</p>"));
         // A file of the way: what it is, the ways on from it, and the two
         // lists, each row a link that can be looked into.
         let row = |path: &str, name: &str, links: u64| json!({"path": path, "name": name, "folder": false, "inside": true, "links": links, "guessed": 0, "changed": false});
@@ -7083,7 +7507,7 @@ mod tests {
         none["edges"] = json!([]);
         assert_eq!(
             side(&none),
-            "<p class=\"knowledge-note\">Nothing is drawn. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p><h4>main.php</h4><p class=\"graph-map-path\">app/main.php</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;app/main.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;main.php&quot;,&quot;path&quot;:&quot;app/main.php&quot;}\">Path to…</button><h4>db&lt;1&gt;.php</h4><p class=\"graph-map-path\">lib/db.php</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;lib/db.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;db&lt;1&gt;.php&quot;,&quot;path&quot;:&quot;lib/db.php&quot;}\">Path to…</button>"
+            "<p class=\"knowledge-note\">Nothing is drawn. What they share shows what both use and what uses both. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"true\">What they share</button><h4>main.php</h4><p class=\"graph-map-path\">app/main.php</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;app/main.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;main.php&quot;,&quot;path&quot;:&quot;app/main.php&quot;}\">Path to…</button><h4>db&lt;1&gt;.php</h4><p class=\"graph-map-path\">lib/db.php</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;lib/db.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;db&lt;1&gt;.php&quot;,&quot;path&quot;:&quot;lib/db.php&quot;}\">Path to…</button>"
         );
         // One end in the other draws nothing either. A symbol lies at a line
         // of its file, and a folder is its path.
@@ -7095,7 +7519,7 @@ mod tests {
         });
         let html = side(&none);
         assert!(
-            html.contains("<h4>Cart</h4><p class=\"graph-map-path\">src/Cart</p>"),
+            html.starts_with("<p class=\"knowledge-note\">Nothing is drawn. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p><h4>Cart</h4><p class=\"graph-map-path\">src/Cart</p>"),
             "{html}"
         );
         assert!(html.contains("<h4>Cart.total()</h4><p class=\"graph-map-path\">src/Cart/Cart.php:19</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Cart.php#L19:.total()&quot;\">Follow links</button>"), "{html}");
@@ -7179,6 +7603,520 @@ mod tests {
         );
         assert_eq!(fresh("")["path"], json!([]));
         assert_eq!(fresh("")["pick"], V::Null);
+    }
+    /// What the two files of the API share, with what both use drawn: the
+    /// core, and the database, which the second of them uses by a link of
+    /// its own. The entry point uses both, and is another picture.
+    fn common() -> V {
+        let node = |path: &str, name: &str, shares: V| {
+            json!({
+                "path": path, "name": name, "folder": false, "files": 1, "symbols": 2, "within": 0,
+                "out": 2, "in": 1, "start": false, "end": false, "shares": shares,
+                "changed": 0, "status": null
+            })
+        };
+        let mut view = json!({
+            "mode": "shared", "scope": "app/api", "certain": false,
+            "crumbs": [
+                {"name": "office", "path": ""}, {"name": "app", "path": "app"},
+                {"name": "api", "path": "app/api"}, {"name": "users.php and orders<1>.php", "path": ""}
+            ],
+            "totals": {"files": 21, "symbols": 22, "relations": 22, "links": 22, "read": 21, "guessed": 1, "unplaced": 0},
+            "shared": {
+                "from": {"path": "app/api/users.php", "name": "users.php", "what": "file"},
+                "to": {"path": "app/api/orders.php", "name": "orders<1>.php", "what": "file"},
+                "names": false, "within": false, "side": "both_use",
+                "both_use": 2, "uses_both": 1, "shown": 2, "wide": 12
+            },
+            "children": 4, "matching": 4,
+            "nodes": [
+                node("app/api/users.php", "users.php", V::Null),
+                node("app/api/orders.php", "orders<1>.php", V::Null),
+                node("lib/core.php", "core.php", json!([1, 1])),
+                node("lib/db.php", "db.php", json!([2, 1]))
+            ],
+            "between": 4, "backbone": false,
+            "edges": [
+                {"from": "lib/core.php", "to": "lib/db.php", "links": 2, "guessed": 0},
+                {"from": "app/api/orders.php", "to": "lib/core.php", "links": 1, "guessed": 0},
+                {"from": "app/api/orders.php", "to": "lib/db.php", "links": 1, "guessed": 1},
+                {"from": "app/api/users.php", "to": "lib/core.php", "links": 1, "guessed": 0}
+            ],
+            "focus": null
+        });
+        view["nodes"][0]["start"] = json!(true);
+        view["nodes"][1]["end"] = json!(true);
+        view
+    }
+    /// The other picture of the same two files: the entry point, which
+    /// uses both.
+    fn common_users() -> V {
+        let mut view = common();
+        let mut main = view["nodes"][2].clone();
+        main["path"] = json!("app/main.php");
+        main["name"] = json!("main.php");
+        view["shared"]["side"] = json!("uses_both");
+        view["shared"]["shown"] = json!(1);
+        view["nodes"] = json!([view["nodes"][0], view["nodes"][1], main]);
+        view["edges"] = json!([
+            {"from": "app/main.php", "to": "app/api/orders.php", "links": 1, "guessed": 0},
+            {"from": "app/main.php", "to": "app/api/users.php", "links": 1, "guessed": 0}
+        ]);
+        view["between"] = json!(2);
+        view
+    }
+    const ASK_USERS: &str = "<span aria-hidden=\"true\">·</span><button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-shared\" data-payload=\"&quot;uses_both&quot;\">What uses both</button>";
+    const ASK_USED: &str = "<span aria-hidden=\"true\">·</span><button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-shared\" data-payload=\"&quot;both_use&quot;\">What both use</button>";
+    const ASK_PATH: &str = "<span aria-hidden=\"true\">·</span><button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-shared\" data-payload=\"false\">The path between them</button>";
+    const THROUGH: &str =
+        "A way that passes the other of the two does not count: the path between them shows those.";
+    #[test]
+    fn what_two_places_share_says_how_much_that_is_and_what_it_leaves_out() {
+        // What both use is drawn: it comes first, and the other kind is
+        // said to be there.
+        let view = common();
+        assert_eq!(
+            summary(&view),
+            "users.php and orders<1>.php both use 2 other files · 1 other file uses both"
+        );
+        assert_eq!(
+            note(&view),
+            format!("What both use stands to the right of the two, each with one shortest way to it from either of them: the strongest where several are as short. {THROUGH} Select a link to see what makes it up.")
+        );
+        // The two close the path above the picture, with the kind that is
+        // drawn; beside them stand the other kind and the way back to the
+        // path between them.
+        assert!(
+            crumbs(&view).ends_with(&format!(
+                "<span class=\"graph-map-crumb\" aria-current=\"location\">users.php and orders&lt;1&gt;.php: what both use</span>{ASK_USERS}{ASK_PATH}"
+            )),
+            "{}",
+            crumbs(&view)
+        );
+        assert!(!crumbs(&view).contains("The other way"));
+        let told = legend(&view, false);
+        assert!(
+            told.ends_with("Thicker: more links. Dotted: against the main direction, closing a cycle (↻). The ringed boxes are the two places. A name in bold is what both use; a box with a plain name lies on the way to it."),
+            "{told}"
+        );
+        assert!(legend(&view, true).ends_with("lies on the way to it. Highlighted: changed."));
+        // What uses both is drawn: the same the other way round.
+        let users = common_users();
+        assert_eq!(
+            summary(&users),
+            "1 other file uses both users.php and orders<1>.php · both use 2 other files"
+        );
+        assert_eq!(
+            note(&users),
+            format!("What uses both stands to the left of the two, each with one shortest way from it to either of them: the strongest where several are as short. {THROUGH} Select a link to see what makes it up.")
+        );
+        assert!(
+            crumbs(&users).ends_with(&format!(": what uses both</span>{ASK_USED}{ASK_PATH}")),
+            "{}",
+            crumbs(&users)
+        );
+        assert!(legend(&users, false).ends_with("closing a cycle (↻). The ringed boxes are the two places. A name in bold is what uses both; a box with a plain name lies on its way to them."));
+        // More is shared than a picture shows.
+        let mut wide = common();
+        wide["shared"]["both_use"] = json!(1037);
+        wide["shared"]["shown"] = json!(12);
+        assert_eq!(
+            summary(&wide),
+            "users.php and orders<1>.php both use 1,037 other files, 12 drawn · 1 other file uses both"
+        );
+        assert!(note(&wide).ends_with(
+            " Select a link to see what makes it up. Only the nearest are drawn, 12 of 1,037: those with the fewest links from the two taken together, and among those as near the most linked."
+        ), "{}", note(&wide));
+        let mut wide = common_users();
+        wide["shared"]["uses_both"] = json!(20);
+        wide["shared"]["shown"] = json!(9);
+        assert_eq!(
+            summary(&wide),
+            "20 other files use both users.php and orders<1>.php, 9 drawn · both use 2 other files"
+        );
+        assert!(note(&wide).ends_with(
+            " Select a link to see what makes it up. Only the nearest are drawn, 9 of 20: those with the fewest links to the two taken together, and among those as near the most linked."
+        ), "{}", note(&wide));
+        // One kind alone: the other has no picture to go to.
+        let mut alone = common();
+        alone["shared"]["uses_both"] = json!(0);
+        assert_eq!(
+            summary(&alone),
+            "users.php and orders<1>.php both use 2 other files · nothing uses both"
+        );
+        assert!(note(&alone).ends_with("Select a link to see what makes it up."));
+        assert!(crumbs(&alone).ends_with(&format!(": what both use</span>{ASK_PATH}")));
+        // A kind that was asked for and has nothing: nothing is drawn, and
+        // the other kind is said to be there.
+        let mut asked = common();
+        asked["shared"]["both_use"] = json!(0);
+        asked["shared"]["uses_both"] = json!(3);
+        asked["shared"]["shown"] = json!(0);
+        asked["nodes"] = json!([]);
+        asked["edges"] = json!([]);
+        assert_eq!(
+            summary(&asked),
+            "users.php and orders<1>.php use nothing in common · 3 other files use both"
+        );
+        assert_eq!(
+            note(&asked),
+            format!("users.php and orders<1>.php use nothing in common. {THROUGH} What uses both is another picture: What uses both, beside the path above this one.")
+        );
+        asked["shared"]["side"] = json!("uses_both");
+        asked["shared"]["both_use"] = json!(1);
+        asked["shared"]["uses_both"] = json!(0);
+        assert_eq!(
+            summary(&asked),
+            "Nothing uses both users.php and orders<1>.php · both use 1 other file"
+        );
+        assert_eq!(
+            note(&asked),
+            format!("Nothing uses both users.php and orders<1>.php. {THROUGH} What they use in common is another picture: What both use, beside the path above this one.")
+        );
+        // Nothing of either kind, with a hint where guesses are left out.
+        // The path between the two can still be asked for.
+        let mut none = asked;
+        none["shared"]["both_use"] = json!(0);
+        assert_eq!(summary(&none), "users.php and orders<1>.php share nothing");
+        assert_eq!(
+            note(&none),
+            format!("Nothing is used by both users.php and orders<1>.php, and nothing uses both. {THROUGH}")
+        );
+        none["certain"] = json!(true);
+        assert!(note(&none)
+            .ends_with("Links guessed by name are left out; with them there may be something."));
+        assert!(crumbs(&none).ends_with(&format!(": what uses both</span>{ASK_PATH}")));
+        // One of the two in the other: they are not apart, and there is
+        // nothing more to ask of them.
+        none["shared"]["within"] = json!(true);
+        assert_eq!(summary(&none), "users.php and orders<1>.php share nothing");
+        assert_eq!(
+            note(&none),
+            "One of users.php and orders<1>.php lies in the other, so the two are not apart. Choose two places that lie apart."
+        );
+        assert!(crumbs(&none).ends_with(": what uses both</span>"));
+        // Among symbols what is shared is names.
+        let mut named = common();
+        named["shared"]["names"] = json!(true);
+        assert_eq!(
+            summary(&named),
+            "users.php and orders<1>.php both use 2 other names · 1 other name uses both"
+        );
+        assert!(legend(&named, true).ends_with("lies on the way to it. T type · m method · f function · c case · # heading. A box without a letter is a plain name, or a file itself for its imports. Highlighted: touched by the change."));
+        // Inside a chosen change the graph may be behind the files.
+        let mut stale = common();
+        stale["stale"] = json!(true);
+        assert!(note(&stale).starts_with("The graph is older than the files"));
+    }
+    #[test]
+    fn the_boxes_of_what_two_places_share_are_ringed_or_bold_and_do_not_open() {
+        let html = canvas(&common());
+        assert_eq!(
+            html.matches("<button type=\"button\" class=\"graph-map-node\"")
+                .count(),
+            4
+        );
+        // The two are ringed, each said in words too.
+        assert_eq!(html.matches("data-start=\"true\" style=").count(), 1);
+        assert_eq!(
+            html.matches("data-start=\"false\" data-end=\"true\" style=")
+                .count(),
+            1
+        );
+        assert!(html.contains("aria-label=\"users.php, file, uses others through 2 links, is used through 1 link, the first of the two places\""), "{html}");
+        assert!(html.contains("aria-label=\"orders&lt;1&gt;.php, file, uses others through 2 links, is used through 1 link, the second of the two places\""), "{html}");
+        // What both use is marked, and says so.
+        assert_eq!(
+            html.matches("data-start=\"false\" data-shared=\"true\" style=")
+                .count(),
+            2
+        );
+        assert!(html.contains("aria-label=\"core.php, file, uses others through 2 links, is used through 1 link, both use it\""), "{html}");
+        // A box is only selected, and has no handles: nothing is unfolded.
+        assert_eq!(html.matches("data-open=\"true\"").count(), 0);
+        assert!(!html.contains("graph-map-more"));
+        assert!(!html.contains("graph-map-spread"));
+        // Every link can be looked into, the guessed one drawn as a guess.
+        assert_eq!(html.matches("data-action=\"graph-map-link\"").count(), 4);
+        assert_eq!(html.matches("graph-map-edge-guess").count(), 1);
+        // What uses both says that instead.
+        let html = canvas(&common_users());
+        assert_eq!(html.matches("data-shared=\"true\"").count(), 1);
+        assert!(html.contains("aria-label=\"main.php, file, uses others through 2 links, is used through 1 link, uses both\""), "{html}");
+        // A place on the way to what is shared is a plain box.
+        let mut view = common();
+        view["nodes"][2]["shares"] = V::Null;
+        let html = canvas(&view);
+        assert_eq!(html.matches("data-shared=\"true\"").count(), 1);
+        assert!(
+            html.contains("aria-label=\"core.php, file, uses others through 2 links, is used through 1 link\""),
+            "{html}"
+        );
+        // One of the two can be a folder among files, drawn as one.
+        view["nodes"][0]["folder"] = json!(true);
+        view["nodes"][0]["files"] = json!(7);
+        let html = canvas(&view);
+        assert!(html.contains("data-payload=\"&quot;app/api/users.php&quot;\" data-folder=\"true\" data-kind=\"\" data-open=\"false\""), "{html}");
+        assert!(html.contains("aria-label=\"users.php, folder, 7 files, uses others through 2 links, is used through 1 link, the first of the two places\""), "{html}");
+        // The two stand side by side whatever their links say: here the
+        // second leads to the database alone, a layer further on, and in a
+        // picture that is none of two places it would stand a layer in.
+        let left = |html: &str, path: &str| {
+            let at = html
+                .find(&format!("data-payload=\"&quot;{path}&quot;\" data-folder"))
+                .unwrap();
+            let from = at + html[at..].find("style=\"left:").unwrap() + 12;
+            html[from..].split("px").next().unwrap().to_owned()
+        };
+        let mut far = common();
+        far["edges"] = json!([
+            {"from": "lib/core.php", "to": "lib/db.php", "links": 2, "guessed": 0},
+            {"from": "app/api/orders.php", "to": "lib/db.php", "links": 1, "guessed": 1},
+            {"from": "app/api/users.php", "to": "lib/core.php", "links": 1, "guessed": 0}
+        ]);
+        let html = canvas(&far);
+        assert_eq!(
+            (
+                left(&html, "app/api/users.php"),
+                left(&html, "app/api/orders.php")
+            ),
+            ("12".to_owned(), "12".to_owned())
+        );
+        far["mode"] = json!("path");
+        let html = canvas(&far);
+        assert_ne!(
+            left(&html, "app/api/users.php"),
+            left(&html, "app/api/orders.php")
+        );
+        // A picture that is none of two places marks nothing, whatever a
+        // box says of itself.
+        let mut other = routed();
+        other["nodes"][1]["shares"] = json!([1, 1]);
+        assert!(!canvas(&other).contains("data-shared"));
+        // Among symbols the boxes carry their letters and keep the ends of
+        // their names.
+        let mut named = traced();
+        named["mode"] = json!("shared");
+        named["shared"] = json!({
+            "from": {"path": TEST_TOTAL, "name": "CartTest.testTotal()", "what": "method", "symbol": true},
+            "to": {"path": PRICE_OF, "name": "Price.of()", "what": "method", "symbol": true},
+            "names": true, "within": false, "side": "both_use",
+            "both_use": 1, "uses_both": 0, "shown": 1, "wide": 12
+        });
+        named["nodes"] = json!([named["nodes"][2], named["nodes"][1], named["nodes"][0]]);
+        named["nodes"][0]["start"] = json!(true);
+        named["nodes"][1]["end"] = json!(true);
+        named["nodes"][2]["start"] = json!(false);
+        named["nodes"][2]["shares"] = json!([1, 1]);
+        named["edges"] = json!([
+            {"from": TEST_TOTAL, "to": TOTAL, "links": 1, "guessed": 0},
+            {"from": PRICE_OF, "to": TOTAL, "links": 1, "guessed": 0}
+        ]);
+        let html = canvas(&named);
+        assert!(html.starts_with("<div class=\"graph-map-plane\" data-names=\"true\" style=\""));
+        assert!(html.contains("is used through 3 links, both use it, modified\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Cart.total()</bdi></span>"), "{html}");
+        assert!(html.contains("aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links, the second of the two places\""), "{html}");
+        assert!(!html.contains("graph-map-more"));
+        assert_eq!(
+            summary(&named),
+            "CartTest.testTotal() and Price.of() both use 1 other name · nothing uses both"
+        );
+    }
+    #[test]
+    fn the_side_panel_of_what_two_places_share_says_what_a_box_is_to_them() {
+        // Nothing selected: how to read the picture, and where the other
+        // questions stand.
+        let mut view = common();
+        let idle = side(&view);
+        assert!(idle.starts_with("<p class=\"knowledge-note\">Select a box to see what it leads to on the way and what leads to it."));
+        assert!(idle.ends_with(
+            "beside it stand the other kind of what the two share, where there is any, and the path between them.</p>"
+        ));
+        // What both use: how far each of the two is, the ways on from it,
+        // and the two lists, each row a link that can be looked into.
+        let row = |path: &str, name: &str, links: u64| json!({"path": path, "name": name, "folder": false, "inside": true, "links": links, "guessed": 0, "changed": false});
+        let mut focus = view["nodes"][3].clone();
+        for (key, value) in [
+            ("inside", json!(true)),
+            ("uses", json!([])),
+            ("uses_more", json!(0)),
+            (
+                "used_by",
+                json!([
+                    row("lib/core.php", "core.php", 2),
+                    row("app/api/orders.php", "orders<1>.php", 1)
+                ]),
+            ),
+            ("used_by_more", json!(0)),
+            ("kinds", json!([])),
+        ] {
+            focus[key] = value;
+        }
+        view["focus"] = focus;
+        let html = side(&view);
+        assert!(html.starts_with("<h3>db.php</h3><p class=\"graph-map-path\">lib/db.php</p><p class=\"knowledge-note\">File · 2 symbols · both use it: 2 links from users.php, 1 link from orders&lt;1&gt;.php</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-open\" data-payload=\"&quot;lib/db.php&quot;\">Open file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;lib/db.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;db.php&quot;,&quot;path&quot;:&quot;lib/db.php&quot;}\">Path to…</button><h4>Next on the way <span class=\"graph-map-total\">0</span></h4>"), "{html}");
+        assert!(
+            html.contains("<h4>Before it on the way <span class=\"graph-map-total\">2</span></h4>")
+        );
+        assert_eq!(html.matches("class=\"graph-map-row-look\"").count(), 2);
+        // What uses both says how far the two are from it.
+        view["shared"]["side"] = json!("uses_both");
+        view["focus"]["shares"] = json!([1, 3]);
+        assert!(side(&view).contains(
+            "File · 2 symbols · uses both: 1 link to users.php, 3 links to orders&lt;1&gt;.php</p>"
+        ));
+        view["shared"]["side"] = json!("both_use");
+        // A box on the way says nothing more, and each of the two says
+        // which it is and can be followed like any other.
+        view["focus"]["shares"] = V::Null;
+        assert!(side(&view).contains("<p class=\"knowledge-note\">File · 2 symbols</p>"));
+        view["focus"]["start"] = json!(true);
+        let html = side(&view);
+        assert!(html.contains("File · 2 symbols · the first of the two places</p>"));
+        assert!(html.contains("data-action=\"graph-map-follow\""));
+        view["focus"]["start"] = json!(false);
+        view["focus"]["end"] = json!(true);
+        assert!(side(&view).contains("File · 2 symbols · the second of the two places</p>"));
+        // One of the two that is a folder is one, with the way into it.
+        view["focus"]["folder"] = json!(true);
+        view["focus"]["files"] = json!(7);
+        let html = side(&view);
+        assert!(html.contains("<p class=\"knowledge-note\">Folder · 7 files · the second of the two places</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-open\" data-payload=\"&quot;lib/db.php&quot;\">Open folder</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\""), "{html}");
+        // A symbol that is shared leads to its file, to its links and to a
+        // path from it.
+        let mut named = traced();
+        named["mode"] = json!("shared");
+        named["shared"] = json!({
+            "from": {"path": TEST_TOTAL, "name": "CartTest.testTotal()"},
+            "to": {"path": PRICE_OF, "name": "Price.of()"},
+            "names": true, "within": false, "side": "both_use"
+        });
+        let mut focus = named["nodes"][0].clone();
+        for (key, value) in [
+            ("inside", json!(true)),
+            ("uses", json!([])),
+            ("used_by", json!([])),
+            ("start", json!(false)),
+            ("shares", json!([1, 1])),
+        ] {
+            focus[key] = value;
+        }
+        named["focus"] = focus;
+        let html = side(&named);
+        assert!(html.starts_with("<h3>Cart.total()</h3><p class=\"graph-map-path\">src/Cart/Cart.php:19</p><p class=\"knowledge-note\">Method of Cart · modified by the change · both use it: 1 link from CartTest.testTotal(), 1 link from Price.of()</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-go\" data-payload=\"{&quot;open&quot;:&quot;src/Cart/Cart.php&quot;,&quot;path&quot;:&quot;src/Cart/Cart.php#L19:.total()&quot;}\">Open in its file</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;src/Cart/Cart.php#L19:.total()&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;Cart.total()&quot;,&quot;path&quot;:&quot;src/Cart/Cart.php#L19:.total()&quot;}\">Path to…</button><h4>Next on the way <span"), "{html}");
+        // A kind that has nothing while the other has: the other kind and
+        // the path between the two are asked for from here, and each of
+        // the two is left to go on from.
+        let ends = "<h4>users.php</h4><p class=\"graph-map-path\">app/api/users.php</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;app/api/users.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;users.php&quot;,&quot;path&quot;:&quot;app/api/users.php&quot;}\">Path to…</button><h4>orders&lt;1&gt;.php</h4><p class=\"graph-map-path\">app/api/orders.php</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-follow\" data-payload=\"&quot;app/api/orders.php&quot;\">Follow links</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-path\" data-payload=\"{&quot;name&quot;:&quot;orders&lt;1&gt;.php&quot;,&quot;path&quot;:&quot;app/api/orders.php&quot;}\">Path to…</button>";
+        let mut none = common();
+        none["shared"]["both_use"] = json!(0);
+        none["shared"]["shown"] = json!(0);
+        none["nodes"] = json!([]);
+        none["edges"] = json!([]);
+        assert_eq!(
+            side(&none),
+            format!("<p class=\"knowledge-note\">Nothing is drawn. What uses both shows what does. The path between them asks how one of the two reaches the other. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"&quot;uses_both&quot;\">What uses both</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"false\">The path between them</button>{ends}")
+        );
+        none["shared"]["side"] = json!("uses_both");
+        none["shared"]["both_use"] = json!(4);
+        none["shared"]["uses_both"] = json!(0);
+        assert!(side(&none).starts_with("<p class=\"knowledge-note\">Nothing is drawn. What both use shows what they do. The path between them asks how one of the two reaches the other. Follow links shows"));
+        // Two places that share nothing are left with the path alone.
+        none["shared"]["both_use"] = json!(0);
+        assert_eq!(
+            side(&none),
+            format!("<p class=\"knowledge-note\">Nothing is drawn. The path between them asks how one of the two reaches the other. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"false\">The path between them</button>{ends}")
+        );
+        // One of the two in the other leaves no path to ask for.
+        none["shared"]["within"] = json!(true);
+        assert_eq!(
+            side(&none),
+            format!("<p class=\"knowledge-note\">Nothing is drawn. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p>{ends}")
+        );
+    }
+    #[test]
+    fn two_places_are_asked_what_they_share_and_for_the_path_again() {
+        // No two places are shown: there is nothing to ask.
+        let state = fresh("pr:7");
+        assert_eq!(
+            (&state["shared"], &state["side"]),
+            (&json!(false), &json!(""))
+        );
+        assert_eq!(sharing(state.clone(), &json!(true)), None);
+        // The two ends of a path, with a box of it selected: the same two
+        // are asked what they share, in the map that is open, and nothing
+        // is selected in the new picture. Which kind is drawn is left to
+        // what there is.
+        let mut pathed = state;
+        for (key, value) in [
+            ("scope", json!("lib")),
+            ("path", json!(["lib/a<b>.php", "lib/db.php"])),
+            ("focus", json!("lib/core.php")),
+            ("spread", json!(["src"])),
+        ] {
+            pathed[key] = value;
+        }
+        let kept = |state: &V, keys: &[&str]| {
+            keys.iter()
+                .map(|key| state[*key].clone())
+                .collect::<Vec<_>>()
+        };
+        let ends = json!(["lib/a<b>.php", "lib/db.php"]);
+        let shown = sharing(pathed.clone(), &json!(true)).unwrap();
+        assert_eq!(
+            kept(&shown, &["shared", "side", "path", "focus"]),
+            [json!(true), json!(""), ends.clone(), json!("")]
+        );
+        assert_eq!(
+            kept(&shown, &["target", "scope", "spread", "pick"]),
+            kept(&pathed, &["target", "scope", "spread", "pick"])
+        );
+        // One kind is asked for by its name, from the path or from the
+        // other kind, and nothing stays selected.
+        let mut chosen = shown.clone();
+        chosen["focus"] = json!("lib/core.php");
+        for side in ["uses_both", "both_use"] {
+            for from in [&pathed, &chosen] {
+                assert_eq!(
+                    kept(
+                        &sharing(from.clone(), &json!(side)).unwrap(),
+                        &["shared", "side", "path", "focus"]
+                    ),
+                    [json!(true), json!(side), ends.clone(), json!("")],
+                    "{side}"
+                );
+            }
+        }
+        // Anything else asks for the path between them again.
+        let users = sharing(chosen, &json!("uses_both")).unwrap();
+        for asked in [json!(false), V::Null, json!("elsewhere")] {
+            assert_eq!(
+                kept(
+                    &sharing(users.clone(), &asked).unwrap(),
+                    &["shared", "side", "path", "focus"]
+                ),
+                [json!(false), json!(""), ends.clone(), json!("")],
+                "{asked}"
+            );
+        }
+        // Leaving the two for a folder or a file leaves what they share.
+        let left = unfollowed(users.clone());
+        assert_eq!(
+            kept(&left, &["shared", "side", "path"]),
+            [json!(false), json!(""), json!([])]
+        );
+        // A path asked from a box of what they share is a path.
+        let mut asked = users;
+        asked["pick"] = json!({"path": "lib/core.php", "name": "core.php"});
+        let other = led(asked, "lib/db.php").unwrap();
+        assert_eq!(
+            kept(&other, &["shared", "side", "path"]),
+            [
+                json!(false),
+                json!(""),
+                json!(["lib/core.php", "lib/db.php"])
+            ]
+        );
     }
     #[test]
     fn what_a_search_typed_is_marked_in_the_names_it_found() {

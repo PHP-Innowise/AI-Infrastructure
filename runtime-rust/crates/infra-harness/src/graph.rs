@@ -921,6 +921,17 @@ pub struct Shown<'a> {
     /// Two places to find the shortest ways between, instead of a folder:
     /// the one they lead from and the one they lead to.
     pub path: Option<(&'a str, &'a str)>,
+    /// Two places to find what they share, instead of a folder.
+    pub shared: Option<Sharing<'a>>,
+}
+/// Two places asked what they share, and which kind of it to draw.
+#[derive(Clone, Copy, Debug)]
+pub struct Sharing<'a> {
+    pub from: &'a str,
+    pub to: &'a str,
+    /// What uses both, or what both use. Where it is not said, what both
+    /// use, unless only the other kind has anything.
+    pub users: Option<bool>,
 }
 /// How many places a request may name in one list, and in how many bytes.
 const UNFOLDED: usize = 256;
@@ -1054,6 +1065,7 @@ impl Graphs {
             spread,
             link,
             path,
+            shared,
         } = *shown;
         // The graph as it was read, or as it is without its tests, with how
         // much that leaves out.
@@ -1077,10 +1089,17 @@ impl Graphs {
                 if let Some((from, to)) = link {
                     return Some(index.link(from, to, certain));
                 }
-                // The ways between two places come before a followed place;
-                // an end the graph does not know leaves what else was asked.
+                // The ways between two places, or what the two share, come
+                // before a followed place; a place the graph does not know
+                // leaves what else was asked.
                 if let Some((from, to)) = path
                     && let Some(view) = index.path(name, from, to, changed, edited, focus, certain)
+                {
+                    return Some(view);
+                }
+                if let Some(Sharing { from, to, users }) = shared
+                    && let Some(view) =
+                        index.shared(name, from, to, users, changed, edited, focus, certain)
                 {
                     return Some(view);
                 }
@@ -2268,6 +2287,26 @@ impl Domain for Graphs {
                     if !ends.is_empty() && ends.len() != 2 {
                         return Err(HarnessError::invalid("Invalid code graph path."));
                     }
+                    // And what two places share: a list of the two, asked
+                    // for instead of the path between them.
+                    let sharing = places(
+                        query["shared"].as_str().unwrap_or(""),
+                        "Invalid code graph places.",
+                        "Invalid code graph places.",
+                    )?;
+                    if !sharing.is_empty() && (sharing.len() != 2 || !ends.is_empty()) {
+                        return Err(HarnessError::invalid("Invalid code graph places."));
+                    }
+                    // Of what they share one kind is drawn, and a request
+                    // may say which.
+                    let users = match query["side"].as_str() {
+                        None | Some("") => None,
+                        Some("both_use") if !sharing.is_empty() => Some(false),
+                        Some("uses_both") if !sharing.is_empty() => Some(true),
+                        Some(_) => {
+                            return Err(HarnessError::invalid("Invalid code graph places."));
+                        }
+                    };
                     let me = self.me.upgrade().ok_or_else(|| {
                         HarnessError::unavailable("The code graph is shutting down.")
                     })?;
@@ -2287,6 +2326,10 @@ impl Domain for Graphs {
                                 link: (!from.is_empty()).then_some((from.as_str(), to.as_str())),
                                 path: match ends.as_slice() {
                                     [from, to] => Some((from.as_str(), to.as_str())),
+                                    _ => None,
+                                },
+                                shared: match sharing.as_slice() {
+                                    [from, to] => Some(Sharing { from, to, users }),
                                     _ => None,
                                 },
                             },
@@ -2377,7 +2420,7 @@ mod tests {
             .unwrap();
         for part in [
             "scope", "focus", "certain", "filter", "target", "follow", "out", "into", "notests",
-            "spread", "from", "to", "path",
+            "spread", "from", "to", "path", "shared", "side",
         ] {
             assert!(route.query.contains(&part), "{part}");
         }
@@ -3363,6 +3406,48 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 .collect::<Vec<_>>();
             assert_eq!(places, ["order.php A", "cart.php M", "price.php M"]);
             assert_eq!(ways("order.php", "nowhere.php")["mode"], "changes");
+            // What two places share is asked of the same graph. The order
+            // reaches the price through the cart alone, so the order and
+            // the cart share nothing, and the answer says so; a place the
+            // graph does not know leaves the change as it is drawn.
+            let sharing = |from: &str, to: &str, users: Option<bool>| {
+                fixture
+                    .graphs
+                    .map(
+                        &fixture.project,
+                        Some(&Target::Work),
+                        &Shown {
+                            shared: Some(Sharing { from, to, users }),
+                            ..Shown::default()
+                        },
+                    )
+                    .unwrap()
+            };
+            let both = sharing("order.php", "cart.php", None);
+            assert_eq!(
+                (
+                    both["mode"].as_str(),
+                    both["shared"]["from"]["name"].as_str(),
+                    both["shared"]["side"].as_str(),
+                    both["shared"]["both_use"].as_u64(),
+                    both["shared"]["uses_both"].as_u64(),
+                    both["chosen"]["kind"].as_str()
+                ),
+                (
+                    Some("shared"),
+                    Some("order.php"),
+                    Some("both_use"),
+                    Some(0),
+                    Some(0),
+                    Some("work")
+                )
+            );
+            // The kind that is asked for is the one answered.
+            assert_eq!(
+                sharing("order.php", "cart.php", Some(true))["shared"]["side"],
+                "uses_both"
+            );
+            assert_eq!(sharing("order.php", "nowhere.php", None)["mode"], "changes");
             // On the whole project the same links carry no mark.
             let whole = fixture
                 .graphs
