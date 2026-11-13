@@ -281,21 +281,15 @@ fn citation_exists(context: &RuntimeContext, name: &str) -> bool {
             return Ok(false);
         }
         #[cfg(not(windows))]
-        let lexical = std::fs::symlink_metadata(&path)?;
+        let symlink = std::fs::symlink_metadata(&path)?.file_type().is_symlink();
         #[cfg(windows)]
-        {
+        let symlink = {
             std::fs::symlink_metadata(&path)?;
             let image = crate::fs::native_image(&path)?
                 .ok_or_else(|| RuntimeError::unavailable("Citation image unavailable"))?;
-            if image.reparse_tag == 0xA000000C {
-                return Ok(false);
-            }
-        }
-        #[cfg(not(windows))]
-        if lexical.file_type().is_symlink() {
-            return Ok(false);
-        }
-        Ok(true)
+            image.reparse_tag == 0xA000000C
+        };
+        Ok(!symlink)
     })();
     operation.unwrap_or(false)
 }
