@@ -24,6 +24,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Mark the dependency map in Harness with the design and architecture patterns
+  the graph shows signs of, list the findings where a picture is open, and draw
+  one finding with what each of its parts is in it.
+
 - View the existing cycle at the base of a pull request in Harness, inspect its
   links at that revision, and switch back to the PR cycle.
 

@@ -778,6 +778,10 @@ fn at_base(view: &V) -> bool {
 fn shares(view: &V) -> bool {
     view["mode"] == "shared"
 }
+/// One found pattern: its parts, each in the frame of what it is in it.
+fn patterned(view: &V) -> bool {
+    view["mode"] == "pattern"
+}
 /// Of what two places share, what uses both is drawn, not what both use.
 fn above(view: &V) -> bool {
     view["shared"]["side"] == "uses_both"
@@ -790,6 +794,7 @@ fn names(view: &V) -> bool {
         || (paths(view) && m::yes(&view["path"]["names"]))
         || (shares(view) && m::yes(&view["shared"]["names"]))
         || (cycles(view) && m::yes(&view["cycle"]["names"]))
+        || patterned(view)
 }
 /// The letter a symbol's box carries for what it is. The file's own node
 /// and a name the graph says nothing more about carry none.
@@ -1020,6 +1025,31 @@ fn shown(view: &V) -> String {
             1 => " · 1 other file uses it".to_owned(),
             users => format!(" · {} other files use it", count(users)),
         });
+        return text;
+    }
+    if patterned(view) {
+        // The pattern, the type it is named after, and its other parts by
+        // what they are in it.
+        let pattern = &view["pattern"];
+        let mut text = format!(
+            "{}: {}",
+            m::text(pattern, "name"),
+            m::text(&pattern["of"], "name")
+        );
+        for part in m::array(&pattern["parts"]) {
+            let number = |key: &str| part[key].as_u64().unwrap_or(0);
+            text.push_str(&format!(
+                " · {}",
+                plural(
+                    number("found"),
+                    &m::text(&part, "one"),
+                    &m::text(&part, "many")
+                )
+            ));
+            if number("drawn") < number("found") {
+                text.push_str(&format!(", {} drawn", count(number("drawn"))));
+            }
+        }
         return text;
     }
     if cycles(view) {
@@ -1631,9 +1661,27 @@ fn shared_note(view: &V) -> String {
     }
     parts.join(" ")
 }
+/// Above the picture of one found pattern: what the pattern is, what tells
+/// it here, and how far that is to be believed.
+fn pattern_note(view: &V) -> String {
+    let pattern = &view["pattern"];
+    let mut parts = vec![m::text(pattern, "tells")];
+    parts.extend(
+        m::array(&pattern["told"])
+            .iter()
+            .filter_map(|told| told.as_str().map(str::to_owned)),
+    );
+    if m::yes(&pattern["guessed"]) {
+        parts.push("A dashed link is one the tool only guessed.".to_owned());
+    }
+    parts.join(" ")
+}
 pub fn note(view: &V) -> String {
     if symbols(view) {
         return file_note(view);
+    }
+    if patterned(view) {
+        return pattern_note(view);
     }
     if paths(view) {
         return path_note(view);
@@ -1798,6 +1846,7 @@ pub fn canvas(view: &V) -> String {
     let pathed = paths(view);
     let shared = shares(view);
     let cycle_view = cycles(view);
+    let pattern_view = patterned(view);
     let cycles = !changes(view) && !opened;
     let shared_edges: BTreeSet<_> = view["focus"]["shared_edges"]
         .as_array()
@@ -1870,8 +1919,22 @@ pub fn canvas(view: &V) -> String {
         } else {
             ""
         };
+        // Between two parts of a pattern a link says how the one stands to
+        // the other.
+        let (user, used) = (
+            escape(&m::text(&nodes[from], "name")),
+            escape(&m::text(&nodes[to], "name")),
+        );
+        let told = match edge["tie"].as_str() {
+            Some(tie) => format!(
+                "{user} {} {used}{}",
+                escape(tie),
+                if guessed > 0 { " · guessed" } else { "" }
+            ),
+            None => format!("{user} uses {used} · {}", weight(links, guessed)),
+        };
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}{}\" data-ends=\"{from} {to}\"{}{} d=\"{}\" stroke=\"url(#graph-map-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow)\"><title>{} uses {} · {}{}{}</title></path>",
+            "<path class=\"graph-map-edge{state}{}{}\" data-ends=\"{from} {to}\"{}{} d=\"{}\" stroke=\"url(#graph-map-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow)\"><title>{told}{}{}</title></path>",
             if guessed == links { " graph-map-edge-guess" } else { "" },
             if back { " graph-map-edge-back" } else { "" },
             if on_path { " data-shared-path=\"true\"" } else { "" },
@@ -1881,9 +1944,6 @@ pub fn canvas(view: &V) -> String {
             // A link that closes a cycle is a row of dots, kept thin.
             (1.0 + ((links.max(1) as f64).log2() * 0.5).min(2.5)).min(if back { 1.8 } else { 3.5 })
                 + if added { 1.5 } else { 0.0 },
-            escape(&m::text(&nodes[from], "name")),
-            escape(&m::text(&nodes[to], "name")),
-            weight(links, guessed),
             if back { " · against the main direction, closes a cycle" } else { "" },
             if added { " · added in PR" } else { "" },
         ));
@@ -1949,7 +2009,7 @@ pub fn canvas(view: &V) -> String {
         } else {
             ""
         };
-        let pressed = if shared {
+        let pressed = if shared || pattern_view {
             format!(" aria-pressed=\"{}\"", chosen == Some(index))
         } else {
             String::new()
@@ -1967,6 +2027,8 @@ pub fn canvas(view: &V) -> String {
                 ", the path starts here"
             } else if cycle_view {
                 ", the cycle starts and ends here"
+            } else if pattern_view {
+                ", the pattern is named after it"
             } else {
                 ", the links are followed from here"
             });
@@ -2024,6 +2086,19 @@ pub fn canvas(view: &V) -> String {
             }
         };
         label.push_str(&mark);
+        // What a part is in the pattern that is drawn, or in how many found
+        // patterns a place of any other picture takes part.
+        if let Some(role) = node["role"].as_str().filter(|_| pattern_view) {
+            label.push_str(&format!(", {role} in the pattern"));
+        }
+        let patterns = node["patterns"].as_u64().unwrap_or(0);
+        if patterns > 0 {
+            label.push_str(&format!(
+                ", {} {}",
+                if symbol { "part of" } else { "holds parts of" },
+                plural(patterns, "found pattern", "found patterns")
+            ));
+        }
         let kind = node["kind"].as_str().unwrap_or("");
         // A folder opens to its files, a file to what it holds. Among
         // followed links, on a path and in what two places share a box is
@@ -2032,6 +2107,7 @@ pub fn canvas(view: &V) -> String {
             && !pathed
             && !shared
             && !cycle_view
+            && !pattern_view
             && (folder || (!symbol && node["symbols"].as_u64().unwrap_or(0) > 0));
         // A symbol lies in the open file, or, among followed symbols, in
         // the file it says.
@@ -2077,6 +2153,16 @@ pub fn canvas(view: &V) -> String {
         ));
         if cycle {
             html.push_str("<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻</span>");
+        }
+        if patterns > 0 {
+            html.push_str(&format!(
+                "<span class=\"graph-map-node-pattern\" aria-hidden=\"true\">◆{}</span>",
+                if patterns > 1 {
+                    count(patterns)
+                } else {
+                    String::new()
+                }
+            ));
         }
         if changed > 0 {
             // A changed file carries Git's letter and a folder how many
@@ -2132,15 +2218,22 @@ pub fn canvas(view: &V) -> String {
             held["places"].as_u64().unwrap_or(0),
             held["drawn"].as_u64().unwrap_or(0),
         );
+        // A frame of a pattern is no folder to draw as one box again.
+        let fixed = m::yes(&held["fixed"]);
+        if !fixed {
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"graph-map-spread\" data-action=\"graph-map-gather\" data-payload=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"Draw {name} as one box again\" aria-label=\"Draw {name} as one box again\">−</button>",
+                payload(&held["path"]),
+                place.x + 13.0,
+                place.y + 11.0,
+            ));
+        }
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-spread\" data-action=\"graph-map-gather\" data-payload=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"Draw {name} as one box again\" aria-label=\"Draw {name} as one box again\">−</button><span class=\"graph-map-frame-name\" style=\"left:{:.0}px;top:{:.0}px;max-width:{:.0}px\" title=\"{}\">{name}{}</span>",
-            payload(&held["path"]),
-            place.x + 13.0,
-            place.y + 11.0,
-            place.x + 26.0,
+            "<span class=\"graph-map-frame-name\" style=\"left:{:.0}px;top:{:.0}px;max-width:{:.0}px\" title=\"{}\">{name}{}</span>",
+            place.x + if fixed { 8.0 } else { 26.0 },
             place.y + 3.0,
-            (place.width - 32.0).max(40.0),
-            escape(&m::text(held, "path")),
+            (place.width - if fixed { 14.0 } else { 32.0 }).max(40.0),
+            escape(&if fixed { m::text(held, "name") } else { m::text(held, "path") }),
             if drawn < places {
                 format!(
                     "<span class=\"graph-map-frame-count\"> · {} of {} drawn</span>",
@@ -3055,12 +3148,151 @@ fn apart(view: &V) -> String {
     }
     html
 }
+/// The side panel of one found pattern: the selected part with what it is
+/// in the pattern and what joins it to the others, or what to do.
+fn pattern_side(view: &V) -> String {
+    let focus = &view["focus"];
+    if !focus.is_object() {
+        return "<p class=\"knowledge-note\">A frame holds the parts that are one thing in the pattern. Select a part to see what joins it to the others, and select it again to let go of it. Select a link to see what makes it up.</p>".to_owned();
+    }
+    name_side(
+        view,
+        focus,
+        false,
+        &format!(" · {} in this pattern", m::text(focus, "role")),
+    )
+}
+/// Findings of one pattern a list shows before it is asked for all of them.
+const FIRST: usize = 3;
+/// One found pattern as a row that opens its picture. Beside a selected
+/// place the row begins with the pattern, in a list of one pattern with the
+/// type the finding is named after.
+fn pattern_row(row: &V, whole: bool) -> String {
+    let line = row["line"].as_u64().unwrap_or(0);
+    let mut told = m::text(row, "parts");
+    for (key, tag) in [("named", "by name"), ("guessed", "guessed")] {
+        if m::yes(&row[key]) {
+            if !told.is_empty() {
+                told.push_str(" · ");
+            }
+            told.push_str(tag);
+        }
+    }
+    format!(
+        "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-pattern\" data-payload=\"{}\" title=\"{}{}\"><span class=\"graph-map-row-name\">{}{}<span class=\"graph-map-row-file\">{}</span></span><span class=\"graph-map-row-links\">{}</span></button></li>",
+        payload(&row["id"]),
+        escape(&m::text(row, "file")),
+        if line > 0 { format!(":{line}") } else { String::new() },
+        if whole {
+            format!("{}: ", escape(&m::text(row, "name")))
+        } else {
+            String::new()
+        },
+        escape(&m::text(row, "of")),
+        escape(base(&m::text(row, "file"))),
+        escape(&told),
+    )
+}
+/// The patterns found where the picture is open, below the rest of the side
+/// panel: those a selected place is part of, or, with nothing selected, all
+/// of them, architecture before design, each pattern with its first few
+/// findings. `open` names the patterns whose whole list is shown. Nothing
+/// where patterns are not asked for.
+pub fn found_patterns(view: &V, open: &[String]) -> String {
+    let found = &view["patterns"];
+    if !found.is_object() {
+        return String::new();
+    }
+    let focus = &view["focus"];
+    if focus.is_object() {
+        let rows = m::array(&focus["patterns"]);
+        let mut html = format!(
+            "<h4>Patterns <span class=\"graph-map-total\">{}</span></h4>",
+            count(rows.len() as u64)
+        );
+        if rows.is_empty() {
+            html.push_str("<p class=\"knowledge-note\">No found pattern has a part here.</p>");
+            return html;
+        }
+        html.push_str("<ul class=\"graph-map-rows\">");
+        for row in &rows {
+            html.push_str(&pattern_row(row, true));
+        }
+        html.push_str("</ul>");
+        return html;
+    }
+    // Beside followed links, a path, shared places or a cycle the side
+    // panel is theirs: only a selected place says what it is part of.
+    if follows(view) || paths(view) || shares(view) || cycles(view) {
+        return String::new();
+    }
+    let kinds = m::array(&found["kinds"]);
+    let mut html = format!(
+        "<h4>Patterns found here <span class=\"graph-map-total\">{}</span></h4>",
+        count(found["found"].as_u64().unwrap_or(0))
+    );
+    if kinds.is_empty() {
+        html.push_str("<p class=\"knowledge-note\">None. A pattern is told by how types extend, implement, hold, take and make each other, and a few by a name.</p>");
+        return html;
+    }
+    html.push_str("<p class=\"knowledge-note\">A box with ◆ holds a part of one. Select a finding to see its parts.</p>");
+    for (family, title) in [("architecture", "Architecture"), ("design", "Design")] {
+        let of = kinds
+            .iter()
+            .filter(|kind| kind["family"] == family)
+            .collect::<Vec<_>>();
+        if of.is_empty() {
+            continue;
+        }
+        html.push_str(&format!("<p class=\"graph-map-family\">{title}</p>"));
+        for kind in of {
+            let id = m::text(kind, "id");
+            let rows = m::array(&kind["instances"]);
+            let all = open.contains(&id);
+            let (found, more) = (
+                kind["found"].as_u64().unwrap_or(0),
+                kind["more"].as_u64().unwrap_or(0),
+            );
+            html.push_str(&format!(
+                "<p class=\"graph-map-pattern-name\" title=\"{}\">{} <span class=\"graph-map-total\">{}</span></p><ul class=\"graph-map-rows\">",
+                escape(&m::text(kind, "tells")),
+                escape(&m::text(kind, "name")),
+                count(found),
+            ));
+            for row in rows.iter().take(if all { rows.len() } else { FIRST }) {
+                html.push_str(&pattern_row(row, false));
+            }
+            html.push_str("</ul>");
+            if rows.len() > FIRST {
+                html.push_str(&format!(
+                    "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-pattern-kind\" data-payload=\"{}\" aria-expanded=\"{all}\">{}</button>",
+                    payload(&json!(id)),
+                    if all {
+                        format!("First {FIRST}")
+                    } else {
+                        format!("All {}", count(rows.len() as u64))
+                    },
+                ));
+            }
+            if all && more > 0 {
+                html.push_str(&format!(
+                    "<p class=\"knowledge-note\">and {} more: open a folder to see those of it.</p>",
+                    count(more)
+                ));
+            }
+        }
+    }
+    html
+}
 /// What the two lists beside a selected box of a path are called.
 const WAY: (&str, &str) = ("Next on the way", "Before it on the way");
 /// The side panel: what the selected place uses and what uses it.
 pub fn side(view: &V) -> String {
     if symbols(view) {
         return file_side(view);
+    }
+    if patterned(view) {
+        return pattern_side(view);
     }
     let focus = &view["focus"];
     let followed = follows(view);
@@ -3314,6 +3546,9 @@ fn legend(view: &V, change: bool) -> String {
         _ if changes(view) => {
             "Highlighted: changed. The rest use the change or are used by it.".to_owned()
         }
+        _ if patterned(view) => format!(
+            "A frame holds the parts that are one thing in the pattern; the ringed box is the type it is named after. {NAME_LEGEND}"
+        ),
         _ if cycles(view) => {
             let mut text = format!("{LEGEND} The ringed box is where the cycle starts and ends.");
             if m::array(&view["edges"])
@@ -3367,9 +3602,14 @@ fn legend(view: &V, change: bool) -> String {
         _ => LEGEND.to_owned(),
     };
     format!(
-        "An arrow runs from what uses {} to what is used {}, and a box is tinted by which it does more here. Solid: read from the code. Dashed: guessed by name. Thicker: more links. {particular}",
+        "An arrow runs from what uses {} to what is used {}, and a box is tinted by which it does more here. Solid: read from the code. Dashed: guessed by name. Thicker: more links. {particular}{}",
         patch("uses"),
         patch("used"),
+        if view["patterns"].is_object() {
+            " ◆: a part of a found pattern, or a place that holds one."
+        } else {
+            ""
+        },
     )
 }
 const TABS: [&str; 3] = ["commits", "pulls", "branches"];
@@ -3985,7 +4225,7 @@ fn watch() {
     }
 }
 fn fresh(target: &str) -> V {
-    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "filter": "", "follow": "", "out": [], "into": [], "spread": [], "path": [], "shared": false, "side": "", "skip": [], "pick": null})
+    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "filter": "", "follow": "", "out": [], "into": [], "spread": [], "path": [], "shared": false, "side": "", "skip": [], "pick": null, "patterns": false, "pattern": null, "pattern_return": null, "kinds": []})
 }
 /// How many folders a picture keeps spread out; the oldest gives way.
 const SPREAD: usize = 32;
@@ -4011,12 +4251,15 @@ fn spread(mut state: V, folder: &str, gather: bool) -> V {
 /// it fits its pictures to the window.
 const NOTESTS: &str = "graph-map-notests";
 const FIT: &str = "graph-map-fit";
+/// And whether it marks its pictures with the patterns found in them.
+const PATTERNS: &str = "graph-map-patterns";
 /// A map begun anew, with tests left out and pictures fitted where they
 /// were the last time.
 fn anew(target: &str) -> V {
     let mut state = fresh(target);
     state["notests"] = json!(dom::storage(NOTESTS).as_deref() == Some("1"));
     state["fit"] = json!(dom::storage(FIT).as_deref() == Some("1"));
+    state["patterns"] = json!(dom::storage(PATTERNS).as_deref() == Some("1"));
     state
 }
 /// The places a list of the state names: those whose side `key` (`out` or
@@ -4028,9 +4271,11 @@ fn unfolded(state: &V, key: &str) -> Vec<String> {
         .filter_map(|place| place.as_str().map(str::to_owned))
         .collect()
 }
-/// Leave any followed links, path, shared places or cycle. A path that is
-/// still being asked for stays asked for.
+/// Leave any followed links, path, shared places, cycle or found pattern. A
+/// path that is still being asked for stays asked for.
 fn unfollowed(mut state: V) -> V {
+    state["pattern"] = V::Null;
+    state["pattern_return"] = V::Null;
     state["follow"] = json!("");
     state["out"] = json!([]);
     state["into"] = json!([]);
@@ -4077,6 +4322,38 @@ fn switch_cycle(mut state: V, comparison: &V) -> Option<V> {
     state["focus"] = json!(place);
     Some(state)
 }
+/// The map as it shows one found pattern, with the map it was found in to
+/// return to. A pattern opened from the picture of another returns where the
+/// first was opened. `None` while the other end of a path is being chosen.
+pub fn showing_pattern(state: V, id: &str) -> Option<V> {
+    if id.is_empty() || state["pick"].is_object() {
+        return None;
+    }
+    let back = if state["pattern"].is_string() {
+        state["pattern_return"].clone()
+    } else {
+        state.clone()
+    };
+    let mut shown = unfollowed(state);
+    shown["pattern"] = json!(id);
+    shown["pattern_return"] = back;
+    shown["focus"] = json!("");
+    shown["filter"] = json!("");
+    Some(shown)
+}
+/// The map a found pattern was opened from, with what was switched since:
+/// those choices are the viewer's and hold wherever the map goes.
+pub fn left_pattern(mut state: V) -> Option<V> {
+    let mut previous = state["pattern_return"].take();
+    if !previous.is_object() {
+        return None;
+    }
+    for key in ["certain", "notests", "fit", "patterns", "kinds"] {
+        previous[key] = state[key].take();
+    }
+    Some(previous)
+}
+const PATTERN_BACK: &str = "<button type=\"button\" class=\"button compact\" id=\"graph-map-pattern-back\" data-action=\"graph-map-pattern-back\">Back to map</button>";
 const CYCLE_BACK: &str = "<button type=\"button\" class=\"button compact\" id=\"graph-map-cycle-back\" data-action=\"graph-map-cycle-back\">Back to map</button>";
 
 fn base_cycle_button(view: &V, showing_base: bool) -> String {
@@ -4896,11 +5173,12 @@ fn render(view: &V) {
     dom::set_checked("graph-map-certain", m::yes(&view["certain"]));
     dom::set_checked("graph-map-notests", m::yes(&view["notests"]));
     dom::set_checked("graph-map-fit", m::yes(&state()["fit"]));
+    dom::set_checked("graph-map-patterns", m::yes(&state()["patterns"]));
     dom::disabled("graph-find-search", at_base(view));
     // Of what two places share, the filter keeps the names that hold it.
     dom::disabled(
         "graph-map-filter",
-        follows(view) || paths(view) || cycles(view),
+        follows(view) || paths(view) || cycles(view) || patterned(view),
     );
     // Keep keyboard focus on the selected node through a repaint.
     const NODE_BUTTONS: &str = "#graph-map-canvas .graph-map-node";
@@ -4909,6 +5187,7 @@ fn render(view: &V) {
         .filter(|node| {
             (shares(view)
                 || cycles(view)
+                || patterned(view)
                 || view["chosen"]["kind"] == "pull"
                 || node.get_attribute("data-cycle").as_deref() == Some("true"))
                 && node
@@ -4955,6 +5234,8 @@ fn render(view: &V) {
             actions.push_str(CYCLE_BACK);
         }
         actions
+    } else if patterned(view) && state["pattern_return"].is_object() {
+        PATTERN_BACK.to_owned()
     } else if show_cycle {
         format!(
             "<button type=\"button\" class=\"button compact\" id=\"graph-map-show-cycle\" data-action=\"graph-map-cycle\" data-payload=\"{}\">Show cycle</button>",
@@ -4969,13 +5250,23 @@ fn render(view: &V) {
         .and_then(|element| element.get_attribute("data-action"));
     let opening_cycle = cycles(view) && active_action.as_deref() == Some("graph-map-cycle");
     let returning = !cycles(view) && active_action.as_deref() == Some("graph-map-cycle-back");
+    // A finding that was opened from the keyboard, or left, took the row or
+    // the button that had the focus with it.
+    let turned = (patterned(view) && active_action.as_deref() == Some("graph-map-pattern"))
+        || (!patterned(view) && active_action.as_deref() == Some("graph-map-pattern-back"));
     html(
         "graph-map-side",
-        &format!("{}{}{action}{}", choosing(&state), paging(view), side(view)),
+        &format!(
+            "{}{}{action}{}{}",
+            choosing(&state),
+            paging(view),
+            side(view),
+            found_patterns(view, &unfolded(&state, "kinds")),
+        ),
     );
     if returning && show_cycle {
         dom::focus("graph-map-show-cycle");
-    } else if opening_cycle || returning {
+    } else if opening_cycle || returning || turned {
         dom::focus("graph-map-summary");
     } else if active_action.as_deref() == Some("graph-map-cycle-back") {
         dom::focus("graph-map-cycle-back");
@@ -5034,6 +5325,11 @@ async fn load(quiet: bool) {
             query.push((key, "1".to_owned()));
         }
     }
+    // The patterns found where the picture is open; the picture of one of
+    // them is that pattern alone.
+    if m::yes(&state["patterns"]) && !state["pattern"].is_string() {
+        query.push(("patterns", "1".to_owned()));
+    }
     // The unfolded places of each side, as a list a URL can carry whatever
     // the paths hold.
     // Two places, asked for the path between them or for what they share,
@@ -5054,6 +5350,8 @@ async fn load(quiet: bool) {
         query.push(("base", revision.to_owned()));
     } else if let Some(cycle) = state["cycle"].as_str() {
         query.push(("cycle", cycle.to_owned()));
+    } else if let Some(pattern) = state["pattern"].as_str() {
+        query.push(("pattern", pattern.to_owned()));
     } else if pathed {
         let asked = if m::yes(&state["shared"]) {
             "shared"
@@ -5109,9 +5407,9 @@ async fn load(quiet: bool) {
                 }
             } else if shares(&view) {
                 state = begins(state, view["shared"]["skip"].as_u64().unwrap_or(0));
-            } else if !paths(&view) && !cycles(&view) {
+            } else if !paths(&view) && !cycles(&view) && !patterned(&view) {
                 // The graph does not know the place, or one of the two
-                // places, or they were left.
+                // places, or the pattern, or they were left.
                 state = unfollowed(state);
             }
             // A graph that was never started, as after a restart of the
@@ -5541,7 +5839,9 @@ pub async fn event(
                 state["focus"] = json!("");
                 state["filter"] = json!("");
                 dom::set_value("graph-map-filter", "");
-            } else if m::yes(&state["shared"]) && state["focus"] == path {
+            } else if (m::yes(&state["shared"]) || state["pattern"].is_string())
+                && state["focus"] == path
+            {
                 state["focus"] = json!("");
             } else {
                 state["focus"] = json!(path);
@@ -5656,6 +5956,36 @@ pub async fn event(
             state["notests"] = json!(checked);
             state["skip"] = json!([]);
             dom::save(NOTESTS, checked.then_some("1"));
+        }
+        ("change", "graph-map-patterns", _) => {
+            // The choice is the viewer's and holds for the next map too.
+            state["patterns"] = json!(checked);
+            dom::save(PATTERNS, checked.then_some("1"));
+        }
+        ("click", _, "graph-map-pattern") => {
+            match showing_pattern(state.clone(), payload.as_str().unwrap_or("")) {
+                Some(shown) => state = shown,
+                None => return true,
+            }
+            dom::set_value("graph-map-filter", "");
+        }
+        ("click", _, "graph-map-pattern-back") => {
+            match left_pattern(state.clone()) {
+                Some(previous) => state = previous,
+                None => return true,
+            }
+            dom::set_value("graph-map-filter", &m::text(&state, "filter"));
+        }
+        ("click", _, "graph-map-pattern-kind") => {
+            // All the listed findings of one pattern, or its first few again.
+            let kind = payload.as_str().unwrap_or("");
+            let mut open = unfolded(&state, "kinds");
+            if open.iter().any(|known| known == kind) {
+                open.retain(|known| known != kind);
+            } else {
+                open.push(kind.to_owned());
+            }
+            state["kinds"] = json!(open);
         }
         ("change", "graph-map-fit", _) => {
             // So does this one, and it asks the server for nothing: the
@@ -9252,5 +9582,307 @@ mod tests {
             [json!(""), json!(""), json!("Cart<T>.php")]
         );
         assert_eq!(top["spread"], state["spread"]);
+    }
+    /// One found pattern as the server draws it: a strategy with a share of
+    /// its implementations and its one user.
+    fn strategy() -> V {
+        let part = |name: &str, role: &str, frame: u64, start: bool| {
+            json!({
+                "path": format!("app/Pay/{name}.php#L3:{name}"), "name": name, "kind": "type",
+                "line": 3, "file": format!("app/Pay/{name}.php"), "symbol": true, "folder": false,
+                "files": 1, "out": u64::from(!start), "in": if start { 3 } else { 0 },
+                "role": role, "start": start, "holder": format!("role:{frame}"),
+            })
+        };
+        let key = |name: &str| format!("app/Pay/{name}.php#L3:{name}");
+        json!({
+            "mode": "pattern", "scope": "app/Pay/Gateway.php", "certain": false,
+            "crumbs": [
+                {"name": "shop", "path": ""}, {"name": "app", "path": "app"},
+                {"name": "Strategy: Gateway", "path": ""}
+            ],
+            "pattern": {
+                "id": "strategy@app/Pay/Gateway.php#L3:Gateway", "sort": "strategy",
+                "name": "Strategy", "family": "design",
+                "tells": "An abstraction with several implementations.",
+                "named": false, "guessed": true,
+                "of": {"path": key("Gateway"), "name": "Gateway", "what": "type", "symbol": true},
+                "role": "abstraction",
+                "told": ["12 implementations stand under Gateway."],
+                "parts": [
+                    {"one": "implementation", "many": "implementations", "found": 12, "drawn": 2},
+                    {"one": "user", "many": "users", "found": 1, "drawn": 1}
+                ],
+            },
+            "frames": [
+                {"path": "role:0", "name": "Abstraction", "holder": null, "places": 1, "drawn": 1, "fixed": true},
+                {"path": "role:1", "name": "Implementations", "holder": null, "places": 12, "drawn": 2, "fixed": true},
+                {"path": "role:2", "name": "User", "holder": null, "places": 1, "drawn": 1, "fixed": true}
+            ],
+            "nodes": [
+                part("Gateway", "abstraction", 0, true),
+                part("Stripe", "implementation", 1, false),
+                part("Pay<b>", "implementation", 1, false),
+                part("Checkout", "user", 2, false)
+            ],
+            "edges": [
+                {"from": key("Stripe"), "to": key("Gateway"), "links": 1, "guessed": 0, "tie": "implements"},
+                {"from": key("Pay<b>"), "to": key("Gateway"), "links": 1, "guessed": 1, "tie": "implements"},
+                {"from": key("Checkout"), "to": key("Gateway"), "links": 1, "guessed": 0, "tie": "holds and takes"}
+            ],
+            "focus": null,
+        })
+    }
+    #[test]
+    fn a_found_pattern_is_drawn_part_by_part_in_the_frame_of_what_each_is() {
+        let view = strategy();
+        assert_eq!(
+            summary(&view),
+            "Strategy: Gateway · 12 implementations, 2 drawn · 1 user"
+        );
+        assert_eq!(
+            note(&view),
+            "An abstraction with several implementations. 12 implementations stand under Gateway. A dashed link is one the tool only guessed."
+        );
+        let html = canvas(&view);
+        // A frame is named for what its parts are, says how many of them
+        // are drawn where that is not all, and is no folder to close.
+        assert!(
+            html.contains("title=\"Abstraction\">Abstraction</span>"),
+            "{html}"
+        );
+        assert!(html.contains(
+            ">Implementations<span class=\"graph-map-frame-count\"> · 2 of 12 drawn</span></span>"
+        ));
+        assert!(html.contains("title=\"User\">User</span>"));
+        assert!(!html.contains("graph-map-gather") && !html.contains("graph-map-spread"));
+        assert_eq!(html.matches("class=\"graph-map-frame\"").count(), 3);
+        // A part is a symbol of its own file: it is selected, never opened.
+        assert_eq!(html.matches("data-open=\"false\"").count(), 4);
+        assert!(html.contains("data-names=\"true\""));
+        assert!(html.contains("Gateway, type, line 3, uses others through 0 links, is used through 3 links, the pattern is named after it, abstraction in the pattern"));
+        assert!(html.contains("Checkout, type, line 3, uses others through 1 link, is used through 0 links, user in the pattern"));
+        assert_eq!(html.matches("data-start=\"true\"").count(), 1);
+        // A link says how the one part stands to the other.
+        assert!(html.contains("<title>Stripe implements Gateway</title>"));
+        assert!(html.contains("<title>Pay&lt;b&gt; implements Gateway · guessed</title>"));
+        assert!(html.contains("<title>Checkout holds and takes Gateway</title>"));
+        assert_eq!(html.matches("graph-map-edge-guess").count(), 1);
+        // The way there ends in the finding, which is no place to open.
+        let way = crumbs(&view);
+        assert!(way.ends_with("<span class=\"graph-map-crumb\" aria-current=\"location\">Strategy: Gateway</span>"), "{way}");
+        assert_eq!(way.matches("data-action=\"graph-map-open\"").count(), 2);
+        assert!(legend(&view, false).contains("A frame holds the parts that are one thing in the pattern; the ringed box is the type it is named after. T type"));
+        // Beside it: what to do, or the selected part with what it is in
+        // the pattern and what joins it to the others.
+        assert!(side(&view).starts_with("<p class=\"knowledge-note\">A frame holds the parts"));
+        let mut selected = view.clone();
+        selected["focus"] = selected["nodes"][3].clone();
+        selected["focus"]["inside"] = json!(true);
+        selected["focus"]["uses"] = json!([{
+            "path": "app/Pay/Gateway.php#L3:Gateway", "name": "Gateway", "kind": "type", "line": 3,
+            "file": "app/Pay/Gateway.php", "symbol": true, "inside": true,
+            "relation": "holds and takes", "role": "abstraction", "links": 1, "guessed": 0
+        }]);
+        selected["focus"]["used_by"] = json!([]);
+        let html = side(&selected);
+        assert!(html.starts_with("<h3>Checkout</h3><p class=\"graph-map-path\">app/Pay/Checkout.php:3</p><p class=\"knowledge-note\">Type · user in this pattern</p>"), "{html}");
+        assert!(html.contains(">Open in its file</button>"));
+        assert!(html.contains("<span class=\"graph-map-row-links\">holds and takes</span>"));
+        assert!(html.contains("<h4>Used by <span class=\"graph-map-total\">0</span></h4>"));
+        let html = canvas(&selected);
+        assert_eq!(html.matches("data-selected=\"true\"").count(), 1);
+        assert_eq!(html.matches("data-dim=\"true\"").count(), 2);
+        assert_eq!(html.matches("aria-pressed=\"true\"").count(), 1);
+        assert_eq!(html.matches("aria-pressed=\"false\"").count(), 3);
+    }
+    /// A folder of the map as the server marks it where patterns are asked
+    /// for.
+    fn marked_folder() -> V {
+        let finding = |sort: &str, name: &str, of: &str, named: bool, guessed: bool| {
+            json!({
+                "id": format!("{sort}@app/Pay/{of}.php#L3:{of}"), "sort": sort, "name": name, "of": of,
+                "file": format!("app/Pay/{of}.php"), "line": 3, "named": named, "guessed": guessed,
+                "parts": "2 implementations · 1 user",
+            })
+        };
+        json!({
+            "mode": "map", "scope": "app", "certain": false,
+            "crumbs": [{"name": "shop", "path": ""}, {"name": "app", "path": "app"}],
+            "nodes": [
+                {"path": "app/Pay", "name": "Pay", "folder": true, "files": 9, "inside": true, "out": 0, "in": 0, "patterns": 1200},
+                {"path": "app/Kernel.php", "name": "Kernel.php", "folder": false, "files": 1, "symbols": 2, "inside": true, "out": 0, "in": 0, "patterns": 1},
+                {"path": "app/Zero", "name": "Zero", "folder": true, "files": 3, "inside": true, "out": 0, "in": 0}
+            ],
+            "edges": [],
+            "focus": null,
+            "patterns": {
+                "found": 1203,
+                "kinds": [
+                    {
+                        "id": "repository", "name": "Repository", "family": "architecture",
+                        "tells": "A type named a <repository>.", "found": 1, "more": 0,
+                        "instances": [finding("repository", "Repository", "Orders<T>", true, false)],
+                    },
+                    {
+                        "id": "strategy", "name": "Strategy", "family": "design",
+                        "tells": "An abstraction with several implementations.", "found": 1202, "more": 1197,
+                        "instances": [
+                            finding("strategy", "Strategy", "Gateway", false, true),
+                            finding("strategy", "Strategy", "Clock", false, false),
+                            finding("strategy", "Strategy", "Mailer", false, false),
+                            finding("strategy", "Strategy", "Store", false, false),
+                            finding("strategy", "Strategy", "Rule", false, false)
+                        ],
+                    }
+                ],
+            },
+        })
+    }
+    #[test]
+    fn a_picture_marks_what_holds_a_part_of_a_found_pattern_and_lists_the_findings() {
+        let view = marked_folder();
+        let html = canvas(&view);
+        // One finding is a mark, more of them a mark with how many.
+        assert!(
+            html.contains(
+                "<span class=\"graph-map-node-pattern\" aria-hidden=\"true\">◆1,200</span>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"graph-map-node-pattern\" aria-hidden=\"true\">◆</span>")
+        );
+        assert_eq!(html.matches("graph-map-node-pattern").count(), 2);
+        assert!(html.contains("Pay, folder, 9 files, uses others through 0 links, is used through 0 links, holds parts of 1,200 found patterns"));
+        assert!(html.contains("Kernel.php, file, uses others through 0 links, is used through 0 links, holds parts of 1 found pattern"));
+        assert!(legend(&view, false)
+            .ends_with("◆: a part of a found pattern, or a place that holds one."));
+        // A picture that was not asked for patterns says nothing of them.
+        let mut plain = view.clone();
+        plain.as_object_mut().unwrap().remove("patterns");
+        assert_eq!(found_patterns(&plain, &[]), "");
+        assert!(!legend(&plain, false).contains('◆'));
+        // With nothing selected: every pattern found here, architecture
+        // first, each with its first findings.
+        let list = found_patterns(&view, &[]);
+        assert!(
+            list.starts_with(
+                "<h4>Patterns found here <span class=\"graph-map-total\">1,203</span></h4>"
+            ),
+            "{list}"
+        );
+        let (architecture, design) = (
+            list.find("<p class=\"graph-map-family\">Architecture</p>")
+                .unwrap(),
+            list.find("<p class=\"graph-map-family\">Design</p>")
+                .unwrap(),
+        );
+        assert!(architecture < design);
+        assert!(list.contains("<p class=\"graph-map-pattern-name\" title=\"A type named a &lt;repository&gt;.\">Repository <span class=\"graph-map-total\">1</span></p>"));
+        assert!(list.contains("Strategy <span class=\"graph-map-total\">1,202</span></p>"));
+        assert_eq!(
+            list.matches("data-action=\"graph-map-pattern\"").count(),
+            1 + FIRST
+        );
+        // A finding says where it lies, what it has, and how far it is
+        // believed.
+        assert!(list.contains("data-payload=\"&quot;repository@app/Pay/Orders&lt;T&gt;.php#L3:Orders&lt;T&gt;&quot;\" title=\"app/Pay/Orders&lt;T&gt;.php:3\"><span class=\"graph-map-row-name\">Orders&lt;T&gt;<span class=\"graph-map-row-file\">Orders&lt;T&gt;.php</span></span><span class=\"graph-map-row-links\">2 implementations · 1 user · by name</span>"), "{list}");
+        assert!(list.contains(">Gateway<span class=\"graph-map-row-file\">Gateway.php</span></span><span class=\"graph-map-row-links\">2 implementations · 1 user · guessed</span>"));
+        assert!(!list.contains(">Store<") && !list.contains(">Rule<"));
+        // More than the first few are asked for, pattern by pattern.
+        assert!(list.contains("data-action=\"graph-map-pattern-kind\" data-payload=\"&quot;strategy&quot;\" aria-expanded=\"false\">All 5</button>"));
+        assert_eq!(list.matches("graph-map-pattern-kind").count(), 1);
+        let all = found_patterns(&view, &["strategy".to_owned()]);
+        assert_eq!(all.matches("data-action=\"graph-map-pattern\"").count(), 6);
+        assert!(all.contains("aria-expanded=\"true\">First 3</button><p class=\"knowledge-note\">and 1,197 more: open a folder to see those of it.</p>"));
+        // Beside a selected place: the findings it has a part in.
+        let mut selected = view.clone();
+        selected["focus"] = json!({"path": "app/Pay", "patterns": [
+            view["patterns"]["kinds"][1]["instances"][0], view["patterns"]["kinds"][0]["instances"][0]
+        ]});
+        let own = found_patterns(&selected, &[]);
+        assert!(own.starts_with("<h4>Patterns <span class=\"graph-map-total\">2</span></h4><ul class=\"graph-map-rows\">"), "{own}");
+        assert!(own.contains("<span class=\"graph-map-row-name\">Strategy: Gateway<span"));
+        assert!(own.contains("<span class=\"graph-map-row-name\">Repository: Orders&lt;T&gt;<span"));
+        assert!(!own.contains("graph-map-family"));
+        selected["focus"]["patterns"] = json!([]);
+        assert_eq!(
+            found_patterns(&selected, &[]),
+            "<h4>Patterns <span class=\"graph-map-total\">0</span></h4><p class=\"knowledge-note\">No found pattern has a part here.</p>"
+        );
+        // Beside followed links, a path, what two places share or a cycle
+        // only a selected place says what it is part of.
+        for mode in ["follow", "path", "shared", "cycle"] {
+            let mut other = view.clone();
+            other["mode"] = json!(mode);
+            assert_eq!(found_patterns(&other, &[]), "", "{mode}");
+            other["focus"] = selected["focus"].clone();
+            other["focus"]["patterns"] = json!([view["patterns"]["kinds"][0]["instances"][0]]);
+            assert!(
+                found_patterns(&other, &[])
+                    .starts_with("<h4>Patterns <span class=\"graph-map-total\">1</span></h4>"),
+                "{mode}"
+            );
+        }
+        // Where none was found, what a pattern is told by.
+        let mut none = view.clone();
+        none["patterns"] = json!({"found": 0, "kinds": []});
+        assert!(found_patterns(&none, &[]).ends_with("and a few by a name.</p>"));
+    }
+    #[test]
+    fn the_map_opens_a_found_pattern_and_returns_to_where_it_was() {
+        let mut map = fresh("");
+        for (key, value) in [
+            ("scope", json!("app")),
+            ("focus", json!("app/Pay")),
+            ("filter", json!("pay")),
+            ("patterns", json!(true)),
+            ("spread", json!(["app/Pay"])),
+        ] {
+            map[key] = value;
+        }
+        let shown =
+            showing_pattern(map.clone(), "strategy@app/Pay/Gateway.php#L3:Gateway").unwrap();
+        assert_eq!(shown["pattern"], "strategy@app/Pay/Gateway.php#L3:Gateway");
+        assert_eq!(shown["pattern_return"], map);
+        assert_eq!(
+            (shown["focus"].as_str(), shown["filter"].as_str()),
+            (Some(""), Some(""))
+        );
+        assert_eq!(shown["patterns"], true);
+        // Another finding opened from this picture returns to the same map.
+        let mut inside = shown.clone();
+        inside["focus"] = json!("app/Pay/Stripe.php#L3:Stripe");
+        let next = showing_pattern(inside, "decorator@app/Pay/Log.php#L3:Log").unwrap();
+        assert_eq!(next["pattern"], "decorator@app/Pay/Log.php#L3:Log");
+        assert_eq!(next["pattern_return"], map);
+        assert_eq!(next["focus"], "");
+        // Nothing is opened while the other end of a path is being chosen.
+        let mut picking = map.clone();
+        picking["pick"] = json!({"path": "app/Pay", "name": "Pay"});
+        assert!(showing_pattern(picking, "strategy@x").is_none());
+        assert!(showing_pattern(map.clone(), "").is_none());
+        // The way back keeps what was switched in the picture.
+        let mut switched = next.clone();
+        switched["notests"] = json!(true);
+        switched["certain"] = json!(true);
+        switched["kinds"] = json!(["strategy"]);
+        let back = left_pattern(switched).unwrap();
+        let mut expected = map.clone();
+        expected["notests"] = json!(true);
+        expected["certain"] = json!(true);
+        expected["kinds"] = json!(["strategy"]);
+        assert_eq!(back, expected);
+        assert!(left_pattern(map.clone()).is_none());
+        // Whatever leaves a picture leaves the pattern: a path from one of
+        // its parts, a followed place, an opened folder.
+        let mut from = shown.clone();
+        from["pick"] = json!({"path": "app/Pay/Stripe.php#L3:Stripe", "name": "Stripe"});
+        let path = led(from, "app/Kernel.php").unwrap();
+        assert!(path["pattern"].is_null() && path["pattern_return"].is_null());
+        let left = unfollowed(shown);
+        assert!(left["pattern"].is_null() && left["pattern_return"].is_null());
+        assert_eq!(left["patterns"], true);
     }
 }

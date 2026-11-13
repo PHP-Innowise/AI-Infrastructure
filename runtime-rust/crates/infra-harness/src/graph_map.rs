@@ -25,6 +25,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
+mod patterns;
 /// Children of one folder drawn at once; the rest are reached by the filter.
 pub const SHOWN: usize = 40;
 /// Links drawn between those children, strongest first.
@@ -368,6 +369,9 @@ struct Link {
     confidence: Option<Text>,
     #[serde(default)]
     source_file: Option<Text>,
+    /// Where in the code the link was read: a parameter's type, a field.
+    #[serde(default)]
+    context: Option<Text>,
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Pair {
@@ -394,6 +398,9 @@ struct Builder<'a> {
     symbols: Vec<Symbol>,
     names: String,
     uses: Vec<Use>,
+    /// Of the links, those that name a type as the type of something, with
+    /// what of: `patterns::how` tells the third part.
+    ties: Vec<Use>,
     kinds: Vec<String>,
     kind_ids: HashMap<String, u16>,
     nodes: u64,
@@ -531,6 +538,13 @@ impl Builder<'_> {
                 return;
             }
         };
+        let named = (relation == "references")
+            .then(|| {
+                link.context
+                    .as_ref()
+                    .and_then(|text| patterns::how(&text.0))
+            })
+            .flatten();
         let kind = match self.kind_ids.get(&relation) {
             Some(kind) => *kind,
             None => {
@@ -544,6 +558,9 @@ impl Builder<'_> {
             .confidence
             .is_none_or(|text| text.0.eq_ignore_ascii_case("EXTRACTED"));
         self.uses.push((source, target, kind, !read));
+        if let Some(how) = named {
+            self.ties.push((source, target, how, !read));
+        }
     }
 }
 struct Whole<'a, 'b>(&'a mut Builder<'b>);
@@ -646,6 +663,9 @@ pub struct Index {
     plain: OnceLock<Arc<Index>>,
     /// The links of each symbol, once the links of one were followed.
     wires: OnceLock<Wires>,
+    /// The patterns the graph shows signs of, once they were asked for: by
+    /// every link, and by the links the tool read from the code.
+    patterns: [OnceLock<patterns::Patterns>; 2],
     /// What a graph without tests leaves out: test files, and tests inside
     /// the files it keeps.
     left: (u64, u64),
@@ -660,6 +680,8 @@ pub struct Index {
     first: Vec<u32>,
     names: String,
     uses: Vec<Use>,
+    /// Of the links, those that name a type as the type of something.
+    ties: Vec<Use>,
     kinds: Vec<String>,
     nodes: u64,
     links: u64,
@@ -778,6 +800,7 @@ impl Index {
             symbols: Vec::new(),
             names: String::new(),
             uses: Vec::new(),
+            ties: Vec::new(),
             kinds: Vec::new(),
             kind_ids: HashMap::new(),
             nodes: 0,
@@ -852,11 +875,24 @@ impl Index {
             .partition(|(from, to, ..)| {
                 !crates.rules_out(symbols[*from as usize].file, symbols[*to as usize].file)
             });
+        // What names a type across two crates that are not built together
+        // names another type of that name.
+        let ties = builder
+            .ties
+            .into_iter()
+            .map(|(from, to, how, guessed)| {
+                (place[from as usize], place[to as usize], how, guessed)
+            })
+            .filter(|(from, to, ..)| {
+                !crates.rules_out(symbols[*from as usize].file, symbols[*to as usize].file)
+            })
+            .collect();
         Ok(Self {
             root: base,
             revision_tests: None,
             plain: OnceLock::new(),
             wires: OnceLock::new(),
+            patterns: Default::default(),
             left: (0, 0),
             ruled,
             files: builder.files,
@@ -865,6 +901,7 @@ impl Index {
             first,
             names: builder.names,
             uses,
+            ties,
             kinds: builder.kinds,
             nodes: builder.nodes,
             links: builder.links,
@@ -1853,6 +1890,7 @@ impl Index {
                 .collect::<Vec<Use>>()
         };
         let (uses, ruled) = (left(&self.uses), left(&self.ruled));
+        let ties = left(&self.ties);
         let unlinked = (self.uses.len() - uses.len()) + (self.ruled.len() - ruled.len());
         let dropped = self.symbols.len() - symbols.len();
         Index {
@@ -1860,6 +1898,8 @@ impl Index {
             revision_tests: None,
             plain: OnceLock::new(),
             wires: OnceLock::new(),
+            patterns: Default::default(),
+            ties,
             left: (gone.iter().filter(|gone| **gone).count() as u64, inside),
             ruled,
             files,

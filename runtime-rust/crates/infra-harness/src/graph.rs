@@ -948,6 +948,11 @@ pub struct Shown<'a> {
     /// Two places to find what they share, instead of a folder, with
     /// which part of that to draw.
     pub shared: Option<Sharing<'a>>,
+    /// Mark the picture with the patterns found where it is open.
+    pub patterns: bool,
+    /// One found pattern to draw, instead of a folder: its pattern and the
+    /// type it is named after.
+    pub pattern: Option<&'a str>,
 }
 /// How many places a request may name in one list, and in how many bytes.
 const UNFOLDED: usize = 256;
@@ -1084,12 +1089,15 @@ impl Graphs {
             cycle,
             shared,
             base,
+            patterns,
+            pattern,
         } = *shown;
         if base.is_some()
             && (!matches!(target, Some(Target::Pull(_)))
                 || cycle.is_some() == link.is_some()
                 || path.is_some()
                 || shared.is_some()
+                || pattern.is_some()
                 || followed.is_some())
         {
             return Err(HarnessError::invalid(
@@ -1120,6 +1128,13 @@ impl Graphs {
                 }
                 if let Some(place) = cycle {
                     return Some(index.cycle(name, place, changed, edited, focus, certain));
+                }
+                // One found pattern; a graph that no longer has it leaves
+                // what else was asked.
+                if let Some(id) = pattern
+                    && let Some(view) = index.pattern(name, id, changed, edited, focus, certain)
+                {
+                    return Some(view);
                 }
                 // The ways between two places, or what the two share, come
                 // before a followed place; a place the graph does not know
@@ -1156,6 +1171,14 @@ impl Graphs {
                 view["tests"] = json!({"files": files, "inside": inside});
             }
         };
+        // The patterns found where a picture is open, on its boxes and
+        // beside it, where they were asked for. A link looked into is no
+        // picture of places, and a pattern's own picture is the pattern.
+        let marked = |index: &crate::graph_map::Index, view: &mut Value| {
+            if patterns && link.is_none() && view["mode"] != "pattern" && view["nodes"].is_array() {
+                index.mark_patterns(view, certain);
+            }
+        };
         let Some(target) = target else {
             let index = asked(self.maps.index(
                 project,
@@ -1164,6 +1187,7 @@ impl Graphs {
             )?);
             let mut view = follow(&index, &[], &|_| None)
                 .unwrap_or_else(|| index.view_with(name, scope, spread, focus, certain, filter));
+            marked(&index, &mut view);
             view["project_id"] = json!(project);
             view["built"] = json!({"commit": built["commit"], "at": built["at"]});
             told(&mut view);
@@ -1242,7 +1266,7 @@ impl Graphs {
                     }
                     graph_changes::edited(&root, &resolved, path).ok().flatten()
                 };
-                if let Some(mut view) = follow(&index, &changed, &touched) {
+                let mut view = if let Some(mut view) = follow(&index, &changed, &touched) {
                     if pull_cycle && view["mode"] == "cycle" {
                         let snapshot = kept.contains('@');
                         self.compare_pr_cycle(
@@ -1272,7 +1296,9 @@ impl Graphs {
                         Some(view) => view,
                         None => index.changes(name, &changed, scope, focus, certain, filter),
                     }
-                }
+                };
+                marked(&index, &mut view);
+                view
             }
             // Until the commit's own graph is there, the project's graph
             // gives a first picture: the files changed are the commit's, the
@@ -1282,6 +1308,7 @@ impl Graphs {
                 let mut view = follow(&index, &changed, &|_| None).unwrap_or_else(|| {
                     index.changes(name, &changed, scope, focus, certain, filter)
                 });
+                marked(&index, &mut view);
                 view["preliminary"] = json!(true);
                 if pull_cycle && view["mode"] == "cycle" {
                     view["cycle"]["comparison"] = if found.state == "failed" {
@@ -2495,6 +2522,7 @@ impl Domain for Graphs {
                         Some(_) => Err(HarnessError::invalid("Invalid graph filter.")),
                     };
                     let (certain, notests) = (flag("certain")?, flag("notests")?);
+                    let patterns = flag("patterns")?;
                     let target = match query["target"].as_str() {
                         None | Some("") => None,
                         Some(text) => Some(Target::parse(text)?),
@@ -2551,6 +2579,18 @@ impl Domain for Graphs {
                     {
                         return Err(HarnessError::invalid("Invalid code graph cycle."));
                     }
+                    // One found pattern is asked for by itself.
+                    let pattern = text("pattern")?;
+                    if !pattern.is_empty()
+                        && (pattern.chars().any(char::is_control)
+                            || !from.is_empty()
+                            || !ends.is_empty()
+                            || !sharing.is_empty()
+                            || !cycle.is_empty()
+                            || followed.is_some())
+                    {
+                        return Err(HarnessError::invalid("Invalid code graph pattern."));
+                    }
                     // Of what they share one kind is drawn, and a request
                     // may say which.
                     let users = match query["side"].as_str() {
@@ -2606,6 +2646,8 @@ impl Domain for Graphs {
                                     }),
                                     _ => None,
                                 },
+                                patterns,
+                                pattern: (!pattern.is_empty()).then_some(pattern.as_str()),
                             },
                         )
                     })
@@ -2694,7 +2736,8 @@ mod tests {
             .unwrap();
         for part in [
             "scope", "focus", "certain", "filter", "target", "follow", "out", "into", "notests",
-            "spread", "from", "to", "path", "shared", "side", "skip", "cycle", "base",
+            "spread", "from", "to", "path", "shared", "side", "skip", "cycle", "base", "patterns",
+            "pattern",
         ] {
             assert!(route.query.contains(&part), "{part}");
         }

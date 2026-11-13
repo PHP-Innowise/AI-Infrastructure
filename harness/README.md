@@ -2115,6 +2115,46 @@ using the current filters. Open a link to inspect its details at the base
 revision. **Back to PR cycle** returns to the PR's chain, and **Back to map**
 returns to the map you started from.
 
+**Patterns** marks a picture with the design and architecture patterns the graph
+shows signs of. A box with ◆ is a part of a found pattern, or a folder or a file
+that holds one, with how many where there are more. The side panel lists what was
+found where the picture is open, architecture before design, each pattern with its
+first findings, and beside a selected place the findings it has a part in. Select a
+finding to draw it alone: its parts as boxes, each in the frame of what it is in
+the pattern, and between them what makes it one, as `implements`, `holds`, `takes`,
+`returns` and `makes`. The ringed box is the type the finding is named after. A
+finding too large for a picture draws a share of each kind of part and says how
+many it left out. **Back to map** returns to the picture the finding was opened
+from, and the choice of **Patterns** is kept for the next map.
+
+A pattern is told by how types stand to each other, which the graph says link by
+link: one type extends or implements another, holds it in a field, takes it as a
+parameter, returns it, makes it.
+
+| Pattern | What tells it |
+| --- | --- |
+| Strategy | An abstraction with two implementations or more, which another type holds or takes as the abstraction. State and Bridge are built the same way. |
+| Decorator | A type that stands under an abstraction and keeps one of it, in a field or taken where it is built. Proxy and Composite are built the same way. |
+| Factory | A method that returns an abstraction and makes the types that implement it. A type named `…Factory` that makes other types is found by its name. |
+| Template method | A method of a base type that calls other methods of that type, which the types under it define. |
+| Builder | A type named `…Builder`, with the type its `build` method gives. |
+| Singleton | A type with a method named `getInstance`, `instance` or the like, with the types that call it. |
+| Events and listeners | A type that others take in a handling method (`handle`, `__invoke`, `on…`), where its name or folder says event, or theirs says listener, subscriber or observer. |
+| Commands and handlers | A message and the type named after it with `Handler`, which takes it. |
+| Repository | A type named `…Repository`, with the types its methods give and take and the types that hold it. |
+
+The first four are told by links alone. The others rest on a name as well, and
+such a finding says **by name**: a name is a promise, not a proof. What stands
+above other types is read from the source: a `trait`, an `interface`, a `protocol`,
+an `abstract` class, or a class that is extended. In Rust only a trait is
+implemented, so an `impl From<Other> for Type`, which the tool reads as
+implementing `Other`, tells nothing. **Only links read from the code** leaves out
+what rests on links the tool inferred, and **Without tests** what rests on test
+doubles. Nothing reads a method's body, and a type the graph does not hold, as one
+of a framework that is not indexed, is no part of a finding. Two patterns built the
+same way are one finding under the commoner name. Layered architecture is not
+looked for.
+
 The server reads `graph.json` in one streaming
 pass and keeps the last four graphs it read. On the development machine a 500 MB
 graph of 545,000 symbols took two seconds to read and 10 ms per folder after that.
