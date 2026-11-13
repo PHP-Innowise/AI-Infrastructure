@@ -154,6 +154,36 @@ fn a_file_is_filed_by_its_name_or_by_the_folder_it_lies_in() {
         ("src/Domain/Order/Line.php", Some("Model")),
         // The name says more than the folder.
         ("app/Services/OrderRepository.php", Some("Data access")),
+        // Not where it is a plain noun in a folder of the model's own
+        // classes: an entity is called after what it is.
+        ("src/Entity/OAuthClient.php", Some("Model")),
+        ("src/Entity/NewsletterSubscriber.php", Some("Model")),
+        ("src/Entity/AccountManager.php", Some("Model")),
+        ("app/Models/Job.php", Some("Model")),
+        ("app/Models/Billing/HostingService.php", Some("Model")),
+        ("src/Dto/WebhookEndpoint.php", Some("Model")),
+        ("shop/models/gateway.py", Some("Model")),
+        ("shop/models/service.py", Some("Model")),
+        // What only does something is no thing of the model, there too.
+        ("src/Entity/UserRepository.php", Some("Data access")),
+        ("src/Entity/OrderListener.php", Some("Services")),
+        ("app/Models/OrderController.php", Some("Entry points")),
+        // A folder nearer than the model's files as before.
+        ("src/Entity/Listener/OrderSubscriber.php", Some("Services")),
+        ("src/Model/Service/PriceService.php", Some("Services")),
+        // A folder that holds more than the model's classes does not make
+        // a noun of a name.
+        ("src/Domain/Billing/InvoiceService.php", Some("Services")),
+        ("app/Events/OrderSubscriber.php", Some("Services")),
+        ("src/Security/Sso/OidcClient.php", Some("Data access")),
+        ("src/Service/Client.php", Some("Data access")),
+        // After a dot `client` says where a file runs, not what it is.
+        ("plugins/analytics.client.ts", None),
+        ("src/api/http.client.ts", None),
+        ("src/api/http-client.ts", Some("Data access")),
+        ("src/api/HttpClient.ts", Some("Data access")),
+        ("src/api/http_client.py", Some("Data access")),
+        ("src/clients/analytics.client.ts", Some("Data access")),
         // Folders that hold more than what their name says file nothing.
         ("app/Http/Requests/StoreOrder.php", None),
         ("src/GraphQL/Type/OrderType.php", None),
@@ -737,6 +767,68 @@ fn the_layers_of_a_folder_count_what_lies_in_it_and_nothing_else() {
             file("Billing", "Entity/Invoice"),
             file("Shop", "Service/PayService")
         )])
+    );
+}
+#[test]
+fn an_entity_called_after_a_plain_noun_is_no_layer_of_its_own() {
+    // `OAuthClient` among the entities is an entity. Filed as data access by
+    // its name it made a folder of entities one of two layers, and every
+    // entity that holds it a link against their order.
+    let mut graph = Graph::default();
+    let entity = |name: &str| format!("src/Entity/{name}.php");
+    for name in ["OAuthClient", "OAuthToken", "Invoice", "Order", "User"] {
+        graph.file(&entity(name));
+    }
+    graph.file("src/Controller/TokenController.php");
+    graph
+        .link(
+            &entity("OAuthToken"),
+            &entity("OAuthClient"),
+            "references",
+            Some("field"),
+        )
+        .link(
+            &entity("OAuthClient"),
+            &entity("User"),
+            "references",
+            Some("field"),
+        )
+        .link(
+            &entity("Order"),
+            &entity("Invoice"),
+            "references",
+            Some("field"),
+        )
+        .link(
+            "src/Controller/TokenController.php",
+            &entity("OAuthClient"),
+            "calls",
+            None,
+        );
+    let index = graph.index();
+    let layers = |scope: &str| {
+        index.pattern(
+            "demo",
+            &format!("layers@{scope}"),
+            &[],
+            &|_| None,
+            None,
+            false,
+        )
+    };
+    assert!(layers("src/Entity").is_none());
+    let view = layers("src").unwrap();
+    assert_eq!(
+        view["pattern"]["layers"],
+        json!([
+            {"id": "entry", "name": "Entry points", "files": 1},
+            {"id": "model", "name": "Model", "files": 5},
+        ])
+    );
+    assert_eq!(view["pattern"]["against"]["links"], 0);
+    assert_eq!(
+        view["edges"],
+        json!([{"from": "layer:entry", "to": "layer:model", "links": 1, "guessed": 0, "against": false}])
     );
 }
 #[test]

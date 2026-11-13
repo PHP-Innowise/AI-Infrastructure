@@ -120,6 +120,30 @@ const FOLDERS_ONLY: &[&str] = &[
     "infrastructure",
     "persistence",
 ];
+/// Folders of the model's own classes: what lies in one is a thing of the
+/// model, whatever it is called.
+const MODEL_OWN: &[&str] = &[
+    "entity",
+    "entities",
+    "model",
+    "models",
+    "dto",
+    "dtos",
+    "valueobjects",
+];
+/// Endings that are plain nouns as well. In a folder of the model's own
+/// classes `OAuthClient`, `ImportJob` and `Subscriber` are things of the
+/// model, named for what they are and not for what they do; a repository or
+/// a listener there is still what its name says.
+const NOUNS: &[&str] = &[
+    "client",
+    "endpoint",
+    "gateway",
+    "job",
+    "manager",
+    "service",
+    "subscriber",
+];
 /// Pairs of files against the order, and files of one layer, that are
 /// listed at once: the most linked first.
 pub const LISTED: usize = 30;
@@ -142,8 +166,9 @@ fn code(path: &str) -> bool {
         })
 }
 /// The layer a file is filed in: by the ending of its name, by its name as a
-/// whole, or by the nearest folder named for a layer. A test is filed in
-/// none, nor is a file that is no code.
+/// whole, or by the nearest folder named for a layer. A name that is a plain
+/// noun says nothing in a folder of the model's own classes: the folder
+/// files it. A test is filed in none, nor is a file that is no code.
 pub(super) fn layer(path: &str) -> Option<usize> {
     if !code(path) {
         return None;
@@ -156,31 +181,39 @@ pub(super) fn layer(path: &str) -> Option<usize> {
         .find_map(|end| stem.strip_suffix(end).filter(|rest| !rest.is_empty()))
         .unwrap_or(stem);
     let low = stem.to_lowercase();
+    // The nearest folder named for a layer, and whether it is one of the
+    // model's own classes.
+    let nearest = folders.rsplit('/').find_map(|folder| {
+        let folder = folder.to_lowercase();
+        LAYERS
+            .iter()
+            .position(|layer| layer.folders.contains(&folder.as_str()))
+            .map(|layer| (layer, MODEL_OWN.contains(&folder.as_str())))
+    });
+    let noun = |word: &str| nearest.is_some_and(|(_, own)| own) && NOUNS.contains(&word);
     // An ending is a word of the name: `OrderService`, `order_service`,
-    // `orders.service`, and not `Remodel` for `model`.
+    // `orders.service`, and not `Remodel` for `model`. After a dot `client`
+    // says where a file runs, as in `analytics.client.ts`, not what it is.
     let ends = |end: &str| {
         let Some(at) = stem.len().checked_sub(end.len()) else {
             return false;
         };
-        stem.get(at..).is_some_and(|tail| {
-            tail.eq_ignore_ascii_case(end)
-                && (at == 0
-                    || stem[..at].ends_with(['.', '_', '-'])
-                    || tail.starts_with(|first: char| first.is_uppercase()))
-        })
+        !noun(end)
+            && stem.get(at..).is_some_and(|tail| {
+                tail.eq_ignore_ascii_case(end)
+                    && (at == 0
+                        || stem[..at].ends_with(['_', '-'])
+                        || (stem[..at].ends_with('.') && end != "client")
+                        || tail.starts_with(|first: char| first.is_uppercase()))
+            })
     };
-    let whole = !FOLDERS_ONLY.contains(&low.as_str());
+    let whole = !FOLDERS_ONLY.contains(&low.as_str()) && !noun(&low);
     if let Some(found) = LAYERS.iter().position(|layer| {
         layer.ends.iter().any(|end| ends(end)) || (whole && layer.folders.contains(&low.as_str()))
     }) {
         return Some(found);
     }
-    folders.rsplit('/').find_map(|folder| {
-        let folder = folder.to_lowercase();
-        LAYERS
-            .iter()
-            .position(|layer| layer.folders.contains(&folder.as_str()))
-    })
+    nearest.map(|(layer, _)| layer)
 }
 /// What places a file in a layer, in words.
 fn signs(layer: &Layer) -> String {

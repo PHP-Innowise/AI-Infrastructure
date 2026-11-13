@@ -2173,8 +2173,13 @@ The ending is a word of the name, in whatever case: `OrderService`,
 such a folder is filed too (`models.py`, `routes.rs`), except by the names that
 mean a folder only: `application`, `console`, `domain`, `infrastructure` and
 `persistence`. A name says more than a folder, and the nearest folder more than
-one above it. A test, a template (`*.blade.php`) and what is no code are filed in
-no layer. A folder is said to be in layers where they hold four files or more and
+one above it, with one exception: in a folder of the model's own classes
+(`entity`, `entities`, `model`, `models`, `dto`, `dtos`, `valueobjects`) an ending
+that is a plain noun as well (`Client`, `Endpoint`, `Gateway`, `Job`, `Manager`,
+`Service`, `Subscriber`) says nothing, because `Entity/OAuthClient` and `Models/Job`
+are things of the model, called after what they are. After a dot `client` says
+where a file runs, as in `analytics.client.ts`, and files nothing either. A test,
+a template (`*.blade.php`) and what is no code are filed in no layer. A folder is said to be in layers where they hold four files or more and
 a tenth of its code or more, and a file of one layer needs a file of another: a
 few files that happen to be named like a layer are no layered design.
 
