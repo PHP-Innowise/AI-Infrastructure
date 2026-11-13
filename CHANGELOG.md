@@ -24,6 +24,9 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Compare a selected pull request's dependency cycle with its base in Harness
+  and highlight links in the displayed chain that the base lacks.
+
 - Return from a dependency cycle to the preceding Harness map with its
   page, filters and selection restored.
 

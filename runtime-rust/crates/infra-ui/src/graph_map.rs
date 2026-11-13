@@ -1220,6 +1220,38 @@ fn shown(view: &V) -> String {
     }
     text
 }
+
+fn cycle_comparison(view: &V) -> String {
+    let comparison = &view["cycle"]["comparison"];
+    let commit = m::text(&comparison["base"], "commit");
+    let at = if commit.is_empty() {
+        "the PR base".to_owned()
+    } else {
+        format!("base {commit}")
+    };
+    match comparison["state"].as_str() {
+        Some("waiting_head") => {
+            "Waiting for the PR graph before comparing with its base.".to_owned()
+        }
+        Some("building") => format!("Preparing the graph at {at}…"),
+        Some("unavailable") => match comparison["reason"].as_str() {
+            Some("tests") => {
+                "Base comparison is unavailable with Without tests for this cached revision."
+                    .to_owned()
+            }
+            Some("no_base") => "The base revision of this PR could not be determined.".to_owned(),
+            Some("head") => "Base comparison requires the graph of the PR revision.".to_owned(),
+            _ => format!("Could not compare with {at}."),
+        },
+        Some("ready") => match comparison["origin"].as_str() {
+            Some("present") => format!("A cycle through this place already existed at {at}."),
+            Some("absent") => format!("No cycle through this place at {at}."),
+            Some("missing") => format!("This place is absent from the graph at {at}."),
+            _ => format!("Could not match this place at {at}."),
+        },
+        _ => String::new(),
+    }
+}
 /// What the map of a change says first: the notes of the change, and
 /// whether the graph is behind the files.
 fn context(view: &V) -> Vec<String> {
@@ -1815,6 +1847,7 @@ pub fn canvas(view: &V) -> String {
         let (from, to) = pairs[wire.edge];
         let back = wire.back && cycles;
         let on_path = shared_edges.contains(&(from, to));
+        let added = cycle_view && m::yes(&edge["added"]);
         let state = if cycle_view || chosen.is_some() {
             if lit((from, to)) {
                 " graph-map-edge-on"
@@ -1825,18 +1858,21 @@ pub fn canvas(view: &V) -> String {
             ""
         };
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}{}\" data-ends=\"{from} {to}\"{} d=\"{}\" stroke=\"url(#graph-map-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow)\"><title>{} uses {} · {}{}</title></path>",
+            "<path class=\"graph-map-edge{state}{}{}\" data-ends=\"{from} {to}\"{}{} d=\"{}\" stroke=\"url(#graph-map-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow)\"><title>{} uses {} · {}{}{}</title></path>",
             if guessed == links { " graph-map-edge-guess" } else { "" },
             if back { " graph-map-edge-back" } else { "" },
             if on_path { " data-shared-path=\"true\"" } else { "" },
+            if added { " data-cycle-added=\"true\"" } else { "" },
             wire.path,
             spans.binary_search(&span(wire)).unwrap_or(0),
             // A link that closes a cycle is a row of dots, kept thin.
-            (1.0 + ((links.max(1) as f64).log2() * 0.5).min(2.5)).min(if back { 1.8 } else { 3.5 }),
+            (1.0 + ((links.max(1) as f64).log2() * 0.5).min(2.5)).min(if back { 1.8 } else { 3.5 })
+                + if added { 1.5 } else { 0.0 },
             escape(&m::text(&nodes[from], "name")),
             escape(&m::text(&nodes[to], "name")),
             weight(links, guessed),
             if back { " · against the main direction, closes a cycle" } else { "" },
+            if added { " · added in PR" } else { "" },
         ));
     }
     // Over each link lies a wider one that cannot be seen and is easy to
@@ -1845,11 +1881,12 @@ pub fn canvas(view: &V) -> String {
     for wire in &plan.wires {
         let (from, to) = pairs[wire.edge];
         html.push_str(&format!(
-            "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {} · select to see what makes up this link</title></path>",
+            "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{} · select to see what makes up this link</title></path>",
             wire.path,
             payload(&json!({"from": nodes[from]["path"], "to": nodes[to]["path"]})),
             escape(&m::text(&nodes[from], "name")),
             escape(&m::text(&nodes[to], "name")),
+            if cycle_view && m::yes(&edges[wire.edge]["added"]) { " · added in PR" } else { "" },
         ));
     }
     html.push_str("</svg>");
@@ -3011,8 +3048,13 @@ pub fn side(view: &V) -> String {
                     " · includes inferred links"
                 };
                 html.push_str(&format!(
-                    "<li>{}{evidence}</li>",
-                    escape(&m::text(place, "path"))
+                    "<li>{}{evidence}{}</li>",
+                    escape(&m::text(place, "path")),
+                    if m::yes(&place["added"]) {
+                        " · incoming link added in PR"
+                    } else {
+                        ""
+                    },
                 ));
             }
             html.push_str("</ol>");
@@ -3226,6 +3268,12 @@ fn legend(view: &V, change: bool) -> String {
         }
         _ if cycles(view) => {
             let mut text = format!("{LEGEND} The ringed box is where the cycle starts and ends.");
+            if m::array(&view["edges"])
+                .iter()
+                .any(|edge| m::yes(&edge["added"]))
+            {
+                text.push_str(" Green links were added in this PR.");
+            }
             if names(view) {
                 text.push(' ');
                 text.push_str(NAME_LEGEND);
@@ -4743,7 +4791,7 @@ fn render(view: &V) {
     dom::text("graph-map-summary", &summary(view));
     dom::text(
         "graph-map-note",
-        [before, note(view)]
+        [before, note(view), cycle_comparison(view)]
             .iter()
             .filter(|part| !part.is_empty())
             .cloned()
@@ -4764,7 +4812,10 @@ fn render(view: &V) {
     let keyboard_key = dom::document()
         .active_element()
         .filter(|node| {
-            (shares(view) || node.get_attribute("data-cycle").as_deref() == Some("true"))
+            (shares(view)
+                || cycles(view)
+                || view["chosen"]["kind"] == "pull"
+                || node.get_attribute("data-cycle").as_deref() == Some("true"))
                 && node
                     .matches(&format!("{NODE_BUTTONS}:focus-visible"))
                     .unwrap_or(false)
@@ -4791,14 +4842,20 @@ fn render(view: &V) {
             "false"
         },
     );
+    let pull_place = view["chosen"]["kind"] == "pull"
+        && (changes(view) || symbols(view))
+        && view["focus"]["path"]
+            .as_str()
+            .is_some_and(|path| !path.is_empty());
     let show_cycle = !cycles(view)
         && !state["pick"].is_object()
-        && !dom::all(
-            "#graph-map-canvas .graph-map-node[data-selected=\"true\"][data-cycle=\"true\"]",
-        )
-        .is_empty();
+        && (pull_place
+            || !dom::all(
+                "#graph-map-canvas .graph-map-node[data-selected=\"true\"][data-cycle=\"true\"]",
+            )
+            .is_empty());
     let action = if cycles(view) && state["cycle_return"].is_object() {
-        "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-cycle-back\">Back to map</button>".to_owned()
+        "<button type=\"button\" class=\"button compact\" id=\"graph-map-cycle-back\" data-action=\"graph-map-cycle-back\">Back to map</button>".to_owned()
     } else if show_cycle {
         format!(
             "<button type=\"button\" class=\"button compact\" id=\"graph-map-show-cycle\" data-action=\"graph-map-cycle\" data-payload=\"{}\">Show cycle</button>",
@@ -4821,6 +4878,10 @@ fn render(view: &V) {
         dom::focus("graph-map-show-cycle");
     } else if opening_cycle || returning {
         dom::focus("graph-map-summary");
+    } else if active_action.as_deref() == Some("graph-map-cycle-back") {
+        dom::focus("graph-map-cycle-back");
+    } else if show_cycle && active_action.as_deref() == Some("graph-map-cycle") {
+        dom::focus("graph-map-show-cycle");
     }
     html("graph-map-legend", &legend(view, change));
 }
@@ -4951,7 +5012,14 @@ async fn load(quiet: bool) {
             m::set("graph-map", state);
             dom::error("graph-map-error", "");
             render(&view);
-            if open() && (view["state"] == "building" || m::yes(&view["rebuilding"])) {
+            if open()
+                && (view["state"] == "building"
+                    || m::yes(&view["rebuilding"])
+                    || matches!(
+                        view["cycle"]["comparison"]["state"].as_str(),
+                        Some("building" | "waiting_head")
+                    ))
+            {
                 dom::later("graph-map-poll", 1000, || {
                     spawn_local(async {
                         load(true).await;
@@ -8408,6 +8476,26 @@ mod tests {
         assert_eq!(html.matches("data-start=\"true\"").count(), 1);
         assert!(!html.contains("graph-map-edge-off"));
 
+        view["cycle"]["comparison"] = json!({
+            "state": "building", "base": {"commit": "123456789abc"}
+        });
+        assert_eq!(
+            cycle_comparison(&view),
+            "Preparing the graph at base 123456789abc…"
+        );
+        view["cycle"]["comparison"]["state"] = json!("ready");
+        view["cycle"]["comparison"]["origin"] = json!("present");
+        assert_eq!(
+            cycle_comparison(&view),
+            "A cycle through this place already existed at base 123456789abc."
+        );
+        view["edges"][1]["added"] = json!(true);
+        assert_eq!(
+            canvas(&view).matches("data-cycle-added=\"true\"").count(),
+            1
+        );
+        assert!(legend(&view, true).contains("Green links were added in this PR."));
+
         view["certain"] = json!(true);
         view["cycle"]["steps"] = json!(0);
         assert_eq!(
@@ -8421,10 +8509,12 @@ mod tests {
         view["cycle"]["places"] = json!([
             {"path": "a.php"},
             {"path": "b<&>.php", "links": 1, "guessed": 0},
-            {"path": "a.php", "links": 1, "guessed": 1}
+            {"path": "a.php", "links": 1, "guessed": 1, "added": true}
         ]);
-        assert!(side(&view)
-            .contains("<li>b&lt;&amp;&gt;.php</li><li>a.php · incoming link inferred</li>"));
+        assert!(
+            side(&view)
+                .contains("<li>b&lt;&amp;&gt;.php</li><li>a.php · incoming link inferred · incoming link added in PR</li>")
+        );
     }
     #[test]
     fn selecting_shared_places_lights_their_drawn_paths() {

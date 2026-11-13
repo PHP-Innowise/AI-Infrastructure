@@ -325,20 +325,22 @@ fn revision(state: &Path, project: &str, commit: &str) -> PathBuf {
         .join("graph.json")
 }
 /// Removes the written-out files of a commit but for what says which links
-/// of its graph cannot be: its Cargo manifests, and of each Rust source the
-/// places where it names other sources, in a file beside where the source
-/// stood. Both are small. A link is removed and never followed.
-fn thin(tree: &Path) {
+/// of its graph cannot be: Cargo manifests, Rust module declarations and
+/// Rust test spans. A link is removed and never followed.
+fn thin(tree: &Path) -> Option<crate::graph_map::TestSpans> {
     let mut folders = vec![tree.to_path_buf()];
     let mut at = 0;
+    let mut complete = true;
+    let mut tests = BTreeMap::new();
     while at < folders.len() {
         // The folder is listed before anything is written into it.
         let entries = std::fs::read_dir(&folders[at])
-            .into_iter()
-            .flatten()
-            .flatten()
-            .collect::<Vec<_>>();
+            .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>());
         at += 1;
+        let Ok(entries) = entries else {
+            complete = false;
+            continue;
+        };
         let mut kept = Vec::new();
         for entry in entries {
             let path = entry.path();
@@ -355,7 +357,16 @@ fn thin(tree: &Path) {
                         name.push(crate::graph_crates::MODULES);
                         kept.push((PathBuf::from(name), modules));
                     }
+                    match crate::graph_map::kept_tests(&path) {
+                        Ok(spans) if !spans.is_empty() => {
+                            let relative = path.strip_prefix(tree).ok()?;
+                            tests.insert(relative.to_string_lossy().replace('\\', "/"), spans);
+                        }
+                        Ok(_) => {}
+                        Err(_) => complete = false,
+                    }
                 }
+                Err(_) => complete = false,
                 _ => {}
             }
             // A link to a folder is removed as a folder on Windows.
@@ -363,14 +374,15 @@ fn thin(tree: &Path) {
                 let _ = std::fs::remove_dir(&path);
             }
         }
-        for (path, modules) in kept {
-            let _ = std::fs::write(path, modules);
+        for (path, metadata) in kept {
+            complete &= std::fs::write(path, metadata).is_ok();
         }
     }
     // The deepest first: a folder that kept nothing goes too.
     for folder in folders.iter().rev() {
         let _ = std::fs::remove_dir(folder);
     }
+    complete.then_some(tests)
 }
 /// What was chosen, for the interface: the two sides and how many files.
 fn chosen(resolved: &Resolved) -> Value {
@@ -648,6 +660,8 @@ struct Job {
     purge: AtomicBool,
     again: AtomicBool,
     seen: Mutex<Seen>,
+    /// Replacement revision jobs share this gate until their work has finished.
+    revision_gate: Arc<Mutex<()>>,
 }
 impl Job {
     fn new() -> Self {
@@ -658,6 +672,7 @@ impl Job {
             purge: AtomicBool::new(false),
             again: AtomicBool::new(false),
             seen: Mutex::new(Seen::default()),
+            revision_gate: Arc::new(Mutex::new(())),
         }
     }
     fn started(&self) -> Instant {
@@ -771,6 +786,10 @@ struct Found {
     /// The name the read graph is kept under, the graph, and the folder its
     /// paths are relative to.
     graph: Option<(String, PathBuf, PathBuf)>,
+}
+enum RevisionBuild<'a> {
+    Normal,
+    Comparison { head: &'a str },
 }
 enum Manifest {
     Absent,
@@ -1149,6 +1168,7 @@ impl Graphs {
                 .ok_or_else(|| HarnessError::conflict("Choose the change again."))?,
         };
         let found = self.graph_of(project, &root, &resolved)?;
+        let pull_cycle = cycle.is_some() && matches!(target, Target::Pull(_));
         let changed = resolved
             .files
             .iter()
@@ -1166,7 +1186,8 @@ impl Graphs {
         }
         let mut view = match &found.graph {
             Some((kept, graph, base)) => {
-                let index = asked(self.maps.index(kept, graph, base)?);
+                let raw = self.maps.index(kept, graph, base)?;
+                let index = asked(raw.clone());
                 // The symbols a change touched are told by line, and the
                 // lines of a graph older than the files are not the files'
                 // own: then links are followed without those marks.
@@ -1176,7 +1197,13 @@ impl Graphs {
                     }
                     graph_changes::edited(&root, &resolved, path).ok().flatten()
                 };
-                if let Some(view) = follow(&index, &changed, &touched) {
+                if let Some(mut view) = follow(&index, &changed, &touched) {
+                    if pull_cycle && view["mode"] == "cycle" {
+                        let snapshot = kept.contains('@');
+                        self.compare_pr_cycle(
+                            project, &root, &resolved, &raw, &index, snapshot, &mut view, shown,
+                        );
+                    }
                     view
                 } else {
                     // An opened file marks the symbols the change touched.
@@ -1211,6 +1238,13 @@ impl Graphs {
                     index.changes(name, &changed, scope, focus, certain, filter)
                 });
                 view["preliminary"] = json!(true);
+                if pull_cycle && view["mode"] == "cycle" {
+                    view["cycle"]["comparison"] = if found.state == "failed" {
+                        json!({"state": "unavailable", "reason": "head"})
+                    } else {
+                        json!({"state": "waiting_head"})
+                    };
+                }
                 view
             }
             None => json!({"mode": "changes"}),
@@ -1724,6 +1758,22 @@ impl Graphs {
                 == Some(store::sha(format!("{commit}\0").as_bytes()).as_str())
     }
     fn graph_of(&self, project: &str, root: &Path, resolved: &Resolved) -> Result<Found> {
+        self.graph_at(
+            project,
+            root,
+            resolved.revision.as_deref(),
+            &resolved.prefix,
+            false,
+        )
+    }
+    fn graph_at(
+        &self,
+        project: &str,
+        root: &Path,
+        commit: Option<&str>,
+        prefix: &str,
+        exact: bool,
+    ) -> Result<Found> {
         let ready = |kept: String, graph: PathBuf, base: PathBuf| Found {
             state: "ready",
             build: Value::Null,
@@ -1731,7 +1781,7 @@ impl Graphs {
             graph: Some((kept, graph, base)),
         };
         let published = live(&self.store.state, project);
-        let Some(commit) = &resolved.revision else {
+        let Some(commit) = commit else {
             return Ok(ready(project.to_owned(), published, root.to_owned()));
         };
         let own = revision(&self.store.state, project, commit);
@@ -1740,15 +1790,15 @@ impl Graphs {
             return Ok(ready(
                 format!("{project}@{commit}"),
                 own,
-                if resolved.prefix.is_empty() {
+                if prefix.is_empty() {
                     tree
                 } else {
-                    tree.join(&resolved.prefix)
+                    tree.join(prefix)
                 },
             ));
         }
         let setting = self.setting(project)?;
-        if self.current(project, &setting, commit) {
+        if !exact && self.current(project, &setting, commit) {
             return Ok(ready(project.to_owned(), published, root.to_owned()));
         }
         let waiting = |state, build, failure| Found {
@@ -1763,11 +1813,92 @@ impl Graphs {
             return Ok(waiting("building", job.view(self.pace(&setting)), None));
         }
         Ok(
-            match lock(&self.refused)?.get(&(project.to_owned(), commit.clone())) {
+            match lock(&self.refused)?.get(&(project.to_owned(), commit.to_owned())) {
                 Some(message) => waiting("failed", Value::Null, Some(message.clone())),
                 None => waiting("missing", Value::Null, None),
             },
         )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn compare_pr_cycle(
+        &self,
+        project: &str,
+        root: &Path,
+        resolved: &Resolved,
+        raw_head: &crate::graph_map::Index,
+        head: &crate::graph_map::Index,
+        snapshot: bool,
+        view: &mut Value,
+        shown: &Shown,
+    ) {
+        let base_side = resolved.json()["base"].clone();
+        let mut compare = || -> Result<Value> {
+            let (Some(base), Some(head_commit)) = (&resolved.base, &resolved.revision) else {
+                return Ok(json!({"state": "unavailable", "reason": "no_base"}));
+            };
+            // Keep ordinary PR views able to reuse the matching live graph.
+            // Comparison needs a snapshot so its source filters describe
+            // the revision even if the checkout subsequently changes.
+            if !snapshot {
+                let found =
+                    self.graph_at(project, root, Some(head_commit), &resolved.prefix, true)?;
+                if found.state == "failed" {
+                    return Ok(
+                        json!({"state": "unavailable", "reason": "head", "base": base_side}),
+                    );
+                }
+                if found.state == "missing" {
+                    self.revise(
+                        project,
+                        root,
+                        head_commit,
+                        &resolved.prefix,
+                        RevisionBuild::Comparison { head: head_commit },
+                    )?;
+                }
+                return Ok(json!({"state": "waiting_head", "base": base_side}));
+            }
+            let found = self.graph_at(project, root, Some(&base.commit), &resolved.prefix, true)?;
+            let Some((key, graph, tree)) = found.graph else {
+                if found.state == "failed" {
+                    return Ok(json!({"state": "unavailable", "base": base_side}));
+                }
+                if found.state == "missing" {
+                    self.revise(
+                        project,
+                        root,
+                        &base.commit,
+                        &resolved.prefix,
+                        RevisionBuild::Comparison { head: head_commit },
+                    )?;
+                }
+                return Ok(json!({"state": "building", "base": base_side}));
+            };
+            let base = self.maps.index(&key, &graph, &tree)?;
+            if shown.notests
+                && ((snapshot && raw_head.has_rust_sources() && !raw_head.has_test_spans())
+                    || (base.has_rust_sources() && !base.has_test_spans()))
+            {
+                return Ok(json!({"state": "unavailable", "reason": "tests", "base": base_side}));
+            }
+            let base = if shown.notests {
+                base.without_tests()
+            } else {
+                base
+            };
+            let renames = resolved
+                .files
+                .iter()
+                .filter_map(|file| {
+                    (file.status == 'R').then_some((file.path.as_str(), file.from.as_deref()?))
+                })
+                .collect();
+            let origin = head.compare_cycle(raw_head, &base, view, &renames, shown.certain);
+            Ok(json!({"state": "ready", "base": base_side, "origin": origin}))
+        };
+        let result =
+            compare().unwrap_or_else(|_| json!({"state": "unavailable", "base": base_side}));
+        view["cycle"]["comparison"] = result;
     }
     /// Works out what a target changed and, for a commit that is not the
     /// checkout, starts building its graph. A pull request is looked up and
@@ -1781,7 +1912,13 @@ impl Graphs {
         )?);
         lock(&self.chosen)?.insert((project.to_owned(), target.text()), resolved.clone());
         if let Some(commit) = &resolved.revision {
-            self.revise(project, &root, commit, &resolved.prefix)?;
+            self.revise(
+                project,
+                &root,
+                commit,
+                &resolved.prefix,
+                RevisionBuild::Normal,
+            )?;
         }
         let found = self.graph_of(project, &root, &resolved)?;
         Ok(json!({
@@ -1796,13 +1933,21 @@ impl Graphs {
     /// Starts the graph of a commit unless it exists or is being built. A
     /// build for another commit of the project gives way: the last one asked
     /// for is the one being looked at.
-    fn revise(&self, project: &str, root: &Path, commit: &str, prefix: &str) -> Result<()> {
+    fn revise(
+        &self,
+        project: &str,
+        root: &Path,
+        commit: &str,
+        prefix: &str,
+        build: RevisionBuild<'_>,
+    ) -> Result<()> {
         if commit.len() < 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(HarnessError::invalid("That is not a commit."));
         }
         if self.stopping.load(Ordering::Acquire)
             || revision(&self.store.state, project, commit).is_file()
-            || self.current(project, &self.setting(project)?, commit)
+            || (matches!(build, RevisionBuild::Normal)
+                && self.current(project, &self.setting(project)?, commit))
         {
             return Ok(());
         }
@@ -1814,18 +1959,24 @@ impl Graphs {
         let Some(me) = self.me.upgrade() else {
             return Ok(());
         };
-        let job = Arc::new(Job::new());
-        job.stage.store(WAITING, Ordering::Release);
-        {
+        let job = {
+            let mut job = Job::new();
+            job.stage.store(WAITING, Ordering::Release);
             let mut revisions = lock(&self.revisions)?;
+            if revision(&self.store.state, project, commit).is_file() {
+                return Ok(());
+            }
             if let Some((building, running)) = revisions.get(project) {
-                if building == commit {
+                if building == commit || matches!(build, RevisionBuild::Comparison { .. }) {
                     return Ok(());
                 }
+                job.revision_gate = running.revision_gate.clone();
                 running.cancel.store(true, Ordering::Release);
             }
+            let job = Arc::new(job);
             revisions.insert(project.to_owned(), (commit.to_owned(), job.clone()));
-        }
+            job
+        };
         lock(&self.refused)?.remove(&(project.to_owned(), commit.to_owned()));
         let (name, root, commit, prefix) = (
             project.to_owned(),
@@ -1834,11 +1985,19 @@ impl Graphs {
             prefix.to_owned(),
         );
         let running = job.clone();
+        let paired = match build {
+            RevisionBuild::Comparison { head } => Some(head.to_owned()),
+            _ => None,
+        };
         let worker = std::thread::Builder::new()
             .name("harness-graph-revision".into())
             .spawn(move || {
+                let _gate = running
+                    .revision_gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let outcome = me.grow(&name, &root, &tool, &commit, &prefix, &running);
-                me.finish(&name, &commit, &running, outcome, &tool);
+                me.finish(&name, &commit, &running, outcome, &tool, paired.as_deref());
             });
         match worker {
             Ok(handle) => {
@@ -1887,6 +2046,9 @@ impl Graphs {
             }
         }
         let own = revision(&self.store.state, project, commit);
+        if own.is_file() {
+            return Outcome::Cancelled;
+        }
         let home = own.with_file_name("");
         let (tree, out) = (own.with_file_name("tree"), own.with_file_name("work"));
         let _ = std::fs::remove_dir_all(&home);
@@ -1917,6 +2079,26 @@ impl Graphs {
                 Ok(ran) => ran,
                 Err(outcome) => return outcome,
             };
+            if let Some(tests) = thin(&tree) {
+                let prefix = if prefix.is_empty() {
+                    String::new()
+                } else {
+                    format!("{prefix}/")
+                };
+                let spans = tests
+                    .iter()
+                    .filter_map(|(path, spans)| Some((path.strip_prefix(&prefix)?, spans)))
+                    .collect::<BTreeMap<_, _>>();
+                if let Ok(spans) = serde_json::to_vec(&spans) {
+                    let file = own.with_file_name(crate::graph_map::TEST_SPANS);
+                    if std::fs::write(&file, spans).is_err() {
+                        let _ = std::fs::remove_file(file);
+                    }
+                }
+            }
+            if stopped() {
+                return Outcome::Cancelled;
+            }
             if std::fs::rename(&ran.fresh, &own).is_err() {
                 return Outcome::Failed("The new graph could not be published.".into());
             }
@@ -1925,14 +2107,20 @@ impl Graphs {
         // The files and the tool's cache are as large as the project. What
         // the graph is read with is not.
         let _ = std::fs::remove_dir_all(&out);
-        if matches!(outcome, Outcome::Built(_)) {
-            thin(&tree);
-        } else {
+        if !matches!(outcome, Outcome::Built(_)) {
             let _ = std::fs::remove_dir_all(&home);
         }
         outcome
     }
-    fn finish(&self, project: &str, commit: &str, job: &Arc<Job>, outcome: Outcome, tool: &Tool) {
+    fn finish(
+        &self,
+        project: &str,
+        commit: &str,
+        job: &Arc<Job>,
+        outcome: Outcome,
+        tool: &Tool,
+        paired: Option<&str>,
+    ) {
         let purge = job.purge.load(Ordering::Acquire);
         if purge {
             let _ = std::fs::remove_dir_all(folder(&self.store.state, project));
@@ -1946,7 +2134,7 @@ impl Graphs {
                         "tool": tool.version,
                     });
                 });
-                self.prune(project, commit);
+                self.prune(project, commit, paired);
             }
             Outcome::Failed(message) => {
                 if let Ok(mut refused) = self.refused.lock() {
@@ -1969,7 +2157,7 @@ impl Graphs {
         }
     }
     /// Keeps the newest graphs of other commits and removes the rest.
-    fn prune(&self, project: &str, keep: &str) {
+    fn prune(&self, project: &str, keep: &str, paired: Option<&str>) {
         let home = folder(&self.store.state, project).join("revisions");
         let Ok(entries) = std::fs::read_dir(&home) else {
             return;
@@ -1981,7 +2169,7 @@ impl Graphs {
                 let changed = std::fs::metadata(entry.path().join("graph.json"))
                     .and_then(|meta| meta.modified())
                     .ok()?;
-                Some((name == keep, changed, name))
+                Some((name == keep || Some(name.as_str()) == paired, changed, name))
             })
             .collect::<Vec<_>>();
         built.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
@@ -3063,7 +3251,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert_eq!(view["change"]["files"], 3);
             assert_eq!(view["change"]["unknown"], 1);
             assert_eq!(fixture.revisions(), std::slice::from_ref(&feature));
-            let kept = std::fs::read_dir(
+            let mut kept = std::fs::read_dir(
                 folder(&fixture.store.state, &fixture.project)
                     .join("revisions")
                     .join(&feature),
@@ -3072,7 +3260,8 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-            assert_eq!(kept, ["graph.json"]);
+            kept.sort();
+            assert_eq!(kept, ["graph.json", "test-spans.json"]);
             assert_eq!(fixture.said(&["status", "--porcelain=v1"]), before);
             assert_eq!(fixture.said(&["rev-parse", "HEAD"]), main);
             assert_eq!(fixture.said(&["symbolic-ref", "--short", "HEAD"]), "main");
@@ -3145,11 +3334,12 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             write("app/src/shared/util.rs", "pub fn helper() {}\n");
             write(
                 "core/src/lib.rs",
-                "#[path = \"../../app/src/shared/util.rs\"]\nmod util;\npub fn run() {}\n",
+                "#[path = \"../../app/src/shared/util.rs\"]\nmod util;\npub fn run() {}\n\
+                 #[test]\nfn runs_with_fixture() {}\n",
             );
             write(
                 "graph.fixture",
-                r#"{"nodes":[{"id":"main","source_file":"app/src/main.rs"},{"id":"run","source_file":"core/src/lib.rs"},{"id":"helper","source_file":"app/src/shared/util.rs"}],"links":[{"source":"main","target":"run","relation":"calls","source_file":"app/src/main.rs"},{"source":"run","target":"main","relation":"imports_from","source_file":"core/src/lib.rs"},{"source":"run","target":"helper","relation":"calls","source_file":"core/src/lib.rs"}]}"#,
+                r#"{"nodes":[{"id":"main","source_file":"app/src/main.rs"},{"id":"run","source_file":"core/src/lib.rs"},{"id":"helper","source_file":"app/src/shared/util.rs"},{"id":"runs_with_fixture","source_file":"core/src/lib.rs","source_location":"L5"}],"links":[{"source":"main","target":"run","relation":"calls","source_file":"app/src/main.rs"},{"source":"run","target":"main","relation":"imports_from","source_file":"core/src/lib.rs"},{"source":"runs_with_fixture","target":"helper","relation":"calls","source_file":"core/src/lib.rs"}]}"#,
             );
             let feature = fixture.commit("two");
             fixture.git(&["switch", "-q", "main"]);
@@ -3225,6 +3415,19 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 (&json!(1), &json!(2))
             );
             assert_eq!(arrows(&view), ["core/src/lib.rs -> app/src/shared/util.rs"]);
+            let plain = fixture
+                .graphs
+                .map(
+                    &fixture.project,
+                    Some(&target),
+                    &Shown {
+                        notests: true,
+                        ..Shown::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(plain["tests"]["inside"], 1);
+            assert!(arrows(&plain).is_empty());
             // Of the files of the commit that much is kept, and no source.
             let home = folder(&fixture.store.state, &fixture.project)
                 .join("revisions")
@@ -3233,6 +3436,7 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 held(&home),
                 [
                     "graph.json",
+                    "test-spans.json",
                     "tree/Cargo.toml",
                     "tree/app/Cargo.toml",
                     "tree/core/Cargo.toml",

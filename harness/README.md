@@ -2103,6 +2103,14 @@ when the underlying links do not connect into a chain. When a cycle is too long
 to draw, the side panel lists every step and marks inferred links. **Back to map**
 restores the previous view, including its page, filters and selected place.
 
+After choosing a pull request, select a place and choose **Show cycle** to check
+whether a cycle through it already existed at the base shown for that PR. The
+PR's cycle remains visible while the base graph is built. Green links in the
+drawing and marked links in a long chain show dependencies absent from the base
+under the active filters. File and symbol matching accounts for Git-detected
+file renames, and moving a symbol to a different line does not change its identity.
+Folder comparisons use the folder path.
+
 The server reads `graph.json` in one streaming
 pass and keeps the last four graphs it read. On the development machine a 500 MB
 graph of 545,000 symbols took two seconds to read and 10 ms per folder after that.

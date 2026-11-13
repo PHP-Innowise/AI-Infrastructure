@@ -236,6 +236,8 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-plane[data-hover="true"] [data-n],.graph-map-plane[data-hover="true"] [data-of] { opacity:.45; }
 .graph-map-plane[data-hover="true"] [data-n]:is([data-lit="true"],[data-shared-path="true"]),.graph-map-plane[data-hover="true"] [data-of][data-lit="true"] { opacity:1; }
 .graph-map-plane[data-cycle-view="true"] :is(.graph-map-edge,[data-n]) { opacity:1; }
+.graph-map-edge[data-cycle-added="true"] { stroke:var(--success); }
+@media (forced-colors:active) { .graph-map-edge[data-cycle-added="true"] { stroke:Highlight; } }
 .graph-map-cycle-places { overflow-wrap:anywhere; }
 .graph-map-flow-uses { stop-color:var(--map-uses); }
 .graph-map-flow-between { stop-color:var(--map-between); }

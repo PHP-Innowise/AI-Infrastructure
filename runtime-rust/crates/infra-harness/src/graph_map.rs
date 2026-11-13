@@ -641,6 +641,7 @@ struct Wires {
 pub struct Index {
     /// Where the files of the graph lie, to read a source for its tests.
     root: PathBuf,
+    revision_tests: Option<TestSpans>,
     /// The same graph without its tests, once it was asked for.
     plain: OnceLock<Arc<Index>>,
     /// The links of each symbol, once the links of one were followed.
@@ -853,6 +854,7 @@ impl Index {
             });
         Ok(Self {
             root: base,
+            revision_tests: None,
             plain: OnceLock::new(),
             wires: OnceLock::new(),
             left: (0, 0),
@@ -1726,6 +1728,22 @@ fn rust_tests(text: &str) -> Vec<(u32, u32)> {
     }
     spans
 }
+
+/// Keep only the line ranges needed for Without tests in a revision graph.
+pub(crate) fn kept_tests(source: &Path) -> std::io::Result<Vec<(u32, u32)>> {
+    if std::fs::symlink_metadata(source)?.len() > SOURCE_LIMIT {
+        return Ok(Vec::new());
+    }
+    match std::fs::read_to_string(source) {
+        Ok(source) => Ok(rust_tests(&source)),
+        // The ordinary source reader also skips files that are not UTF-8.
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+pub(crate) type TestSpans = BTreeMap<String, Vec<(u32, u32)>>;
+pub(crate) const TEST_SPANS: &str = "test-spans.json";
+
 impl Index {
     /// The same graph without its tests: without the files that are tests
     /// by where they lie or how they are named, and, in a Rust source that
@@ -1763,9 +1781,15 @@ impl Index {
             if !path.ends_with(".rs") || own.is_empty() {
                 continue;
             }
-            let spans = source(path)
-                .map(|text| rust_tests(&text))
-                .unwrap_or_default();
+            let scanned;
+            let spans = if let Some(tests) = &self.revision_tests {
+                tests.get(path).map(Vec::as_slice).unwrap_or_default()
+            } else {
+                scanned = source(path)
+                    .map(|text| rust_tests(&text))
+                    .unwrap_or_default();
+                &scanned
+            };
             for at in own {
                 let line = self.symbols[at].line;
                 out[at] = line > 0 && spans.iter().any(|(from, to)| (*from..=*to).contains(&line));
@@ -1833,6 +1857,7 @@ impl Index {
         let dropped = self.symbols.len() - symbols.len();
         Index {
             root: self.root.clone(),
+            revision_tests: None,
             plain: OnceLock::new(),
             wires: OnceLock::new(),
             left: (gone.iter().filter(|gone| **gone).count() as u64, inside),
@@ -3487,6 +3512,128 @@ impl Index {
             view["focus"] = focus;
         }
         view
+    }
+    /// Compare a displayed cycle with the full directed base graph. The
+    /// shortest route at base may use a different set of dependencies.
+    pub(crate) fn compare_cycle(
+        &self,
+        raw: &Self,
+        base: &Self,
+        view: &mut Value,
+        renames: &HashMap<&str, &str>,
+        certain: bool,
+    ) -> &'static str {
+        let origin = view["cycle"]["origin"]["path"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let hidden = self.reach(&origin).is_none();
+        let symbols = view["cycle"]["names"] == true
+            || (hidden && matches!(raw.reach(&origin), Some(Reach::Symbol(_))));
+        let net = Net::new(base, symbols, certain);
+        let mut matched = HashMap::new();
+        let mut matches = |path: &Value| {
+            let path = path.as_str().unwrap_or_default();
+            matched
+                .entry(path.to_owned())
+                .or_insert_with(|| {
+                    let identity = if hidden && path == origin { raw } else { self };
+                    identity.cycle_members_at_base(&net, path, renames)
+                })
+                .clone()
+        };
+        let status = match matches(&view["cycle"]["origin"]["path"]) {
+            None => "ambiguous",
+            Some(members) if members.is_empty() => "missing",
+            Some(members) if net.cycle(&members).is_empty() => "absent",
+            Some(_) => "present",
+        };
+        // An ambiguous symbol cannot establish whether its edge was added.
+        let added = |from: Option<Vec<u32>>, to: Option<Vec<u32>>| {
+            let (from, to) = (from?, to?);
+            let to = to.into_iter().collect::<HashSet<_>>();
+            Some(!from.iter().any(|from| {
+                let mut seen = false;
+                net.each(*from, true, &mut |used| seen |= to.contains(&used));
+                seen
+            }))
+        };
+        if let Some(edges) = view["edges"].as_array_mut() {
+            for edge in edges {
+                edge["added"] = json!(added(matches(&edge["from"]), matches(&edge["to"])));
+            }
+        }
+        if let Some(places) = view["cycle"]["places"].as_array_mut() {
+            let mut previous = places.first().and_then(|place| matches(&place["path"]));
+            for place in places.iter_mut().skip(1) {
+                let next = matches(&place["path"]);
+                place["added"] = json!(added(previous, next.clone()));
+                previous = next;
+            }
+        }
+        status
+    }
+    fn cycle_members_at_base(
+        &self,
+        net: &Net<'_>,
+        path: &str,
+        renames: &HashMap<&str, &str>,
+    ) -> Option<Vec<u32>> {
+        let base = net.index;
+        let before = |file: u32| {
+            let path = self.files[file as usize].as_str();
+            renames.get(path).copied().unwrap_or(path)
+        };
+        let Some(place) = self.reach(path) else {
+            return match base.reach(path) {
+                _ if path.contains("#L") => None,
+                Some(place) => Some(net.members(place)),
+                None => Some(Vec::new()),
+            };
+        };
+        let members = match place {
+            Reach::Folder(path) => net.members(Reach::Folder(path)),
+            Reach::File(file) => base
+                .files
+                .iter()
+                .position(|file_path| file_path == before(file))
+                .map(|at| vec![at as u32])
+                .unwrap_or_default(),
+            Reach::Symbol(at) => {
+                let symbol = &self.symbols[at as usize];
+                let Some(Reach::File(file)) = base.reach(before(symbol.file)) else {
+                    return Some(Vec::new());
+                };
+                let label = self.label(at);
+                let owner = self.owner(at);
+                let same = |index: &Self, other: u32| {
+                    index.symbols[other as usize].kind == symbol.kind
+                        && (symbol.kind == Kind::File || index.label(other) == label)
+                        && index.owner(other) == owner
+                };
+                let mut matches = base.range(file).filter(|other| same(base, *other));
+                let Some(first) = matches.next() else {
+                    return Some(Vec::new());
+                };
+                if matches.next().is_some()
+                    || self
+                        .range(symbol.file)
+                        .filter(|other| same(self, *other))
+                        .nth(1)
+                        .is_some()
+                {
+                    return None;
+                }
+                vec![first]
+            }
+        };
+        Some(members)
+    }
+    pub(crate) fn has_rust_sources(&self) -> bool {
+        self.files.iter().any(|file| file.ends_with(".rs"))
+    }
+    pub(crate) fn has_test_spans(&self) -> bool {
+        self.revision_tests.is_some()
     }
     /// The shortest ways from one place to another along the links: every
     /// chain of the fewest links in which each place uses the next. Either
@@ -5545,7 +5692,13 @@ impl Maps {
                 return Ok(index);
             }
         }
-        let index = Arc::new(Index::read(std::fs::File::open(graph)?, root)?);
+        let mut index = Index::read(std::fs::File::open(graph)?, root)?;
+        if project.contains('@')
+            && let Ok(spans) = std::fs::File::open(graph.with_file_name(TEST_SPANS))
+        {
+            index.revision_tests = serde_json::from_reader(std::io::BufReader::new(spans)).ok();
+        }
+        let index = Arc::new(index);
         if kept.len() >= KEPT {
             kept.remove(0);
         }
@@ -5642,6 +5795,55 @@ mod tests {
         assert_eq!(named["cycle"]["names"], true);
         assert_eq!(named["cycle"]["steps"], 2);
         assert_eq!(named["edges"][1]["to"], first);
+    }
+
+    #[test]
+    fn a_pr_cycle_compares_renamed_and_moved_places_with_the_full_base_graph() {
+        let graph = |head| {
+            let path = if head { "src/new.php" } else { "src/old.php" };
+            let line = if head { "L31" } else { "L3" };
+            let node = |id, file, line| json!({"id": id, "label": format!("{id}()"), "source_file": file, "source_location": line});
+            let edge = |from, to, confidence| json!({"source": from, "target": to, "relation": "calls", "confidence": confidence});
+            let mut links = vec![
+                edge("a", "b", "EXTRACTED"),
+                edge("b", "c", "EXTRACTED"),
+                edge("c", "a", "EXTRACTED"),
+            ];
+            if head {
+                links.push(edge("b", "a", "INFERRED"));
+            }
+            index(json!({
+                "nodes": [node("a", path, line), node("b", "src/b.php", "L5"), node("c", "src/c.php", "L7")],
+                "links": links,
+            }))
+        };
+        let head = graph(true);
+        let base = graph(false);
+        let renames = HashMap::from([("src/new.php", "src/old.php")]);
+        for place in ["src/new.php", "src/new.php#L31:a()"] {
+            let mut view = head.cycle("project", place, &[], &|_| None, None, false);
+            assert_eq!(view["cycle"]["steps"], 2, "{view}");
+            assert_eq!(
+                head.compare_cycle(&head, &base, &mut view, &renames, false),
+                "present"
+            );
+            assert_eq!(view["edges"][0]["added"], false);
+            assert_eq!(view["edges"][1]["added"], true);
+            assert_eq!(view["edges"][1]["guessed"], 1);
+            let mut confirmed = head.cycle("project", place, &[], &|_| None, None, true);
+            assert_eq!(confirmed["cycle"]["steps"], 3);
+            assert_eq!(
+                head.compare_cycle(&head, &base, &mut confirmed, &renames, true),
+                "present"
+            );
+            assert!(
+                confirmed["edges"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|edge| edge["added"] == false)
+            );
+        }
     }
 
     #[test]
