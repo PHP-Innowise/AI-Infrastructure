@@ -42,11 +42,7 @@ impl Usage {
         {
             return false;
         }
-        if c.is_some_and(|c| i.is_none_or(|i| c > i)) || r.is_some_and(|r| o.is_none_or(|o| r > o))
-        {
-            return false;
-        }
-        true
+        !(c.is_some_and(|c| i.is_none_or(|i| c > i)) || r.is_some_and(|r| o.is_none_or(|o| r > o)))
     }
 }
 fn empty(size: Option<usize>, state: &str) -> Value {

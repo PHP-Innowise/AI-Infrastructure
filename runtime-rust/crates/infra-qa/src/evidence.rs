@@ -122,10 +122,6 @@ fn executable(name: &str) -> bool {
         return regular(Path::new(name));
     }
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|p| {
-        let q = p.join(name);
-        if regular(&q) {
-            return true;
-        }
         #[cfg(windows)]
         {
             for ext in [".exe", ".cmd", ".bat"] {
@@ -134,7 +130,7 @@ fn executable(name: &str) -> bool {
                 }
             }
         }
-        false
+        regular(&p.join(name))
     })
 }
 fn shell_quote(s: &str) -> String {
