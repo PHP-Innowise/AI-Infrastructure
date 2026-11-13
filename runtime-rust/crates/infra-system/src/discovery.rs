@@ -824,7 +824,24 @@ pub fn get(state: &State, sid: &str) -> Result<Value> {
     {
         service["path"] = request["roots"][string(&service["passport"]["id"])]["path"].clone();
     }
-    let mut result = object!({"id":sid,"status":session["status"],"active":crate::manager::active(&session),"provider":session["provider"],"proposal":null,"draft":draft,"events":state.host.events(sid,crate::manager::RUNNER_EVENTS)?});
+    let events = state.host.events(sid, crate::manager::RUNNER_EVENTS)?;
+    let active = crate::manager::active(&session);
+    // A scan that stopped without a result names its reason: the runner's last error.
+    let failure = (!active && session["status"] != "completed")
+        .then(|| {
+            events
+                .iter()
+                .rev()
+                .find(|event| event["kind"] == "error")
+                .and_then(|event| event["text"].as_str())
+                .map(|text| text.strip_prefix("AI discovery failed: ").unwrap_or(text))
+                .map(str::to_string)
+        })
+        .flatten();
+    let mut result = object!({"id":sid,"status":session["status"],"active":active,"provider":session["provider"],"proposal":null,"draft":draft,"events":events});
+    if let Some(failure) = failure {
+        result["error"] = failure.into();
+    }
     if session["status"] == "completed" {
         let proposal = (|| -> Result<Value> {
             check_fresh(&request)?;

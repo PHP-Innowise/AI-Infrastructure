@@ -24,6 +24,263 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Memory Bank: a record with a long title can be promoted. A chunk took its
+  file name from the whole title, and publication writes `.{name}.{uuid}.tmp`
+  beside it, so any title over about 190 characters failed with `File name too
+  long` and that record could never become memory (a real system run's outcome
+  hit it). A new chunk's name now carries at most 80 characters of the title's
+  slug, cut at a word; the whole title stays in the chunk. A publication started
+  before the change keeps its full-slug name and still resumes.
+- System Orchestration: every agent of a run shares one context. Each worker's
+  input carries `shared_context`, the same for all of them: the task, the
+  services and their folders, the contract relationships, the plan's excerpts
+  (read again after a dispatch changed their sources) and the complete reports
+  of the agents before it with their receipt paths; a later agent used to see
+  1000 characters of each summary and ten checks. Reports are shortened alike,
+  and marked `reports_condensed`, only when they would not fit the prompt
+  limit. Every agent reads the system folder and every selected service
+  whatever the access scope, which now decides only where service agents write
+  (**Service agents may edit** in the browser): an own-service agent could
+  read neither its neighbours nor the system's contracts. A Claude edit
+  dispatch reads those folders through `Read(//…/**)` rules, since an added
+  folder would be writable. Each attempt's exact input is saved beside its
+  receipt as `PHASE-aN.input.json`, which the run view names, and
+  `handoff.json` keeps the complete reports. Workers remain separate CLI
+  processes, so verification stays independent of the agents it checks.
+- System Orchestration: a change's memory is shared by all of its agents.
+  A plan offers the Memory Bank chunks of the system folder and of every
+  selected service to the shared context; a service agent used to get at most
+  its own folder's memory, and only through an attached edition's hooks.
+  Memory a person reviewed is marked `reviewed_memory`; memory promoted
+  automatically, which plans used to refuse, is shared as `automatic_memory`.
+  Chunks found but not shared are counted per service in one
+  `memory_not_shared` warning. An agent gets what a chunk says, without its
+  metadata, which took 1643 of a real excerpt's 2000 characters. A chunk promoted from a Brain record is
+  admitted by comparing that record's digest (the record never enters
+  context), so promoted memory can be shared at all, and digests read CRLF as
+  LF as the Memory Bank records them. Memory that stops holding during a run
+  leaves the context (`memory_no_longer_holds`) instead of stopping the run.
+  A completed run makes its outcome the system's memory by itself: a resolved
+  finding in the system Brain, verified by the run's verification agent,
+  promoted to the system Memory Bank; its title is bounded so the chunk's file
+  name fits (a real 200-character title overran the name limit), the whole
+  task stays in its text, and a summary's degenerate tail (a real one ended in
+  3848 characters of `");`) stays out of it. A system folder that turns
+  `automatic_promotion` off keeps a proposal for `memory promote-review` and
+  `promote-apply` instead. The handoff and the run view name the memory, and
+  the plan summary's Shared memory line counts what every agent receives.
+- System Orchestration: a worker CLI that cannot run says why. A real
+  verification stopped as only `unavailable` after the engine was replaced
+  under a running Harness; the receipt now keeps the process error as
+  `failure` and the run reads `The codex CLI could not run: ...`. A CLI that
+  went missing or changed between dispatches (a self-updating CLI) blocks the
+  run with that cause in its journal (`Worker executable ... is missing;
+  reinstall it and resume, or start a new run`) instead of leaving it
+  `interrupted` with no error.
+- System Orchestration, found by running it on an eight-service, five-repository
+  microservice system with real Codex workers:
+  - Executing a reviewed plan no longer stops at its first dispatch with
+    `Local SQLite operation failed`. Every dispatch re-ensures its native task,
+    and the second binding of the same task was an insert into a unique key; an
+    existing binding to the same record now follows its revision, and one to a
+    different record is refused instead of repointed.
+  - A Harness run no longer stops at its first service dispatch with `Session
+    workspace belongs to another project`: the launch adapter was the system
+    session's, which refuses any folder outside the system folder's checkout.
+    System runs adapt each launch for the registered project its folder is (or,
+    for a monorepo service folder, lies inside), and refuse any other folder.
+  - `infra-engine system run-status` reports a run whose executor is gone
+    (killed, crashed) as `interrupted` instead of `running` forever; a test
+    kills the executor mid-dispatch and resumes with an explicit retry.
+  - `infra-engine system execute` no longer overflows its worker thread's stack
+    in debug builds: the whole sequential run is one future, and the thread is
+    sized for it.
+  - **Fill with AI** works on Linux again. The boundary probe proves the
+    workspace is writable inside its private `.harness-tmp`, which only the
+    Windows and macOS profiles created; the bubblewrap profile now creates it
+    too. The probe reports any refusal as a JSON line, so the editor names the
+    cause (a readable original path, an unwritable workspace, or a sandbox that
+    could not start) instead of `boundary probe failed`, and a scan that stops
+    without a proposal shows its last error.
+  - Read-only dispatches can build and test. Codex's read-only sandbox allows
+    no writes, not even `/tmp`, so a real contract agent could not run
+    `go test` and verification could never pass for a Go service. A Codex with
+    permission profiles (probed once without a model call) now runs read-only
+    dispatches under a profile that reads the disk, writes only the run's
+    private `scratch` folder and has no network, with `TMPDIR` and tool caches
+    pointed there; an older Codex keeps `--sandbox read-only`. Workers are also
+    told to report checks of the requested change (an unrelated, pre-existing
+    `composer validate --strict` warning blocked a finished inventory dispatch)
+    and to add no notes or task logs to the roots.
+  - Contract and verification workers run in the system folder and now have it
+    in `access.readable`: told to read only the services, a real contract agent
+    refused to check the topic registry, envelope schema and ADRs it was meant
+    to check. Workers are also told that a root's own build and test commands
+    may read the repository containing it, so monorepo services whose tests
+    load shared packages are tested instead of reported `not_run`.
+  - A blocked contract agreement may propose an order (kept as evidence, never
+    applied): such a report was discarded as an invalid result, losing the
+    decisions it asked for. A rejected answer keeps the validator's reason in
+    its receipt (`rejection`) and on the agent's card. A read-only worker that
+    reports writes (a real agent honestly listed a marker a Codex hook had
+    created) now stops the run as `read_only_worker_reported_writes` with its
+    report kept, and workers are told that tool-created files belong in a
+    check and that a check they could not run is `not_run`, not `failed`. A
+    service report that echoes the agreed order (a real payments worker did,
+    after adding its tests) is no longer discarded: only the completed
+    agreement's order is applied, any other is kept as evidence.
+  - Capability routing ignores English and Russian function words and folds
+    English plurals, so a task written as a sentence no longer makes every
+    service with a prose description a candidate; candidates are ranked by
+    matched terms. A plan that still needs a selection keeps the form open with
+    the candidates ticked and says what each matched.
+  - The context capsule keeps policies first and then the sources the task is
+    about: within a service, sources are ranked by task terms shared with their
+    path (`CancelOrder.php` reads as `cancel order`) and with the capabilities
+    and contracts that cite them, before kind and path.
+  - The Wasm editor regained the service card layout its stylesheet expects
+    (head with actions, two-column fields, inline dependency checkbox, row
+    heads with named Remove buttons, `(one per line)` hints); cards before an
+    ID is entered are named by folder. The folder browser opens where the next
+    service usually is (beside the last one added) with a title naming what the
+    folder becomes, and keeps a path typed while it loads. The empty state hides
+    while the editor is open; the page is titled System Orchestration.
+  - The map draws each link between the facing sides of its two boxes, arcs a
+    link that skips boxes in its row, and separates a pair linked both ways.
+    Relationship, step and receipt rows have titles, catalog warnings read as
+    sentences, list fields read as lists, provider choices use product names,
+    a change list shows `needs selection` for a plan that has no services,
+    recovery preselects the retry a dispatch without a successful receipt
+    needs, and error sentences are no longer mangled into labels. A receipt
+    names what stopped its dispatch (failed checks, unrun verification checks,
+    files a read-only worker wrote). The Changes tab again says when unsaved
+    editor changes or an AI scan hold planning and launching, and holds them:
+    a plan is computed from the saved files, not the draft. A launch that
+    leaves its run blocked or interrupted reads `failed` in Sessions instead
+    of `completed`.
+  - A run no longer stops for good with `Updated context exceeds original
+    budget` after a worker grows a file the plan quotes. A plan fills its
+    budget (a real one held 15995 of 16000 characters), so the orders worker's
+    edit to `CancelOrder.php` made the refreshed context too big, and every
+    resume refreshed it again. A refreshed excerpt may now take the room the
+    approved context left free and is cut beyond that (marked `truncated`).
+  - A dispatch whose current attempt saved a successful receipt before its run
+    stopped reads `reported complete; resume to record it` in the run, the
+    retry list and its agent card, instead of `interrupted` and `Stopped`, and
+    a stopped agent's time ends at its last event instead of growing.
+  - A run no longer leaves its clone-only native storage for `git add -A`: in
+    a service folder without an installed edition, `memory-bank/local/context.db`
+    and `project-brain/local/runtime.lock` showed as untracked files. Each
+    `local/` folder the run's storage uses now gets a `.gitignore` that hides
+    it; the Brain's task and handoff records stay visible for review.
+  - Each launch of a system run is titled in Sessions by its change and launch
+    number (`System change <id> · launch 3 retries service-orders: …`): a
+    session is titled by its prompt's first 80 characters, so the nine launches
+    of one real run all read `System orchestration: Allow customers to cancel
+    a CONFIRMED order within 30 minu`. The runner footer says `1 active slot`.
+    Sessions lists a launch when it starts and updates its status when the
+    run stops, instead of only after a reload.
+  - A shared contract or document in the system folder that verification
+    finds out of date no longer costs a whole new run. The real verification
+    agent passed every suite (Go with `-race`, PHP, Node and a cross-service
+    scenario in its scratch folder) and blocked on the topic registry, which no
+    worker may write; a person's edit there made the run stale for good. A
+    resume that accepts source changes now adopts a person's content edit to a
+    system-folder source the plan fingerprints (never `system.json`, never
+    during a run), and the recovery panel says so. A run stopped between
+    dispatches names the changed source instead of `Checkpoint sources
+    changed`, and an accepting resume adopts a person's system-folder edit
+    there too.
+  - A completed verification whose only gaps are checks this environment
+    cannot run can be accepted by a person on resume (`--accept-unrun-checks`,
+    or the recovery checkbox that names them) instead of stopping the run for
+    good: the real agent honestly reported Symfony runtime integration
+    `not_run` (no `vendor/` in the lab) on every attempt, so a run could only
+    complete if verification left such checks out. The step records
+    `accepted_unrun_checks`; failed checks, blocked reports and writes are
+    never accepted.
+  - A completed contract agreement proceeds whatever its checks say; it
+    blocks by its status. A real agent agreed the payments fix and reported
+    the defect the fix is for as a failed check, which stopped the edit run
+    before any implementation; the contract goal now says such a defect is a
+    finding, not a failed check.
+  - A read-only run asks its agents to investigate: the contract agent
+    establishes facts and the order to investigate in, and reports decisions
+    a fix would need as findings instead of blocking on them; verification
+    checks findings, not changes. A real investigation's contract agent found
+    the planted `customer_id` defect and then blocked the run on how a fix
+    should look, so neither service was investigated. Its dispatches also
+    complete with failed or unrun checks, which are findings (the payments
+    agent reproduced the defect as a failed check and stopped the run before
+    verification); verification still needs one passed check, and the
+    receipt reads `completed; failed checks are findings: …`. A saved receipt
+    is refused only when it claims a success its rules do not grant.
+  - Agents may read this run's saved receipts, which their prompt names: a
+    real verification agent was given the paths, read the scope rule as
+    forbidding them and reported the earlier claims unverified. A read-only
+    Claude dispatch is also granted the run's folder (plan mode keeps it
+    read-only); Codex reads it already.
+  - A worker CLI that exits with an error says why: its receipt keeps the
+    CLI's own message (`failure`: an expired sign-in, a usage limit, else its
+    last plain line; withheld if it looks like a secret), and the run reads
+    `The claude CLI exited with code 1: Failed to authenticate: OAuth session
+    expired and could not be refreshed` instead of `worker exit failure`;
+    **Fill with AI** names the cause the same way instead of `Discovery
+    provider exited with code 1`.
+  - A running **Fill with AI** scan can be cancelled again: the editor's
+    lock during a scan disabled every control in it, its own **Cancel**
+    included.
+  - **Fill with AI** on a system that already has passports says, per
+    service, what its proposal changes from the form it replaces (`changes
+    owner, capabilities 1 → 2` or `same as saved`): the proposal replaces the
+    whole form, so hand edits could be saved over unnoticed. The scan is also
+    told that `evidence/draft.json` holds the current passports and to keep
+    what the evidence supports: it was captured but never mentioned, so a real
+    rescan reported the passports "not captured" and rewrote every field of
+    all eight services (owners only reformatted).
+  - Opening **Services** shows the project's system when its file exists,
+    instead of an empty state until **Load system** on every visit; a project
+    without one keeps the empty state.
+  - The change stepper (Plan, Review, Run, Receipts) is drawn again: the
+    browser UI drew it before the Wasm port, which left an empty bar above
+    every change.
+  - **Plan again** opens the plan form filled from a change (task, starting
+    services, consumers, budget and the next change ID): a blocked agreement
+    asks for a decision the next plan has to state, which happened in both
+    real edit runs, and the form used to start empty.
+  - **Remove from list** hides a stopped change from the change list (every
+    plan attempt used to stay there for good); its plan, receipts and the
+    services' native tasks are kept, and it can still be read by its ID.
+  - A stopped run's status line says what stopped it from the stopped
+    dispatch's receipt (`blocked · contracts: blocked by the agent: …`)
+    instead of `worker blocked or verification incomplete`, and after a server
+    restart names the dispatch that stopped before saving a receipt; a queued
+    launch says it waits for a free runner slot. A live
+    restart mid-dispatch killed the agent's whole process tree with the server
+    and resumed with the preselected retry.
+  - A prepared plan joins the change list and is selected there (the list
+    kept showing the previous change until a reload), and the selected entry
+    follows its run's status. The plan form chooses which contract consumers
+    join (`Every service downstream of them`, `Only their direct consumers`,
+    `None`): the API took an impact depth the form never sent, so a read-only
+    investigation of two services planned six.
+  - A 200-service system answers `validate`, `catalog`, `map`, `locate` and a
+    one-hop `plan` in about 25 ms and `verify` in 70 ms instead of 1-2.5 s:
+    the secret, identifier and routing-word patterns were compiled again for
+    every field and source, and a catalog asked Git for every service's HEAD.
+    Patterns are compiled once, and HEAD is asked once per checkout, up to
+    eight at a time (a monorepo's service folders share one; a folder outside
+    any checkout needs no Git process).
+  - A changed contract may be named by its ID alone when one registered
+    service provides it, as the plan form's field suggested (`order.placed`
+    was refused with `Contract selector must be SERVICE:CONTRACT`); an
+    ambiguous or unknown ID names the providers or says none has it.
+  - `plan --output` onto an existing file says that a saved plan is never
+    replaced instead of `Publication effect changed before write`, and a plan
+    launched after the services' contracts changed says to prepare a new plan
+    instead of `Plan relationships differ from current catalog`; `system init`
+    over an existing folder says so instead of `File exists (os error 17)`.
+
 - Keep repository leases and inbox available when an unrelated Linux mount
   has a deleted bind source root or an empty source field. Read only mounts
   covering or nested inside declared Git trees, deciding that from the mount

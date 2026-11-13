@@ -323,6 +323,7 @@ fn status(s: &str) -> String {
         "completed" => "Completed".into(),
         "blocked" => "Blocked".into(),
         "interrupted" => "Stopped".into(),
+        "reported" => "Reported complete".into(),
         _ => m::label(s),
     }
 }
@@ -435,8 +436,14 @@ fn render(root: &str) {
             ),
         );
         let elapsed = if let Some(start) = a["started"].as_str() {
+            // An agent its run left without a finish ended at its last event.
             let end = a["finished"]
                 .as_str()
+                .or_else(|| {
+                    (a["status"] != "running")
+                        .then(|| a["last"]["at"].as_str())
+                        .flatten()
+                })
                 .map(|s| js_sys::Date::new(&s.into()).get_time())
                 .unwrap_or(js_sys::Date::now());
             duration(
@@ -471,6 +478,13 @@ fn render(root: &str) {
             let names = m::array(&a[field])
                 .iter()
                 .filter_map(V::as_str)
+                .map(|name| {
+                    if name == "__system__" {
+                        "system folder"
+                    } else {
+                        name
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             if !names.is_empty() {

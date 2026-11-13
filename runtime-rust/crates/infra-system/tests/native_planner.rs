@@ -2,7 +2,7 @@
 use infra_system::{catalog::System, common, execute};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -367,4 +367,64 @@ fn declared_source_links_are_not_followed_into_an_outside_file() {
             .snapshot
             .contains_key(&("payments".into(), "src/payments.txt".into()))
     );
+}
+#[test]
+fn an_accepted_edit_that_grows_a_quoted_source_keeps_the_run_inside_its_budget() {
+    let temp = Temp::new();
+    let (_control, service, config) = fixture(&temp);
+    // A plan's context fills its budget; size one to exactly what it quotes.
+    let roomy = System::new(&config, &[])
+        .unwrap()
+        .plan(
+            "Change payments",
+            "change-1",
+            &["payments".into()],
+            &[],
+            8000,
+            32,
+        )
+        .unwrap();
+    let exact = roomy["context_chars"].as_u64().unwrap() as usize;
+    let grown = "Payment operations fixture, now with refunds.\n".repeat(20);
+    for spare in [0, 40] {
+        write(
+            &service,
+            "src/payments.txt",
+            "Payment operations fixture only.\n",
+        );
+        let budget = exact + spare;
+        let plan = System::new(&config, &[])
+            .unwrap()
+            .plan(
+                "Change payments",
+                "change-1",
+                &["payments".into()],
+                &[],
+                budget,
+                32,
+            )
+            .unwrap();
+        assert_eq!(plan["context_chars"], roomy["context_chars"]);
+        write(&service, "src/payments.txt", &grown);
+        let accepted = BTreeSet::from([("payments".to_string(), "src/payments.txt".to_string())]);
+        let mut current = System::new(&config, &[]).unwrap();
+        let updated = current
+            .refresh_checkpoint(&plan, &accepted)
+            .expect("a grown quoted source is cut to fit, not a stopped run");
+        let size = updated["context_chars"].as_u64().unwrap() as usize;
+        assert!(size <= budget && size + 2 >= budget, "{size} of {budget}");
+        let source = updated["context"]["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["path"] == "src/payments.txt")
+            .unwrap();
+        let excerpt = source["excerpt"].as_str().unwrap();
+        assert!(grown.starts_with(excerpt) && excerpt.len() < grown.len());
+        assert_eq!(source["truncated"], true);
+        assert_eq!(source["sha256"], common::digest(grown.as_bytes()));
+        assert_eq!(current.verify(&updated).unwrap()["fresh"], true);
+        // The saved checkpoint stays acceptable when the run resumes.
+        current.selected_plan(&updated, true).unwrap();
+    }
 }

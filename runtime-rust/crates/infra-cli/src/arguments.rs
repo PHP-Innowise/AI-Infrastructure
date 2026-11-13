@@ -12,6 +12,7 @@ pub fn key(value: &str) -> String {
 }
 const SWITCHES: &[&str] = &[
     "accept-source-changes",
+    "accept-unrun-checks",
     "allow-downgrade",
     "allow-partial-skills",
     "allow-phase-regression",

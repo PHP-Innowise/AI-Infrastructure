@@ -45,12 +45,28 @@ impl System {
             ));
         }
         let mut groups = BTreeMap::<String, VecDeque<(std::path::PathBuf, Value)>>::new();
+        // What each source is cited for (capability and contract text), so a
+        // source the task is about outranks an unrelated one of the same kind.
+        let mut cited = BTreeMap::<(String, String), String>::new();
         if !selected.is_empty() {
+            let mut declared = BTreeSet::new();
             for entry in items(&self.config_data["shared_sources"], MAX_ITEMS)? {
+                declared.insert(string(&entry["path"]).to_string());
                 groups
                     .entry("__system__".into())
                     .or_default()
                     .push_back((self.root.clone(), entry.clone()));
+            }
+            // The system's memory and each participant's below are offered to
+            // the context every agent shares; the reader admits current chunks
+            // and marks those no person reviewed.
+            for path in memory_chunks(&self.root).unwrap_or_default() {
+                if !declared.contains(&path) {
+                    groups.entry("__system__".into()).or_default().push_back((
+                        self.root.clone(),
+                        object!({"path":path,"kind":"memory","discovered":true}),
+                    ));
+                }
             }
         }
         for selected in &selected {
@@ -67,7 +83,16 @@ impl System {
                 declared.insert(string(&entry["path"]).to_string(), entry.clone());
             }
             for capability in items(&manifest["capabilities"], MAX_ITEMS)? {
+                let about = format!(
+                    "{} {} {}",
+                    string(&capability["id"]),
+                    string(&capability["description"]),
+                    texts(&capability["keywords"]).join(" ")
+                );
                 for path in texts(&capability["sources"]) {
+                    let text = cited.entry((sid.to_string(), path.clone())).or_default();
+                    text.push(' ');
+                    text.push_str(&about);
                     declared.entry(path.clone()).or_insert(
                         object!({"path":path,"kind":if is_memory(&path){"memory"}else{"code"}}),
                     );
@@ -75,10 +100,18 @@ impl System {
             }
             for contract in items(&manifest["provides"], MAX_ITEMS)? {
                 for path in texts(&contract["sources"]) {
+                    let text = cited.entry((sid.to_string(), path.clone())).or_default();
+                    text.push(' ');
+                    text.push_str(string(&contract["id"]));
                     declared.entry(path.clone()).or_insert(
                         object!({"path":path,"kind":if is_memory(&path){"memory"}else{"contract"}}),
                     );
                 }
+            }
+            for path in memory_chunks(&service.root).unwrap_or_default() {
+                declared
+                    .entry(path.clone())
+                    .or_insert(object!({"path":path,"kind":"memory","discovered":true}));
             }
             for entry in declared.into_values() {
                 groups
@@ -93,13 +126,53 @@ impl System {
                 .position(|kind| *kind == string(&value["kind"]))
                 .unwrap_or(6)
         }
-        for group in groups.values_mut() {
-            let mut entries = group.drain(..).collect::<Vec<_>>();
-            entries.sort_by_key(|(_, entry)| (priority(entry), string(&entry["path"]).to_string()));
-            group.extend(entries);
+        // Policies lead; then sources sharing the most task terms through their
+        // path or what cites them; then kind and path as before.
+        let task_terms = crate::catalog::terms(query);
+        for (sid, group) in groups.iter_mut() {
+            let mut entries = group
+                .drain(..)
+                .map(|(root, entry)| {
+                    let path = string(&entry["path"]).to_string();
+                    let about = format!(
+                        "{} {}",
+                        path.replace(['/', '.', '-', '_'], " "),
+                        cited
+                            .get(&(sid.clone(), path.clone()))
+                            .map_or("", String::as_str)
+                    );
+                    let relevance = crate::catalog::terms(&about)
+                        .intersection(&task_terms)
+                        .count();
+                    (root, entry, relevance)
+                })
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|(_, entry, relevance)| {
+                (
+                    usize::from(entry["kind"] != "policy"),
+                    std::cmp::Reverse(*relevance),
+                    priority(entry),
+                    string(&entry["path"]).to_string(),
+                )
+            });
+            group.extend(entries.into_iter().map(|(root, entry, _)| (root, entry)));
         }
         let mut queue = groups.keys().cloned().collect::<VecDeque<_>>();
         let mut omissions = vec![];
+        // Memory found in a bank is counted per service when it is not shared,
+        // so a large bank does not fill the plan with one line per chunk.
+        let mut unshared = BTreeMap::<String, BTreeMap<String, usize>>::new();
+        let mut omit = |sid: &str, entry: &Value, reason: &str| {
+            if entry["discovered"] == true {
+                *unshared
+                    .entry(sid.to_string())
+                    .or_default()
+                    .entry(reason.to_string())
+                    .or_default() += 1;
+            } else {
+                omissions.push(object!({"service":sid,"path":entry["path"],"reason":reason}));
+            }
+        };
         let mut reads = ReadBudget::default();
         let mut exhausted = false;
         while let Some(sid) = queue.pop_front() {
@@ -118,18 +191,18 @@ impl System {
             let floor=encoded(&object!({"service":sid,"path":path,"kind":entry["kind"],"sha256":"0".repeat(64),"trust":"source_evidence","excerpt":"","truncated":true}))?.chars().count();
             let room = budget.saturating_sub(length + separator + floor);
             if room < 1 {
-                omissions.push(object!({"service":sid,"path":path,"reason":"budget"}));
+                omit(&sid, &entry, "budget");
                 continue;
             }
             if exhausted {
-                omissions.push(object!({"service":sid,"path":path,"reason":"read_limit"}));
+                omit(&sid, &entry, "read_limit");
                 continue;
             }
             let content =
                 match self.source_content(&sid, &root, &entry, Some(&mut reads), Some(room)) {
                     Ok(Some(content)) => content,
                     Ok(None) => {
-                        omissions.push(object!({"service":sid,"path":path,"reason":"ineligible"}));
+                        omit(&sid, &entry, "ineligible");
                         continue;
                     }
                     Err(error)
@@ -140,7 +213,7 @@ impl System {
                             exhausted = true;
                             self.warn("__system__", "source_read_limit", None);
                         }
-                        omissions.push(object!({"service":sid,"path":path,"reason":reason}));
+                        omit(&sid, &entry, reason);
                         continue;
                     }
                     Err(error) => return Err(error),
@@ -153,8 +226,14 @@ impl System {
                     .push(content);
                 length += added;
             } else {
-                omissions.push(object!({"service":sid,"path":path,"reason":"budget"}));
+                omit(&sid, &entry, "budget");
             }
+        }
+        for (sid, causes) in unshared {
+            let count = causes.values().sum::<usize>();
+            self.warnings.push(
+                object!({"service":sid,"reason":"memory_not_shared","count":count,"causes":causes}),
+            );
         }
         let mut steps = vec![
             object!({"id":"scope","depends_on":[],"goal":"Confirm affected services and missing relationships"}),
@@ -385,7 +464,9 @@ impl System {
             .cloned()
             .collect::<Vec<_>>();
         if current && plan["relationships"] != object!(relationships) {
-            return Err(fail("Plan relationships differ from current catalog"));
+            return Err(fail(
+                "The services' declared contracts changed after this plan was prepared; prepare a new plan",
+            ));
         }
         let budget = plan["context_budget_chars"]
             .as_u64()
@@ -425,8 +506,15 @@ impl System {
             entry["sha256"] = hash.clone().into();
             hashes.insert((sid, path), hash);
         }
+        // A worker may grow a file the plan quotes. Its new excerpt may take
+        // the room the approved context left free and is cut beyond that, so
+        // an accepted edit never stops a run that fit when it was approved.
+        let budget = updated["context_budget_chars"].as_u64().unwrap_or(0) as usize;
+        let mut room = budget.saturating_sub(encoded(&plan["context"])?.chars().count());
         let mut sources = vec![];
+        let mut dropped = vec![];
         for entry in items(&updated["context"]["sources"], MAX_SERVICES * MAX_ITEMS)? {
+            let before = encoded(entry)?.chars().count();
             let sid = string(&entry["service"]);
             let path = string(&entry["path"]);
             let root = if sid == "__system__" {
@@ -438,15 +526,28 @@ impl System {
                     .root
                     .clone()
             };
-            let content = self
-                .source_content(
-                    sid,
-                    &root,
-                    &object!({"path":path,"kind":entry["kind"]}),
-                    None,
-                    None,
-                )?
-                .ok_or_else(|| fail("Delivered source no longer eligible; prepare new plan"))?;
+            let Some(content) = self.source_content(
+                sid,
+                &root,
+                &object!({"path":path,"kind":entry["kind"]}),
+                None,
+                None,
+            )?
+            else {
+                // Memory that stopped holding (a worker changed what it cites,
+                // or its review fell due) leaves the shared context; the
+                // sources it described are still there.
+                if entry["kind"] == "memory" {
+                    dropped.push(
+                        object!({"service":sid,"path":path,"reason":"memory_no_longer_holds"}),
+                    );
+                    room += before + 1;
+                    continue;
+                }
+                return Err(fail(
+                    "Delivered source no longer eligible; prepare new plan",
+                ));
+            };
             if hashes
                 .get(&(sid.to_string(), path.to_string()))
                 .map(String::as_str)
@@ -454,12 +555,24 @@ impl System {
             {
                 return Err(fail("Source changed while building canonical excerpts"));
             }
+            let content = fit_excerpt(content, before + room)?;
+            room = (room + before).saturating_sub(encoded(&content)?.chars().count());
             sources.push(content);
         }
         updated["context"]["sources"] = object!(sources);
+        if !dropped.is_empty() {
+            let omitted = updated["omitted_sources"]
+                .as_array_mut()
+                .ok_or_else(|| fail("Invalid omitted sources"))?;
+            for entry in dropped {
+                if !omitted.contains(&entry) {
+                    omitted.push(entry);
+                }
+            }
+        }
         let size = encoded(&updated["context"])?.chars().count();
         updated["context_chars"] = object!(size);
-        if size > updated["context_budget_chars"].as_u64().unwrap_or(0) as usize {
+        if size > budget {
             return Err(fail("Updated context exceeds original budget"));
         }
         if System::new(&self.config, &self.allow_roots)?.verify(&updated)?["fresh"] != true {
@@ -467,4 +580,32 @@ impl System {
         }
         Ok(updated)
     }
+}
+/// Keeps the longest start of a source excerpt whose entry fits `limit`
+/// characters in canonical form, marking it truncated. Escaped characters
+/// encode longer, so the cut is searched rather than counted.
+fn fit_excerpt(mut content: Value, limit: usize) -> Result<Value> {
+    if encoded(&content)?.chars().count() <= limit {
+        return Ok(content);
+    }
+    let excerpt = string(&content["excerpt"]).chars().collect::<Vec<_>>();
+    content["truncated"] = true.into();
+    let fits = |content: &mut Value, keep: usize| -> Result<bool> {
+        content["excerpt"] = excerpt[..keep].iter().collect::<String>().into();
+        Ok(encoded(content)?.chars().count() <= limit)
+    };
+    // The whole excerpt did not fit, so at least one character goes.
+    let (mut low, mut high) = (0, excerpt.len().saturating_sub(1));
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if fits(&mut content, middle)? {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    if !fits(&mut content, low)? {
+        return Err(fail("Updated context exceeds original budget"));
+    }
+    Ok(content)
 }

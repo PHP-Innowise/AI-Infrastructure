@@ -1,4 +1,5 @@
 use crate::common::*;
+use infra_core::bank::publication::PublicationFiles;
 use infra_core::{BankService, ErrorKind, Result, Roots, RuntimeContext, RuntimeError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json as object};
@@ -8,7 +9,23 @@ use std::{
     time::Duration,
 };
 
+/// Prefixes a validation error with where in the passport it was found, so a
+/// form of many services says which field to correct.
+fn located(place: &str) -> impl Fn(RuntimeError) -> RuntimeError + '_ {
+    move |mut error| {
+        error.message = format!("{place}: {}", error.message);
+        error
+    }
+}
 pub fn manifest(value: &Value, sid: &str) -> Result<()> {
+    let subject = if sid == "draft" {
+        "Service".to_string()
+    } else {
+        format!("Service {sid}")
+    };
+    manifest_fields(value, sid).map_err(located(&subject))
+}
+fn manifest_fields(value: &Value, sid: &str) -> Result<()> {
     fields(
         value,
         &[
@@ -36,64 +53,101 @@ pub fn manifest(value: &Value, sid: &str) -> Result<()> {
     }
     let mut all_sources = BTreeSet::new();
     let mut seen = BTreeSet::new();
-    for capability in items(&value["capabilities"], MAX_ITEMS)? {
-        fields(
-            capability,
-            &["id", "description", "status", "sources"],
-            &["keywords"],
-        )?;
-        let id = identifier(string(&capability["id"]))?;
-        if !seen.insert(id) {
-            return Err(fail("Duplicate capability"));
-        }
-        text(&capability["description"], "capability description", 2000)?;
-        choice(
-            &capability["status"],
-            &["implemented", "partial", "planned", "unknown"],
-            "capability status",
-        )?;
-        for path in items(&capability["sources"], MAX_ITEMS)? {
-            all_sources.insert(relative(string(path))?);
-        }
-        if let Some(keywords) = capability.get("keywords") {
-            for keyword in items(keywords, MAX_ITEMS)? {
-                text(keyword, "keyword", 200)?;
+    for (index, capability) in items(&value["capabilities"], MAX_ITEMS)
+        .map_err(located("capabilities"))?
+        .iter()
+        .enumerate()
+    {
+        let place = format!("capability {}", index + 1);
+        (|| -> Result<()> {
+            fields(
+                capability,
+                &["id", "description", "status", "sources"],
+                &["keywords"],
+            )?;
+            let id = identifier(string(&capability["id"]))?;
+            if !seen.insert(id.clone()) {
+                return Err(fail(format!("Duplicate capability {id}")));
             }
-        }
+            text(&capability["description"], "capability description", 2000)?;
+            choice(
+                &capability["status"],
+                &["implemented", "partial", "planned", "unknown"],
+                "capability status",
+            )?;
+            for path in items(&capability["sources"], MAX_ITEMS)? {
+                all_sources.insert(relative(string(path))?);
+            }
+            if let Some(keywords) = capability.get("keywords") {
+                for keyword in items(keywords, MAX_ITEMS)? {
+                    text(keyword, "keyword", 200)?;
+                }
+            }
+            Ok(())
+        })()
+        .map_err(located(&place))?;
     }
     seen.clear();
-    for provided in items(&value["provides"], MAX_ITEMS)? {
-        fields(provided, &["id", "kind", "version", "sources"], &[])?;
-        if !seen.insert(identifier(string(&provided["id"]))?) {
-            return Err(fail("Duplicate provided contract"));
-        }
-        choice(
-            &provided["kind"],
-            &["http", "event", "rpc", "graphql", "other"],
-            "contract kind",
-        )?;
-        text(&provided["version"], "contract version", 100)?;
-        for path in items(&provided["sources"], MAX_ITEMS)? {
-            all_sources.insert(relative(string(path))?);
-        }
+    for (index, provided) in items(&value["provides"], MAX_ITEMS)
+        .map_err(located("provided contracts"))?
+        .iter()
+        .enumerate()
+    {
+        let place = format!("provided contract {}", index + 1);
+        (|| -> Result<()> {
+            fields(provided, &["id", "kind", "version", "sources"], &[])?;
+            let id = identifier(string(&provided["id"]))?;
+            if !seen.insert(id.clone()) {
+                return Err(fail(format!("Duplicate provided contract {id}")));
+            }
+            choice(
+                &provided["kind"],
+                &["http", "event", "rpc", "graphql", "other"],
+                "contract kind",
+            )?;
+            text(&provided["version"], "contract version", 100)?;
+            for path in items(&provided["sources"], MAX_ITEMS)? {
+                all_sources.insert(relative(string(path))?);
+            }
+            Ok(())
+        })()
+        .map_err(located(&place))?;
     }
     let mut consumes = BTreeSet::new();
-    for consumed in items(&value["consumes"], MAX_ITEMS)? {
-        fields(consumed, &["service", "contract", "version"], &[])?;
-        if !consumes.insert((
-            identifier(string(&consumed["service"]))?,
-            identifier(string(&consumed["contract"]))?,
-        )) {
-            return Err(fail("Duplicate consumed contract"));
-        }
-        text(&consumed["version"], "contract version", 100)?;
+    for (index, consumed) in items(&value["consumes"], MAX_ITEMS)
+        .map_err(located("consumed contracts"))?
+        .iter()
+        .enumerate()
+    {
+        let place = format!("consumed contract {}", index + 1);
+        (|| -> Result<()> {
+            fields(consumed, &["service", "contract", "version"], &[])?;
+            let key = (
+                identifier(string(&consumed["service"]))?,
+                identifier(string(&consumed["contract"]))?,
+            );
+            if consumes.contains(&key) {
+                return Err(fail(format!(
+                    "Duplicate consumed contract {}:{}",
+                    key.0, key.1
+                )));
+            }
+            consumes.insert(key);
+            text(&consumed["version"], "contract version", 100)?;
+            Ok(())
+        })()
+        .map_err(located(&place))?;
     }
     seen.clear();
-    for entry in items(&value["sources"], MAX_ITEMS)? {
-        source(entry)?;
+    for (index, entry) in items(&value["sources"], MAX_ITEMS)
+        .map_err(located("sources of context"))?
+        .iter()
+        .enumerate()
+    {
+        source(entry).map_err(located(&format!("source {}", index + 1)))?;
         let path = string(&entry["path"]).to_string();
         if !seen.insert(path.clone()) {
-            return Err(fail("Duplicate source"));
+            return Err(fail(format!("Duplicate source {path}")));
         }
         all_sources.insert(path);
     }
@@ -118,6 +172,52 @@ pub fn git_head(root: &Path) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
     .then_some(head)
+}
+/// The folder whose `.git` Git finds first from `root` (Git's own overrides
+/// are removed when it runs): services under it share one HEAD, and a root
+/// with none has no HEAD to ask Git for.
+fn checkout_top(root: &Path) -> Option<PathBuf> {
+    root.ancestors()
+        .find(|folder| std::fs::symlink_metadata(folder.join(".git")).is_ok())
+        .map(Path::to_path_buf)
+}
+/// HEADs of `roots`, in order: one Git process per checkout, up to eight at a
+/// time. Asked once per service, 200 services took a second on every catalog
+/// before any work began, and a monorepo asked once per service folder.
+pub fn git_heads(roots: &[PathBuf]) -> Vec<Option<String>> {
+    let tops = roots
+        .iter()
+        .map(|root| checkout_top(root))
+        .collect::<Vec<_>>();
+    let distinct = tops
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let share = distinct.len().div_ceil(distinct.len().clamp(1, 8)).max(1);
+    let heads = std::thread::scope(|scope| {
+        distinct
+            .chunks(share)
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .map(|top| (top.clone(), git_head(top)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap_or_default())
+            .collect::<BTreeMap<_, _>>()
+    });
+    tops.iter()
+        .map(|top| {
+            top.as_ref()
+                .and_then(|top| heads.get(top).cloned().flatten())
+        })
+        .collect()
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Service {
@@ -258,7 +358,23 @@ impl System {
                 .ok_or_else(|| fail("Service disappeared"))?;
             entry.manifest = Some(passport);
             entry.access = "available".into();
-            entry.head = git_head(&service.root);
+        }
+        let available = system
+            .services
+            .iter()
+            .filter(|(_, service)| service.access == "available")
+            .map(|(sid, service)| (sid.clone(), service.root.clone()))
+            .collect::<Vec<_>>();
+        let heads = git_heads(
+            &available
+                .iter()
+                .map(|(_, root)| root.clone())
+                .collect::<Vec<_>>(),
+        );
+        for ((sid, _), head) in available.into_iter().zip(heads) {
+            if let Some(service) = system.services.get_mut(&sid) {
+                service.head = head;
+            }
         }
         for (sid, service) in system.services.clone() {
             let Some(passport) = service.manifest else {
@@ -269,7 +385,12 @@ impl System {
                 let provider = system
                     .services
                     .get(provider_id)
-                    .ok_or_else(|| fail("Contract references an unregistered service"))?;
+                    .ok_or_else(|| {
+                        fail(format!(
+                            "{sid} consumes {} from {provider_id}, which is not registered in this system",
+                            string(&consume["contract"])
+                        ))
+                    })?;
                 let provided = provider
                     .manifest
                     .as_ref()
@@ -281,9 +402,10 @@ impl System {
                     })
                     .cloned();
                 if provider.manifest.is_some() && provided.is_none() {
-                    return Err(fail(
-                        "Consumer references contract provider does not declare",
-                    ));
+                    return Err(fail(format!(
+                        "{sid} consumes {} from {provider_id}, which does not declare it",
+                        string(&consume["contract"])
+                    )));
                 }
                 if provided.is_none() {
                     system.warn(&sid, "provider_contract_unavailable", None);
@@ -438,9 +560,21 @@ impl System {
                 }
             }
             if !matches.is_empty() {
-                candidates.push(object!({"service":sid,"matches":matches,"provenance":"inferred"}));
+                let score = matches
+                    .iter()
+                    .flat_map(|matched| texts(&matched["terms"]))
+                    .collect::<BTreeSet<_>>()
+                    .len();
+                candidates.push(object!({"service":sid,"matches":matches,"score":score,"provenance":"inferred"}));
             }
         }
+        // Best-supported candidates first: the most distinct task terms matched.
+        candidates.sort_by(|a, b| {
+            b["score"]
+                .as_u64()
+                .cmp(&a["score"].as_u64())
+                .then_with(|| string(&a["service"]).cmp(string(&b["service"])))
+        });
         let selection = if candidates.len() == 1 {
             "suggested"
         } else {
@@ -470,10 +604,42 @@ impl System {
         let mut changed = BTreeSet::new();
         for selector in contracts {
             let values = selector.split(':').collect::<Vec<_>>();
-            if values.len() != 2 {
-                return Err(fail("Contract selector must be SERVICE:CONTRACT"));
-            }
-            let (sid, cid) = (identifier(values[0])?, identifier(values[1])?);
+            let (sid, cid) = match values.as_slice() {
+                [sid, cid] => (identifier(sid)?, identifier(cid)?),
+                // A contract ID alone names its provider when only one has it.
+                [cid] => {
+                    let cid = identifier(cid)?;
+                    let providers = self
+                        .services
+                        .iter()
+                        .filter(|(_, service)| {
+                            service
+                                .manifest
+                                .as_ref()
+                                .and_then(|value| value["provides"].as_array())
+                                .is_some_and(|entries| {
+                                    entries.iter().any(|entry| entry["id"] == cid)
+                                })
+                        })
+                        .map(|(sid, _)| sid.clone())
+                        .collect::<Vec<_>>();
+                    match providers.as_slice() {
+                        [sid] => (sid.clone(), cid),
+                        [] => {
+                            return Err(fail(format!(
+                                "No registered service provides contract {cid}"
+                            )));
+                        }
+                        _ => {
+                            return Err(fail(format!(
+                                "Contract {cid} is provided by {}; name one as SERVICE:CONTRACT",
+                                providers.join(", ")
+                            )));
+                        }
+                    }
+                }
+                _ => return Err(fail("Contract selector must be SERVICE:CONTRACT")),
+            };
             let provided = self
                 .services
                 .get(&sid)
@@ -568,26 +734,38 @@ impl System {
         let path = string(&entry["path"]).to_string();
         let result = (|| -> Result<Value> {
             let raw = self.read(sid, root, &path, budget.as_deref_mut(), room)?;
+            let mut trust = "source_evidence";
             let content = std::str::from_utf8(&raw).map_err(|_| fail("Source is not UTF-8"))?;
             if content.contains('\0') || sensitive(content) {
                 return Err(fail("sensitive_or_binary"));
             }
+            let mut excerpt = content.to_string();
             if entry["kind"] == "memory" {
                 let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-                let raw = normalized
+                let (raw, body) = normalized
                     .strip_prefix("---\n")
                     .and_then(|value| value.split_once("\n---\n"))
-                    .ok_or_else(|| fail("unverified_memory"))?
-                    .0;
+                    .ok_or_else(|| fail("unverified_memory"))?;
+                // Agents get what the memory says. Its metadata took 1643 of
+                // a real excerpt's 2000 characters and left 357 for the
+                // knowledge; the digest still covers the whole chunk.
+                excerpt = body.trim_start().to_string();
                 let meta = parse_json(raw.as_bytes(), MAX_SOURCE_BYTES)?;
                 if !meta.is_object()
                     || meta["status"] != "active"
-                    || texts(&meta["tags"])
-                        .iter()
-                        .any(|tag| tag == "auto-promoted")
                     || !meta["superseded_by"].is_null()
                 {
                     return Err(fail("ineligible_memory"));
+                }
+                // Memory promoted without a person's review is shared too, as
+                // Harness sessions share it, and marked so agents check it.
+                if texts(&meta["tags"])
+                    .iter()
+                    .any(|tag| tag == "auto-promoted")
+                {
+                    trust = "automatic_memory";
+                } else {
+                    trust = "reviewed_memory";
                 }
                 let today = infra_core::domain::clock::local_today();
                 for key in ["review_after", "valid_to"] {
@@ -627,9 +805,20 @@ impl System {
                 {
                     return Err(fail("ineligible_memory"));
                 }
+                // A chunk promoted from a Brain record also cites that record.
+                // The record never enters context: only its digest is
+                // compared, to show it still says what was promoted.
+                let cited = |value: &str| -> Result<String> {
+                    let value = value.split('#').next().unwrap_or("");
+                    if is_record_image(value) {
+                        Ok(value.to_string())
+                    } else {
+                        relative(value)
+                    }
+                };
                 let sources = items(&meta["sources"], MAX_ITEMS)?
                     .iter()
-                    .map(|value| relative(string(value).split('#').next().unwrap_or("")))
+                    .map(|value| cited(string(value)))
                     .collect::<Result<BTreeSet<_>>>()?;
                 let fingerprints = items(&meta["source_digests"], MAX_ITEMS)?;
                 if sources.is_empty() || fingerprints.len() != sources.len() {
@@ -638,16 +827,21 @@ impl System {
                 let mut seen = BTreeSet::new();
                 for fingerprint in fingerprints {
                     fields(fingerprint, &["path", "sha256"], &[])?;
-                    let source = relative(string(&fingerprint["path"]))?;
+                    let source = cited(string(&fingerprint["path"]))?;
                     if !sources.contains(&source)
                         || !seen.insert(source.clone())
                         || !hex(string(&fingerprint["sha256"]), 64)
                     {
                         return Err(fail("unverified_memory"));
                     }
-                    if digest(&self.read(sid, root, &source, budget.as_deref_mut(), None)?)
-                        != string(&fingerprint["sha256"])
-                    {
+                    let raw = if is_record_image(&source) {
+                        PublicationFiles::new(root)?
+                            .read_checked(&source, MAX_SOURCE_BYTES, |_| Ok(()))?
+                            .ok_or_else(|| fail("stale_memory"))?
+                    } else {
+                        self.read(sid, root, &source, budget.as_deref_mut(), None)?
+                    };
+                    if memory_digest(&raw) != string(&fingerprint["sha256"]) {
                         return Err(fail("stale_memory"));
                     }
                 }
@@ -663,7 +857,7 @@ impl System {
                 }
             }
             Ok(
-                object!({"service":sid,"path":path,"kind":entry["kind"],"sha256":digest(&raw),"trust":"source_evidence","excerpt":content.chars().take(2000).collect::<String>(),"truncated":content.chars().count()>2000}),
+                object!({"service":sid,"path":path,"kind":entry["kind"],"sha256":digest(&raw),"trust":trust,"excerpt":excerpt.chars().take(2000).collect::<String>(),"truncated":excerpt.chars().count()>2000}),
             )
         })();
         match result {
@@ -672,22 +866,233 @@ impl System {
                 Err(error)
             }
             Err(_) => {
-                self.warn(sid, "source_unavailable_or_ineligible", Some(&path));
+                // Memory found in a bank rather than cited by a passport is
+                // counted by the planner, not named one file at a time.
+                if entry["discovered"] != true {
+                    self.warn(sid, "source_unavailable_or_ineligible", Some(&path));
+                }
                 Ok(None)
             }
         }
     }
 }
+/// Function words carry no routing signal: every description written in prose
+/// contains them, so matching on them makes every service a candidate.
+const STOP_WORDS: &[&str] = &[
+    "about",
+    "above",
+    "across",
+    "after",
+    "again",
+    "against",
+    "all",
+    "also",
+    "among",
+    "and",
+    "another",
+    "any",
+    "are",
+    "been",
+    "before",
+    "being",
+    "below",
+    "between",
+    "both",
+    "but",
+    "can",
+    "cannot",
+    "could",
+    "did",
+    "does",
+    "doing",
+    "done",
+    "during",
+    "each",
+    "either",
+    "every",
+    "few",
+    "for",
+    "from",
+    "further",
+    "had",
+    "has",
+    "have",
+    "having",
+    "her",
+    "here",
+    "hers",
+    "him",
+    "his",
+    "how",
+    "into",
+    "its",
+    "itself",
+    "just",
+    "least",
+    "less",
+    "may",
+    "might",
+    "more",
+    "most",
+    "much",
+    "must",
+    "neither",
+    "nor",
+    "not",
+    "off",
+    "once",
+    "only",
+    "onto",
+    "other",
+    "our",
+    "ours",
+    "out",
+    "over",
+    "own",
+    "per",
+    "same",
+    "shall",
+    "she",
+    "should",
+    "since",
+    "some",
+    "such",
+    "than",
+    "that",
+    "the",
+    "their",
+    "theirs",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "through",
+    "too",
+    "under",
+    "unless",
+    "until",
+    "upon",
+    "very",
+    "via",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "whether",
+    "which",
+    "while",
+    "who",
+    "whom",
+    "whose",
+    "why",
+    "will",
+    "with",
+    "within",
+    "without",
+    "would",
+    "yet",
+    "you",
+    "your",
+    "yours",
+    "без",
+    "был",
+    "была",
+    "были",
+    "было",
+    "быть",
+    "весь",
+    "все",
+    "всё",
+    "где",
+    "для",
+    "его",
+    "если",
+    "есть",
+    "ещё",
+    "еще",
+    "или",
+    "как",
+    "когда",
+    "который",
+    "которая",
+    "которые",
+    "кто",
+    "между",
+    "может",
+    "можно",
+    "над",
+    "надо",
+    "нет",
+    "них",
+    "она",
+    "они",
+    "оно",
+    "перед",
+    "под",
+    "после",
+    "при",
+    "так",
+    "также",
+    "там",
+    "тоже",
+    "только",
+    "уже",
+    "чем",
+    "через",
+    "что",
+    "чтобы",
+    "это",
+    "этот",
+    "эта",
+    "эти",
+];
+/// Lowercase Unicode words of three or more characters, without function words,
+/// with English plurals folded (`orders` matches `order`, `policies` `policy`),
+/// applied alike to the task and to every capability.
+static WORD: std::sync::LazyLock<Option<regex::Regex>> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"[^\W_]{3,}").ok());
 fn words_for(value: &str) -> BTreeSet<String> {
-    regex::Regex::new(r"[^\W_]{3,}")
+    WORD.as_ref()
         .map(|pattern| {
             pattern
                 .find_iter(&value.to_lowercase())
-                .map(|word| word.as_str().to_string())
+                .map(|word| word.as_str())
+                .filter(|word| !STOP_WORDS.contains(word))
+                .map(|word| {
+                    if let Some(stem) = word.strip_suffix("ies").filter(|stem| stem.len() >= 2) {
+                        format!("{stem}y")
+                    } else if word.len() > 3
+                        && word.ends_with('s')
+                        && !word.ends_with("ss")
+                        && !word.ends_with("us")
+                    {
+                        word[..word.len() - 1].to_string()
+                    } else {
+                        word.to_string()
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default()
 }
 fn words(value: &str) -> BTreeSet<String> {
     words_for(value)
+}
+/// Routing words of text that may name code: `CancelOrder.php` reads as
+/// `cancel order php`, so file names share terms with the task that names them.
+pub fn terms(value: &str) -> BTreeSet<String> {
+    let mut spaced = String::with_capacity(value.len() + 8);
+    let mut previous_lower = false;
+    for character in value.chars() {
+        if character.is_uppercase() && previous_lower {
+            spaced.push(' ');
+        }
+        previous_lower = character.is_lowercase();
+        spaced.push(character);
+    }
+    words_for(&spaced)
 }
