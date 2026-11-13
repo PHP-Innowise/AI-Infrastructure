@@ -1732,8 +1732,12 @@ mod tests {
         let before = repository.git(&["status", "--porcelain=v1"]);
         let into = repository.folder.parent().unwrap().join("out").join("tree");
         export(&repository.folder, &first, &into).unwrap();
+        // Git writes the line ends its settings ask for, and Git for Windows
+        // asks for CRLF in every repository.
         assert_eq!(
-            std::fs::read_to_string(into.join("src/cart.php")).unwrap(),
+            std::fs::read_to_string(into.join("src/cart.php"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "<?php // cart\n"
         );
         assert!(into.join("src/price.php").is_file());
