@@ -3932,19 +3932,31 @@ fn unfolded(state: &V, key: &str) -> Vec<String> {
         .filter_map(|place| place.as_str().map(str::to_owned))
         .collect()
 }
-/// The state with no place followed and no two places shown, neither the
-/// path between them nor what they share: what a folder or a file is drawn
-/// with. A path that is still being asked for stays asked for.
+/// Leave any followed links, path, shared places or cycle. A path that is
+/// still being asked for stays asked for.
 fn unfollowed(mut state: V) -> V {
     state["follow"] = json!("");
     state["out"] = json!([]);
     state["into"] = json!([]);
     state["path"] = json!([]);
     state["cycle"] = V::Null;
+    state["cycle_return"] = V::Null;
     state["shared"] = json!(false);
     state["side"] = json!("");
     state["skip"] = json!([]);
     state
+}
+/// Open a cycle with one return point, keeping the original map as requested.
+fn showing_cycle(state: V, place: &str) -> Option<V> {
+    if place.is_empty() || state["cycle"].is_string() || state["pick"].is_object() {
+        return None;
+    }
+    let mut cycle = unfollowed(state.clone());
+    cycle["cycle"] = json!(place);
+    cycle["focus"] = json!(place);
+    cycle["filter"] = json!("");
+    cycle["cycle_return"] = state;
+    Some(cycle)
 }
 /// The map as it answers another question of the two places it shows:
 /// `true` asks what they share, a kind of that by its name (`both_use`,
@@ -4785,25 +4797,29 @@ fn render(view: &V) {
             "#graph-map-canvas .graph-map-node[data-selected=\"true\"][data-cycle=\"true\"]",
         )
         .is_empty();
-    let action = if show_cycle {
+    let action = if cycles(view) && state["cycle_return"].is_object() {
+        "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-cycle-back\">Back to map</button>".to_owned()
+    } else if show_cycle {
         format!(
-            "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-cycle\" data-payload=\"{}\">Show cycle</button>",
+            "<button type=\"button\" class=\"button compact\" id=\"graph-map-show-cycle\" data-action=\"graph-map-cycle\" data-payload=\"{}\">Show cycle</button>",
             payload(&view["focus"]["path"]),
         )
     } else {
         String::new()
     };
-    let opening_cycle = cycles(view)
-        && dom::document().active_element().is_some_and(|element| {
-            element
-                .matches("[data-action=\"graph-map-cycle\"]:focus-visible")
-                .unwrap_or(false)
-        });
+    let active_action = dom::document()
+        .active_element()
+        .filter(|element| element.matches(":focus-visible").unwrap_or(false))
+        .and_then(|element| element.get_attribute("data-action"));
+    let opening_cycle = cycles(view) && active_action.as_deref() == Some("graph-map-cycle");
+    let returning = !cycles(view) && active_action.as_deref() == Some("graph-map-cycle-back");
     html(
         "graph-map-side",
         &format!("{}{}{action}{}", choosing(&state), paging(view), side(view)),
     );
-    if opening_cycle {
+    if returning && show_cycle {
+        dom::focus("graph-map-show-cycle");
+    } else if opening_cycle || returning {
         dom::focus("graph-map-summary");
     }
     html("graph-map-legend", &legend(view, change));
@@ -4904,6 +4920,8 @@ async fn load(quiet: bool) {
             }
             // The server opens the project when the asked folder is gone.
             let mut state = state;
+            // Fit can change locally while this request is in flight.
+            state["fit"] = self::state()["fit"].clone();
             if view["scope"].is_string() {
                 state["scope"] = view["scope"].clone();
             }
@@ -4949,6 +4967,7 @@ async fn load(quiet: bool) {
             if error.status == 409 && !target.is_empty() && state["asked"] != json!(target) {
                 // The server no longer knows what was chosen.
                 let mut state = state;
+                state["fit"] = self::state()["fit"].clone();
                 state["asked"] = json!(target);
                 m::set("graph-map", state);
                 again = true;
@@ -5236,14 +5255,37 @@ pub async fn event(
             state["pick"] = V::Null;
         }
         ("click", _, "graph-map-cycle") => {
-            let Some(place) = payload.as_str().filter(|place| !place.is_empty()) else {
+            // The old map remains visible while a new page or filter loads.
+            if dom::get("graph-map-canvas")
+                .and_then(|canvas| canvas.get_attribute("aria-busy"))
+                .as_deref()
+                == Some("true")
+            {
                 return true;
-            };
-            state = unfollowed(state);
-            state["cycle"] = json!(place);
-            state["focus"] = json!(place);
-            state["filter"] = json!("");
+            }
+            let place = payload.as_str().unwrap_or("");
+            if state["cycle"].as_str() != Some(place) {
+                // A failed map request also leaves the old picture visible.
+                if dom::get("graph-map-error").is_some_and(|error| !error.has_attribute("hidden")) {
+                    return true;
+                }
+                let Some(cycle) = showing_cycle(state, place) else {
+                    return true;
+                };
+                state = cycle;
+            }
             dom::set_value("graph-map-filter", "");
+        }
+        ("click", _, "graph-map-cycle-back") => {
+            let previous = state["cycle_return"].take();
+            if previous.is_object() {
+                state = previous;
+                dom::set_value("graph-map-filter", &m::text(&state, "filter"));
+                dom::save(NOTESTS, m::yes(&state["notests"]).then_some("1"));
+                dom::save(FIT, m::yes(&state["fit"]).then_some("1"));
+            } else if state["cycle"].is_string() {
+                return true;
+            }
         }
         ("click", _, "graph-map-path-swap") => {
             let mut ends = unfolded(&state, "path");
@@ -8312,6 +8354,34 @@ mod tests {
             summary(&named),
             "CartTest.testTotal() and Price.of() both use 1 other name · nothing uses both"
         );
+    }
+    #[test]
+    fn a_cycle_keeps_the_previous_filtered_page_as_its_return_point() {
+        let mut map = fresh("work");
+        map["scope"] = json!("src/api");
+        map["path"] = json!(["src/api/a.php", "src/api/b.php"]);
+        let mut map = sharing(map, &json!("uses_both")).unwrap();
+        map["filter"] = json!("src/");
+        let mut map = paged(paged(map, Some(9)), Some(21));
+        map["focus"] = json!("src/shared.php");
+        map["fit"] = json!(true);
+
+        let mut cycle = showing_cycle(map.clone(), "src/shared.php").unwrap();
+        assert_eq!(cycle["cycle"], "src/shared.php");
+        assert_eq!(cycle["target"], "work");
+        assert_eq!(cycle["filter"], "");
+        assert!(begun(&cycle).is_empty());
+        assert!(!m::yes(&cycle["shared"]));
+        assert!(showing_cycle(cycle.clone(), "src/other.php").is_none());
+
+        cycle["certain"] = json!(true);
+        cycle["notests"] = json!(true);
+        cycle["fit"] = json!(false);
+        cycle["focus"] = json!("src/other.php");
+        assert!(unfollowed(cycle.clone())["cycle_return"].is_null());
+        let restored = cycle["cycle_return"].take();
+        assert_eq!(restored, map);
+        assert_eq!(begun(&paged(restored, None)), [9]);
     }
     #[test]
     fn a_cycle_marks_its_return_and_explains_when_no_cycle_remains() {

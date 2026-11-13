@@ -2100,7 +2100,8 @@ dashed. **Only links read from the code** recomputes the chain and reports when 
 cycle remains. A folder-level cycle crosses the folder boundary and can leave and
 return through different files. Grouped folders can make a loop on the overview
 when the underlying links do not connect into a chain. When a cycle is too long
-to draw, the side panel lists every step and marks inferred links.
+to draw, the side panel lists every step and marks inferred links. **Back to map**
+restores the previous view, including its page, filters and selected place.
 
 The server reads `graph.json` in one streaming
 pass and keeps the last four graphs it read. On the development machine a 500 MB

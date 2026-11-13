@@ -24,6 +24,9 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Return from a dependency cycle to the preceding Harness map with its
+  page, filters and selection restored.
+
 - Show the shortest directed cycle through a marked place in the Harness
   dependency map. The view follows the current link and test filters.
 
