@@ -65,22 +65,64 @@ fn graph_scenario(mode: &str, arguments: &[String]) -> Result<Value> {
         json!({"ok":true,"code":code,"stdout":String::from_utf8(stdout).map_err(|_|invalid("Fixture runtime output is not UTF-8"))?,"seconds":seconds}),
     )
 }
+/// A process as the kernel shows it, or nothing once it is gone.
 #[cfg(target_os = "linux")]
-fn image(pid: u32, role: &str) -> Value {
-    let text = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+fn seen(pid: u32, role: &str) -> Option<Value> {
+    let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let tail = text
-        .rsplit_once(") ")
-        .unwrap()
+        .rsplit_once(") ")?
         .1
         .split_whitespace()
         .collect::<Vec<_>>();
-    json!({"pid":pid,"ppid":tail[1].parse::<u32>().unwrap(),"pgid":tail[2].parse::<u32>().unwrap(),"start":tail[19].parse::<u64>().unwrap(),"role":role})
+    let field = |at: usize| tail.get(at)?.parse::<u64>().ok();
+    Some(json!({"pid":pid,"ppid":field(1)?,"pgid":field(2)?,"start":field(19)?,"role":role}))
+}
+#[cfg(target_os = "linux")]
+fn image(pid: u32, role: &str) -> Value {
+    seen(pid, role).unwrap()
 }
 #[cfg(not(target_os = "linux"))]
 fn image(pid: u32, role: &str) -> Value {
     json!({"pid":pid,"role":role})
 }
-fn record(root: &Path, role: &str) {
+/// The children of a process, as each of its threads lists them.
+#[cfg(target_os = "linux")]
+fn children(pid: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) else {
+        return found;
+    };
+    for task in tasks.flatten() {
+        if let Ok(list) = fs::read_to_string(task.path().join("children")) {
+            found.extend(
+                list.split_whitespace()
+                    .filter_map(|child| child.parse::<u32>().ok()),
+            );
+        }
+    }
+    found
+}
+/// The native process of the experiment this driver is running, as the kernel
+/// shows it: a child of one of the driver's two helpers that has joined the
+/// group the other helper leads.
+#[cfg(target_os = "linux")]
+fn native_child() -> Option<Value> {
+    let helpers = children(std::process::id());
+    helpers.iter().find_map(|observer| {
+        children(*observer).into_iter().find_map(|child| {
+            seen(child, "native").filter(|native| {
+                native["ppid"] == *observer
+                    && native["pgid"] != *observer
+                    && helpers.iter().any(|anchor| native["pgid"] == *anchor)
+            })
+        })
+    })
+}
+#[cfg(not(target_os = "linux"))]
+fn native_child() -> Option<Value> {
+    None
+}
+fn receipt(root: &Path, role: &str) {
     fs::create_dir_all(root.join("receipts")).unwrap();
     let pid = std::process::id();
     fs::write(
@@ -88,9 +130,12 @@ fn record(root: &Path, role: &str) {
         serde_json::to_vec(&image(pid, role)).unwrap(),
     )
     .unwrap();
+}
+fn record(root: &Path, role: &str) {
+    receipt(root, role);
     #[cfg(target_os = "linux")]
     if role == "leaf" {
-        let own = image(pid, role);
+        let own = image(std::process::id(), role);
         let ppid = own["ppid"].as_u64().unwrap() as u32;
         fs::write(
             root.join("guardian.json"),
@@ -435,7 +480,10 @@ fn experiment_leaf(root: &Path, scenario: &str) -> Result<i32> {
     // A leader that ends by itself keeps the signal held to its end: its own
     // exit is the native status its scenario reports.
     let ends_by_itself = matches!(scenario, "experiment-leader-exited" | "experiment-input");
-    record(root, "leaf");
+    // The observer wrote `guardian.json` and `anchor.json` before it admitted
+    // this leaf. A leaf that wrote them again could be ended by a signal to
+    // its group between emptying one and filling it.
+    receipt(root, "leaf");
     if scenario == "experiment-natural125" {
         return Ok(125);
     }
@@ -557,6 +605,11 @@ fn experiment_scenario(root: &Path, name: &str) -> Result<Value> {
     let mut metadata = None;
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
+    // A leader whose group is killed or interrupted may be gone before it has
+    // published itself. The experiment asks this driver whether it was
+    // interrupted before every step, the one that sends the signal included,
+    // so the driver looks for the leader there and publishes it afterwards.
+    let mut leader = None;
     let started = std::time::Instant::now();
     let result = if name == "experiment-adapter-term" {
         process::experiment(&spec, stop).map(|exit| json!({"exit":exit}))
@@ -571,7 +624,12 @@ fn experiment_scenario(root: &Path, name: &str) -> Result<Value> {
                 deadline: std::time::Instant::now() + Duration::from_secs(4),
             },
             stop,
-            infra_eval::cancel::interrupted,
+            || {
+                if leader.is_none() {
+                    leader = native_child();
+                }
+                infra_eval::cancel::interrupted()
+            },
             |native| metadata = Some(native),
             |stream, bytes| {
                 match stream {
@@ -590,6 +648,13 @@ fn experiment_scenario(root: &Path, name: &str) -> Result<Value> {
             )
         })
     };
+    if let Some(leader) = &leader {
+        fs::write(
+            root.join("receipts")
+                .join(format!("{}-native.json", leader["pid"])),
+            serde_json::to_vec(leader)?,
+        )?;
+    }
     fs::write(root.join("stdout.bin"), stdout)?;
     fs::write(root.join("stderr.bin"), stderr)?;
     let mut report = match result {

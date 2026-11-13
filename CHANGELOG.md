@@ -80,6 +80,17 @@ edition's own files remain in that edition's changelog.
   `scheduled_experiment_waits_for_backpressured_input_after_native_exit_and_output_eof`
   expects 0. A pipe that is too full to shrink already holds the input
   back, so the leader goes on.
+- Experiment cases that signal the whole native group no longer depend on
+  how far the fixture's leader got. A leader killed or interrupted with its
+  group could be gone before it had published itself, or between emptying
+  and rewriting `guardian.json` or `anchor.json`, which its observer had
+  written already;
+  `experiment_delay_cannot_run_before_the_stopped_observer_admits_native`
+  failed with "actual native child of the outside observer" in one CI run.
+  The leader now leaves those two files as its observer wrote them. The
+  fixture's driver looks for the native process among its helpers' children
+  before every step of the experiment, the one that sends the signal
+  included, and publishes what the kernel shows of it.
 - A Cursor plugin image can be materialized again on Windows. Repeating it
   compared each file's planned Unix mode with the mode Windows keeps, only
   read-only, reported as 0o444 or 0o644, and refused an unchanged image with
