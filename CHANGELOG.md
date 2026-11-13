@@ -24,6 +24,9 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Show the shortest directed cycle through a marked place in the Harness
+  dependency map. The view follows the current link and test filters.
+
 - Highlight both paths when a shared place is selected in the Harness
   dependency map. Inferred links stay dashed. Selecting the place again
   clears the highlight.

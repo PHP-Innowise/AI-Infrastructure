@@ -922,6 +922,8 @@ pub struct Shown<'a> {
     /// Two places to find the shortest ways between, instead of a folder:
     /// the one they lead from and the one they lead to.
     pub path: Option<(&'a str, &'a str)>,
+    /// A place to find the shortest directed cycle through.
+    pub cycle: Option<&'a str>,
     /// Two places to find what they share, instead of a folder, with
     /// which part of that to draw.
     pub shared: Option<Sharing<'a>>,
@@ -1058,6 +1060,7 @@ impl Graphs {
             spread,
             link,
             path,
+            cycle,
             shared,
         } = *shown;
         // The graph as it was read, or as it is without its tests, with how
@@ -1081,6 +1084,9 @@ impl Graphs {
              edited: &dyn Fn(&str) -> Option<crate::graph_map::Edited>| {
                 if let Some((from, to)) = link {
                     return Some(index.link(from, to, certain));
+                }
+                if let Some(place) = cycle {
+                    return Some(index.cycle(name, place, changed, edited, focus, certain));
                 }
                 // The ways between two places, or what the two share, come
                 // before a followed place; a place the graph does not know
@@ -2290,6 +2296,16 @@ impl Domain for Graphs {
                     if !sharing.is_empty() && (sharing.len() != 2 || !ends.is_empty()) {
                         return Err(HarnessError::invalid("Invalid code graph places."));
                     }
+                    let cycle = text("cycle")?;
+                    if !cycle.is_empty()
+                        && (cycle.chars().any(char::is_control)
+                            || !from.is_empty()
+                            || !ends.is_empty()
+                            || !sharing.is_empty()
+                            || followed.is_some())
+                    {
+                        return Err(HarnessError::invalid("Invalid code graph cycle."));
+                    }
                     // Of what they share one kind is drawn, and a request
                     // may say which.
                     let users = match query["side"].as_str() {
@@ -2334,6 +2350,7 @@ impl Domain for Graphs {
                                     [from, to] => Some((from.as_str(), to.as_str())),
                                     _ => None,
                                 },
+                                cycle: (!cycle.is_empty()).then_some(cycle.as_str()),
                                 shared: match sharing.as_slice() {
                                     [from, to] => Some(Sharing {
                                         from,
@@ -2431,7 +2448,7 @@ mod tests {
             .unwrap();
         for part in [
             "scope", "focus", "certain", "filter", "target", "follow", "out", "into", "notests",
-            "spread", "from", "to", "path", "shared", "side", "skip",
+            "spread", "from", "to", "path", "shared", "side", "skip", "cycle",
         ] {
             assert!(route.query.contains(&part), "{part}");
         }

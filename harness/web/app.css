@@ -227,7 +227,7 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-hit:hover { stroke-opacity:.16; }
 .graph-map-edge-guess { stroke-dasharray:5 4; opacity:.6; }
 .graph-map-edge-back { stroke-dasharray:0 5; stroke-linecap:round; opacity:.6; }
-.graph-map-edge-guess[data-shared-path="true"] { stroke-dasharray:5 4; }
+.graph-map-edge-guess[data-shared-path="true"],.graph-map-plane[data-cycle-view="true"] .graph-map-edge-guess { stroke-dasharray:5 4; }
 .graph-map-edge-on { opacity:1; }
 .graph-map-edge-off { opacity:.14; }
 .graph-map-edge,.graph-map-plane [data-n],.graph-map-plane [data-of] { transition:opacity var(--motion-fast) var(--ease-standard); }
@@ -235,6 +235,8 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-plane[data-hover="true"] .graph-map-edge:is([data-lit="true"],[data-shared-path="true"]) { opacity:1; }
 .graph-map-plane[data-hover="true"] [data-n],.graph-map-plane[data-hover="true"] [data-of] { opacity:.45; }
 .graph-map-plane[data-hover="true"] [data-n]:is([data-lit="true"],[data-shared-path="true"]),.graph-map-plane[data-hover="true"] [data-of][data-lit="true"] { opacity:1; }
+.graph-map-plane[data-cycle-view="true"] :is(.graph-map-edge,[data-n]) { opacity:1; }
+.graph-map-cycle-places { overflow-wrap:anywhere; }
 .graph-map-flow-uses { stop-color:var(--map-uses); }
 .graph-map-flow-between { stop-color:var(--map-between); }
 .graph-map-flow-used { stop-color:var(--map-used); }

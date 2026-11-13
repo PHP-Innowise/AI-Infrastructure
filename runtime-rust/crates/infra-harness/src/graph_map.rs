@@ -3099,6 +3099,52 @@ impl<'a> Net<'a> {
         }
         far
     }
+    /// The shortest directed return to the origin. A folder stands for
+    /// its files, so a return must leave the folder before re-entering it.
+    fn cycle(&self, origin: &[u32]) -> Vec<(u32, u32, Flow)> {
+        let held = origin.iter().copied().collect::<HashSet<_>>();
+        let mut previous = vec![None; self.count()];
+        let mut front = origin.to_vec();
+        while !front.is_empty() {
+            let mut next = Vec::new();
+            for from in front {
+                let mut closing = None;
+                self.each(from, true, &mut |to| {
+                    if held.contains(&to) {
+                        if !held.contains(&from) {
+                            closing.get_or_insert(to);
+                        }
+                    } else if previous[to as usize].is_none() {
+                        previous[to as usize] = Some(from);
+                        next.push(to);
+                    }
+                });
+                if let Some(to) = closing {
+                    let mut route = vec![(from, to)];
+                    let mut at = from;
+                    while let Some(before) = previous[at as usize] {
+                        route.push((before, at));
+                        at = before;
+                    }
+                    route.reverse();
+                    return route
+                        .into_iter()
+                        .map(|(from, to)| {
+                            let flow = self
+                                .beside(from, true)
+                                .into_iter()
+                                .find(|(other, _)| *other == to)
+                                .expect("edge visited by cycle search")
+                                .1;
+                            (from, to, flow)
+                        })
+                        .collect();
+                }
+            }
+            front = next;
+        }
+        Vec::new()
+    }
     /// Places are told apart by where they lie: the file, then the line.
     fn tag(&self, place: u32) -> (&'a str, u32, u32) {
         let index = self.index;
@@ -3315,6 +3361,132 @@ impl Index {
             Reach::File(file) => holder(&self.files[file as usize]),
             Reach::Folder(folder) => holder(folder),
         }
+    }
+    /// One shortest directed cycle through a file or symbol, or across the
+    /// boundary of a folder. The origin is drawn once, with a return arrow.
+    pub fn cycle(
+        &self,
+        project: &str,
+        place: &str,
+        changed: &[(String, char)],
+        edited: &dyn Fn(&str) -> Option<Edited>,
+        focus: Option<&str>,
+        certain: bool,
+    ) -> Value {
+        let reach = self.reach(place);
+        let symbols = matches!(reach, Some(Reach::Symbol(_)));
+        let scope = reach.map_or_else(|| holder(place), |reach| self.lies(reach));
+        let origin = reach.map_or_else(
+            || json!({"path": place, "name": name(place), "missing": true}),
+            |reach| self.end(place, reach),
+        );
+        let mut crumbs = Self::crumbs(project, scope);
+        crumbs.push(json!({"name": origin["name"], "path": ""}));
+        let mut view = json!({
+            "mode": "cycle", "scope": scope, "crumbs": crumbs, "certain": certain,
+            "totals": self.totals(),
+            "cycle": {"origin": origin, "names": symbols, "steps": 0},
+            "nodes": [], "edges": [], "focus": null,
+        });
+        let Some(reach) = reach else { return view };
+        let net = Net::new(self, symbols, certain);
+        let members = net.members(reach);
+        let mut route = net.cycle(&members);
+        if route.is_empty() {
+            return view;
+        }
+        view["cycle"]["steps"] = json!(route.len());
+        let folder = matches!(reach, Reach::Folder(_));
+        let held = members.iter().copied().collect::<HashSet<_>>();
+        if folder {
+            // A folder arrow represents all links across that boundary,
+            // matching what the link inspector shows.
+            let crossing = |other, outgoing| {
+                net.beside(other, outgoing)
+                    .into_iter()
+                    .filter(|(member, _)| held.contains(member))
+                    .fold(Flow::default(), |sum, (_, flow)| Flow {
+                        links: sum.links + flow.links,
+                        guessed: sum.guessed + flow.guessed,
+                    })
+            };
+            let first = &mut route[0];
+            first.2 = crossing(first.1, false);
+            let last = route.last_mut().expect("nonempty cycle");
+            last.2 = crossing(last.0, true);
+        }
+        let names = Names::new(self, changed, edited);
+        let keys = std::iter::once(place.to_owned())
+            .chain(
+                route
+                    .iter()
+                    .skip(1)
+                    .map(|(from, _, _)| net.key(&names, *from)),
+            )
+            .collect::<Vec<_>>();
+        // Bound the SVG layout, while keeping the entire ordered cycle
+        // available as text when it is too long to draw.
+        if route.len() > FOLLOWED {
+            view["cycle"]["places"] = std::iter::once(json!({"path": keys[0]}))
+                .chain(route.iter().enumerate().map(|(at, (_, _, flow))| {
+                    json!({
+                        "path": keys[(at + 1) % keys.len()],
+                        "guessed": flow.guessed,
+                        "links": flow.links,
+                    })
+                }))
+                .collect();
+            return view;
+        }
+        let paths = keys.iter().map(String::as_str).collect::<Vec<_>>();
+        let node = |at: usize| {
+            let mut node = if at == 0 && folder {
+                let apart = |file| !held.contains(&file);
+                json!({
+                    "path": keys[0], "name": origin["name"], "folder": true,
+                    "files": members.len(),
+                    "out": net.crossing(&members, true, &apart),
+                    "in": net.crossing(&members, false, &apart),
+                })
+            } else {
+                net.node(&names, route[at].0, &keys[at], &paths)
+            };
+            node["start"] = json!(at == 0);
+            node
+        };
+        let len = route.len();
+        view["nodes"] = (0..len).map(node).collect();
+        view["edges"] = route
+            .iter()
+            .enumerate()
+            .map(|(at, (_, _, flow))| {
+                json!({
+                    "from": keys[at], "to": keys[(at + 1) % len],
+                    "links": flow.links, "guessed": flow.guessed,
+                })
+            })
+            .collect();
+        if let Some(at) = focus.and_then(|selected| keys.iter().position(|key| key == selected)) {
+            let row = |other: usize, edge: usize| {
+                let (user, used, flow) = route[edge];
+                if other == 0 && folder {
+                    let mut row = node(other);
+                    row["inside"] = json!(true);
+                    row["links"] = json!(flow.links);
+                    row["guessed"] = json!(flow.guessed);
+                    row
+                } else {
+                    net.row(&names, &paths, route[other].0, flow, Some((user, used)))
+                }
+            };
+            let prior = (at + len - 1) % len;
+            let mut focus = node(at);
+            focus["inside"] = json!(true);
+            focus["uses"] = json!([row((at + 1) % len, at)]);
+            focus["used_by"] = json!([row(prior, prior)]);
+            view["focus"] = focus;
+        }
+        view
     }
     /// The shortest ways from one place to another along the links: every
     /// chain of the fewest links in which each place uses the next. Either
@@ -5398,6 +5570,107 @@ mod tests {
     use super::*;
     fn index(graph: Value) -> Index {
         Index::read(graph.to_string().as_bytes(), Path::new("/work/shop")).unwrap()
+    }
+    #[test]
+    fn cycle_returns_to_the_origin_by_the_shortest_available_directed_route() {
+        let node = |id: &str, file: &str| json!({"id": id, "label": id, "source_file": file});
+        let edge = |from: &str, to: &str, confidence: &str| json!({"source": from, "target": to, "relation": "calls", "confidence": confidence});
+        let index = index(json!({
+            "nodes": [
+                node("a", "src/a.php"), node("b", "src/b.php"),
+                node("c", "src/c.php"), node("d", "src/d.php"),
+                node("entry", "entry.php"), node("first", "folder/first.php"),
+                node("last", "folder/last.php"), node("bridge", "bridge.php"),
+                node("x", "symbols.php"), node("y", "symbols.php"),
+                node("p", "left/p.php"), node("q", "right/q.php"), node("r", "right/r.php")
+            ],
+            "links": [
+                edge("a", "b", "EXTRACTED"), edge("b", "a", "INFERRED"),
+                edge("a", "c", "EXTRACTED"), edge("c", "d", "EXTRACTED"),
+                edge("d", "a", "EXTRACTED"), edge("entry", "a", "EXTRACTED"),
+                edge("first", "bridge", "EXTRACTED"), edge("bridge", "last", "EXTRACTED"),
+                edge("x", "y", "EXTRACTED"), edge("y", "x", "EXTRACTED"),
+                edge("p", "q", "EXTRACTED"), edge("r", "p", "EXTRACTED")
+            ]
+        }));
+        let cycle =
+            |path: &str, certain| index.cycle("demo", path, &[], &|_| None, Some(path), certain);
+        let guessed = cycle("src/a.php", false);
+        assert_eq!(guessed["cycle"]["steps"], 2);
+        assert_eq!(
+            guessed["edges"],
+            json!([
+                {"from": "src/a.php", "to": "src/b.php", "links": 1, "guessed": 0},
+                {"from": "src/b.php", "to": "src/a.php", "links": 1, "guessed": 1}
+            ])
+        );
+        assert_eq!(guessed["focus"]["uses"][0]["path"], "src/b.php");
+        assert_eq!(guessed["focus"]["used_by"][0]["guessed"], 1);
+        let certain = cycle("src/a.php", true);
+        assert_eq!(certain["cycle"]["steps"], 3);
+        assert_eq!(certain["edges"][2]["from"], "src/d.php");
+        assert_eq!(certain["edges"][2]["to"], "src/a.php");
+        assert_eq!(cycle("src/b.php", true)["cycle"]["steps"], 0);
+        assert_eq!(cycle("entry.php", false)["cycle"]["steps"], 0);
+        assert_eq!(cycle("gone.php", true)["cycle"]["origin"]["missing"], true);
+        let folder = cycle("folder", true);
+        assert_eq!(folder["cycle"]["origin"]["what"], "folder");
+        assert_eq!(folder["cycle"]["steps"], 2);
+        assert_eq!(folder["edges"][0]["from"], "folder");
+        assert_eq!(folder["edges"][1]["to"], "folder");
+        let grouped = index.view("demo", "", None, true, "");
+        assert!(
+            grouped["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| edge["from"] == "left" && edge["to"] == "right")
+        );
+        assert!(
+            grouped["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| edge["from"] == "right" && edge["to"] == "left")
+        );
+        assert_eq!(cycle("left", true)["cycle"]["steps"], 0);
+        let symbols = index
+            .symbols("demo", "symbols.php", &[], None, None, false, "")
+            .unwrap();
+        let first = symbols["nodes"][0]["path"].as_str().unwrap();
+        let named = cycle(first, true);
+        assert_eq!(named["cycle"]["names"], true);
+        assert_eq!(named["cycle"]["steps"], 2);
+        assert_eq!(named["edges"][1]["to"], first);
+    }
+
+    #[test]
+    fn a_cycle_too_long_to_draw_keeps_the_whole_ordered_chain() {
+        let steps = FOLLOWED + 1;
+        let nodes = (0..steps)
+            .map(|n| json!({"id": n.to_string(), "source_file": format!("v{n}.php")}))
+            .collect::<Vec<_>>();
+        let links = (0..steps)
+            .map(|n| {
+                json!({
+                    "source": n.to_string(),
+                    "target": ((n + 1) % steps).to_string(),
+                    "relation": "calls",
+                    "confidence": if n == steps - 1 { "INFERRED" } else { "EXTRACTED" }
+                })
+            })
+            .collect::<Vec<_>>();
+        let index = index(json!({"nodes": nodes, "links": links}));
+        let view = index.cycle("demo", "v0.php", &[], &|_| None, None, false);
+        assert_eq!(view["cycle"]["steps"], steps);
+        let places = view["cycle"]["places"].as_array().unwrap();
+        assert_eq!(places.len(), steps + 1);
+        for (at, place) in places.iter().enumerate() {
+            assert_eq!(place["path"], format!("v{}.php", at % steps));
+        }
+        assert_eq!(places[steps]["guessed"], 1);
+        assert_eq!(places[steps]["links"], 1);
+        assert_eq!(view["nodes"], json!([]));
     }
     fn shop() -> Index {
         index(json!({

@@ -768,6 +768,9 @@ fn follows(view: &V) -> bool {
 fn paths(view: &V) -> bool {
     view["mode"] == "path"
 }
+fn cycles(view: &V) -> bool {
+    view["mode"] == "cycle"
+}
 /// What two places share: what both use, or what uses both.
 fn shares(view: &V) -> bool {
     view["mode"] == "shared"
@@ -783,6 +786,7 @@ fn names(view: &V) -> bool {
     (follows(view) && m::yes(&view["followed"]["symbol"]))
         || (paths(view) && m::yes(&view["path"]["names"]))
         || (shares(view) && m::yes(&view["shared"]["names"]))
+        || (cycles(view) && m::yes(&view["cycle"]["names"]))
 }
 /// The letter a symbol's box carries for what it is. The file's own node
 /// and a name the graph says nothing more about carry none.
@@ -1014,6 +1018,32 @@ fn shown(view: &V) -> String {
             users => format!(" · {} other files use it", count(users)),
         });
         return text;
+    }
+    if cycles(view) {
+        let cycle = &view["cycle"];
+        let name = m::text(&cycle["origin"], "name");
+        if m::yes(&cycle["origin"]["missing"]) {
+            return format!("{name} is absent from this graph");
+        }
+        let scope = if cycle["origin"]["what"] == "folder" {
+            "folder-level cycle"
+        } else {
+            "cycle"
+        };
+        let steps = cycle["steps"].as_u64().unwrap_or(0);
+        return if steps == 0 {
+            let links = if m::yes(&view["certain"]) {
+                " using links read from the code"
+            } else {
+                ""
+            };
+            format!("No {scope} found through {name}{links}")
+        } else {
+            format!(
+                "Shortest {scope} through {name} · {}",
+                plural(steps, "link", "links")
+            )
+        };
     }
     if paths(view) {
         let path = &view["path"];
@@ -1563,6 +1593,23 @@ pub fn note(view: &V) -> String {
     if paths(view) {
         return path_note(view);
     }
+    if cycles(view) {
+        let mut parts = context(view);
+        if view["cycle"]["places"].is_array() {
+            parts.push("The full chain is listed beside the map.".to_owned());
+        }
+        if view["cycle"]["steps"] == 0 && !m::yes(&view["cycle"]["origin"]["missing"]) {
+            parts.push(
+                "Arrows between grouped folders may join different files. The cycle search follows connected file or symbol links."
+                    .to_owned(),
+            );
+        } else if view["cycle"]["origin"]["what"] == "folder" {
+            parts.push(
+                "The chain can leave and re-enter the folder through different files.".to_owned(),
+            );
+        }
+        return parts.join(" ");
+    }
     if shares(view) {
         return shared_note(view);
     }
@@ -1705,6 +1752,7 @@ pub fn canvas(view: &V) -> String {
     let followed = follows(view);
     let pathed = paths(view);
     let shared = shares(view);
+    let cycle_view = cycles(view);
     let cycles = !changes(view) && !opened;
     let shared_edges: BTreeSet<_> = view["focus"]["shared_edges"]
         .as_array()
@@ -1713,9 +1761,12 @@ pub fn canvas(view: &V) -> String {
         .flatten()
         .filter_map(|edge| Some((at(&edge[0])?, at(&edge[1])?)))
         .collect();
-    let lit = |pair: (usize, usize)| match chosen {
-        Some(chosen) if shared_edges.is_empty() => pair.0 == chosen || pair.1 == chosen,
-        _ => shared_edges.contains(&pair),
+    let lit = |pair: (usize, usize)| {
+        cycle_view
+            || match chosen {
+                Some(chosen) if shared_edges.is_empty() => pair.0 == chosen || pair.1 == chosen,
+                _ => shared_edges.contains(&pair),
+            }
     };
     let near = |node| {
         chosen == Some(node)
@@ -1727,8 +1778,9 @@ pub fn canvas(view: &V) -> String {
     // where the method stands after its class.
     let named = names(view);
     let mut html = format!(
-        "<div class=\"graph-map-plane\"{} style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>",
+        "<div class=\"graph-map-plane\"{}{} style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>",
         if named { " data-names=\"true\"" } else { "" },
+        if cycle_view { " data-cycle-view=\"true\"" } else { "" },
         plan.width,
         plan.height,
         plan.width,
@@ -1763,7 +1815,7 @@ pub fn canvas(view: &V) -> String {
         let (from, to) = pairs[wire.edge];
         let back = wire.back && cycles;
         let on_path = shared_edges.contains(&(from, to));
-        let state = if chosen.is_some() {
+        let state = if cycle_view || chosen.is_some() {
             if lit((from, to)) {
                 " graph-map-edge-on"
             } else {
@@ -1863,6 +1915,8 @@ pub fn canvas(view: &V) -> String {
                 ", the first of the two places"
             } else if pathed {
                 ", the path starts here"
+            } else if cycle_view {
+                ", the cycle starts and ends here"
             } else {
                 ", the links are followed from here"
             });
@@ -1927,6 +1981,7 @@ pub fn canvas(view: &V) -> String {
         let opens = !followed
             && !pathed
             && !shared
+            && !cycle_view
             && (folder || (!symbol && node["symbols"].as_u64().unwrap_or(0) > 0));
         // A symbol lies in the open file, or, among followed symbols, in
         // the file it says.
@@ -2759,6 +2814,13 @@ fn path_end(focus: &V) -> &'static str {
 /// one of the two or what they share, with how many links each of them is
 /// away.
 fn role(view: &V, focus: &V) -> String {
+    if cycles(view) {
+        return if m::yes(&focus["start"]) {
+            " · the cycle starts and ends here".to_owned()
+        } else {
+            String::new()
+        };
+    }
     if paths(view) {
         return path_end(focus).to_owned();
     }
@@ -2931,9 +2993,32 @@ pub fn side(view: &V) -> String {
     let pathed = paths(view);
     let shared = shares(view);
     // On a path and in what two places share a box lies on a way.
-    let ways = pathed || shared;
+    let cycle = cycles(view);
+    let ways = pathed || shared || cycle;
     if (followed || ways) && m::yes(&focus["symbol"]) {
         return name_side(focus, ways, &role(view, focus));
+    }
+    if cycle && !focus.is_object() {
+        if let Some(places) = view["cycle"]["places"].as_array() {
+            let mut html = String::from("<ol class=\"graph-map-cycle-places\">");
+            for place in places {
+                let guessed = place["guessed"].as_u64().unwrap_or(0);
+                let evidence = if guessed == 0 {
+                    ""
+                } else if place["links"] == guessed {
+                    " · incoming link inferred"
+                } else {
+                    " · includes inferred links"
+                };
+                html.push_str(&format!(
+                    "<li>{}{evidence}</li>",
+                    escape(&m::text(place, "path"))
+                ));
+            }
+            html.push_str("</ol>");
+            return html;
+        }
+        return String::new();
     }
     if !focus.is_object() && pathed {
         // A path that draws nothing leaves its two ends to go on from.
@@ -3085,6 +3170,8 @@ fn crumbs(view: &V) -> String {
                         ": links"
                     } else if paths(view) {
                         ": path"
+                    } else if cycles(view) {
+                        ": cycle"
                     } else if !shares(view) {
                         ""
                     } else if above(view) {
@@ -3136,6 +3223,14 @@ fn legend(view: &V, change: bool) -> String {
         (true, false) => FILE_LEGEND.to_owned(),
         _ if changes(view) => {
             "Highlighted: changed. The rest use the change or are used by it.".to_owned()
+        }
+        _ if cycles(view) => {
+            let mut text = format!("{LEGEND} The ringed box is where the cycle starts and ends.");
+            if names(view) {
+                text.push(' ');
+                text.push_str(NAME_LEGEND);
+            }
+            text
         }
         // What two places share can use each other, which a path cannot.
         _ if paths(view) || shares(view) => format!(
@@ -3845,6 +3940,7 @@ fn unfollowed(mut state: V) -> V {
     state["out"] = json!([]);
     state["into"] = json!([]);
     state["path"] = json!([]);
+    state["cycle"] = V::Null;
     state["shared"] = json!(false);
     state["side"] = json!("");
     state["skip"] = json!([]);
@@ -4647,14 +4743,16 @@ fn render(view: &V) {
     dom::set_checked("graph-map-notests", m::yes(&view["notests"]));
     dom::set_checked("graph-map-fit", m::yes(&state()["fit"]));
     // Of what two places share, the filter keeps the names that hold it.
-    dom::disabled("graph-map-filter", follows(view) || paths(view));
-    // Replacing the canvas must keep the shared selection toggle usable
-    // from the keyboard.
+    dom::disabled(
+        "graph-map-filter",
+        follows(view) || paths(view) || cycles(view),
+    );
+    // Keep keyboard focus on the selected node through a repaint.
     const NODE_BUTTONS: &str = "#graph-map-canvas .graph-map-node";
     let keyboard_key = dom::document()
         .active_element()
         .filter(|node| {
-            shares(view)
+            (shares(view) || node.get_attribute("data-cycle").as_deref() == Some("true"))
                 && node
                     .matches(&format!("{NODE_BUTTONS}:focus-visible"))
                     .unwrap_or(false)
@@ -4681,10 +4779,33 @@ fn render(view: &V) {
             "false"
         },
     );
+    let show_cycle = !cycles(view)
+        && !state["pick"].is_object()
+        && !dom::all(
+            "#graph-map-canvas .graph-map-node[data-selected=\"true\"][data-cycle=\"true\"]",
+        )
+        .is_empty();
+    let action = if show_cycle {
+        format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-cycle\" data-payload=\"{}\">Show cycle</button>",
+            payload(&view["focus"]["path"]),
+        )
+    } else {
+        String::new()
+    };
+    let opening_cycle = cycles(view)
+        && dom::document().active_element().is_some_and(|element| {
+            element
+                .matches("[data-action=\"graph-map-cycle\"]:focus-visible")
+                .unwrap_or(false)
+        });
     html(
         "graph-map-side",
-        &format!("{}{}{}", choosing(&state), paging(view), side(view)),
+        &format!("{}{}{action}{}", choosing(&state), paging(view), side(view)),
     );
+    if opening_cycle {
+        dom::focus("graph-map-summary");
+    }
     html("graph-map-legend", &legend(view, change));
 }
 /// Asks the server to work out a pull request, a branch or a commit, which
@@ -4743,7 +4864,9 @@ async fn load(quiet: bool) {
             query.push((key, json!(places).to_string()));
         }
     }
-    if pathed {
+    if let Some(cycle) = state["cycle"].as_str() {
+        query.push(("cycle", cycle.to_owned()));
+    } else if pathed {
         let asked = if m::yes(&state["shared"]) {
             "shared"
         } else {
@@ -4796,7 +4919,7 @@ async fn load(quiet: bool) {
                 }
             } else if shares(&view) {
                 state = begins(state, view["shared"]["skip"].as_u64().unwrap_or(0));
-            } else if !paths(&view) {
+            } else if !paths(&view) && !cycles(&view) {
                 // The graph does not know the place, or one of the two
                 // places, or they were left.
                 state = unfollowed(state);
@@ -5112,6 +5235,16 @@ pub async fn event(
         ("click", _, "graph-map-path-cancel") => {
             state["pick"] = V::Null;
         }
+        ("click", _, "graph-map-cycle") => {
+            let Some(place) = payload.as_str().filter(|place| !place.is_empty()) else {
+                return true;
+            };
+            state = unfollowed(state);
+            state["cycle"] = json!(place);
+            state["focus"] = json!(place);
+            state["filter"] = json!("");
+            dom::set_value("graph-map-filter", "");
+        }
         ("click", _, "graph-map-path-swap") => {
             let mut ends = unfolded(&state, "path");
             ends.reverse();
@@ -5164,12 +5297,10 @@ pub async fn event(
         ("click", _, "graph-map-follow") => {
             // The first picture is one step each way: what it uses and
             // what uses it. Nothing is selected, so no box of it is dimmed.
+            state = unfollowed(state);
             state["follow"] = payload.clone();
             state["out"] = json!([payload]);
             state["into"] = json!([payload]);
-            state["path"] = json!([]);
-            state["shared"] = json!(false);
-            state["side"] = json!("");
             state["focus"] = json!("");
             state["filter"] = json!("");
             dom::set_value("graph-map-filter", "");
@@ -8181,6 +8312,49 @@ mod tests {
             summary(&named),
             "CartTest.testTotal() and Price.of() both use 1 other name · nothing uses both"
         );
+    }
+    #[test]
+    fn a_cycle_marks_its_return_and_explains_when_no_cycle_remains() {
+        let mut view = json!({
+            "mode": "cycle",
+            "cycle": {"origin": {"name": "a.php"}, "steps": 2},
+            "crumbs": [{"name": "a.php"}],
+            "nodes": [
+                {"path": "a.php", "name": "a.php", "start": true},
+                {"path": "b.php", "name": "b.php"}
+            ],
+            "edges": [
+                {"from": "a.php", "to": "b.php", "links": 2, "guessed": 0},
+                {"from": "b.php", "to": "a.php", "links": 1, "guessed": 1}
+            ],
+            "focus": {"path": "a.php", "name": "a.php", "start": true}
+        });
+        assert_eq!(shown(&view), "Shortest cycle through a.php · 2 links");
+        assert!(crumbs(&view).contains("a.php: cycle"));
+        assert!(!crumbs(&view).contains("What they share"));
+        let html = canvas(&view);
+        assert!(html.contains("data-cycle-view=\"true\""));
+        assert!(html.contains("graph-map-edge-on graph-map-edge-guess graph-map-edge-back"));
+        assert_eq!(html.matches("data-start=\"true\"").count(), 1);
+        assert!(!html.contains("graph-map-edge-off"));
+
+        view["certain"] = json!(true);
+        view["cycle"]["steps"] = json!(0);
+        assert_eq!(
+            shown(&view),
+            "No cycle found through a.php using links read from the code"
+        );
+        view["cycle"]["origin"]["missing"] = json!(true);
+        assert_eq!(shown(&view), "a.php is absent from this graph");
+
+        view["focus"] = V::Null;
+        view["cycle"]["places"] = json!([
+            {"path": "a.php"},
+            {"path": "b<&>.php", "links": 1, "guessed": 0},
+            {"path": "a.php", "links": 1, "guessed": 1}
+        ]);
+        assert!(side(&view)
+            .contains("<li>b&lt;&amp;&gt;.php</li><li>a.php · incoming link inferred</li>"));
     }
     #[test]
     fn selecting_shared_places_lights_their_drawn_paths() {

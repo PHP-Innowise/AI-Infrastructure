@@ -2094,7 +2094,15 @@ A folder shows its 40 most connected children, and **Filter names** reaches the
 rest. Where a folder has more than two links per child, each child keeps its three
 strongest uses on the map and the side panel still lists all of them. A cycle cannot
 be drawn left to right: its members carry ↻, and its weaker direction runs back,
-right to left, as a thin row of dots. The server reads `graph.json` in one streaming
+right to left, as a thin row of dots. Select a marked box and choose **Show cycle**
+to see the shortest chain that returns to it. Inferred links in that chain are
+dashed. **Only links read from the code** recomputes the chain and reports when no
+cycle remains. A folder-level cycle crosses the folder boundary and can leave and
+return through different files. Grouped folders can make a loop on the overview
+when the underlying links do not connect into a chain. When a cycle is too long
+to draw, the side panel lists every step and marks inferred links.
+
+The server reads `graph.json` in one streaming
 pass and keeps the last four graphs it read. On the development machine a 500 MB
 graph of 545,000 symbols took two seconds to read and 10 ms per folder after that.
 
