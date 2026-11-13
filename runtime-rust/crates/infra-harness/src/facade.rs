@@ -475,6 +475,7 @@ Options:
                           Default: the current directory when it is outside the source clone.
   --port N                Loopback port, 0-65535 (default: 8766; 0 chooses a free port).
   --timeout N             Initial session time budget, 1-86400 seconds (default: 900).
+  --session-concurrency N  Experimental independent-session slots, 1-4 (default: 1).
   --claude-bin PATH       Explicit Claude CLI executable.
   --codex-bin PATH        Explicit Codex CLI executable.
   --cursor-bin PATH       Explicit Cursor CLI executable.
@@ -499,6 +500,7 @@ Server options follow open, status, stop or update:
                           Default: the current directory when it is outside the source clone.
   --port N                Loopback port, 0-65535 (default: 8766; 0 chooses a free port).
   --timeout N             Initial session time budget, 1-86400 seconds (default: 900).
+  --session-concurrency N  Experimental independent-session slots, 1-4 (default: 1).
   --claude-bin PATH       Explicit Claude CLI executable.
   --codex-bin PATH        Explicit Codex CLI executable.
   --cursor-bin PATH       Explicit Cursor CLI executable.

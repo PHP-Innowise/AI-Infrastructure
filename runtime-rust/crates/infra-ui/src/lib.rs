@@ -9,6 +9,7 @@ mod classify;
 mod commands;
 mod dom;
 mod eval_viewer;
+mod inbox;
 mod knowledge;
 mod management;
 mod model;

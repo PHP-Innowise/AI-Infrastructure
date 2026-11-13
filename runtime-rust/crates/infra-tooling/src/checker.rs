@@ -855,6 +855,18 @@ fn workflow(catalog: &Catalog, filename: &str) -> Result<String> {
                 "          fallback: none\n",
             ));
         }
+        if platform == "linux" && uses_nextest {
+            output.push_str(concat!(
+                "      - name: Prepare native oracle isolation\n",
+                "        run: |\n",
+                "          sudo apt-get update\n",
+                "          sudo apt-get install --yes bubblewrap\n",
+                "          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then\n",
+                "            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n",
+                "          fi\n",
+                "          bwrap --unshare-all --die-with-parent --ro-bind / / -- /usr/bin/true\n",
+            ));
+        }
         // RUNNER_TEMP is a backslash path on Windows; Cargo and Git Bash both
         // accept the forward-slash spelling.
         output.push_str("      - name: Select the native target directory\n        run: echo \"CARGO_TARGET_DIR=${RUNNER_TEMP//\\\\//}/infra-native-target\" >> \"$GITHUB_ENV\"\n");
@@ -1264,6 +1276,37 @@ mod compiler_workflow_tests {
         assert!(parallel.find("id: native-toolchain").unwrap() < install);
         assert!(install < parallel.find("name: Build the native engine").unwrap());
         assert!(!plain.contains("install-action"));
+    }
+
+    #[test]
+    fn linux_nextest_jobs_provision_and_probe_oracle_namespaces() {
+        let mut linux = group("linux", "linux");
+        linux["gates"][0]["tools"] = json!(["cargo-nextest"]);
+        let mut windows = linux.clone();
+        windows["name"] = "windows".into();
+        windows["job"] = "windows".into();
+        windows["platform"] = "windows".into();
+        let rendered = workflow(
+            &catalog(json!([linux, windows, group("plain", "plain")])),
+            "rust.yml",
+        )
+        .unwrap();
+        let jobs = workflow_jobs(&rendered);
+        let setup = jobs[0]
+            .find("name: Prepare native oracle isolation")
+            .unwrap();
+        assert!(setup < jobs[0].find("name: Build the native engine").unwrap());
+        assert!(jobs[0].contains("sudo apt-get install --yes bubblewrap"));
+        assert!(
+            jobs[0]
+                .contains("if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then")
+        );
+        assert!(
+            jobs[0]
+                .contains("bwrap --unshare-all --die-with-parent --ro-bind / / -- /usr/bin/true")
+        );
+        assert!(!jobs[1].contains("oracle isolation"));
+        assert!(!jobs[2].contains("oracle isolation"));
     }
 
     #[test]
