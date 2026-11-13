@@ -161,10 +161,10 @@ fn descendant(root: &Path, scenario: &str) {
     }
 }
 fn leaf(root: &Path, scenario: &str) -> Result<i32> {
-    record(root, "leaf");
     if scenario.starts_with("experiment-") {
         return experiment_leaf(root, scenario);
     }
+    record(root, "leaf");
     match scenario {
         "signal-int" | "signal-kill" => {
             #[cfg(unix)]
@@ -402,7 +402,40 @@ fn live_receipts(root: &Path) -> Vec<u32> {
     live
 }
 
+/// Blocks SIGTERM in this process and returns the mask it replaced.
+#[cfg(unix)]
+fn hold_term() -> std::io::Result<libc::sigset_t> {
+    let mut term = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    let mut before = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    if unsafe { libc::sigemptyset(term.as_mut_ptr()) } < 0
+        || unsafe { libc::sigaddset(term.as_mut_ptr(), libc::SIGTERM) } < 0
+        || unsafe { libc::sigprocmask(libc::SIG_BLOCK, term.as_ptr(), before.as_mut_ptr()) } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { before.assume_init() })
+}
+/// Restores the mask `hold_term` replaced. A SIGTERM held meanwhile ends this
+/// process here, as the signal it is.
+#[cfg(unix)]
+fn release_term(before: &libc::sigset_t) -> std::io::Result<()> {
+    if unsafe { libc::sigprocmask(libc::SIG_SETMASK, before, std::ptr::null_mut()) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
 fn experiment_leaf(root: &Path, scenario: &str) -> Result<i32> {
+    // An experiment schedules its stop signal from native admission, this
+    // leaf's exec, and knows nothing of what the leaf has done since. Unheld,
+    // the scheduled SIGTERM ends a leaf that starts slowly before it has
+    // spawned its descendant, and its scenario has no process left to drain
+    // during grace. The leaf holds the signal until that descendant exists.
+    #[cfg(unix)]
+    let before = hold_term()?;
+    // A leader that ends by itself keeps the signal held to its end: its own
+    // exit is the native status its scenario reports.
+    let ends_by_itself = matches!(scenario, "experiment-leader-exited" | "experiment-input");
+    record(root, "leaf");
     if scenario == "experiment-natural125" {
         return Ok(125);
     }
@@ -410,14 +443,26 @@ fn experiment_leaf(root: &Path, scenario: &str) -> Result<i32> {
     if scenario == "experiment-input" && unsafe { libc::fcntl(0, libc::F_SETPIPE_SZ, 4096) } < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    let child = Command::new(std::env::current_exe()?)
+    let mut descendant = Command::new(std::env::current_exe()?);
+    descendant
         .arg("descendant")
         .arg(root)
         .arg(scenario)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+        .stderr(Stdio::inherit());
+    // The hold is the leader's alone. Its descendant starts with the mask the
+    // leader was given, so a signal sent to the whole group still ends it.
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        descendant.pre_exec(move || release_term(&before));
+    }
+    let child = descendant.spawn()?;
+    #[cfg(unix)]
+    if !ends_by_itself {
+        release_term(&before)?;
+    }
     let receipt = root
         .join("receipts")
         .join(format!("{}-descendant.json", child.id()));
@@ -431,7 +476,7 @@ fn experiment_leaf(root: &Path, scenario: &str) -> Result<i32> {
         ));
     }
     ready(root);
-    if matches!(scenario, "experiment-leader-exited" | "experiment-input") {
+    if ends_by_itself {
         if scenario == "experiment-input" {
             #[cfg(unix)]
             unsafe {
