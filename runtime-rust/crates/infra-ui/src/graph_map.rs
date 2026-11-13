@@ -4,7 +4,7 @@
 //! in turn to its classes, methods and functions and the files around them.
 use crate::{api, dom, model as m};
 use serde_json::{json, Value as V};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::spawn_local;
 const BOX_WIDTH: f64 = 164.0;
@@ -1706,13 +1706,22 @@ pub fn canvas(view: &V) -> String {
     let pathed = paths(view);
     let shared = shares(view);
     let cycles = !changes(view) && !opened;
-    let near = |node: usize| {
-        chosen.is_some_and(|chosen| {
-            chosen == node
-                || pairs
-                    .iter()
-                    .any(|pair| *pair == (chosen, node) || *pair == (node, chosen))
-        })
+    let shared_edges: BTreeSet<_> = view["focus"]["shared_edges"]
+        .as_array()
+        .filter(|_| shared && chosen.is_some())
+        .into_iter()
+        .flatten()
+        .filter_map(|edge| Some((at(&edge[0])?, at(&edge[1])?)))
+        .collect();
+    let lit = |pair: (usize, usize)| match chosen {
+        Some(chosen) if shared_edges.is_empty() => pair.0 == chosen || pair.1 == chosen,
+        _ => shared_edges.contains(&pair),
+    };
+    let near = |node| {
+        chosen == Some(node)
+            || pairs
+                .iter()
+                .any(|&(from, to)| (from == node || to == node) && lit((from, to)))
     };
     // Among followed symbols a name too long for its box keeps its end,
     // where the method stands after its class.
@@ -1753,15 +1762,21 @@ pub fn canvas(view: &V) -> String {
         );
         let (from, to) = pairs[wire.edge];
         let back = wire.back && cycles;
-        let state = match chosen {
-            Some(chosen) if chosen == from || chosen == to => " graph-map-edge-on",
-            Some(_) => " graph-map-edge-off",
-            None => "",
+        let on_path = shared_edges.contains(&(from, to));
+        let state = if chosen.is_some() {
+            if lit((from, to)) {
+                " graph-map-edge-on"
+            } else {
+                " graph-map-edge-off"
+            }
+        } else {
+            ""
         };
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}{}\" data-ends=\"{from} {to}\" d=\"{}\" stroke=\"url(#graph-map-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow)\"><title>{} uses {} · {}{}</title></path>",
+            "<path class=\"graph-map-edge{state}{}{}\" data-ends=\"{from} {to}\"{} d=\"{}\" stroke=\"url(#graph-map-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow)\"><title>{} uses {} · {}{}</title></path>",
             if guessed == links { " graph-map-edge-guess" } else { "" },
             if back { " graph-map-edge-back" } else { "" },
+            if on_path { " data-shared-path=\"true\"" } else { "" },
             wire.path,
             spans.binary_search(&span(wire)).unwrap_or(0),
             // A link that closes a cycle is a row of dots, kept thin.
@@ -1826,6 +1841,17 @@ pub fn canvas(view: &V) -> String {
         if cycle {
             label.push_str(", part of a cycle");
         }
+        let lit = near(index);
+        let path_mark = if !shared_edges.is_empty() && lit {
+            " data-shared-path=\"true\""
+        } else {
+            ""
+        };
+        let pressed = if shared {
+            format!(" aria-pressed=\"{}\"", chosen == Some(index))
+        } else {
+            String::new()
+        };
         // Where followed links start, where a path starts and ends, or
         // which the two places are that share the rest.
         let (start, end) = (
@@ -1915,13 +1941,13 @@ pub fn canvas(view: &V) -> String {
         };
         let (out, into) = flow[index];
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{} style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark} style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\"{pressed} aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
             payload(&node["path"]),
             escape(kind),
             opened && !symbol,
             changed > 0,
             chosen == Some(index),
-            chosen.is_some() && !near(index),
+            chosen.is_some() && !lit,
             cycle,
             leaning(out, into),
             out > 0,
@@ -2921,7 +2947,7 @@ pub fn side(view: &V) -> String {
         if m::array(&view["nodes"]).is_empty() {
             return apart(view);
         }
-        return "<p class=\"knowledge-note\">Select a box to see what it leads to on the way and what leads to it. Select a link to see what makes it up. The path above the picture leads back; beside it stand the other kind of what the two share, where there is any, and the path between them.</p>".to_owned();
+        return "<p class=\"knowledge-note\">Select a shared place to highlight both paths. Select a link to see what makes it up.</p>".to_owned();
     }
     if !focus.is_object() {
         return if followed {
@@ -4622,8 +4648,28 @@ fn render(view: &V) {
     dom::set_checked("graph-map-fit", m::yes(&state()["fit"]));
     // Of what two places share, the filter keeps the names that hold it.
     dom::disabled("graph-map-filter", follows(view) || paths(view));
+    // Replacing the canvas must keep the shared selection toggle usable
+    // from the keyboard.
+    const NODE_BUTTONS: &str = "#graph-map-canvas .graph-map-node";
+    let keyboard_key = dom::document()
+        .active_element()
+        .filter(|node| {
+            shares(view)
+                && node
+                    .matches(&format!("{NODE_BUTTONS}:focus-visible"))
+                    .unwrap_or(false)
+        })
+        .and_then(|node| node.get_attribute("data-payload"));
     html("graph-map-canvas", &canvas(view));
     fit();
+    if let Some(node) = keyboard_key.and_then(|key| {
+        dom::all(NODE_BUTTONS)
+            .into_iter()
+            .find(|node| node.get_attribute("data-payload").as_ref() == Some(&key))
+            .and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+    }) {
+        let _ = node.focus();
+    }
     // While the other end of a path is chosen, a box is that end.
     let state = state();
     dom::attr(
@@ -5102,6 +5148,8 @@ pub async fn event(
                 state["focus"] = json!("");
                 state["filter"] = json!("");
                 dom::set_value("graph-map-filter", "");
+            } else if m::yes(&state["shared"]) && state["focus"] == path {
+                state["focus"] = json!("");
             } else {
                 state["focus"] = json!(path);
             }
@@ -8135,15 +8183,57 @@ mod tests {
         );
     }
     #[test]
+    fn selecting_shared_places_lights_their_drawn_paths() {
+        let mut view = common();
+        view["focus"] = json!({
+            "path": "lib/db.php",
+            "shared_edges": [
+                ["app/api/users.php", "lib/core.php"],
+                ["app/api/orders.php", "lib/db.php"],
+                ["lib/core.php", "lib/db.php"]
+            ]
+        });
+        let html = canvas(&view);
+        assert!(html.contains(
+            "graph-map-edge-on graph-map-edge-guess\" data-ends=\"1 3\" data-shared-path=\"true\""
+        ));
+        assert!(html.contains("graph-map-edge-on\" data-ends=\"0 2\" data-shared-path=\"true\""));
+        assert!(html.contains("graph-map-edge-on\" data-ends=\"2 3\" data-shared-path=\"true\""));
+        assert!(html.contains("graph-map-edge-off\" data-ends=\"1 2\" d="));
+        assert_eq!(html.matches("data-shared-path=\"true\"").count(), 7);
+        assert_eq!(html.matches("data-action=\"graph-map-link\"").count(), 4);
+        assert_eq!(html.matches("aria-pressed=\"true\"").count(), 1);
+        assert!(!html.contains("data-dim=\"true\""));
+
+        let mut view = common_users();
+        view["focus"] = json!({
+            "path": "app/main.php",
+            "shared_edges": [
+                ["app/main.php", "app/api/users.php"],
+                ["app/main.php", "app/api/orders.php"]
+            ]
+        });
+        let html = canvas(&view);
+        assert!(html.contains("graph-map-edge-on\" data-ends=\"2 0\" data-shared-path=\"true\""));
+        assert!(html.contains("graph-map-edge-on\" data-ends=\"2 1\" data-shared-path=\"true\""));
+        assert_eq!(html.matches("data-shared-path=\"true\"").count(), 5);
+
+        view["focus"] = json!({"path": "app/api/users.php"});
+        let html = canvas(&view);
+        assert!(!html.contains("data-shared-path"));
+        assert!(html.contains("graph-map-edge-on\" data-ends=\"2 0\" d="));
+        assert!(html.contains("graph-map-edge-off\" data-ends=\"2 1\" d="));
+        view["focus"] = V::Null;
+        let html = canvas(&view);
+        assert!(!html.contains("graph-map-edge-on"));
+        assert!(!html.contains("graph-map-edge-off"));
+    }
+    #[test]
     fn the_side_panel_of_what_two_places_share_says_what_a_box_is_to_them() {
-        // Nothing selected: how to read the picture, and where the other
-        // questions stand.
+        // Nothing selected: how to highlight the paths or inspect a link.
         let mut view = common();
         let idle = side(&view);
-        assert!(idle.starts_with("<p class=\"knowledge-note\">Select a box to see what it leads to on the way and what leads to it."));
-        assert!(idle.ends_with(
-            "beside it stand the other kind of what the two share, where there is any, and the path between them.</p>"
-        ));
+        assert!(idle.contains("Select a shared place to highlight both paths."));
         // What both use: how far each of the two is, the ways on from it,
         // and the two lists, each row a link that can be looked into.
         let row = |path: &str, name: &str, links: u64| json!({"path": path, "name": name, "folder": false, "inside": true, "links": links, "guessed": 0, "changed": false});

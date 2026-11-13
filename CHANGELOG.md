@@ -24,6 +24,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Highlight both paths when a shared place is selected in the Harness
+  dependency map. Inferred links stay dashed. Selecting the place again
+  clears the highlight.
+
 - Go through all that two places share in the Harness dependency map. Where
   the two share more than the 12 nearest places a picture shows, a strip above
   the side panel says which places it shows, and **Further** and **Nearer**

@@ -18,7 +18,7 @@ use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess,
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     path::{Path, PathBuf},
     rc::Rc,
@@ -3894,16 +3894,12 @@ impl Index {
             .collect::<HashMap<_, _>>();
         // The links of the picture are those of the ways, each once: a way
         // from the first of the two and a way from the second may share one.
+        let direction = |near, far| if outgoing { (near, far) } else { (far, near) };
         let mut links: HashMap<(usize, usize), Flow> = HashMap::new();
         for (end, way) in on.iter().enumerate() {
             for (at, (before, flow)) in way {
                 let near = before.map_or(end, |before| slot[&before]);
-                let pair = if outgoing {
-                    (near, slot[at])
-                } else {
-                    (slot[at], near)
-                };
-                links.insert(pair, *flow);
+                links.insert(direction(near, slot[at]), *flow);
             }
         }
         let edges = links
@@ -4024,6 +4020,24 @@ impl Index {
                     .collect();
                 focus["used_by_more"] = json!(0);
                 focus["kinds"] = net.kinds(&members(index), &used);
+                if focus["shares"].is_array() {
+                    // Keep each end's chosen route. The combined edges can
+                    // also form routes drawn for other shared places.
+                    let mut shared_edges = BTreeSet::new();
+                    for (end, way) in on.iter().enumerate() {
+                        let mut at = drawn[index - 2];
+                        while let Some((before, _)) = way.get(&at) {
+                            let near = before.map_or(end, |before| slot[&before]);
+                            shared_edges.insert(direction(near, slot[&at]));
+                            let Some(before) = before else { break };
+                            at = *before;
+                        }
+                    }
+                    focus["shared_edges"] = shared_edges
+                        .into_iter()
+                        .map(|(from, to)| json!([keys[from], keys[to]]))
+                        .collect();
+                }
                 focus
             });
         view["children"] = json!(keys.len());
@@ -9412,6 +9426,32 @@ where
             (&focus["path"], &focus["shares"]),
             (&json!("lib/core.php"), &json!([1, 1]))
         );
+        assert_eq!(
+            focus["shared_edges"],
+            json!([[users, "lib/core.php"], [orders, "lib/core.php"]])
+        );
+        assert_eq!(
+            shared(users, orders, None, Some("lib/db.php"), false)["focus"]["shared_edges"],
+            json!([
+                [users, "lib/core.php"],
+                [orders, "lib/db.php"],
+                ["lib/core.php", "lib/db.php"]
+            ])
+        );
+        let cache = "lib/deep/cache/store.php";
+        assert_eq!(
+            shared(users, orders, None, Some(cache), false)["focus"]["shared_edges"],
+            json!([
+                [users, "lib/core.php"],
+                [orders, "lib/core.php"],
+                ["lib/core.php", cache]
+            ])
+        );
+        assert_eq!(
+            shared(users, orders, Some(true), Some("app/main.php"), false)["focus"]["shared_edges"],
+            json!([["app/main.php", users], ["app/main.php", orders]])
+        );
+        assert!(shared(users, orders, None, Some(users), false)["focus"]["shared_edges"].is_null());
         let rows = |focus: &Value, side: &str| {
             focus[side]
                 .as_array()

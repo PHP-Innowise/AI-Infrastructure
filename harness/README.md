@@ -1925,11 +1925,12 @@ where the one before ended, so one after another they show every place once.
 by its path and a symbol as it is shown; what it leaves is counted above the picture
 and gone through the same way. Each place is drawn with one shortest way between it
 and either of the two, the strongest where several are as short: what is shared
-carries its name in bold, and a box with a plain name lies on such a way. Selecting
-a box says how many links each of the two is away, and lists the next and the one
-before it on the way; it leads on with **Open file**, **Follow links** or **Path
-to…** like a box of a path. A chosen change, **Only links read from the code** and
-**Without tests** hold here as they do for a path.
+carries its name in bold, and a box with a plain name lies on such a way. Select a
+shared place to highlight both paths. Inferred links stay dashed. Select the same
+place again to clear the selection. The side panel gives the distances and lists
+the links next to the selected place. It offers **Open file**, **Follow links** and
+**Path to…** as for a box on a path. A chosen change, **Only links read from the
+code** and **Without tests** hold here as they do for a path.
 
 Between folders and files the map counts the graph's links that cross a file
 boundary; the links inside one file show when that file is opened. The relations
