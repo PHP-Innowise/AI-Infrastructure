@@ -410,3 +410,111 @@ fn linked_windows_ancestor_above_existing_state_base_is_refused_before_publicati
         "refusal changed redirected project bytes or tree"
     );
 }
+
+/// The memory commands an attached session runs: the engine its hooks are
+/// bound to, with the variables its launch set, from where the session is.
+#[cfg(unix)]
+#[test]
+fn attached_memory_validates_and_saves_for_a_worktree_the_session_entered() {
+    let boxed = Sandbox::new();
+    let git = |cwd: &Path, args: &[&str]| {
+        let done = Command::new("git")
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", boxed.root.join("absent-gitconfig"))
+            .output()
+            .unwrap();
+        assert!(
+            done.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    };
+    git(&boxed.project, &["init", "-q"]);
+    git(&boxed.project, &["add", "composer.json"]);
+    git(&boxed.project, &["commit", "-qm", "Fixture"]);
+    let worktree = boxed.root.join("entered worktree");
+    git(
+        &boxed.project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "entered",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let elsewhere = boxed.root.join("unrelated folder");
+    fs::create_dir(&elsewhere).unwrap();
+    let prepared = boxed.run("overlay", None);
+    assert!(
+        prepared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let state = boxed.state_root();
+    let home = boxed.root.join("private user home");
+    let memory = |cwd: &Path, project: Option<&Path>| {
+        let mut command = Command::new(&boxed.binary);
+        command.args([
+            OsString::from("memory"),
+            "--root".into(),
+            state.as_os_str().into(),
+        ]);
+        if let Some(project) = project {
+            command.args([OsString::from("--project"), project.as_os_str().into()]);
+        }
+        command
+            .args(["validate", "--json"])
+            .current_dir(cwd)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", boxed.root.join("absent-gitconfig"))
+            .env("ACCELERATOR_HOME", boxed.source.join("PHP Core"))
+            .env("ACCELERATOR_STATE_DIR", &state)
+            .env("ACCELERATOR_PROJECT_DIR", &boxed.project)
+            .env("ACCELERATOR_EDITION", "PHP Core")
+            .env_remove("CLAUDE_PROJECT_DIR")
+            .env_remove("CONTEXT_TASK_ID")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    // Its bank README stays in the clone: a healthy attached state validates.
+    let validated = memory(&boxed.project, None);
+    assert!(
+        validated.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&validated.stdout),
+        String::from_utf8_lossy(&validated.stderr)
+    );
+    assert!(!state.join("memory-bank/README.md").exists());
+    // A session that entered a worktree of the project saves for that
+    // worktree; a folder of no checkout of it is still refused.
+    let entered = memory(&worktree, Some(&worktree));
+    assert!(
+        entered.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&entered.stdout),
+        String::from_utf8_lossy(&entered.stderr)
+    );
+    let refused = memory(&elsewhere, Some(&elsewhere));
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains(
+            "--project names neither this project nor a worktree this installation serves"
+        ),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}

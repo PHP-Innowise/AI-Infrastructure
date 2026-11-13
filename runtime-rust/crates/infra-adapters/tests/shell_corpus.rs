@@ -153,6 +153,31 @@ fn retired_python_memory_launchers_have_explicit_native_equivalents() {
     }
 }
 
+/// The spellings the runtime hands a model for a native save: Claude Code's
+/// installed relative engine after a cd (and an attached session's cd back),
+/// and the engine path Codex and Cursor pipe into. Their JSON is data,
+/// whatever words it holds.
+#[test]
+fn native_save_spellings_the_runtime_hands_out_keep_the_data_exemption() {
+    let json = r#"'{"progress":"The down() migration runs DROP TABLE invoices.","verified":true,"learnings":[]}'"#;
+    let tail = "memory --root '/srv/shop' native-result --request 0f4c2a6b --token 6f1d3b5a --input - --json";
+    for command in [
+        format!("cd '/srv/shop' && echo -E {json} | memory-bank/bin/infra-engine {tail}"),
+        format!(
+            "cd '/srv/shop' && echo -E {json} | memory-bank/bin/infra-engine {tail} && cd '/work'"
+        ),
+        format!("echo {json} | '/srv/shop/memory-bank/bin/infra-engine' {tail}"),
+    ] {
+        for framework in FRAMEWORKS {
+            assert_eq!(
+                category(&command, &Policy::for_framework(framework)),
+                None,
+                "{framework}: {command}"
+            );
+        }
+    }
+}
+
 #[test]
 fn shell_long_options_do_not_consume_short_option_values() {
     let policy = Policy::for_framework("php-core");

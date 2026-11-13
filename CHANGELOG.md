@@ -24,6 +24,564 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Compared step by step with the retired runtime on twin projects, the
+  native memory CLI and hooks again match it where they had drifted:
+  - `memory record` stores a standalone episode again (docs/OPERATIONS.md
+    documents it; the native CLI answered "Unknown memory operation").
+  - `rebind` reports the task as `get` does and whether it was already
+    bound; its text said "rebound: None -> ...".
+  - `get`, `start`, `update` and `rebind` show the task's `status`, `phase`
+    (null when undeclared) and `authority`, and a governed task's
+    `auto_checkpoint` is null until its first automatic checkpoint, not an
+    empty string.
+  - `msg-read` says "No messages." when there are none; a lightweight task's
+    capsule no longer adds "warming: 0 turn(s) pending" under the task it
+    shows; `export` reports the folder it wrote, resolved.
+  - The session banner lists the session's own host tree (`.agents/` and
+    `.codex/` for Codex, `.cursor/` for Cursor) and reports an empty or
+    missing index's freshness as `unknown`, not `current`.
+  - The first save request of a conversation carries the rules measured with
+    live models again: the schema example, `verified=true` only for learnings
+    checked against current sources (it promotes them to durable memory), no
+    duplicate findings, recall-only saves with `learnings=[]`, and where the
+    checked fingerprints come from (`memory source-fingerprints`).
+- Memory MCP's `memory_checkpoint` records the work again: as the retired
+  server did, it rebinds the task and runs `turn --flush`, so the files
+  changed since the last turn reach the task and the reply carries the flush
+  report. The native server only flushed turns a hook had already buffered,
+  so a checkpoint from a client whose hooks had not run wrote nothing and
+  answered `"checkpoint": null` at the unchanged revision. The Harness keeps
+  its own admission, which records no Git delta. The server's instructions
+  and tool descriptions are the retired server's again, including that
+  `memory_record_result` is for clients no Stop hook asks for the
+  native-result save.
+- A capsule delivered as JSON is observed again. Cursor's prompt hook,
+  Memory MCP's `memory_retrieve`, the Harness and `refresh --json` hand the
+  answer's `capsule_text` to the model, and the retired runtime recorded that
+  render in the retrieval trace before answering; the native runtime recorded
+  only printed capsules, after their write. Those deliveries had no render in
+  their trace, and their `funnel_diagnosis` (in the answer and in
+  `refresh-health`) was always `unavailable`. They are recorded again, and the
+  diagnosis checks the capsule without the appended review notice, as before.
+  A retrieval without a session leaves `repeat_withheld` unobserved, not an
+  exact zero: nothing was checked for repeats. Native Windows still records
+  no render, printed or JSON, and its diagnosis stays `unavailable`: its trace
+  store cannot finalize a trace in place or check the trace's owner.
+- Cursor's subagent gate answers in Cursor's own words again: a built-in
+  subagent is refused with "Blocked subagent ...: built-in Cursor subagents
+  are disabled in this project ... (invoke with /agent-name)", and a second
+  write-capable agent with the retired one-line text. The native gate gave
+  Cursor's person Claude Code's three-line text.
+- No Project Brain handoff reaches a capsule again. The retired runtime
+  admitted none (a handoff has no lifecycle of its own), and every measured
+  capsule was built that way; the native runtime admitted an open handoff,
+  so a query naming another task returned its handoff beside its record,
+  which says the same, at the cost of budget. Found by comparing retrieval
+  on real installations: on a copy of a client project 23 of 24 queries
+  gave identical capsules, the 24th differed by this handoff alone.
+  Admitting open handoffs would be a retrieval change to measure on its own
+  (docs/MEMORY-EVAL.md). `memory search` stays broad, as the retired search
+  was, and lists an open handoff; `memory links` follows the capsule.
+- `memory search --json` names its query again, and an explicit `retrieve`
+  records the index's own `stat` and `index` phases in its manifest, so the
+  retrieval report counts the filesystem walk of every turn, as before.
+- A hook without a prompt (session start and compaction capsules, Cursor's
+  rule) asks memory with the task's own words again, as the retired hook
+  did: a file adds its stem (`src/Refund.php` asks for "Refund", not for
+  "src" and "php", which match most of a PHP project), an auto-provisioned
+  goal, the branch slug re-cased, adds nothing, a task with nothing
+  substantive asks with its bare identifier, and a lightweight task's query
+  no longer starts with its identifier. The words are plain words, each
+  once, at most 32; aliases join when the query is searched instead of
+  taking slots from the task's words.
+- Cursor keeps its rule's knowledge across a bare acknowledgement again.
+  The native refresh never decided whether a cleaned Cursor prompt only
+  continues the conversation ("yes", "continue", "давай"), so such a reply
+  searched by itself and the re-sent rule went from the turn's documents to
+  "no-match"; it now decides as the retired runtime did, on the raw prompt
+  before cleaning, and keeps the topic the reply answers, asked with the
+  topic's own words rather than distilled ones; a governed continuation
+  outside the rule asks with the task's explicit goal alone. A previous result
+  that was not saved reaches Cursor through the rule again: Cursor's hook
+  answers in JSON only, so the prompt hook marks the last-turn report and
+  the next capsule says "native memory result not saved completely".
+- `memory hook-context` (Cursor's rule at session start and after a turn)
+  chooses its capsule as the retired runtime did. Cursor's rule follows the
+  conversation's current topic first; a task (lightweight, bound, or held by
+  the Brain before its first checkpoint) asks with its own state; and a
+  branch with no task yet is never searched by its name: without a change
+  the command has no context (exit 3, and Cursor retires a stale rule
+  instead of writing "query: from branch name only"), with one it gives the
+  warming notice alone. An enforced gate's skip exits 4, so the host keeps
+  its rule, and the capsule's manifest stays local, as before.
+- A prompt's query is distilled as the retired runtime distilled it: its
+  plain words, with rarity counted over the local episodes beside the
+  documents. The native distillation counted documents only and ran the
+  prompt through aliases and expansions first, so a word the recorded
+  history repeats stayed in the query: on a copy of a client project "code
+  review checklist" kept "review" (74 of 152 documents, but 92 of 180
+  documents and episodes) and returned two documents where the retired
+  runtime returned none. Since excerpts are weighted by the distilled query,
+  the same change restored which section a long document is quoted from.
+- Excerpts grow into the room the delivered capsule leaves, as the retired
+  renderer measured it. The native runtime measured that room before the
+  capsule was packed, so a document the pack then dropped (a changelog past
+  its slot) still spent it and the best-ranked excerpts stopped growing: a
+  600-character window where the retired runtime quoted 1,200 characters
+  from a better place. With both changes, 35 of 35 capsules on a copy of
+  the client project with the largest memory are identical to the retired
+  runtime's (18 before), and 29, 26, 24, 24 and 15 of as many on five other
+  client copies, with every active task's hook capsule identical too.
+- Project Brain records are read active first and archived after, each in
+  path order, as the retired runtime read them, so `memory validate` lists
+  the stale records an agent works with before the archived ones. The
+  native reader sorted both trees together and put `archive/` first. On a
+  copy of a client project `validate`, `status`, `health`, `bank-audit`,
+  `consolidate`, `promote-auto`, `compact` and the retrieval report now give
+  the retired runtime's output on its real records.
+- Automatic promotion makes at most five new attempts a run again, at a
+  turn boundary, after a saved result, for a resolved record and from
+  `promote-auto`, as the retired runtime did everywhere; the native runtime
+  made ten at a turn boundary and from `promote-auto` and three after a
+  saved result. On a copy of a client project `promote-auto` promoted ten
+  records natively where the retired runtime promoted five; the five it
+  promotes, the seven it blocks and the 53 it leaves for later runs are now
+  the retired runtime's own.
+- The session banner of a linked worktree the installation serves says it
+  shares that installation's memory again, instead of calling it a project
+  attached from elsewhere with nothing installed. The worktree is both
+  "attached" (its state lies outside it) and "shared"; the banner tested
+  the first. Sessions run inside such worktrees for six turns match the
+  retired runtime's hooks at every turn on Claude Code, Codex and Cursor.
+- A governed command that finds no task bound here (`get`, `update`,
+  `complete`, `clear`) says again which task and how one comes to be bound:
+  "Working task not found: <id>; start records it (so does the first
+  checkpoint), and rebind --task-id <id> binds one recorded on another
+  machine". It was the refusal agents met most often in the retired
+  runtime, and the native text was a bare "Working task not found". A
+  lightweight task's refusal names the task too.
+- `memory replay-result` takes `--prepared-scope` again, as the retired CLI
+  required. The native CLI did not accept the option, and the runtime
+  refuses a receipt-only replay without a scope, so the command could not
+  succeed from the command line.
+- Bringing a project to the native runtime leaves Codex a working memory
+  server and its whole policy. Four installed client projects carry an
+  older Codex registration, `[mcp_servers.harness-memory]` running the
+  Python bootstrap (with host `claude`), outside the managed block; the
+  migration retired the script it starts, so Codex would report that server
+  failing in every session beside the new `harness_memory`. The merge now
+  recognizes the bootstrap by its signature, as the JSON registrations are,
+  and cuts that table alone; a server of that name with another command
+  stays. The same configurations set no `project_doc_max_bytes`, and Codex
+  cut a 43 KB `AGENTS.md` at its 32 KiB default, before the Memory Bank,
+  security, verification and Definition of Done sections: the release's
+  limit is added where the project set none, and a project's own value
+  stays. On copies of two clients the Codex bench now passes with the
+  policy heard in full.
+- `infra-engine eval memory-rollout-rehearsal` reads a prompt hook's plain
+  output as its capsule again, as the retired rehearsal did. Claude Code and
+  Codex take that output as context, and the native hooks print the capsule
+  that way; the rehearsal read only a JSON answer, found no capsule and
+  reported every recall missing. On a copy of a client project it now
+  reports the saved finding recalled in the next session for both hosts
+  and both capsule profiles.
+- The Project Brain message journal
+  (`project-brain/control/messages/<task>.jsonl`) is written as before:
+  each line is `json.dumps(sort_keys=True)`, keys sorted and separated by
+  `, ` and `: `. The native runtime wrote compact lines in insertion
+  order, so a migrated task's tracked journal mixed two line formats.
+  Both read the same; only lines written from now on change.
+- An explicit `memory retrieve` (or `context`) request asks with its plain
+  words again, each once and at most 32, as the retired runtime asked, and
+  the capsule and its retrieval manifest record those words. The native
+  runtime searched every word of the request and recorded it verbatim: on
+  twin projects a 35-word request whose subject came after the 32nd word
+  retrieved two documents natively and none before. Recorded history is
+  still searched with the whole request.
+- A task's declared phase reaches its capsule again. The working state the
+  native capsule carried dropped the task's `phase`, `created_at` and
+  `updated_at`, so the `phase: ...` line the render prints under the task
+  never appeared, in hooks or in `memory retrieve`, and Memory MCP's
+  `memory_retrieve` answer lacked the three fields the retired capsule
+  carried. They are carried again, and count toward the capsule's size as
+  before. The capsule's `omitted` reports `last_turn_characters` (and
+  `working_progress_characters`) as zero when nothing was cut, as it did.
+- A retrieval manifest times its `retrieval` phase as the retired one did:
+  from after the turn's own index refresh, without packing the capsule, to
+  the microsecond. The native phase began before the index refresh, so a
+  `memory retrieve` counted its indexing twice (`index` and `retrieval`)
+  and `retrieval-report`'s phase percentiles read several times slower than
+  retrieval ran. The gate's `top_score` is rounded to six places again.
+- Ranking reads the query's evidence words and excerpt weights once, as the
+  retired quoting did, instead of three times for every candidate it quotes
+  (each with a full count of the index), and no longer builds an excerpt
+  for every matched row that only the surviving candidates' quotes
+  replace. On a twin project ranking took 8 ms instead of 20 and
+  `memory retrieve` 61 ms instead of 72; a prompt hook on a client copy,
+  whose time goes to its source scan, is unchanged. The capsules are
+  unchanged: 153 of 153 on six client copies match the retired runtime.
+- A task's files become file edges as the retired index made them. Each of
+  the task's last 50 files is screened as a file edge is (no directory,
+  build output, vendored code, lockfile, runtime state or secret-shaped
+  path), and Git's index is asked about all tasks' files at once with
+  `cat-file --batch-check`, a staged file counting. The native index ran
+  `git ls-files` once per task on every refresh and screened only
+  sensitive paths, so a directory a task listed linked every tracked file
+  under it: on a copy of one client the tasks had 3,934 file edges where
+  the retired index had 163 (`.agents/`, `.claude/`, `.codex/` and
+  `.cursor/` were listed), and on others lockfiles and Memory Bank files
+  were linked. Five client copies now have the retired edges exactly. The
+  incremental index also compares the Brain's links and derived state, as
+  the retired digest did: a file Git starts tracking gains its edge at the
+  next refresh, where the native index kept the old edges until a record
+  changed.
+- Each edition's session banner reads the project as that edition's
+  retired hook did. The native banner was PHP Core's for every
+  installation: a Symfony project lost "Framework: Symfony detected. Use
+  Symfony Controller -> Service -> Repository conventions." (or the note
+  that `bin/console` is missing), a Laravel project its laravel/framework
+  version, Pint, Larastan, Vite and Livewire or Inertia lines and its
+  warning about a Symfony console beside Laravel, and a WordPress project
+  its site lines; each counted PHP Core's folders (a Symfony banner listed
+  `project-brain/`), and a WordPress banner named a policy digest it never
+  showed. The banners of five Symfony client copies and of Laravel,
+  WordPress and PHP Core twins now match the retired ones line for line.
+  One difference stays: a memory chunk citing a URL is not reported as
+  citing a file that is gone; the URL is no file, and the chunk is
+  retrieved.
+- The Stop hook's save step is the retired one word for word again. Its
+  rules were restored earlier, but the native step had rewritten the rest
+  without a measurement: "If no safe result exists" for "If no project
+  result is safe to save", a shortened account of how to answer after the
+  save ("return the substantive original answer ...", "On refusal retain
+  the answer ...", "Correct JSON/schema once only if refused ..."), a
+  different pointer to the rules on a conversation's later saves, and the
+  review and maintenance notes after the skip instead of before it. The
+  wording measured with live models is back in its order; only the memory
+  CLI's own name and the command's form differ.
+- The index reports every layer, an empty one as zero, as the retired index
+  did: `refresh --json` (Memory MCP's `memory_retrieve` answer) and `index
+  --json` lacked `episodic` on a project with no episodic documents, and
+  the `/memory` report printed its line without "(0 documents)". A capsule
+  that searched nothing (the navigation profile, or recall before the
+  task's first save) has the retired shape again: no categories, and its
+  token estimates by layer, not by category with the budget's limits.
+- A refresh that built no capsule (the `memory` skill's plain refresh, a
+  refused prompt, a checkout with no branch) carries the retired
+  "nothing to observe" funnel diagnosis and ordinary receipt again, in its
+  answer and in its `refresh-health` record. The native record carried
+  neither, so `memory health` counted every such refresh as one whose
+  diagnosis is missing, where the retired report counted it unavailable.
+- A refused save says what to correct again, as the retired refusals said
+  it; the save step allows one corrected retry, and the native refusals
+  had lost the part an agent corrects from. A save from the Stop step whose
+  input is not one JSON object names where and what ("not one JSON object
+  (Invalid control character at line 1 column 23); inside a string, write
+  a newline as \n ... pipe with echo -E", "more than one JSON object",
+  "one JSON object expected, got an array") in Python's own positions, and
+  the refusal reaches the native-result journal again; the native step
+  printed its parser's message ("Unescaped control character in JSON
+  string.") and journaled nothing. `record-result` names a learning's
+  missing and unexpected fields with the note that `verified` is a
+  top-level boolean, asks for `verified=true` in the retired words, names
+  the two learnings to merge, says "The result must be a JSON object" for
+  text that is no JSON, and names sensitive data as "a possible <secret>"
+  or "personal data (<kind>)". A missing record is named ("Project Brain
+  task not found: <id>"), an ambiguous identifier too, and a refused
+  promotion says "Promotion source is not eligible: ...". A result ID
+  reused with other content says so ("Result ID was already used with
+  different content") instead of its bare code.
+- A turn says what happened to its task's binding again. When the bound
+  task's record is gone (`git stash -u` or `git clean` removes an
+  uncommitted task) the capsule warns that the next checkpoint records the
+  task again, and when a second active record claims the same task ID (two
+  clones started the branch's task) it names both and the command that
+  keeps one. The native capsule said neither: it served "not recorded
+  yet" with no reason, and silently chose one of the twins. The command
+  reads "One task per branch: memory-bank/bin/infra-engine memory
+  brain-update ..." where the retired one read "Keep one task per branch:
+  context.py brain-update ...": the installed CLI's longer name would
+  have cut the command at a warning's 160 characters.
+- A task record that cannot be read - most often one a merge left with
+  Git's conflict markers - no longer takes every turn's memory with it.
+  As the retired runtime did, the turn is served without the task's state
+  ("working: unavailable (the task's record cannot be read)"), with the
+  knowledge its request finds, and says which file to repair: "Unresolved
+  Git merge conflict in <file>: keep one side or merge both, without the
+  markers; checkpoints wait for it." The native prompt hook refused the
+  whole capsule on every turn until the file was repaired.
+- A save from the Stop step that another writer overtook says to stop and
+  report the held save again, as the retired refusal did: "... the branch
+  task was created (or replaced, or another session or a person saved the
+  task) after this save was requested; nothing was written: report the
+  held save, do not retry it". A save that would start no task and record
+  nothing says to give a progress summary or a learning, or to run the
+  command with --skip, and a result with nothing in it asks for "a progress
+  summary, next steps or a checked learning". The native refusals were the
+  bare codes, which left the agent to guess.
+- A prompt that carries an e-mail address, a phone number, a password or a
+  key keeps its memory again. As the retired refresh did, the automatic path
+  cleans the prompt first and then guards, searches and searches history
+  with the cleaned text; the native refresh guarded the raw prompt before
+  cleaning it, so such a turn lost its whole capsule (Claude Code and Codex
+  printed the operator's layer report and "Capsule unavailable: Task
+  Capsule contains a possible AWS access key ..." into the prompt, Cursor's
+  rule said "working: unavailable"), and recorded history was searched
+  with the raw prompt. A reply with nothing to search, such as "?" or an
+  emoji, is withheld rather than refused. On twin projects 13 unusual
+  prompts now draw the retired hook output on Claude Code, Codex and
+  Cursor, and no stored file holds the private text on either runtime.
+- `context-load --include-transcript` prints a saved transcript as it was
+  saved, as the retired command did; the native output added a blank line
+  after it. Saved and loaded handoffs otherwise match the retired ones on
+  twin projects, files included.
+- `memory validate` validates Project Brain alone again, as the retired
+  command and the operations guide say; the Memory Bank keeps its own
+  validator, `bank validate`. The native command added every bank error, so
+  a chunk that reached its review date, or one citing a deleted file, failed
+  Brain validation, the `memory` skill's step and `refresh --validate`, and
+  every session banner read `brain-validation=invalid` (invoice-api's first
+  chunk reaches its review date on 2027-01-30).
+- `bank validate` reports a broken chunk in the retired validator's words
+  and order again: which metadata keys are missing or unexpected, which date
+  rule failed, which source escapes, the frontmatter's merge conflict or JSON
+  error with its line and column, each index field that differs, and each
+  lineage link that does not point back. Warnings print again, without
+  failing: a retired chunk whose cited file is gone, and an index row kept
+  for a chunk that is broken. A cited file renamed with `git mv` is named
+  (`- Git moved it to src/New.php`), and the refusals of promotion,
+  retirement and re-verification read as before. The native validator
+  printed one generic sentence per rule ("Missing or unexpected memory
+  metadata keys", "Memory verification dates are invalid or overdue"),
+  nothing for warnings and no rename. On twin projects 55 banks, 53 of them
+  broken, now draw the retired report and exit code; only the
+  index-conflict hint differs, naming
+  `memory-bank/bin/infra-engine memory reindex-bank`. A chunk ID that names
+  no chunk is reported as before too: `bank-reverify` says "Memory Bank
+  chunk not found: <ID>", and `bank-retire` or `bank-quarantine` of an ID
+  no chunk file can carry says "Memory Bank retirement identity is
+  invalid"; the native commands said "Invalid memory ID". `promote-review`
+  and `promote-apply` of a proposal that cannot be read say "Promotion not
+  found or invalid: <ID>" as before, where the native commands said
+  "Promotion not found" or "Promotion ID must be UUIDv4".
+- `memory validate` runs the retired command's whole check again. The native
+  command checked records, their relationships and the active handoffs only,
+  so a credential stored in a record, a record whose ID does not match its
+  file, a half-merged deterministic index, a broken message journal,
+  retrieval manifest or promotion file, and an open archived handoff all
+  passed, and the session banner said `brain-validation=valid`. Each problem
+  is worded as before: the schema names the field (`$.status: value is
+  outside schema enum`, `$: missing keys goal`), the lifecycle check names
+  the transition (`illegal lifecycle transition: active -> active`), a
+  half-merged record says so instead of "JSON key must be text", and a
+  lookup refused for an unreadable record gives the reason (`Project Brain
+  record invalid: <file>: <reason>`), which the turn's notice repeats. On
+  twin projects 38 broken Brains draw the retired report and exit code; a
+  handoff whose JSON is broken is named once, where the retired report
+  named its path twice.
+- A refused `update`, `brain-update` or `complete` says again what it found
+  and what to pass: `Stale task revision: expected 9, current 1`,
+  `Illegal task transition: active -> verified; verified is an evidence
+  level, not a task status: set it with brain-update --authority verified`
+  (agents pass an evidence level as a status often enough that the retired
+  runtime measured it), the phase it would move back from and to, the
+  authority edge, the actor without ownership, and who must revise a
+  person's check. The native refusals had dropped every value and hint
+  ("Stale record revision", "Illegal lifecycle transition"). On twin
+  projects nine such refusals now read as the retired ones.
+- `start` of a task ID whose task was completed or cancelled begins a new
+  task again: the finished record is archived first, as the retired start
+  did. The native start refused it as "Project Brain record already
+  exists", so a finished branch task could not be started again by hand.
+  `start` of a task under way names the record and says what to run
+  instead (`get --task-id ID` reads it, `update --task-id ID --revision
+  auto` records progress), a hint the retired runtime added after agents
+  ran start at the top of every session. `complete` without a numeric
+  revision says where the number is.
+- `update` that changes nothing, or passes an empty `--progress`, and
+  `brain-update` that changes nothing are refused again ("Working task
+  update requires a changed field", "Working task progress must not be
+  empty"). The native commands accepted both outside the hook queue: an
+  empty update consumed a revision, and an empty progress erased the
+  task's. An empty `msg-send` body is refused in the retired words.
+- A credential handed to `start`, `update`, `brain-create`, `brain-update`,
+  `complete` or `msg-send` is refused before anything is written, under the
+  name of what would have held it, as the retired commands refused it:
+  "possible AWS access key detected; working task not stored" (`Brain
+  record`, `episode`, `message`). The native commands left it to the
+  record's guard, which named a generic "Record update" or "Agent message".
+  Personal data in a new record is refused by that guard under the record's
+  type again ("Task record contains personal data (email address)"), and a
+  verified record created without a valid attestation says "attestation
+  says who checked a verified record: agent or person". On twin projects
+  nine such refusals read as the retired ones.
+- `rebind --record <UUID>` binds the record it names again; the native
+  command ignored `--record` and bound whichever active record served the
+  task ID. A rebind that cannot bind says why, as the retired command did:
+  "Project Brain record not found: <ID>", "Rebind requires a task record;
+  <UUID> is a finding record", "Rebind target mismatch: record <UUID>
+  belongs to task id 'SHOP-8', not 'SHOP-7'", "Cannot rebind SHOP-7: task
+  <UUID> is completed; start new work under a new task id", or the binding
+  it refuses to repoint. The native command said "Working task not found"
+  or "Task is unavailable for rebind".
+- `complete --json` reports the task's `status` again, as the retired
+  command did. Run with every option on twin projects, `start`, `update`,
+  `get`, `brain-create`, `brain-update`, `brain-get`, `retrieve`, `search`,
+  `complete` and `health` now return what the retired commands returned.
+- A refused `context-save` names what to correct again, as the retired
+  command did: the unexpected or missing input fields, the flag a detail
+  needs (`--topic is required when --detail topic`), the length limit of the
+  chosen detail, a cited path that escapes the repository or is sensitive,
+  and the output that already exists. The native command said "Handoff
+  contains missing or unknown curated fields", "Topic/transcript fields do
+  not match handoff detail" or "Filesystem operation failed: File exists".
+  Cited paths follow the retired rules: `./src/x.php` and an untrimmed path
+  are refused, `.envrc` and `id_rsa.pub` are not. On twin projects 20
+  refused saves read as the retired ones.
+- `context-load` of a handoff edited after it was saved says what no longer
+  holds again, in the retired loader's order: the frontmatter's schema, its
+  version, detail, topic, time, client or task ID, the file fingerprints,
+  the curated context, the transcript, the body or its digest. The native
+  loader folded most of them into "Unsupported handoff metadata schema" and
+  said "JSON key must be text" for broken frontmatter. On twin projects nine
+  edited handoffs are refused as the retired ones.
+- Launches of one attached project no longer refuse each other. Every launch
+  prepares the project's private state: it re-protects the same files and,
+  from another folder, rewrites the record and the launch files. Started
+  together - Fleet starts its reviewers at once, and a root and a worktree
+  session can start together - one launch stopped with `Private state file
+  changed during protection`, `Private state lock custody changed` or
+  `Publication image changed during read`. A launch now prepares the state
+  under `accelerator-attach.lock` in the state directory, taken before
+  anything there is protected or written. A protection that would not change
+  a file's mode no longer calls `chmod`, which moved the file's change time
+  that every custody check compares, so a running session's hooks no longer
+  fail to read their configuration while another session launches.
+- A launch no longer fails because a running session of the same project
+  wrote its state at that moment. The launch walks the whole state to keep it
+  private, and an entry removed or replaced between the walk's looks - a
+  SQLite journal, a record renamed into place - stopped it with `No such file
+  or directory`, `Private state file changed during admission` or `Private
+  state requires owned ordinary entries`. What is gone needs no protection,
+  and a replacement is examined by the next launch; links, foreign owners and
+  a file replaced while its mode is being repaired are still refused.
+  `eval memory-lifecycle-fuzz --attached`, which prepares the state for every
+  hook event of up to three sessions at once, stopped on every seed before its
+  checks; seeds 1-4 now pass them.
+- An attached project's `bank validate` passes again. Its state holds only the
+  project's memory; the Memory Bank README stays in the accelerator clone the
+  project is attached from, and validation now finds it there instead of
+  failing every healthy attached project with `memory-bank/README.md:
+  required file is missing`.
+- An attached session that entered another worktree of its project saves its
+  turns again: `--project` naming that worktree is accepted, as the hooks
+  that ask for the save serve it there and the retired runtime accepted it.
+  The save was refused with `--project names neither this project nor a
+  worktree this installation serves`.
+- `install --sync` names what holds a host's wiring. A hook the project
+  edited keeps the whole host on its current wiring, so that no team change
+  is overwritten or unwired, and every file kept back said only "held back by
+  unchanged host wiring". Each now says which file holds it and the way out:
+  "held back by unchanged host wiring (.claude/settings.json):
+  .claude/hooks/bash-validator.sh is edited in the project: move it aside or
+  merge your change into the release, then sync again" (or `--update-tracked`
+  for a tracked file, `--rewire-codex` for Codex's trust-bound wiring).
+  `bench --sync` shows the same in its refusal.
+- A Project Brain record that cannot be read is named from the project root
+  with forward slashes on native Windows too, as the retired runtime named it,
+  so a turn's notice about a half-merged task record reads `Unresolved Git
+  merge conflict in project-brain/dynamic/tasks/<id>.md` on every system. The
+  native runtime printed the path with backslashes on Windows, and a record
+  outside the project by its absolute path, which names the machine's own
+  directories; such a record is named by its file alone again.
+- On Windows the evaluation contracts give a command that installs an edition
+  into whole corpora 300 s instead of 120 s. The outcome seal's provider-free
+  preparation took 102-104 s of the 120 s on the Windows runner, 122 s on a
+  slower day, and 121.6 s running alone on a runner that needed 432 s for the
+  whole suite instead of about 250; on Linux it takes 13-17 s, with or without
+  this branch. Linux keeps 120 s, and the fixture's transport keeps its own
+  hard bound: 120 s, or the command's budget where that is longer. Two
+  scheduling attempts were withdrawn: both end-to-end slots per evaluation
+  case (`threads-required = 2`) left cases unstarted in nextest 0.9.149, and
+  running the cases one at a time after the rest still saw the 121.6 s.
+- The Linux native-process contracts no longer fail on a process the kernel
+  is still tearing down. Their cleanup check accepted only a zombie or a
+  vanished process, so a native process inside its own exit (`PF_EXITING`,
+  still shown as running) failed the `rust` job now and then (CI:
+  `owner_death_retains_runner_exclusion_until_all_native_descendants_stop`,
+  flags 0x40040c). Such a process now gets up to 2 s to finish; one that is
+  not exiting still fails at once. With eight copies of the binary running
+  together, the old check failed 2 of 200 runs and the new one none of 400.
+- `infra-engine bench --target <project> --sync` and the hook rehearsal's
+  `--target` bring the copied project to the native runtime again. They
+  synced the copy with default options, and an installed project commits
+  its accelerator and wires Codex hooks, so the sync held the whole runtime
+  migration back and the copy kept its previous runtime: the bench measured
+  that runtime (on a copy of one client it failed with no save; another
+  client's older runtime passed in its place). The copy is now synced as
+  its owner would update it, with `update_tracked` and `rewire_codex`, and
+  a copy that still does not reach this runtime is refused with the files
+  that held it back.
+- `memory health` and `memory retrieval-report` list a refresh's phases in
+  the order it runs them (`stat`, `index`, `retrieval`), as the retired
+  reports did; the native text followed the sorted keys of the JSON object.
+
+- Claude Code saves a turn's result without asking again: the Stop request
+  names `cd <installation> && echo -E '<JSON>' | memory-bank/bin/infra-engine
+  memory ...`, the spelling the installed
+  `Bash(memory-bank/bin/infra-engine memory:*)` rule allows, as the retired
+  runtime did. The absolute engine path the native runtime gave matched no
+  rule, so Claude Code asked after every answer and refused the save under
+  `claude -p`. A worktree session reads the result without `--input -`;
+  `native-result --skip` no longer waits on standard input. Codex and Cursor
+  requests are unchanged.
+- Claude Code saves from the other places a session works as well:
+  - below the project root, the user-level dispatcher runs the project's own
+    engine for the project's hooks, as a session at the root does, so the
+    request names the engine the dispatcher's memory-command check allows;
+  - in a linked worktree the main checkout serves, `native-stop` accepts
+    `--entered` again (the CLI schema had lost it, so such a Stop exited 2 and
+    asked nothing), and `--project` naming that worktree is accepted from the
+    main checkout, where the save runs, as the retired runtime accepted it;
+  - an attached session's settings allow the memory command of the engine
+    its hooks are bound to, which the save names by its absolute path.
+- A session in a worktree the main checkout serves, or started below the
+  project root, again hears at its start which engine runs the memory CLI
+  the policy and skills name (`Memory CLI: ... in place of
+  memory-bank/bin/infra-engine memory`): neither place has that relative
+  path, so `/checkpoint` and other explicit memory commands failed there.
+- A new Cursor chat starts with the branch task's memory rule again. Since
+  the hook speed-up its session start rendered the rule for an empty task,
+  removed it, and the chat's first request went without memory, because
+  Cursor reads the rule before the prompt hook runs.
+- `memory validate` again lists records whose cited source changed, was
+  deleted or has no stored digest, with what retrieval does about each
+  (`stale` and `stale_states` in JSON); they do not fail validation.
+- The native result journal again keeps the codes `docs/MEMORY-INTEGRATION.md`
+  lists: why a prompt or Stop asked nothing (`skipped` with `not-armed`,
+  `plan-mode`, `task-completed`, `host-refused`, ...), how a continuation
+  settled its request (`skipped` `recovery-saved`; `failed` with `unsaved`,
+  `incomplete` or `host-refused`; `held` `unconfirmed`), what the last request
+  became when a prompt warns (`previous-failed`, `previous-in-flight`, ...),
+  how a save landed (`repeat`, `late`, `spooled`, `in-flight`, `rebased`) and
+  whether a request was brief. The native runtime had logged every skip and
+  settlement bare, so the funnel report counted no failed or held Stop and
+  troubleshooting found no `host-refused`.
+- `infra-engine bench claude|codex` runs for an unprivileged user: its worker
+  compares its network namespace with the launcher's and requires a
+  loopback-only namespace, instead of reading PID 1's, which only a process
+  allowed to trace PID 1 may. The bench, the hook rehearsal and the lifecycle
+  experiment recognise the engine-path save request as well as the `cd` form.
+  The bench also trusts the Codex dispatcher's user hooks in the form the
+  dispatcher now writes, reads an attached session's policy from Claude
+  Code's block-form system prompt, and runs `/checkpoint` with the CLI
+  spelling the skill names; its Claude Code and Codex variants (root,
+  subfolder, worktrees, attached, permission modes, queued prompts, app
+  server, read-only sandbox) pass offline. `eval memory-lifecycle-fuzz` runs
+  the memory CLI as a session does - the installation's engine with its
+  `memory` group, from the session's folder, naming no root - so its
+  checkpoint, recall-from-every-worktree and turn checks run again instead
+  of failing or being skipped.
 - Memory Bank retrieval now reads canonical `source_digests`, so editing a
   cited file marks the saved knowledge as changed and shows the source-check
   warning. Incremental indexing upgrades older cached metadata transactionally,

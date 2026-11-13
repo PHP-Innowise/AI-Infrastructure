@@ -28,7 +28,10 @@ pub fn normalize_phase(phase: &str) -> Result<&str> {
         value => value,
     };
     if !PHASES.contains(&phase) {
-        return Err(RuntimeError::invalid("Invalid task phase"));
+        return Err(RuntimeError::invalid(format!(
+            "phase must be one of: {} (aliases: implementing->implementation, execution->implementation, review->verification, quality->verification)",
+            PHASES.join(", ")
+        )));
     }
     Ok(phase)
 }
@@ -120,17 +123,16 @@ pub(crate) fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 }
 
 pub(crate) fn string_list(value: &Value, key: &str, unique: bool) -> Result<Vec<String>> {
-    let items = value
-        .get(key)
-        .and_then(Value::as_array)
-        .ok_or_else(|| RuntimeError::invalid(format!("{key} must be a string list")))?;
+    let items = value.get(key).and_then(Value::as_array).ok_or_else(|| {
+        RuntimeError::invalid(format!("{key} must be a list of non-empty strings"))
+    })?;
     let mut output: Vec<String> = Vec::new();
     for item in items {
         output.push(
             item.as_str()
                 .filter(|text| !text.is_empty())
                 .ok_or_else(|| {
-                    RuntimeError::invalid(format!("{key} must contain non-empty strings"))
+                    RuntimeError::invalid(format!("{key} must be a list of non-empty strings"))
                 })?
                 .into(),
         );
@@ -143,25 +145,64 @@ pub(crate) fn string_list(value: &Value, key: &str, unique: bool) -> Result<Vec<
     Ok(output)
 }
 
-fn strict_keys(value: &Value, required: &[&str], optional: &[&str]) -> Result<()> {
+fn invalid(message: impl Into<String>) -> RuntimeError {
+    RuntimeError::invalid(message)
+}
+
+/// Missing, then unexpected keys, each list named in sorted order as the
+/// retired validator named it: "record missing keys: goal".
+fn keys(value: &Value, what: &str, required: &[&str], optional: &[&str]) -> Result<()> {
     let object = value
         .as_object()
-        .ok_or_else(|| RuntimeError::invalid("Record must be an object"))?;
-    if required.iter().any(|key| !object.contains_key(*key)) {
-        return Err(RuntimeError::invalid("Record is missing required keys"));
+        .ok_or_else(|| RuntimeError::invalid(format!("{what} must be an object")))?;
+    let joined = |keys: BTreeSet<&str>| keys.into_iter().collect::<Vec<_>>().join(", ");
+    let missing = required
+        .iter()
+        .copied()
+        .filter(|key| !object.contains_key(*key))
+        .collect::<BTreeSet<_>>();
+    if !missing.is_empty() {
+        return Err(RuntimeError::invalid(format!(
+            "{what} missing keys: {}",
+            joined(missing)
+        )));
     }
-    if object
+    let extra = object
         .keys()
-        .any(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
-    {
-        return Err(RuntimeError::invalid("Record has unexpected keys"));
+        .map(String::as_str)
+        .filter(|key| !required.contains(key) && !optional.contains(key))
+        .collect::<BTreeSet<_>>();
+    if !extra.is_empty() {
+        return Err(RuntimeError::invalid(format!(
+            "{what} has unexpected keys: {}",
+            joined(extra)
+        )));
     }
     Ok(())
 }
 
+/// A non-empty RFC 3339 timestamp.
+fn timestamp(value: &Value, key: &str) -> Result<()> {
+    if !valid_datetime(string(value, key)?) {
+        return Err(RuntimeError::invalid(format!(
+            "{key} must be an RFC3339 timestamp"
+        )));
+    }
+    Ok(())
+}
+
+/// A positive integer, as Python's `type(value) is int` saw one.
+fn positive(value: &Value, key: &str) -> bool {
+    value[key].as_u64().is_some_and(|number| number > 0)
+}
+
+/// The retired `validate_record`, check by check and in its order: its
+/// sentence is all a person repairing a hand-edited or half-merged record is
+/// told, and the schema names a field first wherever it can.
 pub fn validate_record(record: &Value, archived: bool) -> Result<()> {
-    strict_keys(
+    keys(
         record,
+        "record",
         &[
             "schema_version",
             "id",
@@ -190,16 +231,33 @@ pub fn validate_record(record: &Value, archived: bool) -> Result<()> {
         ],
         &["phase", "auto_checkpoint"],
     )?;
+    if let Some(phase) = record.get("phase") {
+        if record["type"] != "task" {
+            return Err(invalid("only a task may declare a phase"));
+        }
+        if !phase.as_str().is_some_and(|phase| PHASES.contains(&phase)) {
+            return Err(invalid(format!(
+                "phase must be one of: {}",
+                PHASES.join(", ")
+            )));
+        }
+    }
+    if record.get("auto_checkpoint").is_some() {
+        if record["type"] != "task" {
+            return Err(invalid("only a task may record an auto checkpoint"));
+        }
+        string(record, "auto_checkpoint")?;
+    }
     if record["schema_version"].as_u64() != Some(1) {
-        return Err(RuntimeError::invalid("Unsupported schema_version"));
+        return Err(invalid("unsupported schema_version"));
     }
-    if !is_uuid4(record["id"].as_str().unwrap_or("")) {
-        return Err(RuntimeError::invalid("Record id must be UUIDv4"));
+    if !record["id"].as_str().is_some_and(is_uuid4) {
+        return Err(invalid("record id must be UUIDv4"));
     }
-    let kind = string(record, "type")?;
-    if !RECORD_TYPES.contains(&kind) {
-        return Err(RuntimeError::invalid("Invalid record type"));
-    }
+    let kind = record["type"]
+        .as_str()
+        .filter(|kind| RECORD_TYPES.contains(kind))
+        .ok_or_else(|| invalid(format!("type must be one of: {}", RECORD_TYPES.join(", "))))?;
     for key in [
         "external_id",
         "title",
@@ -212,12 +270,10 @@ pub fn validate_record(record: &Value, archived: bool) -> Result<()> {
         string(record, key)?;
     }
     if !record["progress"].is_string() {
-        return Err(RuntimeError::invalid("Progress must be text"));
+        return Err(invalid("progress must be text"));
     }
     for key in ["created_at", "updated_at"] {
-        if !valid_datetime(string(record, key)?) {
-            return Err(RuntimeError::invalid(format!("Invalid {key} timestamp")));
-        }
+        timestamp(record, key)?;
     }
     for key in [
         "authorized_owners",
@@ -233,92 +289,95 @@ pub fn validate_record(record: &Value, archived: bool) -> Result<()> {
         .iter()
         .any(|owner| owner == record["owner"].as_str().unwrap_or(""))
     {
-        return Err(RuntimeError::invalid(
-            "Owner must be included in authorized_owners",
-        ));
+        return Err(invalid("owner must be included in authorized_owners"));
     }
-    if !PRIVACY.contains(&string(record, "privacy")?)
-        || !AUTHORITIES.contains(&string(record, "authority")?)
-    {
-        return Err(RuntimeError::invalid("Invalid privacy or authority"));
+    if !PRIVACY.contains(&string(record, "privacy")?) {
+        return Err(invalid("invalid privacy"));
+    }
+    if !AUTHORITIES.contains(&string(record, "authority")?) {
+        return Err(invalid("invalid authority"));
     }
     if !record["confidence"]
         .as_f64()
         .is_some_and(|number| number.is_finite() && (0.0..=1.0).contains(&number))
     {
-        return Err(RuntimeError::invalid("Confidence must be between 0 and 1"));
+        return Err(invalid("confidence must be between 0 and 1"));
     }
-    if !record["revision"].as_u64().is_some_and(|number| number > 0) {
-        return Err(RuntimeError::invalid("Revision must be a positive integer"));
+    if !positive(record, "revision") {
+        return Err(invalid("revision must be a positive integer"));
     }
     let status = string(record, "status")?;
     if !lifecycle_states(kind).contains(&status) {
-        return Err(RuntimeError::invalid("Invalid lifecycle status"));
-    }
-    if let Some(phase) = record.get("phase")
-        && (kind != "task" || !PHASES.contains(&phase.as_str().unwrap_or("")))
-    {
-        return Err(RuntimeError::invalid(
-            "Only tasks may declare a canonical phase",
-        ));
-    }
-    if record.get("auto_checkpoint").is_some() {
-        if kind != "task" {
-            return Err(RuntimeError::invalid(
-                "Only tasks may record auto checkpoints",
-            ));
-        }
-        string(record, "auto_checkpoint")?;
+        return Err(invalid(format!("invalid {kind} status")));
     }
     let transitions = record["transitions"]
         .as_array()
         .filter(|items| !items.is_empty())
-        .ok_or_else(|| RuntimeError::invalid("Transitions must be non-empty"))?;
+        .ok_or_else(|| invalid("transitions must be a non-empty append-only list"))?;
     let mut previous = None;
     for (index, transition) in transitions.iter().enumerate() {
-        strict_keys(transition, &["from", "to", "at", "actor", "reason"], &[])?;
-        let to = string(transition, "to")?;
-        let from = match &transition["from"] {
-            Value::Null => None,
-            Value::String(text) => Some(text.as_str()),
-            _ => return Err(RuntimeError::invalid("Invalid transition source")),
-        };
+        let entry = transition
+            .as_object()
+            .ok_or_else(|| invalid("transition must be an object"))?;
+        if entry.len() != 5
+            || ["from", "to", "at", "actor", "reason"]
+                .iter()
+                .any(|key| !entry.contains_key(*key))
+        {
+            return Err(invalid("transition does not match strict schema"));
+        }
+        timestamp(transition, "at")?;
         string(transition, "actor")?;
         string(transition, "reason")?;
-        if !valid_datetime(string(transition, "at")?) {
-            return Err(RuntimeError::invalid("Invalid transition timestamp"));
-        }
-        if index == 0 {
-            if from.is_some() || to != initial_state(kind)? {
-                return Err(RuntimeError::invalid(
-                    "First transition must create the initial state",
+        let (from, to) = match (&transition["from"], &transition["to"]) {
+            (Value::Null, Value::String(to)) => (None, to.as_str()),
+            (Value::String(from), Value::String(to)) => (Some(from.as_str()), to.as_str()),
+            _ => {
+                return Err(invalid(
+                    "transition endpoints must be text, with a null initial source",
                 ));
+            }
+        };
+        if index == 0 {
+            let initial = initial_state(kind)?;
+            if from.is_some() || to != initial {
+                return Err(invalid(format!(
+                    "first {kind} transition must create {initial} state"
+                )));
             }
         } else if from.is_some_and(|from| AUTHORITIES.contains(&from)) && AUTHORITIES.contains(&to)
         {
             if from != Some("observed") || to != "verified" {
-                return Err(RuntimeError::invalid("Illegal authority transition"));
+                return Err(invalid(format!(
+                    "illegal authority transition: {} -> {to}",
+                    from.unwrap_or("None")
+                )));
             }
             continue;
         } else if from != previous || !from.is_some_and(|from| transition_allowed(kind, from, to)) {
-            return Err(RuntimeError::invalid("Illegal lifecycle transition"));
+            return Err(invalid(format!(
+                "illegal lifecycle transition: {} -> {to}",
+                from.unwrap_or("None")
+            )));
         }
         previous = Some(to);
     }
     if previous != Some(status) {
-        return Err(RuntimeError::invalid(
-            "Transition history does not match status",
-        ));
+        return Err(invalid("transition history does not match status"));
     }
     let fingerprints = record["source_fingerprints"]
         .as_array()
-        .ok_or_else(|| RuntimeError::invalid("source_fingerprints must be a list"))?;
+        .ok_or_else(|| invalid("source_fingerprints must be a list"))?;
     for fingerprint in fingerprints {
-        strict_keys(fingerprint, &["path", "sha256"], &[])?;
-        if !fingerprint["path"].is_string()
-            || !valid_digest(fingerprint["sha256"].as_str().unwrap_or(""))
-        {
-            return Err(RuntimeError::invalid("Invalid source fingerprint"));
+        if !fingerprint.as_object().is_some_and(|entry| {
+            entry.len() == 2
+                && entry["path"].is_string()
+                && entry
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .is_some_and(valid_digest)
+        }) {
+            return Err(invalid("source_fingerprints does not match strict schema"));
         }
     }
     for key in ["conflicts", "supersedes"] {
@@ -326,19 +385,15 @@ pub fn validate_record(record: &Value, archived: bool) -> Result<()> {
             .iter()
             .any(|id| !is_uuid4(id))
         {
-            return Err(RuntimeError::invalid("Relationships must use UUIDv4 IDs"));
+            return Err(invalid("record relationships must use UUIDv4 IDs"));
         }
     }
     if !record["superseded_by"].is_null() && !record["superseded_by"].as_str().is_some_and(is_uuid4)
     {
-        return Err(RuntimeError::invalid(
-            "superseded_by must be null or UUIDv4",
-        ));
+        return Err(invalid("superseded_by must be null or UUIDv4"));
     }
     if archived && !is_terminal(kind, status) {
-        return Err(RuntimeError::invalid(
-            "Only terminal records may be archived",
-        ));
+        return Err(invalid("only terminal records may be archived"));
     }
     Ok(())
 }
@@ -351,8 +406,9 @@ pub(crate) fn valid_digest(value: &str) -> bool {
 }
 
 pub fn validate_handoff(record: &Value, task: Option<&Value>) -> Result<()> {
-    strict_keys(
+    keys(
         record,
+        "handoff",
         &[
             "schema_version",
             "id",
@@ -373,57 +429,77 @@ pub fn validate_handoff(record: &Value, task: Option<&Value>) -> Result<()> {
         ],
         &["phase"],
     )?;
-    if record["schema_version"].as_u64() != Some(1)
-        || record["type"] != "handoff"
-        || !["active", "closed"].contains(&string(record, "status")?)
+    if record["schema_version"].as_u64() != Some(1) {
+        return Err(invalid("unsupported handoff schema_version"));
+    }
+    if let Some(phase) = record.get("phase")
+        && !phase.as_str().is_some_and(|phase| PHASES.contains(&phase))
     {
-        return Err(RuntimeError::invalid("Invalid handoff schema/type/status"));
+        return Err(invalid(format!(
+            "phase must be one of: {}",
+            PHASES.join(", ")
+        )));
     }
-    for key in ["id", "task_id"] {
-        if !is_uuid4(string(record, key)?) {
-            return Err(RuntimeError::invalid("Handoff IDs must be UUIDv4"));
-        }
+    if !record["id"].as_str().is_some_and(is_uuid4)
+        || !record["task_id"].as_str().is_some_and(is_uuid4)
+    {
+        return Err(invalid("handoff and task IDs must be UUIDv4"));
     }
-    for key in ["task_revision", "revision"] {
-        if !record[key].as_u64().is_some_and(|n| n > 0) {
-            return Err(RuntimeError::invalid(
-                "Handoff revisions must be positive integers",
-            ));
-        }
+    let status = string(record, "status")?;
+    if record["type"] != "handoff" || !["active", "closed"].contains(&status) {
+        return Err(invalid("invalid handoff type or status"));
     }
-    for key in ["created_at", "updated_at"] {
-        if !valid_datetime(string(record, key)?) {
-            return Err(RuntimeError::invalid("Invalid handoff timestamp"));
-        }
+    if !record["privacy"]
+        .as_str()
+        .is_some_and(|privacy| PRIVACY.contains(&privacy))
+    {
+        return Err(invalid("invalid handoff privacy"));
     }
     for key in ["owner", "objective"] {
         string(record, key)?;
     }
+    if !record["current_state"].is_string() {
+        return Err(invalid("current_state must be text"));
+    }
+    for key in ["created_at", "updated_at"] {
+        timestamp(record, key)?;
+    }
+    for key in ["task_revision", "revision"] {
+        if !positive(record, key) {
+            return Err(invalid(format!("{key} must be a positive integer")));
+        }
+    }
     for key in ["next_actions", "files", "sources"] {
         string_list(record, key, false)?;
-    }
-    if !record["current_state"].is_string() || !PRIVACY.contains(&string(record, "privacy")?) {
-        return Err(RuntimeError::invalid("Invalid handoff state/privacy"));
-    }
-    if let Some(phase) = record.get("phase")
-        && !PHASES.contains(&phase.as_str().unwrap_or(""))
-    {
-        return Err(RuntimeError::invalid("Invalid handoff phase"));
     }
     if let Some(task) = task
         && (record["task_id"] != task["id"] || record["task_revision"] != task["revision"])
     {
-        return Err(RuntimeError::conflict("Handoff task binding is stale"));
+        return Err(RuntimeError::conflict("handoff task binding is stale"));
     }
     Ok(())
 }
 
+/// A record's frontmatter and body, refused in the retired parser's words.
 pub fn parse_markdown_record(text: &str) -> Result<(Value, String)> {
-    let split = memory_kernel_probe::split_frontmatter(text)
-        .map_err(|_| RuntimeError::invalid("Missing or invalid JSON frontmatter delimiters"))?;
-    let mut metadata: Value = super::json::parse(split.metadata_text)?;
+    let split = memory_kernel_probe::split_frontmatter(text).map_err(|refusal| {
+        invalid(match refusal {
+            memory_kernel_probe::Refusal::MissingOpening => "missing JSON frontmatter",
+            _ => "invalid JSON frontmatter",
+        })
+    })?;
+    let mut metadata: Value = super::json::parse(split.metadata_text).map_err(|_| {
+        // Python read a lone surrogate escape and refused the text it held.
+        if split.metadata_text.contains("\\u")
+            && crate::python_json::first_problem(split.metadata_text).is_none()
+        {
+            invalid("invalid Unicode metadata")
+        } else {
+            invalid("invalid JSON frontmatter")
+        }
+    })?;
     if !metadata.is_object() {
-        return Err(RuntimeError::invalid("Frontmatter must be an object"));
+        return Err(invalid("frontmatter must be an object"));
     }
     if metadata["phase"] == "execution" {
         metadata["phase"] = Value::String("implementation".into());

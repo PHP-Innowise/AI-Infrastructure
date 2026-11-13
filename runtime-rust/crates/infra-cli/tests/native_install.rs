@@ -1464,6 +1464,15 @@ fn schema_one_sync_preserves_client_guard_and_entire_old_runtime_until_review() 
                 .any(|entry| entry["path"] == ".claude/hooks/bash-validator.sh"),
             "{report}"
         );
+        // Every file it keeps back names the hook that holds the host and
+        // the way out, not only "unchanged host wiring".
+        assert!(
+            report["kept"].as_array().unwrap().iter().any(|entry| {
+                entry["reason"]
+                    == "held back by unchanged host wiring (.claude/settings.json): .claude/hooks/bash-validator.sh is edited in the project: move it aside or merge your change into the release, then sync again"
+            }),
+            "{report}"
+        );
     }
     assert_eq!(planned["status"], "planned");
     assert_eq!(applied["status"], "partial");

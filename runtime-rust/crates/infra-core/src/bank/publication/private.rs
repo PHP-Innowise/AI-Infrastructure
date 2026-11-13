@@ -600,6 +600,14 @@ impl PublicationFiles {
     /// closing an unrelated FD can discard a live SQLite connection's locks.
     /// The named chmod has a pre/post metadata identity boundary, like unlink;
     /// it is not an atomic compare-and-swap against a hostile same-user rename.
+    ///
+    /// Sessions keep writing the state while a launch walks it: SQLite
+    /// journals come and go and records are renamed into place. An entry that
+    /// is gone by the time it is looked at needs no protection, and one that a
+    /// writer replaced while nothing was being repaired is the next pass's to
+    /// examine. Walking on keeps one launch from failing for another
+    /// session's write; links, foreign owners and a replacement during a
+    /// repair are still refused.
     pub fn secure_private_tree(&mut self, relative: &str) -> Result<()> {
         match self.parent(&format!("{relative}/.private-tree-admission"), false) {
             Ok(_) => {}
@@ -616,7 +624,12 @@ impl PublicationFiles {
                     "Private state tree exceeds its depth boundary",
                 ));
             }
-            let (parent, _) = self.parent(&format!("{directory}/.private-tree-entry"), false)?;
+            let (parent, _) = match self.parent(&format!("{directory}/.private-tree-entry"), false)
+            {
+                Ok(value) => value,
+                Err(error) if error.kind == crate::ErrorKind::NotFound && depth > 0 => continue,
+                Err(error) => return Err(error),
+            };
             let before = native::identity(&parent)?.namespace;
             if !seen.insert((before.0, before.1)) {
                 return Err(RuntimeError::policy(
@@ -630,20 +643,42 @@ impl PublicationFiles {
                 // parent validates the entire component before the metadata call.
                 let path = format!("{directory}/{name}");
                 let (_, validated) = self.parent(&path, false)?;
-                let (is_directory, entry) = private_entry(&parent, &validated)?;
+                let (is_directory, entry) = match private_entry(&parent, &validated) {
+                    Ok(value) => value,
+                    Err(error) if error.kind == crate::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
                 if is_directory {
-                    self.secure_private_directory(&path, false)?;
-                    pending.push((path, depth + 1));
+                    match self.secure_private_directory(&path, false) {
+                        Ok(_) => pending.push((path, depth + 1)),
+                        Err(error) if error.kind == crate::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error),
+                    }
                 } else {
                     #[cfg(unix)]
-                    repair_private_entry(&parent, &validated, entry)?;
+                    let protected = repair_private_entry(&parent, &validated, entry);
                     #[cfg(not(unix))]
-                    self.secure_private_file(&path)?;
-                    let (after_directory, after) = private_entry(&parent, &validated)?;
-                    if after_directory
+                    let protected = self.secure_private_file(&path);
+                    match protected {
+                        Ok(()) => {}
+                        Err(error) if error.kind == crate::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error),
+                    }
+                    let (after_directory, after) = match private_entry(&parent, &validated) {
+                        Ok(value) => value,
+                        Err(error) if error.kind == crate::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error),
+                    };
+                    let replaced = after_directory
                         || (after.0, after.1, after.2 & 0o170000)
-                            != (entry.0, entry.1, entry.2 & 0o170000)
-                    {
+                            != (entry.0, entry.1, entry.2 & 0o170000);
+                    // A repair checks its own boundary and refuses a
+                    // replacement; without one, the replacement came after.
+                    #[cfg(unix)]
+                    let repaired = entry.2 & 0o077 != 0;
+                    #[cfg(not(unix))]
+                    let repaired = true;
+                    if replaced && repaired {
                         return Err(RuntimeError::conflict(
                             "Private state file changed during admission",
                         ));
@@ -690,6 +725,33 @@ impl PublicationFiles {
         }
         self.check()?;
         Ok(guard)
+    }
+
+    /// Hold an exclusive OS lock on one rooted lock file, created private when
+    /// absent, across threads and processes; dropping the file releases it.
+    /// Nothing is protected or written before the lock is held, so callers that
+    /// serialize on it never observe another holder's effects mid-check.
+    pub fn acquire_private_lock(&mut self, relative: &str) -> Result<File> {
+        let (parent, name) = self.parent(relative, false)?;
+        self.check()?;
+        let file = super::cursor::rooted_lock_file(&parent, &name)?;
+        let wanted = native::identity(&file)?;
+        if !file.metadata()?.is_file() || wanted.links != 1 {
+            return Err(RuntimeError::policy(
+                "Private lock must have one ordinary link",
+            ));
+        }
+        file.lock()?;
+        // A lock taken on a name that was replaced meanwhile excludes no one.
+        let named = native::identity(&native::file(&parent, &name, false)?)?;
+        if (named.namespace.0, named.namespace.1) != (wanted.namespace.0, wanted.namespace.1)
+            || named.links != 1
+        {
+            return Err(RuntimeError::conflict("Private lock changed while waiting"));
+        }
+        self.secure_private_file(relative)?;
+        self.check()?;
+        Ok(file)
     }
 }
 
@@ -826,6 +888,10 @@ fn private_entry(parent: &File, name: &str) -> Result<(bool, (u64, u64, u32))> {
     let value = entry_stat(parent, name)?;
     let directory = value.st_mode & libc::S_IFMT == libc::S_IFDIR;
     let regular = value.st_mode & libc::S_IFMT == libc::S_IFREG;
+    // Looked up just as a writer renamed another file over it or removed it.
+    if regular && value.st_nlink == 0 {
+        return Err(RuntimeError::not_found("Private state entry was removed"));
+    }
     if (!directory && !regular)
         || value.st_uid != unsafe { libc::geteuid() }
         || (regular && value.st_nlink != 1)
@@ -1021,6 +1087,44 @@ mod private_state_tests {
             .query_row("SELECT value FROM retained", [], |row| row.get(0))
             .unwrap();
         assert_eq!(retained, "unfinished data");
+    }
+    /// Custody checks compare change times, so a protection that changes no
+    /// mode must not move them: two launches protecting one already-private
+    /// state at once refused each other's files as changed.
+    #[test]
+    fn protecting_already_private_state_keeps_its_change_time() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let fixture = Fixture::new();
+        let directory = fixture.roots.state.join("project-brain/local");
+        let file = directory.join("custom.json");
+        std::fs::write(&file, b"{}").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let changed = |path: &std::path::Path| {
+            let image = std::fs::symlink_metadata(path).unwrap();
+            (image.ctime(), image.ctime_nsec(), image.mode() & 0o7777)
+        };
+        let (file_before, directory_before) = (changed(&file), changed(&directory));
+        assert_eq!((file_before.2, directory_before.2), (0o600, 0o700));
+        // Past any coarse filesystem clock tick, so a chmod would show.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut files = super::PublicationFiles::open_private_root(&fixture.roots.state).unwrap();
+        files
+            .secure_private_file("project-brain/local/custom.json")
+            .unwrap();
+        files
+            .secure_private_directory("project-brain/local", false)
+            .unwrap();
+        assert_eq!(changed(&file), file_before, "private file was re-chmodded");
+        assert_eq!(
+            changed(&directory),
+            directory_before,
+            "private directory was re-chmodded"
+        );
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        files
+            .secure_private_file("project-brain/local/custom.json")
+            .unwrap();
+        assert_eq!(changed(&file).2, 0o600, "a loose mode was not repaired");
     }
     #[test]
     fn metadata_only_file_admission_still_refuses_symlinks_and_hardlinks() {

@@ -150,9 +150,26 @@ fn reap(image: &Value) {
         pin.reap().expect("reap only the pinned adopted process");
     }
 }
+/// The kernel's task flag for a process inside `do_exit`: it never returns to
+/// user space, but `/proc` keeps its last scheduler state until the teardown
+/// ends and it becomes a zombie or disappears.
+const PF_EXITING: u64 = 0x4;
 fn stopped(image: &Value) {
     reap(image);
-    let observed = state_details(image);
+    let mut observed = state_details(image);
+    // A native process can still be inside its own exit when it is first
+    // looked at - CI and a local stress run saw `('R', 0x40040c)`, PF_EXITING
+    // set - and is gone or reaped a moment later. Only such a process gets a
+    // bounded wait; one that is not exiting fails at once, as before.
+    let until = Instant::now() + Duration::from_secs(2);
+    while observed
+        .is_some_and(|(state, flags)| state != 'Z' && state != 'X' && flags & PF_EXITING != 0)
+        && Instant::now() < until
+    {
+        std::thread::sleep(Duration::from_millis(5));
+        reap(image);
+        observed = state_details(image);
+    }
     assert!(
         !observed.is_some_and(|(state, _)| state != 'Z' && state != 'X'),
         "native process survived confirmed cleanup: {image}; state/flags: {observed:?}"

@@ -49,6 +49,20 @@ fn path(id: &str) -> Result<String> {
     }
     Ok(format!("project-brain/control/promotions/{id}.json"))
 }
+/// A stored proposal, refused as the retired runtime refused one it could
+/// not read: "Promotion not found or invalid: <ID>". An ID that is not a
+/// UUIDv4 names no stored proposal and is not looked up.
+fn stored_proposal(files: &mut PublicationFiles, id: &str) -> Result<(Vec<u8>, Value)> {
+    let missing = || RuntimeError::not_found(format!("Promotion not found or invalid: {id}"));
+    if !domain::is_uuid4(id) {
+        return Err(missing());
+    }
+    let raw = files
+        .read(&path(id)?, 2 * PLAN_LIMIT)?
+        .ok_or_else(missing)?;
+    let value = raw_json(&raw).map_err(|_| missing())?;
+    Ok((raw, value))
+}
 fn raw_json(bytes: &[u8]) -> Result<Value> {
     json::parse(
         std::str::from_utf8(bytes).map_err(|_| RuntimeError::invalid("Promotion is not UTF-8"))?,
@@ -332,10 +346,7 @@ pub fn review(
 ) -> Result<Value> {
     let _guard = service.brain()?.lock()?;
     let mut files = PublicationFiles::new(&service.context.roots.state)?;
-    let raw = files
-        .read(&path(id)?, 2 * PLAN_LIMIT)?
-        .ok_or_else(|| RuntimeError::not_found("Promotion not found"))?;
-    let mut value = raw_json(&raw)?;
+    let (raw, mut value) = stored_proposal(&mut files, id)?;
     validate(service, &value, Some(id))?;
     if value["status"] != "proposed" {
         return Err(RuntimeError::policy(
@@ -583,7 +594,9 @@ fn source_images(
         }
         if let Some(reason) = eligibility(service, record, proposal["review_mode"] == "automatic")?
         {
-            return Err(RuntimeError::policy(reason));
+            return Err(RuntimeError::policy(format!(
+                "Promotion source is not eligible: {reason}"
+            )));
         }
         if proposal["review_mode"] == "automatic"
             && let Some(reason) = provenance(record, proposal["content"].as_str().unwrap_or(""))?
@@ -1046,7 +1059,7 @@ fn resume(service: &BankService, proposal: &Value) -> Result<Value> {
         )?;
         if !errors.is_empty() {
             return Err(RuntimeError::invalid(format!(
-                "Promoted Bank publication failed validation: {}",
+                "Promoted Memory Bank publication failed validation: {}",
                 errors.join("; ")
             )));
         }
@@ -1073,10 +1086,7 @@ pub fn apply(service: &BankService, id: &str) -> Result<Value> {
     let _guard = service.brain()?.lock()?;
     list(service, true)?;
     let mut files = PublicationFiles::new(&service.context.roots.state)?;
-    let raw = files
-        .read(&path(id)?, 2 * PLAN_LIMIT)?
-        .ok_or_else(|| RuntimeError::not_found("Promotion not found"))?;
-    let mut proposal = raw_json(&raw)?;
+    let (raw, mut proposal) = stored_proposal(&mut files, id)?;
     validate(service, &proposal, Some(id))?;
     if proposal["status"] != "reviewed" {
         return Err(RuntimeError::policy(
@@ -1500,10 +1510,7 @@ fn obsolete(
 }
 fn withdraw(service: &BankService, id: &str, reason: &str) -> Result<Value> {
     let mut files = PublicationFiles::new(&service.context.roots.state)?;
-    let raw = files
-        .read(&path(id)?, 2 * PLAN_LIMIT)?
-        .ok_or_else(|| RuntimeError::not_found("Promotion not found"))?;
-    let mut proposal = raw_json(&raw)?;
+    let (_, mut proposal) = stored_proposal(&mut files, id)?;
     validate(service, &proposal, Some(id))?;
     if proposal["review_mode"] != "automatic"
         || !["proposed", "reviewed"].contains(&proposal["status"].as_str().unwrap_or(""))
@@ -1608,6 +1615,11 @@ fn save_retry(
     )?;
     crate::fs::atomic_json(&service.context.roots.state.join(path), value)
 }
+/// New promotion attempts one automatic run makes: at a turn boundary, after
+/// a saved result, for a resolved record and from `promote-auto`. The retired
+/// runtime made five everywhere, the rate every measured run saw; the rest
+/// waits for the next boundary.
+pub const AUTOMATIC_PROMOTION_LIMIT: usize = 5;
 fn empty_auto() -> Value {
     object!({"enabled":false,"promoted":[],"failed":[],"blocked":[],"closed":[],"skipped":0})
 }

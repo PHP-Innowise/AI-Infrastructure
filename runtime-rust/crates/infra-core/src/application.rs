@@ -35,6 +35,10 @@ pub struct RefreshRequest {
     pub delivery_profile: DeliveryProfile,
     pub cursor_continuation: bool,
     pub cursor_topic_eligible: bool,
+    /// The caller prints the capsule and records the printed render once its
+    /// write succeeds. Otherwise the JSON's `capsule_text` is what reaches
+    /// the model, and its render is recorded before the answer is built.
+    pub printed: bool,
 }
 #[derive(Clone, Debug)]
 pub struct MemoryService {
@@ -316,6 +320,27 @@ impl MemoryService {
         if let Some(r) = &mut request.capsule {
             let retrieval_started = Instant::now();
             let raw = r.query.clone();
+            // Whether a Cursor prompt only continues the conversation's topic,
+            // decided on the raw prompt before it is cleaned, as the retired
+            // runtime decided it: a redacted prompt is never a continuation,
+            // so redaction cannot turn a sensitive request into a topic lookup.
+            // Without this a bare "yes" or "давай" searched by itself and the
+            // re-sent rule lost the knowledge of the turn it answers.
+            let unchanged = r.sanitize
+                && domain::sanitize_automatic_query(&raw).is_ok_and(|cleaned| {
+                    cleaned == raw.trim_matches(|c: char| " \t\r\n,;".contains(c))
+                });
+            let cursor_continuation = request.cursor_continuation
+                || (unchanged
+                    && host == "cursor"
+                    && continuity::continuation(&raw, profile.persistent()));
+            let cursor_topic_eligible = request.cursor_topic_eligible
+                || (unchanged
+                    && profile.persistent()
+                    && raw.chars().count() <= 1024
+                    && !["do not continue", "не продолжай", "стоп", "stop"].contains(
+                        &query::folded(&raw).trim_matches(|c: char| " \t\r\n,.!?;".contains(c)),
+                    ));
             let mut query_source = "prompt".to_owned();
             r.refresh_index = false;
             r.entry_point = "refresh".into();
@@ -332,16 +357,31 @@ impl MemoryService {
             r.phase_seconds = phases.clone();
             r.history_text = Some(raw.clone());
             let attempt = (|| -> Result<Option<Capsule>> {
-                domain::guard_shared_text("Task Capsule", std::slice::from_ref(&raw))?;
+                // An automatic path cleans the prompt first, as the retired
+                // refresh replaced the prompt with its cleaned form: what is
+                // then guarded, searched and searched in history is the
+                // cleaned text. A prompt with an address, a number or a key
+                // in it keeps its memory; an explicit request is guarded as
+                // it was given.
                 if r.sanitize {
                     r.query = domain::sanitize_automatic_query(&raw)?;
                     r.sanitize = false;
+                    r.history_text = Some(r.query.clone());
                 }
-                if r.query.trim().is_empty() {
+                domain::guard_shared_text("Task Capsule", std::slice::from_ref(&r.query))?;
+                // Nothing left a search can use - a reply of "?" or an emoji -
+                // is withheld, not turned into a refusal in the prompt.
+                if !r.query.chars().any(|c| c.is_alphanumeric() || c == '_') {
                     withheld = true;
                     return Ok(None);
                 }
-                if request.cursor_continuation {
+                // The prompt is distilled to its informative terms; a
+                // continuation then asks with its topic or its task instead,
+                // undistilled, as the retired runtime did.
+                if warnings.is_empty() {
+                    r.query = query::distill_query(&store.conn, &r.query)?;
+                }
+                if cursor_continuation {
                     if profile.persistent() {
                         if let (Some(plan), Some(id)) = (&topic, &task_id)
                             && let Some((query, source)) =
@@ -353,15 +393,11 @@ impl MemoryService {
                     } else if self.context.mode == "governed"
                         && let Some(id) = &task_id
                         && let Some(uuid) = checkpoint::served_uuid(Some(store), &self.context, id)?
-                        && let Ok(task) =
-                            BrainRepository::new(self.context.clone())?.get_task(&uuid)
+                        && let Some((query, source)) = continuation_query(&self.context, id, &uuid)?
                     {
-                        r.query = query::build_capsule_query("", Some(&task))?;
-                        query_source = "continuation".into();
+                        r.query = query;
+                        query_source = source;
                     }
-                }
-                if warnings.is_empty() {
-                    r.query = query::distill_query(&store.conn, &r.query)?;
                 }
                 r.query_source = query_source.clone();
                 let c = if let Some(preparer) = preparer.take() {
@@ -397,10 +433,10 @@ impl MemoryService {
                     id,
                     plan,
                     &r.query,
-                    request.cursor_topic_eligible && capsule.is_some(),
+                    cursor_topic_eligible && capsule.is_some(),
                     &warnings,
                     query_source == "continuation",
-                    request.cursor_continuation,
+                    cursor_continuation,
                     selected,
                 );
             }
@@ -464,13 +500,24 @@ impl MemoryService {
         if let Some(review) = &review_stage {
             result["memory_review"] = object!(review);
         }
+        // The capsule as its render plan writes it, without the review notice:
+        // the render a trace records and the funnel diagnosis checks.
+        let mut delivered = None;
         if let Some(c) = &capsule {
-            let mut rendered = capsule::render(c, profile)?;
+            let plain = capsule::render(c, profile)?;
+            let mut rendered = plain.clone();
             if let Some(review) = &review_stage {
                 rendered.push('\n');
                 rendered.push_str(review);
             }
             result["capsule_text"] = object!(rendered);
+            if !request.printed {
+                // The answer carries this text to the model (a Cursor rule,
+                // Memory MCP, the Harness), so it is the emitter's render, as
+                // the retired runtime recorded it before answering.
+                crate::observability::record_render(&self.context, c, &plain, "capsule_text");
+            }
+            delivered = Some(plain);
         } else if profile.persistent() {
             result["capsule_text"] = object!(
                 "working: unavailable\nwarning: memory refresh incomplete; verify current canonical sources"
@@ -505,7 +552,7 @@ impl MemoryService {
                 }),
                 rendered,
             );
-            if let Some(rendered) = rendered {
+            if let Some(rendered) = &delivered {
                 let expected = object!({"sha256":query::sha256(rendered.as_bytes()),"bytes":rendered.len(),"form":"capsule_text"});
                 let (diagnosis, receipt) =
                     crate::observability::diagnose_with_receipt(&self.context, c, &expected);
@@ -518,8 +565,19 @@ impl MemoryService {
                     result["ordinary_receipt"] = receipt;
                 }
             }
-        } else if request.capsule.is_some() {
-            health["capsule"] = Value::Null;
+        } else {
+            if request.capsule.is_some() {
+                health["capsule"] = Value::Null;
+            }
+            // No capsule, nothing to observe: the record says so, as the
+            // retired one did, instead of reading as one whose diagnosis is
+            // missing.
+            let diagnosis = crate::observability::unknown_funnel_diagnosis();
+            health["funnel_diagnosis"] = diagnosis.clone();
+            result["funnel_diagnosis"] = diagnosis;
+            let receipt = crate::observability::unknown_ordinary_receipt();
+            health["ordinary_receipt"] = receipt.clone();
+            result["ordinary_receipt"] = receipt;
         }
         if !source_notices.is_empty() {
             health["source_notices"] = object!(source_notices);
@@ -566,6 +624,74 @@ impl MemoryService {
         }
         Ok(result)
     }
+    /// The capsule a hook asks for without a prompt, chosen as the retired
+    /// runtime chose it. Cursor's rule follows the conversation's current
+    /// topic first; then a lightweight task or a governed one (bound, or held
+    /// by the Brain before its first checkpoint) asks with its own state. A
+    /// branch with no task yet is never searched by its name: without a
+    /// change it has no context, and Cursor retires a stale rule on that
+    /// outcome; with one, it gets the warming notice alone.
+    fn hook_context(&self, request: &Value) -> Result<(HookContext, DeliveryProfile)> {
+        let mut store = self.open_recover(true)?;
+        let mut retrieval = request_retrieval(request)?;
+        let id = required(request, "task_id")?.to_string();
+        let profile = retrieval.delivery_profile;
+        retrieval.entry_point = "hook-context".into();
+        retrieval.limit = 3;
+        retrieval.ephemeral = true;
+        let mut chosen = None;
+        if profile.persistent() {
+            let plan = continuity::topic_begin(&store, &self.context, &id);
+            if let Some(found) = continuity::topic_query(&store, &self.context, &id, &plan) {
+                retrieval.allow_unprovisioned = true;
+                retrieval.automatic_links = true;
+                chosen = Some(found);
+            }
+        }
+        if chosen.is_none() {
+            let provisioned = if self.context.mode == "lightweight" {
+                store.working(&id)?.is_some()
+            } else {
+                checkpoint::served_uuid(Some(&store), &self.context, &id)?.is_some()
+            };
+            if provisioned {
+                if self.context.mode != "lightweight" {
+                    retrieval.allow_unprovisioned = store.binding(&id)?.is_none();
+                    retrieval.automatic_links = true;
+                }
+                chosen = Some(hook_query(&store, &self.context, &id)?);
+            }
+        }
+        let Some((query, source)) = chosen else {
+            let (files, excluded) = checkpoint::changed_paths(&self.context)?;
+            if files.is_empty() {
+                return Ok((HookContext::Nothing, profile));
+            }
+            let pending = store.pending_turns(&id)?.len();
+            return Ok((
+                HookContext::Capsule(Capsule::new(object!({
+                    "kind":"warming","task_id":id,"working":null,
+                    "procedural":[],"semantic":[],"episodic":[],
+                    "changed_files":files.len(),"excluded_files":excluded.len(),"pending_turns":pending,
+                    "warnings":["Governed task not provisioned yet; authoritative persistence starts at the 5-turn boundary."]
+                }))),
+                profile,
+            ));
+        };
+        retrieval.query = query;
+        retrieval.query_source = source;
+        let capsule = retrieval::retrieve(&mut store, &self.context, &retrieval)?;
+        let gate = &capsule.0["gate"];
+        if gate["mode"] == "enforce"
+            && gate["decision"] == "skip"
+            && !(profile.persistent()
+                && ["no-relevant-match", "empty-after-filter"]
+                    .contains(&gate["reason"].as_str().unwrap_or("")))
+        {
+            return Ok((HookContext::Withheld, profile));
+        }
+        Ok((HookContext::Capsule(capsule), profile))
+    }
     fn turn_direct(&self, request: TurnRequest) -> Result<Value> {
         let mut store = self.open_recover(true)?;
         checkpoint::run_turn(&mut store, &self.context, &request)
@@ -573,53 +699,41 @@ impl MemoryService {
     pub fn validate(&self) -> Result<Value> {
         let brain = BrainRepository::new(self.context.clone())?;
         let inventory = brain.inventory(true)?;
-        let mut errors = inventory
-            .problems
-            .iter()
-            .map(|problem| format!("{}: {}", problem.path.display(), problem.error))
-            .collect::<Vec<_>>();
-        errors.extend(BankService::new(self.context.clone()).validate()?);
-        let ids = inventory
-            .records
-            .iter()
-            .filter_map(|image| image.record["id"].as_str())
-            .collect::<std::collections::BTreeSet<_>>();
+        // The retired command's whole check: records against the schema and
+        // their lifecycle, path binding, stored secrets, relationships,
+        // handoffs (archived too), message journals, retrieval manifests,
+        // promotions and the deterministic indexes. A changed citation is
+        // listed below instead. Brain alone: the Memory Bank has its own
+        // validator (`bank validate`); a chunk past its review date made
+        // every session banner report the Brain invalid.
+        let errors = crate::bank::maintenance::repository_errors(
+            &BankService::new(self.context.clone()),
+            false,
+        )?;
+        // A record whose cited file changed is intact: retrieval serves it
+        // marked for checking. It is listed, archived ones too, and does not
+        // fail validation the way a broken record does.
+        let mut stale = Vec::new();
+        let mut states = Vec::new();
         for image in &inventory.records {
-            for field in ["conflicts", "supersedes"] {
-                for id in image.record[field]
-                    .as_array()
-                    .into_iter()
+            let mut record = image.record.clone();
+            if record.get("source_fingerprints").is_none() {
+                record["source_fingerprints"] = object!([]);
+            }
+            // A record whose freshness cannot be read is not listed.
+            if let Ok(false) = domain::sources_are_fresh(&self.context.roots, &record) {
+                let state = domain::citation_problem(&self.context.roots, &record)
+                    .ok()
                     .flatten()
-                    .filter_map(Value::as_str)
-                {
-                    if !ids.contains(id) {
-                        errors.push(format!(
-                            "{}: unknown {field} record {id}",
-                            image.path.display()
-                        ));
-                    }
-                }
+                    .unwrap_or("changed");
+                let path = image.path.display().to_string();
+                states.push(object!({"path":path,"state":state}));
+                stale.push(path);
             }
         }
-        let handoffs = self.context.roots.brain_root().join("control/handoffs");
-        if handoffs.is_dir() {
-            for entry in std::fs::read_dir(handoffs)? {
-                let path = entry?.path();
-                if path.extension().is_none_or(|extension| extension != "md") {
-                    continue;
-                }
-                let checked = (|| -> Result<()> {
-                    let (handoff, _) =
-                        domain::parse_markdown_record(&crate::fs::read_text(&path)?)?;
-                    let task = brain.get_task(handoff["task_id"].as_str().unwrap_or(""))?;
-                    domain::validate_handoff(&handoff, Some(&task))
-                })();
-                if let Err(error) = checked {
-                    errors.push(format!("{}: {error}", path.display()));
-                }
-            }
-        }
-        Ok(object!({"valid":errors.is_empty(),"records":inventory.records.len(),"errors":errors}))
+        Ok(
+            object!({"valid":errors.is_empty(),"records":inventory.records.len(),"errors":errors,"stale":stale,"stale_states":states}),
+        )
     }
     pub fn execute(&self, operation: &str, request: &Value, input: &[u8]) -> Result<Value> {
         let operation = operation.replace('_', "-");
@@ -666,7 +780,7 @@ impl MemoryService {
                 } else {
                     vec![]
                 };
-                Ok(object!({"documents":documents,"episodes":episodes}))
+                Ok(object!({"query":query,"documents":documents,"episodes":episodes}))
             }
             "context" | "retrieve" => {
                 let mut retrieval = request_retrieval(&request)?;
@@ -683,36 +797,30 @@ impl MemoryService {
                 }
             }
             "refresh" => self.refresh(request_refresh(&request)?),
-            "hook-context" => {
-                let mut store = self.open_recover(true)?;
-                let mut retrieval = request_retrieval(&request)?;
-                let id = required(&request, "task_id")?;
-                let (query, source) = hook_query(&store, &self.context, id)?;
-                retrieval.query = query;
-                retrieval.query_source = source;
-                retrieval.entry_point = "hook-context".into();
-                retrieval.allow_unprovisioned = true;
-                let capsule = retrieval::retrieve(&mut store, &self.context, &retrieval)?;
-                if flag(&request, "json") {
-                    Ok(capsule.0)
-                } else {
-                    Ok(envelope(
-                        capsule::render(&capsule, retrieval.delivery_profile)? + "\n",
-                        capsule.0,
-                        0,
-                    ))
+            "hook-context" => match self.hook_context(&request)? {
+                (HookContext::Capsule(capsule), profile) => {
+                    if flag(&request, "json") {
+                        Ok(capsule.0)
+                    } else {
+                        Ok(envelope(
+                            capsule::render(&capsule, profile)? + "\n",
+                            capsule.0,
+                            0,
+                        ))
+                    }
                 }
-            }
+                (HookContext::Nothing, _) => Ok(envelope(String::new(), Value::Null, 3)),
+                (HookContext::Withheld, _) => Ok(envelope(String::new(), Value::Null, 4)),
+            },
             "get" => {
                 let store = self.open()?;
+                let id = task()?;
                 if self.context.mode == "lightweight" {
-                    Ok(serde_json::to_value(store.working(task()?)?.ok_or_else(
-                        || RuntimeError::not_found("Working task not found"),
+                    Ok(serde_json::to_value(store.working(id)?.ok_or_else(
+                        || RuntimeError::not_found(format!("Working task not found: {id}")),
                     )?)?)
                 } else {
-                    let binding = store
-                        .binding(task()?)?
-                        .ok_or_else(|| RuntimeError::not_found("Working task not found"))?;
+                    let binding = store.binding(id)?.ok_or_else(|| unbound(id))?;
                     Ok(task_view(&brain.get_task(&binding.task_uuid)?))
                 }
             }
@@ -720,6 +828,13 @@ impl MemoryService {
                 let mut store = self.open()?;
                 let id = required(&request, "task_id")?;
                 let goal = required(&request, "goal")?;
+                {
+                    let files = list(&request, "files", "file")?;
+                    let sources = list(&request, "sources", "source")?;
+                    let mut values = vec![id, goal];
+                    values.extend(files.iter().chain(&sources).map(String::as_str));
+                    reject_secrets("working task", &values)?;
+                }
                 if self.context.mode == "lightweight" {
                     Ok(serde_json::to_value(store.start(storage::StartTask {
                         task_id: id.into(),
@@ -729,13 +844,37 @@ impl MemoryService {
                     })?)?)
                 } else {
                     let _guard = brain.lock()?;
-                    let record = brain.create_task(
+                    let files = list(&request, "files", "file")?;
+                    let sources = list(&request, "sources", "source")?;
+                    let record = match brain.create_task(
                         id,
                         goal,
-                        list(&request, "files", "file")?,
-                        list(&request, "sources", "source")?,
+                        files.clone(),
+                        sources.clone(),
                         "team",
-                    )?;
+                    ) {
+                        // A finished task keeps its ID in dynamic/ until
+                        // compaction archives it; that record, and no other,
+                        // is archived now, as the retired start did.
+                        Err(error)
+                            if error
+                                .message
+                                .starts_with("Project Brain record already exists") =>
+                        {
+                            if !finished_records_only(&brain, id)? {
+                                // Agents ran start at the top of every
+                                // session, and the refusal said nothing of
+                                // what to run instead.
+                                return Err(RuntimeError::conflict(format!(
+                                    "{}; it is the task under way: memory-bank/bin/infra-engine memory get --task-id {id} reads it, and update --task-id {id} --revision auto records progress",
+                                    error.message
+                                )));
+                            }
+                            bank.compact(Some(id))?;
+                            brain.create_task(id, goal, files, sources, "team")?
+                        }
+                        created => created?,
+                    };
                     if let Err(error) = store.bind(
                         id,
                         record["id"].as_str().unwrap_or(""),
@@ -753,7 +892,10 @@ impl MemoryService {
                     &mut store,
                     &self.context,
                     task()?,
-                    text(&request, "record_id").or(text(&request, "task_uuid")),
+                    // `--record` on the command line, `record_id` from Memory MCP.
+                    text(&request, "record")
+                        .or(text(&request, "record_id"))
+                        .or(text(&request, "task_uuid")),
                 )
             }
             "update" => self.update(&request),
@@ -763,9 +905,7 @@ impl MemoryService {
                 if self.context.mode == "lightweight" {
                     store.clear(id)?;
                 } else {
-                    let binding = store
-                        .binding(id)?
-                        .ok_or_else(|| RuntimeError::not_found("Working task not found"))?;
+                    let binding = store.binding(id)?.ok_or_else(|| unbound(id))?;
                     let snapshot = brain.snapshot_record(&binding.task_uuid)?;
                     brain.cancel_task(&binding.task_uuid)?;
                     if let Err(error) = store.remove_binding(&binding.external_id) {
@@ -776,6 +916,19 @@ impl MemoryService {
                 Ok(object!({"task_id":id}))
             }
             "complete" => self.complete(&request),
+            // A standalone completed-work episode in local SQLite, in either
+            // mode: no Brain record, handoff or promotion (docs/OPERATIONS.md).
+            "record" => {
+                let mut store = self.open()?;
+                let episode = store.record_episode(storage::EpisodeInput {
+                    summary: required(&request, "summary")?.into(),
+                    outcome: required(&request, "outcome")?.into(),
+                    files: list(&request, "files", "file")?,
+                    verification: list(&request, "verification", "verification")?,
+                    sources: list(&request, "sources", "source")?,
+                })?;
+                Ok(object!({"episode_id":episode}))
+            }
             "turn" => {
                 let request = TurnRequest {
                     task_id: task()?.into(),
@@ -868,12 +1021,27 @@ impl MemoryService {
                         &mut tasks,
                     )?
                 };
+                let cursor = matches!(host, crate::Host::Cursor);
+                if operation == "native-prompt" && cursor && value["warning"].is_string() {
+                    // Cursor's hook answers in JSON only, so its rule is where
+                    // the notice goes: the next capsule's last-turn line says
+                    // the previous result was not saved completely, as the
+                    // retired runtime wrote it. Claude Code's and Codex's hooks
+                    // print the warning line themselves.
+                    let mut report = crate::advisory::load_last_turn(&self.context)
+                        .unwrap_or_else(|| object!({"schema_version":1}));
+                    report["timestamp"] = object!(domain::utc_now());
+                    report["task_id"] = object!(task()?);
+                    report["native_capture_incomplete"] = object!(true);
+                    crate::advisory::write_last_turn(&self.context, &report);
+                }
                 if flag(&request, "json") {
                     Ok(value)
                 } else {
                     let stdout = if operation == "native-prompt" {
                         value["warning"]
                             .as_str()
+                            .filter(|_| !cursor)
                             .map(|warning| format!("{warning}\n"))
                             .unwrap_or_default()
                     } else if value.as_object().is_some_and(|object| !object.is_empty()) {
@@ -894,8 +1062,24 @@ impl MemoryService {
                         token: required(&request, "token")?.into(),
                         data: if flag(&request, "skip") {
                             Value::Null
+                        } else if let Some(value) = request
+                            .get("request")
+                            .or_else(|| request.get("data"))
+                            .filter(|value| value.is_object())
+                        {
+                            value.clone()
                         } else {
-                            payload(&request, input)?
+                            // The save's own input: a refusal here never reaches
+                            // the save, so it is journaled here, as before.
+                            let raw = match text(&request, "input").filter(|path| *path != "-") {
+                                Some(path) => crate::result_store::read_bounded(
+                                    Path::new(path),
+                                    crate::native::MAX_INPUT + 1,
+                                )?
+                                .ok_or_else(|| RuntimeError::not_found("Input is unavailable"))?,
+                                None => input.to_vec(),
+                            };
+                            native.read_input(&raw, Some(required(&request, "request")?))?
                         },
                         skip: flag(&request, "skip"),
                         spooled: false,
@@ -906,6 +1090,19 @@ impl MemoryService {
             "brain-get" => brain.get(id()?),
             "brain-create" => {
                 let kind = required(&request, "type")?;
+                {
+                    let lists = ["files", "sources", "conflicts"]
+                        .into_iter()
+                        .zip(["file", "source", "conflict"])
+                        .map(|(key, alias)| list(&request, key, alias))
+                        .collect::<Result<Vec<_>>>()?;
+                    let mut values = vec![
+                        required(&request, "external_id")?,
+                        required(&request, "title")?.trim(),
+                    ];
+                    values.extend(lists.iter().flatten().map(String::as_str));
+                    reject_secrets("Brain record", &values)?;
+                }
                 let authority = text(&request, "authority").unwrap_or("observed");
                 brain.create(crate::CreateRecord {
                     record_type: kind.into(),
@@ -927,6 +1124,35 @@ impl MemoryService {
                 })
             }
             "brain-update" => {
+                let progress = text(&request, "progress").map(str::trim);
+                if progress == Some("") {
+                    return Err(RuntimeError::invalid("Record progress must not be empty"));
+                }
+                if progress.is_none()
+                    && list(&request, "next_steps", "next_step")?.is_empty()
+                    && list(&request, "files", "file")?.is_empty()
+                    && list(&request, "sources", "source")?.is_empty()
+                    && list(&request, "conflicts", "conflict")?.is_empty()
+                    && ["transition", "phase", "authority"]
+                        .iter()
+                        .all(|key| text(&request, key).is_none())
+                    && !flag(&request, "reverify")
+                    && !flag(&request, "replace_next_steps")
+                {
+                    return Err(RuntimeError::invalid(
+                        "Brain record update requires a changed field",
+                    ));
+                }
+                {
+                    let lists = ["next_steps", "files", "sources", "conflicts"]
+                        .into_iter()
+                        .zip(["next_step", "file", "source", "conflict"])
+                        .map(|(key, alias)| list(&request, key, alias))
+                        .collect::<Result<Vec<_>>>()?;
+                    let mut values = progress.into_iter().collect::<Vec<_>>();
+                    values.extend(lists.iter().flatten().map(String::as_str));
+                    reject_secrets("Brain record", &values)?;
+                }
                 let record = brain.get(id()?)?;
                 let verifying =
                     text(&request, "authority") == Some("verified") || flag(&request, "reverify");
@@ -1016,7 +1242,11 @@ impl MemoryService {
                 !flag(&request, "reject"),
             ),
             "promote-apply" => bank.apply(required(&request, "promotion_id")?),
-            "promote-auto" => bank.auto_promote(10, None, None),
+            "promote-auto" => bank.auto_promote(
+                crate::bank::promotion::AUTOMATIC_PROMOTION_LIMIT,
+                None,
+                None,
+            ),
             "export" => bank.export(
                 Path::new(required(&request, "destination")?),
                 flag(&request, "include_archive"),
@@ -1024,6 +1254,12 @@ impl MemoryService {
                 flag(&request, "force"),
             ),
             "msg-send" => {
+                {
+                    let refs = list(&request, "refs", "ref")?;
+                    let mut values = vec![text(&request, "body").unwrap_or("")];
+                    values.extend(refs.iter().map(String::as_str));
+                    reject_secrets("message", &values)?;
+                }
                 let task = TaskService::new(self.context.clone(), None).task(task()?, true)?;
                 brain.append_message(
                     task["id"].as_str().unwrap_or(""),
@@ -1031,7 +1267,14 @@ impl MemoryService {
                         from_actor: required(&request, "from_actor")?.into(),
                         to_actor: required(&request, "to_actor")?.into(),
                         message_type: required(&request, "type")?.into(),
-                        body: required(&request, "body")?.into(),
+                        body: text(&request, "body")
+                            .filter(|body| !body.trim().is_empty())
+                            .ok_or_else(|| {
+                                RuntimeError::invalid(
+                                    "Message body must not be empty (--body or --body-file)",
+                                )
+                            })?
+                            .into(),
                         refs: list(&request, "refs", "ref")?,
                         capsule_digest: text(&request, "capsule_digest").map(String::from),
                     },
@@ -1044,7 +1287,9 @@ impl MemoryService {
                 text(&request, "type")
             )?)),
             "context-save" => HandoffService::new(self.context.clone()).save(crate::SaveHandoff {
-                input: payload(&request, input)?,
+                input: payload(&request, input).map_err(|_| {
+                    RuntimeError::invalid("handoff input must contain one JSON object")
+                })?,
                 output: PathBuf::from(required(&request, "output")?),
                 detail: required(&request, "detail")?.into(),
                 topic: text(&request, "topic").map(String::from),
@@ -1082,9 +1327,39 @@ impl MemoryService {
     }
     fn update(&self, request: &Value) -> Result<Value> {
         let id = required(request, "task_id")?;
+        // An update that changes nothing, or blanks the progress, is refused
+        // as the retired command refused it: it consumed a revision, and an
+        // empty progress erased the task's.
+        let progress = text(request, "progress");
+        if progress.is_none()
+            && list(request, "next_steps", "next_step")?.is_empty()
+            && list(request, "files", "file")?.is_empty()
+            && list(request, "sources", "source")?.is_empty()
+            && text(request, "phase").is_none()
+            && !flag(request, "replace_next_steps")
+        {
+            return Err(RuntimeError::invalid(
+                "Working task update requires a changed field",
+            ));
+        }
+        if progress.is_some_and(|progress| progress.trim().is_empty()) {
+            return Err(RuntimeError::invalid(
+                "Working task progress must not be empty",
+            ));
+        }
+        {
+            let lists = ["next_steps", "files", "sources"]
+                .into_iter()
+                .zip(["next_step", "file", "source"])
+                .map(|(key, alias)| list(request, key, alias))
+                .collect::<Result<Vec<_>>>()?;
+            let mut values = progress.into_iter().collect::<Vec<_>>();
+            values.extend(lists.iter().flatten().map(String::as_str));
+            reject_secrets("working task", &values)?;
+        }
         let update = storage::UpdateTask {
             task_id: id.into(),
-            progress: text(request, "progress").map(String::from),
+            progress: progress.map(|progress| progress.trim().to_string()),
             next_steps: list(request, "next_steps", "next_step")?,
             files: list(request, "files", "file")?,
             sources: list(request, "sources", "source")?,
@@ -1112,9 +1387,7 @@ impl MemoryService {
         if self.context.mode == "lightweight" {
             return Ok(serde_json::to_value(store.update(update)?)?);
         }
-        let binding = store
-            .binding(id)?
-            .ok_or_else(|| RuntimeError::not_found("Working task not found"))?;
+        let binding = store.binding(id)?.ok_or_else(|| unbound(id))?;
         let brain = BrainRepository::new(self.context.clone())?;
         let _guard = brain.lock()?;
         let record = brain.get_task(&binding.task_uuid)?;
@@ -1152,24 +1425,56 @@ impl MemoryService {
         let id = required(request, "task_id")?;
         let outcome = required(request, "outcome")?;
         if self.context.mode == "lightweight" {
+            let files = list(request, "files", "file")?;
+            let verification = list(request, "verification", "verification")?;
+            let sources = list(request, "sources", "source")?;
+            let mut values = vec![text(request, "summary").unwrap_or(""), outcome];
+            values.extend(
+                files
+                    .iter()
+                    .chain(&verification)
+                    .chain(&sources)
+                    .map(String::as_str),
+            );
+            reject_secrets("episode", &values)?;
             return Ok(
-                object!({"episode_id":store.complete(storage::CompleteTask{task_id:id.into(),summary:text(request,"summary").map(String::from),outcome:outcome.into(),files:list(request,"files","file")?,verification:list(request,"verification","verification")?,sources:list(request,"sources","source")?})?}),
+                object!({"episode_id":store.complete(storage::CompleteTask{task_id:id.into(),summary:text(request,"summary").map(String::from),outcome:outcome.into(),files,verification,sources})?}),
             );
         }
         let revision = request["revision"]
             .as_u64()
             .filter(|revision| *revision > 0)
             .ok_or_else(|| {
-                RuntimeError::invalid("Governed completion requires the current numeric --revision")
+                // Ending a task pins the revision a person or agent read;
+                // agents passed `auto`, so say where the number is.
+                RuntimeError::invalid(format!(
+                    "Governed completion requires the current numeric --revision; memory-bank/bin/infra-engine memory get --task-id {id} shows it"
+                ))
             })?;
-        let binding = store
-            .binding(id)?
-            .ok_or_else(|| RuntimeError::not_found("Working task not found"))?;
+        let binding = store.binding(id)?.ok_or_else(|| unbound(id))?;
         let brain = BrainRepository::new(self.context.clone())?;
         let _guard = brain.lock()?;
         let before = brain.get_task(&binding.task_uuid)?;
         let snapshot = brain.snapshot_record(&binding.task_uuid)?;
         let verification = list(request, "verification", "verification")?;
+        // The episode is checked before the task closes, as the retired
+        // completion recorded it first.
+        {
+            let files = list(request, "files", "file")?;
+            let sources = list(request, "sources", "source")?;
+            let mut values = vec![
+                text(request, "summary").unwrap_or(before["goal"].as_str().unwrap_or("")),
+                outcome,
+            ];
+            values.extend(
+                files
+                    .iter()
+                    .chain(&verification)
+                    .chain(&sources)
+                    .map(String::as_str),
+            );
+            reject_secrets("episode", &values)?;
+        }
         let task = brain.close_task(&binding.task_uuid, outcome, &verification, Some(revision))?;
         let episode = storage::EpisodeInput {
             summary: text(request, "summary")
@@ -1233,7 +1538,7 @@ impl MemoryService {
             })
             .ok();
         Ok(
-            object!({"episode_id":episode_id,"task_id":id,"task_uuid":task["id"],"revision":task["revision"],"event_id":event.and_then(|record|record["id"].as_str().map(String::from))}),
+            object!({"episode_id":episode_id,"task_id":id,"task_uuid":task["id"],"revision":task["revision"],"status":task["status"],"event_id":event.and_then(|record|record["id"].as_str().map(String::from))}),
         )
     }
     fn links(&self, request: &Value) -> Result<Value> {
@@ -1324,9 +1629,7 @@ impl MemoryService {
             )?);
         }
         let id = required(request, "task_id")?;
-        let binding = store
-            .binding(id)?
-            .ok_or_else(|| RuntimeError::not_found("Working task not found"))?;
+        let binding = store.binding(id)?.ok_or_else(|| unbound(id))?;
         let brain = BrainRepository::new(self.context.clone())?;
         let _guard = brain.lock()?;
         let record = brain.get_task(&binding.task_uuid)?;
@@ -1357,12 +1660,10 @@ impl MemoryService {
         Ok(task_view(&updated))
     }
 }
+/// A governed task as `get`, `start`, `update` and `rebind` show it: its
+/// status and phase (null when undeclared), and Project Brain as its authority.
 pub fn task_view(record: &Value) -> Value {
-    let mut value = object!({"task_id":record["external_id"],"task_uuid":record["id"],"revision":record["revision"],"goal":record["goal"],"progress":record["progress"],"auto_checkpoint":record.get("auto_checkpoint").cloned().unwrap_or(object!("")),"next_steps":record["next_steps"],"files":record["files"],"sources":record["sources"],"created_at":record["created_at"],"updated_at":record["updated_at"]});
-    if let Some(phase) = record.get("phase") {
-        value["phase"] = phase.clone();
-    }
-    value
+    object!({"task_id":record["external_id"],"phase":record.get("phase").cloned().unwrap_or(Value::Null),"task_uuid":record["id"],"revision":record["revision"],"status":record["status"],"goal":record["goal"],"progress":record["progress"],"auto_checkpoint":record.get("auto_checkpoint").cloned().unwrap_or(Value::Null),"next_steps":record["next_steps"],"files":record["files"],"sources":record["sources"],"created_at":record["created_at"],"updated_at":record["updated_at"],"authority":"project-brain"})
 }
 pub fn text<'a>(request: &'a Value, key: &str) -> Option<&'a str> {
     request.get(key).and_then(Value::as_str)
@@ -1432,6 +1733,39 @@ fn update_expected(request: &Value, record: &Value) -> Result<Option<u64>> {
         expected(request, record)
     }
 }
+/// A credential in what a command was given is refused before anything is
+/// written, under the name of what would have held it, as the retired
+/// commands refused it: "possible AWS access key detected; working task not
+/// stored". Personal data is left to the record's own guard.
+fn reject_secrets(label: &str, values: &[&str]) -> Result<()> {
+    if let Some(found) = domain::secret_label(&values.join("\n"))? {
+        return Err(RuntimeError::policy(format!(
+            "possible {found} detected; {label} not stored"
+        )));
+    }
+    Ok(())
+}
+/// Whether every record naming `task_id` is a finished task, so a new task
+/// of that name may move them to the archive. A record that cannot be read
+/// and claims the name keeps it.
+fn finished_records_only(brain: &BrainRepository, task_id: &str) -> Result<bool> {
+    let inventory = brain.inventory(false)?;
+    if inventory.problems.iter().any(|problem| {
+        problem.id.as_deref() == Some(task_id) || problem.external_id.as_deref() == Some(task_id)
+    }) {
+        return Ok(false);
+    }
+    let named = inventory
+        .records
+        .iter()
+        .filter(|image| image.record["id"] == task_id || image.record["external_id"] == task_id)
+        .collect::<Vec<_>>();
+    Ok(!named.is_empty()
+        && named.iter().all(|image| {
+            image.record["type"] == "task"
+                && domain::is_terminal("task", image.record["status"].as_str().unwrap_or(""))
+        }))
+}
 fn promote_on_resolution(bank: &BankService, record: &Value) -> Option<Value> {
     if record["authority"] != "verified"
         || !matches!(
@@ -1446,11 +1780,15 @@ fn promote_on_resolution(bank: &BankService, record: &Value) -> Option<Value> {
     let id = record["id"].as_str()?.to_string();
     let only = [id.clone()];
     Some(
-        bank.auto_promote(10, None, Some(&only))
-            .unwrap_or_else(|error| {
-                object!({"enabled":true,"promoted":[],"blocked":[],"skipped":0,
+        bank.auto_promote(
+            crate::bank::promotion::AUTOMATIC_PROMOTION_LIMIT,
+            None,
+            Some(&only),
+        )
+        .unwrap_or_else(|error| {
+            object!({"enabled":true,"promoted":[],"blocked":[],"skipped":0,
             "failed":[{"record_id":id,"reason":error.to_string()}]})
-            }),
+        }),
     )
 }
 fn payload(request: &Value, input: &[u8]) -> Result<Value> {
@@ -1461,13 +1799,22 @@ fn payload(request: &Value, input: &[u8]) -> Result<Value> {
     {
         return Ok(value.clone());
     }
-    if let Some(path) = text(request, "input").filter(|path| *path != "-") {
+    let parsed = if let Some(path) = text(request, "input").filter(|path| *path != "-") {
         let bytes = crate::result_store::read_bounded(Path::new(path), 1024 * 1024)?
             .ok_or_else(|| RuntimeError::not_found("Input is unavailable"))?;
         crate::results::strict_input(&bytes)
     } else {
         crate::results::strict_input(input)
-    }
+    };
+    // Worded as the retired command refused text that was no JSON.
+    parsed.map_err(|_| RuntimeError::invalid("The result must be a JSON object"))
+}
+/// The refusal agents met most often in the retired runtime, which says how a
+/// task comes to be bound in this checkout.
+fn unbound(id: &str) -> RuntimeError {
+    RuntimeError::not_found(format!(
+        "Working task not found: {id}; start records it (so does the first checkpoint), and rebind --task-id {id} binds one recorded on another machine"
+    ))
 }
 pub fn envelope(stdout: String, result: Value, code: i32) -> Value {
     object!({"_cli":{"stdout":stdout,"stderr":"","code":code},"result":result})
@@ -1509,18 +1856,89 @@ fn hook_query(store: &Store, context: &RuntimeContext, id: &str) -> Result<(Stri
     if context.mode == "lightweight" {
         if let Some(task) = store.working(id)? {
             return Ok((
-                query::build_capsule_query(id, Some(&serde_json::to_value(task)?))?,
+                query::build_capsule_query("", Some(&serde_json::to_value(task)?))?,
                 "task".into(),
             ));
         }
-    } else if let Some(uuid) = checkpoint::served_uuid(Some(store), context, id)? {
-        let task = BrainRepository::new(context.clone())?.get_task(&uuid)?;
-        let config = RuntimeConfig::load(&context.roots)?;
-        if index::record_eligibility(context, &config, &task)?.is_none() {
-            return Ok((query::build_capsule_query(id, Some(&task))?, "task".into()));
-        }
+    } else if let Some(uuid) = checkpoint::served_uuid(Some(store), context, id)?
+        && let Some(found) = governed_hook_query(context, id, &uuid)?
+    {
+        return Ok(found);
     }
     Ok((id.into(), "task-id".into()))
+}
+/// A governed task's own state, as the retired hook asked with it: the goal
+/// unless it is the auto-provisioned one (the branch slug re-cased, noise
+/// under another name), the manual progress note, next steps and files. With
+/// nothing substantive left, or a task that cannot be read, the bare
+/// identifier asks instead.
+fn governed_hook_query(
+    context: &RuntimeContext,
+    id: &str,
+    uuid: &str,
+) -> Result<Option<(String, String)>> {
+    match readable_task(context, uuid)? {
+        Some(task) => task_hook_query(context, id, &task),
+        None => Ok(None),
+    }
+}
+fn readable_task(context: &RuntimeContext, uuid: &str) -> Result<Option<Value>> {
+    match BrainRepository::new(context.clone())?.get_task(uuid) {
+        Ok(task) => Ok(Some(task)),
+        Err(error) if error.code.as_deref() == Some("source-git") => Err(error),
+        Err(_) => Ok(None),
+    }
+}
+/// A governed continuation of a Cursor prompt asks with the current task, as
+/// the retired runtime did: an explicit goal alone (incidental progress and
+/// next-step words would dilute it below relevance), otherwise the task's
+/// state. A terminal or empty task leaves the prompt's own query.
+fn continuation_query(
+    context: &RuntimeContext,
+    id: &str,
+    uuid: &str,
+) -> Result<Option<(String, String)>> {
+    let Some(mut task) = readable_task(context, uuid)? else {
+        return Ok(None);
+    };
+    if domain::is_terminal("task", task["status"].as_str().unwrap_or("")) {
+        return Ok(None);
+    }
+    if task["goal"]
+        .as_str()
+        .is_some_and(|goal| !goal.trim().is_empty() && goal != storage::derive_goal(id))
+    {
+        task["progress"] = object!("");
+        task["next_steps"] = object!([]);
+        task["files"] = object!([]);
+    }
+    task_hook_query(context, id, &task)
+}
+fn task_hook_query(
+    context: &RuntimeContext,
+    id: &str,
+    task: &Value,
+) -> Result<Option<(String, String)>> {
+    let config = RuntimeConfig::load(&context.roots)?;
+    if index::record_eligibility(context, &config, task)?.is_some() {
+        return Ok(None);
+    }
+    let goal = task["goal"]
+        .as_str()
+        .filter(|goal| *goal != storage::derive_goal(id))
+        .unwrap_or("");
+    let listed = |field: &str| task[field].as_array().cloned().unwrap_or_default();
+    let working = object!({"goal":goal,"progress":task["progress"].as_str().unwrap_or(""),"next_steps":listed("next_steps"),"files":listed("files")});
+    let substantive = !goal.is_empty()
+        || !working["progress"].as_str().unwrap_or("").is_empty()
+        || !listed("next_steps").is_empty()
+        || !listed("files").is_empty();
+    if !substantive {
+        return Ok(None);
+    }
+    Ok(query::build_capsule_query(id, Some(&working))
+        .ok()
+        .map(|query| (query, "task".into())))
 }
 fn codebase_status(store: &Store, context: &RuntimeContext) -> Result<Value> {
     let rows = (|| -> std::result::Result<Vec<String>, rusqlite::Error> {
@@ -1587,6 +2005,7 @@ pub fn request_refresh(request: &Value) -> Result<RefreshRequest> {
             .unwrap_or_default(),
         cursor_continuation: flag(request, "cursor_continuation"),
         cursor_topic_eligible: flag(request, "cursor_topic_eligible"),
+        printed: false,
     })
 }
 fn refresh_capsule_shape(
@@ -1609,6 +2028,14 @@ pub struct RefreshOutcome {
     pub profile: DeliveryProfile,
 }
 
+/// What a hook-context request delivers.
+enum HookContext {
+    Capsule(Capsule),
+    /// A valid branch with no task and no change has no context (exit 3).
+    Nothing,
+    /// An enforced gate skipped the turn; the host keeps what it has (exit 4).
+    Withheld,
+}
 /// stdout=None delegates ordinary value formatting to the CLI. A captured
 /// raw protocol may intentionally supply Some("") and still succeed.
 pub struct CommandOutput {
@@ -1683,7 +2110,9 @@ impl MemoryService {
             });
         }
         if operation == "refresh" {
-            let outcome = self.refresh_output(request_refresh(request)?)?;
+            let mut refresh = request_refresh(request)?;
+            refresh.printed = !flag(request, "json");
+            let outcome = self.refresh_output(refresh)?;
             if outcome.value["native_continuation"] == true {
                 return Ok(CommandOutput {
                     value: Value::Null,
@@ -1720,20 +2149,22 @@ impl MemoryService {
                     );
                 }
                 "hook-context" => {
-                    let mut store = self.open_recover(true)?;
-                    let mut retrieval = request_retrieval(request)?;
-                    let id = required(request, "task_id")?;
-                    let (query, source) = hook_query(&store, &self.context, id)?;
-                    retrieval.query = query;
-                    retrieval.query_source = source;
-                    retrieval.entry_point = "hook-context".into();
-                    retrieval.allow_unprovisioned = true;
-                    let capsule = retrieval::retrieve(&mut store, &self.context, &retrieval)?;
-                    return CommandOutput::capsule(
-                        &self.context,
-                        capsule,
-                        retrieval.delivery_profile,
-                    );
+                    return match self.hook_context(request)? {
+                        (HookContext::Capsule(capsule), profile) => {
+                            CommandOutput::capsule(&self.context, capsule, profile)
+                        }
+                        (outcome, _) => Ok(CommandOutput {
+                            value: Value::Null,
+                            stdout: Some(String::new()),
+                            stderr: String::new(),
+                            code: if matches!(outcome, HookContext::Nothing) {
+                                3
+                            } else {
+                                4
+                            },
+                            after_delivery: None,
+                        }),
+                    };
                 }
                 _ => {}
             }

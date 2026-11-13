@@ -78,10 +78,17 @@ pub fn index_errors(service: &BankService) -> Result<Vec<String>> {
                 continue;
             }
         };
-        match json::parse(&raw){
-            Ok(actual)if actual!=wanted=>errors.push(format!("{shown}: deterministic index is stale or non-canonical. {REMEDY}")),
-            Ok(_)=>{},
-            Err(error)=>errors.push(format!("{shown}: deterministic index is not valid JSON ({error}); a merge can leave conflict markers in it. {REMEDY}"))
+        match json::parse(&raw) {
+            Ok(actual) if actual != wanted => errors.push(format!(
+                "{shown}: deterministic index is stale or non-canonical. {REMEDY}"
+            )),
+            Ok(_) => {}
+            Err(error) => {
+                // Python's own reading of the text: where it stopped, and why.
+                let reason =
+                    crate::python_json::decode_error(&raw).unwrap_or_else(|| error.to_string());
+                errors.push(format!("{shown}: deterministic index is not valid JSON ({reason}); a merge can leave conflict markers in it. {REMEDY}"))
+            }
         }
     }
     Ok(errors)
@@ -320,6 +327,9 @@ fn check_promotions(service: &BankService, errors: &mut Vec<String>) -> Result<(
     )? {
         let result = (|| -> Result<()> {
             let proposal = json::parse(&fs::read_text(&path)?)?;
+            if !proposal.is_object() {
+                return Err(RuntimeError::invalid("promotion must be an object"));
+            }
             let id = path
                 .file_stem()
                 .and_then(|name| name.to_str())

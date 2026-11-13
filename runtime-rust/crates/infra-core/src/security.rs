@@ -456,6 +456,12 @@ pub(crate) fn secure_private_handle(file: &std::fs::File, directory: bool) -> Re
     } else {
         metadata.mode() & 0o700
     };
+    // A chmod to the mode the object already has still moves its change time,
+    // and custody checks compare that time: two launches protecting one
+    // already-private state at once refused each other's files as changed.
+    if metadata.mode() & 0o7777 == mode {
+        return Ok(());
+    }
     if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } != 0 {
         return Err(denied());
     }

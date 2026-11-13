@@ -1302,6 +1302,12 @@
           "--json"
         ],
         "action": "store_true"
+      },
+      {
+        "flags": [
+          "--entered"
+        ],
+        "action": "store_true"
       }
     ]
   },
@@ -1430,6 +1436,12 @@
       {
         "flags": [
           "--reason"
+        ],
+        "required": true
+      },
+      {
+        "flags": [
+          "--prepared-scope"
         ],
         "required": true
       },

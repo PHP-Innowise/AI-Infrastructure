@@ -364,16 +364,20 @@ pub fn capsule(root: &Path, host: &str, results: &[Value]) -> String {
         return std::fs::read_to_string(root.join(".cursor/rules/working-memory.mdc"))
             .unwrap_or_default();
     }
+    // What the prompt hook gave the model: its JSON context, else its plain
+    // stdout, which Claude Code and Codex take as context as well, as the
+    // retired rehearsal read it. Reading JSON alone found no capsule in a
+    // plain one, and every recall was reported missing.
     results
         .iter()
         .filter_map(|r| r["stdout"].as_str())
-        .filter_map(|s| artifact::strict(s.as_bytes()).ok())
-        .map(|v| {
-            v["hookSpecificOutput"]["additionalContext"]
+        .map(|stdout| match artifact::strict(stdout.as_bytes()) {
+            Ok(v) => v["hookSpecificOutput"]["additionalContext"]
                 .as_str()
                 .or_else(|| v["additional_context"].as_str())
-                .unwrap_or("")
-                .to_string()
+                .unwrap_or(stdout)
+                .to_string(),
+            Err(_) => stdout.to_string(),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -398,11 +402,14 @@ pub fn request_of(results: &[Value]) -> Option<String> {
     }
     None
 }
+/// The exact command a native save request names: Claude Code's
+/// `cd ROOT && echo -E '<JSON>' | memory-bank/bin/infra-engine memory ...`
+/// (with an optional cd back), the engine path Codex and Cursor pipe into,
+/// or the retired runtime's `(cd ROOT && ...)`.
+pub const SAVE_COMMAND: &str = r"exact command: (\(cd .*?--json\)|cd [^\n]*?--json(?: && cd [^\n]*)?|'[^'\n]*infra-engine(?:\.exe)?' memory [^\n]*?--json)\n";
 pub fn save_command(request: &str, data: &Value) -> Result<(String, Vec<u8>)> {
-    let pattern = regex::Regex::new(
-        r"exact command: (\(cd .*?--json\)|cd [^\n]*?--json(?: && cd [^\n]*)?)\n",
-    )
-    .map_err(|_| artifact::invalid("save expression"))?;
+    let pattern =
+        regex::Regex::new(SAVE_COMMAND).map_err(|_| artifact::invalid("save expression"))?;
     let command = pattern
         .captures(request)
         .map(|m| m[1].to_string())
@@ -609,7 +616,7 @@ pub fn run(source: &Path, runtime: &Path, v: &Value) -> Result<Value> {
             excluded.insert(p);
         }
         bench_driver::copy_tree(&target, &base, &excluded)?;
-        let sync = installer.sync(&base, &Default::default())?;
+        let sync = bench_driver::sync_copy(&installer, &base)?;
         let profile = artifact::read_json(
             &base.join("project-brain/config/runtime.json"),
             artifact::MAX_FILE,
@@ -724,4 +731,45 @@ pub fn render(v: &Value) -> String {
         }
     }
     format!("{}\n", lines.join("\n"))
+}
+
+#[cfg(test)]
+mod save_command_tests {
+    use super::*;
+
+    #[test]
+    fn requests_name_their_save_in_every_host_spelling() {
+        let data = json!({"progress":"It's checked.","verified":true,"learnings":[]});
+        let claude = "This is an internal continuation. Use your shell tool to run this exact command: cd '/srv/shop' && echo -E '<JSON>' | memory-bank/bin/infra-engine memory --root '/srv/shop' native-result --request ab12 --token cd34 --input - --json\nPut one JSON object in place of <JSON>.";
+        let (command, input) = save_command(claude, &data).unwrap();
+        assert!(
+            command.starts_with("cd '/srv/shop' && echo -E ")
+                && !command.contains("<JSON>")
+                && command.ends_with(" --input - --json")
+                && input.is_empty(),
+            "{command}"
+        );
+        let attached = "Use your shell tool to run this exact command: cd '/clone/PHP Core' && echo -E '<JSON>' | memory-bank/bin/infra-engine memory --root '/state' --project '/work' native-result --request ab12 --token cd34 --json && cd '/work'\n";
+        let (command, _) = save_command(attached, &data).unwrap();
+        assert!(command.ends_with(" --json && cd '/work'"), "{command}");
+        for engine in [
+            "'/srv/shop/memory-bank/bin/infra-engine'",
+            r"'C:\shop\memory-bank\bin\infra-engine.exe'",
+        ] {
+            let piped = format!(
+                "INTERNAL_NATIVE_MEMORY_RESULT cd34\nUse your shell tool to pipe one JSON object into this exact command: {engine} memory --root '/srv/shop' native-result --request ab12 --token cd34 --input - --json\nNative result reference schema v1."
+            );
+            let (command, input) = save_command(&piped, &data).unwrap();
+            assert_eq!(
+                command,
+                format!(
+                    "{engine} memory --root '/srv/shop' native-result --request ab12 --token cd34 --input - --json"
+                )
+            );
+            assert_eq!(input, serde_json::to_vec(&data).unwrap());
+        }
+        let retired = "pipe one JSON object into this exact command: (cd /srv/shop && python3 memory-bank/scripts/context.py --root /srv/shop native-result --input - --json)\n";
+        assert!(save_command(retired, &data).is_ok());
+        assert!(save_command("no command here\n", &data).is_err());
+    }
 }

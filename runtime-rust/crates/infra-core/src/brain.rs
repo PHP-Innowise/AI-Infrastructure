@@ -156,12 +156,18 @@ impl BrainRepository {
         if !fs::admit_directory(&anchor)? {
             return Ok((Vec::new(), Vec::new()));
         }
+        // Active records first and the archive after, each in path order, as
+        // the retired runtime read them: validation and its stale list name
+        // the records an agent works with before the archived ones.
         let mut candidates = Vec::new();
         collect_records(&anchor.join("dynamic"), &mut candidates)?;
-        if include_archive {
-            collect_records(&anchor.join("archive"), &mut candidates)?;
-        }
         candidates.sort();
+        if include_archive {
+            let mut archived = Vec::new();
+            collect_records(&anchor.join("archive"), &mut archived)?;
+            archived.sort();
+            candidates.extend(archived);
+        }
         let mut records = Vec::new();
         let mut problems = Vec::new();
         for path in candidates {
@@ -174,33 +180,78 @@ impl BrainRepository {
             let parsed = text
                 .as_ref()
                 .map_err(|error| RuntimeError::invalid(error.to_string()))
-                .and_then(|text| parse_markdown_record(text));
+                .and_then(|text| parse_markdown_record(text))
+                .map_err(|error| {
+                    // A half-merged record names the conflict, not the JSON
+                    // error its markers cause.
+                    if text.as_ref().is_ok_and(|text| {
+                        text.lines().any(|line| line.starts_with("<<<<<<< "))
+                    }) {
+                        RuntimeError::invalid(
+                            "unresolved Git merge conflict (<<<<<<< ... >>>>>>>); keep one side or merge both, without the markers",
+                        )
+                    } else {
+                        error
+                    }
+                });
             if let Ok((metadata, _)) = &parsed
                 && metadata["type"] == "handoff"
             {
                 let expected = metadata["task_id"].as_str().unwrap_or("");
-                if path.parent() == Some(anchor.join("archive/handoffs").as_path())
+                let error = if path.parent() == Some(anchor.join("archive/handoffs").as_path())
                     && path.file_stem().and_then(|name| name.to_str()) == Some(expected)
-                    && metadata["status"] == "closed"
-                    && validate_handoff(metadata, None).is_ok()
                 {
-                    continue;
-                }
+                    let checked = validate_handoff(metadata, None).and_then(|()| {
+                        if metadata["status"] == "closed" {
+                            Ok(())
+                        } else {
+                            Err(RuntimeError::invalid("archived handoff must be closed"))
+                        }
+                    });
+                    match checked {
+                        Ok(()) => continue,
+                        Err(error) => format!("archived handoff invalid: {}", error.message),
+                    }
+                } else {
+                    "unexpected handoff in authority path".into()
+                };
                 problems.push(RecordProblem {
                     path,
-                    error: "Unexpected or invalid archived handoff in authority path".into(),
+                    error,
                     record_type: None,
                     id: metadata["id"].as_str().map(String::from),
                     external_id: metadata
                         .get("external_id")
-                        .or(metadata.get("task_id"))
                         .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .or(metadata["task_id"].as_str())
                         .map(String::from),
                 });
                 continue;
             }
+            // A record that parsed but fails is named by the field the schema
+            // rejects where it rejects one; the lifecycle check alone may not
+            // name it.
             let parsed = parsed.and_then(|(record, body)| {
-                validate_record(&record, archived)?;
+                let identified = RECORD_TYPES.contains(&record["type"].as_str().unwrap_or(""))
+                    && record["id"].as_str().is_some_and(is_uuid4)
+                    && record["external_id"]
+                        .as_str()
+                        .is_some_and(|id| !id.trim().is_empty());
+                let checked = if identified {
+                    validate_record(&record, archived)
+                } else {
+                    Err(RuntimeError::invalid("record identity unavailable"))
+                };
+                if let Err(error) = checked {
+                    return Err(crate::domain::validate_schema_file(
+                        self.roots(),
+                        "dynamic-record.schema.json",
+                        &record,
+                    )
+                    .err()
+                    .unwrap_or(error));
+                }
                 Ok((record, body))
             });
             match parsed {
@@ -271,24 +322,42 @@ impl BrainRepository {
             })
             .collect();
         if matches.len() + claimants.len() > 1 {
-            return Err(RuntimeError::conflict(
-                "Project Brain record identifier is ambiguous",
-            ));
-        }
-        if let Some(problem) = claimants.first() {
-            return Err(RuntimeError::invalid(format!(
-                "Project Brain record is invalid: {}",
-                problem
-                    .path
-                    .strip_prefix(&self.roots().state)
-                    .unwrap_or(&problem.path)
-                    .display()
+            return Err(RuntimeError::conflict(format!(
+                "Project Brain record identifier is ambiguous: {identifier}"
             )));
         }
-        matches
-            .into_iter()
-            .next()
-            .ok_or_else(|| RuntimeError::not_found("Project Brain record not found"))
+        if let Some(problem) = claimants.first() {
+            // Named from the project root with forward slashes on every
+            // system, as the retired runtime named it: the message reaches
+            // prompts and logs, where a turn quotes the file to repair, and an
+            // absolute path would name the machine's own directories, so a
+            // record outside the project is named by its file alone.
+            let shown = problem
+                .path
+                .strip_prefix(&self.roots().state)
+                .ok()
+                .and_then(Path::to_str)
+                .map(|relative| relative.replace('\\', "/"))
+                .unwrap_or_else(|| {
+                    problem
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                });
+            return Err(RuntimeError::invalid(format!(
+                "Project Brain record invalid: {shown}: {}",
+                problem.error
+            )));
+        }
+        matches.into_iter().next().ok_or_else(|| {
+            // Which record, as the retired lookup said: an agent told only
+            // "not found" cannot tell a typo from a task never started.
+            RuntimeError::not_found(format!(
+                "Project Brain {} not found: {identifier}",
+                record_type.unwrap_or("record")
+            ))
+        })
     }
 
     pub fn get(&self, identifier: &str) -> Result<Value> {
@@ -304,21 +373,28 @@ impl BrainRepository {
             input.authority != "verified" || !["agent", "person"].contains(&actor)
         }) {
             return Err(RuntimeError::invalid(
-                "Attestation requires a verified record and agent or person",
+                "attestation says who checked a verified record: agent or person",
             ));
         }
         let mut introduced = vec![input.title.clone()];
         introduced.extend(input.goal.iter().cloned());
         introduced.extend(input.conflicts.clone());
-        guard_shared_text("Record", &introduced)?;
+        // Named as the retired guard named it: "Task record", "Finding record".
+        let mut kind = input.record_type.chars();
+        let label = kind
+            .next()
+            .map(|first| format!("{}{} record", first.to_uppercase(), kind.as_str()))
+            .unwrap_or_else(|| "Record".into());
+        guard_shared_text(&label, &introduced)?;
         let _guard = self.lock()?;
         match self.find(&input.external_id, None, false) {
             Err(error) if error.kind == ErrorKind::NotFound => {}
             Err(error) => return Err(error),
             Ok(_) => {
-                return Err(RuntimeError::conflict(
-                    "Project Brain record already exists",
-                ));
+                return Err(RuntimeError::conflict(format!(
+                    "Project Brain record already exists: {}",
+                    input.external_id
+                )));
             }
         }
         let owner = if input.owner.is_empty() {
@@ -391,11 +467,13 @@ impl BrainRepository {
         let revision = record["revision"]
             .as_u64()
             .ok_or_else(|| RuntimeError::invalid("Invalid record revision"))?;
-        if input
+        if let Some(expected) = input
             .expected_revision
-            .is_some_and(|expected| expected != revision)
+            .filter(|expected| *expected != revision)
         {
-            return Err(RuntimeError::conflict("Stale record revision"));
+            return Err(RuntimeError::conflict(format!(
+                "Stale {kind} revision: expected {expected}, current {revision}"
+            )));
         }
         if !strings(&record, "authorized_owners")?
             .iter()
@@ -403,7 +481,7 @@ impl BrainRepository {
         {
             return Err(RuntimeError::new(
                 ErrorKind::Unauthorized,
-                "Owner is not authorized to mutate record",
+                format!("Owner is not authorized to mutate record: {actor}"),
             ));
         }
         if kind == "event"
@@ -420,7 +498,7 @@ impl BrainRepository {
         }
         if input.auto_checkpoint.is_some() && kind != "task" {
             return Err(RuntimeError::invalid(
-                "Only tasks may record an auto checkpoint",
+                "only a task may record an auto checkpoint",
             ));
         }
         if input
@@ -428,7 +506,9 @@ impl BrainRepository {
             .as_deref()
             .is_some_and(|actor| !["agent", "person"].contains(&actor))
         {
-            return Err(RuntimeError::invalid("Attestation must be agent or person"));
+            return Err(RuntimeError::invalid(
+                "attestation must be one of: agent, person",
+            ));
         }
         let checked = ["finding", "bug", "incident", "decision"].contains(&kind.as_str())
             && record["authority"] == "verified";
@@ -438,7 +518,7 @@ impl BrainRepository {
             && record_attestation(&record) != "agent"
         {
             return Err(RuntimeError::policy(
-                "Only a person may revise a person or unknown actor's verified claim",
+                "A person or unknown actor verified this record's claim; only a person revises it (attestation person)",
             ));
         }
         let old_sources = strings(&record, "sources")?;
@@ -446,19 +526,6 @@ impl BrainRepository {
             .into_iter()
             .filter(|source| !old_sources.contains(source))
             .collect();
-        if checked
-            && (input
-                .progress
-                .as_deref()
-                .is_some_and(|progress| record["progress"].as_str() != Some(progress))
-                || !cited_now.is_empty())
-            && input.attestation.as_deref() != Some("person")
-            && record_attestation(&record) == "person"
-        {
-            return Err(RuntimeError::policy(
-                "Only a person may revise a person-verified claim",
-            ));
-        }
         let all_sources = unique_strings(old_sources.into_iter().chain(input.sources.clone()));
         if let Some(expected) = &input.checked_source_fingerprints {
             if !(input.reverify || input.authority.as_deref() == Some("verified"))
@@ -477,11 +544,27 @@ impl BrainRepository {
                 ));
             }
         }
+        // The next agent must not be free to overwrite a person's check;
+        // record-result holds the same revision.
+        if checked
+            && (input
+                .progress
+                .as_deref()
+                .is_some_and(|progress| record["progress"].as_str() != Some(progress))
+                || !cited_now.is_empty())
+            && input.attestation.as_deref() != Some("person")
+            && record_attestation(&record) == "person"
+        {
+            return Err(RuntimeError::policy(
+                "A person verified this record's claim; only a person revises it (attestation person), or record the new finding as a record of its own",
+            ));
+        }
         if let Some(authority) = &input.authority {
             if record["authority"] != "observed" || authority != "verified" {
-                return Err(RuntimeError::invalid(
-                    "Only observed -> verified authority transition is allowed",
-                ));
+                return Err(RuntimeError::invalid(format!(
+                    "Illegal authority transition: {} -> {authority}; only observed -> verified is allowed",
+                    record["authority"].as_str().unwrap_or("")
+                )));
             }
             let suffix = input
                 .attestation
@@ -494,19 +577,36 @@ impl BrainRepository {
         if input.reverify {
             if input.authority.is_some() || record["authority"] != "verified" {
                 return Err(RuntimeError::invalid(
-                    "Only an already verified record may be re-verified",
+                    "Only a verified record's revised claim is verified again",
                 ));
             }
-            let attestation = input
-                .attestation
-                .as_deref()
-                .ok_or_else(|| RuntimeError::invalid("Re-verification requires attestation"))?;
+            let attestation = input.attestation.as_deref().ok_or_else(|| {
+                RuntimeError::invalid(
+                    "Say who checked the revised claim: attestation agent or person",
+                )
+            })?;
             record["transitions"].as_array_mut().ok_or_else(|| RuntimeError::invalid("Invalid transitions"))?.push(json!({"from":"observed","to":"verified","at":utc_now(),"actor":actor,"reason":format!("{} [attestation:{attestation}]",input.reason)}));
         }
         if let Some(to) = &input.transition_to {
             let from = record["status"].as_str().unwrap_or("").to_string();
             if !transition_allowed(&kind, &from, to) {
-                return Err(RuntimeError::invalid("Illegal lifecycle transition"));
+                // Agents pass an evidence level for a status: 15 of the 383
+                // calls Codex made in one client project in September 2026
+                // were `--transition verified` or `observed`.
+                let hint = if !AUTHORITIES.contains(&to.as_str()) {
+                    String::new()
+                } else if to == "verified" {
+                    format!(
+                        "; {to} is an evidence level, not a {kind} status: set it with brain-update --authority verified"
+                    )
+                } else {
+                    format!(
+                        "; {to} is an evidence level, not a {kind} status: a record starts observed, and only brain-update --authority verified changes it"
+                    )
+                };
+                return Err(RuntimeError::invalid(format!(
+                    "Illegal {kind} transition: {from} -> {to}{hint}"
+                )));
             }
             record["transitions"]
                 .as_array_mut()
@@ -518,7 +618,7 @@ impl BrainRepository {
         }
         if let Some(phase) = &input.phase {
             if kind != "task" {
-                return Err(RuntimeError::invalid("Only a task may declare a phase"));
+                return Err(RuntimeError::invalid("only a task may declare a phase"));
             }
             let phase = normalize_phase(phase)?;
             if !input.allow_phase_regression {
@@ -526,13 +626,13 @@ impl BrainRepository {
                     .as_str()
                     .and_then(|current| PHASES.iter().position(|phase| *phase == current));
                 let next = PHASES.iter().position(|candidate| *candidate == phase);
-                if current
-                    .zip(next)
-                    .is_some_and(|(current, next)| next < current)
+                if let Some((current, next)) =
+                    current.zip(next).filter(|(current, next)| next < current)
                 {
-                    return Err(RuntimeError::policy(
-                        "Phase may not move backward without explicit regression",
-                    ));
+                    return Err(RuntimeError::policy(format!(
+                        "Phase may not move backward: {} -> {}; pass allow_phase_regression to state the regression is deliberate",
+                        PHASES[current], PHASES[next]
+                    )));
                 }
             }
             record["phase"] = phase.into();
@@ -819,7 +919,9 @@ impl BrainRepository {
         }
         validate_message(&message)?;
         validate_schema_file(self.roots(), "message.schema.json", &message)?;
-        let mut line = serde_json::to_string(&message)?;
+        // Written as the retired runtime wrote it (`json.dumps(sort_keys=True)`):
+        // the journal is tracked, and a migrated task keeps one line format.
+        let mut line = crate::domain::json::python_default(&message, true, false, false)?;
         for (character, escaped) in [
             ('\u{2028}', "\\u2028"),
             ('\u{2029}', "\\u2029"),

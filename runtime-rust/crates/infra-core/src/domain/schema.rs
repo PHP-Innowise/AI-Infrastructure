@@ -104,6 +104,20 @@ pub fn validate_schema_value(value: &Value, schema: &Value) -> Result<()> {
     validate_at(value, schema, schema, "$", 0)
 }
 
+/// A schema value as Python's `repr` shows it in "value must equal".
+fn shown(value: &Value) -> String {
+    match value {
+        Value::Null => "None".into(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::String(text) => format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'")),
+        other => other.to_string(),
+    }
+}
+
+/// The retired validator's checks in its order, each refusal naming the
+/// field and the rule it broke; `maxItems` and `maxLength`, which this
+/// runtime also enforces, come after the rules it shared.
 fn validate_at(
     value: &Value,
     schema: &Value,
@@ -115,25 +129,25 @@ fn validate_at(
         return Err(RuntimeError::invalid("Schema nesting limit exceeded"));
     }
     if let Some(reference) = schema["$ref"].as_str() {
-        let pointer = reference
+        let target = reference
             .strip_prefix('#')
-            .ok_or_else(|| RuntimeError::invalid("External schema reference is unsupported"))?;
-        let target = root
-            .pointer(pointer)
-            .ok_or_else(|| RuntimeError::invalid("Unknown schema reference"))?;
+            .and_then(|pointer| root.pointer(pointer))
+            .filter(|target| target.is_object())
+            .ok_or_else(|| {
+                RuntimeError::invalid(format!("invalid schema reference: {reference}"))
+            })?;
         return validate_at(value, target, root, location, depth + 1);
     }
-    let fail = || RuntimeError::invalid(format!("{location}: value violates schema"));
-    if schema
-        .get("const")
-        .is_some_and(|constant| constant != value)
+    let fail = |rule: &str| RuntimeError::invalid(format!("{location}: {rule}"));
+    if let Some(constant) = schema.get("const")
+        && constant != value
     {
-        return Err(fail());
+        return Err(fail(&format!("value must equal {}", shown(constant))));
     }
     if let Some(items) = schema["enum"].as_array()
         && !items.contains(value)
     {
-        return Err(fail());
+        return Err(fail("value is outside schema enum"));
     }
     let accepts = |kind: &str| match kind {
         "object" => value.is_object(),
@@ -152,24 +166,36 @@ fn validate_at(
             _ => false,
         };
         if !accepted {
-            return Err(fail());
+            return Err(fail("value has invalid schema type"));
         }
     }
     if let Some(object) = value.as_object() {
-        if let Some(required) = schema["required"].as_array()
-            && required
-                .iter()
-                .any(|key| !key.as_str().is_some_and(|key| object.contains_key(key)))
-        {
-            return Err(fail());
+        let missing = schema["required"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|key| !object.contains_key(*key))
+            .collect::<BTreeSet<_>>();
+        if !missing.is_empty() {
+            return Err(fail(&format!(
+                "missing keys {}",
+                missing.into_iter().collect::<Vec<_>>().join(", ")
+            )));
         }
         let properties = schema["properties"].as_object();
-        if schema["additionalProperties"] == false
-            && object
+        if schema["additionalProperties"] == false {
+            let extra = object
                 .keys()
-                .any(|key| !properties.is_some_and(|properties| properties.contains_key(key)))
-        {
-            return Err(fail());
+                .map(String::as_str)
+                .filter(|key| !properties.is_some_and(|properties| properties.contains_key(*key)))
+                .collect::<BTreeSet<_>>();
+            if !extra.is_empty() {
+                return Err(fail(&format!(
+                    "unexpected keys {}",
+                    extra.into_iter().collect::<Vec<_>>().join(", ")
+                )));
+            }
         }
         if let Some(properties) = properties {
             for (key, child) in properties {
@@ -180,19 +206,13 @@ fn validate_at(
         }
     }
     if let Some(array) = value.as_array() {
-        if schema["maxItems"]
-            .as_u64()
-            .is_some_and(|limit| array.len() as u64 > limit)
-        {
-            return Err(fail());
-        }
         if array.len() < schema["minItems"].as_u64().unwrap_or(0) as usize {
-            return Err(fail());
+            return Err(fail("too few items"));
         }
         if schema["uniqueItems"] == true {
             let serialized: BTreeSet<_> = array.iter().map(Value::to_string).collect();
             if serialized.len() != array.len() {
-                return Err(fail());
+                return Err(fail("items must be unique"));
             }
         }
         if schema["items"].is_object() {
@@ -206,40 +226,50 @@ fn validate_at(
                 )?;
             }
         }
+        if schema["maxItems"]
+            .as_u64()
+            .is_some_and(|limit| array.len() as u64 > limit)
+        {
+            return Err(fail("too many items"));
+        }
     }
     if let Some(text) = value.as_str() {
-        if schema["maxLength"]
-            .as_u64()
-            .is_some_and(|limit| text.chars().count() as u64 > limit)
-        {
-            return Err(fail());
-        }
         if text.chars().count() < schema["minLength"].as_u64().unwrap_or(0) as usize {
-            return Err(fail());
+            return Err(fail("string is too short"));
         }
         if let Some(pattern) = schema["pattern"].as_str() {
             let pattern = regex::Regex::new(&format!("^(?:{pattern})$"))
                 .map_err(|_| RuntimeError::invalid("Unsupported schema pattern"))?;
             if !pattern.is_match(text) {
-                return Err(fail());
+                return Err(fail("string does not match schema pattern"));
             }
         }
         if schema["format"] == "uuid" && !is_uuid4(text) {
-            return Err(fail());
+            return Err(fail("value must be UUIDv4"));
         }
         if schema["format"] == "date-time" && !valid_datetime(text) {
-            return Err(fail());
+            return Err(fail("invalid date-time"));
+        }
+        if schema["maxLength"]
+            .as_u64()
+            .is_some_and(|limit| text.chars().count() as u64 > limit)
+        {
+            return Err(fail("string is too long"));
         }
     }
-    if let Some(number) = value.as_f64()
-        && (schema["minimum"]
+    if let Some(number) = value.as_f64() {
+        if schema["minimum"]
             .as_f64()
             .is_some_and(|minimum| number < minimum)
-            || schema["maximum"]
-                .as_f64()
-                .is_some_and(|maximum| number > maximum))
-    {
-        return Err(fail());
+        {
+            return Err(fail("value is below minimum"));
+        }
+        if schema["maximum"]
+            .as_f64()
+            .is_some_and(|maximum| number > maximum)
+        {
+            return Err(fail("value is above maximum"));
+        }
     }
     Ok(())
 }

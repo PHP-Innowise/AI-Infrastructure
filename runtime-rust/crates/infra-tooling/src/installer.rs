@@ -963,6 +963,17 @@ impl Installer {
         let mut active_paths = BTreeSet::new();
         let mut runtime_held = false;
         let mut held_wiring = BTreeSet::new();
+        // What holds each host's wiring, as the report names it beside every
+        // file it keeps back: a hook edited in the project holds the whole
+        // host, and "unchanged host wiring" alone left the reader guessing
+        // which file and what to do.
+        let mut held_by = BTreeMap::<String, Vec<String>>::new();
+        let mut hold = |wiring: &str, cause: String| {
+            let causes = held_by.entry(wiring.to_string()).or_default();
+            if !causes.contains(&cause) {
+                causes.push(cause);
+            }
+        };
         for item in &inventory.files {
             let mut name = item.path.clone();
             if name == "README.md" {
@@ -987,12 +998,15 @@ impl Installer {
                 if runtime {
                     runtime_held = true;
                 }
+                let cause = format!("{name} is tracked by the project: pass --update-tracked");
                 if is_wiring(&name) {
                     held_wiring.insert(name.clone());
+                    hold(&name, cause);
                 } else if name.ends_with(".sh")
                     && let Some(wiring) = wiring
                 {
                     held_wiring.insert(wiring.into());
+                    hold(wiring, cause);
                 }
                 kept.push(json!({"path":name,"reason":"tracked by project; explicit update_tracked is required"}));
                 continue;
@@ -1012,6 +1026,7 @@ impl Installer {
             }
             if name == ".codex/hooks.json" && before.is_some() && !options.rewire_codex {
                 held_wiring.insert(name.clone());
+                hold(&name, format!("{name} is trust-bound: pass --rewire-codex"));
                 kept.push(json!({"path":name,"reason":"trust-bound wiring needs explicit rewire_codex; trust records are never written"}));
                 continue;
             }
@@ -1074,12 +1089,17 @@ impl Installer {
                 }
                 .into();
             } else if before.is_some() && !pristine && !runtime {
+                let cause = format!(
+                    "{name} is edited in the project: move it aside or merge your change into the release, then sync again"
+                );
                 if is_wiring(&name) {
                     held_wiring.insert(name.clone());
+                    hold(&name, cause);
                 } else if name.ends_with(".sh")
                     && let Some(wiring) = wiring
                 {
                     held_wiring.insert(wiring.into());
+                    hold(wiring, cause);
                 }
                 kept.push(json!({"path":name,"reason":"edited in project"}));
                 continue;
@@ -1159,14 +1179,19 @@ impl Installer {
                 runtime_held = true;
             }
             effects.retain(|effect| {
-                let held = held_wiring.contains(&effect.path)
-                    || hook_wiring(&effect.path).is_some_and(|wiring| held_wiring.contains(wiring));
-                if held {
-                    kept.push(
-                        json!({"path":effect.path,"reason":"held back by unchanged host wiring"}),
-                    );
+                let wiring = if held_wiring.contains(&effect.path) {
+                    Some(effect.path.as_str())
+                } else {
+                    hook_wiring(&effect.path).filter(|wiring| held_wiring.contains(*wiring))
+                };
+                if let Some(wiring) = wiring {
+                    let causes = held_by
+                        .get(wiring)
+                        .map(|causes| causes.join("; "))
+                        .unwrap_or_default();
+                    kept.push(json!({"path":effect.path,"reason":format!("held back by unchanged host wiring ({wiring}): {causes}")}));
                 }
-                !held
+                wiring.is_none()
             });
         }
         if runtime_held {

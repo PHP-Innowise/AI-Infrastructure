@@ -137,6 +137,186 @@ pub fn render(scope: &Context) -> Result<Output> {
         )
     })
 }
+/// The policy and skills name the memory CLI by its path from the root, which
+/// a worktree this installation serves has none of, and which a session
+/// started below the root does not reach: the session hears the engine that
+/// works from where it is. Run there, it finds the memory and the task itself.
+fn memory_cli(scope: &Context) -> Option<String> {
+    if scope.roots.attached() && !scope.roots.shared {
+        return None;
+    }
+    let place = if scope.roots.shared {
+        (scope.roots.state == scope.roots.tooling
+            && !super::installed_engine(&scope.roots.project).is_file())
+        .then_some("this worktree has none")
+    } else {
+        let root = infra_core::fs::canonicalize(&scope.roots.tooling).ok()?;
+        super::valid_path(scope.payload["cwd"].as_str(), 4096)
+            .and_then(|cwd| infra_core::fs::canonicalize(cwd).ok())
+            .filter(|cwd| cwd != &root && cwd.starts_with(&root))
+            .map(|_| "this session started below the project root")
+    }?;
+    let engine = super::installed_engine(&scope.roots.tooling);
+    if !engine.is_file() {
+        return None;
+    }
+    // Bare, or in single quotes: the dispatcher's allow for the memory CLI
+    // takes no double-quoted path, which the shell expands.
+    let name = engine.to_string_lossy();
+    let spelled = if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c))
+    {
+        name.into_owned()
+    } else {
+        infra_core::native::quote(&name)
+    };
+    Some(format!(
+        "Memory CLI: {place} - run the commands the policy and skills name with `{spelled} memory` in place of `memory-bank/bin/infra-engine memory`."
+    ))
+}
+/// The edition an installation is, by its configured framework.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edition {
+    Core,
+    Laravel,
+    Symfony,
+    WordPress,
+}
+impl Edition {
+    fn of(framework: &str) -> Self {
+        let framework = framework.to_ascii_lowercase();
+        if framework.contains("laravel") {
+            Self::Laravel
+        } else if framework.contains("symfony") {
+            Self::Symfony
+        } else if framework.contains("wordpress") {
+            Self::WordPress
+        } else {
+            Self::Core
+        }
+    }
+    /// The project folders the structure section counts, before the host's.
+    fn folders(self) -> &'static [&'static str] {
+        match self {
+            Self::Core => &[
+                "src",
+                "app",
+                "public",
+                "config",
+                "bin",
+                "templates",
+                "views",
+                "tests",
+                "specs",
+                "tasks",
+                "memory-bank",
+                "project-brain",
+                "examples",
+            ],
+            Self::Symfony => &[
+                "src",
+                "app",
+                "public",
+                "config",
+                "bin",
+                "templates",
+                "views",
+                "tests",
+                "specs",
+                "tasks",
+                "memory-bank",
+                "examples",
+            ],
+            Self::Laravel => &[
+                "app",
+                "bootstrap",
+                "config",
+                "database",
+                "public",
+                "resources",
+                "routes",
+                "storage",
+                "tests",
+                "specs",
+                "tasks",
+                "memory-bank",
+                "examples",
+            ],
+            Self::WordPress => &[
+                "includes",
+                "src",
+                "app",
+                "blocks",
+                "build",
+                "assets",
+                "templates",
+                "parts",
+                "patterns",
+                "tests",
+                "specs",
+                "tasks",
+                "memory-bank",
+                "project-brain",
+                "examples",
+            ],
+        }
+    }
+}
+/// laravel/framework's version as composer.lock records it: the first
+/// `"version":` after its `"name"`, as the retired banner's awk read it.
+fn laravel_version(project: &Path) -> Option<String> {
+    let lock = std::fs::read_to_string(project.join("composer.lock")).ok()?;
+    let mut found = false;
+    for line in lock.lines() {
+        if !found {
+            found = line.contains("\"name\": \"laravel/framework\"");
+            continue;
+        }
+        if line.contains("\"version\":") {
+            return line
+                .split('"')
+                .nth(3)
+                .filter(|version| !version.is_empty())
+                .map(String::from);
+        }
+    }
+    None
+}
+/// A `block.json` at the project root or one directory below it, as
+/// `find . -maxdepth 2 -type f -name block.json` found one.
+fn block_metadata(project: &Path) -> bool {
+    let regular =
+        |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file());
+    regular(&project.join("block.json"))
+        || std::fs::read_dir(project).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && regular(&entry.path().join("block.json"))
+            })
+        })
+}
+/// Whether an executable of this name is on PATH, as `command -v` answered.
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| {
+            let candidate = directory.join(name);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::metadata(&candidate)
+                    .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            }
+            #[cfg(not(unix))]
+            {
+                ["", ".exe", ".bat", ".cmd"]
+                    .iter()
+                    .any(|suffix| directory.join(format!("{name}{suffix}")).is_file())
+                    || candidate.is_file()
+            }
+        })
+    })
+}
 fn render_lines(
     scope: &Context,
     php: impl FnOnce() -> Option<String>,
@@ -145,10 +325,14 @@ fn render_lines(
     branch: impl FnOnce() -> Option<Vec<u8>>,
 ) -> Result<Output> {
     let mut lines = vec!["Project Context".into(), "===============".into()];
+    let configured = RuntimeConfig::load(&scope.roots)?;
+    let edition = Edition::of(configured.value["framework"].as_str().unwrap_or("generic"));
     if let Ok(version) = std::fs::read_to_string(scope.roots.tooling.join("VERSION")) {
         let version = version.split_whitespace().collect::<String>();
-        let policy = fs::read_text(&scope.roots.tooling.join(".accelerator-policy-lock.json"))
-            .ok()
+        // The WordPress banner named the release alone.
+        let policy = (edition != Edition::WordPress)
+            .then(|| fs::read_text(&scope.roots.tooling.join(".accelerator-policy-lock.json")))
+            .and_then(Result::ok)
             .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
             .and_then(|value| {
                 value["policy_digest"]
@@ -162,7 +346,12 @@ fn render_lines(
                 .unwrap_or_default()
         ));
     }
-    if scope.roots.attached() {
+    // A worktree the installation serves shares its state, so it is no
+    // attached project: the retired banner told the two apart by whether the
+    // state lies outside the installation.
+    if scope.roots.shared {
+        lines.push(format!("Accelerator: the installation in {}, whose memory this worktree shares (Git gives the worktree none of it): the memory-bank/ and project-brain/ paths the policy and skills name are there.",scope.roots.tooling.display()));
+    } else if scope.roots.attached() {
         lines.push(format!(
             "Accelerator: attached from {} (nothing is installed in this project).",
             scope.roots.tooling.display()
@@ -171,9 +360,12 @@ fn render_lines(
             "Accelerator state (Project Brain, Memory Bank, index): {}",
             scope.roots.state.display()
         ));
-    } else if scope.roots.shared {
-        lines.push(format!("Accelerator: the installation in {}, whose memory this worktree shares (Git gives the worktree none of it): the memory-bank/ and project-brain/ paths the policy and skills name are there.",scope.roots.tooling.display()));
     }
+    if let Some(line) = memory_cli(scope) {
+        lines.push(line);
+    }
+    let project = &scope.roots.project;
+    let present = |paths: &[&str]| paths.iter().any(|path| project.join(path).is_file());
     let managers = [
         ("composer.json", "composer"),
         ("composer.lock", "composer.lock"),
@@ -182,7 +374,7 @@ fn render_lines(
         ("pnpm-lock.yaml", "pnpm"),
     ]
     .into_iter()
-    .filter_map(|(file, name)| scope.roots.project.join(file).is_file().then_some(name))
+    .filter_map(|(file, name)| present(&[file]).then_some(name))
     .collect::<Vec<_>>();
     if !managers.is_empty() {
         lines.push(format!("Dependencies: {}", managers.join(" ")));
@@ -190,24 +382,54 @@ fn render_lines(
     if let Some(version) = php() {
         lines.push(format!("PHP: {version}"));
     }
-    for (paths, label) in [
+    // Each edition's retired banner read the project its own way; these are
+    // its lines, in its order.
+    if edition == Edition::Laravel {
+        if present(&["artisan"]) {
+            lines.push(match laravel_version(project) {
+                Some(version) => format!("Laravel: laravel/framework {version} (composer.lock)"),
+                None => "Laravel: artisan present".into(),
+            });
+        } else {
+            lines.extend([
+                "".into(),
+                "NOTE: No artisan file found. This is the Laravel accelerator folder;".into(),
+                "      for framework-agnostic native PHP, use the sibling PHP Core/ folder.".into(),
+            ]);
+        }
+    }
+    let mut markers: Vec<(&[&str], &str)> = vec![
         (
-            &["phpunit.xml", "phpunit.xml.dist"][..],
+            &["phpunit.xml", "phpunit.xml.dist"],
             "Tests: PHPUnit config present",
         ),
-        (&["tests/Pest.php"][..], "Tests: Pest present"),
-        (
-            &[".php-cs-fixer.php", ".php-cs-fixer.dist.php"][..],
-            "Formatter: PHP-CS-Fixer config present",
-        ),
-        (
-            &["phpcs.xml", "phpcs.xml.dist"][..],
-            "Formatter: PHP_CodeSniffer config present",
-        ),
-        (
-            &["phpstan.neon", "phpstan.neon.dist"][..],
-            "Static analysis: PHPStan config present",
-        ),
+        (&["tests/Pest.php"], "Tests: Pest present"),
+    ];
+    if edition == Edition::Laravel {
+        markers.extend([
+            (&["pint.json"][..], "Formatter: Pint config present"),
+            (
+                &["phpstan.neon", "phpstan.neon.dist"][..],
+                "Static analysis: PHPStan/Larastan config present",
+            ),
+        ]);
+    } else {
+        markers.extend([
+            (
+                &[".php-cs-fixer.php", ".php-cs-fixer.dist.php"][..],
+                "Formatter: PHP-CS-Fixer config present",
+            ),
+            (
+                &["phpcs.xml", "phpcs.xml.dist"][..],
+                "Formatter: PHP_CodeSniffer config present",
+            ),
+            (
+                &["phpstan.neon", "phpstan.neon.dist"][..],
+                "Static analysis: PHPStan config present",
+            ),
+        ]);
+    }
+    markers.extend([
         (
             &["psalm.xml", "psalm.xml.dist"][..],
             "Static analysis: Psalm config present",
@@ -217,45 +439,114 @@ fn render_lines(
             &["phpbench.json"][..],
             "Benchmarks: PHPBench config present",
         ),
-        (
-            &["public/index.php"][..],
+    ]);
+    match edition {
+        Edition::Laravel => markers.push((
+            &["public/index.php"],
+            "Entry point: public/index.php (Laravel front controller)",
+        )),
+        Edition::WordPress => markers.extend([
+            (
+                &["wp-config.php"][..],
+                "WordPress: full-site configuration present",
+            ),
+            (
+                &["config/application.php"][..],
+                "WordPress: Bedrock-style configuration present",
+            ),
+            (
+                &["style.css"][..],
+                "WordPress: theme stylesheet/header present",
+            ),
+            (
+                &["theme.json"][..],
+                "WordPress: block or hybrid theme.json present",
+            ),
+        ]),
+        Edition::Core | Edition::Symfony => markers.push((
+            &["public/index.php"],
             "Entry point: public/index.php (front controller)",
-        ),
-        (&["Makefile"][..], "Build system: Make"),
-        (
-            &["Dockerfile", "docker-compose.yml", "compose.yaml"][..],
-            "Containers: Docker present",
-        ),
-    ] {
-        if paths
-            .iter()
-            .any(|path| scope.roots.project.join(path).is_file())
-        {
+        )),
+    }
+    for (paths, label) in markers {
+        if present(paths) {
             lines.push(label.into());
         }
     }
-    let configured = RuntimeConfig::load(&scope.roots)?;
-    let framework = configured.value["framework"]
-        .as_str()
-        .unwrap_or("generic")
-        .to_ascii_lowercase();
-    if !framework.contains("laravel") && !framework.contains("symfony") {
-        let composer = std::fs::read_to_string(scope.roots.project.join("composer.json"))
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let detected = if composer.contains("yiisoft/yii2") {
-            Some("Yii")
-        } else if composer.contains("cakephp/cakephp") {
-            Some("CakePHP")
-        } else if scope.roots.project.join("bin/console").is_file() {
-            Some("Symfony")
-        } else if scope.roots.project.join("artisan").is_file() {
-            Some("Laravel")
-        } else {
-            None
-        };
-        if let Some(framework) = detected {
-            lines.extend(["".into(),format!("NOTE: {framework} detected. This is the native-PHP base folder (PHP Core/)."),"      For framework-specific conventions, switch to the matching sibling folder (Laravel/, Symfony/).".into()]);
+    if edition == Edition::WordPress {
+        if block_metadata(project) {
+            lines.push("WordPress: block metadata present".into());
+        }
+        if on_path("wp") {
+            lines.push("WP-CLI: available".into());
+        }
+    }
+    if edition != Edition::Laravel && present(&["Makefile"]) {
+        lines.push("Build system: Make".into());
+    }
+    if present(&["Dockerfile", "docker-compose.yml", "compose.yaml"]) {
+        lines.push("Containers: Docker present".into());
+    }
+    let composer = std::fs::read_to_string(project.join("composer.json")).unwrap_or_default();
+    match edition {
+        Edition::Core => {
+            let composer = composer.to_ascii_lowercase();
+            let detected = if composer.contains("yiisoft/yii2") {
+                Some("Yii")
+            } else if composer.contains("cakephp/cakephp") {
+                Some("CakePHP")
+            } else if present(&["bin/console"]) {
+                Some("Symfony")
+            } else if present(&["artisan"]) {
+                Some("Laravel")
+            } else {
+                None
+            };
+            if let Some(framework) = detected {
+                lines.extend(["".into(),format!("NOTE: {framework} detected. This is the native-PHP base folder (PHP Core/)."),"      For framework-specific conventions, switch to the matching sibling folder (Laravel/, Symfony/).".into()]);
+            }
+        }
+        Edition::Symfony => {
+            lines.push("".into());
+            lines.push(if present(&["bin/console"]) {
+                "Framework: Symfony detected. Use Symfony Controller -> Service -> Repository conventions.".into()
+            } else {
+                "NOTE: Symfony bin/console was not detected. Apply these Symfony rules only after confirming this is a Symfony project.".into()
+            });
+        }
+        Edition::Laravel => {
+            if present(&["vite.config.js", "vite.config.ts"]) {
+                lines.push("Frontend build: Vite present".into());
+            }
+            let stack = if composer.contains("\"inertiajs/inertia-laravel\"") {
+                Some("Inertia")
+            } else if composer.contains("\"livewire/livewire\"") {
+                Some("Livewire")
+            } else {
+                None
+            };
+            if let Some(stack) = stack {
+                lines.push(format!("Frontend stack: {stack}"));
+            }
+            if present(&["bin/console"]) {
+                lines.extend([
+                    "".into(),
+                    "NOTE: Symfony console detected alongside Laravel. Verify project intent."
+                        .into(),
+                ]);
+            }
+        }
+        Edition::WordPress => {
+            let composer = composer.to_ascii_lowercase();
+            if present(&["woocommerce.php"]) || composer.contains("woocommerce") {
+                lines.push("WordPress specialty: WooCommerce evidence present".into());
+            }
+            if composer.contains("wordpress-plugin") {
+                lines.push("WordPress shape: Composer plugin package".into());
+            }
+            if composer.contains("wordpress-theme") {
+                lines.push("WordPress shape: Composer theme package".into());
+            }
         }
     }
     let key = key();
@@ -293,8 +584,10 @@ fn render_lines(
         } else {
             "healthy"
         };
+        // A missing or empty index has no freshness to report.
         let staleness = database
             .as_ref()
+            .filter(|_| index == "healthy")
             .and_then(|path| std::fs::metadata(path).ok())
             .and_then(|meta| meta.modified().ok())
             .map(|at| {
@@ -386,22 +679,13 @@ fn render_lines(
         }
     }
     lines.extend(["".into(), "Structure:".into()]);
-    for name in [
-        "src",
-        "app",
-        "public",
-        "config",
-        "bin",
-        "templates",
-        "views",
-        "tests",
-        "specs",
-        "tasks",
-        "memory-bank",
-        "project-brain",
-        "examples",
-        ".claude",
-    ] {
+    // The session's own host tree closes the list, as each host's hook did.
+    let host_trees: &[&str] = match scope.host.as_str() {
+        "codex" => &[".agents", ".codex"],
+        "cursor" => &[".cursor"],
+        _ => &[".claude"],
+    };
+    for name in edition.folders().iter().chain(host_trees) {
         let path = scope.roots.project.join(name);
         if path.is_dir() {
             let count = std::fs::read_dir(path)?

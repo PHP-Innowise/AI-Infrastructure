@@ -31,8 +31,9 @@ struct Request {
 fn run(path: &std::path::Path) -> Result<Value> {
     let value = artifact::read_json(path, REQUEST_LIMIT)?;
     let request: Request = serde_json::from_value(value)?;
+    // A long evaluation command gets up to 300 s on Windows.
     if request.budget.milliseconds == 0
-        || request.budget.milliseconds > 120_000
+        || request.budget.milliseconds > 300_000
         || request.budget.max_bytes == 0
         || request.budget.max_bytes > OUTPUT_LIMIT
         || request.input.len() > REQUEST_LIMIT

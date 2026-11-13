@@ -667,6 +667,37 @@ pub fn discover_sources(context: &RuntimeContext, reusable: &SourceState) -> Res
     Ok(result)
 }
 
+/// How many of a task's most recent files may become file edges.
+const FILE_LINK_RECORD_LIMIT: usize = 50;
+/// The paths Git's index holds as files, project-relative, asked as the
+/// retired index asked: one `cat-file --batch-check` over every task's files
+/// (a directory or a submodule is not a blob, and a staged file counts).
+/// `None` when Git cannot say; then no file edge is written.
+fn tracked_paths(project: &Path, paths: &[String]) -> Option<BTreeSet<String>> {
+    let input = paths
+        .iter()
+        .map(|path| format!(":./{path}\n"))
+        .collect::<String>();
+    let output = crate::git::run(
+        project,
+        &crate::git::strings(&["cat-file", "--batch-check=%(objecttype)"]),
+        Some(input.into_bytes()),
+        std::time::Duration::from_secs(3),
+        8 * 1024 * 1024,
+    )
+    .ok()
+    .filter(|output| output.code == 0)?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    let lines = text.lines().collect::<Vec<_>>();
+    (lines.len() == paths.len()).then(|| {
+        paths
+            .iter()
+            .zip(lines)
+            .filter(|(_, line)| *line == "blob")
+            .map(|(path, _)| path.clone())
+            .collect()
+    })
+}
 fn append_brain(
     context: &RuntimeContext,
     config: &RuntimeConfig,
@@ -676,6 +707,7 @@ fn append_brain(
     let mut tasks = BTreeMap::<String, Value>::new();
     let mut twins = BTreeMap::<String, Vec<(String, String)>>::new();
     let mut prefixes = BTreeSet::new();
+    let mut file_candidates = Vec::<(String, Vec<String>)>::new();
     let mut first_error = None;
     // Consume each admitted raw image before the next one is read. Unit
     // projections keep no second copy of the complete inventory in memory.
@@ -749,37 +781,17 @@ fn append_brain(
                 .links
                 .extend(links(&document, &record["sources"], "source"));
             if record["type"] == "task" {
+                // The task's last 50 files, screened one by one as file edges
+                // are (no directory, build output, runtime state or secret);
+                // Git's index is asked about every task's files at once below.
                 let files = strings(record, "files");
-                let mut admissible = Vec::new();
-                for file in files.iter().rev().take(50) {
-                    if source_path_problem(file).is_none() {
-                        admissible.push(file.clone());
-                    }
-                }
+                let admissible = files[files.len().saturating_sub(FILE_LINK_RECORD_LIMIT)..]
+                    .iter()
+                    .map(|file| file.strip_prefix("./").unwrap_or(file).to_string())
+                    .filter(|file| crate::source_links::file_link_problem(file).is_none())
+                    .collect::<Vec<_>>();
                 if !admissible.is_empty() {
-                    let mut arguments = crate::git::strings(&["ls-files", "-z", "--"]);
-                    arguments.extend(admissible.iter().map(std::ffi::OsString::from));
-                    let tracked = crate::git::run(
-                        &context.roots.project,
-                        &arguments,
-                        None,
-                        std::time::Duration::from_secs(3),
-                        8 * 1024 * 1024,
-                    )?;
-                    if tracked.code == 0 {
-                        for path in tracked
-                            .stdout
-                            .split(|byte| *byte == 0)
-                            .filter(|path| !path.is_empty())
-                        {
-                            let path = std::str::from_utf8(path).map_err(|_| {
-                                RuntimeError::invalid("Tracked source is not UTF-8")
-                            })?;
-                            result
-                                .links
-                                .push((document.path.clone(), path.into(), "file".into()));
-                        }
-                    }
+                    file_candidates.push((document.path.clone(), admissible));
                 }
                 tasks.insert(record["id"].as_str().unwrap_or("").into(), record.clone());
             }
@@ -793,6 +805,26 @@ fn append_brain(
     })?;
     if let Some(error) = first_error {
         return Err(error);
+    }
+    if !file_candidates.is_empty() {
+        let union = file_candidates
+            .iter()
+            .flat_map(|(_, files)| files.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let tracked = tracked_paths(&context.roots.project, &union).unwrap_or_default();
+        for (path, files) in file_candidates {
+            let linked = files
+                .into_iter()
+                .filter(|file| tracked.contains(file))
+                .collect::<BTreeSet<_>>();
+            result.links.extend(
+                linked
+                    .into_iter()
+                    .map(|file| (path.clone(), file, "file".into())),
+            );
+        }
     }
     for problem in problems {
         result.excluded.push(Exclusion {
@@ -1022,7 +1054,22 @@ pub fn refresh_index(
         .iter()
         .filter(|doc| doc.kind.starts_with("brain-"))
         .collect::<Vec<_>>();
-    let brain_digest = sha256(serde_json::to_string(&brain_documents)?.as_bytes());
+    // Every Brain row a refresh writes, as the retired digest covered them:
+    // the documents, their links and the state derived from them. A task's
+    // file edges change when Git's index does, with no record changing.
+    let brain_paths = brain_documents
+        .iter()
+        .map(|doc| doc.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let brain_links = discovery
+        .links
+        .iter()
+        .filter(|(path, _, _)| brain_paths.contains(path.as_str()))
+        .collect::<BTreeSet<_>>();
+    let brain_digest = sha256(
+        serde_json::to_string(&(&brain_documents, &brain_links, &discovery.extra_state))?
+            .as_bytes(),
+    );
     let existing = paths(&store.conn)?;
     let unchanged = current_format
         && existing == current
@@ -1188,7 +1235,11 @@ pub fn refresh_index(
             return Err(error);
         }
     }
-    let mut layers = BTreeMap::new();
+    // Every layer is reported, an empty one as zero, as the retired index did.
+    let mut layers = ["procedural", "semantic", "episodic"]
+        .into_iter()
+        .map(|layer| (layer.to_string(), 0))
+        .collect::<BTreeMap<_, _>>();
     let mut statement = store
         .conn
         .prepare("SELECT layer,COUNT(*) FROM documents GROUP BY layer")?;

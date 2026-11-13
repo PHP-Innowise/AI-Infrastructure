@@ -23,6 +23,12 @@ const ENGINE_NAME: &str = if cfg!(windows) {
 } else {
     "infra-engine"
 };
+/// The budget of an evaluation command that installs an edition into whole
+/// corpora. Linux runs one in 10-20 s. The Windows runner took 102-104 s for
+/// the outcome seal and 122 s on a slower day, and 121.6 s with the case
+/// running alone on a runner that took 432 s for the whole suite instead of
+/// about 250, so Windows grants 300 s; a hang still ends the case.
+const LONG_COMMAND_SECONDS: u64 = if cfg!(windows) { 300 } else { 120 };
 
 struct Fixture {
     root: PathBuf,
@@ -334,7 +340,7 @@ fn public_memory_eval_accepts_hardlinked_selected_native_runtime_without_a_provi
     ];
     // No runtime-binary override: the public CLI's default current_exe is our
     // two-link native engine. This controller invokes only local index/refresh.
-    let (code, stdout, stderr) = fixture.run(&fixture.root, argv, 120);
+    let (code, stdout, stderr) = fixture.run(&fixture.root, argv, LONG_COMMAND_SECONDS);
     let result: Value = serde_json::from_slice(&bounded(&result_path, 64 * 1024 * 1024)).unwrap();
     if code != 0 {
         eprintln!(
@@ -543,7 +549,7 @@ fn public_native_ab_plan_admits_only_the_canonical_engine_outside_data_budgets()
             // remains inside this fixture through the isolated TMPDIR/TEMP values.
         ]
     };
-    let (code, stdout, stderr) = fixture.run(&fixture.root, args(&run), 120);
+    let (code, stdout, stderr) = fixture.run(&fixture.root, args(&run), LONG_COMMAND_SECONDS);
     assert_eq!(
         code,
         0,
@@ -576,7 +582,8 @@ fn public_native_ab_plan_admits_only_the_canonical_engine_outside_data_budgets()
     fs::write(&installed, &modified).unwrap();
     private_mode(&installed, 0o755);
     let refused_run = fixture.root.join("native-refused-run");
-    let (code, stdout, stderr) = fixture.run(&fixture.root, args(&refused_run), 120);
+    let (code, stdout, stderr) =
+        fixture.run(&fixture.root, args(&refused_run), LONG_COMMAND_SECONDS);
     assert_ne!(
         code,
         0,
@@ -715,7 +722,7 @@ fn public_outcome_seal_consolidation_retains_the_selected_native_engine_without_
         "--codex".into(),
         selected.display().to_string(),
     ];
-    let (code, stdout, stderr) = fixture.run(&fixture.root, argv, 120);
+    let (code, stdout, stderr) = fixture.run(&fixture.root, argv, LONG_COMMAND_SECONDS);
     assert_eq!(
         code,
         0,
