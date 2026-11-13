@@ -97,10 +97,6 @@ pub fn executable(
         Path::new(name).is_file()
     } else {
         std::env::split_paths(environment.get("PATH").map(String::as_str).unwrap_or("")).any(|p| {
-            let candidate = p.join(name);
-            if candidate.is_file() {
-                return true;
-            }
             #[cfg(windows)]
             {
                 for ext in environment
@@ -114,7 +110,7 @@ pub fn executable(
                     }
                 }
             }
-            false
+            p.join(name).is_file()
         })
     };
     if !available {
