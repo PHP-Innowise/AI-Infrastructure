@@ -73,6 +73,13 @@ edition's own files remain in that edition's changelog.
   the descendant starts with the mask the leader was given. A leader may
   start about 450 ms late instead of 80 ms; the cases and the capture code
   are unchanged.
+- That fixture's leader also leaves with 0 when the driver has filled its
+  input pipe first. `experiment-input` shrinks the leader's stdin pipe to
+  hold the driver's megabyte back, and a leader that came to it about 10 ms
+  late found the pipe too full to shrink and left with 126, where
+  `scheduled_experiment_waits_for_backpressured_input_after_native_exit_and_output_eof`
+  expects 0. A pipe that is too full to shrink already holds the input
+  back, so the leader goes on.
 - A Cursor plugin image can be materialized again on Windows. Repeating it
   compared each file's planned Unix mode with the mode Windows keeps, only
   read-only, reported as 0o444 or 0o644, and refused an unchanged image with

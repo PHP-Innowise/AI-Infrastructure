@@ -441,7 +441,13 @@ fn experiment_leaf(root: &Path, scenario: &str) -> Result<i32> {
     }
     #[cfg(target_os = "linux")]
     if scenario == "experiment-input" && unsafe { libc::fcntl(0, libc::F_SETPIPE_SZ, 4096) } < 0 {
-        return Err(std::io::Error::last_os_error().into());
+        // The driver writes its megabyte from admission on and may have
+        // filled the pipe before this leaf could shrink it. A pipe that is
+        // too full to shrink already holds the input back.
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EBUSY) {
+            return Err(error.into());
+        }
     }
     let mut descendant = Command::new(std::env::current_exe()?);
     descendant
