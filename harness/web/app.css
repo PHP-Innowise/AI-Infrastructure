@@ -227,6 +227,8 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-hit:hover { stroke-opacity:.16; }
 .graph-map-edge-guess { stroke-dasharray:5 4; opacity:.6; }
 .graph-map-edge-back { stroke-dasharray:0 5; stroke-linecap:round; opacity:.6; }
+/* Among layers a link back runs under their row and wears the colour of what is wrong: it runs against their order. */
+.graph-map-edge-against { stroke:var(--error-dot); }
 .graph-map-edge-guess[data-shared-path="true"],.graph-map-plane[data-cycle-view="true"] .graph-map-edge-guess { stroke-dasharray:5 4; }
 .graph-map-edge-on { opacity:1; }
 .graph-map-edge-off { opacity:.14; }
@@ -243,6 +245,7 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-flow-between { stop-color:var(--map-between); }
 .graph-map-flow-used { stop-color:var(--map-used); }
 .graph-map-arrow path { fill:var(--map-used); }
+.graph-map-arrow-against path { fill:var(--error-dot); }
 .graph-map-caption { position:absolute; left:12px; color:var(--muted); font-size:var(--text-meta); }
 .graph-map-node { position:absolute; display:flex; align-items:center; gap:6px; width:164px; height:30px; padding:0 10px; border:1px solid var(--field-line); border-radius:var(--radius); background:var(--paper); color:var(--ink); font-size:var(--text-ui); text-align:left; }
 .graph-map-node:hover { border-color:var(--field-line-hover); }
@@ -298,8 +301,8 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-node-pattern { flex:none; color:var(--purple); font-size:var(--text-meta); font-variant-numeric:tabular-nums; }
 .graph-map-family { margin:14px 0 0; color:var(--muted); font-size:var(--text-meta); font-weight:var(--weight-strong); letter-spacing:.04em; text-transform:uppercase; }
 .graph-map-pattern-name { margin:8px 0 2px; font-weight:var(--weight-strong); }
-.graph-map-row[data-action="graph-map-pattern"] { flex-wrap:wrap; gap:0 8px; }
-.graph-map-row[data-action="graph-map-pattern"] .graph-map-row-links { flex:1 1 100%; }
+.graph-map-row:is([data-action="graph-map-pattern"],[data-against="true"]) { flex-wrap:wrap; gap:0 8px; }
+.graph-map-row:is([data-action="graph-map-pattern"],[data-against="true"]) .graph-map-row-links { flex:1 1 100%; }
 .graph-map-side { overflow:auto; padding:2px 4px 2px 0; font-size:var(--text-ui); }
 .graph-map-side h3 { margin:0; font-size:var(--text-title); overflow-wrap:anywhere; }
 .graph-map-side h4 { margin:16px 0 4px; font-size:var(--text-ui); }

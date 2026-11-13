@@ -24,6 +24,11 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Show the layers of a folder on the dependency map in Harness: its files filed
+  as entry points, services, data access and model by their names and folders,
+  the links between those layers in their order, and the pairs of files that
+  run against it.
+
 - Mark the dependency map in Harness with the design and architecture patterns
   the graph shows signs of, list the findings where a picture is open, and draw
   one finding with what each of its parts is in it.

@@ -168,6 +168,8 @@ struct Found {
 #[derive(Debug, Default)]
 pub(super) struct Patterns {
     found: Vec<Found>,
+    /// The layers its files are filed in, which a folder is asked for.
+    layers: layers::Layers,
 }
 /// The graph as the patterns read it: types, what each lies in, and how
 /// they stand to each other.
@@ -1072,7 +1074,10 @@ impl Patterns {
                 .then(b.parts.len().cmp(&a.parts.len()))
                 .then(place(a).cmp(&place(b)))
         });
-        Self { found }
+        Self {
+            found,
+            layers: layers::Layers::read(index, certain),
+        }
     }
 }
 impl Found {
@@ -1174,6 +1179,14 @@ impl Index {
         }
         let mut kinds = Vec::new();
         let mut total = 0;
+        // The layers of the open folder are one finding, and come first.
+        if let Some(row) = patterns.layers.row(self, &scope) {
+            total += 1;
+            kinds.push(json!({
+                "id": "layers", "name": "Layers", "family": "architecture",
+                "tells": layers::TELLS, "found": 1, "more": 0, "instances": [row],
+            }));
+        }
         for (sort, told) in SORTS.iter().enumerate() {
             let here = patterns
                 .found
@@ -1213,6 +1226,13 @@ impl Index {
         certain: bool,
     ) -> Option<Value> {
         let (sort, place) = id.split_once('@')?;
+        if sort == "layers" {
+            // The layers of a folder are asked for by the folder.
+            return self
+                .patterns_of(certain)
+                .layers
+                .view(self, project, place, focus, certain);
+        }
         let sort = SORTS.iter().position(|known| known.id == sort)?;
         let Some(Reach::Symbol(anchor)) = self.reach(place) else {
             return None;

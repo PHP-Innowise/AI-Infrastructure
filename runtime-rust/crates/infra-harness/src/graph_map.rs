@@ -25,6 +25,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
+mod layers;
 mod patterns;
 /// Children of one folder drawn at once; the rest are reached by the filter.
 pub const SHOWN: usize = 40;

@@ -705,6 +705,128 @@ pub fn plan_beside(
         apart,
     }
 }
+/// How far the first link that passes over or under a row of layers stands
+/// off it, and how much further each next one.
+const ARC_FIRST: f64 = 18.0;
+const ARC_STEP: f64 = 12.0;
+/// How far apart two links leave or reach one edge of a box.
+const ARC_APART: f64 = 10.0;
+/// Places `count` nodes in one row, in the order they come in, and routes
+/// `edges` (user, used, weight) between them. This is the picture of layers:
+/// their order is their own, not what their links make of it. A link to the
+/// next node runs straight; one that passes a node arcs over the row; and a
+/// link back, from a later node to an earlier one, arcs under it. No two arcs
+/// of a side lie at one height, the shorter nearer the row, and those that
+/// share an edge of a box leave it and reach it apart, so they nest.
+pub fn plan_row(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
+    let mut seen = BTreeSet::new();
+    let drawn = edges
+        .iter()
+        .enumerate()
+        .filter(|(_, (from, to, _))| {
+            from != to && *from < count && *to < count && seen.insert((*from, *to))
+        })
+        .map(|(edge, (from, to, _))| (edge, *from, *to))
+        .collect::<Vec<_>>();
+    // The arcs of a side, the shorter first.
+    let arcs = |back: bool| {
+        let mut arcs = drawn
+            .iter()
+            .filter(
+                |(_, from, to)| {
+                    if back {
+                        from > to
+                    } else {
+                        *to > from + 1
+                    }
+                },
+            )
+            .map(|(_, from, to)| (from.abs_diff(*to), *from.min(to), (*from, *to)))
+            .collect::<Vec<_>>();
+        arcs.sort_unstable();
+        arcs.into_iter().map(|(.., pair)| pair).collect::<Vec<_>>()
+    };
+    let (over, under) = (arcs(false), arcs(true));
+    let reach = |arcs: &[(usize, usize)]| match arcs.len() {
+        0 => 0.0,
+        many => ARC_FIRST + ARC_STEP * (many - 1) as f64,
+    };
+    let top = MARGIN + reach(&over);
+    let left = |at: usize| MARGIN + at as f64 * (BOX_WIDTH + COLUMN_GAP);
+    // An arc leaves a box on the half towards where it runs and reaches a box
+    // on the half it comes from; each next one of a box stands further out.
+    let route = |arcs: &[(usize, usize)], below: bool| {
+        let (mut leaving, mut reaching) = (vec![0usize; count], vec![0usize; count]);
+        arcs.iter()
+            .enumerate()
+            .map(|(level, (from, to))| {
+                let out = ARC_APART * leaving[*from] as f64;
+                let into = ARC_APART * reaching[*to] as f64;
+                leaving[*from] += 1;
+                reaching[*to] += 1;
+                // Over the row an arc runs to the right, under it to the left.
+                let (start, end) = if below {
+                    (
+                        left(*from) + BOX_WIDTH * 0.25 + out,
+                        left(*to) + BOX_WIDTH * 0.75 - into,
+                    )
+                } else {
+                    (
+                        left(*from) + BOX_WIDTH * 0.75 - out,
+                        left(*to) + BOX_WIDTH * 0.25 + into,
+                    )
+                };
+                // A curve held at both ends by handles of one length bulges
+                // three quarters of that length.
+                let pull = (ARC_FIRST + ARC_STEP * level as f64) / 0.75;
+                let (edge, handle) = if below {
+                    (top + BOX_HEIGHT, top + BOX_HEIGHT + pull)
+                } else {
+                    (top, top - pull)
+                };
+                (
+                    (*from, *to),
+                    format!(
+                        "M{start:.1} {edge:.1} C{start:.1} {handle:.1} {end:.1} {handle:.1} {end:.1} {edge:.1}"
+                    ),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut paths = route(&over, false);
+    paths.extend(route(&under, true));
+    let middle = top + BOX_HEIGHT / 2.0;
+    let wires = drawn
+        .iter()
+        .map(|(edge, from, to)| Wire {
+            edge: *edge,
+            path: match paths.iter().find(|(pair, _)| *pair == (*from, *to)) {
+                Some((_, path)) => path.clone(),
+                None => format!(
+                    "M{:.1} {middle:.1} L{:.1} {middle:.1}",
+                    left(*from) + BOX_WIDTH,
+                    left(*to)
+                ),
+            },
+            back: from > to,
+        })
+        .collect();
+    Plan {
+        nodes: (0..count)
+            .map(|node| Placed {
+                x: left(node),
+                y: top,
+                layer: Some(node),
+                cycle: false,
+            })
+            .collect(),
+        wires,
+        frames: vec![],
+        width: left(count.max(1) - 1) + BOX_WIDTH + MARGIN,
+        height: top + BOX_HEIGHT + reach(&under) + MARGIN,
+        apart: None,
+    }
+}
 fn count(value: u64) -> String {
     let digits = value.to_string();
     let mut out = String::new();
@@ -782,6 +904,11 @@ fn shares(view: &V) -> bool {
 fn patterned(view: &V) -> bool {
     view["mode"] == "pattern"
 }
+/// The layers of a folder: no finding among its types, but all its files by
+/// the layer each is filed in.
+fn layered(view: &V) -> bool {
+    patterned(view) && view["pattern"]["sort"] == "layers"
+}
 /// Of what two places share, what uses both is drawn, not what both use.
 fn above(view: &V) -> bool {
     view["shared"]["side"] == "uses_both"
@@ -794,7 +921,7 @@ fn names(view: &V) -> bool {
         || (paths(view) && m::yes(&view["path"]["names"]))
         || (shares(view) && m::yes(&view["shared"]["names"]))
         || (cycles(view) && m::yes(&view["cycle"]["names"]))
-        || patterned(view)
+        || (patterned(view) && !layered(view))
 }
 /// The letter a symbol's box carries for what it is. The file's own node
 /// and a name the graph says nothing more about carry none.
@@ -1026,6 +1153,29 @@ fn shown(view: &V) -> String {
             users => format!(" · {} other files use it", count(users)),
         });
         return text;
+    }
+    if layered(view) {
+        // The folder, how many layers hold how many of its files, and how
+        // much runs against their order.
+        let pattern = &view["pattern"];
+        let layers = m::array(&pattern["layers"]);
+        return format!(
+            "Layers: {} · {} · {} · {}",
+            m::text(&pattern["of"], "name"),
+            plural(layers.len() as u64, "layer", "layers"),
+            plural(
+                layers
+                    .iter()
+                    .map(|layer| layer["files"].as_u64().unwrap_or(0))
+                    .sum(),
+                "file",
+                "files"
+            ),
+            match pattern["against"]["links"].as_u64().unwrap_or(0) {
+                0 => "nothing against their order".to_owned(),
+                links => format!("{} against their order", plural(links, "link", "links")),
+            }
+        );
     }
     if patterned(view) {
         // The pattern, the type it is named after, and its other parts by
@@ -1812,7 +1962,13 @@ pub fn canvas(view: &V) -> String {
         .zip(two("end"))
         .filter(|_| shares(view))
         .map(|(first, second)| ([first, second], above(view)));
-    let plan = plan_beside(nodes.len(), &weighted, &framed, pair);
+    // Layers stand in a row in their own order, whatever their links say.
+    let layered_view = layered(view);
+    let plan = if layered_view {
+        plan_row(nodes.len(), &weighted)
+    } else {
+        plan_beside(nodes.len(), &weighted, &framed, pair)
+    };
     // How much each box uses and is used through the links drawn here.
     let mut flow = vec![(0u64, 0u64); nodes.len()];
     for (from, to, links) in &weighted {
@@ -1887,6 +2043,10 @@ pub fn canvas(view: &V) -> String {
             "<linearGradient id=\"graph-map-flow-{index}\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
         ));
     }
+    if layered_view {
+        // The head of a link that runs against the order of the layers.
+        html.push_str("<marker id=\"graph-map-arrow-against\" class=\"graph-map-arrow graph-map-arrow-against\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\"/></marker>");
+    }
     html.push_str("</defs>");
     for (index, place) in plan.frames.iter().enumerate() {
         if place.width > 0.0 {
@@ -1907,7 +2067,10 @@ pub fn canvas(view: &V) -> String {
             edge["guessed"].as_u64().unwrap_or(0),
         );
         let (from, to) = pairs[wire.edge];
-        let back = wire.back && cycles;
+        // Among layers a link back is no weaker direction of a cycle: it
+        // runs against their order, under the row.
+        let against = layered_view && wire.back;
+        let back = wire.back && cycles && !layered_view;
         let on_path = shared_edges.contains(&(from, to));
         let added = cycle_view && m::yes(&edge["added"]);
         let state = if cycle_view || chosen.is_some() {
@@ -1934,9 +2097,10 @@ pub fn canvas(view: &V) -> String {
             None => format!("{user} uses {used} · {}", weight(links, guessed)),
         };
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}{}\" data-ends=\"{from} {to}\"{}{} d=\"{}\" stroke=\"url(#graph-map-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow)\"><title>{told}{}{}</title></path>",
+            "<path class=\"graph-map-edge{state}{}{}{}\" data-ends=\"{from} {to}\"{}{} d=\"{}\" stroke=\"url(#graph-map-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow{})\"><title>{told}{}{}{}</title></path>",
             if guessed == links { " graph-map-edge-guess" } else { "" },
             if back { " graph-map-edge-back" } else { "" },
+            if against { " graph-map-edge-against" } else { "" },
             if on_path { " data-shared-path=\"true\"" } else { "" },
             if added { " data-cycle-added=\"true\"" } else { "" },
             wire.path,
@@ -1944,14 +2108,18 @@ pub fn canvas(view: &V) -> String {
             // A link that closes a cycle is a row of dots, kept thin.
             (1.0 + ((links.max(1) as f64).log2() * 0.5).min(2.5)).min(if back { 1.8 } else { 3.5 })
                 + if added { 1.5 } else { 0.0 },
+            if against { "-against" } else { "" },
             if back { " · against the main direction, closes a cycle" } else { "" },
+            if against { " · against the order of the layers" } else { "" },
             if added { " · added in PR" } else { "" },
         ));
     }
     // Over each link lies a wider one that cannot be seen and is easy to
     // hit: selecting a link looks into it. They lie over all the links, so
-    // none of them is hidden under a link drawn later.
-    for wire in &plan.wires {
+    // none of them is hidden under a link drawn later. A link between two
+    // layers is many links of many files: what runs against the order is
+    // listed beside the picture, pair by pair.
+    for wire in plan.wires.iter().filter(|_| !layered_view) {
         let (from, to) = pairs[wire.edge];
         html.push_str(&format!(
             "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{} · select to see what makes up this link</title></path>",
@@ -1987,7 +2155,12 @@ pub fn canvas(view: &V) -> String {
                 }
             } else if folder {
                 format!(
-                    "folder, {}",
+                    "{}, {}",
+                    if m::yes(&node["layer"]) {
+                        "layer"
+                    } else {
+                        "folder"
+                    },
                     plural(node["files"].as_u64().unwrap_or(0), "file", "files")
                 )
             } else {
@@ -2118,6 +2291,8 @@ pub fn canvas(view: &V) -> String {
         let title = match (symbol, line) {
             (true, 0) => format!("{} · {home}", m::text(node, "name")),
             (true, line) => format!("{} · {home}:{line}", m::text(node, "name")),
+            // A layer is no place of the project: it has a name, no path.
+            _ if m::yes(&node["layer"]) => m::text(node, "name"),
             _ => m::text(node, "path"),
         };
         let (out, into) = flow[index];
@@ -2773,7 +2948,15 @@ fn rows(title: &str, rows: &V, more: &V, look: Option<(&V, bool)>) -> String {
                 escape(&relation.replace('_', " ")),
                 if guessed > 0 { ", guessed" } else { "" }
             ),
-            (None, Some(links)) => weight(links, guessed),
+            (None, Some(links)) => format!(
+                "{}{}",
+                weight(links, guessed),
+                if m::yes(&row["against"]) {
+                    " · against the order"
+                } else {
+                    ""
+                }
+            ),
             _ => match row["line"].as_u64() {
                 Some(line) if line > 0 => format!("line {line}"),
                 _ => String::new(),
@@ -3148,9 +3331,89 @@ fn apart(view: &V) -> String {
     }
     html
 }
+/// Pairs of files of which the first needs the second against the order of
+/// their layers: each a row that opens what makes up their link. `none` is
+/// said where there are no such pairs.
+fn against_rows(title: &str, against: &V, none: &str) -> String {
+    let rows = m::array(&against["rows"]);
+    let more = against["more"].as_u64().unwrap_or(0);
+    let mut html = format!(
+        "<h4>{title} <span class=\"graph-map-total\">{}</span></h4>",
+        count(rows.len() as u64 + more)
+    );
+    if rows.is_empty() {
+        html.push_str(&format!("<p class=\"knowledge-note\">{none}</p>"));
+        return html;
+    }
+    html.push_str("<ul class=\"graph-map-rows\">");
+    for row in &rows {
+        let (from, to) = (&row["from"], &row["to"]);
+        html.push_str(&format!(
+            "<li><button type=\"button\" class=\"graph-map-row\" data-against=\"true\" data-action=\"graph-map-link\" data-payload=\"{}\" title=\"{} uses {} · select to see what makes up this link\"><span class=\"graph-map-row-name\">{} → {}</span><span class=\"graph-map-row-links\">{} → {} · {}</span></button></li>",
+            payload(&json!({"from": from["path"], "to": to["path"]})),
+            escape(&m::text(from, "path")),
+            escape(&m::text(to, "path")),
+            escape(&m::text(from, "name")),
+            escape(&m::text(to, "name")),
+            escape(&m::text(from, "layer")),
+            escape(&m::text(to, "layer")),
+            weight(
+                row["links"].as_u64().unwrap_or(0),
+                row["guessed"].as_u64().unwrap_or(0)
+            ),
+        ));
+    }
+    html.push_str("</ul>");
+    if more > 0 {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">and {} more</p>",
+            count(more)
+        ));
+    }
+    html
+}
+/// The side panel of the layers of a folder: what runs against their order,
+/// or, of a selected layer, what places a file in it, what it has with the
+/// other layers, what of that runs against the order, and its files.
+fn layers_side(view: &V) -> String {
+    let focus = &view["focus"];
+    if !focus.is_object() {
+        return format!(
+            "<p class=\"knowledge-note\">A box is a layer: the files a name or a folder places in it. Select a layer to see its files and what it has with the others, and select it again to let go of it.</p>{}",
+            against_rows(
+                "Against the order",
+                &view["pattern"]["against"],
+                "No layer here needs one before it."
+            )
+        );
+    }
+    let mut html = format!(
+        "<h3>{}</h3><p class=\"knowledge-note\">Layer · {} · placed by {}</p>",
+        escape(&m::text(focus, "name")),
+        plural(focus["files"].as_u64().unwrap_or(0), "file", "files"),
+        escape(&m::text(focus, "signs")),
+    );
+    html.push_str(&rows("Uses", &focus["uses"], &V::Null, None));
+    html.push_str(&rows("Used by", &focus["used_by"], &V::Null, None));
+    html.push_str(&against_rows(
+        "Against the order, from here",
+        &focus["against"],
+        "Nothing here needs a layer before this one.",
+    ));
+    html.push_str(&rows(
+        "Files",
+        &focus["members"],
+        &focus["members_more"],
+        None,
+    ));
+    html
+}
 /// The side panel of one found pattern: the selected part with what it is
 /// in the pattern and what joins it to the others, or what to do.
 fn pattern_side(view: &V) -> String {
+    if layered(view) {
+        return layers_side(view);
+    }
     let focus = &view["focus"];
     if !focus.is_object() {
         return "<p class=\"knowledge-note\">A frame holds the parts that are one thing in the pattern. Select a part to see what joins it to the others, and select it again to let go of it. Select a link to see what makes it up.</p>".to_owned();
@@ -3533,6 +3796,7 @@ fn html(id: &str, markup: &str) {
 const LEGEND: &str = "Dotted: against the main direction, closing a cycle (↻).";
 const FILE_LEGEND: &str = "T type · m method · f function · c case · # heading. A box without a letter is another file, a plain name, or the open file itself for its imports.";
 const NAME_LEGEND: &str = "T type · m method · f function · c case · # heading. A box without a letter is a plain name, or a file itself for its imports.";
+const LAYER_LEGEND: &str = "A box is a layer; the layers stand in their order, and each may use those after it. A link to the next layer runs straight, one that passes a layer runs over the row. A link under the row, in red, runs back: against the order.";
 /// What the colours and the lines of the map mean, each colour beside a
 /// patch of it, then what is particular to the picture: a folder, an opened
 /// file, or a change (`change` says a change is chosen).
@@ -3546,6 +3810,7 @@ fn legend(view: &V, change: bool) -> String {
         _ if changes(view) => {
             "Highlighted: changed. The rest use the change or are used by it.".to_owned()
         }
+        _ if layered(view) => LAYER_LEGEND.to_owned(),
         _ if patterned(view) => format!(
             "A frame holds the parts that are one thing in the pattern; the ringed box is the type it is named after. {NAME_LEGEND}"
         ),
@@ -9884,5 +10149,327 @@ mod tests {
         let left = unfollowed(shown);
         assert!(left["pattern"].is_null() && left["pattern_return"].is_null());
         assert_eq!(left["patterns"], true);
+    }
+    #[test]
+    fn layers_stand_in_a_row_in_their_order_and_a_link_back_runs_under_it() {
+        // Entry points, services, data access and the model, with a link
+        // that passes a layer and two that run back.
+        let edges = [
+            (0, 1, 3),
+            (1, 2, 2),
+            (1, 3, 3),
+            (2, 0, 1),
+            (2, 3, 2),
+            (3, 1, 2),
+        ];
+        let plan = plan_row(4, &edges);
+        assert_eq!(
+            plan.nodes
+                .iter()
+                .map(|node| (node.x, node.y, node.layer, node.cycle))
+                .collect::<Vec<_>>(),
+            [
+                (12.0, 30.0, Some(0), false),
+                (248.0, 30.0, Some(1), false),
+                (484.0, 30.0, Some(2), false),
+                (720.0, 30.0, Some(3), false),
+            ]
+        );
+        assert_eq!(
+            plan.wires
+                .iter()
+                .map(|wire| (wire.edge, wire.path.as_str(), wire.back))
+                .collect::<Vec<_>>(),
+            [
+                // To the next layer: straight, from side to side.
+                (0, "M176.0 45.0 L248.0 45.0", false),
+                (1, "M412.0 45.0 L484.0 45.0", false),
+                // Past a layer: over the row.
+                (2, "M371.0 30.0 C371.0 6.0 761.0 6.0 761.0 30.0", false),
+                // Back: under the row, the second arc deeper than the first.
+                (3, "M525.0 60.0 C525.0 84.0 135.0 84.0 135.0 60.0", true),
+                (4, "M648.0 45.0 L720.0 45.0", false),
+                (5, "M761.0 60.0 C761.0 100.0 371.0 100.0 371.0 60.0", true),
+            ]
+        );
+        assert_eq!((plan.width, plan.height), (896.0, 102.0));
+        assert!(plan.frames.is_empty() && plan.apart.is_none());
+        // Arcs that share an edge of a box leave it and reach it apart, the
+        // longer one outside the shorter.
+        let nested = plan_row(4, &[(0, 2, 1), (0, 3, 1), (1, 3, 1), (3, 0, 1), (2, 0, 1)]);
+        let paths = nested
+            .wires
+            .iter()
+            .map(|wire| wire.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                "M135.0 54.0 C135.0 30.0 525.0 30.0 525.0 54.0",
+                "M125.0 54.0 C125.0 -2.0 771.0 -2.0 771.0 54.0",
+                "M371.0 54.0 C371.0 14.0 761.0 14.0 761.0 54.0",
+                "M761.0 84.0 C761.0 124.0 125.0 124.0 125.0 84.0",
+                "M525.0 84.0 C525.0 108.0 135.0 108.0 135.0 84.0",
+            ]
+        );
+        assert_eq!(nested.height, 84.0 + 30.0 + 12.0);
+        // A row without links, a link named twice, one to itself and one to
+        // what is not there.
+        let plain = plan_row(2, &[(0, 0, 1), (0, 1, 1), (0, 1, 4), (1, 5, 1)]);
+        assert_eq!(plain.wires.len(), 1);
+        assert_eq!(plain.wires[0].edge, 1);
+        assert_eq!((plain.nodes[0].y, plain.height), (12.0, 54.0));
+        let none = plan_row(0, &[]);
+        assert!(none.nodes.is_empty() && none.wires.is_empty());
+        assert_eq!((none.width, none.height), (188.0, 54.0));
+    }
+    /// The layers of a folder as the server draws them: four layers, two
+    /// links against their order, one of them guessed.
+    fn layers() -> V {
+        let layer = |id: &str, name: &str, files: u64, out: u64, into: u64| {
+            json!({
+                "path": format!("layer:{id}"), "name": name, "folder": true, "layer": true,
+                "files": files, "symbols": 0, "within": 0, "changed": 0, "out": out, "in": into,
+            })
+        };
+        let end =
+            |path: &str, layer: &str| json!({"path": path, "name": base(path), "layer": layer});
+        let link = |from: &str, to: &str, links: u64, guessed: u64, against: bool| {
+            json!({
+                "from": format!("layer:{from}"), "to": format!("layer:{to}"),
+                "links": links, "guessed": guessed, "against": against,
+            })
+        };
+        json!({
+            "mode": "pattern", "scope": "app", "certain": false,
+            "crumbs": [
+                {"name": "shop", "path": ""}, {"name": "app", "path": "app"},
+                {"name": "Layers", "path": ""}
+            ],
+            "pattern": {
+                "id": "layers@app", "sort": "layers", "name": "Layers", "family": "architecture",
+                "tells": "Files filed in layers by their names.",
+                "named": true, "guessed": true,
+                "of": {"path": "app", "name": "app", "what": "folder"},
+                "told": ["1 file of code here is filed in no layer."],
+                "layers": [
+                    {"id": "entry", "name": "Entry points", "files": 2},
+                    {"id": "services", "name": "Services", "files": 2},
+                    {"id": "data", "name": "Data access", "files": 2},
+                    {"id": "model", "name": "Model", "files": 1200}
+                ],
+                "apart": 1,
+                "against": {
+                    "links": 3, "guessed": 1, "pairs": 2, "more": 0,
+                    "rows": [
+                        {
+                            "from": end("app/Models/Order.php", "Model"),
+                            "to": end("app/Services/Pay<b>.php", "Services"),
+                            "links": 2, "guessed": 0
+                        },
+                        {
+                            "from": end("app/Repositories/OrderRepository.php", "Data access"),
+                            "to": end("app/Http/Controllers/CheckoutController.php", "Entry points"),
+                            "links": 1, "guessed": 1
+                        }
+                    ],
+                },
+            },
+            "nodes": [
+                layer("entry", "Entry points", 2, 3, 1),
+                layer("services", "Services", 2, 5, 5),
+                layer("data", "Data access", 2, 3, 2),
+                layer("model", "Model", 1200, 2, 5)
+            ],
+            "edges": [
+                link("entry", "services", 3, 0, false),
+                link("services", "data", 2, 0, false),
+                link("services", "model", 3, 0, false),
+                link("data", "entry", 1, 1, true),
+                link("data", "model", 2, 0, false),
+                link("model", "services", 2, 0, true)
+            ],
+            "focus": null,
+        })
+    }
+    #[test]
+    fn the_layers_of_a_folder_are_drawn_in_their_order_with_what_runs_against_it() {
+        let view = layers();
+        assert_eq!(
+            summary(&view),
+            "Layers: app · 4 layers · 1,206 files · 3 links against their order"
+        );
+        assert_eq!(
+            note(&view),
+            "Files filed in layers by their names. 1 file of code here is filed in no layer. A dashed link is one the tool only guessed."
+        );
+        let html = canvas(&view);
+        // One row, in the order of the layers, whatever the links say.
+        assert!(
+            html.contains("style=\"width:896px;height:102px\""),
+            "{html}"
+        );
+        for at in [
+            "left:12px;top:30px",
+            "left:248px;top:30px",
+            "left:484px;top:30px",
+            "left:720px;top:30px",
+        ] {
+            assert!(html.contains(at), "{at}");
+        }
+        // A layer is no folder and no symbol: it is selected, never opened,
+        // and is called by its name.
+        assert!(html.contains("title=\"Entry points\" aria-pressed=\"false\" aria-label=\"Entry points, layer, 2 files, uses others through 3 links, is used through 1 link\""), "{html}");
+        assert!(html.contains("aria-label=\"Model, layer, 1,200 files, uses others through 2 links, is used through 5 links\""));
+        assert_eq!(html.matches("data-open=\"false\"").count(), 4);
+        assert!(!html.contains("data-names=\"true\""));
+        assert!(
+            html.contains("<span class=\"graph-map-node-count\" aria-hidden=\"true\">1,200</span>")
+        );
+        // A link back runs under the row, is marked, and says so; it is no
+        // weaker direction of a cycle, and no layer is part of one.
+        assert_eq!(html.matches(" graph-map-edge-against\"").count(), 2);
+        assert_eq!(
+            html.matches("marker-end=\"url(#graph-map-arrow-against)\"")
+                .count(),
+            2
+        );
+        assert_eq!(
+            html.matches("marker-end=\"url(#graph-map-arrow)\"").count(),
+            4
+        );
+        assert_eq!(
+            html.matches("<marker id=\"graph-map-arrow-against\"")
+                .count(),
+            1
+        );
+        assert!(html.contains("d=\"M761.0 60.0 C761.0 100.0 371.0 100.0 371.0 60.0\""));
+        assert!(html.contains(
+            "<title>Model uses Services · 2 links · against the order of the layers</title>"
+        ));
+        assert!(html.contains("<title>Data access uses Entry points · 1 link guessed · against the order of the layers</title>"));
+        assert!(html.contains("<title>Entry points uses Services · 3 links</title>"));
+        assert!(html.contains("<title>Services uses Model · 3 links</title>"));
+        assert!(!html.contains("graph-map-edge-back") && !html.contains("closes a cycle"));
+        assert!(!html.contains("graph-map-node-cycle") && !html.contains("part of a cycle"));
+        // One guessed link is dashed, against the order or not.
+        assert_eq!(html.matches(" graph-map-edge-guess").count(), 1);
+        // A link between two layers is many links of many files: it is not
+        // looked into as one.
+        assert!(!html.contains("graph-map-hit") && !html.contains("graph-map-link"));
+        // The way there ends in the layers, which are no place to open.
+        let way = crumbs(&view);
+        assert!(
+            way.ends_with(
+                "<span class=\"graph-map-crumb\" aria-current=\"location\">Layers</span>"
+            ),
+            "{way}"
+        );
+        assert_eq!(way.matches("data-action=\"graph-map-open\"").count(), 2);
+        let key = legend(&view, false);
+        assert!(
+            key.ends_with("A link under the row, in red, runs back: against the order."),
+            "{key}"
+        );
+        assert!(!key.contains("A frame holds") && !key.contains("T type"));
+        // Beside it: what runs against the order, pair by pair, each a way
+        // to what makes up the link of its two files.
+        let html = side(&view);
+        assert!(html.starts_with("<p class=\"knowledge-note\">A box is a layer: the files a name or a folder places in it."), "{html}");
+        assert!(
+            html.contains("<h4>Against the order <span class=\"graph-map-total\">2</span></h4>")
+        );
+        assert!(html.contains("data-against=\"true\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;app/Models/Order.php&quot;,&quot;to&quot;:&quot;app/Services/Pay&lt;b&gt;.php&quot;}\" title=\"app/Models/Order.php uses app/Services/Pay&lt;b&gt;.php · select to see what makes up this link\"><span class=\"graph-map-row-name\">Order.php → Pay&lt;b&gt;.php</span><span class=\"graph-map-row-links\">Model → Services · 2 links</span>"), "{html}");
+        assert!(html.contains("<span class=\"graph-map-row-links\">Data access → Entry points · 1 link guessed</span>"));
+        assert_eq!(html.matches("data-action=\"graph-map-link\"").count(), 2);
+        let mut more = view.clone();
+        more["pattern"]["against"]["more"] = json!(1200);
+        let html = side(&more);
+        assert!(html
+            .contains("<h4>Against the order <span class=\"graph-map-total\">1,202</span></h4>"));
+        assert!(html.ends_with("<p class=\"knowledge-note\">and 1,200 more</p>"));
+        // A folder in order says so.
+        let mut clean = view.clone();
+        clean["pattern"]["against"] =
+            json!({"links": 0, "guessed": 0, "pairs": 0, "rows": [], "more": 0});
+        assert_eq!(
+            summary(&clean),
+            "Layers: app · 4 layers · 1,206 files · nothing against their order"
+        );
+        assert!(side(&clean).ends_with("<h4>Against the order <span class=\"graph-map-total\">0</span></h4><p class=\"knowledge-note\">No layer here needs one before it.</p>"));
+        clean["pattern"]["against"]["links"] = json!(1);
+        assert!(summary(&clean).ends_with("· 1 link against their order"));
+    }
+    #[test]
+    fn a_selected_layer_says_what_places_a_file_in_it_and_lists_its_files() {
+        let mut view = layers();
+        let mut focus = view["nodes"][3].clone();
+        let beside = |layer: &str, name: &str, links: u64, against: bool| {
+            json!({
+                "path": format!("layer:{layer}"), "name": name, "folder": false, "inside": true,
+                "links": links, "guessed": 0, "changed": false, "against": against,
+            })
+        };
+        for (key, value) in [
+            ("inside", json!(true)),
+            (
+                "signs",
+                json!("a name that ends in <model>, or a folder named models"),
+            ),
+            ("uses", json!([beside("services", "Services", 2, true)])),
+            (
+                "used_by",
+                json!([
+                    beside("services", "Services", 3, false),
+                    beside("data", "Data access", 2, false)
+                ]),
+            ),
+            (
+                "members",
+                json!([{
+                    "path": "app/Models/Order.php", "name": "Order.php", "folder": false,
+                    "inside": false, "links": 5, "guessed": 0, "changed": false
+                }]),
+            ),
+            ("members_more", json!(1199)),
+            (
+                "against",
+                json!({"rows": [view["pattern"]["against"]["rows"][0].clone()], "more": 0}),
+            ),
+        ] {
+            focus[key] = value;
+        }
+        view["focus"] = focus;
+        let html = side(&view);
+        assert!(html.starts_with("<h3>Model</h3><p class=\"knowledge-note\">Layer · 1,200 files · placed by a name that ends in &lt;model&gt;, or a folder named models</p><h4>Uses <span class=\"graph-map-total\">1</span></h4>"), "{html}");
+        // Another layer is a row that selects it; what runs back says so.
+        assert!(html.contains("&quot;path&quot;:&quot;layer:services&quot;"));
+        assert!(html.contains("Services</span><span class=\"graph-map-row-links\">2 links · against the order</span>"), "{html}");
+        assert!(html.contains("<h4>Used by <span class=\"graph-map-total\">2</span></h4>"));
+        assert!(html.contains("Services</span><span class=\"graph-map-row-links\">3 links</span>"));
+        assert!(
+            html.contains("Data access</span><span class=\"graph-map-row-links\">2 links</span>")
+        );
+        // No row of a layer is a link to look into: only a pair of files is.
+        assert!(!html.contains("graph-map-row-look"));
+        assert!(html.contains(
+            "<h4>Against the order, from here <span class=\"graph-map-total\">1</span></h4>"
+        ));
+        assert_eq!(html.matches("data-action=\"graph-map-link\"").count(), 1);
+        // Its files, the most linked first, each a way to it in its folder.
+        assert!(html.contains("<h4>Files <span class=\"graph-map-total\">1,200</span></h4>"));
+        assert!(html.contains("title=\"app/Models/Order.php\"><span class=\"graph-map-row-name\">Order.php</span><span class=\"graph-map-row-links\">5 links</span>"), "{html}");
+        assert!(html.ends_with("<p class=\"knowledge-note\">and 1,199 more</p>"));
+        let mut none = view.clone();
+        none["focus"]["against"] = json!({"rows": [], "more": 0});
+        assert!(side(&none).contains("<h4>Against the order, from here <span class=\"graph-map-total\">0</span></h4><p class=\"knowledge-note\">Nothing here needs a layer before this one.</p>"));
+        // In the picture the layer is selected, and what it has no link
+        // with steps back.
+        let html = canvas(&view);
+        assert_eq!(html.matches("data-selected=\"true\"").count(), 1);
+        assert_eq!(html.matches("aria-pressed=\"true\"").count(), 1);
+        assert_eq!(html.matches(" graph-map-edge-on").count(), 3);
+        assert_eq!(html.matches(" graph-map-edge-off").count(), 3);
+        assert_eq!(html.matches("data-dim=\"true\"").count(), 1);
     }
 }

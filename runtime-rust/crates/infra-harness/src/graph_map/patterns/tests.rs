@@ -649,7 +649,8 @@ fn a_picture_carries_the_patterns_of_what_is_open() {
     assert_eq!(marks["app/Support"], 3);
     assert_eq!(marks["app/Models"], 1);
     assert_eq!(marks["app/Commands"], 2);
-    assert_eq!(view["patterns"]["found"], 9);
+    // With them, and before them, the layers its files are filed in.
+    assert_eq!(view["patterns"]["found"], 10);
     let kinds = view["patterns"]["kinds"].as_array().unwrap();
     assert_eq!(
         kinds
@@ -660,6 +661,7 @@ fn a_picture_carries_the_patterns_of_what_is_open() {
             ))
             .collect::<Vec<_>>(),
         [
+            ("layers", "architecture"),
             ("repository", "architecture"),
             ("events", "architecture"),
             ("commands", "architecture"),
@@ -671,7 +673,8 @@ fn a_picture_carries_the_patterns_of_what_is_open() {
             ("singleton", "design"),
         ]
     );
-    let strategy = &kinds[3]["instances"][0];
+    assert_eq!(kinds[0]["instances"][0]["id"], "layers@app");
+    let strategy = &kinds[4]["instances"][0];
     assert_eq!(
         strategy,
         &json!({
@@ -852,7 +855,9 @@ fn one_finding_is_drawn_with_what_each_part_is_in_it() {
         "strategy@app/Payments/LoggingGateway.php#L3:LoggingGateway",
         "decorator@app/Payments/LoggingGateway.php",
         "decorator@gone.php#L1:Gone",
-        "layers@app",
+        "layers@gone",
+        "layers@app/Models",
+        "layer@app",
         "decorator",
         "",
     ] {

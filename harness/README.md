@@ -2152,8 +2152,46 @@ implementing `Other`, tells nothing. **Only links read from the code** leaves ou
 what rests on links the tool inferred, and **Without tests** what rests on test
 doubles. Nothing reads a method's body, and a type the graph does not hold, as one
 of a framework that is not indexed, is no part of a finding. Two patterns built the
-same way are one finding under the commoner name. Layered architecture is not
-looked for.
+same way are one finding under the commoner name.
+
+**Layers** come first among the findings where the open folder is built in them:
+its files filed as entry points, services, data access and model, with how many
+there are and how much runs against their order. Nothing in a graph says which
+layer a file belongs to, so a file is filed by its name or, failing that, by the
+nearest folder named for a layer, and the finding says **by name**:
+
+| Layer | A name that ends in | Or a folder named |
+| --- | --- | --- |
+| Entry points | `Controller`, `Middleware`, `Endpoint` | `controller`, `controllers`, `console`, `middleware`, `resolver`, `resolvers`, `views`, `routes` |
+| Services | `Service`, `Manager`, `UseCase`, `Interactor`, `Handler`, `Listener`, `Subscriber`, `Job` | `service`, `services`, `usecase`, `usecases`, `handler`, `handlers`, `listener`, `listeners`, `subscribers`, `eventsubscriber`, `eventlistener`, `jobs`, `manager`, `managers`, `application` |
+| Data access | `Repository`, `Gateway`, `Mapper`, `Dao`, `Client` | `repository`, `repositories`, `gateways`, `mappers`, `persistence`, `infrastructure`, `dao`, `clients` |
+| Model | `Model`, `Entity`, `Dto`, `ValueObject` | `model`, `models`, `entity`, `entities`, `domain`, `dto`, `dtos`, `valueobjects`, `event`, `events` |
+
+The ending is a word of the name, in whatever case: `OrderService`,
+`order_service.py`, `orders.service.ts`, and not `Remodel` for `Model`.
+`Interface` and `Impl` after it are passed over. A file named as a whole like
+such a folder is filed too (`models.py`, `routes.rs`), except by the names that
+mean a folder only: `application`, `console`, `domain`, `infrastructure` and
+`persistence`. A name says more than a folder, and the nearest folder more than
+one above it. A test, a template (`*.blade.php`) and what is no code are filed in
+no layer. A folder is said to be in layers where they hold four files or more and
+a tenth of its code or more, and a file of one layer needs a file of another: a
+few files that happen to be named like a layer are no layered design.
+
+Select the finding to draw the layers: one box a layer, in their order from left
+to right, each with how many files it holds. A layer may use those after it. A
+link to the next layer runs straight, one that passes a layer runs over the row,
+and a link back runs under it, in red, and says that it runs against the order.
+The links counted are those by which one file needs another: a call, an
+inheritance, and the type of a field, a parameter or a result. An import, and a
+class named in an attribute, say only that one file knows of another and are not
+counted, so a pair of files can show more links where it is looked into than it
+counts here. The side panel lists the pairs of files that run against the order,
+the most linked first; select a pair to see what makes up its link. Select a
+layer to see what places a file in it, what it has with the other layers, and its
+files, each a way to that file among its neighbours. Whether a link against the
+order is a fault is for whoever knows the design to say; the map shows where
+such links are.
 
 The server reads `graph.json` in one streaming
 pass and keeps the last four graphs it read. On the development machine a 500 MB
