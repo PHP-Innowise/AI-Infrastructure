@@ -2110,6 +2110,10 @@ drawing and marked links in a long chain show dependencies absent from the base
 under the active filters. File and symbol matching accounts for Git-detected
 file renames, and moving a symbol to a different line does not change its identity.
 Folder comparisons use the folder path.
+When the base also has a cycle, **Show base cycle** draws its shortest chain
+using the current filters. Open a link to inspect its details at the base
+revision. **Back to PR cycle** returns to the PR's chain, and **Back to map**
+returns to the map you started from.
 
 The server reads `graph.json` in one streaming
 pass and keeps the last four graphs it read. On the development machine a 500 MB

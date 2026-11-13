@@ -3522,14 +3522,16 @@ impl Index {
         view: &mut Value,
         renames: &HashMap<&str, &str>,
         certain: bool,
-    ) -> &'static str {
+    ) -> (&'static str, Option<String>) {
         let origin = view["cycle"]["origin"]["path"]
             .as_str()
             .unwrap_or_default()
             .to_owned();
-        let hidden = self.reach(&origin).is_none();
-        let symbols = view["cycle"]["names"] == true
-            || (hidden && matches!(raw.reach(&origin), Some(Reach::Symbol(_))));
+        let head_place = self.reach(&origin);
+        let hidden = head_place.is_none();
+        let original_place = head_place.or_else(|| raw.reach(&origin));
+        let symbols =
+            view["cycle"]["names"] == true || matches!(original_place, Some(Reach::Symbol(_)));
         let net = Net::new(base, symbols, certain);
         let mut matched = HashMap::new();
         let mut matches = |path: &Value| {
@@ -3542,11 +3544,17 @@ impl Index {
                 })
                 .clone()
         };
-        let status = match matches(&view["cycle"]["origin"]["path"]) {
-            None => "ambiguous",
-            Some(members) if members.is_empty() => "missing",
-            Some(members) if net.cycle(&members).is_empty() => "absent",
-            Some(_) => "present",
+        let result = match matches(&view["cycle"]["origin"]["path"]) {
+            None => ("ambiguous", None),
+            Some(members) if members.is_empty() => ("missing", None),
+            Some(members) if net.cycle(&members).is_empty() => ("absent", None),
+            Some(members) => {
+                let place = match original_place.or_else(|| base.reach(&origin)) {
+                    Some(Reach::Folder(path)) => path.to_owned(),
+                    _ => net.key(&Names::new(base, &[], &|_| None), members[0]),
+                };
+                ("present", Some(place))
+            }
         };
         // An ambiguous symbol cannot establish whether its edge was added.
         let added = |from: Option<Vec<u32>>, to: Option<Vec<u32>>| {
@@ -3571,7 +3579,7 @@ impl Index {
                 previous = next;
             }
         }
-        status
+        result
     }
     fn cycle_members_at_base(
         &self,
@@ -3586,8 +3594,9 @@ impl Index {
         };
         let Some(place) = self.reach(path) else {
             return match base.reach(path) {
-                _ if path.contains("#L") => None,
+                Some(Reach::Symbol(_)) => None,
                 Some(place) => Some(net.members(place)),
+                None if path.contains('#') => None,
                 None => Some(Vec::new()),
             };
         };
@@ -5820,12 +5829,15 @@ mod tests {
         let head = graph(true);
         let base = graph(false);
         let renames = HashMap::from([("src/new.php", "src/old.php")]);
-        for place in ["src/new.php", "src/new.php#L31:a()"] {
+        for (place, earlier) in [
+            ("src/new.php", "src/old.php"),
+            ("src/new.php#L31:a()", "src/old.php#L3:a()"),
+        ] {
             let mut view = head.cycle("project", place, &[], &|_| None, None, false);
             assert_eq!(view["cycle"]["steps"], 2, "{view}");
             assert_eq!(
                 head.compare_cycle(&head, &base, &mut view, &renames, false),
-                "present"
+                ("present", Some(earlier.to_owned()))
             );
             assert_eq!(view["edges"][0]["added"], false);
             assert_eq!(view["edges"][1]["added"], true);
@@ -5834,8 +5846,11 @@ mod tests {
             assert_eq!(confirmed["cycle"]["steps"], 3);
             assert_eq!(
                 head.compare_cycle(&head, &base, &mut confirmed, &renames, true),
-                "present"
+                ("present", Some(earlier.to_owned()))
             );
+            let historical = base.cycle("project", earlier, &[], &|_| None, Some(earlier), false);
+            assert_eq!(historical["cycle"]["origin"]["path"], earlier);
+            assert_eq!(historical["cycle"]["steps"], 3);
             assert!(
                 confirmed["edges"]
                     .as_array()
@@ -5844,6 +5859,30 @@ mod tests {
                     .all(|edge| edge["added"] == false)
             );
         }
+    }
+
+    #[test]
+    fn a_missing_head_symbol_does_not_match_a_file_cycle_in_the_base() {
+        let base = index(json!({
+            "nodes": [
+                {"id": "f", "label": "f()", "source_file": "a.php"},
+                {"id": "a", "source_file": "a.php"}, {"id": "b", "source_file": "b.php"},
+            ],
+            "links": [
+                {"source": "a", "target": "b", "relation": "calls"},
+                {"source": "b", "target": "a", "relation": "calls"},
+            ],
+        }));
+        let head = index(json!({"nodes": [{"id": "a", "source_file": "a.php"}], "links": []}));
+        assert_eq!(
+            base.cycle("project", "a.php", &[], &|_| None, None, false)["cycle"]["steps"],
+            2
+        );
+        let mut view = head.cycle("project", "a.php#f()", &[], &|_| None, None, false);
+        assert_eq!(
+            head.compare_cycle(&head, &base, &mut view, &HashMap::new(), false),
+            ("ambiguous", None),
+        );
     }
 
     #[test]

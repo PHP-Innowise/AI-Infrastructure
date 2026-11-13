@@ -943,6 +943,8 @@ pub struct Shown<'a> {
     pub path: Option<(&'a str, &'a str)>,
     /// A place to find the shortest directed cycle through.
     pub cycle: Option<&'a str>,
+    /// The selected PR's base identifier for a cycle or link inspection.
+    pub base: Option<&'a str>,
     /// Two places to find what they share, instead of a folder, with
     /// which part of that to draw.
     pub shared: Option<Sharing<'a>>,
@@ -1081,7 +1083,19 @@ impl Graphs {
             path,
             cycle,
             shared,
+            base,
         } = *shown;
+        if base.is_some()
+            && (!matches!(target, Some(Target::Pull(_)))
+                || cycle.is_some() == link.is_some()
+                || path.is_some()
+                || shared.is_some()
+                || followed.is_some())
+        {
+            return Err(HarnessError::invalid(
+                "Choose a pull request to inspect a base cycle or link.",
+            ));
+        }
         // The graph as it was read, or as it is without its tests, with how
         // much that leaves out.
         let left = std::cell::Cell::new(None);
@@ -1167,6 +1181,37 @@ impl Graphs {
                 .cloned()
                 .ok_or_else(|| HarnessError::conflict("Choose the change again."))?,
         };
+        if let Some(expected) = base {
+            let chosen = chosen(&resolved);
+            let commit = &resolved
+                .base
+                .as_ref()
+                .filter(|base| base.commit == expected)
+                .ok_or_else(|| {
+                    HarnessError::conflict("The pull request base changed. Reopen the PR cycle.")
+                })?
+                .commit;
+            let found = self.graph_at(project, &root, Some(commit), &resolved.prefix, true)?;
+            let (key, graph, tree) = found.graph.ok_or_else(|| {
+                HarnessError::unavailable("The PR base graph is no longer cached. Return to the PR cycle to prepare it again.")
+            })?;
+            let index = self.maps.index(&key, &graph, &tree)?;
+            if notests && index.has_rust_sources() && !index.has_test_spans() {
+                return Err(HarnessError::unavailable(
+                    "This cached base graph cannot be shown with Without tests.",
+                ));
+            }
+            let index = asked(index);
+            let mut view = follow(&index, &[], &|_| None)
+                .ok_or_else(|| HarnessError::invalid("Choose a base cycle or link."))?;
+            view["project_id"] = json!(project);
+            view["target"] = json!(target.text());
+            view["base"] = chosen["base"].clone();
+            view["chosen"] = chosen;
+            view["state"] = json!("ready");
+            told(&mut view);
+            return Ok(view);
+        }
         let found = self.graph_of(project, &root, &resolved)?;
         let pull_cycle = cycle.is_some() && matches!(target, Target::Pull(_));
         let changed = resolved
@@ -1858,7 +1903,8 @@ impl Graphs {
                 }
                 return Ok(json!({"state": "waiting_head", "base": base_side}));
             }
-            let found = self.graph_at(project, root, Some(&base.commit), &resolved.prefix, true)?;
+            let revision = &base.commit;
+            let found = self.graph_at(project, root, Some(revision), &resolved.prefix, true)?;
             let Some((key, graph, tree)) = found.graph else {
                 if found.state == "failed" {
                     return Ok(json!({"state": "unavailable", "base": base_side}));
@@ -1893,8 +1939,12 @@ impl Graphs {
                     (file.status == 'R').then_some((file.path.as_str(), file.from.as_deref()?))
                 })
                 .collect();
-            let origin = head.compare_cycle(raw_head, &base, view, &renames, shown.certain);
-            Ok(json!({"state": "ready", "base": base_side, "origin": origin}))
+            let (origin, place) =
+                head.compare_cycle(raw_head, &base, view, &renames, shown.certain);
+            Ok(json!({
+                "state": "ready", "base": base_side, "origin": origin, "place": place,
+                "revision": revision,
+            }))
         };
         let result =
             compare().unwrap_or_else(|_| json!({"state": "unavailable", "base": base_side}));
@@ -2485,6 +2535,13 @@ impl Domain for Graphs {
                         return Err(HarnessError::invalid("Invalid code graph places."));
                     }
                     let cycle = text("cycle")?;
+                    let base = text("base")?;
+                    if !base.is_empty()
+                        && (!matches!(base.len(), 40 | 64)
+                            || !base.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    {
+                        return Err(HarnessError::invalid("Invalid pull request base."));
+                    }
                     if !cycle.is_empty()
                         && (cycle.chars().any(char::is_control)
                             || !from.is_empty()
@@ -2539,6 +2596,7 @@ impl Domain for Graphs {
                                     _ => None,
                                 },
                                 cycle: (!cycle.is_empty()).then_some(cycle.as_str()),
+                                base: (!base.is_empty()).then_some(base.as_str()),
                                 shared: match sharing.as_slice() {
                                     [from, to] => Some(Sharing {
                                         from,
@@ -2636,7 +2694,7 @@ mod tests {
             .unwrap();
         for part in [
             "scope", "focus", "certain", "filter", "target", "follow", "out", "into", "notests",
-            "spread", "from", "to", "path", "shared", "side", "skip", "cycle",
+            "spread", "from", "to", "path", "shared", "side", "skip", "cycle", "base",
         ] {
             assert!(route.query.contains(&part), "{part}");
         }
@@ -3066,6 +3124,107 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                     )
                     .unwrap();
             }
+        }
+        #[test]
+        fn a_pr_base_cycle_and_its_links_use_the_pinned_revision() {
+            let fixture = Fixture::new();
+            let (base, head) = fixture.branched();
+            let target = Target::Pull(1);
+            let resolved = Resolved {
+                target: target.clone(),
+                kind: "pull",
+                name: "#1".to_owned(),
+                title: None,
+                pull: Some(1),
+                head: None,
+                base: Some(graph_changes::Side {
+                    name: "main".to_owned(),
+                    commit: base.clone(),
+                }),
+                revision: Some(head.clone()),
+                prefix: String::new(),
+                files: Vec::new(),
+                notes: Vec::new(),
+            };
+            lock(&fixture.graphs.chosen)
+                .unwrap()
+                .insert((fixture.project.clone(), target.text()), Arc::new(resolved));
+            let put = |commit: &str, edges: &[(&str, &str, &str)]| {
+                let graph = revision(&fixture.store.state, &fixture.project, commit);
+                std::fs::create_dir_all(graph.parent().unwrap()).unwrap();
+                let links = edges.iter().map(|(from, to, confidence)| {
+                    json!({"source": from, "target": to, "relation": "calls", "confidence": confidence})
+                }).collect::<Vec<_>>();
+                std::fs::write(graph, json!({
+                    "nodes": (["a", "b", "c"].map(|node| json!({"id": node, "source_file": format!("{node}.php")}))),
+                    "links": links,
+                }).to_string()).unwrap();
+            };
+            put(
+                &base,
+                &[
+                    ("a", "b", "EXTRACTED"),
+                    ("b", "c", "EXTRACTED"),
+                    ("c", "a", "INFERRED"),
+                ],
+            );
+            put(&head, &[("a", "b", "EXTRACTED"), ("b", "a", "EXTRACTED")]);
+            let map = |shown| fixture.graphs.map(&fixture.project, Some(&target), &shown);
+            let current = map(Shown {
+                cycle: Some("a.php"),
+                ..Shown::default()
+            })
+            .unwrap();
+            assert_eq!(current["cycle"]["steps"], 2);
+            let comparison = &current["cycle"]["comparison"];
+            assert_eq!(comparison["revision"], base);
+            assert_eq!(comparison["place"], "a.php");
+            let historical = Shown {
+                cycle: Some("a.php"),
+                base: Some(&base),
+                notests: true,
+                ..Shown::default()
+            };
+            let earlier = map(historical).unwrap();
+            assert_eq!(earlier["base"]["commit"], &base[..12]);
+            assert_eq!(earlier["cycle"]["steps"], 3);
+            assert_eq!(earlier["notests"], true);
+            assert_eq!(
+                map(Shown {
+                    certain: true,
+                    ..historical
+                })
+                .unwrap()["cycle"]["steps"],
+                0
+            );
+            let link = Shown {
+                link: Some(("b.php", "c.php")),
+                ..Shown::default()
+            };
+            assert_eq!(map(link).unwrap()["links"], 0);
+            assert_eq!(
+                map(Shown {
+                    base: Some(&base),
+                    ..link
+                })
+                .unwrap()["links"],
+                1
+            );
+            assert!(
+                map(Shown {
+                    base: Some(&head),
+                    ..historical
+                })
+                .is_err()
+            );
+            assert!(
+                fixture
+                    .graphs
+                    .map(&fixture.project, None, &historical)
+                    .is_err()
+            );
+            std::fs::remove_file(revision(&fixture.store.state, &fixture.project, &base)).unwrap();
+            assert!(map(historical).is_err());
         }
         #[test]
         fn switching_the_graph_on_builds_and_publishes_it() {

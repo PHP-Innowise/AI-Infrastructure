@@ -24,6 +24,9 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- View the existing cycle at the base of a pull request in Harness, inspect its
+  links at that revision, and switch back to the PR cycle.
+
 - Compare a selected pull request's dependency cycle with its base in Harness
   and highlight links in the displayed chain that the base lacks.
 

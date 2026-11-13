@@ -771,6 +771,9 @@ fn paths(view: &V) -> bool {
 fn cycles(view: &V) -> bool {
     view["mode"] == "cycle"
 }
+fn at_base(view: &V) -> bool {
+    view["base"].is_object()
+}
 /// What two places share: what both use, or what uses both.
 fn shares(view: &V) -> bool {
     view["mode"] == "shared"
@@ -1250,6 +1253,16 @@ fn cycle_comparison(view: &V) -> String {
             _ => format!("Could not match this place at {at}."),
         },
         _ => String::new(),
+    }
+}
+fn cycle_revision(view: &V) -> String {
+    if at_base(view) {
+        format!(
+            "Showing the cycle at PR base {}.",
+            m::text(&view["base"], "commit")
+        )
+    } else {
+        cycle_comparison(view)
     }
 }
 /// What the map of a change says first: the notes of the change, and
@@ -2525,6 +2538,12 @@ pub fn link_note(view: &V) -> String {
     let drawn = m::array(&view["edges"]).len() as u64;
     let links = view["links"].as_u64().unwrap_or(0);
     let mut parts = vec![];
+    if at_base(view) {
+        parts.push(format!(
+            "Links at PR base {}.",
+            m::text(&view["base"], "commit")
+        ));
+    }
     if m::yes(&view["preliminary"]) {
         parts.push(
             "The links are those the files have in the checkout, not in that commit.".to_owned(),
@@ -2566,7 +2585,12 @@ pub fn link_side(view: &V, chosen: &str) -> String {
             })
             .collect::<Vec<_>>();
         return format!(
-            "<p class=\"knowledge-note\">Select a name to light its links. Select it again to open its file on it in the map.</p>{}",
+            "<p class=\"knowledge-note\">Select a name to light its links.{}</p>{}",
+            if at_base(view) {
+                ""
+            } else {
+                " Select it again to open its file on it in the map."
+            },
             if kinds.is_empty() {
                 String::new()
             } else {
@@ -2579,7 +2603,7 @@ pub fn link_side(view: &V, chosen: &str) -> String {
     };
     let line = name["line"].as_u64().unwrap_or(0);
     let mut html = format!(
-        "<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p><button type=\"button\" class=\"button compact\" data-action=\"graph-link-open\" data-payload=\"{}\">Open in the map</button>",
+        "<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p>",
         escape(&m::text(name, "name")),
         escape(&m::text(file, "path")),
         if line > 0 {
@@ -2588,8 +2612,13 @@ pub fn link_side(view: &V, chosen: &str) -> String {
             String::new()
         },
         escape(&capital(&what(name))),
-        payload(&name["key"]),
     );
+    if !at_base(view) {
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"graph-link-open\" data-payload=\"{}\">Open in the map</button>",
+            payload(&name["key"]),
+        ));
+    }
     // What it is linked with in this link, each with the way it is.
     let edges = m::array(&view["edges"]);
     for (title, own, other) in [("Uses here", "from", "to"), ("Used by here", "to", "from")] {
@@ -2673,8 +2702,7 @@ fn rows(title: &str, rows: &V, more: &V, look: Option<(&V, bool)>) -> String {
             },
             told,
             match look {
-                // A row of two symbols is one link, and says it all.
-                Some((place, uses)) if row["relation"].is_null() => {
+                Some((place, uses)) => {
                     let (from, to) = if uses {
                         (place, &row["path"])
                     } else {
@@ -2899,12 +2927,12 @@ fn role(view: &V, focus: &V) -> String {
 /// a path from it, and what it uses and what uses it, each with the file it
 /// lies in. Where the boxes lie on ways (`ways`) those are the next and the
 /// one before.
-fn name_side(focus: &V, ways: bool, role: &str) -> String {
+fn name_side(view: &V, focus: &V, ways: bool, role: &str) -> String {
     let line = focus["line"].as_u64().unwrap_or(0);
     let mut told = reached(focus, capital(&what(focus)));
     told.push_str(role);
     let mut html = format!(
-        "<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-go\" data-payload=\"{}\">Open in its file</button>",
+        "<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p>",
         escape(&m::text(focus, "name")),
         escape(&m::text(focus, "file")),
         if line > 0 {
@@ -2913,18 +2941,27 @@ fn name_side(focus: &V, ways: bool, role: &str) -> String {
             String::new()
         },
         escape(&told),
-        // The keys stand as the alphabet has them, which is how a payload
-        // is written whether or not the build's JSON keeps their order.
-        payload(&json!({"open": focus["file"], "path": focus["path"]})),
     );
-    // The symbol the links are followed from is followed already.
-    if ways || !m::yes(&focus["start"]) {
-        html.push_str(&follow_links(&focus["path"]));
+    if !at_base(view) {
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-go\" data-payload=\"{}\">Open in its file</button>",
+            payload(&json!({"open": focus["file"], "path": focus["path"]})),
+        ));
+        // The symbol the links are followed from is followed already.
+        if ways || !m::yes(&focus["start"]) {
+            html.push_str(&follow_links(&focus["path"]));
+        }
+        html.push_str(&path_to(focus));
     }
-    html.push_str(&path_to(focus));
     let (uses, used) = if ways { WAY } else { ("Uses", "Used by") };
-    html.push_str(&rows(uses, &focus["uses"], &focus["uses_more"], None));
-    html.push_str(&rows(used, &focus["used_by"], &focus["used_by_more"], None));
+    let look = |outgoing| at_base(view).then_some((&focus["path"], outgoing));
+    html.push_str(&rows(uses, &focus["uses"], &focus["uses_more"], look(true)));
+    html.push_str(&rows(
+        used,
+        &focus["used_by"],
+        &focus["used_by_more"],
+        look(false),
+    ));
     html.push_str(&kinds(focus));
     html
 }
@@ -3033,12 +3070,12 @@ pub fn side(view: &V) -> String {
     let cycle = cycles(view);
     let ways = pathed || shared || cycle;
     if (followed || ways) && m::yes(&focus["symbol"]) {
-        return name_side(focus, ways, &role(view, focus));
+        return name_side(view, focus, ways, &role(view, focus));
     }
     if cycle && !focus.is_object() {
         if let Some(places) = view["cycle"]["places"].as_array() {
             let mut html = String::from("<ol class=\"graph-map-cycle-places\">");
-            for place in places {
+            for (at, place) in places.iter().enumerate() {
                 let guessed = place["guessed"].as_u64().unwrap_or(0);
                 let evidence = if guessed == 0 {
                     ""
@@ -3048,7 +3085,7 @@ pub fn side(view: &V) -> String {
                     " · includes inferred links"
                 };
                 html.push_str(&format!(
-                    "<li>{}{evidence}{}</li>",
+                    "<li>{}{evidence}{}",
                     escape(&m::text(place, "path")),
                     if m::yes(&place["added"]) {
                         " · incoming link added in PR"
@@ -3056,6 +3093,13 @@ pub fn side(view: &V) -> String {
                         ""
                     },
                 ));
+                if at_base(view) && at > 0 {
+                    html.push_str(&format!(
+                        " <button type=\"button\" class=\"button compact\" data-action=\"graph-map-link\" data-payload=\"{}\">Inspect link</button>",
+                        payload(&json!({"from": places[at - 1]["path"], "to": place["path"]})),
+                    ));
+                }
+                html.push_str("</li>");
             }
             html.push_str("</ol>");
             return html;
@@ -3154,7 +3198,7 @@ pub fn side(view: &V) -> String {
         escape(&m::text(focus, "path")),
         escape(&told),
     );
-    if folder {
+    if !at_base(view) && folder {
         html.push_str(&format!(
             "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-open\" data-payload=\"{}\">Open folder</button>",
             payload(&focus["path"])
@@ -3165,14 +3209,16 @@ pub fn side(view: &V) -> String {
                 payload(&focus["path"])
             ));
         }
-    } else if held > 0 {
+    } else if !at_base(view) && held > 0 {
         html.push_str(&open_file(&focus["path"]));
     }
     // The place the links are followed from is followed already.
-    if ways || !m::yes(&focus["start"]) {
-        html.push_str(&follow_links(&focus["path"]));
+    if !at_base(view) {
+        if ways || !m::yes(&focus["start"]) {
+            html.push_str(&follow_links(&focus["path"]));
+        }
+        html.push_str(&path_to(focus));
     }
-    html.push_str(&path_to(focus));
     let (uses, used) = if ways {
         WAY
     } else if beside {
@@ -3222,6 +3268,8 @@ fn crumbs(view: &V) -> String {
                         ": what both use"
                     }
                 )
+            } else if at_base(view) {
+                format!("<span class=\"graph-map-crumb\">{}</span><span aria-hidden=\"true\">/</span>", escape(&m::text(crumb, "name")))
             } else {
                 format!(
                     "<button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-open\" data-payload=\"{}\">{}</button><span aria-hidden=\"true\">/</span>",
@@ -3989,6 +4037,7 @@ fn unfollowed(mut state: V) -> V {
     state["path"] = json!([]);
     state["cycle"] = V::Null;
     state["cycle_return"] = V::Null;
+    state["cycle_base"] = V::Null;
     state["shared"] = json!(false);
     state["side"] = json!("");
     state["skip"] = json!([]);
@@ -4005,6 +4054,48 @@ fn showing_cycle(state: V, place: &str) -> Option<V> {
     cycle["filter"] = json!("");
     cycle["cycle_return"] = state;
     Some(cycle)
+}
+fn switch_cycle(mut state: V, comparison: &V) -> Option<V> {
+    state["cycle"].as_str()?;
+    if comparison.is_null() {
+        if state["cycle_base"].is_object() {
+            let base = state["cycle_base"].take();
+            state["focus"] = base["head_focus"].clone();
+        }
+        return Some(state);
+    }
+    let place = comparison["place"].as_str()?;
+    let revision = comparison["revision"].as_str()?;
+    if state["cycle_base"].is_object() {
+        return None;
+    }
+    state["cycle_base"] = json!({
+        "place": place,
+        "revision": revision,
+        "head_focus": state["focus"],
+    });
+    state["focus"] = json!(place);
+    Some(state)
+}
+const CYCLE_BACK: &str = "<button type=\"button\" class=\"button compact\" id=\"graph-map-cycle-back\" data-action=\"graph-map-cycle-back\">Back to map</button>";
+
+fn base_cycle_button(view: &V, showing_base: bool) -> String {
+    let comparison = &view["cycle"]["comparison"];
+    let (label, comparison) = if showing_base {
+        ("Back to PR cycle", &V::Null)
+    } else if comparison["state"] == "ready"
+        && comparison["origin"] == "present"
+        && comparison["place"].is_string()
+        && comparison["revision"].is_string()
+    {
+        ("Show base cycle", comparison)
+    } else {
+        return String::new();
+    };
+    format!(
+        "<button type=\"button\" class=\"button compact\" id=\"graph-map-cycle-switch\" data-action=\"graph-map-cycle-switch\" data-payload=\"{}\">{label}</button>",
+        payload(comparison),
+    )
 }
 /// The map as it answers another question of the two places it shows:
 /// `true` asks what they share, a kind of that by its name (`both_use`,
@@ -4193,6 +4284,9 @@ async fn look(from: &str, to: &str) {
             query.push((key, "1".to_owned()));
         }
     }
+    if let Some(revision) = state["cycle_base"]["revision"].as_str() {
+        query.push(("base", revision.to_owned()));
+    }
     let path = format!(
         "/api/projects/{}/graph/map{}",
         dom::enc(&project),
@@ -4232,7 +4326,7 @@ fn find_path(finder: &V) -> Option<String> {
     let state = state();
     let project = dom::value("project");
     let query = m::text(finder, "query").trim().to_owned();
-    if project.is_empty() || query.is_empty() {
+    if project.is_empty() || query.is_empty() || state["cycle_base"].is_object() {
         return None;
     }
     let mut asked = vec![("query", query)];
@@ -4393,7 +4487,7 @@ fn reveal() {
 /// arrows walk what was found, Enter goes to the marked place, and Escape
 /// closes the list, not the map behind it.
 fn find_key(e: &web_sys::KeyboardEvent) -> bool {
-    if !open() {
+    if !open() || state()["cycle_base"].is_object() {
         return false;
     }
     let target = e
@@ -4791,7 +4885,7 @@ fn render(view: &V) {
     dom::text("graph-map-summary", &summary(view));
     dom::text(
         "graph-map-note",
-        [before, note(view), cycle_comparison(view)]
+        [before, note(view), cycle_revision(view)]
             .iter()
             .filter(|part| !part.is_empty())
             .cloned()
@@ -4802,6 +4896,7 @@ fn render(view: &V) {
     dom::set_checked("graph-map-certain", m::yes(&view["certain"]));
     dom::set_checked("graph-map-notests", m::yes(&view["notests"]));
     dom::set_checked("graph-map-fit", m::yes(&state()["fit"]));
+    dom::disabled("graph-find-search", at_base(view));
     // Of what two places share, the filter keeps the names that hold it.
     dom::disabled(
         "graph-map-filter",
@@ -4854,8 +4949,12 @@ fn render(view: &V) {
                 "#graph-map-canvas .graph-map-node[data-selected=\"true\"][data-cycle=\"true\"]",
             )
             .is_empty());
-    let action = if cycles(view) && state["cycle_return"].is_object() {
-        "<button type=\"button\" class=\"button compact\" id=\"graph-map-cycle-back\" data-action=\"graph-map-cycle-back\">Back to map</button>".to_owned()
+    let action = if cycles(view) {
+        let mut actions = base_cycle_button(view, at_base(view));
+        if state["cycle_return"].is_object() {
+            actions.push_str(CYCLE_BACK);
+        }
+        actions
     } else if show_cycle {
         format!(
             "<button type=\"button\" class=\"button compact\" id=\"graph-map-show-cycle\" data-action=\"graph-map-cycle\" data-payload=\"{}\">Show cycle</button>",
@@ -4880,6 +4979,12 @@ fn render(view: &V) {
         dom::focus("graph-map-summary");
     } else if active_action.as_deref() == Some("graph-map-cycle-back") {
         dom::focus("graph-map-cycle-back");
+    } else if active_action.as_deref() == Some("graph-map-cycle-switch") {
+        if dom::get("graph-map-cycle-switch").is_some() {
+            dom::focus("graph-map-cycle-switch");
+        } else {
+            dom::focus("graph-map-summary");
+        }
     } else if show_cycle && active_action.as_deref() == Some("graph-map-cycle") {
         dom::focus("graph-map-show-cycle");
     }
@@ -4941,7 +5046,13 @@ async fn load(quiet: bool) {
             query.push((key, json!(places).to_string()));
         }
     }
-    if let Some(cycle) = state["cycle"].as_str() {
+    if let (Some(place), Some(revision)) = (
+        state["cycle_base"]["place"].as_str(),
+        state["cycle_base"]["revision"].as_str(),
+    ) {
+        query.push(("cycle", place.to_owned()));
+        query.push(("base", revision.to_owned()));
+    } else if let Some(cycle) = state["cycle"].as_str() {
         query.push(("cycle", cycle.to_owned()));
     } else if pathed {
         let asked = if m::yes(&state["shared"]) {
@@ -4983,7 +5094,7 @@ async fn load(quiet: bool) {
             let mut state = state;
             // Fit can change locally while this request is in flight.
             state["fit"] = self::state()["fit"].clone();
-            if view["scope"].is_string() {
+            if view["scope"].is_string() && !at_base(&view) {
                 state["scope"] = view["scope"].clone();
             }
             if follows(&view) {
@@ -5032,7 +5143,24 @@ async fn load(quiet: bool) {
         Err(error) if error.aborted => return,
         Err(error) => {
             dom::cancel_timer("graph-map-poll");
-            if error.status == 409 && !target.is_empty() && state["asked"] != json!(target) {
+            if state["cycle_base"].is_object() {
+                // A stale or pruned snapshot leaves a way back to the PR
+                // cycle. The old drawing might be of another revision.
+                html("graph-map-crumbs", "");
+                html("graph-map-canvas", "");
+                let mut actions = base_cycle_button(&V::Null, true);
+                if state["cycle_return"].is_object() {
+                    actions.push_str(CYCLE_BACK);
+                }
+                html("graph-map-side", &actions);
+                html("graph-map-legend", "");
+                dom::hidden("graph-map-progress", true);
+                dom::text("graph-map-note", "");
+                dom::text("graph-map-summary", "PR base cycle");
+                dom::disabled("graph-find-search", true);
+                dom::error("graph-map-error", &error.message);
+                dom::focus("graph-map-cycle-switch");
+            } else if error.status == 409 && !target.is_empty() && state["asked"] != json!(target) {
                 // The server no longer knows what was chosen.
                 let mut state = state;
                 state["fit"] = self::state()["fit"].clone();
@@ -5081,8 +5209,25 @@ pub async fn event(
     let mut chosen = false;
     // A place a search found is brought into view once it is drawn.
     let mut jumped = false;
+    let busy = || {
+        dom::get("graph-map-canvas")
+            .and_then(|canvas| canvas.get_attribute("aria-busy"))
+            .as_deref()
+            == Some("true")
+    };
+    let map_failed =
+        || dom::get("graph-map-error").is_some_and(|error| !error.has_attribute("hidden"));
+    if kind == "click"
+        && state["cycle"].is_string()
+        && (matches!(action, "graph-map-node" | "graph-map-go" | "graph-map-link")
+            && (busy() || map_failed())
+            || action == "graph-map-cycle-switch" && busy())
+    {
+        return true;
+    }
     match (kind, id, action) {
         ("click", "graph-view" | "graph-changes", _) => {
+            dom::disabled("graph-find-search", false);
             let changes = id == "graph-changes";
             state = anew(if changes { "work" } else { "" });
             m::set("graph-map", state.clone());
@@ -5324,17 +5469,13 @@ pub async fn event(
         }
         ("click", _, "graph-map-cycle") => {
             // The old map remains visible while a new page or filter loads.
-            if dom::get("graph-map-canvas")
-                .and_then(|canvas| canvas.get_attribute("aria-busy"))
-                .as_deref()
-                == Some("true")
-            {
+            if busy() {
                 return true;
             }
             let place = payload.as_str().unwrap_or("");
             if state["cycle"].as_str() != Some(place) {
                 // A failed map request also leaves the old picture visible.
-                if dom::get("graph-map-error").is_some_and(|error| !error.has_attribute("hidden")) {
+                if map_failed() {
                     return true;
                 }
                 let Some(cycle) = showing_cycle(state, place) else {
@@ -5343,6 +5484,15 @@ pub async fn event(
                 state = cycle;
             }
             dom::set_value("graph-map-filter", "");
+        }
+        ("click", _, "graph-map-cycle-switch") => {
+            let Some(cycle) = switch_cycle(state, payload) else {
+                return true;
+            };
+            state = cycle;
+            close_found();
+            dom::cancel_timer("graph-map-poll");
+            dom::disabled("graph-find-search", state["cycle_base"].is_object());
         }
         ("click", _, "graph-map-cycle-back") => {
             let previous = state["cycle_return"].take();
@@ -5450,6 +5600,9 @@ pub async fn event(
                 link["chosen"] = json!(key);
                 m::set("graph-link", link);
                 draw_link();
+                return true;
+            }
+            if at_base(&link["view"]) {
                 return true;
             }
             // Selected again, or asked for: its file opens on it in the map.
@@ -8422,6 +8575,35 @@ mod tests {
             summary(&named),
             "CartTest.testTotal() and Price.of() both use 1 other name · nothing uses both"
         );
+    }
+    #[test]
+    fn switching_cycle_revisions_keeps_the_pr_origin_and_current_filters() {
+        let mut original = fresh("pr:1");
+        original["focus"] = json!("src/renamed.php");
+        let mut current = showing_cycle(original.clone(), "src/renamed.php#L8:a()").unwrap();
+        current["focus"] = json!("src/b.php#L5:b()");
+        let comparison = json!({
+            "state": "ready", "origin": "present", "place": "src/original.php#L3:a()",
+            "revision": "abc123",
+        });
+        let mut earlier = switch_cycle(current.clone(), &comparison).unwrap();
+        assert_eq!(earlier["cycle"], "src/renamed.php#L8:a()");
+        assert_eq!(earlier["focus"], "src/original.php#L3:a()");
+        assert_eq!(earlier["cycle_return"], original);
+        earlier["focus"] = json!("src/c.php#L4:c()");
+        earlier["certain"] = json!(true);
+        earlier["notests"] = json!(true);
+        let resumed = switch_cycle(earlier, &V::Null).unwrap();
+        assert_eq!(resumed["focus"], current["focus"]);
+        assert!(m::yes(&resumed["certain"]) && m::yes(&resumed["notests"]));
+        assert_eq!(resumed["cycle_return"], original);
+        assert!(resumed["cycle_base"].is_null());
+
+        let head = json!({"cycle": {"comparison": comparison}});
+        assert!(base_cycle_button(&head, false).contains("Show base cycle"));
+        assert!(base_cycle_button(&V::Null, true).contains("Back to PR cycle"));
+        assert!(base_cycle_button(&V::Null, false).is_empty());
+        assert_eq!(switch_cycle(resumed.clone(), &V::Null), Some(resumed));
     }
     #[test]
     fn a_cycle_keeps_the_previous_filtered_page_as_its_return_point() {
