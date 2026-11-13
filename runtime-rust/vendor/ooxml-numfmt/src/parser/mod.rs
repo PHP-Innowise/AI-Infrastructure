@@ -689,8 +689,8 @@ impl SectionBuilder {
     /// Collect a variable denominator across retained layout anchors.
     fn collect_variable_denominator(&self, start: usize) -> Vec<usize> {
         let mut indices = Vec::new();
-        for index in start..self.parts.len() {
-            match &self.parts[index] {
+        for (index, part) in self.parts.iter().enumerate().skip(start) {
+            match part {
                 FormatPart::Digit(_) => indices.push(index),
                 part if is_fraction_layout_anchor(part) => {}
                 _ => break,
@@ -703,11 +703,11 @@ impl SectionBuilder {
     fn collect_fixed_denominator(&self, start: usize) -> Option<Vec<(usize, u8)>> {
         let mut digits = Vec::new();
         let mut value = 0_u32;
-        for index in start..self.parts.len() {
-            if let Some(digit) = fixed_denominator_digit(&self.parts[index]) {
+        for (index, part) in self.parts.iter().enumerate().skip(start) {
+            if let Some(digit) = fixed_denominator_digit(part) {
                 value = value.checked_mul(10)?.checked_add(u32::from(digit))?;
                 digits.push((index, digit));
-            } else if !is_fraction_layout_anchor(&self.parts[index]) {
+            } else if !is_fraction_layout_anchor(part) {
                 break;
             }
         }
