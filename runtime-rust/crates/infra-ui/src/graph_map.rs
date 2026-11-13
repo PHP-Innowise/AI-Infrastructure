@@ -1994,6 +1994,11 @@ pub fn canvas(view: &V) -> String {
     spans.dedup();
     let focus = view["focus"]["path"].as_str();
     let chosen = focus.and_then(|path| at(&json!(path)));
+    // Among layers a link is selected too: its two ends.
+    let chosen_link = Some(&view["focus"])
+        .filter(|focus| m::yes(&focus["link"]))
+        .and_then(|focus| Some((at(&focus["from"]["path"])?, at(&focus["to"]["path"])?)));
+    let selected = chosen.is_some() || chosen_link.is_some();
     // A folder of changed files both uses and is used by the files around
     // it, so in a change map a link running back is no finding; nor is it
     // around an opened file.
@@ -2013,6 +2018,7 @@ pub fn canvas(view: &V) -> String {
         .collect();
     let lit = |pair: (usize, usize)| {
         cycle_view
+            || chosen_link == Some(pair)
             || match chosen {
                 Some(chosen) if shared_edges.is_empty() => pair.0 == chosen || pair.1 == chosen,
                 _ => shared_edges.contains(&pair),
@@ -2073,7 +2079,7 @@ pub fn canvas(view: &V) -> String {
         let back = wire.back && cycles && !layered_view;
         let on_path = shared_edges.contains(&(from, to));
         let added = cycle_view && m::yes(&edge["added"]);
-        let state = if cycle_view || chosen.is_some() {
+        let state = if cycle_view || selected {
             if lit((from, to)) {
                 " graph-map-edge-on"
             } else {
@@ -2117,17 +2123,22 @@ pub fn canvas(view: &V) -> String {
     // Over each link lies a wider one that cannot be seen and is easy to
     // hit: selecting a link looks into it. They lie over all the links, so
     // none of them is hidden under a link drawn later. A link between two
-    // layers is many links of many files: what runs against the order is
-    // listed beside the picture, pair by pair.
-    for wire in plan.wires.iter().filter(|_| !layered_view) {
+    // layers is many links of many files: selecting it lists the pairs of
+    // files it is made of beside the picture.
+    for wire in &plan.wires {
         let (from, to) = pairs[wire.edge];
         html.push_str(&format!(
-            "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{} · select to see what makes up this link</title></path>",
+            "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{} · select to see {}</title></path>",
             wire.path,
             payload(&json!({"from": nodes[from]["path"], "to": nodes[to]["path"]})),
             escape(&m::text(&nodes[from], "name")),
             escape(&m::text(&nodes[to], "name")),
             if cycle_view && m::yes(&edges[wire.edge]["added"]) { " · added in PR" } else { "" },
+            if layered_view {
+                "the pairs of files it is made of"
+            } else {
+                "what makes up this link"
+            },
         ));
     }
     html.push_str("</svg>");
@@ -2303,7 +2314,7 @@ pub fn canvas(view: &V) -> String {
             opened && !symbol,
             changed > 0,
             chosen == Some(index),
-            chosen.is_some() && !lit,
+            selected && !lit,
             cycle,
             leaning(out, into),
             out > 0,
@@ -3331,12 +3342,13 @@ fn apart(view: &V) -> String {
     }
     html
 }
-/// Pairs of files of which the first needs the second against the order of
-/// their layers: each a row that opens what makes up their link. `none` is
-/// said where there are no such pairs.
-fn against_rows(title: &str, against: &V, none: &str) -> String {
-    let rows = m::array(&against["rows"]);
-    let more = against["more"].as_u64().unwrap_or(0);
+/// Pairs of files of two layers of which the first needs the second: each a
+/// row that opens what makes up their link. `layers` says of each pair which
+/// layers its two files are filed in, where the pairs are not all of the
+/// same two; `none` is said where there are no pairs.
+fn pair_rows(title: &str, pairs: &V, none: &str, layers: bool) -> String {
+    let rows = m::array(&pairs["rows"]);
+    let more = pairs["more"].as_u64().unwrap_or(0);
     let mut html = format!(
         "<h4>{title} <span class=\"graph-map-total\">{}</span></h4>",
         count(rows.len() as u64 + more)
@@ -3349,14 +3361,21 @@ fn against_rows(title: &str, against: &V, none: &str) -> String {
     for row in &rows {
         let (from, to) = (&row["from"], &row["to"]);
         html.push_str(&format!(
-            "<li><button type=\"button\" class=\"graph-map-row\" data-against=\"true\" data-action=\"graph-map-link\" data-payload=\"{}\" title=\"{} uses {} · select to see what makes up this link\"><span class=\"graph-map-row-name\">{} → {}</span><span class=\"graph-map-row-links\">{} → {} · {}</span></button></li>",
+            "<li><button type=\"button\" class=\"graph-map-row\" data-pair=\"true\" data-action=\"graph-map-link\" data-payload=\"{}\" title=\"{} uses {} · select to see what makes up this link\"><span class=\"graph-map-row-name\">{} → {}</span><span class=\"graph-map-row-links\">{}{}</span></button></li>",
             payload(&json!({"from": from["path"], "to": to["path"]})),
             escape(&m::text(from, "path")),
             escape(&m::text(to, "path")),
             escape(&m::text(from, "name")),
             escape(&m::text(to, "name")),
-            escape(&m::text(from, "layer")),
-            escape(&m::text(to, "layer")),
+            if layers {
+                format!(
+                    "{} → {} · ",
+                    escape(&m::text(from, "layer")),
+                    escape(&m::text(to, "layer"))
+                )
+            } else {
+                String::new()
+            },
             weight(
                 row["links"].as_u64().unwrap_or(0),
                 row["guessed"].as_u64().unwrap_or(0)
@@ -3372,19 +3391,44 @@ fn against_rows(title: &str, against: &V, none: &str) -> String {
     }
     html
 }
-/// The side panel of the layers of a folder: what runs against their order,
-/// or, of a selected layer, what places a file in it, what it has with the
-/// other layers, what of that runs against the order, and its files.
+/// The side panel of the layers of a folder: what runs against their order;
+/// of a selected layer, what places a file in it, what it has with the other
+/// layers, what of that runs against the order, and its files; or, of a
+/// selected link between two layers, the pairs of files it is made of.
 fn layers_side(view: &V) -> String {
     let focus = &view["focus"];
     if !focus.is_object() {
         return format!(
-            "<p class=\"knowledge-note\">A box is a layer: the files a name or a folder places in it. Select a layer to see its files and what it has with the others, and select it again to let go of it.</p>{}",
-            against_rows(
+            "<p class=\"knowledge-note\">A box is a layer: the files a name or a folder places in it. Select a layer to see its files and what it has with the others, or a link to see the pairs of files it is made of. Select it again to let go of it.</p>{}",
+            pair_rows(
                 "Against the order",
                 &view["pattern"]["against"],
-                "No layer here needs one before it."
+                "No layer here needs one before it.",
+                true
             )
+        );
+    }
+    if m::yes(&focus["link"]) {
+        // The two layers are said once, above the pairs.
+        return format!(
+            "<h3>{} → {}</h3><p class=\"knowledge-note\">Link between two layers · {} · {}{}</p>{}",
+            escape(&m::text(&focus["from"], "name")),
+            escape(&m::text(&focus["to"], "name")),
+            weight(
+                focus["links"].as_u64().unwrap_or(0),
+                focus["guessed"].as_u64().unwrap_or(0)
+            ),
+            plural(
+                focus["pairs"].as_u64().unwrap_or(0),
+                "pair of files",
+                "pairs of files"
+            ),
+            if m::yes(&focus["against"]) {
+                " · against the order"
+            } else {
+                ""
+            },
+            pair_rows("Pairs of files", focus, "None.", false),
         );
     }
     let mut html = format!(
@@ -3393,12 +3437,21 @@ fn layers_side(view: &V) -> String {
         plural(focus["files"].as_u64().unwrap_or(0), "file", "files"),
         escape(&m::text(focus, "signs")),
     );
-    html.push_str(&rows("Uses", &focus["uses"], &V::Null, None));
-    html.push_str(&rows("Used by", &focus["used_by"], &V::Null, None));
-    html.push_str(&against_rows(
+    // Each row is a link of the layer with another: looked into, it is
+    // selected, and lists its pairs of files.
+    let place = &focus["path"];
+    html.push_str(&rows("Uses", &focus["uses"], &V::Null, Some((place, true))));
+    html.push_str(&rows(
+        "Used by",
+        &focus["used_by"],
+        &V::Null,
+        Some((place, false)),
+    ));
+    html.push_str(&pair_rows(
         "Against the order, from here",
         &focus["against"],
         "Nothing here needs a layer before this one.",
+        true,
     ));
     html.push_str(&rows(
         "Files",
@@ -4605,6 +4658,24 @@ pub fn showing_pattern(state: V, id: &str) -> Option<V> {
     shown["focus"] = json!("");
     shown["filter"] = json!("");
     Some(shown)
+}
+/// The map with a link between two layers selected, where the layers of a
+/// folder are drawn and the link is one between two of them; selected again,
+/// it is let go of. `None` for any other link: that one is looked into.
+pub fn between(mut state: V, from: &str, to: &str) -> Option<V> {
+    let layers = state["pattern"]
+        .as_str()
+        .is_some_and(|pattern| pattern.starts_with("layers@"));
+    if !layers || !from.starts_with("layer:") || !to.starts_with("layer:") {
+        return None;
+    }
+    let link = format!("{from}>{to}");
+    state["focus"] = json!(if state["focus"] == link.as_str() {
+        ""
+    } else {
+        link.as_str()
+    });
+    Some(state)
 }
 /// The map a found pattern was opened from, with what was switched since:
 /// those choices are the viewer's and hold wherever the map goes.
@@ -6147,12 +6218,19 @@ pub async fn event(
             state[key] = json!(places);
         }
         ("click", _, "graph-map-link") => {
-            look(
+            let (from, to) = (
                 payload["from"].as_str().unwrap_or(""),
                 payload["to"].as_str().unwrap_or(""),
-            )
-            .await;
-            return true;
+            );
+            // A link between two layers is many links of many files: it is
+            // selected, and the pairs of files it is made of are listed.
+            match between(state.clone(), from, to) {
+                Some(selected) => state = selected,
+                None => {
+                    look(from, to).await;
+                    return true;
+                }
+            }
         }
         ("click", "graph-link-close", _) => {
             dom::dialog("graph-link", false);
@@ -10354,9 +10432,14 @@ mod tests {
         assert!(!html.contains("graph-map-node-cycle") && !html.contains("part of a cycle"));
         // One guessed link is dashed, against the order or not.
         assert_eq!(html.matches(" graph-map-edge-guess").count(), 1);
-        // A link between two layers is many links of many files: it is not
-        // looked into as one.
-        assert!(!html.contains("graph-map-hit") && !html.contains("graph-map-link"));
+        // A link between two layers is many links of many files: it is
+        // selected like any link, and says what selecting it shows.
+        assert_eq!(html.matches("<path class=\"graph-map-hit\"").count(), 6);
+        assert!(html.contains("<path class=\"graph-map-hit\" data-ends=\"3 1\" d=\"M761.0 60.0 C761.0 100.0 371.0 100.0 371.0 60.0\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;layer:model&quot;,&quot;to&quot;:&quot;layer:services&quot;}\"><title>Model uses Services · select to see the pairs of files it is made of</title></path>"), "{html}");
+        assert!(!html.contains("select to see what makes up this link"));
+        // With nothing selected no link and no layer steps back.
+        assert!(!html.contains("graph-map-edge-on") && !html.contains("graph-map-edge-off"));
+        assert!(!html.contains("data-dim=\"true\""));
         // The way there ends in the layers, which are no place to open.
         let way = crumbs(&view);
         assert!(
@@ -10379,7 +10462,7 @@ mod tests {
         assert!(
             html.contains("<h4>Against the order <span class=\"graph-map-total\">2</span></h4>")
         );
-        assert!(html.contains("data-against=\"true\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;app/Models/Order.php&quot;,&quot;to&quot;:&quot;app/Services/Pay&lt;b&gt;.php&quot;}\" title=\"app/Models/Order.php uses app/Services/Pay&lt;b&gt;.php · select to see what makes up this link\"><span class=\"graph-map-row-name\">Order.php → Pay&lt;b&gt;.php</span><span class=\"graph-map-row-links\">Model → Services · 2 links</span>"), "{html}");
+        assert!(html.contains("data-pair=\"true\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;app/Models/Order.php&quot;,&quot;to&quot;:&quot;app/Services/Pay&lt;b&gt;.php&quot;}\" title=\"app/Models/Order.php uses app/Services/Pay&lt;b&gt;.php · select to see what makes up this link\"><span class=\"graph-map-row-name\">Order.php → Pay&lt;b&gt;.php</span><span class=\"graph-map-row-links\">Model → Services · 2 links</span>"), "{html}");
         assert!(html.contains("<span class=\"graph-map-row-links\">Data access → Entry points · 1 link guessed</span>"));
         assert_eq!(html.matches("data-action=\"graph-map-link\"").count(), 2);
         let mut more = view.clone();
@@ -10450,12 +10533,18 @@ mod tests {
         assert!(
             html.contains("Data access</span><span class=\"graph-map-row-links\">2 links</span>")
         );
-        // No row of a layer is a link to look into: only a pair of files is.
-        assert!(!html.contains("graph-map-row-look"));
+        // Each of them is a link between two layers, which the mark beside
+        // it selects: from the layer to what it uses, to it from what uses
+        // it.
+        assert_eq!(html.matches("class=\"graph-map-row-look\"").count(), 3);
+        assert!(html.contains("class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;layer:model&quot;,&quot;to&quot;:&quot;layer:services&quot;}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with Services\">↗</button>"), "{html}");
+        assert!(html.contains("data-payload=\"{&quot;from&quot;:&quot;layer:data&quot;,&quot;to&quot;:&quot;layer:model&quot;}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with Data access\">"));
         assert!(html.contains(
             "<h4>Against the order, from here <span class=\"graph-map-total\">1</span></h4>"
         ));
-        assert_eq!(html.matches("data-action=\"graph-map-link\"").count(), 1);
+        assert_eq!(html.matches("data-pair=\"true\"").count(), 1);
+        // The files of the layer are no links to look into.
+        assert_eq!(html.matches("data-action=\"graph-map-link\"").count(), 4);
         // Its files, the most linked first, each a way to it in its folder.
         assert!(html.contains("<h4>Files <span class=\"graph-map-total\">1,200</span></h4>"));
         assert!(html.contains("title=\"app/Models/Order.php\"><span class=\"graph-map-row-name\">Order.php</span><span class=\"graph-map-row-links\">5 links</span>"), "{html}");
@@ -10471,5 +10560,114 @@ mod tests {
         assert_eq!(html.matches(" graph-map-edge-on").count(), 3);
         assert_eq!(html.matches(" graph-map-edge-off").count(), 3);
         assert_eq!(html.matches("data-dim=\"true\"").count(), 1);
+    }
+    #[test]
+    fn a_selected_link_between_two_layers_lists_the_pairs_of_files_it_is_made_of() {
+        let mut view = layers();
+        let end =
+            |path: &str, layer: &str| json!({"path": path, "name": base(path), "layer": layer});
+        view["focus"] = json!({
+            "path": "layer:services>layer:model", "link": true,
+            "from": {"path": "layer:services", "name": "Services"},
+            "to": {"path": "layer:model", "name": "Model"},
+            "links": 3, "guessed": 1, "against": false, "pairs": 2, "more": 0,
+            "rows": [
+                {
+                    "from": end("app/Services/Pay<b>.php", "Services"),
+                    "to": end("app/Models/Order.php", "Model"),
+                    "links": 2, "guessed": 1
+                },
+                {
+                    "from": end("app/Listeners/SendReceipt.php", "Services"),
+                    "to": end("app/Events/OrderPaid.php", "Model"),
+                    "links": 1, "guessed": 0
+                }
+            ],
+        });
+        // In the picture the link stands out with its two layers, and no
+        // layer is the selected one.
+        let html = canvas(&view);
+        assert_eq!(html.matches(" graph-map-edge-on").count(), 1);
+        assert_eq!(html.matches(" graph-map-edge-off").count(), 5);
+        assert!(
+            html.contains("<path class=\"graph-map-edge graph-map-edge-on\" data-ends=\"1 3\""),
+            "{html}"
+        );
+        assert!(html.contains("<path class=\"graph-map-edge graph-map-edge-off graph-map-edge-against\" data-ends=\"3 1\""));
+        assert_eq!(html.matches("data-selected=\"true\"").count(), 0);
+        assert_eq!(html.matches("aria-pressed=\"true\"").count(), 0);
+        assert_eq!(html.matches("data-dim=\"true\"").count(), 2);
+        for (layer, dim) in [
+            ("Entry points", true),
+            ("Services", false),
+            ("Data access", true),
+            ("Model", false),
+        ] {
+            let button = html
+                .split("<button ")
+                .find(|button| button.contains(&format!("aria-label=\"{layer}, layer")))
+                .unwrap();
+            assert_eq!(button.contains("data-dim=\"true\""), dim, "{layer}");
+        }
+        // Beside it: the two layers once, then each pair of files as a way
+        // to what makes up its link.
+        let html = side(&view);
+        assert!(html.starts_with("<h3>Services → Model</h3><p class=\"knowledge-note\">Link between two layers · 3 links, 1 guessed · 2 pairs of files</p><h4>Pairs of files <span class=\"graph-map-total\">2</span></h4>"), "{html}");
+        assert!(html.contains("data-pair=\"true\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;app/Services/Pay&lt;b&gt;.php&quot;,&quot;to&quot;:&quot;app/Models/Order.php&quot;}\" title=\"app/Services/Pay&lt;b&gt;.php uses app/Models/Order.php · select to see what makes up this link\"><span class=\"graph-map-row-name\">Pay&lt;b&gt;.php → Order.php</span><span class=\"graph-map-row-links\">2 links, 1 guessed</span>"), "{html}");
+        assert!(html.contains("<span class=\"graph-map-row-name\">SendReceipt.php → OrderPaid.php</span><span class=\"graph-map-row-links\">1 link</span>"));
+        assert_eq!(html.matches("data-action=\"graph-map-link\"").count(), 2);
+        // A link against the order says so, one pair is one, and what did
+        // not fit is counted.
+        let mut back = view.clone();
+        for (key, value) in [
+            ("against", json!(true)),
+            ("pairs", json!(1)),
+            ("more", json!(1200)),
+        ] {
+            back["focus"][key] = value;
+        }
+        let html = side(&back);
+        assert!(html.contains("<p class=\"knowledge-note\">Link between two layers · 3 links, 1 guessed · 1 pair of files · against the order</p><h4>Pairs of files <span class=\"graph-map-total\">1,202</span></h4>"), "{html}");
+        assert!(html.ends_with("<p class=\"knowledge-note\">and 1,200 more</p>"));
+    }
+    #[test]
+    fn a_link_between_two_layers_is_selected_and_any_other_is_looked_into() {
+        let mut map = fresh("");
+        map["scope"] = json!("app");
+        map["patterns"] = json!(true);
+        let shown = showing_pattern(map.clone(), "layers@app").unwrap();
+        // Selected, the link is the focus of the picture; selected again,
+        // it is let go of; another link takes its place.
+        let selected = between(shown.clone(), "layer:services", "layer:model").unwrap();
+        assert_eq!(selected["focus"], "layer:services>layer:model");
+        let mut expected = shown.clone();
+        expected["focus"] = json!("layer:services>layer:model");
+        assert_eq!(selected, expected);
+        let other = between(selected.clone(), "layer:model", "layer:services").unwrap();
+        assert_eq!(other["focus"], "layer:model>layer:services");
+        assert_eq!(
+            between(selected.clone(), "layer:services", "layer:model").unwrap(),
+            shown
+        );
+        // A selected layer gives way to a link.
+        let mut layer = shown.clone();
+        layer["focus"] = json!("layer:model");
+        assert_eq!(
+            between(layer, "layer:services", "layer:model").unwrap()["focus"],
+            "layer:services>layer:model"
+        );
+        // A pair of files of the layers is looked into, and so is every
+        // link of any other picture.
+        assert!(between(
+            shown.clone(),
+            "app/Models/Order.php",
+            "app/Services/Pay.php"
+        )
+        .is_none());
+        assert!(between(shown.clone(), "layer:model", "app/Services/Pay.php").is_none());
+        assert!(between(shown.clone(), "app/Models/Order.php", "layer:services").is_none());
+        assert!(between(map.clone(), "layer:services", "layer:model").is_none());
+        let strategy = showing_pattern(map, "strategy@app/Pay/Gateway.php#L3:Gateway").unwrap();
+        assert!(between(strategy, "layer:services", "layer:model").is_none());
     }
 }

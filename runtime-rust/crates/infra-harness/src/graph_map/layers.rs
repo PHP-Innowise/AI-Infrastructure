@@ -336,9 +336,11 @@ impl Layers {
     }
     /// The picture of the layers of a folder: each layer that holds files
     /// as one box, and between them through how many links the files of the
-    /// one need those of the other. A selected layer lists its files and
-    /// what it has with the other layers. `None` where the folder has no
-    /// layers, as after the graph was built anew.
+    /// one need those of the other. A selected layer (`layer:services`)
+    /// lists its files and what it has with the other layers, and a
+    /// selected link between two of them (`layer:services>layer:model`) the
+    /// pairs of files it is made of. `None` where the folder has no layers,
+    /// as after the graph was built anew.
     pub(super) fn view(
         &self,
         index: &Index,
@@ -449,12 +451,45 @@ impl Layers {
                 .collect::<Vec<_>>(),
             "focus": null,
         });
-        let Some(chosen) =
-            focus.and_then(|focus| present.iter().find(|layer| key(**layer) == focus))
-        else {
+        let layer = |asked: &str| present.iter().copied().find(|layer| key(*layer) == asked);
+        // A link between two layers is many links of many files: the pairs
+        // of files it is made of, the most linked first. A link that is not
+        // drawn selects nothing.
+        if let Some((from, to)) = focus.and_then(|focus| focus.split_once('>')) {
+            if let (Some(from), Some(to)) = (layer(from), layer(to))
+                && held.needs[from][to].links > 0
+            {
+                let flow = held.needs[from][to];
+                let made = held
+                    .pairs
+                    .iter()
+                    .filter(|(user, used, _)| {
+                        self.of[*user as usize] as usize == from
+                            && self.of[*used as usize] as usize == to
+                    })
+                    .collect::<Vec<_>>();
+                view["focus"] = json!({
+                    "path": format!("{}>{}", key(from), key(to)),
+                    "link": true,
+                    "from": {"path": key(from), "name": LAYERS[from].name},
+                    "to": {"path": key(to), "name": LAYERS[to].name},
+                    "links": flow.links,
+                    "guessed": flow.guessed,
+                    "against": from > to,
+                    "pairs": made.len(),
+                    "rows": made
+                        .iter()
+                        .take(LISTED)
+                        .map(|(user, used, flow)| pair(*user, *used, *flow))
+                        .collect::<Vec<_>>(),
+                    "more": made.len().saturating_sub(LISTED),
+                });
+            }
+            return Some(view);
+        }
+        let Some(chosen) = focus.and_then(layer) else {
             return Some(view);
         };
-        let chosen = *chosen;
         // The files of the layer, by how much they have with other layers.
         let mut members: HashMap<u32, Flow> = HashMap::new();
         for (from, to, flow) in &held.pairs {

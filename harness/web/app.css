@@ -301,8 +301,8 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-node-pattern { flex:none; color:var(--purple); font-size:var(--text-meta); font-variant-numeric:tabular-nums; }
 .graph-map-family { margin:14px 0 0; color:var(--muted); font-size:var(--text-meta); font-weight:var(--weight-strong); letter-spacing:.04em; text-transform:uppercase; }
 .graph-map-pattern-name { margin:8px 0 2px; font-weight:var(--weight-strong); }
-.graph-map-row:is([data-action="graph-map-pattern"],[data-against="true"]) { flex-wrap:wrap; gap:0 8px; }
-.graph-map-row:is([data-action="graph-map-pattern"],[data-against="true"]) .graph-map-row-links { flex:1 1 100%; }
+.graph-map-row:is([data-action="graph-map-pattern"],[data-pair="true"]) { flex-wrap:wrap; gap:0 8px; }
+.graph-map-row:is([data-action="graph-map-pattern"],[data-pair="true"]) .graph-map-row-links { flex:1 1 100%; }
 .graph-map-side { overflow:auto; padding:2px 4px 2px 0; font-size:var(--text-ui); }
 .graph-map-side h3 { margin:0; font-size:var(--text-title); overflow-wrap:anywhere; }
 .graph-map-side h4 { margin:16px 0 4px; font-size:var(--text-ui); }

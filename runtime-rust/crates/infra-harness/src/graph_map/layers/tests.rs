@@ -364,6 +364,103 @@ fn a_selected_layer_lists_its_files_and_what_it_has_with_the_others() {
     }
 }
 #[test]
+fn a_selected_link_between_two_layers_lists_the_pairs_of_files_it_is_made_of() {
+    let index = shop().index();
+    let link = |between: &str, certain: bool| {
+        index
+            .pattern("demo", "layers@app", &[], &|_| None, Some(between), certain)
+            .unwrap()["focus"]
+            .clone()
+    };
+    let pairs = |focus: &Value| {
+        focus["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["from"]["path"].as_str().unwrap().to_owned(),
+                    row["to"]["path"].as_str().unwrap().to_owned(),
+                    row["links"].as_u64().unwrap(),
+                    row["guessed"].as_u64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let pair = |from: &str, to: &str, links: u64, guessed: u64| {
+        (from.to_owned(), to.to_owned(), links, guessed)
+    };
+    // With the order: every pair of a file of the one layer and a file of
+    // the other that it needs, of as many links in the order of the paths.
+    let focus = link("layer:services>layer:model", false);
+    assert_eq!(focus["path"], "layer:services>layer:model");
+    assert_eq!(focus["link"], true);
+    assert_eq!(
+        focus["from"],
+        json!({"path": "layer:services", "name": "Services"})
+    );
+    assert_eq!(focus["to"], json!({"path": "layer:model", "name": "Model"}));
+    assert_eq!(
+        (
+            &focus["links"],
+            &focus["guessed"],
+            &focus["against"],
+            &focus["pairs"],
+            &focus["more"]
+        ),
+        (&json!(3), &json!(0), &json!(false), &json!(3), &json!(0))
+    );
+    assert_eq!(
+        pairs(&focus),
+        [
+            pair(LISTENER, PAID, 1, 0),
+            pair(SERVICE, PAID, 1, 0),
+            pair(SERVICE, ORDER, 1, 0),
+        ]
+    );
+    assert_eq!(focus["rows"][0]["from"]["name"], "SendReceipt.php");
+    assert_eq!(focus["rows"][0]["from"]["layer"], "Services");
+    assert_eq!(focus["rows"][0]["to"]["layer"], "Model");
+    // The same two layers the other way round are another link, and it
+    // runs against the order.
+    let focus = link("layer:model>layer:services", false);
+    assert_eq!(focus["against"], true);
+    assert_eq!((&focus["links"], &focus["pairs"]), (&json!(2), &json!(1)));
+    assert_eq!(pairs(&focus), [pair(ORDER, SERVICE, 2, 0)]);
+    let focus = link("layer:entry>layer:services", false);
+    assert_eq!(
+        pairs(&focus),
+        [
+            pair(CONTROLLER, SERVICE, 2, 0),
+            pair(MIDDLEWARE, SERVICE, 1, 0)
+        ]
+    );
+    // A link the tool only inferred is one until only what was read from
+    // the code is asked for.
+    let focus = link("layer:data>layer:entry", false);
+    assert_eq!(
+        (&focus["links"], &focus["guessed"], &focus["against"]),
+        (&json!(1), &json!(1), &json!(true))
+    );
+    assert_eq!(pairs(&focus), [pair(REPOSITORY, CONTROLLER, 1, 1)]);
+    assert_eq!(link("layer:data>layer:entry", true), Value::Null);
+    // What is no link of the picture selects nothing: two layers without a
+    // link that way, a layer and itself, a layer that is not there.
+    for none in [
+        "layer:entry>layer:model",
+        "layer:services>layer:entry",
+        "layer:model>layer:model",
+        "layer:entry>layer:none",
+        "layer:entry>",
+        ">layer:entry",
+        ">",
+        "layer:entry>layer:services>layer:model",
+        "entry>services",
+    ] {
+        assert_eq!(link(none, false), Value::Null, "{none}");
+    }
+}
+#[test]
 fn layers_are_those_of_the_folder_that_is_open() {
     let index = shop().index();
     let layers = |scope: &str| {
@@ -598,6 +695,49 @@ fn the_layers_of_a_folder_count_what_lies_in_it_and_nothing_else() {
             (file("Shop", "Entity/Line"), 0),
         ]
     );
+    // So does a selected link list the pairs of the open folder.
+    let made = |scope: &str, link: &str| {
+        let view = index
+            .pattern(
+                "demo",
+                &format!("layers@{scope}"),
+                &[],
+                &|_| None,
+                Some(link),
+                false,
+            )
+            .unwrap();
+        view["focus"]["rows"].as_array().map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    (
+                        row["from"]["path"].as_str().unwrap().to_owned(),
+                        row["to"]["path"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(
+        made("src/Billing", "layer:entry>layer:services"),
+        Some(vec![(
+            file("Billing", "Controller/PayController"),
+            file("Billing", "Service/PayService")
+        )])
+    );
+    assert_eq!(
+        made("src", "layer:entry>layer:services").map(|pairs| pairs.len()),
+        Some(2)
+    );
+    // The link against the order leaves each part, and is one of the whole.
+    assert_eq!(made("src/Billing", "layer:model>layer:services"), None);
+    assert_eq!(
+        made("src", "layer:model>layer:services"),
+        Some(vec![(
+            file("Billing", "Entity/Invoice"),
+            file("Shop", "Service/PayService")
+        )])
+    );
 }
 #[test]
 fn a_few_files_named_like_layers_are_no_layered_design() {
@@ -681,4 +821,26 @@ fn many_files_and_many_pairs_are_listed_the_most_linked_first() {
     assert_eq!(members[0]["links"], 5);
     assert_eq!(members[LISTED - 1]["links"], 5);
     assert_eq!(view["focus"]["against"]["more"], 5);
+    // A link of more pairs than fit lists the first of them and says how
+    // many it left out.
+    let link = |between: &str| {
+        index
+            .pattern("demo", "layers@app", &[], &|_| None, Some(between), false)
+            .unwrap()["focus"]
+            .clone()
+    };
+    let back = link("layer:model>layer:services");
+    assert_eq!(back["pairs"], LISTED + 5);
+    assert_eq!(back["rows"].as_array().unwrap().len(), LISTED);
+    assert_eq!(back["more"], 5);
+    assert_eq!(back["links"], LISTED + 5);
+    // Four services need each model from the fourth on, and fewer the three
+    // before it.
+    let forth = link("layer:services>layer:model");
+    assert_eq!(forth["pairs"], 1 + 2 + 3 + 4 * (LISTED + 2));
+    assert_eq!(forth["rows"].as_array().unwrap().len(), LISTED);
+    assert_eq!(forth["more"], 1 + 2 + 3 + 4 * (LISTED + 2) - LISTED);
+    assert_eq!(forth["rows"][0]["from"]["name"], "Step00Service.php");
+    assert_eq!(forth["rows"][0]["to"]["name"], "Thing00.php");
+    assert_eq!(forth["rows"][1]["to"]["name"], "Thing01.php");
 }

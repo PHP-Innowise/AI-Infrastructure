@@ -2187,11 +2187,13 @@ inheritance, and the type of a field, a parameter or a result. An import, and a
 class named in an attribute, say only that one file knows of another and are not
 counted, so a pair of files can show more links where it is looked into than it
 counts here. The side panel lists the pairs of files that run against the order,
-the most linked first; select a pair to see what makes up its link. Select a
-layer to see what places a file in it, what it has with the other layers, and its
-files, each a way to that file among its neighbours. Whether a link against the
-order is a fault is for whoever knows the design to say; the map shows where
-such links are.
+the most linked first; select a pair to see what makes up its link. Select a link
+between two layers to list the pairs of files it is made of in the same way, and
+select it again to let go of it. Select a layer to see what places a file in it,
+what it has with the other layers, and its files, each a way to that file among
+its neighbours; ↗ beside another layer selects the link with it. Whether a link
+against the order is a fault is for whoever knows the design to say; the map
+shows where such links are.
 
 The server reads `graph.json` in one streaming
 pass and keeps the last four graphs it read. On the development machine a 500 MB
