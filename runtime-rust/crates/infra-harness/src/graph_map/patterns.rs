@@ -531,6 +531,18 @@ impl<'a> Read<'a> {
             if under.len() < 2 || !self.above(*abstraction) {
                 continue;
             }
+            // Entities behind a shared interface are data that something
+            // takes, not ways of doing one thing: where every type under
+            // the abstraction is one of the model's own classes, a test
+            // double aside, there is no strategy.
+            let mut made = under
+                .iter()
+                .map(|(sub, ..)| self.path(*sub))
+                .filter(|path| !is_test(path))
+                .peekable();
+            if made.peek().is_some() && made.all(layers::own) {
+                continue;
+            }
             let users = self
                 .holders(*abstraction)
                 .into_iter()

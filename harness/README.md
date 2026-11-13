@@ -2133,7 +2133,7 @@ parameter, returns it, makes it.
 
 | Pattern | What tells it |
 | --- | --- |
-| Strategy | An abstraction with two implementations or more, which another type holds or takes as the abstraction. State and Bridge are built the same way. |
+| Strategy | An abstraction with two implementations or more, which another type holds or takes as the abstraction. State and Bridge are built the same way. Entities behind a shared interface are no strategy: where every implementation, a test double aside, is one of the model's own classes (named `…Entity`, `…Dto`, `…Model` or `…ValueObject`, or lying in a folder of them), they are data that something takes, not ways of doing one thing. |
 | Decorator | A type that stands under an abstraction and keeps one of it, in a field or taken where it is built. Proxy and Composite are built the same way. |
 | Factory | A method that returns an abstraction and makes the types that implement it. A type named `…Factory` that makes other types is found by its name. |
 | Template method | A method of a base type that calls other methods of that type, which the types under it define. |
@@ -2166,6 +2166,11 @@ nearest folder named for a layer, and the finding says **by name**:
 | Services | `Service`, `Manager`, `UseCase`, `Interactor`, `Handler`, `Listener`, `Subscriber`, `Job` | `service`, `services`, `usecase`, `usecases`, `handler`, `handlers`, `listener`, `listeners`, `subscribers`, `eventsubscriber`, `eventlistener`, `jobs`, `manager`, `managers`, `application` |
 | Data access | `Repository`, `Gateway`, `Mapper`, `Dao`, `Client` | `repository`, `repositories`, `gateways`, `mappers`, `persistence`, `infrastructure`, `dao`, `clients` |
 | Model | `Model`, `Entity`, `Dto`, `ValueObject` | `model`, `models`, `entity`, `entities`, `domain`, `dto`, `dtos`, `valueobjects`, `event`, `events` |
+
+Inside a folder named `graphql` a folder of operations holds entry points too:
+`mutation`, `mutations`, `operation`, `operations`, `query`, `queries`,
+`subscription`, `subscriptions`. Anywhere else such a folder holds messages as
+often, and files nothing.
 
 The ending is a word of the name, in whatever case: `OrderService`,
 `order_service.py`, `orders.service.ts`, and not `Remodel` for `Model`.

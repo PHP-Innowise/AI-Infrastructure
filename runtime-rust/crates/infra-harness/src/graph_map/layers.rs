@@ -120,6 +120,22 @@ const FOLDERS_ONLY: &[&str] = &[
     "infrastructure",
     "persistence",
 ];
+/// Where the layers named in the code below stand in the order.
+const ENTRY: usize = 0;
+const MODEL: usize = 3;
+/// Folders that hold the operations of a GraphQL API where they lie in a
+/// folder named `graphql`: a request comes in at an operation as it does at
+/// a resolver. Anywhere else a folder of queries holds messages as often.
+const GRAPHQL: &[&str] = &[
+    "mutation",
+    "mutations",
+    "operation",
+    "operations",
+    "query",
+    "queries",
+    "subscription",
+    "subscriptions",
+];
 /// Folders of the model's own classes: what lies in one is a thing of the
 /// model, whatever it is called.
 const MODEL_OWN: &[&str] = &[
@@ -170,6 +186,17 @@ fn code(path: &str) -> bool {
 /// noun says nothing in a folder of the model's own classes: the folder
 /// files it. A test is filed in none, nor is a file that is no code.
 pub(super) fn layer(path: &str) -> Option<usize> {
+    filed(path).map(|(layer, _)| layer)
+}
+/// Whether a file is one of the model's own classes: named for one, as
+/// `OrderEntity` is, or lying in a folder of them. What a folder of wider
+/// meaning files in the model, as `domain` does, may be anything.
+pub(super) fn own(path: &str) -> bool {
+    filed(path).is_some_and(|(_, own)| own)
+}
+/// The layer of a file, and whether it is one of the model's own classes:
+/// only what files a file in the model can say so.
+fn filed(path: &str) -> Option<(usize, bool)> {
     if !code(path) {
         return None;
     }
@@ -182,13 +209,22 @@ pub(super) fn layer(path: &str) -> Option<usize> {
         .unwrap_or(stem);
     let low = stem.to_lowercase();
     // The nearest folder named for a layer, and whether it is one of the
-    // model's own classes.
-    let nearest = folders.rsplit('/').find_map(|folder| {
+    // model's own classes. Inside `graphql` a folder of operations is named
+    // for the entry points.
+    let parts = folders.split('/').collect::<Vec<_>>();
+    let nearest = parts.iter().enumerate().rev().find_map(|(at, folder)| {
         let folder = folder.to_lowercase();
-        LAYERS
+        if let Some(layer) = LAYERS
             .iter()
             .position(|layer| layer.folders.contains(&folder.as_str()))
-            .map(|layer| (layer, MODEL_OWN.contains(&folder.as_str())))
+        {
+            return Some((layer, MODEL_OWN.contains(&folder.as_str())));
+        }
+        (GRAPHQL.contains(&folder.as_str())
+            && parts[..at]
+                .iter()
+                .any(|above| above.eq_ignore_ascii_case("graphql")))
+        .then_some((ENTRY, false))
     });
     let noun = |word: &str| nearest.is_some_and(|(_, own)| own) && NOUNS.contains(&word);
     // An ending is a word of the name: `OrderService`, `order_service`,
@@ -207,21 +243,36 @@ pub(super) fn layer(path: &str) -> Option<usize> {
                         || tail.starts_with(|first: char| first.is_uppercase()))
             })
     };
-    let whole = !FOLDERS_ONLY.contains(&low.as_str()) && !noun(&low);
-    if let Some(found) = LAYERS.iter().position(|layer| {
-        layer.ends.iter().any(|end| ends(end)) || (whole && layer.folders.contains(&low.as_str()))
-    }) {
-        return Some(found);
+    if let Some(found) = LAYERS
+        .iter()
+        .position(|layer| layer.ends.iter().any(|end| ends(end)))
+    {
+        return Some((found, found == MODEL));
     }
-    nearest.map(|(layer, _)| layer)
+    let whole = !FOLDERS_ONLY.contains(&low.as_str()) && !noun(&low);
+    if whole
+        && let Some(found) = LAYERS
+            .iter()
+            .position(|layer| layer.folders.contains(&low.as_str()))
+    {
+        return Some((found, MODEL_OWN.contains(&low.as_str())));
+    }
+    nearest
 }
 /// What places a file in a layer, in words.
-fn signs(layer: &Layer) -> String {
-    format!(
+fn signs(layer: usize) -> String {
+    let mut signs = format!(
         "a name that ends in {}, or a folder named {}",
-        layer.ends.join(", "),
-        layer.folders.join(", ")
-    )
+        LAYERS[layer].ends.join(", "),
+        LAYERS[layer].folders.join(", ")
+    );
+    if layer == ENTRY {
+        signs.push_str(&format!(
+            ", or inside graphql a folder named {}",
+            GRAPHQL.join(", ")
+        ));
+    }
+    signs
 }
 /// The layers of a graph: the layer of each file, and every pair of files of
 /// two layers of which the first needs the second, with through how many
@@ -556,7 +607,7 @@ impl Layers {
         };
         let mut focus = node(chosen);
         focus["inside"] = json!(true);
-        focus["signs"] = json!(signs(&LAYERS[chosen]));
+        focus["signs"] = json!(signs(chosen));
         focus["uses"] = present
             .iter()
             .filter(|other| held.needs[chosen][**other].links > 0)

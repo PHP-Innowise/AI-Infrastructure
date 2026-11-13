@@ -187,8 +187,45 @@ fn a_file_is_filed_by_its_name_or_by_the_folder_it_lies_in() {
         // Folders that hold more than what their name says file nothing.
         ("app/Http/Requests/StoreOrder.php", None),
         ("src/GraphQL/Type/OrderType.php", None),
+        ("src/GraphQL/Scalars/Date.php", None),
+        ("src/GraphQL/Schema.php", None),
         ("src/Command/ImportOrders.php", None),
         ("app/Actions/CreateOrder.php", None),
+        // Inside `graphql` a folder of operations holds entry points, as a
+        // folder of resolvers does anywhere.
+        (
+            "src/GraphQL/Operation/Mutation/CreateOrder.php",
+            Some("Entry points"),
+        ),
+        (
+            "src/GraphQL/Operation/AbstractOperation.php",
+            Some("Entry points"),
+        ),
+        ("app/GraphQL/Queries/Orders.php", Some("Entry points")),
+        (
+            "app/GraphQL/Mutations/Billing/PayOrder.php",
+            Some("Entry points"),
+        ),
+        (
+            "src/graphql/subscriptions/orderPaid.ts",
+            Some("Entry points"),
+        ),
+        ("src/Api/Graphql/Query/Orders.php", Some("Entry points")),
+        // Anywhere else it holds messages as often, and files nothing.
+        ("src/Query/GetOrders.php", None),
+        ("app/Mutations/CreateOrder.php", None),
+        ("src/Application/Query/GetOrders.php", Some("Services")),
+        ("src/Query/GraphQL/Orders.php", None),
+        // A nearer folder and a name say more there as everywhere.
+        (
+            "src/GraphQL/Mutation/Handler/CreateOrder.php",
+            Some("Services"),
+        ),
+        (
+            "src/GraphQL/Mutation/OrderRepository.php",
+            Some("Data access"),
+        ),
+        ("src/GraphQL/Query/Model/OAuthClient.php", Some("Model")),
         // A test is filed in no layer, nor is what is no code.
         ("tests/Services/CheckoutServiceTest.php", None),
         ("src/Services/__tests__/checkout.service.ts", None),
@@ -200,6 +237,33 @@ fn a_file_is_filed_by_its_name_or_by_the_folder_it_lies_in() {
         ("services", None),
     ] {
         assert_eq!(named(path), expected, "{path}");
+    }
+}
+#[test]
+fn a_file_is_one_of_the_models_own_classes_by_its_name_or_its_folder() {
+    // The order the code names two layers by.
+    assert_eq!((LAYERS[ENTRY].id, LAYERS[MODEL].id), ("entry", "model"));
+    for (path, expected) in [
+        ("src/Entity/Order.php", true),
+        ("src/Entity/OAuthClient.php", true),
+        ("app/Models/Billing/Invoice.php", true),
+        ("src/Billing/OrderEntity.php", true),
+        ("src/Api/OrderDto.php", true),
+        ("shop/models.py", true),
+        ("shop/billing/entity.ts", true),
+        // What a folder of wider meaning files in the model may be anything.
+        ("src/Domain/Order/Line.php", false),
+        ("app/Events/OrderPaid.php", false),
+        ("shop/events.py", false),
+        // What is filed elsewhere, or nowhere, is none of them.
+        ("src/Entity/UserRepository.php", false),
+        ("src/Entity/Listener/OrderListener.php", false),
+        ("src/Service/Pricing.php", false),
+        ("src/Support/Money.php", false),
+        ("tests/Entity/OrderTest.php", false),
+        ("docs/entity/order.md", false),
+    ] {
+        assert_eq!(own(path), expected, "{path}");
     }
 }
 #[test]
@@ -335,6 +399,21 @@ fn a_selected_layer_lists_its_files_and_what_it_has_with_the_others() {
     assert_eq!(
         focus["signs"],
         "a name that ends in model, entity, dto, valueobject, or a folder named models, model, entities, entity, domain, dto, dtos, valueobjects, events, event"
+    );
+    // The entry points also say what files an operation of a GraphQL API.
+    let entry = index
+        .pattern(
+            "demo",
+            "layers@app",
+            &[],
+            &|_| None,
+            Some("layer:entry"),
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        entry["focus"]["signs"],
+        "a name that ends in controller, middleware, endpoint, or a folder named controller, controllers, console, middleware, resolver, resolvers, views, routes, or inside graphql a folder named mutation, mutations, operation, operations, query, queries, subscription, subscriptions"
     );
     // Its files, by how much each has with the other layers.
     assert_eq!(

@@ -545,6 +545,91 @@ fn an_abstraction_is_what_the_source_declares_as_one() {
     assert_eq!(Patterns::find(&index, false, &|_| None).found.len(), 1);
 }
 #[test]
+fn entities_behind_a_shared_interface_are_no_strategy() {
+    // Many entities implement one interface so that one listener can take
+    // any of them. They are data that something handles, not ways of doing
+    // one thing.
+    let built = |under: &[(&str, &str)]| {
+        let mut graph = Graph::default();
+        graph
+            .class("Owned", "src/Entity/Owned.php", "interface Owned")
+            .method("Owned", "setOwner")
+            .class(
+                "AssignOwner",
+                "src/EventSubscriber/AssignOwner.php",
+                "class AssignOwner",
+            )
+            .method("AssignOwner", "prePersist")
+            .names("AssignOwner.prePersist", "Owned", "parameter_type");
+        for (name, file) in under {
+            graph
+                .class(name, file, &format!("class {name} implements Owned"))
+                .link(name, "Owned", "implements");
+        }
+        let index = graph.index();
+        // A type named a repository is found as one beside it, whatever
+        // else it is.
+        graph
+            .found(&index, false)
+            .found
+            .iter()
+            .map(|found| SORTS[found.sort].id)
+            .filter(|sort| *sort != "repository")
+            .collect::<Vec<_>>()
+    };
+    let none = Vec::<&str>::new();
+    let invoice = ("Invoice", "src/Entity/Invoice.php");
+    let order = ("Order", "src/Entity/Order.php");
+    // In a folder of the model's own classes.
+    assert_eq!(built(&[invoice, order]), none);
+    // Named for them wherever they lie, or among them under a name that is
+    // a plain noun.
+    assert_eq!(
+        built(&[
+            ("ParcelEntity", "src/Shipping/ParcelEntity.php"),
+            ("OAuthClient", "app/Models/OAuthClient.php"),
+            ("OrderDto", "src/Api/OrderDto.php"),
+        ]),
+        none
+    );
+    // A test double beside them changes nothing.
+    assert_eq!(
+        built(&[invoice, order, ("FakeOwned", "tests/Support/FakeOwned.php")]),
+        none
+    );
+    // One type under the abstraction that is no thing of the model, and
+    // the finding is what it was.
+    assert_eq!(
+        built(&[invoice, ("SystemOwner", "src/Security/SystemOwner.php")]),
+        ["strategy"]
+    );
+    assert_eq!(
+        built(&[
+            invoice,
+            ("OwnerRepository", "src/Entity/OwnerRepository.php")
+        ]),
+        ["strategy"]
+    );
+    // Ways of doing one thing are a strategy where they lie in the domain:
+    // a folder of wider meaning than the model's own classes says nothing
+    // of what a file is.
+    assert_eq!(
+        built(&[
+            ("FlatPricing", "src/Domain/Pricing/FlatPricing.php"),
+            ("TieredPricing", "src/Domain/Pricing/TieredPricing.php"),
+        ]),
+        ["strategy"]
+    );
+    // Nothing but test doubles under it is no data either.
+    assert_eq!(
+        built(&[
+            ("FakeOne", "tests/Support/FakeOne.php"),
+            ("FakeTwo", "tests/Support/FakeTwo.php"),
+        ]),
+        ["strategy"]
+    );
+}
+#[test]
 fn names_alone_tell_what_links_cannot() {
     let mut graph = Graph::default();
     graph
