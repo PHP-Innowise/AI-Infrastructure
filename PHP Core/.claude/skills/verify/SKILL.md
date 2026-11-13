@@ -76,7 +76,7 @@ Verification is the only step that re-checks a claim against reality, so recordi
 For every Project Brain record (finding, bug, incident, decision) whose claim this run actually confirmed, promote its authority BEFORE transitioning the record to a terminal status (`resolved`, `closed`, `accepted`):
 
 ```bash
-python3 memory-bank/scripts/context.py brain-update \
+memory-bank/bin/infra-engine memory brain-update \
   --record-id <id> --revision auto \
   --authority verified --reason "Verified: <check that confirmed it>"
 ```

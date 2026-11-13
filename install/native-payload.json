@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "editions": {
+    "Laravel": [
+      "memory-bank/config/mirror-rules.json"
+    ],
+    "Symfony": [
+      "memory-bank/config/mirror-rules.json"
+    ],
+    "PHP Core": [
+      "memory-bank/config/mirror-rules.json"
+    ],
+    "Cms/wordpress": [
+      "memory-bank/config/mirror-rules.json"
+    ]
+  },
+  "optional_files": [
+    "project-brain/config/hook-policy.json"
+  ]
+}

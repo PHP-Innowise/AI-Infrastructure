@@ -17,6 +17,20 @@ EDITION = ROOT / 'PHP Core'
 FIXTURES = ROOT / 'tests/fixtures'
 
 
+def full_capsule(root):
+    """Pin the full automatic capsule in a fixture project.
+
+    The editions ship the recall capsule - working state, recent files and
+    the task's own saves. A test of a layer only the full capsule carries -
+    shared documents and what is built on them - pins `full`, which a
+    project can still choose.
+    """
+    config = Path(root) / 'project-brain/config/runtime.json'
+    data = json.loads(config.read_text(encoding='utf-8'))
+    data['capsule_profile'] = 'full'
+    config.write_text(json.dumps(data), encoding='utf-8')
+
+
 @unittest.skipUnless(shutil.which('git'), 'owned temporary Git projects require Git')
 class CursorContinuationTests(unittest.TestCase):
     def setUp(self):
@@ -74,6 +88,7 @@ class CursorContinuationTests(unittest.TestCase):
         return sorted(item['path'] for item in report['capsule']['semantic'])
 
     def seed(self, gate='shadow'):
+        full_capsule(self.project)  # the continuation starts from a delivered shared document
         self.start()
         report = self.refresh(self.public['goal'], gate=gate)
         self.assertEqual(self.expected['continued_semantic_paths'], self.paths(report))
@@ -190,6 +205,7 @@ class CursorContinuationTests(unittest.TestCase):
         self.assertEqual(self.expected['auto_goal_query_source'], automatic['capsule']['query_source'])
 
     def test_auto_derived_goal_with_manual_progress_can_continue(self):
+        full_capsule(self.project)  # the continuation keeps a delivered shared document
         self.start(goal=self.boundary['auto_goal'])
         self.call('update', '--task-id', self.public['task'], '--revision', 'auto',
                   '--progress', self.projection['auto_task_progress'], '--json')

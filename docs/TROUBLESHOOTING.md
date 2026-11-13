@@ -1,5 +1,13 @@
 # Troubleshooting
 
+> Rust migration, 2026-11-03: Python test and demo invocations below are
+> retained pre-Rust behavior specifications and historical evidence. They are
+> not verification commands for the migrated checkout. Run the registered native
+> suites from the repository root with
+> `cargo test --manifest-path runtime-rust/Cargo.toml --workspace --all-targets --locked --offline`.
+> Current coverage is defined by those Rust assertions; historical passes are
+> not transferred to the port.
+
 This guide starts from observable symptoms and uses non-destructive diagnosis
 first. Run commands from the selected accelerator root (`Laravel/`,
 `Symfony/`, or `PHP Core/`) unless a command explicitly names another path.
@@ -33,7 +41,7 @@ Confirm the tool's native discovery path:
 Check the skill directory and validate it:
 
 ```bash
-python3 .agents/skills/skill-creator/scripts/quick_validate.py \
+infra-engine skill-tools quick-validate \
   .agents/skills/<skill-name>
 ```
 
@@ -140,32 +148,38 @@ quiet hook is not proof of safety.
 
 Do not add fake Codex command or one-skill agent trees.
 
-## Python or SQLite FTS5 Is Unavailable
+## A Clone Refuses Every Command, or Memory Is Bound Elsewhere
 
 ### Symptom
 
-`context.py` reports a Python version/import error, `no such module: fts5`,
-or cannot create an FTS virtual table.
+In a fresh clone every shell command is refused with `BLOCKED: no accelerator
+engine is installed for <checkout>`, and the session banner says the hooks and
+memory are off. Or, in a project installed before the portable wiring, a
+session prints `Memory not consulted: this session runs in <dir>, outside the
+project these hooks are bound to (<project>)`.
 
-### Diagnose
+### Cause
 
-The Local Context Engine requires Python 3.9+ and SQLite with FTS5:
-
-```bash
-python3 --version
-python3 -c 'import sqlite3; print(sqlite3.sqlite_version)'
-python3 -c 'import sqlite3; c=sqlite3.connect(":memory:"); c.execute("CREATE VIRTUAL TABLE t USING fts5(body)"); print("FTS5 OK")'
-```
-
-Also confirm the script is the selected accelerator's
-`memory-bank/scripts/context.py`, not a similarly named global utility.
+The engine (`memory-bank/bin/infra-engine`) is ignored by Git, so a clone has
+none until it is installed there; the committed launchers then refuse shell
+commands rather than let them through unchecked. Older installations wrote the
+absolute path of the installing machine's engine and root into the hook and
+MCP configuration: elsewhere that path is absent, and a second checkout on the
+same machine ran the first checkout's engine, whose memory hooks now skip a
+session outside it.
 
 ### Recover
 
-Use the project's documented Python runtime that includes FTS5. Do not install
-or replace system Python without approval. If tooling is unavailable, report
-`N/A - tooling not configured`; Project Brain Markdown/JSON remains the shared
-authority, but local indexing/retrieval cannot be claimed as validated.
+Install the accelerator in the checkout you work in (dry run first, as in
+[install/README.md](../install/README.md#teammates-and-other-checkouts)): with
+portable wiring it only adds the engine and leaves no diff. An older
+installation becomes portable through `--sync --update-tracked` (add
+`--rewire-codex` when Codex hooks are installed); commit the rewritten wiring
+once.
+
+## Native Engine or SQLite FTS5 Is Unavailable
+
+Use the platform's installed `memory-bank/bin/infra-engine` (`.exe` on Windows). Verify the native release and its resources were installed together, then run `memory-bank/bin/infra-engine capabilities --json` and `memory-bank/bin/infra-engine memory index` during the validation phase. A runtime error remains an unavailable result; reinstall through the native installer rather than introducing an interpreter fallback.
 
 ## SQLite Database Is Stale or Corrupt
 
@@ -178,14 +192,15 @@ search results are clearly stale, or `status` cannot open
 ### Diagnose
 
 ```bash
-python3 memory-bank/scripts/context.py status --json
-python3 memory-bank/scripts/context.py index --json
+memory-bank/bin/infra-engine memory status --json
+memory-bank/bin/infra-engine memory index --json
 ```
 
-If SQLite can open the database, an integrity check is read-only:
+If the optional SQLite CLI is available and SQLite can open the database,
+run a read-only integrity check:
 
 ```bash
-python3 -c 'import sqlite3; c=sqlite3.connect("memory-bank/local/context.db"); print(c.execute("PRAGMA integrity_check").fetchone()[0])'
+sqlite3 -readonly memory-bank/local/context.db 'PRAGMA integrity_check;'
 ```
 
 Distinguish data classes before replacement:
@@ -193,6 +208,9 @@ Distinguish data classes before replacement:
 - the document index is derived and rebuildable;
 - governed task authority is in `project-brain/`, although SQLite holds local
   bindings/cache;
+- the turns buffered since the last checkpoint, the recent files and what each
+  conversation was already handed exist only in SQLite: a new database starts
+  them empty;
 - lightweight working tasks and local episodes exist only in SQLite and are
   not reconstructable from the repository.
 
@@ -205,7 +223,9 @@ database"): they move it and its journal files aside to
 `memory-bank/local/context.db.quarantine-<UTC time>`, build a new one and run
 once more, and the capsule says so. Everything in it is derived there - the
 index is rebuilt, the binding comes back from the Brain at the next
-checkpoint - except the turns buffered since the last checkpoint. Lightweight
+checkpoint - except the turns buffered since the last checkpoint, the recent
+files and what each conversation was already handed, which stay in the
+quarantined file. Lightweight
 mode keeps its working tasks only in that file, so it is never moved
 automatically; use the steps below.
 
@@ -222,8 +242,8 @@ original aside instead of deleting it, then reindex:
 ```bash
 mv memory-bank/local/context.db \
   memory-bank/local/context.db.quarantine-YYYYMMDD-HHMMSS
-python3 memory-bank/scripts/context.py index --json
-python3 memory-bank/scripts/context.py status --json
+memory-bank/bin/infra-engine memory index --json
+memory-bank/bin/infra-engine memory status --json
 ```
 
 Replace the timestamp placeholders manually before running. Do not perform
@@ -242,9 +262,14 @@ recovery is verified.
 Run the checks separately so the failing contract is clear:
 
 ```bash
-python3 memory-bank/scripts/context.py validate
-python3 memory-bank/scripts/context.py parity
-python3 memory-bank/scripts/validate.py
+memory-bank/bin/infra-engine memory validate
+memory-bank/bin/infra-engine memory parity
+memory-bank/bin/infra-engine bank validate
+```
+
+Historical pre-Rust invocations (reference only):
+
+```text
 python3 -m unittest discover project-brain/tests
 python3 -m unittest discover memory-bank/tests
 ```
@@ -287,8 +312,8 @@ compare-and-swap safety failure, not corruption.
 1. Reload the task or record:
 
    ```bash
-   python3 memory-bank/scripts/context.py get --task-id TASK-ID --json
-   python3 memory-bank/scripts/context.py brain-get --record-id UUID --json
+   memory-bank/bin/infra-engine memory get --task-id TASK-ID --json
+   memory-bank/bin/infra-engine memory brain-get --record-id UUID --json
    ```
 
 2. Review the current revision, progress, transitions, handoff, and conflicts.
@@ -310,7 +335,7 @@ The CLI actor comes from global `--owner`, then `PROJECT_BRAIN_OWNER`, then
 `local`. The global option must precede the subcommand:
 
 ```bash
-python3 memory-bank/scripts/context.py \
+memory-bank/bin/infra-engine memory \
   --owner alice \
   brain-get --record-id UUID --json
 ```
@@ -380,9 +405,9 @@ Mode changes do not migrate state:
 ### Diagnose
 
 ```bash
-python3 memory-bank/scripts/context.py status --json
+memory-bank/bin/infra-engine memory status --json
 PROJECT_BRAIN_MODE=lightweight \
-  python3 memory-bank/scripts/context.py status --json
+  memory-bank/bin/infra-engine memory status --json
 ```
 
 Check `project-brain/config/runtime.json`, `PROJECT_BRAIN_MODE`, and any global
@@ -402,7 +427,7 @@ See [`CONTEXT-MODES.md`](CONTEXT-MODES.md) for the full contract.
 ### Symptom
 
 The capsule warns "Task record <UUID> also claims <branch>; this turn uses
-<UUID>.", or `context.py rebind --task-id <branch>` reports that the
+<UUID>.", or `memory-bank/bin/infra-engine memory rebind --task-id <branch>` reports that the
 identifier is ambiguous.
 
 ### Cause
@@ -424,7 +449,7 @@ Keep one task per branch. Carry what matters from the other record's
 progress and next steps into the kept one, then cancel the other:
 
 ```bash
-python3 memory-bank/scripts/context.py brain-update --record-id <other UUID> \
+memory-bank/bin/infra-engine memory brain-update --record-id <other UUID> \
   --revision auto --transition cancelled --reason "Duplicate of <kept UUID>"
 ```
 
@@ -445,15 +470,208 @@ or carries a warning about the branch's task.
 
 | First line or warning | Meaning | What to do |
 |---|---|---|
-| `working: not recorded yet (the task starts at the 5-turn checkpoint)` | The branch has no task yet; a later checkpoint records one. | Nothing, or `context.py start` to record it now. |
-| `working: closed (this branch's task is finished; ...)` | The branch's task was completed or cancelled, and turns after it are not recorded. | `python3 memory-bank/scripts/context.py start --task-id <branch> --goal "..."`; the finished record moves to the archive. |
+| `working: not recorded yet (the task starts at the 5-turn checkpoint)` | The branch has no task yet; a later checkpoint records one. | Nothing, or `memory-bank/bin/infra-engine memory start` to record it now. |
+| `working: not recorded yet (task codex-thread/<UUID>; the task starts at ...)` | A worktree Codex made, on a detached HEAD: the thread that owns it names the task, which has no record yet. | Nothing; use that ID with the CLI. |
+| `working: closed (this branch's task is finished; ...)` | The branch's task was completed or cancelled, and turns after it are not recorded. | `memory-bank/bin/infra-engine memory start --task-id <branch> --goal "..."`; the finished record moves to the archive. |
 | `working: unavailable (the task's record cannot be read)` | The record is invalid - a merge conflict, a hand edit; a warning names the file. | Repair or restore that file; checkpoints wait for it. |
 | `working: unavailable (the task's record changed while this turn read it; read <path>)` | Another session's checkpoint rewrote the record in the last moments of this read. | Read the named record; the next prompt carries it again. |
 | warning `This branch was renamed from <old>; its task continues here.` | The branch was renamed with `git branch -m`, and its earlier name's task is used. | Nothing; `start --task-id <new name>` records a task of its own instead. |
 | `working: <id> — ...` where `<id>` is the branch name with `-` for some characters and eight hex digits at the end | The branch name has characters a task ID does not take; the ID is derived from it. | Nothing; use that ID with the CLI. |
 
 On a detached HEAD there is no task, and the prompt hook stays silent -
-except during a rebase, where it reads the branch being rebased.
+except during a rebase, where it reads the branch being rebased, and in a
+worktree Codex made, where it reads the task of the thread that owns it.
+
+## Every Prompt Says "Capsule unavailable"
+
+### Symptom
+
+Each prompt hook prints the refresh's own lines (`procedural: updated ...`,
+`phases: ...`) and `warning: Capsule unavailable: ... No task context was
+assembled this turn` instead of a capsule. The agent works with no task
+context, and nothing says so outside the conversation.
+
+### Diagnose
+
+From a clone of this repository,
+`infra-engine eval memory-eval install-status --project DIR` names what it
+can see: the commit the project was last synced from against the clone, the
+capsule profile against the profiles the project's runtime knows, and whether
+the last capsule asked for was built. Otherwise the warning's text says it:
+
+| After "Capsule unavailable:" | Cause | What to do |
+|---|---|---|
+| `Capsule profile must be full or navigation` (or another list) | `project-brain/config/runtime.json` names a profile the project's runtime does not know: the runtime is older than the setting. On 2026-10-30 a Harness sync from a clone on `main` took four projects synced from a newer branch back to `main`'s runtime this way. | Sync the project from a clone that has the commit it was synced from (`infra-engine install --sync --target DIR`), or set a profile the runtime knows. A runtime of 2026-10-31 or later builds the full capsule and says why instead. |
+| `Task ID must use letters, digits, ...` | A task ID given by hand or in `CONTEXT_TASK_ID` with a character the grammar refuses (a branch name is mapped to a valid ID). | Unset `CONTEXT_TASK_ID`, or use the ID the capsule names for the branch. |
+| `Working task not found` | A runtime from before 2026-10-06, which refused a branch whose task was not recorded yet. | Sync the project. |
+
+### Recover
+
+After the sync, `install-status` reads no problem, and the next prompt
+carries a capsule. A sync no longer takes a project back to a clone that
+lacks its commit, the Harness's included; the Harness's **Project** chip
+panel then says the project was left as it is.
+
+## Codex Does Not Follow the End of AGENTS.md
+
+### Symptom
+
+Codex sessions ignore rules near the end of a long `AGENTS.md` - Security,
+the memory rules - while Claude Code follows them.
+
+### Cause
+
+Codex reads at most `project_doc_max_bytes` of a project's `AGENTS.md` files,
+32 KiB by default, and the installer appends the policy after the project's
+own part. The editions' `.codex/config.toml` raises the limit to 128 KiB, but
+a project's own configuration - edited by the team, or an older release's -
+is kept by every sync. One client's 27 KB of notes put the policy past byte
+32,768: Codex 0.163 stopped reading it mid-line in Working Memory.
+
+### Diagnose
+
+`infra-engine install --sync` reports it as `codex_policy_cut`, an install
+with Codex prints it on stderr, and `infra-engine eval memory-eval install-status` names it.
+`infra-engine bench codex --target DIR --sync` shows whether the whole policy
+reached the model (`policy`, `policy_bytes`). For Claude Code started below
+the project root, `infra-engine bench claude-code --target DIR --sync
+--subfolder src` does the same: until 2026-10-31 its dispatcher carried
+39,000 characters of the policy there and filed the rest away.
+
+### Recover
+
+Put `project_doc_max_bytes = 65536` (or the number the warning names) at the
+top of the project's `.codex/config.toml`, before any `[table]`: Codex reads
+it from a trusted project. A line in your own `~/.codex/config.toml` covers
+only your machine. Or shorten the project's own part of `AGENTS.md`.
+
+## The Agent Saves After Every Answer
+
+### Symptom
+
+After each answer the agent runs one more shell command. The command pipes a
+JSON object into the selected native `memory ... native-result` command, and in some sessions the
+agent then repeats its answer. Each turn takes noticeably longer and costs
+more.
+
+### Cause
+
+This is the automatic native result capture of governed mode. The Stop hook
+asks the same agent to save the result of the work it just did - progress,
+next steps and at most three source-backed learnings - so that the next
+session's capsule can recall them. The request follows every answer. The
+agent repeats its answer where a headless run (`codex exec`, `claude -p`)
+would show only the last message. A session the host marks as attended -
+Claude Code in the terminal, VS Code or the desktop app; Codex in its app,
+IDE extension or terminal UI - ends with at most one short line instead;
+every other session, Cursor's included, repeats (see
+`docs/MEMORY-INTEGRATION.md`). On 21 Codex runs with one save each, the
+continuation cost a median of 10 seconds, 383 output and 59k mostly cached
+input tokens: about half of the answer's own. Only the first step of a
+conversation, and the first after a compaction, carries the full rules; later
+ones point back to them and are about 900 characters shorter.
+
+An agent that also runs `memory-bank/bin/infra-engine memory record-result` or `memory_record_result`
+during the answer saves it twice. The `AGENTS.md` of releases before 24
+October 2026 asked for that explicit save after every answer; the current
+policy asks for it only where the Stop hook requests no save.
+`infra-engine install --sync` rewrites the policy's managed block, with
+`--update-tracked` where the project's Git tracks `AGENTS.md`.
+
+### Recover
+
+To keep the capsule but drop the request, set `"native_result_request": "off"`
+in `project-brain/config/runtime.json`, or `CONTEXT_NATIVE_RESULT_REQUEST=off`
+for one session.
+
+- `--sync` never rewrites `runtime.json`, so the setting stays.
+- Results then reach memory only when an agent or a person records them:
+  `memory-bank/bin/infra-engine memory record-result`, the MCP `memory_record_result` tool, or the
+  Harness.
+- The native journal (`memory-bank/local/native-results.ndjson`) shows each
+  skipped prompt and Stop as `skipped` with the code `switched-off`.
+
+To keep the request but stop the repeat in a session the hooks do not
+recognise as attended, set `"native_result_answer": "brief"` (or
+`CONTEXT_NATIVE_RESULT_ANSWER=brief`). Only do this where nobody reads the
+final message alone: a headless caller would then get one short line instead
+of the answer. `repeat` restores the repeat everywhere.
+
+## Claude Code Asks Before the Save After Every Answer
+
+### Symptom
+
+After each answer Claude Code asks to approve a command like
+`cd <project> && echo -E '{...}' | memory-bank/bin/infra-engine memory ... native-result ...`.
+Under `claude -p` the command is refused instead and the result is not
+saved: `memory-bank/local/native-results.ndjson` records `stop` `failed` with
+the code `host-refused` (`unsaved` on runtimes before 24 October 2026).
+
+### Cause
+
+Claude Code runs that command without asking only when
+`.claude/settings.json` allows the memory CLI
+(`Bash(memory-bank/bin/infra-engine memory:*)`, using the platform's
+`infra-engine.exe` spelling on Windows) and the project is trusted. Claude Code ignores a project's allow
+rules until its trust dialog has been accepted once. A team-edited
+`settings.json` may have lost the rules.
+
+Runtimes released before 23 October 2026 gave the command as
+`(cd <project> && python3 ...)`. Claude Code asks before any command holding a
+subshell, whatever the allow rules say. They also sent the request as a Stop
+block, which the transcript shows as "Stop hook error" with an error
+notification after every answer.
+
+### Recover
+
+- Accept the trust dialog once in an interactive session.
+  `infra-engine bench claude-code --target DIR` says whether your Claude
+  Code has accepted it for that project.
+- Put the three allow rules back into `.claude/settings.json`. The edition's
+  own file lists them. The dialog's "Yes, and don't ask again for: echo *"
+  does not help: it adds `Bash(echo *)` to `.claude/settings.local.json`,
+  which leaves the memory CLI unapproved, and the next session asks again.
+- On an older runtime, update the accelerator (`--sync`). Until then, set
+  `"native_result_request": "off"` to stop the request (see the previous
+  section).
+
+After Claude Code refuses the save once, the session is not asked again for
+a day: the journal records `stop` `failed` `host-refused`, then `prompt`
+`skipped` `host-refused`. A new session is asked again, so check the trust
+and the rules before starting one.
+
+## A Headless Run Hits Its Turn Limit After a Complete Answer
+
+### Symptom
+
+`claude -p ... --max-turns N` (or an Agent SDK query with `maxTurns`) ends
+with `"subtype": "error_max_turns"`, `"is_error": true` and no `result`,
+although the agent had answered. In `memory-bank/local/native-results.ndjson`
+the run's last lines are `stop` `requested`, sometimes followed by `save`
+`saved`.
+
+### Cause
+
+The save continues the turn: one model call runs the save command and one
+more ends the turn. Claude Code counts both against `--max-turns`. An answer
+given in the last two allowed calls leaves the save no room, so the run ends
+on the limit instead of on the answer. Claude Code tells the Stop hook
+neither the limit nor the count, so the hook cannot step aside.
+
+Seen offline on Claude Code 2.1.278, with the answer on the second model call:
+
+- `--max-turns 2`: `error_max_turns`, nothing saved;
+- `--max-turns 3`: the result saved, then `error_max_turns` before the final
+  message.
+
+### Recover
+
+- Give a headless run that keeps the request two more turns than its work
+  needs.
+- Or switch the request off for that run with
+  `CONTEXT_NATIVE_RESULT_REQUEST=off` in its environment. Its results then
+  reach memory only through `memory-bank/bin/infra-engine memory record-result`, the MCP
+  `memory_record_result` tool or the Harness.
 
 ## Promotion Review or Apply Fails
 
@@ -480,8 +698,8 @@ Confirm:
 Run:
 
 ```bash
-python3 memory-bank/scripts/context.py validate
-python3 memory-bank/scripts/validate.py
+memory-bank/bin/infra-engine memory validate
+memory-bank/bin/infra-engine bank validate
 ```
 
 ### Recover
@@ -513,15 +731,15 @@ Project Brain indexes are deterministic navigation summaries; records remain
 authority. SQLite's document index is separate.
 
 ```bash
-python3 memory-bank/scripts/context.py validate
-python3 memory-bank/scripts/context.py index --json
+memory-bank/bin/infra-engine memory validate
+memory-bank/bin/infra-engine memory index --json
 ```
 
 For terminal/superseded Project Brain records, validate before compacting:
 
 ```bash
-python3 memory-bank/scripts/context.py compact
-python3 memory-bank/scripts/context.py validate
+memory-bank/bin/infra-engine memory compact
+memory-bank/bin/infra-engine memory validate
 ```
 
 ### Recover
@@ -538,7 +756,7 @@ python3 memory-bank/scripts/context.py validate
   or one side's list, in `project-brain/indexes/*.json`. Those files are
   derived from the records: resolve the Git conflict either way, and the next
   Brain write (a checkpoint, `update`, `record-result`) rebuilds them;
-  `context.py compact` rebuilds them too, even with nothing to archive.
+  `memory-bank/bin/infra-engine memory compact` rebuilds them too, even with nothing to archive.
   Compaction no longer refuses because of a stale or conflicted index, only
   because of an invalid record.
 - If compaction fails, retain all files and indexes. The runtime is designed to
@@ -572,40 +790,7 @@ blocked, or a hook times out.
    `echo '$TOOL_INPUT' | <script>` wrapper passes the literal variable name
    instead of the payload, and the hook then exits 0 on every call.
 8. Check return-code semantics in the edition hook README.
-9. Memory hooks that stay silent - no capsule on any prompt, no checkpoint in
-   `memory-bank/local/last-turn-report.json` - while `context.py status`
-   works: check that Python 3.9+ runs in the shell the host starts hooks with
-   (Git Bash on native Windows). The hooks take `python3`; on native Windows,
-   where the python.org installer provides `python` and `py` but no
-   `python3` and the `python3` found may be the Microsoft Store stub, they try
-   `python`, `py -3` and `python3`, in that order, and take the first that is
-   Python 3.9+. With none of them the hooks exit quietly, and the session
-   banner says `Context governance: unavailable - no Python 3.9+ found`. The
-   name found is remembered in `ai-accelerator-python-<uid>` in the temporary
-   directory and used while the shell finds it at the same path; delete that
-   file to make the hooks look again.
-   Outside Windows a `python3` on `PATH` is taken without a check, so one that
-   is not Python makes every prompt report `Memory refresh unavailable`.
-   Where Python has another name, the session banner says which, and the
-   agent runs the memory CLI with it: Claude Code allows the CLI under
-   `python3`, `python` and `py -3`, the Cursor CLI under `python3` and
-   `python`.
-
-### Recover
-
-Make the smallest pattern or payload fix, then test:
-
-- a known safe operation;
-- a known blocked destructive operation;
-- missing/unexpected payload keys;
-- a script failure and timeout;
-- duplicate loading;
-- secret-safe error output.
-
-Mirror shared script behavior across editions while preserving native event
-wiring. Do not make hooks fail closed globally without evaluating the risk of
-blocking all work, and do not make them fail open silently for high-risk
-operations without documenting the limitation.
+9. If native memory status works while hooks stay silent, inspect the materialized host configuration and its final absolute executable/root binding. Source templates copied directly into a live host are incomplete. Reinstall or sync through the native installer, preserve custom settings, and inspect the host's hook result. No Python interpreter lookup or temporary interpreter cache is used.
 
 ## Framework Tools Are Missing
 

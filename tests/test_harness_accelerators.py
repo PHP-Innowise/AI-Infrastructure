@@ -408,6 +408,20 @@ class InstalledAcceleratorSyncTests(unittest.TestCase):
         with patch.object(Accelerators, "source_version", return_value=version):
             return self.store.accelerators.keep_current(self.project_id)
 
+    def test_a_project_synced_from_newer_work_is_not_taken_back(self):
+        # A person synced the project from a memory branch this clone lacks;
+        # at its next start the Harness put it back onto the clone's main.
+        runtime = self.project / "memory-bank/scripts/context.py"
+        runtime.write_text("# synced from newer work\n", encoding="utf-8")
+        reason = "the project was last synced from 8b20d5f1abcd, which this clone (1cbdf9e7abcd) does not contain"
+        with patch.object(self.installer, "installation_ahead", return_value=reason) as ahead:
+            report = self.keep_current("release-1")
+        ahead.assert_called_once()
+        self.assertEqual((reason, []), (report["error"], report["changed"]))
+        self.assertEqual("# synced from newer work\n", runtime.read_text(encoding="utf-8"))
+        # The project's status says why it was left as it is.
+        self.assertEqual(reason, self.store.accelerators.get(self.project_id)["sync"]["error"])
+
     def test_a_linked_tool_folder_takes_no_write_outside_the_project(self):
         # Opening the project synced it: the shared `.cursor/README.md` went
         # through a link standing where `.cursor` was.

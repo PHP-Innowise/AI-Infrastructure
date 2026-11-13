@@ -27,6 +27,46 @@ Write exactly three sibling files:
 
 Follow `references/project-profile-schema.md` exactly. The JSON is generator runtime input, not a target artifact, and MUST NOT be copied into a generated skill tree or cited as a generated target skill's source. The rejection report is the human-readable account of everything deliberately not generated; rejection means "no separate skill contract yet", never "the concern is unimportant", and the report must read that way.
 
+## Reviewed native hook selection
+
+Before asking the user to review the Project Profile, include one complete machine-readable native hook selection in that same report, between these exact comment markers:
+
+````markdown
+<!-- infra-hook-policy-selection-v1 -->
+```json
+{
+  "schema_version": 1,
+  "framework": "symfony",
+  "approved_tools": ["console"],
+  "project_command_prefixes": [
+    {
+      "tool": "console",
+      "argv": ["php", "bin/console"],
+      "options_with_values": ["--env", "-e"],
+      "short_options_with_values": "e"
+    }
+  ],
+  "deny_rules": [
+    {
+      "id": "doctrine-database-drop",
+      "tool": "console",
+      "command": ["doctrine:database:drop"],
+      "matching": "console",
+      "condition": {"kind": "always"},
+      "reason": "destructive_command"
+    }
+  ]
+}
+```
+<!-- /infra-hook-policy-selection-v1 -->
+````
+
+This Symfony example illustrates the schema; it is never a default for another target. Emit the actual complete selection from confirmed profile evidence. No detected tool means empty tool/prefix/rule arrays, never an invented PHP or framework tool. Every declared tool has an evidenced literal command prefix; each rule names an approved tool. Explain each chosen tool and denial against the report's confirmed sections 2, 5 and 6 so the user reviews the actual guard behavior, not only a prose summary.
+
+The selection contains only these fields: `schema_version`, `framework`, `approved_tools`, `project_command_prefixes` and `deny_rules`. Do not include a self-hash or approval field. Tool/rule IDs are unique lowercase slugs of at most 64 bytes. Use at most 64 tools, 128 prefixes and 256 rules; prefix argv has 1–8 bounded literal values. Prefix option names and short option letters are explicit data. Rules use bounded literal command parts, `exact` or `console` matching, and only `always`, `any_option`, `no_option`, `first_argument` or `argument_contains` conditions. Conditional patterns are bounded globs. Reasons are `destructive_command`, `secret_exposure` or `verification_bypass`. No shell, evaluation, environment expansion, executable policy or guessed command is allowed; the native schema is the final shape/size authority.
+
+Use the explicit generator engine's `creator inspect-hook-policy-profile --profile REPORT --profile-path tasks/TASK-N/infra-scan-project-profile.md --json` before review. It reports the actual complete selection and profile/selection digests; it does not grant approval. Record the digest of the exact report the user approved with that approval. A newly computed matching digest alone is not evidence of review. Any subsequent report/selection change requires refreshing that review before generation. Legacy reports without this block cannot silently fall back to a full ready-edition command policy.
+
 ## Process
 
 1. **Load all inputs** from `tasks/TASK-{N}/`: the seven `*-findings.md` (including `domain-behavior-scanner-findings.md`), `stack-researcher-findings.md`, and `clarifying-interview-answers.md`. Fill section 0's "Generator version" from the `VERSION` file at this generator's root - it is the single source of the version (the same value `infra-generate` later stamps into the target's `AGENTS.md` and `.infra-manifest.json`); never hardcode it or recall it from the changelog.
@@ -92,7 +132,7 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
    that grounds it and the procedure step that discharges it. Three or more
    obligations pointing at one step is a template and is rejected.
    Run every executable verification command once - only after
-   `bootstrap-verifier/scripts/analyze_commands.py --verification` reports it
+   the native `creator analyze-commands --verification` helper reports it
    `verification_safe`, and only in a throwaway copy of the target
    (`cp -a <target> "$(mktemp -d)"`), never in the target itself: Phase 1 is
    read-only there, and a test run can still write caches and reports. Compare
@@ -195,4 +235,4 @@ Read the profile and correct anything wrong, then run `infra-generate`.
 
 ## Final Output
 
-Return all three artifact paths, the selected editions, the behavioral-contract summary (including contradictions), the selected and rejected skill inventory with reasons (risk-flagged rejections called out with their interview references), the dynamic agents/commands preview counts, the memory-bank concept preview count, the confidence summary, and the next step (user reviews the artifacts, then runs `infra-generate`).
+Return all three artifact paths, the selected editions, the behavioral-contract summary (including contradictions), the selected and rejected skill inventory with reasons (risk-flagged rejections called out with their interview references), the dynamic agents/commands preview counts, the memory-bank concept preview count, the complete native hook selection and approved-report digest, the confidence summary, and the next step (user reviews the artifacts, then runs `infra-generate`).

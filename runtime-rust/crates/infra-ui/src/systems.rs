@@ -1,0 +1,2018 @@
+use crate::{api, dom, management, model as m, session};
+use serde_json::{json, Value as V};
+use std::collections::{BTreeMap, VecDeque};
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::spawn_local;
+fn editor_current(project: &str, config: &str, generation: u64) -> bool {
+    dom::value("system-project") == project
+        && dom::value("system-config") == config
+        && m::scope_current("editor-scope", generation, project, config)
+}
+fn editor_ready() -> bool {
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    let editor = m::data("editor");
+    editor["project_id"] == project
+        && editor["config_path"] == config
+        && m::scope_current(
+            "editor-scope",
+            m::data("editor-generation").as_u64().unwrap_or(0),
+            &project,
+            &config,
+        )
+}
+fn sync_editor_target() -> bool {
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    if m::owns_scope("editor-scope", &project, &config) {
+        return true;
+    }
+    let previous = m::data("editor-scope-owner");
+    if previous["owner"].is_string()
+        && (m::yes(&m::data("editor-dirty")) || m::yes(&m::data("editor-pending")))
+    {
+        dom::set_value("system-project", &m::text(&previous, "owner"));
+        dom::set_value("system-config", &m::text(&previous, "item"));
+        dom::error(
+            "system-editor-error",
+            "Save or discard the current system draft before changing its project or file.",
+        );
+        return false;
+    }
+    reset_system_target(&project, &config);
+    true
+}
+fn clear_editor_notices() {
+    dom::text("system-discovery-status", "");
+    dom::text("system-editor-status", "");
+    dom::error("system-editor-error", "");
+    dom::clear("system-discovery-report");
+    for id in [
+        "system-discovery-report",
+        "system-discovery-agents",
+        "system-discovery-live",
+        "system-discovery-cancel",
+    ] {
+        dom::hidden(id, true);
+    }
+}
+fn reset_system_target(project: &str, config: &str) {
+    clear_editor_notices();
+    dom::hidden("system-plan-form", true);
+    dom::clear("system-plan-services");
+    dom::set_checked("system-reviewed", false);
+    for (error, message) in [
+        ("system-error", "system-message"),
+        ("system-run-error", "system-run-message"),
+    ] {
+        dom::error(error, "");
+        dom::text(message, "");
+    }
+    m::bind_scope("editor-scope", project, config);
+    m::next("system-read");
+    m::next("system-list");
+    m::next("discovery");
+    m::bind_scope("system-scope", project, "");
+    dom::options("system-runs", &[], m::summary, None);
+    crate::activity::reset("system-agents");
+    crate::activity::reset("system-discovery-agent");
+    dom::cancel_timer("system-poll");
+    dom::cancel_timer("discovery-poll");
+    for key in [
+        "editor",
+        "editor-generation",
+        "system-run",
+        "system-catalog",
+        "discovery-id",
+        "discovery-owner",
+    ] {
+        m::take(key);
+    }
+    for key in ["editor-dirty", "editor-pending", "discovery-active"] {
+        m::set(key, json!(false));
+    }
+    for id in [
+        "system-editor",
+        "system-run",
+        "system-catalog",
+        "system-discovery-agents",
+    ] {
+        dom::hidden(id, true);
+    }
+}
+fn system_current(project: &str, id: &str, generation: u64) -> bool {
+    dom::value("system-project") == project
+        && m::scope_current("system-scope", generation, project, id)
+}
+fn discovery_current(epoch: u64) -> bool {
+    let owner = m::data("discovery-owner");
+    m::current("discovery", epoch)
+        && editor_current(
+            &m::text(&owner, "project"),
+            &m::text(&owner, "config"),
+            owner["generation"].as_u64().unwrap_or(0),
+        )
+}
+
+pub fn adopt_sidebar_project(previous_view: &str) {
+    let held = [
+        "editor-dirty",
+        "editor-pending",
+        "system-pending",
+        "discovery-active",
+    ]
+    .iter()
+    .any(|key| m::yes(&m::data(key)));
+    let current = dom::value("system-project");
+    let sidebar = dom::value("project-switcher");
+    let projects = m::read(|state| m::array(&state.boot["projects"]));
+    if let Some(project) = m::project_for_reentry(
+        "editor-scope",
+        &current,
+        &sidebar,
+        held,
+        &projects,
+        previous_view,
+    ) {
+        dom::set_value("system-project", &project);
+        reset_system_project();
+    }
+}
+pub fn reset_system_project() {
+    reset_system_target(&dom::value("system-project"), &dom::value("system-config"));
+    controls();
+}
+pub async fn load() {
+    if !sync_editor_target() {
+        return;
+    }
+    dom::cancel_timer("system-poll");
+    m::next("system-read");
+    let project = dom::value("system-project");
+    let generation = m::bind_scope("system-scope", &project, "");
+    m::take("system-run");
+    dom::hidden("system-run", true);
+    crate::activity::reset("system-agents");
+    if project.is_empty() {
+        return;
+    }
+    let path = format!("/api/system-runs?project_id={}", dom::enc(&project));
+    match api::scoped("system-list", &path).await {
+        Ok((epoch, value))
+            if m::current("system-list", epoch) && system_current(&project, "", generation) =>
+        {
+            dom::options(
+                "system-runs",
+                &m::array(&value["runs"]),
+                |run| {
+                    format!(
+                        "{} · {}",
+                        m::text(run, "change_id"),
+                        m::label(run["status"].as_str().unwrap_or(""))
+                    )
+                },
+                None,
+            );
+            dom::hidden("system-runs-empty", !m::array(&value["runs"]).is_empty());
+            let id = dom::value("system-runs");
+            if !id.is_empty() {
+                read(&id).await;
+            }
+        }
+        Err(error) if !error.aborted && system_current(&project, "", generation) => {
+            dom::error("system-run-error", &error.message)
+        }
+        _ => {}
+    }
+}
+async fn read(id: &str) {
+    let project = dom::value("system-project");
+    let generation = m::bind_scope("system-scope", &project, id);
+    read_scoped(id, &project, generation).await;
+}
+async fn read_scoped(id: &str, project: &str, generation: u64) {
+    if !system_current(project, id, generation) {
+        return;
+    }
+    dom::cancel_timer("system-poll");
+    if id.is_empty() {
+        return;
+    }
+    match api::scoped("system-read", &format!("/api/system-runs/{}", dom::enc(id))).await {
+        Ok((epoch, mut value))
+            if m::current("system-read", epoch)
+                && system_current(project, id, generation)
+                && value["id"] == id
+                && value["project_id"] == project =>
+        {
+            if m::data("system-run")["id"] != value["id"] {
+                dom::set_checked("system-reviewed", false);
+                dom::set_checked("system-accept-changes", false);
+                m::take("agent-session");
+                m::take("agents");
+                crate::activity::reset("system-agents");
+            }
+            value["view_generation"] = json!(generation);
+            m::set("system-run", value.clone());
+            render_run();
+            agents(&value).await;
+            if system_current(project, id, generation) && m::yes(&value["active"]) {
+                let id = id.to_owned();
+                let project = project.to_owned();
+                dom::later("system-poll", 1100, move || {
+                    spawn_local(async move {
+                        read_scoped(&id, &project, generation).await;
+                    })
+                });
+            }
+        }
+        Err(error) if !error.aborted && system_current(project, id, generation) => {
+            dom::error("system-run-error", &error.message)
+        }
+        _ => {}
+    }
+}
+fn controls() {
+    let pending = m::yes(&m::data("system-pending"));
+    let dirty = m::yes(&m::data("editor-dirty"));
+    let locked = m::yes(&m::data("editor-pending"));
+    let v = m::data("system-run");
+    let active = m::yes(&v["active"]);
+    let provider = m::array(&v["providers"])
+        .into_iter()
+        .find(|v| v["id"] == dom::value("system-provider"))
+        .unwrap_or(V::Null);
+    for id in [
+        "system-project",
+        "system-config",
+        "system-load",
+        "system-choose-project",
+    ] {
+        dom::disabled(id, pending || locked || dirty);
+    }
+    for e in dom::all(
+        "#system-editor input,#system-editor select,#system-editor textarea,#system-editor button",
+    ) {
+        if e.closest("#system-discovery-agents")
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            if locked {
+                let _ = e.set_attribute("disabled", "");
+            } else {
+                let _ = e.remove_attribute("disabled");
+            }
+        }
+    }
+    dom::disabled(
+        "system-execute",
+        pending
+            || active
+            || v["session_id"].is_string()
+            || v["plan"]["status"] != "needs_review"
+            || !dom::checked("system-reviewed")
+            || !m::yes(&provider["available"]),
+    );
+    dom::disabled(
+        "system-resume",
+        pending || active || !v["session_id"].is_string() || v["status"] == "completed",
+    );
+    dom::disabled("system-cancel", pending || !active);
+    dom::hidden(
+        "system-recovery",
+        !v["session_id"].is_string() || active || v["status"] == "completed",
+    );
+    dom::hidden("system-launch", v["session_id"].is_string());
+    dom::hidden("system-cancel", !active);
+    let editor = m::data("editor");
+    dom::disabled("system-edit", pending || locked);
+    dom::disabled("system-editor-save", locked || !editor.is_object());
+    dom::disabled("system-editor-add", locked || !editor.is_object());
+    dom::disabled(
+        "system-discovery-start",
+        locked
+            || m::array(&editor["services"]).is_empty()
+            || !m::yes(&m::provider(&dom::value("system-discovery-provider"))["available"]),
+    );
+    dom::hidden(
+        "system-discovery-cancel",
+        !m::yes(&m::data("discovery-active")),
+    );
+}
+async fn catalog_load() {
+    if !sync_editor_target() {
+        return;
+    }
+    if m::yes(&m::data("editor-dirty")) {
+        dom::error(
+            "system-error",
+            "Save or discard the current system draft before reloading.",
+        );
+        return;
+    }
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    let generation = m::read(|s| s.epochs.get("editor-scope").copied().unwrap_or(0));
+    let epoch = m::next("system-catalog-load");
+    match api::post(
+        "/api/systems/catalog",
+        json!({"project_id":project,"config_path":config}),
+    )
+    .await
+    {
+        Ok(value)
+            if editor_current(&project, &config, generation)
+                && m::current("system-catalog-load", epoch) =>
+        {
+            m::set("system-catalog", value.clone());
+            render_catalog(&value);
+        }
+        Err(error)
+            if editor_current(&project, &config, generation)
+                && m::current("system-catalog-load", epoch) =>
+        {
+            dom::error("system-error", &error.message)
+        }
+        _ => {}
+    }
+}
+fn svg(tag: &str, attrs: &[(&str, String)], text: &str) -> web_sys::Element {
+    let e = dom::document()
+        .create_element_ns(Some("http://www.w3.org/2000/svg"), tag)
+        .expect("SVG element");
+    for (k, v) in attrs {
+        let _ = e.set_attribute(k, v);
+    }
+    e.set_text_content(Some(text));
+    e
+}
+fn render_catalog(v: &V) {
+    let catalog = &v["catalog"];
+    let services = m::array(&catalog["services"]);
+    let edges = m::array(&catalog["relationships"]);
+    dom::hidden("system-catalog", false);
+    dom::hidden("system-empty", true);
+    dom::text("system-name", &m::text(catalog, "system"));
+    dom::text(
+        "system-catalog-summary",
+        &format!(
+            "{} services · {} declared contract links",
+            services.len(),
+            edges.len()
+        ),
+    );
+    let mut indegree: BTreeMap<String, usize> =
+        services.iter().map(|s| (m::text(s, "id"), 0)).collect();
+    for edge in &edges {
+        *indegree.entry(m::text(edge, "consumer")).or_default() += 1;
+    }
+    let mut queue: VecDeque<String> = services
+        .iter()
+        .filter(|s| indegree.get(&m::text(s, "id")) == Some(&0))
+        .map(|s| m::text(s, "id"))
+        .collect();
+    let mut ordered = vec![];
+    while let Some(id) = queue.pop_front() {
+        if ordered.contains(&id) {
+            continue;
+        }
+        ordered.push(id.clone());
+        for edge in edges.iter().filter(|e| e["provider"] == id) {
+            let next = m::text(edge, "consumer");
+            if let Some(n) = indegree.get_mut(&next) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+    for s in &services {
+        let id = m::text(s, "id");
+        if !ordered.contains(&id) {
+            ordered.push(id);
+        }
+    }
+    let columns = ordered.len().clamp(1, 4);
+    let width = columns * 236 + 2;
+    let height = ordered.len().div_ceil(columns) * 124;
+    let map = svg(
+        "svg",
+        &[
+            ("viewBox", format!("0 0 {width} {height}")),
+            ("width", width.to_string()),
+            ("height", height.to_string()),
+            ("role", "img".into()),
+            ("aria-label", "Declared service contract graph".into()),
+        ],
+        "",
+    );
+    let defs = svg("defs", &[], "");
+    let marker = svg(
+        "marker",
+        &[
+            ("id", "system-arrow".into()),
+            ("viewBox", "0 0 10 10".into()),
+            ("refX", "9".into()),
+            ("refY", "5".into()),
+            ("markerWidth", "6".into()),
+            ("markerHeight", "6".into()),
+            ("orient", "auto-start-reverse".into()),
+        ],
+        "",
+    );
+    dom::add(
+        &marker,
+        &svg(
+            "path",
+            &[
+                ("d", "M 0 0 L 10 5 L 0 10 z".into()),
+                ("class", "system-arrow".into()),
+            ],
+            "",
+        ),
+    );
+    dom::add(&defs, &marker);
+    dom::add(&map, &defs);
+    let positions: BTreeMap<_, _> = ordered
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            (
+                id.clone(),
+                (24 + (i % columns) * 236, 24 + (i / columns) * 124),
+            )
+        })
+        .collect();
+    for edge in &edges {
+        if let (Some(a), Some(b)) = (
+            positions.get(&m::text(edge, "provider")),
+            positions.get(&m::text(edge, "consumer")),
+        ) {
+            let same = a.1 == b.1;
+            let (x1, y1, x2, y2) = if same {
+                (a.0 + 190, a.1 + 38, b.0, b.1 + 38)
+            } else {
+                (a.0 + 95, a.1 + 76, b.0 + 95, b.1)
+            };
+            let path = svg(
+                "path",
+                &[
+                    ("d", format!("M{x1},{y1} L{x2},{y2}")),
+                    ("class", "system-edge".into()),
+                    ("marker-end", "url(#system-arrow)".into()),
+                ],
+                "",
+            );
+            dom::add(
+                &path,
+                &svg(
+                    "title",
+                    &[],
+                    &format!(
+                        "{} → {}: {}",
+                        m::text(edge, "provider"),
+                        m::text(edge, "consumer"),
+                        m::text(edge, "contract")
+                    ),
+                ),
+            );
+            dom::add(&map, &path);
+        }
+    }
+    dom::clear("system-services");
+    let chosen = dom::selected_checks("system-plan-services");
+    dom::clear("system-plan-services");
+    for id in ordered {
+        let Some(service) = services.iter().find(|s| s["id"] == id) else {
+            continue;
+        };
+        let (x, y) = positions[&id];
+        let group = svg(
+            "g",
+            &[(
+                "class",
+                format!(
+                    "system-node{}",
+                    if service["access"] == "available" {
+                        ""
+                    } else {
+                        " unavailable"
+                    }
+                ),
+            )],
+            "",
+        );
+        dom::add(
+            &group,
+            &svg(
+                "rect",
+                &[
+                    ("x", x.to_string()),
+                    ("y", y.to_string()),
+                    ("width", "190".into()),
+                    ("height", "76".into()),
+                    ("rx", "8".into()),
+                ],
+                "",
+            ),
+        );
+        dom::add(
+            &group,
+            &svg(
+                "text",
+                &[
+                    ("x", (x + 16).to_string()),
+                    ("y", (y + 28).to_string()),
+                    ("class", "system-node-title".into()),
+                ],
+                &id,
+            ),
+        );
+        dom::add(
+            &group,
+            &svg(
+                "text",
+                &[
+                    ("x", (x + 16).to_string()),
+                    ("y", (y + 48).to_string()),
+                    ("class", "system-node-meta".into()),
+                ],
+                service["declared"]["owner"]
+                    .as_str()
+                    .unwrap_or("No passport"),
+            ),
+        );
+        dom::add(&group, &svg("title", &[], &m::text(service, "root")));
+        dom::add(&map, &group);
+        let card = dom::el("article", "system-card", "");
+        dom::add(&card, &dom::el("h4", "", &id));
+        dom::add(
+            &card,
+            &dom::el("p", "", &m::text(&service["declared"], "description")),
+        );
+        dom::add(
+            &card,
+            &dom::el(
+                "p",
+                "system-card-meta",
+                &format!(
+                    "{} · {}",
+                    m::text(&service["declared"], "owner"),
+                    m::text(service, "root")
+                ),
+            ),
+        );
+        for cap in m::array(&service["declared"]["capabilities"]) {
+            dom::add(
+                &card,
+                &dom::el(
+                    "p",
+                    "system-card-meta",
+                    &format!(
+                        "{} · {} — {} · sources {}",
+                        m::text(&cap, "id"),
+                        m::text(&cap, "status"),
+                        m::text(&cap, "description"),
+                        m::string(&cap["sources"])
+                    ),
+                ),
+            );
+        }
+        if service["declared"]["relationships_complete"] == false {
+            dom::add(
+                &card,
+                &dom::el(
+                    "p",
+                    "system-card-warning",
+                    "Relationships are declared incomplete. Confirm missing dependencies.",
+                ),
+            );
+        }
+        dom::append("system-services", &card);
+        let choice = dom::check(&id, "system-service", &id, chosen.iter().any(|v| v == &id));
+        if service["access"] != "available" {
+            if let Ok(Some(input)) = choice.query_selector("input") {
+                let _ = input.set_attribute("disabled", "");
+            }
+        }
+        dom::append("system-plan-services", &choice);
+    }
+    dom::clear("system-map");
+    dom::append("system-map", &map);
+    dom::rows("system-relationships", &edges);
+    for warning in m::array(&catalog["warnings"]) {
+        dom::append(
+            "system-relationships",
+            &dom::el("p", "system-warning", &m::string(&warning)),
+        );
+    }
+    dom::clear("system-banks");
+    for service in services {
+        dom::append(
+            "system-banks",
+            &dom::el(
+                "p",
+                "system-card-meta",
+                &format!(
+                    "{} · {}/project-brain · {}/memory-bank",
+                    m::text(&service, "id"),
+                    m::text(&service, "root"),
+                    m::text(&service, "root")
+                ),
+            ),
+        );
+    }
+    controls();
+}
+fn render_run() {
+    let v = m::data("system-run");
+    if !v.is_object() {
+        dom::hidden("system-run", true);
+        return;
+    }
+    dom::hidden("system-run", false);
+    dom::text(
+        "system-run-title",
+        &format!("{} · {}", m::text(&v, "change_id"), m::text(&v, "system")),
+    );
+    dom::text(
+        "system-run-status",
+        &format!(
+            "{}{}",
+            m::label(v["status"].as_str().unwrap_or("")),
+            v["execution"]["error"]
+                .as_str()
+                .map(|s| format!(" · {}", m::label(s)))
+                .unwrap_or_default()
+        ),
+    );
+    dom::pretty("system-plan-json", &v["plan"]);
+    dom::clear("system-plan-summary");
+    for (term, value) in [
+        ("Participants", m::string(&v["plan"]["context"]["services"])),
+        (
+            "Context",
+            format!(
+                "{} of {} characters · {} sources · {} omitted",
+                m::string(&v["plan"]["context_chars"]),
+                m::string(&v["plan"]["context_budget_chars"]),
+                m::array(&v["plan"]["context"]["sources"]).len(),
+                m::array(&v["plan"]["omitted_sources"]).len()
+            ),
+        ),
+        ("System file", m::text(&v, "config_path")),
+    ] {
+        dom::append("system-plan-summary", &dom::el("dt", "", term));
+        dom::append("system-plan-summary", &dom::el("dd", "", &value));
+    }
+    let steps = if v["execution"]["steps"].is_array() {
+        m::array(&v["execution"]["steps"])
+    } else {
+        m::array(&v["plan"]["steps"])
+    };
+    dom::rows("system-flow", &steps);
+    dom::options(
+        "system-provider",
+        &m::array(&v["providers"]),
+        m::summary,
+        Some(
+            v["provider"]
+                .as_str()
+                .unwrap_or(&dom::value("system-provider")),
+        ),
+    );
+    let mut retry =
+        vec![json!({"id":"","label":"Reconcile saved receipt / continue pending dispatch"})];
+    retry.extend(steps.into_iter().filter(|s|matches!(s["status"].as_str(),Some("running"|"interrupted"|"blocked"))).map(|s|json!({"id":s["id"],"label":format!("Retry {} · {}",m::text(&s,"id"),m::text(&s,"status"))})));
+    dom::options("system-retry", &retry, m::summary, None);
+    dom::rows("system-receipts", &m::array(&v["receipts"]));
+    dom::pretty("system-native-tasks", &v["execution"]["tasks"]);
+    dom::hidden(
+        "system-native-details",
+        !v["execution"]["tasks"].is_object(),
+    );
+    dom::text(
+        "system-handoff",
+        &if v["handoff"].is_null() {
+            String::new()
+        } else {
+            format!(
+                "Handoff saved: {}/handoff.json\n{}",
+                m::text(&v["execution"], "run_dir"),
+                m::text(&v["handoff"], "knowledge")
+            )
+        },
+    );
+    dom::text(
+        "system-events",
+        &m::array(&v["events"])
+            .iter()
+            .filter(|v| v["kind"] != "user")
+            .map(|v| m::text(v, "text"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let launches = m::array(&v["launches"]);
+    let options=launches.iter().enumerate().map(|(i,l)|json!({"id":l["session_id"],"label":format!("Launch {} · {}",i+1,m::text(l,"status"))})).collect::<Vec<_>>();
+    let chosen = m::data("system-agent-launch")
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| launches.last().map(|v| m::text(v, "session_id")));
+    dom::options(
+        "system-agents-launch",
+        &options,
+        m::summary,
+        chosen.as_deref(),
+    );
+    dom::hidden("system-agents-section", launches.is_empty());
+    dom::hidden("system-agents-live", !m::yes(&v["active"]));
+    dom::hidden("system-open-session", !v["session_id"].is_string());
+    controls();
+}
+async fn mutate(action: &str, extra: V) {
+    if m::yes(&m::data("system-pending")) {
+        return;
+    }
+    let value = m::data("system-run");
+    let project = dom::value("system-project");
+    let id = m::text(&value, "id");
+    if id.is_empty()
+        || value["project_id"] != project
+        || !system_current(
+            &project,
+            &id,
+            value["view_generation"].as_u64().unwrap_or(0),
+        )
+    {
+        dom::error(
+            "system-run-error",
+            "Load the current project's change before continuing.",
+        );
+        return;
+    }
+    let mut body = json!({"action":action,"revision":value["revision"]});
+    if let Some(map) = extra.as_object() {
+        for (key, value) in map {
+            body[key] = value.clone();
+        }
+    }
+    let generation = m::bind_scope("system-scope", &project, &id);
+    m::next("system-read");
+    dom::cancel_timer("system-poll");
+    m::bind_pending("system-pending", generation);
+    controls();
+    match api::post(&format!("/api/system-runs/{}", dom::enc(&id)), body).await {
+        Ok(value)
+            if system_current(&project, &id, generation)
+                && value["id"] == id
+                && value["project_id"] == project =>
+        {
+            m::cache_scope_value(
+                "system-run",
+                "system-scope",
+                generation,
+                &project,
+                &id,
+                value.clone(),
+            );
+            render_run();
+            if m::yes(&value["active"]) {
+                dom::later("system-poll", 1100, move || {
+                    spawn_local(async move {
+                        read_scoped(&id, &project, generation).await;
+                    })
+                });
+            }
+        }
+        Err(error) if system_current(&project, &id, generation) => {
+            dom::error("system-run-error", &error.message);
+            read_scoped(&id, &project, generation).await;
+        }
+        _ => {}
+    }
+    if m::finish_pending("system-pending", generation) {
+        controls();
+    }
+}
+async fn plan() {
+    if !sync_editor_target()
+        || m::yes(&m::data("system-pending"))
+        || m::data("system-catalog").is_null()
+        || !dom::validity("system-plan-form")
+    {
+        return;
+    }
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    if !m::owns_scope("editor-scope", &project, &config) {
+        return;
+    }
+    let generation = m::read(|s| s.epochs.get("editor-scope").copied().unwrap_or(0));
+    let epoch = m::next("system-plan");
+    let body = json!({"project_id":project,"config_path":config,"task":dom::value("system-task"),"change_id":dom::value("system-change-id"),"services":dom::selected_checks("system-plan-services"),"contracts":dom::value("system-contracts").split(',').map(str::trim).filter(|s|!s.is_empty()).collect::<Vec<_>>(),"budget":dom::num("system-budget")});
+    m::bind_pending("system-pending", epoch);
+    controls();
+    match api::post("/api/system-runs", body).await {
+        Ok(value)
+            if editor_current(&project, &config, generation)
+                && m::current("system-plan", epoch)
+                && value["project_id"] == project =>
+        {
+            let id = m::text(&value, "id");
+            let run_generation = m::bind_scope("system-scope", &project, &id);
+            let mut value = value;
+            value["view_generation"] = json!(run_generation);
+            m::set("system-run", value);
+            dom::hidden("system-plan-form", true);
+            dom::set_checked("system-reviewed", false);
+            render_run();
+        }
+        Err(error)
+            if editor_current(&project, &config, generation)
+                && m::current("system-plan", epoch) =>
+        {
+            dom::error("system-run-error", &error.message)
+        }
+        _ => {}
+    }
+    if m::finish_pending("system-pending", epoch) {
+        controls();
+    }
+}
+pub async fn editor_open() {
+    if m::yes(&m::data("editor-pending")) {
+        return;
+    }
+    if !sync_editor_target() {
+        return;
+    }
+    if m::yes(&m::data("editor-dirty")) && editor_ready() {
+        dom::hidden("system-editor", false);
+        return;
+    }
+    clear_editor_notices();
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    let generation = m::bind_scope("editor-scope", &project, &config);
+    m::bind_pending("editor-pending", generation);
+    controls();
+    match api::post(
+        "/api/systems/editor",
+        json!({"project_id":project,"config_path":config}),
+    )
+    .await
+    {
+        Ok(value)
+            if editor_current(&project, &config, generation)
+                && value["project_id"] == project
+                && value["config_path"] == config =>
+        {
+            m::set("editor-generation", json!(generation));
+            m::set("editor", value);
+            m::set("editor-dirty", json!(false));
+            render_editor();
+            restore_discovery().await;
+        }
+        Err(error) if editor_current(&project, &config, generation) => {
+            dom::hidden("system-editor", false);
+            dom::error("system-editor-error", &error.message);
+        }
+        _ => {}
+    }
+    if m::finish_pending("editor-pending", generation) {
+        m::set("editor-pending", m::data("discovery-active"));
+        controls();
+    }
+}
+fn field(
+    parent: &web_sys::Element,
+    label: &str,
+    value: &V,
+    path: &str,
+    kind: &str,
+    choices: &[&str],
+    constraints: (bool, usize),
+) {
+    let (required, limit) = constraints;
+    let wrap = dom::el(
+        "label",
+        if kind == "lines" || kind == "textarea" {
+            "field wide"
+        } else {
+            "field"
+        },
+        label,
+    );
+    let input = dom::el(
+        if !choices.is_empty() {
+            "select"
+        } else if kind == "lines" || kind == "textarea" {
+            "textarea"
+        } else {
+            "input"
+        },
+        "",
+        "",
+    );
+    let _ = input.set_attribute("data-field", &format!("{path}|{kind}"));
+    if required {
+        let _ = input.set_attribute("required", "");
+    }
+    if choices.is_empty() {
+        let _ = input.set_attribute("maxlength", &limit.to_string());
+    }
+    if kind == "checkbox" {
+        let _ = input.set_attribute("type", "checkbox");
+        if let Some(i) = input.dyn_ref::<web_sys::HtmlInputElement>() {
+            i.set_checked(m::yes(value));
+        }
+    } else {
+        for choice in choices {
+            let e = dom::el("option", "", choice);
+            let _ = e.set_attribute("value", choice);
+            dom::add(&input, &e);
+        }
+        dom::set_element_value(
+            &input,
+            &if kind == "lines" {
+                m::array(value)
+                    .iter()
+                    .map(m::string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                m::string(value)
+            },
+        );
+    }
+    dom::add(&wrap, &input);
+    dom::add(parent, &wrap);
+}
+fn rows(parent: &web_sys::Element, title: &str, values: &V, path: &str, kind: &str) {
+    let d = dom::el("details", "system-editor-section", "");
+    dom::add(
+        &d,
+        &dom::el(
+            "summary",
+            "",
+            &format!("{title} ({})", m::array(values).len()),
+        ),
+    );
+    for (index, value) in m::array(values).into_iter().enumerate() {
+        let row = dom::el("div", "system-editor-row", "");
+        let base = format!("{path}/{index}");
+        dom::add(&row, &dom::el("h6", "", &format!("{title} {}", index + 1)));
+        match kind {
+            "capabilities" => {
+                field(
+                    &row,
+                    "Capability ID",
+                    &value["id"],
+                    &format!("{base}/id"),
+                    "text",
+                    &[],
+                    (true, 80),
+                );
+                field(
+                    &row,
+                    "Status",
+                    &value["status"],
+                    &format!("{base}/status"),
+                    "text",
+                    &["unknown", "planned", "partial", "implemented"],
+                    (false, 200),
+                );
+                field(
+                    &row,
+                    "Description",
+                    &value["description"],
+                    &format!("{base}/description"),
+                    "textarea",
+                    &[],
+                    (true, 2000),
+                );
+                field(
+                    &row,
+                    "Source paths",
+                    &value["sources"],
+                    &format!("{base}/sources"),
+                    "lines",
+                    &[],
+                    (false, 102400),
+                );
+                field(
+                    &row,
+                    "Routing keywords",
+                    &value["keywords"],
+                    &format!("{base}/keywords"),
+                    "lines",
+                    &[],
+                    (false, 102400),
+                );
+            }
+            "provides" => {
+                field(
+                    &row,
+                    "Contract ID",
+                    &value["id"],
+                    &format!("{base}/id"),
+                    "text",
+                    &[],
+                    (true, 80),
+                );
+                field(
+                    &row,
+                    "Contract type",
+                    &value["kind"],
+                    &format!("{base}/kind"),
+                    "text",
+                    &["http", "event", "rpc", "graphql", "other"],
+                    (false, 200),
+                );
+                field(
+                    &row,
+                    "Contract version",
+                    &value["version"],
+                    &format!("{base}/version"),
+                    "text",
+                    &[],
+                    (true, 100),
+                );
+                field(
+                    &row,
+                    "Source paths",
+                    &value["sources"],
+                    &format!("{base}/sources"),
+                    "lines",
+                    &[],
+                    (false, 102400),
+                );
+            }
+            "consumes" => {
+                for (key, label, limit) in [
+                    ("service", "Provider service ID", 80),
+                    ("contract", "Consumed contract ID", 80),
+                    ("version", "Contract version", 100),
+                ] {
+                    field(
+                        &row,
+                        label,
+                        &value[key],
+                        &format!("{base}/{key}"),
+                        "text",
+                        &[],
+                        (true, limit),
+                    );
+                }
+            }
+            _ => {
+                field(
+                    &row,
+                    "Source path",
+                    &value["path"],
+                    &format!("{base}/path"),
+                    "text",
+                    &[],
+                    (true, 1024),
+                );
+                field(
+                    &row,
+                    "Source kind",
+                    &value["kind"],
+                    &format!("{base}/kind"),
+                    "text",
+                    &["policy", "spec", "contract", "code", "test", "memory"],
+                    (false, 200),
+                );
+            }
+        }
+        dom::add(
+            &row,
+            &dom::button(
+                "Remove",
+                "editor-row-remove",
+                json!({"path":path,"index":index}),
+            ),
+        );
+        dom::add(&d, &row);
+    }
+    dom::add(
+        &d,
+        &dom::button(
+            &format!("Add {}", title.to_lowercase()),
+            "editor-row-add",
+            json!({"path":path,"kind":kind}),
+        ),
+    );
+    dom::add(parent, &d);
+}
+fn render_editor() {
+    let data = m::data("editor");
+    if !data.is_object() {
+        return;
+    }
+    dom::hidden("system-editor", false);
+    dom::set_value("system-editor-name", &m::text(&data, "name"));
+    dom::text(
+        "system-editor-location",
+        &format!(
+            "{} / {}",
+            m::text(&m::project(&m::text(&data, "project_id")), "path"),
+            m::text(&data, "config_path")
+        ),
+    );
+    dom::clear("system-editor-services");
+    dom::clear("system-editor-shared");
+    for (index, service) in m::array(&data["services"]).into_iter().enumerate() {
+        let base = format!("/services/{index}/passport");
+        let p = &service["passport"];
+        let card = dom::el("section", "system-editor-service", "");
+        dom::add(
+            &card,
+            &dom::el("h5", "", p["id"].as_str().unwrap_or("New service")),
+        );
+        dom::add(
+            &card,
+            &dom::el("p", "system-note", &m::text(&service, "path")),
+        );
+        for (key, label, kind, required, limit) in [
+            ("id", "Service ID", "text", true, 80),
+            ("owner", "Owning team", "text", true, 200),
+            ("description", "Service description", "textarea", true, 2000),
+            (
+                "relationships_complete",
+                "I have described all known dependencies",
+                "checkbox",
+                false,
+                200,
+            ),
+        ] {
+            field(
+                &card,
+                label,
+                &p[key],
+                &format!("{base}/{key}"),
+                kind,
+                &[],
+                (required, limit),
+            );
+        }
+        dom::add(
+            &card,
+            &dom::button(
+                "Choose another folder",
+                "editor-service-folder",
+                json!(index),
+            ),
+        );
+        dom::add(
+            &card,
+            &dom::button(
+                "Remove service",
+                "editor-row-remove",
+                json!({"path":"/services","index":index}),
+            ),
+        );
+        for (key, title) in [
+            ("capabilities", "Capabilities"),
+            ("provides", "Provided contracts"),
+            ("consumes", "Consumed contracts"),
+            ("sources", "Sources of context"),
+        ] {
+            rows(&card, title, &p[key], &format!("{base}/{key}"), key);
+        }
+        dom::append("system-editor-services", &card);
+    }
+    if let Some(e) = dom::get("system-editor-shared") {
+        rows(
+            &e,
+            "Shared sources",
+            &data["shared_sources"],
+            "/shared_sources",
+            "sources",
+        );
+    }
+    controls();
+}
+fn pointer_token(token: &str) -> Option<String> {
+    let mut decoded = String::new();
+    let mut chars = token.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '~' {
+            decoded.push(match chars.next()? {
+                '0' => '~',
+                '1' => '/',
+                _ => return None,
+            });
+        } else {
+            decoded.push(ch);
+        }
+    }
+    Some(decoded)
+}
+fn set_editor_value(data: &mut V, path: &str, value: V) -> bool {
+    let Some(tokens) = path.strip_prefix('/') else {
+        return false;
+    };
+    if tokens
+        .split('/')
+        .any(|token| pointer_token(token).is_none())
+    {
+        return false;
+    }
+    let Some((parent, leaf)) = path.rsplit_once('/') else {
+        return false;
+    };
+    let Some(leaf) = pointer_token(leaf) else {
+        return false;
+    };
+    if let Some(slot) = data.pointer_mut(path) {
+        *slot = value;
+        return true;
+    }
+    let Some(object) = data.pointer_mut(parent).and_then(V::as_object_mut) else {
+        return false;
+    };
+    object.insert(leaf, value);
+    true
+}
+pub fn edit_field(field: &str, value: &str, checked: bool) {
+    if !editor_ready() || m::yes(&m::data("editor-pending")) {
+        return;
+    }
+    if m::yes(&m::data("editor-pending")) {
+        return;
+    }
+    let (path, kind) = field.rsplit_once('|').unwrap_or((field, "text"));
+    let mut data = m::data("editor");
+    let v = if kind == "checkbox" {
+        json!(checked)
+    } else if kind == "lines" {
+        json!(value
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>())
+    } else {
+        json!(value)
+    };
+    if set_editor_value(&mut data, path, v) {
+        m::set("editor", data);
+        changed();
+    }
+}
+fn changed() {
+    m::set("editor-dirty", json!(true));
+    dom::text("system-editor-status", "Unsaved changes");
+    controls();
+}
+async fn service_folder(index: Option<u64>) {
+    if !editor_ready() || m::yes(&m::data("editor-pending")) {
+        return;
+    }
+    let generation = m::read(|s| s.epochs.get("editor-scope").copied().unwrap_or(0));
+    m::set(
+        "service-folder-owner",
+        json!({"project":dom::value("system-project"),"config":dom::value("system-config"),"generation":generation}),
+    );
+    let purpose = index
+        .map(|i| format!("service:{i}"))
+        .unwrap_or_else(|| "service:".into());
+    management::folder_open(&purpose).await;
+}
+pub async fn add_service(project: &str, index: Option<usize>) {
+    let selected = m::take("service-folder-owner");
+    if !editor_current(
+        &m::text(&selected, "project"),
+        &m::text(&selected, "config"),
+        selected["generation"].as_u64().unwrap_or(0),
+    ) {
+        dom::error(
+            "system-editor-error",
+            "The selected system changed. Choose the service folder again.",
+        );
+        return;
+    }
+    if m::yes(&m::data("editor-pending")) || !editor_ready() {
+        return;
+    }
+    let owner = dom::value("system-project");
+    let config = dom::value("system-config");
+    let generation = m::bind_scope("editor-scope", &owner, &config);
+    m::set("editor-generation", json!(generation));
+    m::bind_pending("editor-pending", generation);
+    controls();
+    match api::post("/api/systems/service", json!({"project_id":project})).await {
+        Ok(mut service) if editor_current(&owner, &config, generation) && editor_ready() => {
+            let mut data = m::data("editor");
+            if let Some(services) = data["services"].as_array_mut() {
+                if let Some(index) = index {
+                    if index < services.len() {
+                        if service["fingerprint"].is_null() {
+                            service["passport"] = services[index]["passport"].clone();
+                        }
+                        services[index] = service;
+                    }
+                } else {
+                    services.push(service);
+                }
+            }
+            m::set("editor", data);
+            changed();
+            render_editor();
+        }
+        Err(error) if editor_current(&owner, &config, generation) => {
+            dom::error("system-editor-error", &error.message)
+        }
+        _ => {}
+    }
+    if m::finish_pending("editor-pending", generation) {
+        controls();
+    }
+}
+fn editor_payload() -> V {
+    let mut data = m::data("editor");
+    if let Some(items) = data["services"].as_array_mut() {
+        for item in items {
+            if let Some(map) = item.as_object_mut() {
+                map.remove("path");
+            }
+        }
+    }
+    data
+}
+async fn save_editor() {
+    if m::yes(&m::data("editor-pending")) || !dom::validity("system-editor") {
+        return;
+    }
+    if !editor_ready() {
+        dom::error(
+            "system-editor-error",
+            "Load the current project's system before saving.",
+        );
+        return;
+    }
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    let payload = editor_payload();
+    let generation = m::bind_scope("editor-scope", &project, &config);
+    m::set("editor-generation", json!(generation));
+    m::next("discovery");
+    m::bind_pending("editor-pending", generation);
+    controls();
+    let mut saved = false;
+    match api::post("/api/systems/preview", payload).await {
+        Ok(preview) if editor_current(&project, &config, generation) && editor_ready() => {
+            if let Some(id) = preview["preview_id"].as_str() {
+                // The file preview is reviewed for this same bound target.
+                if editor_current(&project, &config, generation) && editor_ready() {
+                    match api::post("/api/systems/apply", json!({"preview_id":id})).await {
+                        Ok(value)
+                            if editor_current(&project, &config, generation)
+                                && value["editor"]["project_id"] == project
+                                && value["editor"]["config_path"] == config =>
+                        {
+                            m::set("editor", value["editor"].clone());
+                            m::set("editor-dirty", json!(false));
+                            m::set("system-catalog", value.clone());
+                            render_catalog(&value);
+                            remember_discovery(None);
+                            saved = true;
+                        }
+                        Err(error) if editor_current(&project, &config, generation) => {
+                            dom::error("system-editor-error", &error.message)
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                dom::error(
+                    "system-editor-error",
+                    "The runner returned no system preview.",
+                );
+            }
+        }
+        Err(error) if editor_current(&project, &config, generation) => {
+            dom::error("system-editor-error", &error.message)
+        }
+        _ => {}
+    }
+    if m::finish_pending("editor-pending", generation) {
+        if editor_current(&project, &config, generation) {
+            if saved {
+                dom::hidden("system-editor", true);
+                dom::text(
+                    "system-message",
+                    "System saved. The map shows the saved services.",
+                );
+            } else {
+                dom::text("system-editor-status", "Save did not complete. The form is retained; reload metadata before retrying if files changed.");
+            }
+        }
+        controls();
+    }
+}
+fn discovery_key() -> String {
+    let d = m::data("editor");
+    format!(
+        "harness-discovery:{}:{}",
+        m::text(&d, "project_id"),
+        m::text(&d, "config_path")
+    )
+}
+fn remember_discovery(id: Option<&str>) {
+    dom::save(&discovery_key(), id);
+}
+async fn discovery_start() {
+    if m::yes(&m::data("editor-pending")) || !editor_ready() {
+        return;
+    }
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    let generation = m::bind_scope("editor-scope", &project, &config);
+    m::set("editor-generation", json!(generation));
+    let epoch = m::next("discovery");
+    m::set(
+        "discovery-owner",
+        json!({"project":project,"config":config,"generation":generation}),
+    );
+    m::set("editor-pending", json!(true));
+    m::set("discovery-active", json!(true));
+    controls();
+    dom::text(
+        "system-discovery-status",
+        "Capturing service evidence and queueing AI scan…",
+    );
+    match api::post("/api/system-discoveries",json!({"editor":editor_payload(),"provider":dom::value("system-discovery-provider"),"timeout":dom::num("system-discovery-timeout")})).await {
+        Ok(value) if discovery_current(epoch) => {
+            let id=m::text(&value,"id");
+            m::set("discovery-id",json!(id));
+            remember_discovery(Some(&id));
+            session::refresh().await;
+            if discovery_current(epoch) { discovery_poll(epoch).await; }
+        }
+        Err(error) if discovery_current(epoch) => {
+            dom::error("system-editor-error",&error.message);
+            m::set("editor-pending",json!(false));
+            m::set("discovery-active",json!(false));
+            controls();
+        }
+        _ => {}
+    }
+}
+fn proposal(v: &V) {
+    if !editor_ready()
+        || v["editor"]["project_id"] != dom::value("system-project")
+        || v["editor"]["config_path"] != dom::value("system-config")
+    {
+        return;
+    }
+    if v["editor"].is_object() {
+        m::set("editor", v["editor"].clone());
+        changed();
+        render_editor();
+    }
+    dom::clear("system-discovery-report");
+    dom::hidden("system-discovery-report", false);
+    dom::append("system-discovery-report",&dom::el("p","system-note","AI filled the forms. Verify sources, ownership and dependencies before saving. Complete dependency coverage remains unconfirmed."));
+    for warning in m::array(&v["warnings"]) {
+        dom::append(
+            "system-discovery-report",
+            &dom::el("p", "system-warning", &m::string(&warning)),
+        );
+    }
+    for report in m::array(&v["reports"]) {
+        let d = dom::details(
+            &format!(
+                "{} · {} capabilities · {} provided · {} consumed contracts",
+                m::text(&report, "id"),
+                m::array(&report["passport"]["capabilities"]).len(),
+                m::array(&report["passport"]["provides"]).len(),
+                m::array(&report["passport"]["consumes"]).len()
+            ),
+            &serde_json::to_string_pretty(&report).unwrap_or_default(),
+        );
+        dom::add(
+            &d,
+            &dom::details(
+                "Captured evidence inventory",
+                &serde_json::to_string_pretty(&v["inventory"][m::text(&report, "id")])
+                    .unwrap_or_default(),
+            ),
+        );
+        dom::append("system-discovery-report", &d);
+    }
+}
+async fn discovery_poll(epoch: u64) {
+    if !discovery_current(epoch) {
+        return;
+    }
+    dom::cancel_timer("discovery-poll");
+    let id = m::string(&m::data("discovery-id"));
+    if id.is_empty() {
+        return;
+    }
+    match api::get(&format!("/api/system-discoveries/{}", dom::enc(&id))).await {
+        Ok(job) if discovery_current(epoch) && job["id"] == id => {
+            let active = m::yes(&job["active"]);
+            m::set("discovery-active", json!(active));
+            m::set("editor-pending", json!(active));
+            dom::text(
+                "system-discovery-status",
+                &format!(
+                    "AI scan · {} · {}",
+                    m::text(&job, "provider"),
+                    m::label(job["status"].as_str().unwrap_or(""))
+                ),
+            );
+            dom::hidden("system-discovery-agents", false);
+            dom::hidden("system-discovery-live", !active);
+            discovery_agents(&job).await;
+            if !discovery_current(epoch) {
+                return;
+            }
+            if active {
+                dom::later("discovery-poll", 1000, move || {
+                    spawn_local(async move {
+                        discovery_poll(epoch).await;
+                    })
+                });
+            } else {
+                if job["proposal"].is_object() {
+                    proposal(&job["proposal"]);
+                    dom::text("system-editor-status","AI filled service details. Review sources and uncertainties, then Save system.");
+                } else {
+                    dom::text(
+                        "system-discovery-status",
+                        &format!(
+                            "{} Your original form is retained.",
+                            job["error"]
+                                .as_str()
+                                .unwrap_or("AI scan ended without a proposal.")
+                        ),
+                    );
+                }
+                session::refresh().await;
+            }
+            if discovery_current(epoch) {
+                controls();
+            }
+        }
+        Err(error) if discovery_current(epoch) => {
+            if [400, 404].contains(&error.status) {
+                let unavailable = match api::get(&format!("/api/sessions/{}", dom::enc(&id))).await
+                {
+                    Ok(value) => !m::active(&value["session"]),
+                    Err(missing) => [400, 404].contains(&missing.status),
+                };
+                if !discovery_current(epoch) {
+                    return;
+                }
+                if unavailable {
+                    m::set("discovery-active", json!(false));
+                    m::set("editor-pending", json!(false));
+                    changed();
+                    remember_discovery(None);
+                    dom::text(
+                        "system-discovery-status",
+                        "AI scan is no longer available. The original form is retained.",
+                    );
+                    controls();
+                    return;
+                }
+            }
+            if !discovery_current(epoch) {
+                return;
+            }
+            dom::text(
+                "system-discovery-status",
+                &format!("Reconnecting to AI scan: {}", error.message),
+            );
+            dom::later("discovery-poll", 3000, move || {
+                spawn_local(async move {
+                    discovery_poll(epoch).await;
+                })
+            });
+        }
+        _ => {}
+    }
+}
+async fn restore_discovery() {
+    if !editor_ready() {
+        return;
+    }
+    let key = discovery_key();
+    let Some(id) = dom::storage(&key) else {
+        return;
+    };
+    let owner = m::data("editor-scope-owner");
+    let project = m::text(&owner, "owner");
+    let config = m::text(&owner, "item");
+    let generation = m::read(|s| s.epochs.get("editor-scope").copied().unwrap_or(0));
+    let epoch = m::next("discovery");
+    m::set(
+        "discovery-owner",
+        json!({"project":project,"config":config,"generation":generation}),
+    );
+    match api::get(&format!("/api/system-discoveries/{}", dom::enc(&id))).await {
+        Ok(job) if discovery_current(epoch) && key == discovery_key() && job["id"] == id => {
+            m::set("discovery-id", json!(id));
+            discovery_agents(&job).await;
+            if !discovery_current(epoch) {
+                return;
+            }
+            let active = m::yes(&job["active"]);
+            m::set("discovery-active", json!(active));
+            m::set("editor-pending", json!(active));
+            let draft = &job["draft"];
+            let same_target = draft["project_id"] == project && draft["config_path"] == config;
+            if active && same_target {
+                m::set("editor", draft.clone());
+                changed();
+                render_editor();
+                discovery_poll(epoch).await;
+            } else if job["proposal"].is_object() {
+                proposal(&job["proposal"]);
+            } else if same_target && draft["revision"] == m::data("editor")["revision"] {
+                m::set("editor", draft.clone());
+                changed();
+                render_editor();
+            }
+        }
+        Err(error) if discovery_current(epoch) => dom::text(
+            "system-discovery-status",
+            &format!("Previous AI scan unavailable: {}", error.message),
+        ),
+        _ => {}
+    }
+}
+async fn agents(v: &V) {
+    let launches = m::array(&v["launches"]);
+    dom::hidden("system-agents-section", launches.is_empty());
+    dom::hidden("system-agents-live", !m::yes(&v["active"]));
+    if launches.is_empty() {
+        crate::activity::reset("system-agents");
+        return;
+    }
+    let latest = launches
+        .last()
+        .map(|l| m::text(l, "session_id"))
+        .unwrap_or_default();
+    let count = m::data("agent-launch-count").as_u64().unwrap_or(0);
+    let preferred = m::data("system-agent-launch")
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let sid = if count != launches.len() as u64
+        || !launches.iter().any(|l| l["session_id"] == preferred)
+    {
+        latest.clone()
+    } else {
+        preferred
+    };
+    m::set("agent-launch-count", json!(launches.len()));
+    m::set("system-agent-launch", json!(sid));
+    dom::options("system-agents-launch",&launches.iter().enumerate().map(|(i,l)|json!({"id":l["session_id"],"label":format!("Launch {} · {}",i+1,m::label(l["status"].as_str().unwrap_or("")))})).collect::<Vec<_>>(),m::summary,Some(&sid));
+    dom::hidden("system-agents-launch-field", launches.len() < 2);
+    let current = sid == latest;
+    let mut steps = m::array(&v["execution"]["steps"]);
+    if steps.is_empty() {
+        steps.push(json!({"id":"contracts","service":"__system__","mode":"read-only"}));
+        for service in m::array(&v["plan"]["context"]["services"]) {
+            steps.push(json!({"id":format!("service-{}",m::string(&service)),"service":service,"mode":v["mode"]}));
+        }
+        steps.push(json!({"id":"verify","service":"__system__","mode":"read-only"}));
+    }
+    let active = current && m::yes(&v["active"]);
+    for step in &mut steps {
+        let id = m::text(step, "id");
+        let service = m::text(step, "service");
+        let (label, goal) = match id.as_str() {
+            "contracts" => (
+                "Contracts agent".into(),
+                "Reads contracts and shared context before dispatch.".into(),
+            ),
+            "verify" => (
+                "Verification agent".into(),
+                "Checks service receipts and cross-service contracts.".into(),
+            ),
+            _ => (
+                format!("{service} agent"),
+                format!(
+                    "Works on {service}; folder access: {}.",
+                    if v["access"] == "all" {
+                        "every selected service folder (read; write in edit mode)"
+                    } else {
+                        "own service folder only"
+                    }
+                ),
+            ),
+        };
+        step["label"] = json!(label);
+        step["goal"] = json!(goal);
+        step["journal"] = if current && step["status"].is_string() {
+            if step["status"] == "running" && !active {
+                json!("interrupted")
+            } else {
+                step["status"].clone()
+            }
+        } else {
+            V::Null
+        };
+    }
+    crate::activity::set_plan("system-agents", steps, active);
+    crate::activity::load("system-agents", &sid).await;
+}
+async fn discovery_agents(job: &V) {
+    dom::hidden("system-discovery-agents", false);
+    dom::hidden("system-discovery-live", !m::yes(&job["active"]));
+    let journal = if m::yes(&job["active"]) {
+        V::Null
+    } else {
+        json!(match job["status"].as_str().unwrap_or("") {
+            "completed" | "stale" => "completed",
+            "failed" => "blocked",
+            "cancelled" | "interrupted" => "interrupted",
+            _ => "pending",
+        })
+    };
+    crate::activity::set_plan(
+        "system-discovery-agent",
+        vec![
+            json!({"id":"discovery","service":"__system__","mode":"read-only","label":"Discovery agent","goal":"Reads captured evidence and fills the service forms.","journal":journal}),
+        ],
+        m::yes(&job["active"]),
+    );
+    crate::activity::load("system-discovery-agent", &m::text(job, "id")).await;
+}
+pub async fn event(
+    kind: &str,
+    id: &str,
+    action: &str,
+    payload: &V,
+    value: &str,
+    _checked: bool,
+) -> bool {
+    if kind == "input" || kind == "change" {
+        if id == "system-editor-name" {
+            if !editor_ready() || m::yes(&m::data("editor-pending")) {
+                return true;
+            }
+            let mut data = m::data("editor");
+            data["name"] = json!(value);
+            m::set("editor", data);
+            changed();
+            return true;
+        }
+        if id == "system-project" {
+            if !sync_editor_target() {
+                return true;
+            }
+            if !m::yes(&m::data("editor-dirty")) {
+                m::take("system-run");
+                m::take("system-catalog");
+                load().await;
+            }
+            return true;
+        }
+        if id == "system-runs" {
+            read(value).await;
+            return true;
+        }
+        if id == "system-config" {
+            if !sync_editor_target() {
+                return true;
+            }
+            m::take("system-catalog");
+            dom::hidden("system-catalog", true);
+            return true;
+        }
+        if id == "system-agents-launch" {
+            m::set("system-agent-launch", json!(value));
+            let v = m::data("system-run");
+            agents(&v).await;
+            return true;
+        }
+        if [
+            "system-provider",
+            "system-access",
+            "system-mode",
+            "system-reviewed",
+            "system-discovery-provider",
+        ]
+        .contains(&id)
+        {
+            controls();
+            return true;
+        }
+    }
+    if kind == "submit" {
+        match id {
+            "system-editor" => {
+                save_editor().await;
+                return true;
+            }
+            "system-plan-form" => {
+                plan().await;
+                return true;
+            }
+            _ => {}
+        }
+    }
+    if kind != "click" {
+        return false;
+    }
+    match action {
+        "system-load" => catalog_load().await,
+        "system-refresh" => load().await,
+        "system-edit" => editor_open().await,
+        "system-choose-project" => management::folder_open("system-project").await,
+        "system-editor-add" => service_folder(None).await,
+        "editor-service-folder" => service_folder(Some(payload.as_u64().unwrap_or(0))).await,
+        "editor-row-remove" => {
+            if m::yes(&m::data("editor-pending")) || !editor_ready() {
+                return true;
+            }
+            let mut data = m::data("editor");
+            if let Some(rows) = data
+                .pointer_mut(payload["path"].as_str().unwrap_or(""))
+                .and_then(V::as_array_mut)
+            {
+                if let Some(index) = payload["index"].as_u64() {
+                    if (index as usize) < rows.len() {
+                        rows.remove(index as usize);
+                    }
+                }
+            }
+            m::set("editor", data);
+            changed();
+            render_editor();
+        }
+        "editor-row-add" => {
+            if m::yes(&m::data("editor-pending")) || !editor_ready() {
+                return true;
+            }
+            let empty = match payload["kind"].as_str().unwrap_or("") {
+                "capabilities" => {
+                    json!({"id":"","description":"","status":"unknown","sources":[],"keywords":[]})
+                }
+                "provides" => json!({"id":"","kind":"http","version":"1","sources":[]}),
+                "consumes" => json!({"service":"","contract":"","version":"1"}),
+                _ => json!({"path":"","kind":"code"}),
+            };
+            let mut data = m::data("editor");
+            if let Some(rows) = data
+                .pointer_mut(payload["path"].as_str().unwrap_or(""))
+                .and_then(V::as_array_mut)
+            {
+                rows.push(empty);
+            }
+            m::set("editor", data);
+            changed();
+            render_editor();
+        }
+        "system-editor-close" => dom::hidden("system-editor", true),
+        "system-editor-discard" => {
+            if !m::yes(&m::data("editor-pending")) {
+                clear_editor_notices();
+                remember_discovery(None);
+                m::next("discovery");
+                dom::cancel_timer("discovery-poll");
+                crate::activity::reset("system-discovery-agent");
+                m::take("discovery-owner");
+                m::next("editor-scope");
+                m::take("editor");
+                m::set("editor-dirty", json!(false));
+                dom::hidden("system-editor", true);
+                controls();
+            }
+        }
+        "system-plan-change" | "system-new-change" => {
+            if m::data("system-catalog").is_null() {
+                catalog_load().await;
+            }
+            session::open_view("system-changes", true).await;
+            dom::hidden("system-plan-form", false);
+        }
+        "system-plan-cancel" => dom::hidden("system-plan-form", true),
+        "system-execute" => {
+            if dom::checked("system-reviewed") {
+                mutate("execute",json!({"provider":dom::value("system-provider"),"mode":dom::value("system-mode"),"access":dom::value("system-access"),"timeout":dom::num("system-timeout")})).await;
+            }
+        }
+        "system-cancel" => mutate("cancel", json!({})).await,
+        "system-resume" => {
+            let mut extra = json!({"accept_source_changes":dom::checked("system-accept-changes")});
+            if !dom::value("system-retry").is_empty() {
+                extra["retry_step"] = json!(dom::value("system-retry"));
+            }
+            mutate("resume", extra).await;
+        }
+        "system-open-session" => {
+            let sid = m::text(&m::data("system-run"), "session_id");
+            session::select(&sid).await;
+            session::open_view("sessions", true).await;
+        }
+        "system-discovery-start" => discovery_start().await,
+        "system-discovery-cancel" => {
+            let epoch = m::read(|s| s.epochs.get("discovery").copied().unwrap_or(0));
+            if !discovery_current(epoch) || !editor_ready() {
+                return true;
+            }
+            let id = m::string(&m::data("discovery-id"));
+            if let Err(e) = api::post(
+                &format!("/api/sessions/{}/cancel", dom::enc(&id)),
+                json!({}),
+            )
+            .await
+            {
+                if discovery_current(epoch) {
+                    dom::error("system-editor-error", &e.message);
+                }
+            }
+            if discovery_current(epoch) {
+                discovery_poll(epoch).await;
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+#[cfg(test)]
+mod editor_value_tests {
+    use super::*;
+    fn partial_passport() -> V {
+        json!({"project_id":"a","config_path":"system.json","services":[{"passport":{
+            "schema_version":1,"id":"service-a","description":"Existing valid service","owner":"Team A",
+            "capabilities":[{"id":"read","description":"Read records","status":"implemented","sources":[]}],
+            "provides":[],"consumes":[],"sources":[]
+        }}]})
+    }
+    #[test]
+    fn edits_insert_optional_fields_of_an_existing_native_passport() {
+        let mut data = partial_passport();
+        assert!(data
+            .pointer("/services/0/passport/relationships_complete")
+            .is_none());
+        assert!(data
+            .pointer("/services/0/passport/capabilities/0/keywords")
+            .is_none());
+        assert!(set_editor_value(
+            &mut data,
+            "/services/0/passport/relationships_complete",
+            json!(true)
+        ));
+        assert!(set_editor_value(
+            &mut data,
+            "/services/0/passport/capabilities/0/keywords",
+            json!(["routing", "lookup"])
+        ));
+        assert_eq!(
+            data["services"][0]["passport"]["relationships_complete"],
+            true
+        );
+        assert_eq!(
+            data["services"][0]["passport"]["capabilities"][0]["keywords"],
+            json!(["routing", "lookup"])
+        );
+        assert_eq!(data["services"][0]["passport"]["owner"], "Team A");
+        assert_eq!(data["project_id"], "a");
+    }
+    #[test]
+    fn setter_decodes_final_object_keys_and_preserves_existing_array_indices() {
+        let mut data = json!({"object":{},"array":[{"name":"before"}]});
+        assert!(set_editor_value(
+            &mut data,
+            "/object/a~1b~0c",
+            json!("created")
+        ));
+        assert_eq!(data["object"]["a/b~c"], "created");
+        assert!(set_editor_value(&mut data, "/array/0/name", json!("after")));
+        assert!(set_editor_value(&mut data, "/array/0/new", json!(7)));
+        assert_eq!(data["array"][0], json!({"name":"after","new":7}));
+        assert_eq!(data["array"].as_array().unwrap().len(), 1);
+    }
+    #[test]
+    fn missing_parents_invalid_pointers_and_array_growth_leave_the_document_unchanged() {
+        let mut data = partial_passport();
+        let before = data.clone();
+        for path in [
+            "",
+            "services/0/passport/owner",
+            "/services/1/passport/owner",
+            "/services/-",
+            "/services/0/missing/leaf",
+            "/services/0/passport/invalid~2escape",
+            "/services/0/passport/capabilities/01/keywords",
+        ] {
+            assert!(
+                !set_editor_value(&mut data, path, json!("discarded")),
+                "{path}"
+            );
+            assert_eq!(data, before, "{path}");
+        }
+    }
+}

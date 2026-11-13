@@ -1,4 +1,2 @@
-#!/usr/bin/env bash
-set -euo pipefail
-KIT3_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$KIT3_ROOT/scripts/kit3.py" "$@"
+#!/bin/sh
+exec "$(dirname -- "$0")/infra-engine" kit "$@"

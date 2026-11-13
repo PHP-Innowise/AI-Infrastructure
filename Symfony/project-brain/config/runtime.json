@@ -14,6 +14,7 @@
   "automatic_promotion": true,
   "bank_duplicate_ratio": 0.6,
   "canonical_edition": ".agents",
+  "capsule_profile": "recall",
   "codebase_map_max_drift": 25,
   "compaction_threshold": 5,
   "framework": "symfony",

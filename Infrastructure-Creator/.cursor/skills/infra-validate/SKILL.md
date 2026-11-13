@@ -9,6 +9,8 @@ related: [content-reviewer, bootstrap-verifier, infra-generate, infra-update, sk
 
 # Infra Validate
 
+Native helper commands use the generator's explicit bundled executable. Set `GENERATOR_NATIVE` to the absolute path `<generator>/memory-bank/bin/infra-engine` (`infra-engine.exe` on Windows) before the commands below; this is the selected release artifact, with no interpreter, download or build fallback.
+
 ## Overview
 
 `infra-validate` is the sixth sanctioned orchestrator (see `AGENTS.md`'s
@@ -45,7 +47,7 @@ advisory only). The `runtime-verbatim` lane is valid only for the
 stack-agnostic runtime surface (`memory-bank/scripts/`,
 `memory-bank/templates/`, `project-brain/PROTOCOL.md`,
 `project-brain/schemas/`, `project-brain/templates/`) and requires a `basis`.
-`validate_content_review.py` enforces all of this; the schema above is
+`"$GENERATOR_NATIVE" creator validate-content-review` enforces all of this; the schema above is
 documentation, not a substitute for running the gate.
 
 ## Process
@@ -79,7 +81,7 @@ documentation, not a substitute for running the gate.
    into the lane's findings:
 
    ```bash
-   python3 .agents/skills/bootstrap-verifier/scripts/validate_memory_content.py \
+   "$GENERATOR_NATIVE" creator validate-memory-content \
      --bank "tasks/TASK-003/infra-generate-staging/memory-bank" \
      --target "<path-to-real-target>"
    ```
@@ -106,22 +108,22 @@ documentation, not a substitute for running the gate.
    regress what the validators already passed:
 
    ```bash
-   python3 .agents/skills/bootstrap-verifier/scripts/validate_skill_quality.py \
+   "$GENERATOR_NATIVE" creator validate-skill-quality \
      --plan "tasks/TASK-003/skill-generation-plan.json" \
      --target "<path-to-real-target>" \
      --skills-dir "tasks/TASK-003/infra-generate-staging/.claude/skills" \
      --registry ".agents/skills/skill-forge/references/candidate-registry.json"
    ```
 
-   plus `validate_generated.py` with the run's usual arguments, and
-   `validate_memory_content.py` whenever a repair touched the `memory` lane.
+   plus `"$GENERATOR_NATIVE" creator validate-generated` with the run's usual arguments, and
+   `"$GENERATOR_NATIVE" creator validate-memory-content` whenever a repair touched the `memory` lane.
    Re-review each repaired file (its reviewer entry reflects the repaired
    content, with the finding's `resolution.round` recording when it was
    fixed). Record the re-run gates in `post_repair_gates`.
 7. **Run the deterministic gate** and require exit 0:
 
    ```bash
-   python3 .agents/skills/bootstrap-verifier/scripts/validate_content_review.py \
+   "$GENERATOR_NATIVE" creator validate-content-review \
      --publication-plan "tasks/TASK-003/infra-generate-publication-plan.txt" \
      --review "tasks/TASK-003/infra-validate-review.json"
    ```
@@ -130,7 +132,7 @@ documentation, not a substitute for running the gate.
    `files` map. A nonzero exit is this phase failing, not a formality.
 8. **Standalone repairs publish transactionally.** Against a published
    target, forges write into `tasks/TASK-{N}/infra-validate-staging/`, the
-   repaired subset publishes via `publish_staging.py` snapshot/publish with a
+   repaired subset publishes via `"$GENERATOR_NATIVE" creator publish-staging` snapshot/publish with a
    rollback journal, the manifest hashes are refreshed with
    `bootstrap-verifier`'s recipe, and `bootstrap-verifier` runs afterwards.
    Never edit a manifest-owned file in place.
@@ -143,8 +145,8 @@ documentation, not a substitute for running the gate.
    same sources) and apply only approved rewrites, appending new knowledge
    as a superseding chunk rather than overwriting a team edit. A chunk the
    evidence can no longer support is flagged `needs-review`, never silently
-   deleted. Re-run `validate_memory_content.py` and the bank's own
-   `validate.py` against the published bank afterwards.
+   deleted. Re-run `"$GENERATOR_NATIVE" creator validate-memory-content` and the bank's own
+   `"$GENERATOR_NATIVE" bank validate --root <published-root> --source-root <evidence-target>` afterwards.
 9. **Report** per-lane counts, findings, repairs, escalations, and the gate
    result in `infra-validate-report.md`.
 
@@ -175,7 +177,7 @@ documentation, not a substitute for running the gate.
 - MUST review every file the publication plan (or manifest) lists - a file
   too boring to review is still dispositioned, and the verbatim exemption
   covers only the sanctioned runtime surface.
-- MUST run `validate_memory_content.py` for the `memory` lane in every mode -
+- MUST run `"$GENERATOR_NATIVE" creator validate-memory-content` for the `memory` lane in every mode -
   a bank whose chunks share one body template has preserved nothing, however
   clean its structure - and in standalone mode MUST cover the unmanifested
   seeded chunks (`memory-bank/chunks/MEM-*.md` + `INDEX.md` only) while
@@ -188,9 +190,9 @@ documentation, not a substitute for running the gate.
   loop a forge against a reviewer indefinitely.
 - MUST NOT let a forge invent content to satisfy a finding - missing evidence
   escalates to re-scan/re-interview.
-- MUST re-run `validate_skill_quality.py` and `validate_generated.py` after
+- MUST re-run `"$GENERATOR_NATIVE" creator validate-skill-quality` and `"$GENERATOR_NATIVE" creator validate-generated` after
   any repair round, and MUST NOT report success while
-  `validate_content_review.py` exits nonzero.
+  `"$GENERATOR_NATIVE" creator validate-content-review` exits nonzero.
 - MUST NOT walk staging or the target to enumerate the surface - the explicit
   plan or manifest is the only authority.
 - In standalone mode, MUST abort without `.infra-manifest.json` and MUST

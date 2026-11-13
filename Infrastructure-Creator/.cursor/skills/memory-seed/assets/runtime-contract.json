@@ -1,13 +1,10 @@
 {
-  "schema_version": "1.0",
-  "contract_id": "context-brain-runtime",
+  "schema_version": "2.0",
+  "contract_id": "context-brain-native-runtime",
   "authority": {
     "canonical_sources": [
-      "memory-bank/scripts/context.py",
-      "memory-bank/scripts/context_handoff.py",
-      "memory-bank/scripts/context_continuity.py",
-      "memory-bank/scripts/brain_runtime.py",
-      "memory-bank/scripts/context_retrieval.py",
+      "memory-bank/bin/infra-engine",
+      "memory-bank/config/mirror-rules.json",
       "project-brain/PROTOCOL.md"
     ],
     "precedence": [
@@ -20,10 +17,9 @@
   "sqlite": {
     "path": "memory-bank/local/context.db",
     "classification": "creatable",
-    "created_by": "python3 memory-bank/scripts/context.py status",
+    "created_by": "memory-bank/bin/infra-engine memory status",
     "requirements": [
-      "Python standard library sqlite3",
-      "SQLite FTS5"
+      "Bundled native SQLite with FTS5"
     ],
     "checkpoint_tables": {
       "working_tasks": {
@@ -56,15 +52,6 @@
       "memory-bank/README.md",
       "memory-bank/INDEX.md",
       "memory-bank/templates/chunk.md",
-      "memory-bank/scripts/context.py",
-      "memory-bank/scripts/native_results.py",
-      "memory-bank/scripts/context_handoff.py",
-      "memory-bank/scripts/context_continuity.py",
-      "memory-bank/scripts/brain_runtime.py",
-      "memory-bank/scripts/context_retrieval.py",
-      "memory-bank/scripts/validate.py",
-      "memory-bank/scripts/telemetry.py",
-      "memory-bank/scripts/workspace_roots.py",
       "memory-bank/local/",
       "memory-bank/chunks/",
       "project-brain/PROTOCOL.md",
@@ -88,25 +75,24 @@
       "project-brain/control/retrieval-manifests/",
       "project-brain/archive/",
       "project-brain/local/",
-      "memory-bank/scripts/mcp_server.py",
-      "memory-bank/scripts/mcp_config.py",
       "memory-bank/MCP.md",
-      "memory-bank/scripts/automatic_query.py",
-      "memory-bank/scripts/memory_results.py",
-      "memory-bank/scripts/context_cli.py"
+      "memory-bank/bin/",
+      "memory-bank/config/mirror-rules.json",
+      "project-brain/config/hook-policy.json",
+      "project-brain/schemas/hook-policy.schema.json"
     ],
     "creatable": [
       {
         "path": "tasks/TASK-NNN/context-save-*.md",
-        "via": "context.py context-save from curated JSON and, for detail full, an explicit visible transcript export"
+        "via": "infra-engine memory context-save from curated JSON and, for detail full, an explicit visible transcript export"
       },
       {
         "path": ".context-handoff/",
-        "via": "the context-continuity hook (visible-text chat snapshots) and context_continuity.py --event merge (frozen merges under merges/); local ignored same-repository, same-branch state only"
+        "via": "the context-continuity hook (visible-text chat snapshots) and infra-engine continuity --event merge (frozen merges under merges/); local ignored same-repository, same-branch state only"
       },
       {
         "path": "memory-bank/local/context.db",
-        "via": "any context.py command that opens the runtime"
+        "via": "any infra-engine memory command that opens the runtime"
       },
       {
         "path": "memory-bank/chunks/MEM-*.md",
@@ -114,7 +100,7 @@
       },
       {
         "path": "project-brain/dynamic/{tasks,findings,bugs,incidents,decisions,events}/*.md",
-        "via": "context.py start, brain-create, or supported update operations"
+        "via": "infra-engine memory start, brain-create, or supported update operations"
       },
       {
         "path": "project-brain/control/handoffs/*.md",
@@ -122,27 +108,27 @@
       },
       {
         "path": "project-brain/control/messages/*.jsonl",
-        "via": "context.py msg-send or msg-dispatch"
+        "via": "infra-engine memory msg-send or msg-dispatch"
       },
       {
         "path": "project-brain/control/promotions/*.json",
-        "via": "context.py promote-propose"
+        "via": "infra-engine memory promote-propose"
       },
       {
         "path": "project-brain/control/retrieval-manifests/*.json",
-        "via": "context.py retrieve without --ephemeral"
+        "via": "infra-engine memory retrieve without --ephemeral"
       },
       {
         "path": "project-brain/control/result-attempts/{task_uuid}/*.json",
-        "via": "context.py record-result or replay-result and the memory_record_result MCP tool: an attempt, then a completion proof; compaction removes an archived task's folder"
+        "via": "infra-engine memory record-result or replay-result and the memory_record_result MCP tool: an attempt, then a completion proof; compaction removes an archived task's folder"
       },
       {
         "path": "project-brain/control/result-learning-images/*.json",
-        "via": "context.py record-result: the image of the learning an agent last wrote; compaction removes those of archived learnings"
+        "via": "infra-engine memory record-result: the image of the learning an agent last wrote; compaction removes those of archived learnings"
       },
       {
         "path": "project-brain/archive/**",
-        "via": "context.py compact"
+        "via": "infra-engine memory compact"
       },
       {
         "path": "project-brain/local/runtime.lock",
@@ -153,75 +139,82 @@
       "memory-bank/local/context-index.sqlite",
       "memory-bank/local/checkpoints.jsonl",
       "project-brain/records/**"
+    ],
+    "native_artifacts": [
+      {
+        "unix": "memory-bank/bin/infra-engine",
+        "windows": "memory-bank/bin/infra-engine.exe",
+        "capability_profile": "infra-engine-v1"
+      }
     ]
   },
   "commands": {
     "read_health": [
-      "python3 memory-bank/scripts/context.py status",
-      "python3 memory-bank/scripts/context.py status --json",
-      "python3 memory-bank/scripts/context.py validate",
-      "python3 memory-bank/scripts/context.py parity --json",
-      "python3 memory-bank/scripts/validate.py",
-      "python3 memory-bank/scripts/validate.py --summary"
+      "memory-bank/bin/infra-engine memory status",
+      "memory-bank/bin/infra-engine memory status --json",
+      "memory-bank/bin/infra-engine memory validate",
+      "memory-bank/bin/infra-engine memory parity --json",
+      "memory-bank/bin/infra-engine bank validate",
+      "memory-bank/bin/infra-engine bank validate --summary"
     ],
     "refresh_retrieve": [
-      "python3 memory-bank/scripts/context.py refresh",
-      "python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID"
+      "memory-bank/bin/infra-engine memory refresh",
+      "memory-bank/bin/infra-engine memory retrieve QUERY --task-id ID"
     ],
     "portable_handoff": [
-      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail summary --source-client CLIENT --json",
-      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail topic --topic TOPIC --source-client CLIENT --json",
-      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail full --source-client CLIENT --transcript VISIBLE-EXPORT.md --json",
-      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --json",
-      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --include-transcript --json"
+      "memory-bank/bin/infra-engine memory context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail summary --source-client CLIENT --json",
+      "memory-bank/bin/infra-engine memory context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail topic --topic TOPIC --source-client CLIENT --json",
+      "memory-bank/bin/infra-engine memory context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail full --source-client CLIENT --transcript VISIBLE-EXPORT.md --json",
+      "memory-bank/bin/infra-engine memory context-load --input HANDOFF.md --json",
+      "memory-bank/bin/infra-engine memory context-load --input HANDOFF.md --include-transcript --json"
     ],
     "checkpoint": {
-      "automatic_or_manual_flush": "python3 memory-bank/scripts/context.py turn --task-id ID --flush",
-      "buffered_turn": "python3 memory-bank/scripts/context.py turn --task-id ID",
+      "automatic_or_manual_flush": "memory-bank/bin/infra-engine memory turn --task-id ID --flush",
+      "buffered_turn": "memory-bank/bin/infra-engine memory turn --task-id ID",
       "governed_authority": "turn updates the governed task auto-checkpoint through the runtime; it never completes the task",
       "lightweight_authority": "start/update/get/clear/complete operate SQLite working_tasks; checkpointing is CLI-backed and no checkpoints.jsonl file exists"
     },
     "governed_task": [
-      "python3 memory-bank/scripts/context.py start --task-id ID --goal GOAL",
-      "python3 memory-bank/scripts/context.py update --task-id ID",
-      "python3 memory-bank/scripts/context.py get --task-id ID",
-      "python3 memory-bank/scripts/context.py complete --task-id ID --outcome OUTCOME"
+      "memory-bank/bin/infra-engine memory start --task-id ID --goal GOAL",
+      "memory-bank/bin/infra-engine memory update --task-id ID",
+      "memory-bank/bin/infra-engine memory get --task-id ID",
+      "memory-bank/bin/infra-engine memory complete --task-id ID --outcome OUTCOME"
     ],
     "dynamic_records": [
-      "python3 memory-bank/scripts/context.py brain-create TYPE --external-id ID --title TITLE",
-      "python3 memory-bank/scripts/context.py brain-update --record-id ID --revision N",
-      "python3 memory-bank/scripts/context.py brain-get --record-id ID"
+      "memory-bank/bin/infra-engine memory brain-create TYPE --external-id ID --title TITLE",
+      "memory-bank/bin/infra-engine memory brain-update --record-id ID --revision N",
+      "memory-bank/bin/infra-engine memory brain-get --record-id ID"
     ],
     "purposes": {
-      "python3 memory-bank/scripts/context.py status": "show local context index counts for the procedural, semantic and episodic layers",
-      "python3 memory-bank/scripts/context.py status --json": "show local context index counts for the procedural, semantic and episodic layers as machine-readable output",
-      "python3 memory-bank/scripts/context.py validate": "validate active and archived Brain records, the governed control plane and the repository index",
-      "python3 memory-bank/scripts/context.py parity --json": "compare the canonical mirrors across editions and fail on drift in mirrored skills, hooks, commands, agents or governance documents",
-      "python3 memory-bank/scripts/validate.py": "validate the durable memory bank: chunk frontmatter, statuses and the bank index",
-      "python3 memory-bank/scripts/validate.py --summary": "print durable memory bank status counts from chunk frontmatter without printing chunk contents",
-      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail summary --source-client CLIENT --json": "create one exclusive-new portable summary handoff from a curated payload, writing only the named artifact",
-      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail topic --topic TOPIC --source-client CLIENT --json": "create one exclusive-new portable topic handoff from a curated payload, writing only the named artifact",
-      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail full --source-client CLIENT --transcript VISIBLE-EXPORT.md --json": "create one exclusive-new portable full handoff from a curated payload and explicit visible transcript export, writing only the named artifact",
-      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --json": "validate one explicit portable handoff and report source-fingerprint drift without loading transcript content or writing files",
-      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --include-transcript --json": "validate one explicit portable handoff, include its explicit visible transcript, and report source-fingerprint drift without writing files",
-      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event hook": "read the hook payload's hook_event_name: on a prompt or a final answer, append the documented visible text to the chat's snapshot in ignored same-repository, same-branch local storage; on a session start, return in the host's context envelope only a merge prepared for this new task (or a merged task's frozen sources again on resume or compact); never mutates Brain, Bank, or SQLite",
-      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event list": "list the chats captured on this branch as host:session IDs with a short visible preview, without writing anything",
-      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B": "freeze 2-8 selected captured chats into one ignored local archive for the next new task in the destination client, refusing an invalid source or an already pending merge without replacing it"
+      "memory-bank/bin/infra-engine memory status": "show local context index counts for the procedural, semantic and episodic layers",
+      "memory-bank/bin/infra-engine memory status --json": "show local context index counts for the procedural, semantic and episodic layers as machine-readable output",
+      "memory-bank/bin/infra-engine memory validate": "validate active and archived Brain records, the governed control plane and the repository index",
+      "memory-bank/bin/infra-engine memory parity --json": "compare the canonical mirrors across editions and fail on drift in mirrored skills, hooks, commands, agents or governance documents",
+      "memory-bank/bin/infra-engine bank validate": "validate the durable memory bank: chunk frontmatter, statuses and the bank index",
+      "memory-bank/bin/infra-engine bank validate --summary": "print durable memory bank status counts from chunk frontmatter without printing chunk contents",
+      "memory-bank/bin/infra-engine memory context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail summary --source-client CLIENT --json": "create one exclusive-new portable summary handoff from a curated payload, writing only the named artifact",
+      "memory-bank/bin/infra-engine memory context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail topic --topic TOPIC --source-client CLIENT --json": "create one exclusive-new portable topic handoff from a curated payload, writing only the named artifact",
+      "memory-bank/bin/infra-engine memory context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail full --source-client CLIENT --transcript VISIBLE-EXPORT.md --json": "create one exclusive-new portable full handoff from a curated payload and explicit visible transcript export, writing only the named artifact",
+      "memory-bank/bin/infra-engine memory context-load --input HANDOFF.md --json": "validate one explicit portable handoff and report source-fingerprint drift without loading transcript content or writing files",
+      "memory-bank/bin/infra-engine memory context-load --input HANDOFF.md --include-transcript --json": "validate one explicit portable handoff, include its explicit visible transcript, and report source-fingerprint drift without writing files",
+      "memory-bank/bin/infra-engine continuity --root ROOT --host CLIENT --event hook": "read the hook payload's hook_event_name: on a prompt or a final answer, append the documented visible text to the chat's snapshot in ignored same-repository, same-branch local storage; on a session start, return in the host's context envelope only a merge prepared for this new task (or a merged task's frozen sources again on resume or compact); never mutates Brain, Bank, or SQLite",
+      "memory-bank/bin/infra-engine continuity --host CLIENT --event list": "list the chats captured on this branch as host:session IDs with a short visible preview, without writing anything",
+      "memory-bank/bin/infra-engine continuity --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B": "freeze 2-8 selected captured chats into one ignored local archive for the next new task in the destination client, refusing an invalid source or an already pending merge without replacing it"
     },
     "outcomes": {
-      "python3 memory-bank/scripts/context.py status": [
+      "memory-bank/bin/infra-engine memory status": [
         {
           "exit": 0,
           "meaning": "prints the document, episode and working-task counts per layer"
         }
       ],
-      "python3 memory-bank/scripts/context.py status --json": [
+      "memory-bank/bin/infra-engine memory status --json": [
         {
           "exit": 0,
           "meaning": "prints the same counts as JSON with the mode and the authority"
         }
       ],
-      "python3 memory-bank/scripts/context.py validate": [
+      "memory-bank/bin/infra-engine memory validate": [
         {
           "exit": 0,
           "meaning": "every Brain record and index is canonical and it says validation passed"
@@ -231,7 +224,7 @@
           "meaning": "prints each record or index that is stale or non-canonical"
         }
       ],
-      "python3 memory-bank/scripts/context.py parity --json": [
+      "memory-bank/bin/infra-engine memory parity --json": [
         {
           "exit": 0,
           "meaning": "the canonical mirrors agree, or the edition is standalone and parity is skipped"
@@ -241,7 +234,7 @@
           "meaning": "prints the mirrored files that drifted between editions"
         }
       ],
-      "python3 memory-bank/scripts/validate.py": [
+      "memory-bank/bin/infra-engine bank validate": [
         {
           "exit": 0,
           "meaning": "the durable memory bank passes chunk frontmatter and status validation; non-fatal warnings may still be printed to stderr"
@@ -251,13 +244,13 @@
           "meaning": "prints each chunk error that failed validation"
         }
       ],
-      "python3 memory-bank/scripts/validate.py --summary": [
+      "memory-bank/bin/infra-engine bank validate --summary": [
         {
           "exit": 0,
           "meaning": "prints the durable memory bank chunk status counts"
         }
       ],
-      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail summary --source-client CLIENT --json": [
+      "memory-bank/bin/infra-engine memory context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail summary --source-client CLIENT --json": [
         {
           "exit": 0,
           "meaning": "creates the new portable summary handoff and reports its path"
@@ -267,7 +260,7 @@
           "meaning": "reports invalid curated input, unsafe content, or an existing output path without changing runtime state"
         }
       ],
-      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail topic --topic TOPIC --source-client CLIENT --json": [
+      "memory-bank/bin/infra-engine memory context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail topic --topic TOPIC --source-client CLIENT --json": [
         {
           "exit": 0,
           "meaning": "creates the new portable topic handoff and reports its path"
@@ -277,7 +270,7 @@
           "meaning": "reports invalid topic or curated input, unsafe content, or an existing output path without changing runtime state"
         }
       ],
-      "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail full --source-client CLIENT --transcript VISIBLE-EXPORT.md --json": [
+      "memory-bank/bin/infra-engine memory context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail full --source-client CLIENT --transcript VISIBLE-EXPORT.md --json": [
         {
           "exit": 0,
           "meaning": "creates the new full handoff with the explicit visible transcript and reports its path"
@@ -287,7 +280,7 @@
           "meaning": "reports missing, unsafe, or invalid transcript/input or an existing output path without changing runtime state"
         }
       ],
-      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --json": [
+      "memory-bank/bin/infra-engine memory context-load --input HANDOFF.md --json": [
         {
           "exit": 0,
           "meaning": "prints validated curated context and source-fingerprint drift without transcript content"
@@ -297,7 +290,7 @@
           "meaning": "reports malformed or unsafe input without changing runtime state"
         }
       ],
-      "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --include-transcript --json": [
+      "memory-bank/bin/infra-engine memory context-load --input HANDOFF.md --include-transcript --json": [
         {
           "exit": 0,
           "meaning": "prints validated curated context, explicit visible transcript, and source-fingerprint drift"
@@ -307,13 +300,13 @@
           "meaning": "reports malformed or unsafe input without changing runtime state"
         }
       ],
-      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event hook": [
+      "memory-bank/bin/infra-engine continuity --root ROOT --host CLIENT --event hook": [
         {
           "exit": 0,
           "meaning": "always: captures or delivers when trusted hook input, branch identity and (for delivery) a prepared merge are available; otherwise stores and returns nothing"
         }
       ],
-      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event list": [
+      "memory-bank/bin/infra-engine continuity --host CLIENT --event list": [
         {
           "exit": 0,
           "meaning": "prints the captured chats of this branch as JSON"
@@ -323,7 +316,7 @@
           "meaning": "reports unreadable snapshots, disabled continuity, or an invalid state root without changing snapshots"
         }
       ],
-      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B": [
+      "memory-bank/bin/infra-engine continuity --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B": [
         {
           "exit": 0,
           "meaning": "prepares the merge for the next new task in the destination client and reports its archive"
@@ -335,11 +328,11 @@
       ]
     },
     "automatic_continuity": [
-      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event hook"
+      "memory-bank/bin/infra-engine continuity --root ROOT --host CLIENT --event hook"
     ],
     "chat_merge": [
-      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event list",
-      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B"
+      "memory-bank/bin/infra-engine continuity --host CLIENT --event list",
+      "memory-bank/bin/infra-engine continuity --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B"
     ]
   },
   "runtime_fixed_skills": {
@@ -413,12 +406,35 @@
     "identity": "every hook payload's session_id for codex/claude, conversation_id for cursor; a missing or invalid identity stores and delivers nothing",
     "creation": "native task creation only through a supported client tool when the current user asks; otherwise await a newly opened task",
     "commands": [
-      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event list",
-      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B"
+      "memory-bank/bin/infra-engine continuity --host CLIENT --event list",
+      "memory-bank/bin/infra-engine continuity --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B"
     ],
     "limits": "32 MiB serialized per frozen archive; 128 archives and 256 MiB total per checkout; refuse new archives at quota without evicting existing task history",
     "disabled_restore_by": "CONTEXT_CONTINUITY_RESTORE_DISABLED=1, true, or yes; capture remains enabled",
     "snapshots": "one visible-text snapshot per chat; at most 8 per branch and 64 per checkout; snapshots idle for 30 days and interrupted temporary writes are removed before capture",
     "skipped_when": "CONTEXT_MEMORY_RECOVERY=1 (a draft-only recovery is not part of the conversation)"
+  },
+  "native_engine": {
+    "capability_profile": "infra-engine-v1",
+    "unix_path": "memory-bank/bin/infra-engine",
+    "windows_path": "memory-bank/bin/infra-engine.exe",
+    "required_capabilities": [
+      "memory",
+      "brain",
+      "bank",
+      "hooks",
+      "mcp",
+      "install"
+    ],
+    "launch_policy": "Use the explicit installed artifact; no PATH alias, download, compilation, Python execution or fallback."
+  },
+  "native_hook_policy": {
+    "schema_version": 1,
+    "policy_path": "project-brain/config/hook-policy.json",
+    "schema_path": "project-brain/schemas/hook-policy.schema.json",
+    "profile_selection_marker": "infra-hook-policy-selection-v1",
+    "approved_profile_digest_required": true,
+    "selection": "Complete data-only selection extracted independently from the actual human-reviewed profile; policy self-hash is not approval.",
+    "builtin_guards": "Native Rust common destructive/secret/permission guards remain active."
   }
 }

@@ -1,0 +1,3 @@
+# Each checkout installs its own native engine; it is never committed.
+/infra-engine
+/infra-engine.exe

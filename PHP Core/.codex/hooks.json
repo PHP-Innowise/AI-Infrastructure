@@ -5,11 +5,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh local-context.sh"
+            "command": "memory-bank/bin/infra-engine hook codex local-context --root ."
           },
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh context-continuity.sh",
+            "command": "memory-bank/bin/infra-engine hook codex context-continuity --root .",
             "additionalContextLimit": 6000
           }
         ]
@@ -20,12 +20,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh working-memory-read.sh",
+            "command": "memory-bank/bin/infra-engine hook codex working-memory-read --root .",
             "additionalContextLimit": 4000
           },
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh context-continuity.sh"
+            "command": "memory-bank/bin/infra-engine hook codex context-continuity --root ."
           }
         ]
       }
@@ -35,11 +35,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh working-memory-write.sh"
+            "command": "memory-bank/bin/infra-engine hook codex working-memory-write --root ."
           },
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh context-continuity.sh"
+            "command": "memory-bank/bin/infra-engine hook codex context-continuity --root ."
           }
         ]
       }
@@ -49,15 +49,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh bash-validator.sh"
+            "command": "memory-bank/bin/infra-engine hook codex bash-validator --root ."
           },
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh file-naming-validator.sh"
+            "command": "memory-bank/bin/infra-engine hook codex file-naming-validator --root ."
           },
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh subagent-gate.sh"
+            "command": "memory-bank/bin/infra-engine hook codex subagent-gate --root ."
           }
         ]
       }
@@ -67,7 +67,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh loop-detection.sh"
+            "command": "memory-bank/bin/infra-engine hook codex loop-detection --root ."
           }
         ]
       }

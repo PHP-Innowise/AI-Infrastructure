@@ -337,6 +337,23 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
 """
         subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
 
+    @unittest.skipUnless(shutil.which('node'), 'Installed project summary check requires Node')
+    def test_an_installed_project_says_why_it_is_not_kept_current(self):
+        # A project synced from newer work than the server's clone is left as it is; before,
+        # the panel said only that the project had its own accelerator.
+        page = ui_script()
+        source = page[page.index('\nfunction installedSummary('):page.index('\nfunction renderProjectAccelerator(')]
+        script = """const assert = require('node:assert/strict');
+""" + source + """
+const plain = 'This project has its own installed accelerator; sessions use those files and nothing is attached.';
+assert.equal(installedSummary(null), plain);
+assert.equal(installedSummary({source:'abc', error:null, partial:null}), plain);
+assert.equal(installedSummary({error:'the project was last synced from 8b20d5f1abcd, which this clone (1cbdf9e7abcd) does not contain'}),
+  plain + ' It is not kept current from this clone: the project was last synced from 8b20d5f1abcd, which this clone (1cbdf9e7abcd) does not contain.');
+assert.equal(installedSummary({error:null, partial:'2 file(s) of release 2.0.0 held back'}), plain + ' 2 file(s) of release 2.0.0 held back.');
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
     @unittest.skipUnless(shutil.which('node'), 'Memory draft check requires Node')
     def test_each_run_saves_its_memory_draft_and_no_record_result_panel_remains(self):
         # Record result & durable memory is gone from the conversation: no markup, no code that drives it.

@@ -9,6 +9,10 @@ related: [infra-generate, policy-forge, skill-forge, agent-forge, hook-forge, me
 
 # Command Forge
 
+Native commands below use `"$GENERATOR_NATIVE"`: set `GENERATOR_NATIVE` to the
+selected generator's absolute `memory-bank/bin/infra-engine` path
+(`infra-engine.exe` on Windows), as required by the owning generator skill.
+
 ## Overview
 
 `command-forge` writes thin user-facing commands for validated agents and
@@ -86,7 +90,7 @@ each validated wrapped agent and selected command-carrying edition, write
      available lenses were skipped and why.
      A specialist whose contract has a non-empty `writes` list is explicitly
      marked `write-capable; skip review` and is never spawned by `flow-review`.
-   - Body: instruct the main conversation to build one bounded delegation capsule per spawn (objective, output format, tool and source guidance, task boundaries, decisions-and-assumptions so far), record it with `python3 memory-bank/scripts/context.py msg-dispatch --task-id <ID> --agent <name> --event spawn --capsule-file <file>` (which refuses an under-specified capsule), spawn with the Task tool, then record progress with `context.py update --task-id <ID> --actor <name>`. Completions are recorded by the `subagent-dispatch.sh` hook, so the flow must NOT record them a second time.
+   - Body: instruct the main conversation to build one bounded delegation capsule per spawn (objective, output format, tool and source guidance, task boundaries, decisions-and-assumptions so far), record it with `memory-bank/bin/infra-engine memory msg-dispatch --task-id <ID> --agent <name> --event spawn --capsule-file <file>` (which refuses an under-specified capsule), spawn with the Task tool, then record progress with `memory-bank/bin/infra-engine memory update --task-id <ID> --actor <name>`. Completions are recorded by the `subagent-dispatch.sh` hook, so the flow must NOT record them a second time.
    - Rules to state in every flow: spawn only agents from the canonical roster;
      a `parallel: true` stage may hold at most one roster entry carrying
      `writes: true`; preserve graph order; stop at every checkpoint for explicit
@@ -94,7 +98,7 @@ each validated wrapped agent and selected command-carrying edition, write
      report a failed stage rather than retrying silently.
 8. **Compiled-graph validation is orchestrator-owned - do NOT run it here.**
    `skill-flow-composer` runs after command-forge, so `SKILL FLOW.md` does not
-   exist yet when this skill finishes; invoking `validate_flow_contracts.py`
+   exist yet when this skill finishes; invoking `"$GENERATOR_NATIVE" creator validate-flow-contracts`
    now would fail on the missing artifact instead of validating anything.
    After `skill-flow-composer` writes its artifact, `infra-generate` step 9
    runs that validator against each selected command-carrying edition, and any
@@ -122,7 +126,7 @@ tasks/TASK-{N}/command-forge-log.md
 ## Next
 hook-forge; memory-seed/skill-flow-composer if not already run. Compiled-graph
 validation stays pending until the orchestrator runs
-`validate_flow_contracts.py` after `skill-flow-composer`.
+`"$GENERATOR_NATIVE" creator validate-flow-contracts` after `skill-flow-composer`.
 ```
 
 ## Guardrails

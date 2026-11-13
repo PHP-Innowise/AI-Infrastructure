@@ -68,7 +68,7 @@ target.
      names the step and what is missing.
    - **Accuracy** - re-check every cited path, symbol, command, count, and
      line range against the real target as it is now, and every prescribed
-     runtime command against `memory-bank/scripts/context.py`'s actual
+     runtime command against the selected native engine's actual
      interface. Never run target commands; verify statically.
    - **Coherence** - compare the file with its siblings: a skill against its
      agent and command wrappers, wrappers against `SKILL FLOW.md`, policy

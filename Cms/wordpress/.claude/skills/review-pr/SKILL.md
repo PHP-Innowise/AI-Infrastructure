@@ -68,7 +68,7 @@ so it re-sends every generated mirror in full. Locally, files marked
 `-diff linguist-generated=true` collapse to a one-line stub.
 
 **A stub is not a gap.** Those files are regenerated from a canonical source
-and verified by `build_mirrors.py --check`; the real change is in the canon
+and verified by `infra-engine repo mirrors --check`; the real change is in the canon
 they came from. Review the canonical file, not its copies. If a stub appears
 whose canonical source is *not* in the diff, that is drift worth flagging.
 

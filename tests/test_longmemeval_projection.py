@@ -147,6 +147,17 @@ class NativeProjection(unittest.TestCase):
         self.assertNotIn('GOLD_NEVER', json.dumps(metadata))
         self.assertEqual(len(output[0]['value'].encode()), metadata['context_bytes'])
 
+    def test_the_bridge_measures_the_full_capsule_whatever_the_project_ships(self):
+        # The bridge measures retrieval; the project's automatic capsule may be
+        # set to carry no document at all.
+        config = self.project / 'project-brain/config/runtime.json'
+        settings = json.loads(config.read_text())
+        config.write_text(json.dumps({**settings, 'capsule_profile': 'navigation'}))
+        self.insert_all()
+        output = self.memory.query(PUBLIC['requests']['ferry'])
+        self.assertEqual(1, len(output))
+        self.assertIn(EXPECTED['support']['ferry'], output[0]['value'])
+
     def test_exact_replay_conflict_and_input_mutation_do_not_rewrite(self):
         item = copy.deepcopy(PUBLIC['trajectories'][0])
         self.memory.insert(item)

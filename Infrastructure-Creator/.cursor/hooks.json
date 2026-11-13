@@ -2,17 +2,33 @@
   "version": 1,
   "hooks": {
     "sessionStart": [
-      { "command": ".cursor/hooks/local-context.sh", "timeout": 10 }
+      {
+        "command": "memory-bank/bin/infra-engine hook cursor local-context --root .",
+        "timeout": 10
+      }
     ],
     "subagentStart": [
-      { "command": ".cursor/hooks/subagent-gate.sh", "timeout": 5, "failClosed": true }
+      {
+        "command": "memory-bank/bin/infra-engine hook cursor subagent-gate --root .",
+        "timeout": 5,
+        "failClosed": true
+      }
     ],
     "beforeShellExecution": [
-      { "command": ".cursor/hooks/bash-validator.sh", "timeout": 5 }
+      {
+        "command": "memory-bank/bin/infra-engine hook cursor bash-validator --root .",
+        "timeout": 5
+      }
     ],
     "afterFileEdit": [
-      { "command": ".cursor/hooks/file-naming-validator.sh", "timeout": 5 },
-      { "command": ".cursor/hooks/loop-detection.sh", "timeout": 5 }
+      {
+        "command": "memory-bank/bin/infra-engine hook cursor file-naming-validator --root .",
+        "timeout": 5
+      },
+      {
+        "command": "memory-bank/bin/infra-engine hook cursor loop-detection --root .",
+        "timeout": 5
+      }
     ]
   }
 }

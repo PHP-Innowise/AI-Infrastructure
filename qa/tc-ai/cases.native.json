@@ -1,0 +1,856 @@
+{
+  "schema_version": "2.0.0",
+  "cases": [
+    {
+      "run_id": "RUN-20260803-001",
+      "test_case_id": "TC-AI-001",
+      "title": "Laravel native Memory Bank legacy-storage/public contract suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "laravel-memory-bank",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "memory_legacy_compat"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        },
+        {
+          "id": "laravel-parity",
+          "argv": [
+            "{infra}",
+            "memory",
+            "parity",
+            "--root",
+            "."
+          ],
+          "cwd": "Laravel"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-002",
+      "test_case_id": "TC-AI-002",
+      "title": "Laravel native Project Brain public lifecycle contract suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "laravel-project-brain",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "memory_public_contracts"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        },
+        {
+          "id": "laravel-parity",
+          "argv": [
+            "{infra}",
+            "memory",
+            "parity",
+            "--root",
+            "."
+          ],
+          "cwd": "Laravel"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-003",
+      "test_case_id": "TC-AI-003",
+      "title": "Symfony native Memory Bank legacy-storage/public contract suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "symfony-memory-bank",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "memory_legacy_compat"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        },
+        {
+          "id": "symfony-parity",
+          "argv": [
+            "{infra}",
+            "memory",
+            "parity",
+            "--root",
+            "."
+          ],
+          "cwd": "Symfony"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-004",
+      "test_case_id": "TC-AI-004",
+      "title": "Symfony native Project Brain public lifecycle contract suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "symfony-project-brain",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "memory_public_contracts"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        },
+        {
+          "id": "symfony-parity",
+          "argv": [
+            "{infra}",
+            "memory",
+            "parity",
+            "--root",
+            "."
+          ],
+          "cwd": "Symfony"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-005",
+      "test_case_id": "TC-AI-005",
+      "title": "PHP Core native Memory Bank legacy-storage/public contract suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "php-core-memory-bank",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "memory_legacy_compat"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        },
+        {
+          "id": "php-core-parity",
+          "argv": [
+            "{infra}",
+            "memory",
+            "parity",
+            "--root",
+            "."
+          ],
+          "cwd": "PHP Core"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-006",
+      "test_case_id": "TC-AI-006",
+      "title": "PHP Core native Project Brain public lifecycle contract suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "php-core-project-brain",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "memory_public_contracts"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        },
+        {
+          "id": "php-core-parity",
+          "argv": [
+            "{infra}",
+            "memory",
+            "parity",
+            "--root",
+            "."
+          ],
+          "cwd": "PHP Core"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-007",
+      "test_case_id": "TC-AI-007",
+      "title": "Native Infrastructure-Creator unit and public CLI contract suites",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "infrastructure-creator-unit",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-generator",
+            "--test",
+            "native_contracts"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        },
+        {
+          "id": "infrastructure-creator",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "native_generator"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-008",
+      "test_case_id": "TC-AI-008",
+      "title": "Native cross-stack integrity and static gates",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "mirror-check",
+          "argv": [
+            "{infra}",
+            "check",
+            "--group",
+            "mirrors",
+            "--strict",
+            "--jobs",
+            "1"
+          ],
+          "cwd": "."
+        },
+        {
+          "id": "laravel-parity",
+          "argv": [
+            "{infra}",
+            "memory",
+            "parity",
+            "--root",
+            "."
+          ],
+          "cwd": "Laravel"
+        },
+        {
+          "id": "laravel-cross-parity",
+          "argv": [
+            "{infra}",
+            "memory",
+            "parity",
+            "--root",
+            ".",
+            "--cross-edition"
+          ],
+          "cwd": "Laravel"
+        },
+        {
+          "id": "symfony-parity",
+          "argv": [
+            "{infra}",
+            "memory",
+            "parity",
+            "--root",
+            "."
+          ],
+          "cwd": "Symfony"
+        },
+        {
+          "id": "symfony-cross-parity",
+          "argv": [
+            "{infra}",
+            "memory",
+            "parity",
+            "--root",
+            ".",
+            "--cross-edition"
+          ],
+          "cwd": "Symfony"
+        },
+        {
+          "id": "php-core-parity",
+          "argv": [
+            "{infra}",
+            "memory",
+            "parity",
+            "--root",
+            "."
+          ],
+          "cwd": "PHP Core"
+        },
+        {
+          "id": "php-core-cross-parity",
+          "argv": [
+            "{infra}",
+            "memory",
+            "parity",
+            "--root",
+            ".",
+            "--cross-edition"
+          ],
+          "cwd": "PHP Core"
+        },
+        {
+          "id": "bash-syntax",
+          "argv": [
+            "bash",
+            "-c",
+            "git ls-files -z -- '*.sh' | xargs -0 -n1 bash -n"
+          ],
+          "cwd": "."
+        },
+        {
+          "id": "shellcheck",
+          "argv": [
+            "bash",
+            "-c",
+            "git ls-files -z -- '*.sh' | xargs -0 shellcheck -S error"
+          ],
+          "cwd": ".",
+          "requires_executable": "shellcheck"
+        },
+        {
+          "id": "json-validation",
+          "argv": [
+            "{infra}",
+            "check",
+            "--group",
+            "lint",
+            "--strict",
+            "--jobs",
+            "1"
+          ],
+          "cwd": "."
+        },
+        {
+          "id": "link-check",
+          "argv": [
+            "{infra}",
+            "repo",
+            "links"
+          ],
+          "cwd": "."
+        },
+        {
+          "id": "context-budget",
+          "argv": [
+            "{infra}",
+            "repo",
+            "budget",
+            "--check"
+          ],
+          "cwd": "."
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "install/check-catalog.json",
+          "regex": "\"operation\"\\s*:\\s*\"json-syntax\""
+        }
+      ],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-009",
+      "test_case_id": "TC-AI-009",
+      "title": "Native public governed lifecycle and retrieval contracts",
+      "classification": "hybrid",
+      "commands": [
+        {
+          "id": "governed-runtime",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "memory_public_contracts"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/memory_public_contracts.rs",
+          "regex": "fn mcp_returns_canonical_status_and_refresh_without_bypassing_scope_guards\\("
+        }
+      ],
+      "native_requirement": "codex",
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-010",
+      "test_case_id": "TC-AI-010",
+      "title": "Native checkpoint turn-boundary and queue scope contracts",
+      "classification": "hybrid",
+      "commands": [
+        {
+          "id": "checkpoint-turn-boundary",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "memory_public_contracts",
+            "next_prompt_and_continuation_stop_drain_pending_native_save_exactly_once",
+            "--",
+            "--exact"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        },
+        {
+          "id": "queued-checkpoint",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "memory_queue_scope"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/memory_public_contracts.rs",
+          "regex": "fn next_prompt_and_continuation_stop_drain_pending_native_save_exactly_once\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/memory_queue_scope.rs",
+          "regex": "fn implicit_and_explicit_normalized_default_database_queues_still_drain\\("
+        }
+      ],
+      "native_requirement": "codex",
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-011",
+      "test_case_id": "TC-AI-011",
+      "title": "Reviewed and automatic durable-memory promotion modes",
+      "classification": "hybrid",
+      "commands": [
+        {
+          "id": "promotion-mode-regressions",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "memory_public_contracts"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/memory_public_contracts.rs",
+          "regex": "(?m)^fn resolving_verified_record_promotes_only_that_record_before_a_turn_boundary\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/memory_public_contracts.rs",
+          "regex": "(?m)^fn promotion_remains_optional_and_its_failure_does_not_undo_resolution\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/memory_public_contracts.rs",
+          "regex": "(?m)^fn reviewed_manual_promotion_requires_independent_approval_and_applies_once\\("
+        }
+      ],
+      "native_requirement": "codex",
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-012",
+      "test_case_id": "TC-AI-012",
+      "title": "Explicit completion authority at merge boundary",
+      "classification": "hybrid",
+      "commands": [
+        {
+          "id": "explicit-completion-regressions",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "memory_public_contracts"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/memory_public_contracts.rs",
+          "regex": "(?m)^fn turn_reports_merge_candidate_without_completing_authority_or_losing_pending\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/memory_public_contracts.rs",
+          "regex": "(?m)^fn governed_completion_requires_an_explicit_numeric_revision_and_preserves_refused_state\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/memory_public_contracts.rs",
+          "regex": "(?m)^fn concurrent_completion_cas_creates_one_episode_and_preserves_pending_and_other_authority\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/memory_public_contracts.rs",
+          "regex": "(?m)^fn completion_candidate_ignores_a_never_diverged_branch_even_after_checkout_to_main\\("
+        }
+      ],
+      "native_requirement": "codex",
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-013",
+      "test_case_id": "TC-AI-013",
+      "title": "Validator handles relative and absolute target paths",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "target-path-regressions",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "native_generator",
+            "generate_edit_classify_keep_revalidate_lifecycle",
+            "--",
+            "--exact"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/native_generator.rs",
+          "regex": "(?m)^#\\[test\\]\\s+fn generate_edit_classify_keep_revalidate_lifecycle\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/native_generator.rs",
+          "regex": "(?m)^fn caller_relative_target_generation_and_validation_use_the_callers_cwd\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/native_generator.rs",
+          "regex": "(?m)^fn absolute_target_generation_and_validation_are_independent_of_the_callers_cwd\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/native_generator.rs",
+          "regex": "(?m)^\\s*caller_relative_target_generation_and_validation_use_the_callers_cwd\\(\\s*temp\\s*,\\s*&options\\s*,\\s*&owned_paths\\s*,?\\s*\\);"
+        },
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/native_generator.rs",
+          "regex": "(?m)^\\s*absolute_target_generation_and_validation_are_independent_of_the_callers_cwd\\(\\s*temp\\s*,\\s*&options\\s*,\\s*&owned_paths\\s*,?\\s*\\);"
+        }
+      ],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-014",
+      "test_case_id": "TC-AI-014",
+      "title": "Infrastructure-Creator full generate and update lifecycle",
+      "classification": "hybrid",
+      "commands": [
+        {
+          "id": "generator-lifecycle-regressions",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "native_generator",
+            "generate_edit_classify_keep_revalidate_lifecycle",
+            "--",
+            "--exact"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/native_generator.rs",
+          "regex": "(?m)^#\\[test\\]\\s+fn generate_edit_classify_keep_revalidate_lifecycle\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/native_generator.rs",
+          "regex": "(?m)^fn generated_update_keep_revalidate_lifecycle\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/native_generator.rs",
+          "regex": "(?m)^\\s*generated_update_keep_revalidate_lifecycle\\(\\s*temp\\s*,\\s*stage\\s*,\\s*delivery\\s*,\\s*&options\\s*,\\s*&owned_paths\\s*,?\\s*\\);"
+        }
+      ],
+      "native_requirement": "claude-code",
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-015",
+      "test_case_id": "TC-AI-015",
+      "title": "Exact-checkout native workspace and repository CI matrix",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "exact-local-ci-matrix",
+          "argv": [
+            "{infra}",
+            "check",
+            "--group",
+            "rust",
+            "--group",
+            "wasm",
+            "--group",
+            "parity",
+            "--group",
+            "mirrors",
+            "--group",
+            "installation",
+            "--group",
+            "lint",
+            "--group",
+            "links",
+            "--strict",
+            "--jobs",
+            "1"
+          ],
+          "cwd": "."
+        },
+        {
+          "id": "bash-syntax",
+          "argv": [
+            "bash",
+            "-c",
+            "git ls-files -z -- '*.sh' | xargs -0 -n1 bash -n"
+          ],
+          "cwd": "."
+        },
+        {
+          "id": "shellcheck",
+          "argv": [
+            "bash",
+            "-c",
+            "git ls-files -z -- '*.sh' | xargs -0 shellcheck -S error"
+          ],
+          "cwd": ".",
+          "requires_executable": "shellcheck"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "install/check-catalog.json",
+          "regex": "\"operation\"\\s*:\\s*\"json-syntax\""
+        }
+      ],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-016",
+      "test_case_id": "TC-AI-016",
+      "title": "Curated governed retrieval relevance benchmark",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "retrieval-quality-regressions",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-cli",
+            "--test",
+            "memory_public_contracts"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "runtime-rust/crates/infra-cli/tests/*.rs",
+          "regex": "fn [a-z0-9_]*frozen_retrieval_corpus[a-z0-9_]*\\("
+        },
+        {
+          "glob": "qa/tc-ai/fixtures/retrieval-golden.json",
+          "regex": "\"queries\""
+        }
+      ],
+      "native_requirement": null,
+      "blocker": "The frozen corpus still declares awaiting-approved-thresholds with null precision/recall/token limits, and no native frozen-corpus outcome regression is present. General retrieval tests are not a replacement."
+    },
+    {
+      "run_id": "RUN-20260803-017",
+      "test_case_id": "TC-AI-017",
+      "title": "Telemetry configured-off and sanitized adapter behavior",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "telemetry-regressions",
+          "argv": [
+            "cargo",
+            "test",
+            "--manifest-path",
+            "runtime-rust/Cargo.toml",
+            "--locked",
+            "--offline",
+            "--package",
+            "infra-core",
+            "--lib"
+          ],
+          "cwd": ".",
+          "requires_executable": "cargo"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "runtime-rust/crates/infra-core/src/health.rs",
+          "regex": "(?m)^\\s*#\\[test\\]\\s+fn telemetry_configured_off_preserves_state_through_both_gates_and_refresh_adapter\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-core/src/health.rs",
+          "regex": "(?m)^\\s*#\\[test\\]\\s+fn telemetry_sanitized_metadata_preserves_known_metrics_and_refuses_payload_or_invalid_values\\("
+        },
+        {
+          "glob": "runtime-rust/crates/infra-core/src/health.rs",
+          "regex": "(?m)^\\s*#\\[test\\]\\s+fn telemetry_sanitized_refresh_adapter_excludes_capsule_bodies_and_is_best_effort\\("
+        },
+        {
+          "glob": "qa/tc-ai/fixtures/telemetry-events.json",
+          "regex": "\"events\""
+        }
+      ],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-018",
+      "test_case_id": "TC-AI-018",
+      "title": "Reviewed native host smoke across Claude Code, Cursor and Codex (manual)",
+      "classification": "native",
+      "commands": [],
+      "required_test_patterns": [],
+      "native_requirement": "claude-code,cursor,codex",
+      "blocker": "Requires reviewed native Claude Code, Cursor, and Codex observations."
+    }
+  ]
+}

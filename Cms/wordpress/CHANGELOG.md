@@ -5,6 +5,96 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ## Unreleased
 
+- `.codex/hooks/README.md` describes the Codex hook command the installer now
+  writes: it starts the checkout's `memory-bank/bin/infra-engine` directly,
+  found from Git's top level, and runs the role's `.codex/hooks/<role>.sh`
+  only without that engine - the launcher uses the main checkout's engine in a
+  linked worktree and refuses guarded commands when none is installed. The
+  README still spelled out the Python-era launcher that walked up to the
+  nearest `.codex/hooks.json`. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
+- Route this edition's policy, memory/checkpoint skills, host hooks, MCP and
+  skill-creator helpers through the native Rust `infra-engine` runtime
+  (`infra-engine.exe` on Windows). Replace retired Python entry points in tool
+  configuration and operating instructions while preserving governed authority,
+  native-save and approval boundaries. Validation and native-client evidence
+  remain separate. See the root [changelog](../../CHANGELOG.md).
+
+- The `checkpoint` skill records into the task the hooks name. It took the branch alone and stopped
+  on a detached HEAD, where the hooks name the branch a rebase in progress rewrites, or
+  `codex-thread/<thread>` in a worktree Codex made; there it now takes the task
+  `context.py status --json` reports, which names a rebase's branch too. On a task with nothing
+  buffered yet its `turn --flush` made no task, so its `update` was refused; the flush makes the task
+  now. From a sandbox that cannot write the project's memory - Codex's in a worktree or below the
+  project root - its `turn --flush` and `update`, and the policy's stage-boundary `update`, failed on
+  a read-only file system; they now wait for the session's next hook, which makes them when the turn
+  ends, and answer `queued`, which the skill reports. It and the `memory` skill now take the mode
+  from `context.py status --json`, where they read `project-brain/config/runtime.json` under the Git
+  top, which a worktree the installation serves does not hold. The policy lock was rewritten.
+  Details in the
+  root [`CHANGELOG.md`](../../CHANGELOG.md).
+
+- Codex in a worktree it made itself - `codex --worktree`, a new worktree in the Codex app - works
+  on a detached HEAD, which named no task: the hooks ran there and brought neither capsule nor save.
+  The thread that owns the worktree, which Codex records in `codex-thread.json` of its Git
+  directory, now names its task, `codex-thread/<thread>`, until a branch is made there; any other
+  detached HEAD still names none. `memory-bank/MCP.md` says so. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
+- Codex started in a Git worktree of the project that has none of the installation runs the
+  project's hooks and gets its `AGENTS.md` there too, for the worktree - the root's memory, the
+  worktree's own task - once you trust the entries a session in the root puts into your own
+  `~/.codex/hooks.json`. The Codex copy of `.codex/hooks/local-context.sh` sets them up; Quick
+  Start in `README.md` (`ACCELERATOR.md`) and `.codex/hooks/README.md` say so. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
+- Claude Code started in a Git worktree of the project that has none of the installation - the
+  desktop app's `.claude/worktrees/<name>` among them - gets the project's hooks, rules, `env` and
+  policy there too, for the worktree: the root's memory, the worktree's own task. Quick Start in
+  `README.md` (`ACCELERATOR.md`) and `.claude/hooks/README.md` say so. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
+- Claude Code started in a folder below the project root gets the project's hooks, rules, `env` and
+  policy on Windows too, under the Git Bash it runs hooks with. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
+- Claude Code started in a folder below the project root also gets the project's permission rules
+  and `env` there, and the installer run in a terminal sets that up at once. Quick Start in
+  `README.md` (`ACCELERATOR.md`) and `.claude/hooks/README.md` say so. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
+- `.claude/settings.json` no longer carries `Write(**)` and `Glob(**)` in `allow`, nor `Write(.env)`,
+  `Write(.env.*)` and `Write(wp-config.php)`, `Write(wp-config-*.php)` in `deny`. Claude Code 2.1 matches file permissions only by `Edit(path)` and
+  `Read(path)` rules, which already cover them, and printed a warning for each at every start of its
+  terminal. Nothing allowed or denied changes. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
+- Claude Code started in a folder below the project root runs the project's hooks and gets its
+  `AGENTS.md`: in a session in the root, `.claude/hooks/local-context.sh` sets up a dispatcher in
+  your own Claude Code configuration (`memory-bank/scripts/claude_subfolders.py`, with
+  `claude_dispatch.py` and `claude_dispatch.sh`); a file named `off` in `~/.claude/ai-accelerator/`
+  turns it off. Codex started in a subfolder saves through a temporary folder. Quick Start in
+  `README.md` (`ACCELERATOR.md`) and `.claude/hooks/README.md` say so. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
+- `README.md`, installed as `ACCELERATOR.md`, opens Quick Start with where to start the tools: in the
+  project root. Claude Code started in a subfolder reads none of the project's settings and runs none
+  of its hooks; Codex started in one cannot save memory there. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
+- `AGENTS.md` asks for an explicit memory save (`context.py record-result`,
+  `memory_record_result`, Harness `memory-draft`) only where the Stop hook
+  requests no `native-result` save; where it does, the save rule opens with
+  the prohibition on saving the answer another way, a closing `update`
+  included, and that request is the save. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md). Policy lock regenerated.
+
+- `runtime.json` ships `capsule_profile: recall`: the automatic Task Capsule
+  carries the working state, the recent files and what the task itself
+  saved, and `AGENTS.md` says so; `retrieve` still searches everything.
+  Details in the root [`CHANGELOG.md`](../../CHANGELOG.md). Policy lock regenerated.
+
 - `runtime.json` ships `automatic_consolidation` and
   `automatic_consolidation_verification` off; `AGENTS.md`, the `project-brain`
   skill, `PROTOCOL.md` and the READMEs say the capsule's episodic layer holds

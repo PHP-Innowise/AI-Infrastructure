@@ -219,6 +219,22 @@ class MissAuditTests(unittest.TestCase):
         self.assertNotIn("audit:", ordinary)
         self.assertIn("audit knowledge: automatic-link-limit", compared)
 
+    def test_every_manifest_exclusion_the_runtime_writes_has_a_stage(self) -> None:
+        # The ticket filter withholds a changelog that names only other
+        # tickets, and a path link past its cap is an automatic link too;
+        # both read as an unknown stage, so a withheld changelog looked like
+        # an unexplained miss.
+        self.add_document("CHANGELOG.md", "answer CMS-700 released")
+        self.add_document("docs/linked.md", "answer")
+        for path, reason, stage in (("CHANGELOG.md", "ticket-mismatch", "runtime-exclusion"),
+                                    ("docs/linked.md", "path-link-limit", "automatic-link-limit")):
+            with self.subTest(reason=reason):
+                ref = self.manifest("answer")
+                document = json.loads((self.corpus / ref).read_text())
+                document["excluded"] = [{"path": path, "reason": reason}]
+                (self.corpus / ref).write_text(json.dumps(document))
+                self.assertEqual(stage, audit.audit(self.corpus, ref, [path])["items"][0]["stage"])
+
 
 if __name__ == "__main__":
     unittest.main()

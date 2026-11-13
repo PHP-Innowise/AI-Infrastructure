@@ -143,7 +143,7 @@ only the native integration directories selected during `clarifying-interview`:
 - Matching agents with project-specific positive/negative routing and sibling deferrals, plus thin commands (Claude/Cursor only; Codex invokes skills directly).
 - Two adaptive orchestrator commands for Claude/Cursor: `flow-feature` and `flow-review` select specialists only when the current request/change intersects their validated contract. Available domain or integration reviewers are not run unconditionally.
 - Nine hook roles in four groups: four evidence-tuned enforcement hooks (`local-context.sh`, `bash-validator.sh`, `file-naming-validator.sh`, `loop-detection.sh`), two automatic-memory hooks (`working-memory-read.sh`, `working-memory-write.sh`), the chat-snapshot hook `context-continuity.sh` (keeps each chat's visible text in ignored `.context-handoff/` for `context-load merge`; a new session receives only a merge prepared for it), and two orchestration hooks (`subagent-gate.sh`, `subagent-dispatch.sh`) for roster enforcement, write serialization, and completion recording. Cursor's `working-memory-read.sh` renders the capsule into an ignored `alwaysApply` rule, because `beforeSubmitPrompt` cannot add context to a prompt; Codex ships the dispatch hook unregistered because multi-agent execution is disabled.
-- A seeded `memory-bank/` whose chunks represent cohesive durable confirmed concepts, link canonical sources, and are operated through the generated `memory-bank` skill - plus the dependency-free context-brain runtime under `memory-bank/scripts/` (`context.py`, `context_handoff.py`, `context_continuity.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py`) and the governed `project-brain/` control-plane skeleton it drives.
+- A seeded `memory-bank/` whose chunks represent cohesive durable confirmed concepts, link canonical sources, and are operated through the generated `memory-bank` skill - plus the selected Rust executable at `memory-bank/bin/infra-engine` (`infra-engine.exe` on Windows), its trusted runtime contract and static resources and the governed `project-brain/` control-plane skeleton it drives.
 - A `SKILL FLOW.md` built from the skills that were actually generated, not a template.
 - The upgrade contract: a version-stamp comment on a generated `AGENTS.md` and a `.infra-manifest.json` at the target root (generator version, source profile, and sha256 of every path in the explicit generation write plan) - this is what makes `infra-update` possible later. Manifest membership, not location under a managed root, exclusively defines generator ownership. Commit it with the rest of the accelerator.
 
@@ -203,7 +203,7 @@ The generator has no `memory-bank/` or `project-brain/` of its own - it seeds bo
 
 - Read access to the target PHP project's source tree (`composer.json`, config, `*.php`, CI/CD, IaC).
 - Internet access for `stack-researcher`'s web-research pass (falls back to internal-only findings and flags the gap if unavailable).
-- Python 3 (dependency-free) for `bootstrap-verifier`'s structural checks and the seeded `memory-bank/scripts/validate.py`.
+- The selected native `memory-bank/bin/infra-engine` artifact (`infra-engine.exe` on Windows), with the capabilities required by `bootstrap-verifier` and the seeded memory runtime. No target-side interpreter or Rust toolchain is required.
 
 ## Optional MCP Integrations
 
@@ -282,7 +282,7 @@ the content phase: parallel read-only reviewers walk every staged file - and
 the run's own profile and plan - judging uniqueness, completeness, accuracy,
 and coherence; blocking findings are repaired through the owning forge
 (bounded at two rounds) or escalated, and the deterministic
-`validate_content_review.py` gate refuses publication until every file is
+`infra-engine creator validate-content-review` gate refuses publication until every file is
 dispositioned. Standalone, `/infra-validate <target>` reviews and repairs a
 previously generated accelerator through its `.infra-manifest.json`.
 
@@ -292,7 +292,6 @@ the content-review record,
 manifest-owned frontmatter/cross-references, hooks and wiring, the generated
 memory/runtime surface, every manifest member's existence and hash, a tracked
 `AGENTS.md` stamp, and placeholders across generated text. The immutable
-`memory-bank/templates/chunk.md` and `memory-bank/scripts/validate.py` may carry
-only their exact ISO-date format token. A shared root `.gitignore` is validated
+`memory-bank/templates/chunk.md` may carry only its exact ISO-date format token. A shared root `.gitignore` is validated
 through its declared managed requirements rather than unrelated team comments.
 Unmanifested team files are ignored in both full and merge modes.

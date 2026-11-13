@@ -1,0 +1,19 @@
+[package]
+name = "infra-system"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+infra-core = { path = "../infra-core" }
+infra-host = { path = "../infra-host" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["preserve_order", "arbitrary_precision"] }
+regex = "1"
+uuid = { version = "=1.22.0", features = ["v4"] }
+chrono = "=0.4.45"
+rusqlite = { version = "=0.37.0", features = ["bundled", "modern_sqlite"] }
+tokio = { version = "1", features = ["rt-multi-thread","sync","time"] }
+libc = "=0.2.191"
+

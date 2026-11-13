@@ -38,7 +38,7 @@
       "name": "harness-project-memory",
       "version": "1.0.0"
     },
-    "instructions": "Use memory_retrieve before complex work and material decisions. Check cited sources. Use memory_checkpoint and memory_record_result at meaningful boundaries and before finishing authorized work. Reuse the current task ID; never store transcripts or secrets."
+    "instructions": "Use memory_retrieve before complex work and material decisions. Check cited sources. Use memory_checkpoint at meaningful boundaries, and memory_record_result before finishing authorized work only where no Stop hook asks for the native-result save. Reuse the current task ID; never store transcripts or secrets."
   },
   "provider_usage": null,
   "query_horizon_cli": 3,

@@ -1,0 +1,34 @@
+[package]
+name = "infra-host"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[[bin]]
+name = "infra-host-sandbox-fixture"
+path = "tests/support/sandbox_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "infra-host-provider-fixture"
+path = "tests/support/provider_fixture.rs"
+test = false
+bench = false
+
+[dependencies]
+infra-core = { path = "../infra-core" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["preserve_order", "arbitrary_precision"] }
+rusqlite = { version = "=0.37.0", features = ["bundled", "modern_sqlite"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "process", "signal", "io-util", "sync", "time"] }
+uuid = { version = "=1.22.0", features = ["v4"] }
+sha2 = "=0.11.0"
+regex = "1"
+chrono = { version = "=0.4.45", features = ["clock"] }
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_IO", "Win32_System_Console", "Win32_System_Pipes", "Win32_Storage_FileSystem"] }
+

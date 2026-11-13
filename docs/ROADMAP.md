@@ -23,6 +23,12 @@ LOCAL_MANIFEST_RETENTION = 200, окно перезаписывается за �
 
 # Роудмап: память как инфраструктура
 
+> Снимок до Rust-порта, пометка 2026-11-03: структурные числа, названия
+> Python-модулей, LangGraph-контура и результаты старых тестов ниже сохранены
+> как исторические сведения. Они не описывают текущую Rust-реализацию и не
+> засчитываются как её проверка. Текущие команды, результаты и ограничения
+> опубликованы в [отчёте о миграции](RUST-MIGRATION.md).
+
 ![Карта состояния памяти: открытая работа, закрытые пункты и измеримые блокировки](assets/roadmap-map.svg)
 
 ## 0. Как читать этот документ и как его поддерживать
@@ -47,7 +53,7 @@ LOCAL_MANIFEST_RETENTION = 200, окно перезаписывается за �
 Правило поддержки: **пункт не пишется, пока его предпосылка не проверена
 командой.** Процедура — в разделе 8.
 
-Все команды `memory-bank/scripts/context.py` ниже выполняются из корня
+Все команды `memory-bank/bin/infra-engine` ниже выполняются из корня
 конкретного издания; команды `scripts/*.py` — из корня монорепо.
 
 ---
@@ -80,7 +86,7 @@ client-codebase proof; длительная production-калибровка ос
 200 решений `shadow`:
 
 ```bash
-python3 memory-bank/scripts/context.py retrieval-report --json
+memory-bank/bin/infra-engine memory retrieval-report --json
 ```
 
 В `shadow` решение `skip` — только телеметрия; контекст удерживается лишь в
@@ -128,8 +134,8 @@ production-наблюдение на серии реальных задач, к�
 |---|---|---|
 | Модулей ядра | **5**: `brain_runtime.py`, `context.py`, `context_retrieval.py`, `telemetry.py`, `validate.py` | `git ls-files \| grep -E 'memory-bank/scripts/.*\.py$'` |
 | Строк на издание | 11 836 (+41 в `project-brain/scripts/validate.py`) | `wc -l <edition>/memory-bank/scripts/*.py` |
-| Копий, побайтово идентичных | **5** — четыре готовых издания плюс ассет генератора | `python3 scripts/asset_parity.py --check` и `context.py parity --cross-edition` |
-| Подкоманд CLI | **36** | `python3 memory-bank/scripts/context.py --help` |
+| Копий, побайтово идентичных | **5** — четыре готовых издания плюс ассет генератора | `infra-engine repo asset-parity --check` и `memory-bank/bin/infra-engine memory parity --cross-edition` |
+| Подкоманд CLI | **36** | `memory-bank/bin/infra-engine memory --help` |
 | Тестов | **2652** — 2520 в девяти сьютах (53 файла), 132 репозиторных (8 файлов) | прогон каждого `test_*.py` |
 | Джобов CI | **8**: tests, parity, mirrors, infrastructure-creator-reliability, installation, lint, changelog, links | `.github/workflows/ci.yml` |
 | Инструментов в `scripts/` | 11 Python + 1 shell; **9 запускаются напрямую в CI**; scorer/fixtures `routing_eval.py` тестируются без модели, `cost_attribution.py` — вне CI | `.github/workflows/ci.yml`, `scripts/README.md` |
@@ -149,7 +155,7 @@ production-наблюдение на серии реальных задач, к�
 | Repeat-baseline | изолирован по task + host + entry point; сигнатура включает query, path + source hash, task revision и локальный эпизод | `context_retrieval.py::_retrieval_signature`, `_retrieval_baseline_key` |
 | Ладдер капсулы | 2 procedural / 3 semantic / 1 episodic | `context_retrieval.py::CAPSULE_*_LIMIT` |
 | Локальный эпизод | ищется до решения ворот, входит в лимит и токены; manifest хранит только count/tokens, не id/body | `context_retrieval.py::retrieve` |
-| Обратный индекс | таблица `document_links`, команда `links`, флаг `retrieve --path` | `context.py links --path <путь>` |
+| Обратный индекс | таблица `document_links`, команда `links`, флаг `retrieve --path` | `memory-bank/bin/infra-engine memory links --path <путь>` |
 
 **Осторожно с двумя формулировками.** `selection_identical_to_previous_turn` —
 это булев сигнал внутри `gate.signals`, а не причина; группировка отчёта по
@@ -342,7 +348,7 @@ verified/resolved finding, `complete` создал event + episode, а hook др
 **R-04 — ЗАКРЫТО. Удержать `memory-probes.json` кросс-издательским
 гейтом.** Фикстура включена в `CROSS_EDITION_CORE_MANIFEST`;
 `skill-routing-golden.json` и `routing.json` не включены, потому что законно
-различаются. Проверка: `context.py parity --cross-edition` ×4 и
+различаются. Проверка: `memory-bank/bin/infra-engine memory parity --cross-edition` ×4 и
 `asset_parity --check`.
 
 **R-05. Гейт соответствия документации и конфигурации.**
@@ -410,7 +416,7 @@ write/searchable-каталогом. Невалидный override блокир�
 
 **M-02. Baseline `routing_eval` для четырёх изданий.**
 Машинерия, данные и правило релиза есть; числа нет.
-`python3 scripts/routing_eval.py --edition <E> --runs 5 --write-baseline`.
+`infra-engine routing-eval --edition <E> --runs 5 --write-baseline`.
 Для WordPress значение `<E>` — `Cms/wordpress`.
 Стоит модельных прогонов и минут; вне CI сознательно. Пока baseline'а нет,
 правило из `docs/EXTENDING.md` («PR, трогающий `description:`, прикладывает

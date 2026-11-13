@@ -31,7 +31,7 @@ with different readers. "Exactly one" applies to each kind separately:
 | --- | --- | --- |
 | Report | `tasks/TASK-{NNN}/<scanner-name>-findings.md` | a human reviewing the profile |
 | Ledger | `tasks/TASK-{NNN}/<scanner-name>-evidence.json` | `profile-synthesizer` and the plan validators |
-| Coverage | `tasks/TASK-{NNN}/<scanner-name>-coverage.json` | `validate_scan_coverage.py` |
+| Coverage | `tasks/TASK-{NNN}/<scanner-name>-coverage.json` | `"$GENERATOR_NATIVE" creator validate-scan-coverage` |
 
 Write exactly one of each, per scanner, per run. A report without its ledger is
 an incomplete scan: nothing in it can pass the evidence gate. A ledger without
@@ -130,7 +130,7 @@ another calls forbidden is `SCAN_DISPOSITION_CONFLICT`.
 Run the gate yourself before returning:
 
 ```bash
-python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir tasks/TASK-001
+"$GENERATOR_NATIVE" creator validate-scan-coverage --target <target> --task-dir tasks/TASK-001
 ```
 
 ## 2b. The reconciled claim set
@@ -229,7 +229,7 @@ undocumented decision cannot be told apart from an oversight. After synthesis,
 run the gate with the plan:
 
 ```bash
-python3 bootstrap-verifier/scripts/validate_scan_coverage.py --target <target> --task-dir tasks/TASK-001 --plan tasks/TASK-001/skill-generation-plan.json
+"$GENERATOR_NATIVE" creator validate-scan-coverage --target <target> --task-dir tasks/TASK-001 --plan tasks/TASK-001/skill-generation-plan.json
 ```
 
 An invariant the plan states against at least one of the same evidence ids, in
@@ -332,9 +332,15 @@ staying wrong. Word the claim out of the search, not out of the subject line.
 The fingerprint is `sha256:` + the lowercase hex digest of the **whole file's
 bytes** - not of the cited line range, and not of a normalized text form:
 
+Use a trusted read-only SHA-256 tool on the admitted whole file, for example:
+
 ```bash
-python3 -c "import hashlib,sys;print('sha256:'+hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$TARGET/composer.json"
+sha256sum "$TARGET/composer.json"
 ```
+
+On Windows, PowerShell `Get-FileHash -Algorithm SHA256` computes the same digest.
+Record `sha256:` followed by the lowercase hexadecimal digest, without the
+tool's filename or other display columns.
 
 Fingerprint the file at the moment you read it. If a file changes during the
 run, re-read it and re-fingerprint; a stale digest blocks publication later
@@ -433,6 +439,8 @@ One template per scanner; the scanner's own Process defines what fills them. Kee
 
 ```markdown
 # Stack Scanner Findings: [target_name]
+
+Native helper commands use the generator's explicit bundled executable. Set `GENERATOR_NATIVE` to the absolute path `<generator>/memory-bank/bin/infra-engine` (`infra-engine.exe` on Windows) before the commands below; this is the selected release artifact, with no interpreter, download or build fallback.
 
 **Target:** [path]  **Scanned:** [date]
 

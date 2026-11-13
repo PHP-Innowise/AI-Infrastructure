@@ -8,6 +8,14 @@ memory-bank/local/
 .superpowers/
 /.c2p/
 /.c2pconfig
+/runtime-rust/target/
+# Native distribution artifacts are assembled explicitly for each host.
+**/memory-bank/bin/infra-engine
+**/memory-bank/bin/infra-engine.exe
+**/memory-bank/runtime-capabilities.json
+**/memory-seed/assets/bin/infra-engine
+**/memory-seed/assets/bin/infra-engine.exe
+**/memory-seed/assets/native-artifacts.json
 infrastructure-creator/tasks/
 /docs/Accelerator-TestEvidence-Submission/
 /docs/qa/evidence*/

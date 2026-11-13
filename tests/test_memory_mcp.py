@@ -30,7 +30,7 @@ class MemoryMcpTests(unittest.TestCase):
         messages = [{'jsonrpc': '2.0', 'id': 0, 'method': 'initialize',
             'params': {'protocolVersion': '2025-06-18', 'capabilities': {}, 'clientInfo': {'name': 'test', 'version': '1'}}},
             {'jsonrpc': '2.0', 'method': 'notifications/initialized'}, *requests]
-        result = subprocess.run([sys.executable, str(self.server), '--root', str(root or self.root)],
+        result = subprocess.run([sys.executable, '-B', str(self.server), '--root', str(root or self.root)],
             input=''.join(json.dumps(m) + '\n' for m in messages), capture_output=True, text=True, timeout=20)
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual('', result.stderr)
@@ -43,6 +43,16 @@ class MemoryMcpTests(unittest.TestCase):
     def start(self):
         self.cli_call('start', '--task-id', 'TASK-MCP', '--goal', 'Check cobalt allocation')
         return self.cli_call('get', '--task-id', 'TASK-MCP')['revision']
+
+    def test_checked_source_image_tool_does_not_create_state_or_attest(self):
+        before={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        reply=self.call('memory_source_fingerprints',sources=['specs/authority.md'])
+        self.assertFalse(reply['isError'],reply)
+        image=reply['structuredContent']['source_fingerprints']
+        self.assertEqual('specs/authority.md',image[0]['path']);self.assertEqual(64,len(image[0]['sha256']))
+        after={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        self.assertEqual(before,after)
+        self.assertTrue(self.call('memory_source_fingerprints',sources=['.env'])['isError'])
 
     def test_surrogate_request_id_does_not_end_the_protocol_stream(self):
         replies = self.exchange([
@@ -64,7 +74,7 @@ class MemoryMcpTests(unittest.TestCase):
     def test_protocol_and_warming_retrieval_leave_task_unprovisioned(self):
         reply = self.exchange([{'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'},
             {'jsonrpc': '2.0', 'id': 2, 'method': 'not-a-method'}])
-        self.assertEqual(4, len(reply[0]['result']['tools']))
+        self.assertEqual(5, len(reply[0]['result']['tools']))
         self.assertEqual(-32601, reply[1]['error']['code'])
         found = self.call('memory_retrieve', task_id='TASK-MCP', query='cobalt allocation', paths=['specs/authority.md'])
         self.assertFalse(found['isError'], found)
@@ -77,7 +87,7 @@ class MemoryMcpTests(unittest.TestCase):
              'params': {'_meta': {'progressToken': 7, 'clientTag': 'native-codex'}}},
             {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call',
              'params': {'name': 'memory_status', 'arguments': {}, '_meta': {'progressToken': 'status-1'}}}])
-        self.assertEqual(4, len(replies[0]['result']['tools']))
+        self.assertEqual(5, len(replies[0]['result']['tools']))
         self.assertFalse(replies[1]['result']['isError'], replies[1])
         self.assertEqual('governed', replies[1]['result']['structuredContent']['mode'])
 
@@ -107,6 +117,29 @@ class MemoryMcpTests(unittest.TestCase):
         self.assertEqual(1, len(list((self.root / 'project-brain/dynamic/findings').glob('*.md'))))
         changed = self.call('memory_record_result', **{**draft, 'progress': 'Different result'})
         self.assertTrue(changed['isError'])
+
+    def test_capture_decision_schema_roundtrip_and_contradictions(self):
+        listed = self.exchange([{'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}])[0]['result']['tools']
+        schema = next(tool['inputSchema'] for tool in listed if tool['name'] == 'memory_record_result')
+        self.assertEqual(['selected', 'no_reusable_knowledge', 'insufficiently_checked'],
+                         schema['properties']['capture_decision']['enum'])
+        self.assertNotIn('capture_decision', schema['required'])
+        revision = self.start()
+        for decision in ('selected', 'no_reusable_knowledge', 'insufficiently_checked'):
+            draft = {**self.draft(revision), 'result_id': decision, 'capture_decision': decision}
+            if decision != 'selected':
+                draft['learnings'] = []
+            reply = self.call('memory_record_result', **draft)
+            self.assertFalse(reply['isError'], reply)
+            self.assertEqual(decision, reply['structuredContent']['capture_decision'])
+            self.assertTrue(self.call('memory_record_result', **draft)['structuredContent']['replayed'])
+            revision = self.cli_call('get', '--task-id', 'TASK-MCP')['revision']
+        before = self.cli_call('get', '--task-id', 'TASK-MCP')
+        for changes in ({'capture_decision': 'unknown'}, {'capture_decision': 'no_reusable_knowledge'},
+                        {'capture_decision': 'selected', 'learnings': []}):
+            reply = self.call('memory_record_result', **{**self.draft(revision), 'result_id': 'invalid', **changes})
+            self.assertTrue(reply['isError'], reply)
+        self.assertEqual(before, self.cli_call('get', '--task-id', 'TASK-MCP'))
 
     def test_memory_retrieve_searches_under_the_navigation_profile(self):
         # The profile shapes what a hook pushes; memory_retrieve is the
@@ -228,6 +261,20 @@ class MemoryMcpTests(unittest.TestCase):
             reply = self.call('memory_checkpoint', task_id='TASK-MCP', **arguments)
             self.assertFalse(reply['isError'], reply)
         self.assertEqual('Check cobalt allocation', self.cli_call('get', '--task-id', 'TASK-MCP')['goal'])
+
+    def test_a_refused_save_names_its_code(self):
+        # A refused save carries its code apart from its message: the agent
+        # read "Memory operation failed" with no reason for every refusal.
+        revision = self.start()
+        for progress, code in (('x' * 1001, 'text_limit'), ('stderr: the dispatcher failed', 'raw_text'),
+                               ('Cut \ud83d in two', 'text_unicode')):
+            with self.subTest(code=code):
+                reply = self.call('memory_record_result', **{**self.draft(revision), 'progress': progress,
+                                                             'learnings': []})
+                self.assertTrue(reply['isError'], reply)
+                self.assertIn(f'({code})', reply['content'][0]['text'])
+                # The code, never the submitted text.
+                self.assertNotIn(progress[:12], json.dumps(reply, ensure_ascii=False))
 
     def test_a_result_whose_progress_is_not_text_is_refused_before_anything_is_written(self):
         # The schema says progress is text; null was read as "leave the task

@@ -4,6 +4,640 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Generated hooks and MCP work in every clone of the target — 2026-11-03
+
+- As the editions' do (root `CHANGELOG.md`, same day): on POSIX the generated
+  hook and MCP wiring names no path of the generating machine, `repo
+  hook-handler` returns that portable launch for the final target, and the
+  compatibility launchers fall back to the main checkout's engine in a linked
+  worktree and refuse shell commands when no engine is installed. `hook-forge`
+  and `bootstrap-verifier` describe the portable form; the policy lock was
+  rewritten. Native Windows output keeps the bound absolute launch.
+
+### Native runtime and deterministic generator helpers — 2026-11-02
+
+- Seed the platform's native `infra-engine` with its versioned runtime contract,
+  policy schema and resources; bind hooks and MCP to the final delivery root.
+  Route deterministic generation, validation, ownership and publication through
+  native `creator` commands. Update model-facing procedures to use those APIs
+  instead of copying or invoking retired Python helpers. Preserve the approved
+  profile, staging, publication and approval boundaries. Validation and live
+  client evidence remain separate; see the root [changelog](../CHANGELOG.md).
+
+### The seeded runtime promotes on Windows again — 2026-11-02
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`
+  changes in the asset (`linked_reparse` takes a stat without attributes for
+  no reparse point); the policy lock was rewritten.
+
+### The seeded dispatcher brings a long `AGENTS.md` below the root — 2026-10-31
+
+- As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`
+  and `claude_dispatch.sh` change in the asset (six `policy-N` entries,
+  `DISPATCH_VERSION` 5); the policy lock was rewritten.
+
+### The seeded runtime records a capsule it could not build — 2026-10-31
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime's capsule survives a profile it does not know — 2026-10-31
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
+  `brain_runtime.py` change in the asset (`automatic_capsule_profile`); the
+  policy lock was rewritten.
+
+### The seeded runtime's CLI answers the common refusals — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
+  `brain_runtime.py` change in the asset (`brain-validate`, the hint for an
+  evidence level passed as a status, where completion's revision is, what
+  to run instead of a second start, and how a missing task gets bound);
+  the policy lock was rewritten.
+
+### The seeded runtime leaves an undigested citation undigested — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime's health line names the host — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime counts the bytes a capsule printed — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset, and each `refresh-health.ndjson` capsule shape gains
+  `bytes`. The policy lock was rewritten.
+
+### The seeded runtime's chat snapshots leave out more Codex context — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day):
+  `context_continuity.py` changes in the asset; the policy lock was
+  rewritten.
+
+### The seeded runtime keeps a verified record's checked versions — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`,
+  `context.py` and `PROTOCOL.md` change in the asset. A verified record keeps
+  the fingerprints taken when it was checked through writes that check
+  nothing, `brain-create`/`brain-update` record who checked (`--attestation`,
+  `agent` by default, `--reverify`), and a person's verified claim is revised
+  only by a person. The policy lock was rewritten.
+
+### The seeded runtime can name a ticket's files, switched off — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
+  `brain_runtime.py` change in the asset. `runtime.json.template` names no
+  `ticket_files`, so a generated project keeps the line off. The policy lock
+  was rewritten.
+
+### The seeded runtime starts a Codex turn where its rollout says — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime records each capsule's shape — 2026-10-30
+
+- memory-seed's `context.py` writes the capsule's shape (profile, working
+  state, recent-file and document counts, token estimate) into each
+  `refresh-health.ndjson` line, as the editions' does, so
+  `scripts/memory_eval.py funnel` can add up a generated project too. Counts
+  only: no path, query or text.
+
+### The seeded runtime's turn mends a bank index a stopped write left behind — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded Memory MCP names the code of a save it refuses — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `mcp_server.py`
+  changes in the asset; the policy lock was rewritten.
+
+### hook-forge: a generated project's memory hooks follow a bisect — 2026-10-30
+
+- The canonical `rebased_branch()` in `hook-forge` also reads
+  `BISECT_START`, as the editions' hooks do (root `CHANGELOG.md`, same
+  day). The seeded runtime admits that branch while the bisect runs:
+  `context.py` changes in the asset. The policy lock was rewritten.
+
+### The seeded runtime's agent channel follows the task record its capsule serves — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime refuses text holding half of a character by name — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`,
+  `memory_results.py` and `context.py` change in the asset; the policy lock
+  was rewritten.
+
+### The seeded runtime reads a channel message holding a Unicode line separator — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime takes back a channel message a full disk cuts short — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime buffers a turn that changed a file named outside UTF-8 — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime names an index, a chunk or a channel left in a merge conflict — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `validate.py` and
+  `brain_runtime.py` change in the asset; the policy lock was rewritten.
+
+### The seeded runtime keeps a citation as the file is spelled — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `memory_results.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime reads a task record left in a merge conflict as invalid, not absent — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`,
+  `context.py` and `native_results.py` change in the asset; the policy lock
+  was rewritten.
+
+### The seeded runtime saves a branch two task records claim where its capsule says — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day), with the capsule's
+  advice naming the same twin in every clone: `context.py` and
+  `native_results.py` change in the asset; the policy lock was rewritten.
+
+### The seeded runtime reads past a broken line in its health series — 2026-10-29
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime keeps a held save or checkpoint its hook's budget stops — 2026-10-29
+
+- As the editions' does (root `CHANGELOG.md`, same day): `native_results.py`,
+  `context.py` and `workspace_roots.py` change in the asset; the policy lock
+  was rewritten.
+
+### The seeded runtime pins a save in a worktree Codex made to its thread — 2026-10-29
+
+- As the editions' does (root `CHANGELOG.md`, same day): `native_results.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime keeps a waiting command's worktree — 2026-10-28
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` changes
+  in the asset; the policy lock was rewritten.
+
+### The seeded dispatcher matches its root on Windows — 2026-10-28
+
+- As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.sh`
+  and `claude_dispatch.py` change in the asset; the policy lock was
+  rewritten.
+
+### The seeded runtime takes an attached project's worktree — 2026-10-27
+
+- As the editions' does (root `CHANGELOG.md`, same day): `workspace_roots.py`
+  and `native_results.py` change in the asset; the policy lock was rewritten.
+
+### The seeded runtime indexes a document two refreshes find at once — 2026-10-27
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context_retrieval.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime keeps a save another session or a commit overtook — 2026-10-26
+
+- As the editions' does (root `CHANGELOG.md`, same day): `native_results.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime and dispatcher serve a session that entered a worktree — 2026-10-26
+
+- As the editions' do (root `CHANGELOG.md`, same day): `context.py`,
+  `native_results.py`, `workspace_roots.py`, `claude_dispatch.py` and
+  `claude_dispatch.sh` (dispatcher version 4) change in the asset, and
+  hook-forge's Stop journal fragment passes `${ENTERED:+"$ENTERED"}` to
+  `native-stop` as the editions' hook does; hook-forge tells a generated
+  project's hooks to serve a worktree a session entered as the editions'
+  do (`ENTERED`, the exported layout, Windows paths, Cursor left out); the
+  policy lock was rewritten.
+
+### The seeded runtime gives an attached project's worktree its own index — 2026-10-26
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
+  `workspace_roots.py` change in the asset; the policy lock was rewritten.
+
+### Memory writes a sandbox refuses wait; the checkpoint names the hooks' task — 2026-10-26
+
+- As the editions do (root `CHANGELOG.md`, same day): the memory-seed asset's
+  `context.py` lets an `update` or a `turn --flush` that a sandbox keeps from
+  the project's memory wait in a temporary folder of the user's, made by the
+  next turn a hook records; its `status` names a rebase's branch as the task;
+  and an explicit `turn --flush` makes a task with nothing buffered yet.
+  `workspace_roots.py` and `native_results.py` change with it. skill-forge's
+  `checkpoint` guidance takes the task the hooks name - `CONTEXT_TASK_ID`,
+  else the branch, else on a detached HEAD the one `context.py status --json`
+  reports - where it said the branch task. The policy lock was rewritten.
+
+### The seeded runtime's sandboxed lookup publishes locally — 2026-10-26
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` changes
+  in the asset; the policy lock was rewritten.
+
+### The seeded runtime finds a worktree by itself — 2026-10-26
+
+- As the editions' does (root `CHANGELOG.md`, same day): `workspace_roots.py`,
+  `memory_results.py`, `mcp_server.py` and `context.py` change in the asset;
+  the policy lock was rewritten.
+
+### A worktree Codex made names its task by its owning thread — 2026-10-26
+
+- As the editions do (root `CHANGELOG.md`, same day): the memory-seed asset's
+  `context.py` admits `codex-thread/<thread>` as an inferred task while the
+  worktree Codex made stays detached, `status` reports it, and the first
+  capsule names it; its `MCP.md` says so. hook-forge's identity contract lets
+  the memory hooks follow the rebase line with
+  `[ -n "$TASK_ID" ] || TASK_ID=$(codex_thread_task)`, the resolver the
+  editions ship, and bootstrap-verifier's contract admits that line there
+  only, right after the rebase one. Its skill-body total is 305,962 bytes,
+  under the 306,200 ceiling. The policy lock was rewritten.
+
+### Codex in a worktree of a generated project runs its hooks — 2026-10-26
+
+- As the editions do (root `CHANGELOG.md`, same day): memory-seed copies
+  `codex_worktrees.py`, `codex_dispatch.py` and `codex_dispatch.sh` (it now
+  copies every `assets/scripts/*.sh`), `native_results.py` and
+  `context_retrieval.py` change in the asset, and hook-forge has the Codex
+  copy of `local-context.sh` run `codex_worktrees.py` where the others run
+  `claude_subfolders.py`. Its skill-body total is 305,085 bytes, under the
+  306,200 ceiling. The policy lock was rewritten.
+
+### The seeded dispatcher serves the project's worktrees — 2026-10-25
+
+- As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`,
+  `claude_dispatch.sh`, `workspace_roots.py`, `context.py` and
+  `brain_runtime.py` change in the asset; the policy lock was rewritten.
+
+### The seeded dispatcher runs on Windows and keeps its newest copy — 2026-10-25
+
+- As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`,
+  `claude_dispatch.sh` and `claude_subfolders.py` change in the asset; the
+  policy lock was rewritten.
+
+### The seeded dispatcher carries the project's permission rules and env — 2026-10-25
+
+- As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`,
+  `claude_dispatch.sh` and `claude_subfolders.py` change in the asset, with a
+  `permissions` and an `environment` entry for a Claude Code session started
+  below the root and a `--install` mode; the policy lock was rewritten.
+
+### Its Claude Code settings deny writing secrets with Edit rules — 2026-10-25
+
+- `.claude/settings.json` denies writing `.env`, `.env.*`, `**/.env`,
+  `**/.env.*` and `**/secrets/**` with `Edit(...)` rules instead of
+  `Write(...)` ones, which Claude Code 2.1 never matches and warned about at
+  every start of its terminal. The `Read(...)` denies already stopped those
+  writes (offline, 2.1.278 in `acceptEdits`: refused before and after); the
+  policy lock was rewritten.
+
+### Claude Code started below a generated project's root runs its hooks — 2026-10-25
+
+- As the editions do (root `CHANGELOG.md`, same day): memory-seed copies
+  `claude_subfolders.py`, `claude_dispatch.py` and now `claude_dispatch.sh`
+  (`scripts/asset_parity.py` requires `memory-bank/scripts/*.sh` in the
+  asset), and hook-forge ends `local-context.sh` with the fragment that, in
+  a session in the root, sets up the dispatcher in the person's own Claude
+  Code configuration. `context_retrieval.py` changes in the asset (the
+  shared-core manifest names `memory-bank/scripts/*.sh`); the policy lock
+  was rewritten. The two instructions add about 800 bytes to the skill
+  bodies, which stood 8 bytes under their ceiling: `body_bytes` in
+  `scripts/token_budget.json` goes from 303,878 to 306,200.
+
+### The seeded runtime saves from a sandbox that cannot write the project — 2026-10-25
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day): a save the
+  agent's sandbox cannot write waits in a temporary folder of the user's,
+  and the session's next hook saves it. `native_results.py` and
+  `context.py` change in the asset; the policy lock was rewritten.
+
+### bash-validator lets the memory CLI name SQL — 2026-10-25
+
+- The generic section shared with the editions (root `CHANGELOG.md`, same
+  day): a command that runs nothing but the memory CLI and cd, cat, echo or
+  printf is left alone by the SQL rules.
+
+### The seeded runtime keeps a save in flight when a prompt arrives — 2026-10-25
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), a prompt
+  that finds the last request asked and unsettled moves it aside instead of
+  replacing it, so the save being written still lands. `native_results.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime replaces a save request it cannot read — 2026-10-25
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), the prompt
+  replaces a session's request file refused as `invalid-state` and journals
+  `previous-unreadable`, instead of refusing every later prompt of the
+  session. `native_results.py` changes in the asset; the policy lock was
+  rewritten.
+
+### The seeded runtime asks no save of a Codex session that cannot write the Brain — 2026-10-24
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), a Codex Stop
+  whose turn's file-system policy does not let a command write the Brain is
+  skipped as `outside-sandbox`. `native_results.py` changes in the asset; the
+  policy lock was rewritten.
+
+### The seeded runtime keeps Cursor's save step full — 2026-10-24
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), Cursor gets
+  the full save step every time. `native_results.py` changes in the asset;
+  the policy lock was rewritten.
+
+### The seeded runtime sends the full save step again after a Codex compaction — 2026-10-24
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), a full save
+  step counts only after the compaction record's own line.
+  `native_results.py` changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime cuts each section into sentences once per request — 2026-10-24
+
+- The memory runtime memory-seed copies holds a section's excerpt units, as
+  the editions' runtime does (root `CHANGELOG.md`, same day).
+  `context_retrieval.py` changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime masks each document image once per request — 2026-10-24
+
+- The memory runtime memory-seed copies holds `mask_secrets` per text and
+  secret policy, as the editions' runtime does (root `CHANGELOG.md`, same
+  day). `validate.py` changes in the asset; the policy lock was rewritten.
+
+### policy-forge asks for an explicit save only where no Stop request comes — 2026-10-24
+
+- `policy-forge`'s working-memory rules: where the generated Stop hook
+  requests the `native-result` save (governed Claude Code, Codex and Cursor
+  sessions running the hooks, outside Harness sessions, unless
+  `native_result_request` is `off`), that request is the save. The generated
+  save rule opens with the prohibition on saving the answer's result another
+  way (`record-result`, the MCP tool, a closing `update`), and an answer's
+  end is not a stage boundary that asks for `update`; only where Stop
+  requests none does the agent save explicitly (Harness `memory-draft`, the
+  Memory MCP, or `record-result`). The policy names those cases. A policy
+  that asked for the explicit save after every answer made an agent save
+  each answer twice, and one that opened with "MUST save" still drew it on
+  a session's first answer (root `CHANGELOG.md`, same day).
+- The memory-seed asset's `mcp_server.py` (server instructions and the
+  `memory_record_result` description) and `MCP.md` say the same, as the
+  editions' do. The policy lock was rewritten.
+
+### The seeded runtime's later save steps point back to the full one — 2026-10-24
+
+- The memory runtime memory-seed copies sends the save step's full rules only
+  while the conversation lacks them, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `native_results.py` changes in the asset; the
+  policy lock was rewritten.
+
+### The seeded runtime stops asking a session whose host refused the save — 2026-10-24
+
+- The memory runtime memory-seed copies reads Claude Code's denial of the
+  save command from the transcript, at the recovery Stop or, after No in the
+  terminal dialog, at the next prompt, and does not ask that session again
+  for a day, as the editions' runtime does (root `CHANGELOG.md`, same day).
+  `native_results.py` changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime says to report a save another session overtook — 2026-10-24
+
+- The memory runtime memory-seed copies explains the stale-revision and
+  task-changed refusals of a native save, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `native_results.py` changes in the asset; the
+  policy lock was rewritten.
+
+### The seeded runtime names the echo behind a raw newline — 2026-10-24
+
+- The memory runtime memory-seed copies adds to the raw-newline refusal that
+  a plain `echo` in zsh turns `\n` into a line break and that `echo -E`
+  keeps it, as the editions' runtime does (root `CHANGELOG.md`, same day).
+  `native_results.py` changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime sees a compaction after a conversation's first turn — 2026-10-24
+
+- The memory runtime memory-seed copies takes a transcript not written yet
+  as a position, its start. A compaction before the second turn of a new
+  Claude Code conversation then hands its memory again, as the editions'
+  runtime does (root `CHANGELOG.md`, same day). `context_retrieval.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime's status counts the accelerator's own files apart — 2026-10-24
+
+- `context.py status --json` in the runtime memory-seed copies reports
+  `uncommitted` and `accelerator_uncommitted`, as the editions' runtime does
+  (root `CHANGELOG.md`, same day). Generated hooks are unchanged. `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime says what to correct in a refused save — 2026-10-23
+
+- The memory runtime memory-seed copies names the JSON error, with its line
+  and column, of an input that is not one JSON object, and names the missing
+  and unexpected fields of a learning, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `native_results.py` and `memory_results.py`
+  change in the asset; the policy lock was rewritten.
+
+### The seeded runtime asks no save of a Codex Plan-mode or read-only turn — 2026-10-23
+
+- The memory runtime memory-seed copies reads the Codex turn's
+  `turn_context` from the rollout and skips the save request in Plan
+  collaboration mode and in a read-only sandbox, as the editions' runtime
+  does (root `CHANGELOG.md`, same day). `native_results.py` changes in the
+  asset; the policy lock was rewritten.
+
+### The seeded runtime asks no save of a plan-mode turn — 2026-10-23
+
+- The memory runtime memory-seed copies skips the save request when the
+  Stop's `permission_mode` is `plan`, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `native_results.py` changes in the asset; the
+  policy lock was rewritten.
+
+### The seeded runtime asks Claude Code for its save without a prompt or a hook error — 2026-10-23
+
+- The memory runtime memory-seed copies answers Claude Code's Stop with
+  `hookSpecificOutput.additionalContext` instead of a block. Its save command
+  holds no subshell: `cd ROOT && echo -E '<JSON>' | python3 … --json`.
+  This matches the editions' runtime (root `CHANGELOG.md`, same day): Claude
+  Code asked before the old command after every answer and showed the step as
+  a hook error. `native_results.py` changes in the asset; the policy lock was
+  rewritten.
+
+### The seeded runtime closes Claude Code's save request with its marker — 2026-10-23
+
+- The memory runtime memory-seed copies puts the save request's marker last
+  for Claude Code, so the first line a person sees under "Ran N stop hooks"
+  is the instruction, as the editions' runtime does (root `CHANGELOG.md`,
+  same day). `native_results.py` changes in the asset; the policy lock was
+  rewritten.
+
+### The seeded runtime builds no capsule for a Codex save continuation — 2026-10-23
+
+- The memory runtime memory-seed copies returns silently from `refresh` for
+  Claude Code and Codex when the query is the Stop hook's own save
+  continuation, as the editions' runtime does (root `CHANGELOG.md`, same
+  day). `context.py` changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime leaves its own memory writes out of task work — 2026-10-23
+
+- The memory runtime memory-seed copies skips the chunks a promoted save
+  writes and the index it rewrites when it lists a turn's changed files, as
+  the editions' runtime does (root `CHANGELOG.md`, same day). `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The hook contract accepts an arm beside the refresh — 2026-10-23
+
+- `validate_generated.py` (`native_capture_hook_contract`) accepts a prompt
+  hook that runs `native-prompt` in the background beside the refresh, as
+  the editions' Claude Code and Codex hooks now do, when its output goes to
+  the hook's own file, its PID is taken at once and the hook waits for it.
+  The sequential form hook-forge describes is unchanged. The seeded runtime
+  writes the unsaved-result flag for Cursor only and carries the Cursor
+  mirror rule that keeps its arm first (root `CHANGELOG.md`, same day); the
+  policy lock was rewritten.
+
+### The seeded runtime ends an attended session's save briefly — 2026-10-23
+
+- The memory runtime memory-seed copies asks a session a person reads as it
+  goes not to repeat its answer after the save, and keeps the repeat for
+  headless runs, as the editions' runtime does (root `CHANGELOG.md`, same
+  day). `native_results.py` changes in the asset; the policy lock was
+  rewritten.
+
+### The seeded runtime checks a citation with one resolve — 2026-10-23
+
+- The memory runtime memory-seed copies resolves the roots once per pass
+  and each cited source once, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `brain_runtime.py`, `validate.py` and
+  `workspace_roots.py` change in the asset; the policy lock was rewritten.
+
+### A generated Stop hook's journal line is lost quietly — 2026-10-23
+
+- The hook-forge journal fragment appended its line with `>> file
+  2>/dev/null`. A project whose `memory-bank/local` is read-only then
+  printed "Permission denied" on every Stop, because bash opens the file
+  before stderr reaches `/dev/null`. The fragment, and the line
+  `validate_generated.py` requires verbatim, now redirect stderr first, as
+  the editions' hooks do (root `CHANGELOG.md`, same day).
+  `test_native_journal_generator.py` finds the line by its file name.
+
+### A generated project's own files are not taken for a task's work — 2026-10-23
+
+- The seeded memory runtime (memory-seed) reads `.infra-manifest.json` where
+  no install record exists. Until the team commits or ignores what the
+  generator wrote, the generator's files and the manifest itself no longer
+  count as changes on every turn, while a file the team edits still does.
+  The root `CHANGELOG.md` entry of the same day has the details.
+
+### Generated Stop hooks journal their save request — 2026-10-22
+
+- The seeded runtime journals every prompt, Stop and save to ignored
+  `memory-bank/local/native-results.ndjson` (memory-seed carries it since the
+  root change of the same day), but a generated Stop hook did not write the
+  one line the runtime cannot: its save request's exit status. A request
+  killed at the hook's budget, or failed before its own line, left nothing,
+  so a count of real sessions could not see those Stops. hook-forge now
+  documents the editions' Stop block as a mandatory fragment ("Native result
+  journal"), and step 6 runs `native-stop` through it: one `stop-hook` line
+  per Stop - `exited` with the request's status (124 when the budget killed
+  it), or `skipped` `capsule-delivered` when the Harness asked for no save -
+  with no payload, path, task or session, never through a linked journal file
+  or a linked attached state, its clock on one physical line.
+- bootstrap-verifier requires that fragment, line for line and with the
+  hook's own host, in a manifest-owned `working-memory-write.sh` once the
+  generator-owned `native_results.py` journals (`lacks the native result
+  journal line (hook-forge step 6)`). A project seeded before the journal
+  keeps its hooks, and the adapter contract still sees exactly two
+  `native-stop` lines.
+- The skill-body ceiling in `scripts/token_budget.json` rises by the 3,133
+  bytes the fragment added; mirrors and the policy lock regenerated.
+- Tests: `tests/test_native_journal_generator.py` runs the documented
+  fragment in a temporary project (each status, 124 at a one-second budget,
+  the Harness skip, every host, links at the journal and at an attached
+  state, an unwritable journal) and holds the verifier to it (missing,
+  rewritten, seeded before the journal, unowned files);
+  `tests/test_memory_prompt_generator.py` at the repository root checks that
+  the fragment is the block every edition ships. Each fails without the
+  change.
+
+### Seeded retrieval finds a path written out under the project root — 2026-10-22
+
+- memory-seed's `context_retrieval.py` finds an absolute path a prompt names
+  under the project root when the root holds a space ("My Projects") or is
+  written the Windows way (`C:\Users\...`); before, such a path seeded
+  nothing. The policy lock and mirrors were regenerated for the changed
+  asset.
+
+### Seeded memory serves a chunk written today west of UTC — 2026-10-22
+
+- memory-seed's `validate.py` takes a date as in the future only past today
+  by both the local and the UTC calendar, and `context.py bank-quarantine`
+  writes the UTC date: west of UTC every evening the chunks the runtime
+  promoted or re-verified were "in the future" and left retrieval until local
+  midnight. The policy lock and mirrors were regenerated for the changed
+  assets.
+
+### Seeded memory reads a Windows session's PowerShell commands — 2026-10-22
+
+- memory-seed's `context.py` reads Claude Code's `PowerShell` tool calls for
+  the `recent files` line of a Windows session that has that tool on. The
+  policy lock and mirrors were regenerated for the changed asset.
+
+### Seeded continuity leaves a Stop hook's continuation out — 2026-10-22
+
+- memory-seed's `context_continuity.py` leaves a Stop hook's continuation
+  (`<hook_prompt>`, Codex 0.162 and later) out of a Codex snapshot, as its
+  comment always said; the native result's own took most of every snapshot
+  taken where it ran. The policy lock and mirrors were regenerated for the
+  changed asset.
+
+### Seeded memory reads a Codex turn's files again — 2026-10-22
+
+- memory-seed's `context.py` reads the files of a Codex turn from its `exec`
+  cell (`tools.exec_command`, `tools.apply_patch`), the only form Codex 0.162
+  and later write; until now such a turn recorded none. The policy lock and
+  mirrors were regenerated for the changed asset.
+
+### Memory stands down for a session in another worktree — 2026-10-22
+
+- hook-forge: a Claude Code desktop session in its own worktree, and any
+  session after `EnterWorktree`, runs the hooks of the checkout it started from
+  and names its own checkout only in the payload's `cwd`. The generated
+  working-memory hooks read `cwd`; when it is another worktree of the
+  repository, the read hook says memory was not consulted instead of handing
+  over this branch's task, and the write hook records no turn.
+- memory-seed carries `context_continuity.py` with the same check: such a
+  session neither captures a snapshot nor claims a merge prepared for this
+  branch.
+- the policy lock and mirrors were regenerated for the changed skill and assets.
+
+### Seeded projects ship the recall capsule — 2026-10-22
+
+- memory-seed's `runtime.json.template` sets `capsule_profile: recall`, as
+  the four editions do: a generated project's automatic capsule carries the
+  working state, the recent files and what the task itself saved, and
+  `retrieve` still searches everything. Details in the root `CHANGELOG.md`.
+  The policy lock was regenerated for the changed asset.
+
+### Seeded runtime names its capsule profile flag — 2026-10-22
+
+- memory-seed's `context.py` carries the `CAPSULE_PROFILE_FLAG` marker, by
+  which a helper such as Harness tells that `refresh` takes
+  `--capsule-profile`. The policy lock was regenerated for the changed asset.
+
+### Seeded excerpts quote a chunk's rule, not its Sources footer — 2026-10-22
+
+- memory-seed's `context_retrieval.py` skips a Memory Bank chunk's
+  citation-only `## Sources` footer whatever selected it, as it did for linked
+  selections: a request naming a cited file got the paths without the rule.
+  The policy lock was regenerated for the changed asset.
+
 ### Seeded memory consolidates only on request — 2026-10-21
 
 - memory-seed's `runtime.json.template` ships `automatic_consolidation` and
@@ -150,6 +784,9 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 - memory-seed carries the runtime's Windows fixes: file identity under
   Python 3.12+, Memory Bank index paths, 8.3 project roots for the memory MCP
   server and its registration, and source hints through NT handles.
+- memory-seed's runtime gives the Git frame check before a query with no
+  branch to admit two seconds, as every other Git source check has: with one,
+  a Windows runner that paused for about a second cost a refresh its memory.
 
 - Seed the structured native result coordinator and require it in the runtime skeleton. Generated prompt/Stop hooks use one bounded same-agent save with guarded revisions and Cursor loop limits, retaining the existing Harness result path.
 

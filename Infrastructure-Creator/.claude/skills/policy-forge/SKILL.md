@@ -9,6 +9,10 @@ related: [infra-generate, skill-forge, agent-forge, command-forge, hook-forge, m
 
 # Policy Forge
 
+Native commands below use `"$GENERATOR_NATIVE"`: set `GENERATOR_NATIVE` to the
+selected generator's absolute `memory-bank/bin/infra-engine` path
+(`infra-engine.exe` on Windows), as required by the owning generator skill.
+
 ## Overview
 
 `policy-forge` writes the target project's governance layer: the operational rules any AI edition must obey when working in that repository. It produces one shared `AGENTS.md` at the target root - the single source of policy truth regardless of which editions are installed - and duplicates the three enforcement companions (`DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md`) inside each selected edition folder so each edition ships self-contained. Every rule is authored from confirmed profile evidence: the real PHP stack (section 2), architecture (section 3), security posture (section 6), conventions (section 7), and only the high-value behavioral contract in section 8 (project-specific authority, critical invariants, authorization boundaries, forbidden/high-risk behavior with documented governance, audit obligations, and required regression scenarios). It never emits a rule for absent tooling or turns inferred behavior into policy.
@@ -43,7 +47,17 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
    after compaction/scope changes and before uncovered material decisions;
    source verification; progress/next-step checkpoints at meaningful boundaries;
    and source-backed reusable findings/decisions at finalization when writes are
-   authorized. Support Harness `memory-draft` and an available Harness Memory MCP
+   authorized. Where the generated Stop hook requests the `native-result` save -
+   governed Claude Code, Codex and Cursor sessions running the hooks, outside
+   Harness sessions, unless `native_result_request` is `off` - that request is
+   the save: the policy opens its save rule with the prohibition on saving the
+   answer's result another way (`record-result`, the MCP tool, a closing
+   `update`), and an answer's end is not one of the stage boundaries that ask
+   for `update`. Only where Stop requests none does the agent save explicitly.
+   Name those cases in the policy so an agent can tell which applies before it
+   finishes: a rule that opened with "MUST save" drew an explicit save on the
+   first answer of a session. For the explicit save, support Harness
+   `memory-draft` and an available Harness Memory MCP
    without requiring either for an otherwise self-contained target; the fallback
    is the installed context CLI's `record-result`. An exact completed result ID
    replays passively. An interrupted attempt repeated with the same result ID
@@ -69,7 +83,7 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
 5. **Author `STABILIZATION.md`**: the error-to-rule loop the target uses to convert recurring mistakes into permanent rules. It MUST carry `## Localization` (the `COMPONENT - COMPONENT | blame: SIDE` label, its components - model, owner, grader, third party, context, memory, tool, local and external environment - mapped to the target, and the two attribution rules: label the earliest unrecovered failure; blame follows behavior, not opportunity) and `## Routing` (where each blamed side's repair belongs): the bug, finding and incident templates `memory-seed` installs point there.
 6. **Duplicate** `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` into every selected edition folder (byte-identical copies). Do NOT write into unselected editions. When `.claude` is selected, also write `.claude/CLAUDE.md` with the `@../AGENTS.md` import (see the naming convention); bootstrap-verifier fails a Claude edition without it.
 7. **Analyze commands before publication.** Run
-   `bootstrap-verifier/scripts/analyze_commands.py --target <real-target>` to
+   `"$GENERATOR_NATIVE" creator analyze-commands --target <real-target>` to
    inventory target aliases without execution. Then analyze every command
    prescribed by `AGENTS.md` or `DOD.md` separately with `--no-scripts
    --verification --command '<command>'`. Resolve Composer/npm aliases all the

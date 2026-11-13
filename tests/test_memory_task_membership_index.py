@@ -21,6 +21,20 @@ IMAGES = {ELM: '# Elm Orchard allocation\nOWNER_COUNT = 1\n',
           OAK: '# Oak Orchard allocation\nOWNER_COUNT = 1\n'}
 
 
+def full_capsule(root):
+    """Pin the full automatic capsule in a fixture project.
+
+    The editions ship the recall capsule - working state, recent files and
+    the task's own saves. A test of a layer only the full capsule carries -
+    shared documents and what is built on them - pins `full`, which a
+    project can still choose.
+    """
+    config = Path(root) / 'project-brain/config/runtime.json'
+    data = json.loads(config.read_text(encoding='utf-8'))
+    data['capsule_profile'] = 'full'
+    config.write_text(json.dumps(data), encoding='utf-8')
+
+
 class TaskMembershipIndexTests(unittest.TestCase):
     def setUp(self):
         clean = {key: value for key, value in os.environ.items()
@@ -343,6 +357,7 @@ class TaskMembershipIndexTests(unittest.TestCase):
         self.assertEqual([], [c for c in calls.call_args_list if '--shared-index-path' in c.args[0]])
 
     def test_full_capsule_render_and_manifest_follow_index_only_membership(self):
+        full_capsule(self.repo)  # the full capsule's render and manifest
         source = 'app/elm_gate.py'; image = '# Elm transfer\nOWNER_LIMIT = 1\n'
         (self.repo / source).write_text(image)
         target = self.brain.create_record(self.repo, 'task', 'ELM-ORCHARD',

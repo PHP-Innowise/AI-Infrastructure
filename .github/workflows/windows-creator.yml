@@ -1,17 +1,21 @@
-name: Windows Creator sandbox
+name: Native Windows Creator sandbox
 on:
   workflow_dispatch:
 
-# This runner needs native Codex with its elevated sandbox setup completed.
-# No model credentials are needed: tests sandbox Python fixtures directly.
+permissions:
+  contents: read
+
+# Actual native Codex with elevated sandbox setup is required on this runner.
+# Hosted Windows workspace tests do not establish this sandbox behavior.
 jobs:
   creator:
     runs-on: [self-hosted, Windows, codex-sandbox]
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       HARNESS_WINDOWS_CREATOR_SANDBOX: '1'
     steps:
       - uses: actions/checkout@v4
-      - name: Verify real elevated sandbox boundaries for Creator and AI discovery
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Exercise native Creator and discovery sandbox boundaries
         shell: pwsh
-        run: python -m unittest tests.test_windows_creator tests.test_windows_discovery -v
+        run: cargo test --manifest-path runtime-rust/Cargo.toml --locked -p infra-host --test windows_creator_sandbox -- --ignored --nocapture

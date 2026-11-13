@@ -434,6 +434,57 @@ class MemoryWiringClaimsTest(unittest.TestCase):
         self.assertEqual([], offenders)
 
 
+class NativeSaveRequestPolicyTest(unittest.TestCase):
+    """Where the Stop hook asks for the save, the policy asks for no other.
+
+    The Stop hook asks for one `native-result` save after every answer. The
+    policy also required an explicit save (`context.py record-result`,
+    `memory_record_result`, a Harness `memory-draft`) after all authorized
+    work, and the Memory MCP server asked for `memory_record_result` before
+    finishing, so an agent following them saved each answer twice: 12 of 12
+    answers in a live Codex run on a copy of a client project. A rewording
+    that kept "MUST save" in front still drew the explicit save on a
+    session's first answer; the rule that opens with the prohibition drew it
+    in 2 of 12. Checked only where an edition's Stop hook asks for the save.
+    """
+
+    RULE = (
+        "In governed Claude Code, Codex and Cursor sessions running these hooks, outside the Harness and unless `native_result_request` is `off`, it then requests one `native-result` save after every answer",
+        "- MUST NOT save an answer's result yourself where Stop requests it - no `record-result`, `memory_record_result` or closing `update`: answering that request is the save.",
+        "Where none comes, MUST save progress/next steps and source-backed reusable findings/decisions before finishing",
+        "but not at an answer's end that Stop's request saves",
+        "claim saves only after success",
+    )
+
+    def test_an_edition_whose_stop_hook_saves_asks_for_no_second_save(self) -> None:
+        checked = 0
+        for framework, edition in FRAMEWORK_PATHS.items():
+            hook = (ROOT / edition / ".claude/hooks/working-memory-write.sh").read_text(encoding="utf-8")
+            if "native-stop" not in hook:
+                continue
+            checked += 1
+            policy = (ROOT / edition / "AGENTS.md").read_text(encoding="utf-8")
+            server = (ROOT / edition / "memory-bank/scripts/mcp_server.py").read_text(encoding="utf-8")
+            with self.subTest(edition=framework):
+                self.assertNotIn("MUST finish authorized work with", policy)
+                for text in self.RULE:
+                    self.assertIn(text, policy)
+                # The order is the fix: the prohibition comes before the save
+                # an agent makes only where no request comes.
+                self.assertLess(policy.index(self.RULE[1]), policy.index(self.RULE[2]))
+                self.assertNotIn("and memory_record_result at meaningful boundaries and before finishing", server)
+                self.assertIn("where no Stop hook asks for the native-result save", server)
+        # Sanity: the condition must hold today, or the test checks nothing.
+        self.assertGreater(checked, 0)
+
+    def test_the_generator_writes_the_same_rule(self) -> None:
+        forge = (ROOT / "Infrastructure-Creator/.agents/skills/policy-forge/SKILL.md").read_text(encoding="utf-8")
+        flat = " ".join(forge.split())
+        self.assertIn("that request is the save", flat)
+        self.assertIn("opens its save rule with the prohibition", flat)
+        self.assertIn("Only where Stop requests none does the agent save explicitly", flat)
+
+
 class FrameworkApiCurrencyTest(unittest.TestCase):
     """Snippets that fatal or mislead on the framework versions an edition
     declares. Each pattern was shipped once and found by an audit."""

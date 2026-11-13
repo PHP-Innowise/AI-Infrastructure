@@ -8,15 +8,14 @@ This is **not a PHP application**. It is a monorepo of AI-agent accelerators for
 projects: ready-made policy/skill/agent/hook bundles for Laravel, Symfony, and
 framework-neutral PHP Core, plus `Infrastructure-Creator/`, a generator that scans
 a *target* PHP project and builds a bespoke accelerator for it. There is no
-application code, no Composer install, and no PHP runtime to execute here — the
-repository's own tests and tooling are Python (standard library only) and shell.
+application code, no Composer install, and no PHP runtime to execute here — production runtime, hooks, applications, generator gates and repository tooling live in the Rust workspace; retained test fixtures describe the former implementation.
 
 ```
 Laravel/, Symfony/, PHP Core/    # three independent, ready-to-use editions
 Infrastructure-Creator/          # generator that builds a bespoke edition for a target project
 install/                         # installer docs + versioned inventories
-scripts/                         # repo-level build/install/measurement/CI tools (Python, stdlib only)
-harness/                         # optional external LangGraph batch orchestrator (own venv, own deps)
+scripts/                         # versioned tooling data and retained source references; runtime in runtime-rust/
+harness/                         # browser assets and historical fixtures; native orchestration in runtime-rust/
 tests/                           # repository-level tests (installation, mirrors, framework semantics)
 docs/                            # shared documentation (CI, adoption, tool integration, operations)
 ```
@@ -31,107 +30,91 @@ others — verify a change is meaningful for the target stack before porting it.
 
 ## Commands
 
-All commands run from the repository root unless noted. Requirements: Python 3
-(3.9+), `git`, `bash`, and `shellcheck` for one lint step.
+The production runtime and repository tools are native Rust. Run the platform's
+`infra-engine` executable from a verified release or from
+`runtime-rust/target/release/`; installed projects use
+`memory-bank/bin/infra-engine` (`.exe` on Windows). Git is required for
+source custody and repository operations. PHP is needed only for PHP snippet
+validation; provider CLIs and optional ONNX/vector libraries are selected
+explicitly for the operations that use them.
 
-### Run all edition + generator test suites
-
-```bash
-for suite in \
-  "Laravel/memory-bank/tests" "Laravel/project-brain/tests" \
-  "Symfony/memory-bank/tests" "Symfony/project-brain/tests" \
-  "PHP Core/memory-bank/tests" "PHP Core/project-brain/tests" \
-  "Infrastructure-Creator/tests"; do
-  (cd "$suite" && for test_file in test_*.py; do python3 "$test_file"; done)
-done
-```
-
-Run a single test file directly, e.g. `(cd "Infrastructure-Creator/tests" && python3 test_scan_contracts.py)`.
-The explicit-file loop (not `unittest discover`) is intentional: some
-distribution test directories live under a hyphenated parent path and aren't
-importable as packages, so `discover` can silently report zero tests.
-
-### Repository-level tests
+### Native validation
 
 ```bash
-python3 -m unittest tests.test_installation
-python3 -m unittest tests.test_framework_semantics
-python3 -m unittest tests.test_collect_context
-python3 -m unittest tests.test_build_mirrors
+cargo build --manifest-path runtime-rust/Cargo.toml --release --locked --bin infra-engine
+infra-engine check --list
+infra-engine check --strict --base origin/main
+infra-engine check --group mirrors --group parity --strict
 ```
 
-### Mirror parity (Codex / Cursor / Codex trees must match canon)
+The declarative catalog is `install/check-catalog.json`. The same native
+catalog runner backs local checks and generated GitHub workflows. Retained
+Python tests and fixtures are historical references; they are not a production
+runtime or a working differential oracle after their imported implementation
+has been retired.
+
+### Canonical resources and mirrors
 
 ```bash
-python3 scripts/build_mirrors.py --check                 # all editions
-python3 scripts/build_mirrors.py --check --edition Symfony
-python3 scripts/build_mirrors.py --write --edition Laravel --edition "PHP Core"  # after intentional canon edits
+infra-engine repo mirrors --check
+infra-engine repo mirrors --write --edition Laravel --edition "PHP Core"
+infra-engine repo core-sync --check
+infra-engine repo core-sync --write
+infra-engine repo asset-parity --check
+infra-engine repo policy-lock --check
+infra-engine repo budget --check
+infra-engine repo links
+infra-engine repo routes
+infra-engine repo php-snippets --require-php
+infra-engine repo stabilization
+infra-engine repo changelog --base origin/main
 ```
 
-### Cross-edition / core parity
+Edit canonical resources only. Native mirror generation carries those edits to
+generated tool trees. Runtime logic belongs in `runtime-rust/`; shared resource
+changes start in `PHP Core/` and are propagated through the native tools.
+Rebuilding policy locks or inventories is a deliberate payload change.
+
+### Installation and attached mode
 
 ```bash
-(cd "Laravel"  && python3 memory-bank/scripts/context.py parity && python3 memory-bank/scripts/context.py parity --cross-edition)
-(cd "Symfony"  && python3 memory-bank/scripts/context.py parity && python3 memory-bank/scripts/context.py parity --cross-edition)
-(cd "PHP Core" && python3 memory-bank/scripts/context.py parity && python3 memory-bank/scripts/context.py parity --cross-edition)
+infra-engine install --verify-inventories
+infra-engine install --write-inventories
+infra-engine install --edition "PHP Core" --target /path/to/project --dry-run --merge-existing
+infra-engine install --edition "PHP Core" --target /path/to/project --merge-existing
+infra-engine attach run --project /path/to/project --tool codex
 ```
 
-Make a core change in `PHP Core/` only, then write it to every copy:
+Review a dry-run's collisions before installation. Source hook and MCP
+configuration files are templates. Installation and generation commit a
+portable form that names no path of the installing machine: the host names the
+checkout (`$CLAUDE_PROJECT_DIR`, Cursor's project root and `${workspaceFolder}`,
+Git's top level for Codex) and the committed launchers in `.claude/hooks/`,
+`.cursor/hooks/` and `.codex/hooks/` run that checkout's ignored engine, or the
+main checkout's in a linked worktree (`runtime-rust/crates/infra-tooling/src/launch.rs`).
+A teammate's clone needs only `infra-engine install --merge-existing`, which
+adds the engine. Native Windows installations and attached overlays bind the
+absolute executable and root. Do not replace either with a shell ancestor
+search or a Python bootstrap.
+
+### Installed memory and native applications
 
 ```bash
-python3 scripts/core_sync.py --write   # the other editions, then asset_parity.py --write and build_mirrors.py --write
-python3 scripts/core_sync.py --check   # which copies differ from PHP Core
+memory-bank/bin/infra-engine memory start --task-id TASK-ID --goal "Goal"
+memory-bank/bin/infra-engine memory index
+memory-bank/bin/infra-engine memory retrieve "Query" --task-id TASK-ID
+memory-bank/bin/infra-engine memory validate
+infra-engine collect skills --edition Laravel --dry-run
+infra-engine serve start --project /path/to/project
+infra-engine app install
+infra-engine harness run --project /path/to/project --worker dry-run
 ```
 
-The copies are marked `linguist-generated` in `.gitattributes`, so a pull
-request shows the canonical change once; the parity gates still hold every
-copy byte-identical.
-
-### Installer inventory verification
-
-```bash
-python3 scripts/install_accelerator.py --verify-inventories   # must report VERIFIED for all 3 editions
-python3 scripts/install_accelerator.py --write-inventories     # only after intentionally changing distribution files; regenerate then re-verify
-```
-
-Inventories are generated from `git ls-files --cached`; stage new distribution
-files before regenerating or they won't be included.
-
-### Lint (mirrors CI exactly)
-
-```bash
-git ls-files -z -- '*.sh' 'collect' | xargs -0 -r -n1 bash -n
-git ls-files -z -- '*.sh' 'collect' | xargs -0 -r shellcheck -S error
-git ls-files -z -- '*.json' | while IFS= read -r -d '' f; do python3 -m json.tool "$f" > /dev/null || echo "Invalid JSON: $f"; done
-python3 scripts/check_php_snippets.py --require-php   # lints every complete ```<?php``` block in tracked Markdown
-python3 scripts/context_budget.py --check              # startup context-price ceilings per edition (scripts/token_budget.json)
-python3 scripts/context_budget.py                       # print current numbers without gating
-```
-
-### Other CI-mirroring checks
-
-```bash
-python3 scripts/check_links.py                                    # relative markdown links resolve
-bash scripts/check_core_changelog.sh                               # shared-core diff requires a root CHANGELOG.md entry
-bash scripts/check_core_changelog.sh some-branch                   # against an explicit base ref
-```
-
-### Optional external harness (not a release gate, separate deps)
-
-```bash
-python3 -m venv harness/.venv
-harness/.venv/bin/pip install -e "harness[dev]"
-harness/.venv/bin/python -m pytest harness/tests
-```
-
-### Context collection bundler (for pasting a slice of this repo into another model)
-
-```bash
-./collect                                    # list scopes: edition, skills, core, hooks, tooling, docs, harness, diff, custom
-./collect skills --edition Laravel --dry-run
-./collect diff --base origin/main --stdout
-```
-In Codex this is the `/collect` command. Bundles land in the ignored `.c2p/`. This tool is never installed into a target project and is not a CI gate.
+Memory global options (`--root`, `--project`, `--db`, `--mode`, `--owner`)
+precede the memory operation. Ordinary memory and hook commands use the real
+calendar. Historical evaluation clocks are accepted only through explicit
+controlled evaluation routes; proof and deadline clocks remain real.
+Collection bundles stay in ignored `.c2p/` and are never installed in clients.
 
 ## Architecture
 
@@ -164,10 +147,10 @@ distinct from lowercase `tasks/` — and is excluded from the installed payload.
 | Codex | `.agents/skills/` + `.codex/` | No command/agent-wrapper layer; skills only. |
 
 `.Codex/skills` (and `.agents/skills`, the canonical source) generate the
-`.cursor/skills` mirror; `scripts/build_mirrors.py` enforces this per the
+`.cursor/skills` mirror; `infra-engine repo mirrors` enforces this per the
 transformation rules in `scripts/README.md`. **Never hand-edit a generated
 mirror file** — edit the canonical source and regenerate with `--write`, or
-`build_mirrors --check` (and CI's `mirrors`/`parity` jobs) will fail.
+`infra-engine repo mirrors --check` (and CI's `mirrors`/`parity` jobs) will fail.
 
 ### Project Brain / Local Context Engine / Memory Bank
 
@@ -178,7 +161,10 @@ generated target project):
   active tasks, handoffs, findings, decisions. Governed mode is default.
 - **Local Context Engine** — indexes policy/skills/docs/specs/Project Brain
   records into ignored SQLite (`memory-bank/local/context.db`), retrieval via
-  FTS5/BM25. Disposable: deleting it deletes no authoritative data.
+  FTS5/BM25. Indexed knowledge is rebuildable, but the same database also
+  holds unfinished `turn_deltas` and local working/session state. Preserve
+  or recover those before replacing it; reindexing alone cannot restore
+  unfinished work.
 - **Memory Bank** (`memory-bank/`) — Git-tracked durable knowledge chunks
   (`MEM-YYYYMMDD-xxxxxxxx-{slug}.md`), auto-promoted by default from resolved
   findings/incidents/decisions (tagged `auto-promoted`, unreviewed) unless
@@ -189,7 +175,7 @@ project sources (code, config, migrations, tests, specs) → Project Brain →
 Memory Bank → skills/operations → examples → README docs. Retrieved snippets
 are discovery aids only, always verified against the cited canonical source.
 
-The public CLI is `python3 memory-bank/scripts/context.py {start,update,retrieve,complete,index,parity,status,validate,compact,export}`,
+The public CLI is `memory-bank/bin/infra-engine memory {start,update,retrieve,complete,index,parity,status,validate,compact,export}`,
 run from an edition or a consuming project's root. `retrieve` is the current
 name; `context` is a compatibility alias. `memory`/`checkpoint` (Codex) or
 `/memory`/`/checkpoint` (Codex/Cursor) are the argument-free refresh/capture
@@ -217,7 +203,7 @@ into the target project. It supports non-PHP targets by offering to build an
 independent sibling generator (`Infrastructure-Creator-[Stack]/`) rather than
 silently failing — see `Infrastructure-Creator/README.md#non-php-targets`.
 
-### Installer (`scripts/install_accelerator.py`)
+### Native installer (`infra-engine install`)
 
 Installs one of the three ready-made editions into a target project from
 versioned inventories (`install/inventories/*.json`), refusing unsupported
@@ -233,14 +219,14 @@ custom architecture — see `install/README.md`.
 - Evaluate a universal policy change in `PHP Core/` first, then adapt it to
   other frameworks' boundaries rather than copying it blindly.
 - Within one edition, mirror supported skill/agent/command changes across
-  `.Codex/`, `.cursor/`, `.agents/`, and `.codex/` (via `build_mirrors.py --write`,
+  `.Codex/`, `.cursor/`, `.agents/`, and `.codex/` (via `infra-engine repo mirrors --write`,
   not by hand).
 - Record edition-local changes in that edition's own `CHANGELOG.md`. Changes
   to shared core (memory/context core, Project Brain, hooks, mirror machinery,
   root `scripts/`) go in the root `CHANGELOG.md` instead — CI's `changelog`
-  job enforces this on PRs via `scripts/check_core_changelog.sh`.
+  job enforces this on PRs via `infra-engine repo changelog`.
 - Run the affected edition's `DOD.md` verification after a change.
-- Memory retrieval takes fixes only until a measurement of task outcomes
-  exists (capsule on against off, on replayed or real tasks). A new
-  ranking, admission or capsule heuristic is not merged on stand numbers;
-  see `docs/MEMORY-EVAL.md` ("Accepting a retrieval change").
+- Memory retrieval takes fixes. A ranking, admission, budget or capsule
+  heuristic is merged only on its own task-outcome measurement, sealed
+  before it runs on held-out tasks, never on stand numbers; see
+  `docs/MEMORY-EVAL.md` ("Accepting a retrieval change").

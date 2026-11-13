@@ -34,9 +34,9 @@ Execute only the selected mode, then stop. Do not turn every Context Summary int
 1. Confirm the candidate is durable, reusable, project-specific, and safe to commit. Reject transient status, speculative reasoning, generic framework advice, and duplicated spec content.
 2. Search the index and chunks by concept, scope, tags, sources, and synonyms. Update an existing chunk instead of creating a near duplicate.
 3. Verify the candidate from current authoritative sources. If it cannot be verified, use `needs-review` and clearly state that agents must not rely on it as fact.
-4. For a new chunk, mint a conflict-free ID `MEM-YYYYMMDD-xxxxxxxx` — today's UTC date plus eight lowercase hex characters (for example from `python3 -c 'import uuid; print(uuid.uuid4().hex[:8])'`) — and write `memory-bank/chunks/MEM-YYYYMMDD-xxxxxxxx-short-slug.md` using `templates/chunk.md`. Never read or increment the legacy `.memory-counter`; existing `MEM-NNNN` chunks keep their IDs and are never renamed.
+4. For a new chunk, mint a conflict-free ID `MEM-YYYYMMDD-xxxxxxxx` — today's UTC date plus eight lowercase hex characters (generated independently at random; retry if the resulting ID already exists) — and write `memory-bank/chunks/MEM-YYYYMMDD-xxxxxxxx-short-slug.md` using `templates/chunk.md`. Never read or increment the legacy `.memory-counter`; existing `MEM-NNNN` chunks keep their IDs and are never renamed.
 5. Keep one cohesive concept per chunk. Include consequences, source paths, verification date, review trigger/date, and replacement links where applicable.
-6. Regenerate the index with `python3 memory-bank/scripts/context.py reindex-bank` after creating or updating a chunk. Do not hand-edit `INDEX.md` rows and do not touch `.memory-counter`.
+6. Regenerate the index with `memory-bank/bin/infra-engine memory reindex-bank` after creating or updating a chunk. Do not hand-edit `INDEX.md` rows and do not touch `.memory-counter`.
 7. Validate the bank before reporting completion.
 
 ## Governed Promotion Application
@@ -62,9 +62,9 @@ Check:
 
 Update a chunk in place when its concept remains valid.
 
-When it stops being valid, retire it with `python3 memory-bank/scripts/context.py bank-retire --id MEM-... --valid-to YYYY-MM-DD [--superseded-by MEM-...]`. MUST use that command rather than hand-editing frontmatter, for the same reason the `memory` skill MUST call the command the hook calls: retiring by hand means editing both sides of a replacement link and then the index, and between any two of those edits the bank is invalid. `bank-retire` writes all of it under one lock and rolls the whole thing back if validation fails.
+When it stops being valid, retire it with `memory-bank/bin/infra-engine memory bank-retire --id MEM-... --valid-to YYYY-MM-DD [--superseded-by MEM-...]`. MUST use that command rather than hand-editing frontmatter, for the same reason the `memory` skill MUST call the command the hook calls: retiring by hand means editing both sides of a replacement link and then the index, and between any two of those edits the bank is invalid. `bank-retire` writes all of it under one lock and rolls the whole thing back if validation fails.
 
-After writing or updating a chunk by hand, run `python3 memory-bank/scripts/context.py bank-reverify --id MEM-...`. It digests every local path the chunk cites and stamps `last_verified`, which is what lets the chunk later notice that the file it summarizes has moved on. `bank-audit` lists chunks whose citations changed and chunks past `review_after`; a chunk reported there is re-read against its sources and then either re-verified or retired. A chunk with no digests keeps working exactly as before — the field is optional so that chunks written before it existed stay valid.
+After writing or updating a chunk by hand, run `memory-bank/bin/infra-engine memory bank-reverify --id MEM-...`. It digests every local path the chunk cites and stamps `last_verified`, which is what lets the chunk later notice that the file it summarizes has moved on. `bank-audit` lists chunks whose citations changed and chunks past `review_after`; a chunk reported there is re-read against its sources and then either re-verified or retired. A chunk with no digests keeps working exactly as before — the field is optional so that chunks written before it existed stay valid.
 
 The two fields answer different questions and both matter. `valid_to` is the date the knowledge stopped being true, which is what removes the chunk from retrieval; `superseded_by` is what replaced it. Pass `--superseded-by` when a successor exists — the chunk becomes `superseded` and the successor's `supersedes` gains it in the same write. Without a successor the chunk becomes `archived`, the honest status for knowledge that simply ceased. The chunk body and every other field are left untouched, the file stays on disk, and its `INDEX.md` row survives with the new status: what leaves is retrieval, not history.
 
@@ -93,7 +93,7 @@ Memory can point to a living spec but must not replace one when architecture, AP
 
 ## Validation
 
-- Run `python3 memory-bank/scripts/validate.py`.
+- Run `memory-bank/bin/infra-engine bank validate`.
 - Parse chunk YAML frontmatter with an installed parser when available.
 - Confirm chunk ID, filename ID, and index ID match.
 - Treat `.memory-counter` as retired: it is not an ID source, may be absent, and the validator deliberately ignores it. Do not delete it on your own; removal is the owner's decision.

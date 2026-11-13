@@ -48,7 +48,7 @@ as unavailable; never reconstruct or invent it.
 5. Run the supported facade with the curated JSON and explicit detail:
 
    ```bash
-   python3 memory-bank/scripts/context.py context-save \
+   memory-bank/bin/infra-engine memory context-save \
      --input PATH_TO_CURATED_JSON \
      --output tasks/TASK-NNN/context-save-YYYYMMDDTHHMMSSZ.md \
      --detail summary \

@@ -1,0 +1,20 @@
+# Local source-vendored package; upstream manifest is Cargo.toml.upstream.
+[package]
+name = "ooxml-numfmt"
+version = "0.2.3"
+edition = "2021"
+publish = false
+description = "Pinned OOXML number format parser and bounded preview formatter"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/a4s-lab/ooxml-numfmt"
+
+[dependencies]
+chrono = { version = "0.4", optional = true, default-features = false, features = ["std"] }
+lru = "=0.16.4"
+num-bigint = { version = "0.4", optional = true }
+thiserror = "=2.0.21"
+
+[features]
+default = ["chrono"]
+chrono = ["dep:chrono"]
+bigint = ["dep:num-bigint"]

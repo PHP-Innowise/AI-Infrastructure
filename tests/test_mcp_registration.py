@@ -46,7 +46,8 @@ class McpRegistrationTests(unittest.TestCase):
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual('', result.stderr)
                 replies = [json.loads(line) for line in result.stdout.splitlines()]
-                self.assertEqual(4, len(replies[-1]['result']['tools']))
+                self.assertEqual({'memory_status','memory_retrieve','memory_checkpoint','memory_record_result',
+                                  'memory_source_fingerprints'}, {tool['name'] for tool in replies[-1]['result']['tools']})
 
     def test_claude_uses_declared_project_root_and_bootstrap_stops_at_nested_marker(self):
         self.write_configs(); outside = self.root.parent / 'other'; outside.mkdir()

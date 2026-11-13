@@ -9,6 +9,10 @@ related: [infra-scan]
 
 # Stack Adapter
 
+Native commands below use `"$GENERATOR_NATIVE"`: set `GENERATOR_NATIVE` to the
+selected generator's absolute `memory-bank/bin/infra-engine` path
+(`infra-engine.exe` on Windows), as required by the owning generator skill.
+
 ## Overview
 
 `stack-adapter` is one of the six sanctioned orchestrator skills (see `AGENTS.md`'s "Orchestration Exception"). It does not generate an accelerator for a target project - it generates an entire **new, independent generator**, structurally identical to Infrastructure-Creator, but fully re-authored for a different technology stack than PHP.
@@ -21,15 +25,12 @@ The produced sibling generator MUST be exactly as independent as Infrastructure-
 
 Not everything needs to be rewritten - some of Infrastructure-Creator's own bundled material is already stack-agnostic by design:
 
-- **Copy verbatim (already stack-agnostic):** memory runtime validation
-  assets, `bootstrap-verifier/scripts/validate_generated.py`,
-  `validate_skill_quality.py`, `validate_reference_catalogs.py`,
-  command-risk and flow-contract validators, `publish_staging.py`, ownership
-  helpers, the generation-plan schema
-  mechanism, and their negative/positive/rollback regression fixtures. These
-  enforce evidence, typed operational contracts, provider/capability safety,
-  path/invariant/anchor coverage, routing/flow equivalence, transactional, and
-  structural quality without encoding a source stack.
+- **Reuse the versioned native engine and static contracts (already stack-agnostic):**
+  memory runtime resources, deterministic generation/skill/reference/command/flow
+  gates, transactional publication and ownership services, generation-plan
+  schemas, and their negative/positive/rollback fixtures. Deliver the selected
+  native artifact and its resources together. Re-author only stack evidence and
+  vocabulary; do not copy retired helper programs or add an interpreter fallback.
 - **Replicate structurally, then adapt wording only:** the directory layout, `SKILL.md`/agent/command frontmatter contracts, hook *mechanics* (event wiring per edition schema), the three-edition layout, the Orchestration Exception model, and the general shape of `AGENTS.md`/`DOD.md`/`GOLDEN-PRINCIPLES.md`/`STABILIZATION.md`. Only the prose describing the target domain changes (e.g. "PHP project" -> "[Stack] project"); the policy structure itself does not.
 - **Re-author entirely, grounded in fresh research:** all seven scanners' detection signals (including domain behavior), `stack-researcher`, `clarifying-interview`, `profile-synthesizer`, every forge's stack-specific guidance, all `skill-forge/references/*.md` equivalents, and the Project Profile schema.
 - **Re-author with identity swapped, not copied verbatim:** `stack-adapter` itself. Its own copy in the new generator must keep the same mechanism (research -> replicate -> re-author -> mirror -> self-verify -> report) but with every self-reference updated: "PHP" -> the new generator's own domain, "Infrastructure-Creator" -> the new generator's own name, and its own independence guardrail restated in terms of *that* generator's identity (e.g. a Flutter generator's `stack-adapter` copy must forbid mentions of Flutter/Dart or "Infrastructure-Creator-Flutter" in whatever it spawns next, not PHP).
@@ -90,7 +91,7 @@ Not everything needs to be rewritten - some of Infrastructure-Creator's own bund
     and execute a dry synthetic profile-to-staged-skills rehearsal. The current
     generator's target-runtime/manifest checks may be skipped only where they
     genuinely require a generated target; semantic checks are never skipped.
-    Run the copied `validate_reference_catalogs.py --references-dir <sibling
+    Run the copied `"$GENERATOR_NATIVE" creator validate-reference-catalogs --references-dir <sibling
     references> --forbid "PHP,Laravel,Symfony,PHP Core,Infrastructure-Creator"`
     (replace the forbidden identity list appropriately in the sibling's own
     identity-swapped adapter).

@@ -9,6 +9,8 @@ related: [infra-generate, infra-update, infra-validate, content-reviewer, skill-
 
 # Bootstrap Verifier
 
+Native helper commands use the generator's explicit bundled executable. Set `GENERATOR_NATIVE` to the absolute path `<generator>/memory-bank/bin/infra-engine` (`infra-engine.exe` on Windows) before the commands below; this is the selected release artifact, with no interpreter, download or build fallback.
+
 ## Overview
 
 `bootstrap-verifier` is the blocking gate for both the complete staged bundle
@@ -16,10 +18,10 @@ and the published target. It validates generated skills against the approved
 evidence/contract plan before running structural, routing, hook, runtime,
 ownership, and placeholder checks.
 
-It uses the bundled dependency-free `scripts/validate_generated.py`,
-`scripts/validate_scan_coverage.py`, `scripts/validate_plan_review.py`,
-`scripts/validate_content_review.py`, `scripts/validate_plan_mutations.py`,
-`scripts/validate_memory_content.py`, and `scripts/analyze_commands.py` plus
+It uses the bundled native `creator validate-generated` command,
+`"$GENERATOR_NATIVE" creator validate-scan-coverage`, `"$GENERATOR_NATIVE" creator validate-plan-review`,
+`"$GENERATOR_NATIVE" creator validate-content-review`, `"$GENERATOR_NATIVE" creator validate-plan-mutations`,
+`"$GENERATOR_NATIVE" creator validate-memory-content`, and `"$GENERATOR_NATIVE" creator analyze-commands` plus
 targeted manual checks.
 
 ## Generated File Naming Convention (MANDATORY)
@@ -28,30 +30,22 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
 
 ## Inferred task identity verification
 
-The structural hook check enforces hook-forge's canonical inferred-branch
-fragments in manifest-owned prompt reads for Claude/Codex/Cursor and in Cursor
-turn/session readers. Check explicit override versus inferred fallback,
-quoted array forwarding, the prompt relay and both Cursor timeout arms. No
-expected-branch marker belongs on a write or rule-maintenance operation.
-Missing, unconditional, mismatched or data-only markers fail with the fixed
-`lacks canonical inferred-branch read contract` diagnostic. Unowned hooks must
-never be read to perform this check.
+Native read hooks apply explicit task overrides and guard inferred task identity
+against the served branch. Write and rule-maintenance operations do not borrow
+a read-only expected-branch marker. The structural gate verifies the selected
+native role, exact shared handler, final engine/root binding and approved policy
+resources; it does not treat shell fragments or comments as an implementation.
 
-Use the documented variable names and fragments; comments, multiline quoted
-programs and literal heredocs are data, and later mutations invalidate the
-contract. The limited lexical check rejects unsupported forms. It does not
-prove arbitrary shell control flow, sourced/eval code, runtime redefinition or
-live delivery. Do not execute unchecked target hooks inside this validator.
-Trusted isolated fixtures may capture actual CLI argv against independent
-public expected lists; distinguish those tests from AI generation, real
-clients, Windows, remote CI and full memory semantic/token-cost evaluation.
+Do not execute unchecked target hooks during this inspection. Runtime fixtures,
+actual native clients and Windows execution provide separate behavior evidence;
+a structural handler match alone does not establish live delivery.
 
 ## Process
 
 1. **Determine the selected editions** from the profile (section 1) and the generate report.
 2. **Run static command analysis without executing target commands.** Invoke:
 
-   `python3 scripts/analyze_commands.py --target <real-target>`
+   `"$GENERATOR_NATIVE" creator analyze-commands --target <real-target>`
 
    This inventories both `composer.json` and `package.json` scripts, expands
    Composer/npm aliases transitively with cycle detection, tokenizes
@@ -61,7 +55,7 @@ clients, Windows, remote CI and full memory semantic/token-cost evaluation.
    `AGENTS.md`, edition `DOD.md` files, and generated skills, and invoke one
    analysis per command:
 
-   `python3 scripts/analyze_commands.py --target <real-target> --no-scripts --verification --command '<exact-command>'`
+   `"$GENERATOR_NATIVE" creator analyze-commands --target <real-target> --no-scripts --verification --command '<exact-command>'`
 
    Exit 1 is blocking. Shell composition, malformed tokenization, unknown or
    cyclic aliases, shell interpreters running `-c` strings (including
@@ -77,7 +71,7 @@ clients, Windows, remote CI and full memory semantic/token-cost evaluation.
    execute a command to discover whether it is safe.
 
    Generated skill *prose* is analyzed mechanically by
-   `validate_skill_quality.py` (step 3), so this manual pass covers `AGENTS.md`
+   `"$GENERATOR_NATIVE" creator validate-skill-quality` (step 3), so this manual pass covers `AGENTS.md`
    and `DOD.md` commands; do not skip a skill body that the validator already
    reported.
 
@@ -92,16 +86,16 @@ clients, Windows, remote CI and full memory semantic/token-cost evaluation.
    review itself.
    Before publishing, also require the discovery, review, and content gates
    the generator required:
-   `python3 scripts/validate_scan_coverage.py --target <real-target> --task-dir <task> --plan <task>/skill-generation-plan.json`
+   `"$GENERATOR_NATIVE" creator validate-scan-coverage --target <real-target> --task-dir <task> --plan <task>/skill-generation-plan.json`
    (which also refuses a plan that leaves a discovered surface unowned without
    saying so in `plan-ownership.json`),
-   `python3 scripts/validate_plan_review.py --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json --registry <generator>/skill-forge/references/candidate-registry.json`,
+   `"$GENERATOR_NATIVE" creator validate-plan-review --plan <task>/skill-generation-plan.json --review <task>/skill-plan-quality-report.json --registry <generator>/skill-forge/references/candidate-registry.json`,
    and
-   `python3 scripts/validate_content_review.py --publication-plan <task>/infra-generate-publication-plan.txt --review <task>/infra-validate-review.json`.
+   `"$GENERATOR_NATIVE" creator validate-content-review --publication-plan <task>/infra-generate-publication-plan.txt --review <task>/infra-validate-review.json`.
 3. **Run the validator:** distinguish the generation root (staging or published
    target) from the real evidence target:
 
-   `python3 scripts/validate_generated.py --target <generation-root> --editions <selected> --skill-plan <task/skill-generation-plan.json> --evidence-target <real-target> --candidate-registry <generator>/skill-forge/references/candidate-registry.json`
+   `"$GENERATOR_NATIVE" creator validate-generated --target <generation-root> --editions <selected> --skill-plan <task/skill-generation-plan.json> --evidence-target <real-target> --delivery-root <real-target> --approved-profile <approved-report> --approved-profile-sha256 <recorded-approved-sha256> --candidate-registry <generator>/skill-forge/references/candidate-registry.json`
 
    It checks:
    - The plan's required evidence metadata, containment, optional fingerprints
@@ -229,21 +223,21 @@ clients, Windows, remote CI and full memory semantic/token-cost evaluation.
    - Every selected edition root exists and every unselected edition root is absent (`.claude`; `.cursor`; `.agents` + `.codex` for Codex).
    - Frontmatter validity across every generated `SKILL.md`, agent, and command.
    - Every `flow-next`/`flow-alternatives`/`related`/`invokes`/`spawns` reference resolves to a skill/agent that exists in that edition.
-   - Every generated hook passes `bash -n` and carries the executable bit, and the per-edition hook set is complete (nine hooks - seven shared, the tool-owned `subagent-gate.sh` variant, and `subagent-dispatch.sh`; `context-continuity.sh` calls `memory-bank/scripts/context_continuity.py` with its edition's `--host` and `--event hook`; Cursor's `working-memory-read.sh` answers `{"continue": true}` to `beforeSubmitPrompt` and renders the working-memory rule, and Codex ships the dispatch observer unregistered). Verify all Cursor `refresh`/`hook-context` calls use `--delivery-profile cursor-rule` without session/transcript suppression, follow the canonical templates, and preserve current warnings and fresh source checks; Claude/Codex use the ordinary profile.
+   - Every selected native hook role is present. Compatibility launchers are byte-identical to the trusted native launcher; handlers equal the shared native formatter for the final delivery root (portable on POSIX). Native policy/schema bytes must match the complete selection in the exact approved report digest. Cursor keeps its native continuation/rule behavior and Codex leaves dispatch unregistered. Never execute an untrusted target shim while inspecting it.
    - Orchestration parity, when the run generated flows: every `stages` entry in a flow command names an agent that exists in that edition, no `parallel: true` stage contains more than one agent carrying `writes: true`, and each multi-stage flow declares at least one checkpoint (a single-stage read-only flow needs none). A generated accelerator whose flows name absent agents is a failed generation, not a warning.
-   - Every hook wiring file (`.claude/settings.json`, `.cursor/hooks.json`, `.codex/hooks.json` + `config.toml`) references only hook scripts that exist and are executable - no dead hooks. Every command that names a hook (a `.sh` script or a `hooks/` path) must be exactly hook-forge's step 9 form for its edition - `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` (or the unbraced `"$CLAUDE_PROJECT_DIR"`), the verbatim Codex root-finding launcher ending in `sh <script>.sh`, bare `.cursor/hooks/<script>.sh` - matched in full, never token by token: anything else is an error, not a skip. A bare Claude/Codex path exits 127 from a subdirectory (both hosts run hooks from the session's cwd and let the call through); `|| true` or `; exit 0` swallows the blocking exit 2; a quoted path, a `bash -c` wrapper or a launcher given a name without `.sh` hides a dead hook. A bare-path error names the anchored command to write instead. Every hook hook-forge registers (all nine on Claude and on Cursor, eight on Codex without `subagent-dispatch.sh`) must also be wired in that form - an unwired guard never runs - and `context-continuity.sh`, with no argument, on each event it serves: `SessionStart`, `UserPromptSubmit` and `Stop` (Claude, Codex), `sessionStart`, `beforeSubmitPrompt` and `afterAgentResponse` (Cursor). Cursor runs project hooks from the project root and keeps bare paths.
-   - The seeded `memory-bank/` passes its own `scripts/validate.py`, run against `--evidence-target` as the source root: the chunks cite the target's files, and during generation the bank is staged apart from them.
-   - The seeded chunks pass `scripts/validate_memory_content.py --bank <generation-root>/memory-bank --target <evidence-target>`: every body states a rule with concrete anchors, no two bodies share a skeleton, no known boilerplate phrase survives, every cited source is explained with a range its file can contain, and contradiction chunks record both claims as `needs-review`. The structural validator proves shape; this gate proves the bank preserves knowledge.
-   - The context-brain runtime is complete (`context.py`, `context_cli.py`, `context_handoff.py`, `context_continuity.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py` under `memory-bank/scripts/`), the `project-brain/` skeleton exists, and `config/runtime.json` parses with a substituted, non-empty framework slug and a `canonical_edition` whose skills tree actually exists in the target (otherwise `context.py parity` would report false total drift).
-   - Smoke: `python3 memory-bank/scripts/context.py status` and `python3 memory-bank/scripts/context.py validate` both exit 0 inside the generated tree.
+   - Every host hook configuration must use the exact shared native handler for its final executable, host, role and delivery root. Materialize source templates before use. The selected compatibility launchers must exist with executable modes and be byte-identical to the trusted native launcher; they carry no policy logic. Claude and Cursor wire all nine roles; Codex leaves subagent dispatch unregistered. Wire context continuity on session start, prompt and turn completion: `SessionStart`, `UserPromptSubmit`, `Stop` for Claude/Codex; `sessionStart`, `beforeSubmitPrompt`, `afterAgentResponse` for Cursor. A missing role, malformed native handler or hidden shell wrapper is blocking. Claude's optional native notification role needs no script file.
+   - The seeded `memory-bank/` passes `"$GENERATOR_NATIVE" bank validate --root <generation-root> --source-root <evidence-target>`: chunks cite the target's files while the generated bank is staged apart from them.
+   - The seeded chunks pass `"$GENERATOR_NATIVE" creator validate-memory-content --bank <generation-root>/memory-bank --target <evidence-target>`: every body states a rule with concrete anchors, no two bodies share a skeleton, no known boilerplate phrase survives, every cited source is explained with a range its file can contain, and contradiction chunks record both claims as `needs-review`. The structural validator proves shape; this gate proves the bank preserves knowledge.
+   - The selected native `memory-bank/bin/infra-engine` artifact (`infra-engine.exe` on Windows) and its declared versioned resources are complete and satisfy `capabilities --json`. The `project-brain/` skeleton exists; `config/runtime.json` has a substituted, non-empty framework slug and a `canonical_edition` whose skills tree exists. Compare those paths and CLI forms with the exact runtime contract; do not require retired interpreter modules.
+   - Smoke: `memory-bank/bin/infra-engine memory status` and `memory-bank/bin/infra-engine memory validate` both exit 0 inside the generated tree.
    - Every selected edition contains the six memory-continuity skills (`memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save`, `context-load`) and their agent/command wrappers where applicable. A manual `context-save full --transcript` artifact is never an automatic-retrieval input or a Project Brain, Memory Bank, SQLite, or hook store. Chat snapshots are separate local ignored `.context-handoff/` state, holding only visible text from the hook payload or the transcript it names - never private client storage or hidden reasoning.
    - The upgrade contract: `.infra-manifest.json` exists at the target root, parses, carries a semver `generator_version`, a `TASK-{N}` reference, a valid mode (`full`/`merge`), valid selected editions, and a well-formed optional `decisions` map whose legacy `decision`, `rejected_sha256`, and `task` fields remain valid. Optional shared-file metadata (`origin`, `strategy`, proposal/resolved hashes, requirements) must be internally consistent; unknown future additive fields are tolerated. It lists no runtime state or itself, and every listed file exists with a matching sha256. Manifest membership exclusively defines ownership in both modes; unlisted target files are not opened or reported. A manifest-owned `AGENTS.md` carries the matching version/task stamp; an untracked team `AGENTS.md` is ignored.
    - A manifest-owned shared root `.gitignore` is validated through its exact
      sorted requirements and hashes. Unrelated team comments/content outside the
      managed block are not placeholder-scanned. An unchanged target-sourced
      shared file must also pass the watch-only publication baseline.
-   - No template placeholders (`{skill-name}`, `TODO`, literal `YYYY-MM-DD`, `[target_name]`, `TASK-{N}`, `{{TARGET_FRAMEWORK}}`, etc.) remain in any manifest-owned text file. The only approved verbatim-asset declarations are the exact manifest-relative path-plus-regex pairs `memory-bank/templates/chunk.md` + `\bYYYY-MM-DD\b` and `memory-bank/scripts/validate.py` + `\bYYYY-MM-DD\b`. Each declaration exempts only matching occurrences, not the whole file: every other placeholder in those assets and the same ISO-date token at any other path remains blocking. Unmanifested team skills, agents, commands, hooks, memory, brain, and root documents are never scanned.
-   - Optional `--baseline-plan <prior plan>` on `validate_skill_quality.py`
+   - No template placeholders (`{skill-name}`, `TODO`, literal `YYYY-MM-DD`, `[target_name]`, `TASK-{N}`, `{{TARGET_FRAMEWORK}}`, etc.) remain in any manifest-owned text file. The only approved verbatim-asset declaration is the exact manifest-relative path-plus-regex pair `memory-bank/templates/chunk.md` + `\bYYYY-MM-DD\b`. Each declaration exempts only matching occurrences, not the whole file: every other placeholder in those assets and the same ISO-date token at any other path remains blocking. Unmanifested team skills, agents, commands, hooks, memory, brain, and root documents are never scanned.
+   - Optional `--baseline-plan <prior plan>` on `"$GENERATOR_NATIVE" creator validate-skill-quality`
      names coverage this run lost: each absent skill with the paths it cited
      (`BASELINE_SKILL_DROPPED`), each `evidence[].path`/`source_paths` entry
      covered there and not here (`BASELINE_COVERAGE_DROPPED`), both repeated
@@ -269,53 +263,17 @@ clients, Windows, remote CI and full memory semantic/token-cost evaluation.
 
 ## Command Analyzer API
 
-- `CommandAnalyzer(target)` reads only target `composer.json`/`package.json`.
-- `CommandAnalyzer.analyze(command, verification=False, ecosystem=None)`
-  returns `CommandAnalysis`.
-- `CommandAnalyzer.analyze_scripts(verification=False)` returns analyses keyed
-  as `composer:<name>` / `package:<name>`.
-- `analyze_command(target, command, verification=False, ecosystem=None)` is the
-  single-command convenience API.
-- `analyze_target(target, commands=(), verification=False)` returns
-  `TargetAnalysis`.
-- `RUNNER_EXECUTABLES` is the public set of every executable name the module
-  recognises (including the unwrapped wrappers). Callers deciding whether a
-  token found in prose is plausibly a command at all gate on it.
-- `CODE_HOST_EXECUTABLES` is the public set of executables that run code handed
-  to them as an argument, so a caller can re-read that argument as a nested
-  command instead of treating it as opaque data.
-- `CommandAnalysis` exposes `categories` (the four risk categories, plus
-  `verification_blocker` when the command is blocked or unresolvable),
-  structured `findings`, `expanded_commands`, traversed `aliases`,
-  `verification_safe`, and `to_dict()`. The analyzer is standard-library-only
-  and never starts a process other than its own CLI.
+The native `creator analyze-commands` route uses the Rust `CommandAnalyzer` in `infra-generator`. It reads the target's Composer/package scripts and recursively analyzes explicit command strings, wrappers and aliases. It reports categories, structured findings, expanded commands, traversed aliases and `verification_safe`; it never runs the commands being inspected. Use the CLI's JSON result for integrations.
 
 ## Manifest Refresh Recipe (after content auto-fixes)
 
 Re-hash every file the manifest already lists, in place - never add or remove entries here (set changes belong to `infra-generate`/`infra-update`'s full recipe):
 
 ```bash
-python3 - "<path-to-target>" <<'PY'
-import hashlib, json, sys, time
-from pathlib import Path
-target = Path(sys.argv[1]).resolve()
-mp = target / ".infra-manifest.json"
-manifest = json.loads(mp.read_text(encoding="utf-8"))
-missing = []
-for rel in list(manifest["files"]):
-    p = target / rel
-    if p.is_file():
-        manifest["files"][rel] = hashlib.sha256(p.read_bytes()).hexdigest()
-    else:
-        missing.append(rel)
-manifest["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-mp.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-print(f"refreshed {len(manifest['files'])} hash(es)"
-      + (f"; STILL MISSING: {missing}" if missing else ""))
-PY
+"$GENERATOR_NATIVE" creator ownership refresh --target "<path-to-target>"
 ```
 
-A non-empty `STILL MISSING` list means a tracked file vanished - that is an escalation, not something to silently drop from the manifest.
+A non-empty `STILL MISSING` list exits nonzero and means a tracked file vanished. Escalate it; the native refresh preserves manifest membership and the missing entry's earlier hash.
 
 ## Output Template
 
@@ -328,7 +286,7 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
 ## Checks
 - Evidence/plan completeness and fingerprints: [pass/fail]
 - Per-skill contract conformance: [pass/fail]
-- Content review record (validate_content_review.py: coverage + no open findings): [pass/fail]
+- Content review record ("$GENERATOR_NATIVE" creator validate-content-review: coverage + no open findings): [pass/fail]
 - Command safety (all prescribed verification resolves + non-mutating): [pass/fail]
 - Skill-body command safety (no destructive/mutating/provider command in prose): [pass/fail]
 - Operational quality (specific procedures/anchors/pass-fail/skip): [pass/fail]
@@ -340,10 +298,10 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
 - Hooks (bash -n + exec bit + per-edition set): [pass/fail]
 - Hook wiring (hook-forge's exact forms, every registered hook wired, all wired scripts exist + executable): [pass/fail]
 - Edition scope (selected present, unselected absent): [pass/fail]
-- Memory bank validate.py: [pass/fail]
-- Memory chunk substance (validate_memory_content.py): [pass/fail]
+- Native Memory Bank validation: [pass/fail]
+- Memory chunk substance ("$GENERATOR_NATIVE" creator validate-memory-content): [pass/fail]
 - Context-brain runtime + project-brain skeleton: [pass/fail]
-- Smoke (context.py status / validate): [pass/fail]
+- Smoke (native memory status / validate): [pass/fail]
 - Manifest (.infra-manifest.json membership + hashes + tracked AGENTS.md stamp): [pass/fail]
 - No placeholders: [pass/fail]
 - Edition scoping: [pass/fail]
@@ -362,11 +320,11 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
 - MUST require `--skill-plan` and `--evidence-target` for every generation or
   update gate; structural-only invocation is for validator maintenance tests,
   not release approval.
-- MUST require a passing `validate_content_review.py` record for every
+- MUST require a passing `"$GENERATOR_NATIVE" creator validate-content-review` record for every
   generation or update gate - a bundle nobody read is not verified, however
   many mechanical checks it passed.
 - MUST confirm no unselected edition was generated.
-- MUST run the seeded memory bank's own validator, not a substitute, and MUST also run `validate_memory_content.py` - a bank that validates structurally while every body restates its title is a failed seed, not a passing one.
+- MUST run the seeded memory bank's own validator, not a substitute, and MUST also run `"$GENERATOR_NATIVE" creator validate-memory-content` - a bank that validates structurally while every body restates its title is a failed seed, not a passing one.
 - MUST keep placeholder exemptions occurrence-scoped to an explicitly approved manifest-relative path-plus-regex declaration; MUST NOT exempt a whole file or a placeholder pattern globally.
 - MUST refresh the manifest hashes (recipe above) after any auto-fix that changed file content, and re-run the validator - a manifest describing pre-fix content is a broken upgrade contract.
 - MUST NOT add or remove manifest entries merely to make the validator pass. Membership changes require the explicit `infra-generate` or `infra-update` write plan; unmanifested on-disk files are team-owned and are not a validation failure.
@@ -412,4 +370,4 @@ named prefix increments and default-parameter assignments cannot rewrite
 resolved task identities.
 
 
-For generated prompt readers, verify the direct `REPORT=$(run python3 "$CONTEXT_CLI" "${ARGUMENTS[@]}" 2>"$ERROR_FILE")` call from hook-forge, preceded by the relay and followed by the status capture. Cursor appends `--json` after the conditional and delivers through its rule arm. Reject any `prompt-supervise` call (the runtime no longer ships one) and post-dispatch array mutations. `CONTEXT_CLI` is assigned only as hook-forge's runtime entry - `memory-bank/scripts/context_cli.py` followed at once by its `[ -f "$CONTEXT_CLI" ] ||` fallback to `context.py` - or, in hooks generated before the loader, as `context.py` alone; any other assignment fails the read contract, because a path that names no file skips memory silently. Continue manifest membership-before-read and syntax-only analysis; never execute an untrusted target hook to validate this grammar.
+For generated prompt readers, validate the exact native compatibility shim and shared native handler metadata. Rust owns task identity, prompt deadlines, complete-output admission, readiness/privacy, Cursor rule publication and response protocols. Reject interpreter fallback or shell implementations of these behaviors; never execute an untrusted target hook to inspect its grammar.
