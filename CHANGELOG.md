@@ -58,6 +58,39 @@ edition's own files remain in that edition's changelog.
   native process test in infra-eval panicked with "No such process" in one
   CI run; the ONNX cleanup test's helper had the same gap. Both now read
   ESRCH as an exited process, as the host tests already did.
+- The lifecycle experiment fixture in infra-eval keeps its leader alive until
+  the leader has a descendant. An experiment schedules its stop signal 80 ms
+  after the native process is executed, and the fixture's leader then still
+  had to publish its identity and spawn the descendant its scenario watches;
+  nothing made the signal wait for that. On a busy runner the leader was
+  slower than that and the scheduled SIGTERM ended it first:
+  `lifecycle_adapter_returns_the_actual_signed_native_exit` panicked with
+  "No such file or directory" for `experiment-late` in one CI run and passed
+  in another run of the same commit, and
+  `scheduled_term_never_retargets_an_already_exited_native_leader` had
+  reported -15 where it expects 0. The leader now holds SIGTERM until its
+  descendant exists, a leader that exits by itself holds it to its end, and
+  the descendant starts with the mask the leader was given. A leader may
+  start about 450 ms late instead of 80 ms; the cases and the capture code
+  are unchanged.
+- That fixture's leader also leaves with 0 when the driver has filled its
+  input pipe first. `experiment-input` shrinks the leader's stdin pipe to
+  hold the driver's megabyte back, and a leader that came to it about 10 ms
+  late found the pipe too full to shrink and left with 126, where
+  `scheduled_experiment_waits_for_backpressured_input_after_native_exit_and_output_eof`
+  expects 0. A pipe that is too full to shrink already holds the input
+  back, so the leader goes on.
+- Experiment cases that signal the whole native group no longer depend on
+  how far the fixture's leader got. A leader killed or interrupted with its
+  group could be gone before it had published itself, or between emptying
+  and rewriting `guardian.json` or `anchor.json`, which its observer had
+  written already;
+  `experiment_delay_cannot_run_before_the_stopped_observer_admits_native`
+  failed with "actual native child of the outside observer" in one CI run.
+  The leader now leaves those two files as its observer wrote them. The
+  fixture's driver looks for the native process among its helpers' children
+  before every step of the experiment, the one that sends the signal
+  included, and publishes what the kernel shows of it.
 - A Cursor plugin image can be materialized again on Windows. Repeating it
   compared each file's planned Unix mode with the mode Windows keeps, only
   read-only, reported as 0o444 or 0o644, and refused an unchanged image with

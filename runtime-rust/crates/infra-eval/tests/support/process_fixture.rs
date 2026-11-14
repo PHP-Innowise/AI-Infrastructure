@@ -65,22 +65,64 @@ fn graph_scenario(mode: &str, arguments: &[String]) -> Result<Value> {
         json!({"ok":true,"code":code,"stdout":String::from_utf8(stdout).map_err(|_|invalid("Fixture runtime output is not UTF-8"))?,"seconds":seconds}),
     )
 }
+/// A process as the kernel shows it, or nothing once it is gone.
 #[cfg(target_os = "linux")]
-fn image(pid: u32, role: &str) -> Value {
-    let text = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+fn seen(pid: u32, role: &str) -> Option<Value> {
+    let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let tail = text
-        .rsplit_once(") ")
-        .unwrap()
+        .rsplit_once(") ")?
         .1
         .split_whitespace()
         .collect::<Vec<_>>();
-    json!({"pid":pid,"ppid":tail[1].parse::<u32>().unwrap(),"pgid":tail[2].parse::<u32>().unwrap(),"start":tail[19].parse::<u64>().unwrap(),"role":role})
+    let field = |at: usize| tail.get(at)?.parse::<u64>().ok();
+    Some(json!({"pid":pid,"ppid":field(1)?,"pgid":field(2)?,"start":field(19)?,"role":role}))
+}
+#[cfg(target_os = "linux")]
+fn image(pid: u32, role: &str) -> Value {
+    seen(pid, role).unwrap()
 }
 #[cfg(not(target_os = "linux"))]
 fn image(pid: u32, role: &str) -> Value {
     json!({"pid":pid,"role":role})
 }
-fn record(root: &Path, role: &str) {
+/// The children of a process, as each of its threads lists them.
+#[cfg(target_os = "linux")]
+fn children(pid: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) else {
+        return found;
+    };
+    for task in tasks.flatten() {
+        if let Ok(list) = fs::read_to_string(task.path().join("children")) {
+            found.extend(
+                list.split_whitespace()
+                    .filter_map(|child| child.parse::<u32>().ok()),
+            );
+        }
+    }
+    found
+}
+/// The native process of the experiment this driver is running, as the kernel
+/// shows it: a child of one of the driver's two helpers that has joined the
+/// group the other helper leads.
+#[cfg(target_os = "linux")]
+fn native_child() -> Option<Value> {
+    let helpers = children(std::process::id());
+    helpers.iter().find_map(|observer| {
+        children(*observer).into_iter().find_map(|child| {
+            seen(child, "native").filter(|native| {
+                native["ppid"] == *observer
+                    && native["pgid"] != *observer
+                    && helpers.iter().any(|anchor| native["pgid"] == *anchor)
+            })
+        })
+    })
+}
+#[cfg(not(target_os = "linux"))]
+fn native_child() -> Option<Value> {
+    None
+}
+fn receipt(root: &Path, role: &str) {
     fs::create_dir_all(root.join("receipts")).unwrap();
     let pid = std::process::id();
     fs::write(
@@ -88,9 +130,12 @@ fn record(root: &Path, role: &str) {
         serde_json::to_vec(&image(pid, role)).unwrap(),
     )
     .unwrap();
+}
+fn record(root: &Path, role: &str) {
+    receipt(root, role);
     #[cfg(target_os = "linux")]
     if role == "leaf" {
-        let own = image(pid, role);
+        let own = image(std::process::id(), role);
         let ppid = own["ppid"].as_u64().unwrap() as u32;
         fs::write(
             root.join("guardian.json"),
@@ -161,10 +206,10 @@ fn descendant(root: &Path, scenario: &str) {
     }
 }
 fn leaf(root: &Path, scenario: &str) -> Result<i32> {
-    record(root, "leaf");
     if scenario.starts_with("experiment-") {
         return experiment_leaf(root, scenario);
     }
+    record(root, "leaf");
     match scenario {
         "signal-int" | "signal-kill" => {
             #[cfg(unix)]
@@ -402,22 +447,76 @@ fn live_receipts(root: &Path) -> Vec<u32> {
     live
 }
 
+/// Blocks SIGTERM in this process and returns the mask it replaced.
+#[cfg(unix)]
+fn hold_term() -> std::io::Result<libc::sigset_t> {
+    let mut term = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    let mut before = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    if unsafe { libc::sigemptyset(term.as_mut_ptr()) } < 0
+        || unsafe { libc::sigaddset(term.as_mut_ptr(), libc::SIGTERM) } < 0
+        || unsafe { libc::sigprocmask(libc::SIG_BLOCK, term.as_ptr(), before.as_mut_ptr()) } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { before.assume_init() })
+}
+/// Restores the mask `hold_term` replaced. A SIGTERM held meanwhile ends this
+/// process here, as the signal it is.
+#[cfg(unix)]
+fn release_term(before: &libc::sigset_t) -> std::io::Result<()> {
+    if unsafe { libc::sigprocmask(libc::SIG_SETMASK, before, std::ptr::null_mut()) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
 fn experiment_leaf(root: &Path, scenario: &str) -> Result<i32> {
+    // An experiment schedules its stop signal from native admission, this
+    // leaf's exec, and knows nothing of what the leaf has done since. Unheld,
+    // the scheduled SIGTERM ends a leaf that starts slowly before it has
+    // spawned its descendant, and its scenario has no process left to drain
+    // during grace. The leaf holds the signal until that descendant exists.
+    #[cfg(unix)]
+    let before = hold_term()?;
+    // A leader that ends by itself keeps the signal held to its end: its own
+    // exit is the native status its scenario reports.
+    let ends_by_itself = matches!(scenario, "experiment-leader-exited" | "experiment-input");
+    // The observer wrote `guardian.json` and `anchor.json` before it admitted
+    // this leaf. A leaf that wrote them again could be ended by a signal to
+    // its group between emptying one and filling it.
+    receipt(root, "leaf");
     if scenario == "experiment-natural125" {
         return Ok(125);
     }
     #[cfg(target_os = "linux")]
     if scenario == "experiment-input" && unsafe { libc::fcntl(0, libc::F_SETPIPE_SZ, 4096) } < 0 {
-        return Err(std::io::Error::last_os_error().into());
+        // The driver writes its megabyte from admission on and may have
+        // filled the pipe before this leaf could shrink it. A pipe that is
+        // too full to shrink already holds the input back.
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EBUSY) {
+            return Err(error.into());
+        }
     }
-    let child = Command::new(std::env::current_exe()?)
+    let mut descendant = Command::new(std::env::current_exe()?);
+    descendant
         .arg("descendant")
         .arg(root)
         .arg(scenario)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+        .stderr(Stdio::inherit());
+    // The hold is the leader's alone. Its descendant starts with the mask the
+    // leader was given, so a signal sent to the whole group still ends it.
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        descendant.pre_exec(move || release_term(&before));
+    }
+    let child = descendant.spawn()?;
+    #[cfg(unix)]
+    if !ends_by_itself {
+        release_term(&before)?;
+    }
     let receipt = root
         .join("receipts")
         .join(format!("{}-descendant.json", child.id()));
@@ -431,7 +530,7 @@ fn experiment_leaf(root: &Path, scenario: &str) -> Result<i32> {
         ));
     }
     ready(root);
-    if matches!(scenario, "experiment-leader-exited" | "experiment-input") {
+    if ends_by_itself {
         if scenario == "experiment-input" {
             #[cfg(unix)]
             unsafe {
@@ -506,6 +605,11 @@ fn experiment_scenario(root: &Path, name: &str) -> Result<Value> {
     let mut metadata = None;
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
+    // A leader whose group is killed or interrupted may be gone before it has
+    // published itself. The experiment asks this driver whether it was
+    // interrupted before every step, the one that sends the signal included,
+    // so the driver looks for the leader there and publishes it afterwards.
+    let mut leader = None;
     let started = std::time::Instant::now();
     let result = if name == "experiment-adapter-term" {
         process::experiment(&spec, stop).map(|exit| json!({"exit":exit}))
@@ -520,7 +624,12 @@ fn experiment_scenario(root: &Path, name: &str) -> Result<Value> {
                 deadline: std::time::Instant::now() + Duration::from_secs(4),
             },
             stop,
-            infra_eval::cancel::interrupted,
+            || {
+                if leader.is_none() {
+                    leader = native_child();
+                }
+                infra_eval::cancel::interrupted()
+            },
             |native| metadata = Some(native),
             |stream, bytes| {
                 match stream {
@@ -539,6 +648,13 @@ fn experiment_scenario(root: &Path, name: &str) -> Result<Value> {
             )
         })
     };
+    if let Some(leader) = &leader {
+        fs::write(
+            root.join("receipts")
+                .join(format!("{}-native.json", leader["pid"])),
+            serde_json::to_vec(leader)?,
+        )?;
+    }
     fs::write(root.join("stdout.bin"), stdout)?;
     fs::write(root.join("stderr.bin"), stderr)?;
     let mut report = match result {
