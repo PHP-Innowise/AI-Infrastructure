@@ -1254,6 +1254,11 @@ Creator and System runs keep their own progress and show only their waiting line
   fills the Checks form with the bare command and names what was removed; nothing
   runs until you press **Run check**.
 
+After the turn the strip closes. A **Last run** line under the conversation opens
+the same tabs for the launch that just ended (**Show files**, **Show plan**, **Show
+commands**), and **Close** puts them away. The page keeps the newest launch only, so
+the line goes when the next turn or a Harness check starts.
+
 ![Detailed › Files during a run: the file being read carries a ring, edits are filled, a created file has a plus](../docs/images/harness-run-view/files-map.jpg)
 
 ![Detailed › Commands: a check that failed twice and then passed, and a PHPStan run piped to tail marked unknown](../docs/images/harness-run-view/commands.jpg)

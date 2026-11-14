@@ -340,6 +340,24 @@ edition's own files remain in that edition's changelog.
   this user owns, on the project's file system, with no configuration that can
   move or remove the work tree, is now read without Git, with the same top,
   prefix and administrative directory.
+- The Harness Run view opens again. Since the move to Rust it stayed
+  collapsed and out of reach, during a run and after it: the markup ships the
+  view as `data-open="false" inert` and its panel as `inert`, the stylesheet
+  shows them only as `data-open="true"` and `data-detailed="true"`, and the
+  Wasm interface filled the view without ever setting either. It also never
+  showed the Now line or the Plan and Commands tabs, and wrote the step count
+  over the strip's whole second line, which deleted the Calm/Detailed switch,
+  Close and the away summary. The strip above the composer now shows the
+  waiting line while a session is queued or preparing and what the agent does
+  while a native launch runs; Calm/Detailed, or the count chip in a narrow
+  window, opens the Files, Plan and Commands tabs. After the turn a **Last
+  run** line under the conversation opens the same tabs for it, and **Close**
+  puts them away. An earlier launch never stands in for one that is starting.
+  Whether the view is open, and as what, is one function with tests
+  (`mode` in `infra-ui/src/run.rs`). Not brought back: the run receipt in the
+  conversation, details of turns before the last launch (the page keeps one
+  launch, and a Harness check counts as one), Escape and arrow keys in the
+  panel, and the notification button.
 - The Harness page shows its own updates again. Since the move to Rust the
   Update button never appeared: the Wasm interface waited for an `available`
   flag that `GET /api/app/update` does not send (it reports `state`), filled

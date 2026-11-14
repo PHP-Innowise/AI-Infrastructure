@@ -9,13 +9,24 @@ fn clean(s: &str) -> String {
 }
 pub fn reset() {
     dom::cancel_timer("run-clock");
-    for key in ["run", "agents", "run-file-filter", "run-command-filter"] {
+    for key in [
+        "run",
+        "agents",
+        "run-file-filter",
+        "run-command-filter",
+        "run-after",
+        "run-idle",
+    ] {
         m::take(key);
     }
     dom::clear("events");
     dom::clear("run-tree");
     dom::clear("run-pane-plan");
     dom::clear("run-pane-commands");
+    // The away summary belongs to the session being left.
+    away(false);
+    // The session being left closes its strip now, not when the next one answers.
+    render();
 }
 fn initial() -> V {
     json!({"launch":"","calls":{},"open":[],"files":{},"commands":[],"plan":[],"searches":[],"steps":0,"messages":0,"finished":false,"outcome":null,"memory":null,"kinds":[],"started":null})
@@ -248,6 +259,105 @@ fn native_run(run: &V) -> bool {
         )
     })
 }
+/// What the strip above the composer shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// Nothing runs and no finished turn is open: the view is collapsed and inert.
+    Closed,
+    /// The session is queued, preparing, or runs something the strip does not describe.
+    Waiting,
+    /// A native launch is running: the Now line and, on request, its details.
+    Now,
+    /// The details of the finished turn, opened from the line under the conversation.
+    After,
+}
+/// Fleet, Clash, Creator and System sessions keep their own progress: the strip only says they run.
+fn plain(session: &V) -> bool {
+    session["workflow"] == "fleet-review"
+        || [
+            "fleet",
+            "clash",
+            "creator",
+            "system_run",
+            "system_discovery",
+        ]
+        .iter()
+        .any(|key| session[*key].is_object())
+}
+fn kinds(run: &V) -> impl Iterator<Item = &str> {
+    run["kinds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(V::as_str)
+}
+/// The provider has written something for this launch; until then the session is only preparing.
+fn cli_started(run: &V) -> bool {
+    kinds(run).any(|kind| {
+        matches!(
+            kind,
+            "session" | "text" | "tool" | "plan" | "usage" | "result" | "error"
+        )
+    })
+}
+/// The launch the model holds cannot be the one that runs now: it closed itself, the person has
+/// asked for the next turn since it started, or the page has already seen the session at rest
+/// with it. `idle` is the launch the page last saw at rest.
+fn over(run: &V, idle: &V) -> bool {
+    let launch = run["launch"].as_str().unwrap_or("");
+    m::yes(&run["finished"])
+        || idle.as_str() == Some(launch)
+        || (!launch.is_empty() && kinds(run).any(|kind| kind == "user"))
+}
+/// Whether the Run view is open, and as what. `after` is the launch whose finished details the
+/// person opened; `idle` is the launch the page last saw at rest.
+fn mode(session: &V, run: &V, after: &V, idle: &V) -> Mode {
+    let native = run.is_object() && native_run(run) && !plain(session);
+    if !m::active(session) {
+        // A finished turn's details stay open only while nothing runs, and only for the launch
+        // they were opened for.
+        let opened = after.as_str().is_some() && after.as_str() == run["launch"].as_str();
+        return if session.is_object() && native && opened {
+            Mode::After
+        } else {
+            Mode::Closed
+        };
+    }
+    if session["status"] == "queued" || !native || over(run, idle) || !cli_started(run) {
+        Mode::Waiting
+    } else {
+        Mode::Now
+    }
+}
+const TABS: [&str; 3] = ["files", "plan", "commands"];
+/// The launch recorded something for this tab.
+fn has(run: &V, tab: &str) -> bool {
+    match tab {
+        "files" => run["files"].as_object().is_some_and(|map| !map.is_empty()),
+        _ => run[tab].as_array().is_some_and(|list| !list.is_empty()),
+    }
+}
+/// The tabs a finished turn can open from the line under the conversation: none while a turn
+/// runs, for a session that keeps its own progress, or when the launch recorded nothing.
+fn openers(session: &V, run: &V) -> Vec<&'static str> {
+    if !session.is_object()
+        || m::active(session)
+        || plain(session)
+        || !run.is_object()
+        || !native_run(run)
+    {
+        return vec![];
+    }
+    TABS.into_iter().filter(|tab| has(run, tab)).collect()
+}
+/// The tab the panel shows: the chosen one while the launch has something for it, else Files.
+fn shown_tab<'a>(run: &V, chosen: &'a str) -> &'a str {
+    if TABS.contains(&chosen) && has(run, chosen) {
+        chosen
+    } else {
+        "files"
+    }
+}
 #[derive(Debug, PartialEq)]
 struct RunClock {
     started: Option<String>,
@@ -291,17 +401,170 @@ fn update_clock() {
         dom::cancel_timer("run-clock");
     }
 }
-pub fn render() {
-    let run = m::data("run");
-    if !run.is_object() {
-        dom::cancel_timer("run-clock");
-        dom::hidden("run-view", true);
+fn truth(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
+}
+fn inert(id: &str, value: bool) {
+    if let Some(e) = dom::get(id) {
+        if value {
+            let _ = e.set_attribute("inert", "");
+        } else {
+            let _ = e.remove_attribute("inert");
+        }
+    }
+}
+fn focus_within(ids: &[&str]) -> bool {
+    let Some(focused) = dom::document().active_element() else {
+        return false;
+    };
+    ids.iter()
+        .any(|id| dom::get(id).is_some_and(|e| e.contains(Some(&focused))))
+}
+/// Focus without scrolling: the view clips its content while it opens, and a scrolling focus
+/// would shift what it clips.
+fn focus(id: &str) {
+    let Some(e) = dom::get(id) else { return };
+    let options = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&options, &"preventScroll".into(), &true.into());
+    if let Ok(method) = js_sys::Reflect::get(&e, &"focus".into()) {
+        if let Some(method) = method.dyn_ref::<js_sys::Function>() {
+            let _ = method.call1(&e, &options);
+        }
+    }
+}
+/// The Calm/Detailed switch that is on screen: a narrow window shows only the compact chip.
+fn detail_switch() -> &'static str {
+    let narrow = dom::window()
+        .match_media("(max-width:760px)")
+        .ok()
+        .flatten()
+        .is_some_and(|media| media.matches());
+    if narrow {
+        "run-compact"
+    } else {
+        "run-calm"
+    }
+}
+/// Opens or collapses the view and its panel. The markup ships both collapsed and inert, and the
+/// stylesheet shows the view only as `data-open="true"` and the panel only as
+/// `data-detailed="true"` on the card.
+fn reveal(mode: Mode, detailed: bool) {
+    let strip = matches!(mode, Mode::Now | Mode::After);
+    let panel = strip && detailed;
+    // Keyboard focus in a part that is about to go inert would fall to <body>: it moves first,
+    // to the Calm/Detailed switch while the strip stays, else to the composer.
+    if !strip && focus_within(&["run-view", "run-file-card"]) {
+        focus("prompt");
+    } else if !panel && focus_within(&["run-panel", "run-file-card"]) {
+        focus(detail_switch());
+    }
+    if !panel {
+        dom::hidden("run-file-card", true);
+    }
+    dom::attr("run-view", "data-open", truth(mode != Mode::Closed));
+    inert("run-view", mode == Mode::Closed);
+    dom::attr("run-card", "data-detailed", truth(panel));
+    inert("run-panel", !panel);
+    for (id, pressed) in [
+        ("run-calm", !detailed),
+        ("run-detailed", detailed),
+        ("run-compact", detailed),
+    ] {
+        dom::attr(id, "aria-pressed", truth(pressed));
+    }
+    dom::hidden("waiting", mode != Mode::Waiting);
+    dom::hidden("run-now", !strip);
+    dom::hidden("run-line2", !strip);
+    dom::hidden("run-close", mode != Mode::After);
+    dom::attr(
+        "run-dot",
+        "data-state",
+        if mode == Mode::Now { "running" } else { "done" },
+    );
+    dom::attr("run-dot", "data-pulse", truth(mode == Mode::Now));
+}
+const TURN: &str = "run-turn";
+/// The line under the conversation that opens a finished turn's details. The page keeps the
+/// newest launch only, so there is one line, and it goes when the next turn starts.
+fn turn_line(session: &V, run: &V) {
+    let tabs = openers(session, run);
+    let old = dom::get(TURN);
+    if tabs.is_empty() {
+        if let Some(old) = old {
+            old.remove();
+        }
         return;
     }
+    let text = format!(
+        "Last run · {} steps · {} messages",
+        m::string(&run["steps"]),
+        m::string(&run["messages"])
+    );
+    let signature = format!("{text}|{}", tabs.join(","));
+    let Some(events) = dom::get("events") else {
+        return;
+    };
+    let line = match old {
+        Some(old) if old.get_attribute("data-signature").as_deref() == Some(&signature) => old,
+        old => {
+            if let Some(old) = old {
+                old.remove();
+            }
+            let line = dom::el("article", "run-receipt", "");
+            let _ = line.set_attribute("id", TURN);
+            let _ = line.set_attribute("data-compact", "true");
+            let _ = line.set_attribute("data-signature", &signature);
+            let _ = line.set_attribute("aria-label", "Last run");
+            dom::add(&line, &dom::el("span", "", &text));
+            for tab in tabs {
+                let open = dom::button(&format!("Show {tab}"), "run-open", json!(tab));
+                open.set_class_name("run-link");
+                dom::add(&line, &open);
+            }
+            line
+        }
+    };
+    // It follows the log instead of living in it: the log is a live region and is cleared whole.
+    if events.next_element_sibling().as_ref() != Some(&line) {
+        let _ = events.after_with_node_1(&line);
+    }
+}
+/// The away summary takes the counts' place on the strip's second line while it shows.
+fn away(shown: bool) {
+    dom::hidden("run-away", !shown);
+    dom::hidden("run-chips", shown);
+}
+fn chip(text: &str) {
+    let Some(chips) = dom::get("run-chips") else {
+        return;
+    };
+    match chips.first_element_child() {
+        Some(chip) => {
+            if chip.text_content().as_deref() != Some(text) {
+                chip.set_text_content(Some(text));
+            }
+        }
+        None => dom::add(&chips, &dom::el("span", "run-chip", text)),
+    }
+}
+pub fn render() {
+    let run = m::data("run");
     let session = m::read(|s| s.selected.clone());
-    let native = native_run(&run);
-    dom::hidden("run-view", !native);
-    if !native {
+    if m::active(&session) {
+        // A turn that starts takes the strip back from an earlier turn's details.
+        m::take("run-after");
+    } else if run.is_object() {
+        // The page has seen this launch at rest: whatever runs next is not it.
+        m::set("run-idle", run["launch"].clone());
+    }
+    let mode = mode(&session, &run, &m::data("run-after"), &m::data("run-idle"));
+    reveal(mode, m::yes(&m::data("run-detailed")));
+    turn_line(&session, &run);
+    if !run.is_object() || !native_run(&run) {
         dom::cancel_timer("run-clock");
         return;
     }
@@ -333,16 +596,31 @@ pub fn render() {
     } else {
         "Model’s turn".into()
     };
-    update_clock();
+    if mode == Mode::Now {
+        update_clock();
+    } else {
+        // Only a running launch has a clock: a finished turn would show the age of its first event.
+        dom::cancel_timer("run-clock");
+        dom::text("run-clock", "");
+    }
     dom::text("run-now-text", &now);
     dom::text("run-verb", &now);
+    // The counts go into the chips' own box: the second line also holds the Calm/Detailed switch,
+    // Close and the away summary, which a text written over the whole line would delete.
+    let counts = format!(
+        "{} steps · {} messages",
+        m::string(&run["steps"]),
+        m::string(&run["messages"])
+    );
+    chip(&counts);
     dom::text(
-        "run-line2",
-        &format!(
-            "{} steps · {} messages",
-            m::string(&run["steps"]),
-            m::string(&run["messages"])
-        ),
+        "run-compact",
+        &format!("{} steps", m::string(&run["steps"])),
+    );
+    dom::attr(
+        "run-compact",
+        "aria-label",
+        &format!("Run details. {counts}"),
     );
     let files = run["files"].as_object().cloned().unwrap_or_default();
     dom::text("run-badge-files", &files.len().to_string());
@@ -489,22 +767,44 @@ pub fn render() {
             block
         },
     );
-    let tab = m::data("run-tab").as_str().unwrap_or("files").to_owned();
-    for name in ["files", "plan", "commands"] {
-        dom::hidden(&format!("run-pane-{name}"), name != tab);
-        dom::attr(
-            &format!("run-tab-{name}"),
-            "aria-selected",
-            if name == tab { "true" } else { "false" },
-        );
+    let chosen = m::data("run-tab");
+    let tab = shown_tab(&run, chosen.as_str().unwrap_or("files"));
+    if chosen.as_str().is_some_and(|chosen| chosen != tab) {
+        // The fallback becomes the choice: the panel does not jump to Plan when one arrives later.
+        m::set("run-tab", json!(tab));
     }
-    let detailed = m::data("run-detailed").as_bool().unwrap_or(false);
-    dom::hidden("run-panel", !detailed);
-    dom::attr(
-        "run-view",
-        "data-detailed",
-        if detailed { "true" } else { "false" },
-    );
+    for name in TABS {
+        let selected = name == tab;
+        let button = format!("run-tab-{name}");
+        // Plan and Commands ship hidden: each joins the tab list once the launch has one.
+        dom::hidden(&button, name != "files" && !has(&run, name));
+        dom::attr(&button, "aria-selected", truth(selected));
+        // Every shown tab is a tab stop: the page has no arrow-key handling for the tab list.
+        dom::attr(&button, "tabindex", "0");
+        dom::hidden(&format!("run-pane-{name}"), !selected);
+    }
+}
+/// Opens the finished turn's details on a tab; while a turn runs the strip is its own.
+fn open(tab: &str) {
+    let (session, run) = (m::read(|s| s.selected.clone()), m::data("run"));
+    let tab = shown_tab(&run, tab);
+    if !openers(&session, &run).contains(&tab) {
+        return;
+    }
+    m::set("run-after", run["launch"].clone());
+    m::set("run-tab", json!(tab));
+    m::set("run-detailed", json!(true));
+    render();
+    focus(&format!("run-tab-{tab}"));
+}
+fn close() {
+    m::take("run-after");
+    render();
+    focus("prompt");
+}
+fn detail(on: bool) {
+    m::set("run-detailed", json!(on));
+    render();
 }
 pub fn activity(event: &V) {
     let sid = m::read(|s| s.sid.clone());
@@ -587,20 +887,15 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, _value: &str
         return false;
     }
     match action {
-        "run-calm" => {
-            m::set("run-detailed", json!(false));
-            render();
-        }
-        "run-detailed" | "run-compact" | "run-now" => {
-            m::set("run-detailed", json!(!m::yes(&m::data("run-detailed"))));
-            render();
-        }
-        "run-close" => {
-            m::set("run-detailed", json!(false));
-            render();
-        }
+        "run-calm" => detail(false),
+        "run-detailed" => detail(true),
+        "run-compact" | "run-now" => detail(!m::yes(&m::data("run-detailed"))),
+        "run-close" => close(),
+        "run-open" => open(payload.as_str().unwrap_or("files")),
         "run-tab-files" | "run-tab-plan" | "run-tab-commands" => {
             m::set("run-tab", json!(action.trim_start_matches("run-tab-")));
+            // The file card belongs to the Files tab.
+            dom::hidden("run-file-card", true);
             render();
         }
         "run-view-map" | "run-view-list" => {
@@ -615,7 +910,8 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, _value: &str
             dom::focus("check-command");
         }
         "run-away-close" => {
-            dom::hidden("run-away", true);
+            away(false);
+            focus("run-now");
         }
         "run-away-jump" => {
             if let Some(e) =
@@ -623,7 +919,8 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, _value: &str
             {
                 e.set_scroll_top(e.scroll_height());
             }
-            dom::hidden("run-away", true);
+            away(false);
+            focus("run-now");
         }
         "run-reveal" => {
             let selector = format!("[data-event-id=\"{}\"]", m::string(payload));
@@ -724,7 +1021,7 @@ pub fn visibility() {
         .unwrap_or(0);
     let text=format!("While you were away{}: {steps} steps · {edits} edits · {messages} messages · {failed} failed checks{}",if minutes>0{format!(" ({minutes} min)")}else{String::new()},if after["finished"]==true{format!(" · run {}",m::text(&after,"outcome"))}else{String::new()});
     dom::text("run-away-text", &text);
-    dom::hidden("run-away", false);
+    away(true);
     dom::text("run-announcer", &text);
 }
 fn notify_finished() {
@@ -777,6 +1074,208 @@ fn notify_finished() {
         });
         note.set_onclick(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    fn launch(id: &str, kinds: &[&str]) -> V {
+        let mut run = initial();
+        run["launch"] = json!(id);
+        run["kinds"] = json!(kinds);
+        run
+    }
+    fn session(status: &str) -> V {
+        json!({"id":"s","status":status,"workflow":"native"})
+    }
+    const NONE: V = V::Null;
+
+    #[test]
+    fn the_view_stays_closed_while_nothing_runs() {
+        let run = launch("a", &["status", "tool", "text"]);
+        assert_eq!(mode(&NONE, &NONE, &NONE, &NONE), Mode::Closed);
+        assert_eq!(mode(&NONE, &run, &NONE, &NONE), Mode::Closed);
+        for status in [
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+            "awaiting_context",
+            "awaiting_approval",
+        ] {
+            assert_eq!(
+                mode(&session(status), &run, &NONE, &json!("a")),
+                Mode::Closed,
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_running_native_launch_opens_the_now_line() {
+        let running = session("running");
+        for kind in [
+            "session", "text", "tool", "plan", "usage", "result", "error",
+        ] {
+            assert_eq!(
+                mode(&running, &launch("a", &["status", kind]), &NONE, &NONE),
+                Mode::Now,
+                "{kind}"
+            );
+        }
+        // A reload during the run replays the record with the session still running.
+        assert_eq!(
+            mode(&running, &launch("b", &["tool"]), &NONE, &json!("a")),
+            Mode::Now
+        );
+    }
+
+    #[test]
+    fn the_strip_waits_until_the_provider_writes() {
+        let running = session("running");
+        assert_eq!(mode(&running, &NONE, &NONE, &NONE), Mode::Waiting);
+        assert_eq!(
+            mode(&running, &launch("", &["user"]), &NONE, &NONE),
+            Mode::Waiting
+        );
+        assert_eq!(
+            mode(&running, &launch("a", &["status", "memory"]), &NONE, &NONE),
+            Mode::Waiting
+        );
+        assert_eq!(
+            mode(&session("queued"), &launch("a", &["tool"]), &NONE, &NONE),
+            Mode::Waiting
+        );
+    }
+
+    #[test]
+    fn an_earlier_launch_never_stands_in_for_the_one_that_starts() {
+        let running = session("running");
+        // The person's next message arrived after this launch began.
+        let answered = launch("a", &["tool", "text", "user"]);
+        assert_eq!(mode(&running, &answered, &NONE, &NONE), Mode::Waiting);
+        // The page saw the session at rest with this launch: a check or a retry runs now.
+        let rested = launch("a", &["tool", "text"]);
+        assert_eq!(mode(&running, &rested, &NONE, &json!("a")), Mode::Waiting);
+        // The launch closed itself while the session still settles.
+        let mut closed = launch("a", &["tool", "status"]);
+        closed["finished"] = json!(true);
+        assert_eq!(mode(&running, &closed, &NONE, &NONE), Mode::Waiting);
+        // Its successor's first provider event takes the strip.
+        assert_eq!(
+            mode(&running, &launch("b", &["tool"]), &NONE, &json!("a")),
+            Mode::Now
+        );
+        // A record without launch ids holds the messages too; they end nothing.
+        assert!(!over(&launch("", &["user", "tool"]), &NONE));
+        assert!(over(&launch("", &["user", "tool"]), &json!("")));
+    }
+
+    #[test]
+    fn sessions_with_their_own_progress_only_wait() {
+        let run = launch("a", &["status", "tool"]);
+        let mut sessions = vec![json!({"id":"s","status":"running","workflow":"fleet-review"})];
+        for key in [
+            "fleet",
+            "clash",
+            "creator",
+            "system_run",
+            "system_discovery",
+        ] {
+            let mut session = session("running");
+            session[key] = json!({});
+            sessions.push(session);
+        }
+        for mut session in sessions {
+            assert_eq!(mode(&session, &run, &NONE, &NONE), Mode::Waiting);
+            session["status"] = json!("completed");
+            assert_eq!(mode(&session, &run, &json!("a"), &NONE), Mode::Closed);
+            assert!(openers(&session, &run).is_empty());
+        }
+        for kind in [
+            "fleet_stage",
+            "fleet_reviewer",
+            "clash_turn",
+            "agent",
+            "agent_activity",
+        ] {
+            let mut run = launch("a", &["tool", kind]);
+            run["files"] = json!({"a.php":{"path":"a.php"}});
+            assert_eq!(mode(&session("running"), &run, &NONE, &NONE), Mode::Waiting);
+            assert_eq!(
+                mode(&session("completed"), &run, &json!("a"), &NONE),
+                Mode::Closed
+            );
+            assert!(openers(&session("completed"), &run).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_finished_turn_opens_for_its_own_launch_and_closes_again() {
+        let done = session("completed");
+        let run = launch("a", &["tool", "text"]);
+        assert_eq!(mode(&done, &run, &json!("a"), &json!("a")), Mode::After);
+        // Close forgets the launch; another launch's request opens nothing.
+        assert_eq!(mode(&done, &run, &NONE, &json!("a")), Mode::Closed);
+        assert_eq!(mode(&done, &run, &json!("b"), &json!("a")), Mode::Closed);
+        assert_eq!(mode(&done, &NONE, &json!("a"), &NONE), Mode::Closed);
+        // No session is selected: a launch left in the model opens nothing.
+        assert_eq!(mode(&NONE, &run, &json!("a"), &NONE), Mode::Closed);
+        // A record without launch ids is one launch with an empty id.
+        assert_eq!(
+            mode(
+                &done,
+                &launch("", &["user", "tool"]),
+                &json!(""),
+                &json!("")
+            ),
+            Mode::After
+        );
+        // The next turn takes the strip back.
+        assert_eq!(
+            mode(&session("queued"), &run, &json!("a"), &json!("a")),
+            Mode::Waiting
+        );
+        assert_eq!(
+            mode(&session("running"), &run, &json!("a"), &json!("a")),
+            Mode::Waiting
+        );
+    }
+
+    #[test]
+    fn a_finished_turn_offers_only_the_tabs_it_filled() {
+        let done = session("completed");
+        let mut run = launch("a", &["tool", "text"]);
+        assert!(openers(&done, &run).is_empty());
+        run["files"] = json!({"a.php":{"path":"a.php","reads":1,"edits":0}});
+        assert_eq!(openers(&done, &run), ["files"]);
+        run["plan"] = json!([{"content":"Write the test","status":"pending"}]);
+        run["commands"] = json!([{"call":"c1","command":"composer test"}]);
+        assert_eq!(openers(&done, &run), ["files", "plan", "commands"]);
+        run["files"] = json!({});
+        assert_eq!(openers(&done, &run), ["plan", "commands"]);
+        // While a turn runs, the strip is its own; without a session there is nothing to open.
+        assert!(openers(&session("running"), &run).is_empty());
+        assert!(openers(&session("queued"), &run).is_empty());
+        assert!(openers(&NONE, &run).is_empty());
+        assert!(openers(&done, &NONE).is_empty());
+    }
+
+    #[test]
+    fn the_panel_shows_files_when_the_chosen_tab_is_empty() {
+        let mut run = launch("a", &["tool"]);
+        assert_eq!(shown_tab(&run, "files"), "files");
+        assert_eq!(shown_tab(&run, "plan"), "files");
+        assert_eq!(shown_tab(&run, "commands"), "files");
+        assert_eq!(shown_tab(&run, "elsewhere"), "files");
+        run["plan"] = json!([{"content":"Write the test","status":"pending"}]);
+        assert_eq!(shown_tab(&run, "plan"), "plan");
+        assert_eq!(shown_tab(&run, "commands"), "files");
+        // A plan event without a list leaves the tab out, as the pane would be empty.
+        run["plan"] = json!({"note":"no items"});
+        assert_eq!(shown_tab(&run, "plan"), "files");
     }
 }
 
