@@ -27,6 +27,7 @@ use std::{
 };
 mod layers;
 mod patterns;
+mod runs;
 /// Children of one folder drawn at once; the rest are reached by the filter.
 pub const SHOWN: usize = 40;
 /// Links drawn between those children, strongest first.

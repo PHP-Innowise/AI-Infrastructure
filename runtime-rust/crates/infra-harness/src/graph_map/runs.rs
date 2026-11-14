@@ -1,0 +1,138 @@
+//! A run of an agent laid over the map of what it changed: which of the
+//! files that use the change the run opened, and which it left unopened.
+//!
+//! A session records the files a run opened and those it changed. A graph
+//! knows which files use the changed ones. A file that uses the change and
+//! was never opened is where a break the run did not see is looked for
+//! first. What a run saw through a shell command or a search is not
+//! recorded as opened, so the list is where to look, not a verdict.
+use super::*;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Bound,
+};
+
+/// Unopened files listed at once; the rest are counted.
+pub const LISTED: usize = 30;
+
+impl Index {
+    /// Says in a picture of what a run changed what the run opened. A box
+    /// of a file the run opened says so, and a box of a folder how many
+    /// files in it the run opened; so do the two sides of a selected place.
+    /// `view["run"]["reach"]` tells of the files that use what the run
+    /// changed where the picture is open: how many there are, how many of
+    /// them the run opened, and the unopened ones, the most linked first.
+    /// A changed file is no user of the change, and a deleted file has no
+    /// users in a graph built after it was gone.
+    pub fn overlay_run(
+        &self,
+        view: &mut Value,
+        changed: &[(String, char)],
+        opened: &BTreeSet<String>,
+        certain: bool,
+    ) {
+        let scope = view["scope"].as_str().unwrap_or("").to_owned();
+        let within = |path: &str| {
+            scope.is_empty()
+                || path == scope
+                || path
+                    .strip_prefix(scope.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        };
+        let ids = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(id, path)| (path.as_str(), id as u32))
+            .collect::<HashMap<_, _>>();
+        // Every changed file is left out of the users; those of the open
+        // folder are the ones whose users are told.
+        let all = changed
+            .iter()
+            .filter(|(_, done)| *done != 'D')
+            .filter_map(|(path, _)| ids.get(path.as_str()).copied())
+            .collect::<HashSet<_>>();
+        let ours = all
+            .iter()
+            .copied()
+            .filter(|id| within(&self.files[*id as usize]))
+            .collect::<HashSet<_>>();
+        // Each with the changed files it uses, and through how many links.
+        let mut users: HashMap<u32, (Flow, BTreeMap<u32, u64>)> = HashMap::new();
+        for (from, to, pair) in &self.pairs {
+            let weight = pair.weight(certain);
+            if weight == 0 || !ours.contains(to) || all.contains(from) {
+                continue;
+            }
+            let (flow, used) = users.entry(*from).or_default();
+            flow.links += weight;
+            flow.guessed += if certain { 0 } else { pair.guessed };
+            *used.entry(*to).or_default() += weight;
+        }
+        let mut unopened = users
+            .iter()
+            .map(|(id, told)| (self.files[*id as usize].as_str(), told))
+            .filter(|(path, _)| !opened.contains(*path))
+            .collect::<Vec<_>>();
+        unopened.sort_by(|a, b| b.1.0.links.cmp(&a.1.0.links).then(a.0.cmp(b.0)));
+        view["run"]["reach"] = json!({
+            "users": users.len(),
+            "opened": users.len() - unopened.len(),
+            "unopened": unopened.len(),
+            "rows": unopened
+                .iter()
+                .take(LISTED)
+                .map(|(path, (flow, used))| {
+                    // The changed file it uses most is where its link is
+                    // looked into.
+                    let most = used
+                        .iter()
+                        .map(|(id, links)| (self.files[*id as usize].as_str(), *links))
+                        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0)))
+                        .map_or("", |(path, _)| path);
+                    json!({
+                        "path": path, "name": name(path),
+                        "links": flow.links, "guessed": flow.guessed,
+                        "uses": used.len(), "to": most, "test": is_test(path),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "more": unopened.len().saturating_sub(LISTED),
+        });
+        // The boxes: a file by itself, a folder by the files in it. A
+        // symbol is no file, and its path is none that a run opened.
+        let inside = |folder: &str| {
+            let from = format!("{folder}/");
+            opened
+                .range::<str, _>((Bound::Included(from.as_str()), Bound::Unbounded))
+                .take_while(|path| path.starts_with(&from))
+                .count()
+        };
+        let mark = |place: &mut Value| {
+            let Some(path) = place["path"].as_str() else {
+                return;
+            };
+            if place["folder"] == true {
+                let files = inside(path);
+                if files > 0 {
+                    place["opened"] = json!(files);
+                }
+            } else if opened.contains(path) {
+                place["opened"] = json!(true);
+            }
+        };
+        for places in ["/nodes", "/focus/uses", "/focus/used_by"] {
+            for place in view
+                .pointer_mut(places)
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                mark(place);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

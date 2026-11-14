@@ -303,10 +303,11 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-node[data-selected="true"] .graph-map-node-kind { color:inherit; }
 .graph-map-node-cycle { color:var(--warning); }
 .graph-map-node-pattern { flex:none; color:var(--purple); font-size:var(--text-meta); font-variant-numeric:tabular-nums; }
+.graph-map-node-opened { flex:none; color:var(--muted); font-size:var(--text-meta); font-variant-numeric:tabular-nums; }
 .graph-map-family { margin:14px 0 0; color:var(--muted); font-size:var(--text-meta); font-weight:var(--weight-strong); letter-spacing:.04em; text-transform:uppercase; }
 .graph-map-pattern-name { margin:8px 0 2px; font-weight:var(--weight-strong); }
-.graph-map-row:is([data-action="graph-map-pattern"],[data-pair="true"]) { flex-wrap:wrap; gap:0 8px; }
-.graph-map-row:is([data-action="graph-map-pattern"],[data-pair="true"]) .graph-map-row-links { flex:1 1 100%; }
+.graph-map-row:is([data-action="graph-map-pattern"],[data-pair="true"],[data-unopened="true"]) { flex-wrap:wrap; gap:0 8px; }
+.graph-map-row:is([data-action="graph-map-pattern"],[data-pair="true"],[data-unopened="true"]) .graph-map-row-links { flex:1 1 100%; }
 .graph-map-row[data-gone="true"] { color:var(--muted); }
 .graph-map-row[data-gone="true"]:hover { background:transparent; }
 .graph-map-row[data-gone="true"] .graph-map-row-name { text-decoration:line-through; }

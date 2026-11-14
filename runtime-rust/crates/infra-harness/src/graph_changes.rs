@@ -45,6 +45,8 @@ pub enum Target {
     Named(String),
     /// One commit against its parent, as a history lists it.
     Commit(String),
+    /// What a run of an agent changed, as its session recorded it.
+    Run(String),
 }
 impl Target {
     pub fn parse(text: &str) -> Result<Self> {
@@ -75,6 +77,15 @@ impl Target {
             .then(|| Self::Commit(hash.to_ascii_lowercase()))
             .ok_or_else(invalid);
         }
+        if let Some(session) = text.strip_prefix("run:") {
+            return (!session.is_empty()
+                && session.len() <= 64
+                && session
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+            .then(|| Self::Run(session.to_owned()))
+            .ok_or_else(invalid);
+        }
         let name = text.strip_prefix("ref:").ok_or_else(invalid)?;
         if name.is_empty()
             || name.len() > 200
@@ -94,6 +105,7 @@ impl Target {
             Self::Pull(number) => format!("pr:{number}"),
             Self::Named(name) => format!("ref:{name}"),
             Self::Commit(hash) => format!("commit:{hash}"),
+            Self::Run(session) => format!("run:{session}"),
         }
     }
 }
@@ -141,7 +153,7 @@ impl Pull {
 #[derive(Clone, Debug)]
 pub struct Resolved {
     pub target: Target,
-    /// `work`, `uncommitted`, `pull`, `branch` or `commit`.
+    /// `work`, `uncommitted`, `pull`, `branch`, `commit` or `run`.
     pub kind: &'static str,
     pub name: String,
     pub title: Option<String>,
@@ -807,6 +819,10 @@ pub fn resolve(root: &Path, target: &Target, pulls: &[Pull]) -> Result<Resolved>
         Target::Named(name) => named(root, prefix, name, pulls),
         Target::Commit(hash) => single(root, prefix, hash),
         Target::Pull(number) => pull(root, prefix, *number),
+        // Git knows nothing of a run: its session does.
+        Target::Run(_) => Err(HarnessError::invalid(
+            "A run is read from its session, not from Git.",
+        )),
     }
 }
 /// Pull requests of the project's repository in one state (`open`, `closed`,
@@ -1186,6 +1202,10 @@ mod tests {
             ("ref:feature/cart", Target::Named("feature/cart".into())),
             ("ref:HEAD~2", Target::Named("HEAD~2".into())),
             ("commit:1a2b3c4", Target::Commit("1a2b3c4".into())),
+            (
+                "run:0b0e7f3a-5c1d-4e2f-9a6b-7c8d9e0f1a2b",
+                Target::Run("0b0e7f3a-5c1d-4e2f-9a6b-7c8d9e0f1a2b".into()),
+            ),
         ] {
             assert_eq!(Target::parse(text).unwrap(), target);
             assert_eq!(target.text(), text);
@@ -1201,6 +1221,10 @@ mod tests {
             "ref:-x",
             "ref:a b",
             "ref:a\nb",
+            "run:",
+            "run:a b",
+            "run:../x",
+            "run:0b0e7f3a-5c1d-4e2f-9a6b-7c8d9e0f1a2b-0b0e7f3a-5c1d-4e2f-9a6b-7c8d9e0f1a2b",
             "branch",
             "commit:",
             "commit:12345",
