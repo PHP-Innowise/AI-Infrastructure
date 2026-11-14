@@ -340,6 +340,37 @@ edition's own files remain in that edition's changelog.
   this user owns, on the project's file system, with no configuration that can
   move or remove the work tree, is now read without Git, with the same top,
   prefix and administrative directory.
+- The Harness Run view opens again. Since the move to Rust it stayed
+  collapsed and out of reach, during a run and after it: the markup ships the
+  view as `data-open="false" inert` and its panel as `inert`, the stylesheet
+  shows them only as `data-open="true"` and `data-detailed="true"`, and the
+  Wasm interface filled the view without ever setting either. It also never
+  showed the Now line or the Plan and Commands tabs, and wrote the step count
+  over the strip's whole second line, which deleted the Calm/Detailed switch,
+  Close and the away summary. The strip above the composer now shows the
+  waiting line while a session is queued or preparing and what the agent does
+  while a native launch runs; Calm/Detailed, or the count chip in a narrow
+  window, opens the Files, Plan and Commands tabs. After the turn a **Last
+  run** line under the conversation opens the same tabs for it, and **Close**
+  puts them away. An earlier launch never stands in for one that is starting.
+  A Harness check runs under a launch id of its own and used to replace the
+  turn in the page's model: it is now told from a turn by the two lines it
+  writes, the launch it replaces is kept, and the **Last run** line and its
+  details stay after one check or several, also when the session is opened
+  again. The Files tab is a map again: folder blocks with a chip for each
+  file in the order it was first touched, marked as the legend says (edited,
+  created, failed, deleted, opened again, a helper's file, the call that is
+  open now). Filters dim the chips they leave out. A click on a chip opens
+  its card with **Show in conversation**, **Add path to message** and **Copy
+  path**; Escape, a second click or a press elsewhere puts it away, and
+  Escape with the focus in the view folds the details. A call now counts
+  once for the file it names (its start and its result used to count as two
+  reads or two edits), an edit counts when the tool reports it done, and
+  steps recorded as plain labels pair in order instead of staying open
+  forever. Whether the view is open, and as what, is one function with tests
+  (`mode` in `infra-ui/src/run.rs`). Not brought back: the run receipt in the
+  conversation, details of turns before the last one, the card on hover,
+  arrow keys in the tab list, and the notification button.
 - The Harness page shows its own updates again. Since the move to Rust the
   Update button never appeared: the Wasm interface waited for an `available`
   flag that `GET /api/app/update` does not send (it reports `state`), filled

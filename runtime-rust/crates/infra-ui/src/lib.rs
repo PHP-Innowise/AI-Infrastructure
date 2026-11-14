@@ -80,9 +80,13 @@ pub fn start() -> Result<(), JsValue> {
                     dom::attr("menu-toggle", "aria-expanded", "false");
                     dom::dialog("folder-picker", false);
                     dom::dialog("merge-picker", false);
+                    run::escape();
                 }
                 session::resize_key(key);
                 return;
+            }
+            if k == "pointerdown" {
+                run::pointer_down(&target);
             }
             if [
                 "pointerdown",

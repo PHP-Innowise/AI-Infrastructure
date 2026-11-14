@@ -711,7 +711,7 @@ pub fn controls() {
             "Off"
         },
     );
-    dom::hidden("waiting", !m::active(&session));
+    // The Run view shows this line while it waits; `run::render` below decides when that is.
     dom::text(
         "waiting-text",
         if session["status"] == "queued" {
