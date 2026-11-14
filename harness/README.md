@@ -1240,10 +1240,12 @@ Creator and System runs keep their own progress and show only their waiting line
 - **Files:** every file a tool named, as a chip with its name in folder blocks, in the
   order it was first touched. An outline is opened, a fill is an edit the tool
   reported as ok, `+` created, `!` a tool error, a struck name deleted, `×N` opened
-  again, a dot a helper agent's file and a ring the call that is open now. Hover or
-  focus a chip for its path and steps, **Show in conversation**, **Add path to
-  message** or **Copy path**. **List** shows the same set as a tree. Untouched files
-  are not shown, and Codex reads through shell commands, so its reads are not listed.
+  again, a dot a helper agent's file and a ring the call that is open now. Filters
+  (**Edited**, **Searched**, **Failed**, **Outside**) dim the other chips. Click a
+  chip for its path and steps, **Show in conversation**, **Add path to message** or
+  **Copy path**; Escape puts the card away. **List** shows the same set by folder.
+  Untouched files are not shown, and Codex reads through shell commands, so its reads
+  are not listed.
 - **Plan:** the agent's own todo list with what was added or dropped. The agent
   ticks it; Harness does not verify it. After the run, **Continue with N unchecked
   items** fills the message box and sends nothing.

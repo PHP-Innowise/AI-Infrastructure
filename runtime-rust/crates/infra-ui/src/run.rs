@@ -101,11 +101,11 @@ fn advance(mut run: V, event: &V) -> (V, Option<V>) {
         "tool" => {
             let name = tool_name(event);
             let key = name.to_lowercase();
-            let call = event["call"]
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("anonymous-{}", m::string(&event["id"])));
             let start = starts(event);
+            let call = match event["call"].as_str() {
+                Some(call) => call.to_owned(),
+                None => paired(&mut run, &key, start, &m::string(&event["id"])),
+            };
             let target = event["path"]
                 .as_str()
                 .or_else(|| event["detail"].as_str())
@@ -117,26 +117,15 @@ fn advance(mut run: V, event: &V) -> (V, Option<V>) {
                 .as_bool()
                 .unwrap_or(!m::text(event, "text").contains("failed")));
             item["event_id"] = event["id"].clone();
-            calls.insert(call.clone(), item.clone());
-            run["calls"] = json!(calls);
             if start {
                 run["steps"] = json!(run["steps"].as_u64().unwrap_or(0) + 1);
             }
-            if [
-                "read",
-                "edit",
-                "write",
-                "multiedit",
-                "notebookedit",
-                "delete",
-            ]
-            .contains(&key.as_str())
-            {
-                record_file(&mut run, target, &key, event);
+            touch(&mut run, &mut item, &named(&key, target, event), event);
+            if !start {
+                settle(&mut run, &mut item, event);
             }
-            for change in m::array(&event["changes"]) {
-                record_file(&mut run, &m::text(&change, "path"), "edit", event);
-            }
+            calls.insert(call.clone(), item.clone());
+            run["calls"] = json!(calls);
             if ["grep", "glob", "ls"].contains(&key.as_str()) && start {
                 let mut searches = m::array(&run["searches"]);
                 searches.push(
@@ -200,18 +189,131 @@ fn advance(mut run: V, event: &V) -> (V, Option<V>) {
     }
     (run, replaced)
 }
-fn record_file(run: &mut V, path: &str, kind: &str, event: &V) {
+/// The call an event without a call id belongs to. Such events are plain labels: a start waits
+/// under its tool's name, and the next completion of that tool closes the oldest one waiting.
+fn paired(run: &mut V, key: &str, start: bool, event_id: &str) -> String {
+    let mut waiting = run["uncalled"].as_object().cloned().unwrap_or_default();
+    let mut queue = m::array(&waiting.get(key).cloned().unwrap_or(V::Null));
+    let call = if start || queue.is_empty() {
+        format!("anonymous-{event_id}")
+    } else {
+        m::string(&queue.remove(0))
+    };
+    if start {
+        queue.push(json!(call));
+    }
+    waiting.insert(key.into(), json!(queue));
+    run["uncalled"] = V::Object(waiting);
+    call
+}
+/// A path as the page keys it: no bidirectional controls, forward slashes.
+fn tidy(path: &str) -> String {
+    clean(path).replace('\\', "/")
+}
+/// The files a tool event names and what the call does to each: the files of a change, or the
+/// call's own target.
+fn named(key: &str, target: &str, event: &V) -> Vec<(String, &'static str, bool)> {
+    let changes = m::array(&event["changes"]);
+    if !changes.is_empty() {
+        return changes
+            .iter()
+            .map(|change| {
+                let how = match change["kind"].as_str() {
+                    Some("add") => "add",
+                    Some("delete") => "delete",
+                    _ => "edit",
+                };
+                (
+                    tidy(&m::text(change, "path")),
+                    how,
+                    m::yes(&change["outside"]),
+                )
+            })
+            .filter(|(path, _, _)| !path.is_empty())
+            .collect();
+    }
+    let how = match key {
+        "read" => "read",
+        "delete" => "delete",
+        "edit" | "write" | "multiedit" | "notebookedit" => "edit",
+        _ => return vec![],
+    };
+    let path = tidy(target);
     if path.is_empty() {
+        vec![]
+    } else {
+        vec![(path, how, m::yes(&event["outside"]))]
+    }
+}
+/// A call reaches a file once: its start and its result name the same file, and only the first
+/// of them opens it.
+fn touch(run: &mut V, call: &mut V, named: &[(String, &'static str, bool)], event: &V) {
+    if named.is_empty() {
         return;
     }
-    let path = clean(path).replace('\\', "/");
+    let mut touched = call["touched"].as_object().cloned().unwrap_or_default();
     let mut files = run["files"].as_object().cloned().unwrap_or_default();
-    let mut f=files.get(&path).cloned().unwrap_or(json!({"path":path,"reads":0,"edits":0,"outside":m::yes(&event["outside"]),"event_id":event["id"]}));
-    let field = if kind == "read" { "reads" } else { "edits" };
-    f[field] = json!(f[field].as_u64().unwrap_or(0) + 1);
-    f["event_id"] = event["id"].clone();
-    files.insert(path, f);
-    run["files"] = json!(files);
+    let step = run["steps"].clone();
+    let by = if event["parent"].as_str().is_some_and(|id| !id.is_empty()) {
+        "helper"
+    } else {
+        "main"
+    };
+    for (path, how, outside) in named {
+        if touched.contains_key(path) {
+            continue;
+        }
+        touched.insert(path.clone(), json!(how));
+        if !files.contains_key(path) {
+            let fresh = json!({"path":path,"reads":0,"edits":0,"outside":outside,"order":files.len(),"first_step":step});
+            files.insert(path.clone(), fresh);
+        }
+        let Some(file) = files.get_mut(path) else {
+            continue;
+        };
+        if *how == "read" {
+            file["reads"] = json!(file["reads"].as_u64().unwrap_or(0) + 1);
+        }
+        file[by] = json!(true);
+        file["last_step"] = step.clone();
+        file["event_id"] = event["id"].clone();
+    }
+    call["touched"] = V::Object(touched);
+    run["files"] = V::Object(files);
+}
+/// The call's result reaches the files it touched, once: an edit counts when the tool reports it
+/// done, and a failure marks the file.
+fn settle(run: &mut V, call: &mut V, event: &V) {
+    if m::yes(&call["settled"]) {
+        return;
+    }
+    call["settled"] = json!(true);
+    let Some(touched) = call["touched"].as_object() else {
+        return;
+    };
+    let mut files = run["files"].as_object().cloned().unwrap_or_default();
+    let ok = m::yes(&call["ok"]);
+    for (path, how) in touched {
+        let Some(file) = files.get_mut(path) else {
+            continue;
+        };
+        if !ok {
+            // A command that was never run reported nothing about the file.
+            if event["outcome"] != "not_run" {
+                file["failed"] = json!(true);
+            }
+            continue;
+        }
+        match how.as_str() {
+            Some("read") => continue,
+            Some("add") => file["created"] = json!(true),
+            Some("delete") => file["deleted"] = json!(true),
+            _ => {}
+        }
+        file["edits"] = json!(file["edits"].as_u64().unwrap_or(0) + 1);
+        file["event_id"] = event["id"].clone();
+    }
+    run["files"] = V::Object(files);
 }
 fn conversation(v: &V) {
     let kind = m::text(v, "kind");
@@ -410,6 +512,314 @@ fn shown_tab<'a>(run: &V, chosen: &'a str) -> &'a str {
         "files"
     }
 }
+fn count(n: u64, one: &str) -> String {
+    format!("{n} {one}{}", if n == 1 { "" } else { "s" })
+}
+fn counts(run: &V) -> String {
+    format!(
+        "{} · {}",
+        count(run["steps"].as_u64().unwrap_or(0), "step"),
+        count(run["messages"].as_u64().unwrap_or(0), "message")
+    )
+}
+fn number(file: &V, key: &str) -> u64 {
+    file[key].as_u64().unwrap_or(0)
+}
+/// The launch's files in the order they were first touched.
+fn files_of(run: &V) -> Vec<V> {
+    let mut files: Vec<V> = run["files"]
+        .as_object()
+        .map(|map| map.values().cloned().collect())
+        .unwrap_or_default();
+    files.sort_by_key(|file| number(file, "order"));
+    files
+}
+const OUTSIDE: &str = ":outside";
+/// Map layout: the top folder is a district (a WordPress plugin or theme is one), and up to
+/// three more folders make a block.
+fn place_of(file: &V) -> (String, String) {
+    if m::yes(&file["outside"]) {
+        return (OUTSIDE.into(), String::new());
+    }
+    let path = m::text(file, "path");
+    let mut folder: Vec<&str> = path.split('/').collect();
+    folder.pop();
+    if folder.is_empty() {
+        return (String::new(), String::new());
+    }
+    let wordpress =
+        folder.len() > 2 && folder[0] == "wp-content" && ["plugins", "themes"].contains(&folder[1]);
+    let depth = if wordpress { 3 } else { 1 };
+    let rest = &folder[depth..];
+    let mut block = rest.iter().take(3).copied().collect::<Vec<_>>().join("/");
+    if rest.len() > 3 {
+        block.push_str("/…");
+    }
+    (folder[..depth].join("/"), block)
+}
+fn district_label(name: &str) -> String {
+    match name {
+        "" => "./".into(),
+        OUTSIDE => "Outside the project".into(),
+        _ => format!("{name}/"),
+    }
+}
+/// The patterns of the searches whose scope holds the file; a search without a scope looked
+/// everywhere in the project.
+fn searched_in(run: &V, file: &V) -> Vec<String> {
+    if m::yes(&file["outside"]) {
+        return vec![];
+    }
+    let path = m::text(file, "path");
+    m::array(&run["searches"])
+        .iter()
+        .filter(|search| {
+            let scope = m::text(search, "scope");
+            let scope = scope.trim_end_matches('/');
+            scope.is_empty()
+                || scope == "."
+                || path == scope
+                || path.starts_with(&format!("{scope}/"))
+        })
+        .map(|search| m::text(search, "pattern"))
+        .filter(|pattern| !pattern.is_empty())
+        .collect()
+}
+const FILTERS: [(&str, &str); 5] = [
+    ("all", "All"),
+    ("edited", "Edited"),
+    ("searched", "Searched"),
+    ("failed", "Failed"),
+    ("outside", "Outside"),
+];
+fn matches(run: &V, file: &V, filter: &str) -> bool {
+    match filter {
+        "edited" => number(file, "edits") > 0,
+        "searched" => !searched_in(run, file).is_empty(),
+        "failed" => m::yes(&file["failed"]),
+        "outside" => m::yes(&file["outside"]),
+        _ => true,
+    }
+}
+/// The filters worth offering: All, and each kind that has a file. A choice whose kind has no
+/// file any more reads as All.
+fn filters(run: &V, chosen: &str) -> Vec<V> {
+    let files = files_of(run);
+    let offered: Vec<(&str, String)> = FILTERS
+        .iter()
+        .filter_map(|(id, label)| {
+            let n = files.iter().filter(|file| matches(run, file, id)).count();
+            match (*id, n) {
+                ("all", _) => Some((*id, label.to_string())),
+                (_, 0) => None,
+                _ => Some((*id, format!("{label} {n}"))),
+            }
+        })
+        .collect();
+    let chosen = if offered.iter().any(|(id, _)| *id == chosen) {
+        chosen
+    } else {
+        "all"
+    };
+    offered
+        .into_iter()
+        .map(|(id, label)| json!({"id":id,"label":label,"pressed":id == chosen}))
+        .collect()
+}
+/// What a chip says after its path to someone who cannot see its marks.
+fn chip_words(file: &V) -> Vec<String> {
+    let (reads, edits) = (number(file, "reads"), number(file, "edits"));
+    let mut words = vec![];
+    match reads {
+        0 => {}
+        1 => words.push("opened once".into()),
+        _ => words.push(format!("opened {reads} times")),
+    }
+    if m::yes(&file["created"]) {
+        words.push("created".into());
+    }
+    if m::yes(&file["deleted"]) {
+        words.push("deleted".into());
+    }
+    match edits {
+        0 => {}
+        1 => words.push("edit reported ok".into()),
+        _ => words.push(format!("edit reported ok {edits} times")),
+    }
+    if m::yes(&file["failed"]) {
+        words.push("a tool reported an error".into());
+    }
+    if m::yes(&file["helper"]) {
+        words.push("by a helper agent".into());
+    }
+    if m::yes(&file["outside"]) {
+        words.push("outside the project, name only".into());
+    }
+    words
+}
+/// The facts on a file's card.
+fn card_facts(run: &V, file: &V) -> Vec<String> {
+    let (reads, edits) = (number(file, "reads"), number(file, "edits"));
+    let mut facts = vec![];
+    if reads > 0 {
+        facts.push(format!("Opened ×{reads}"));
+    }
+    let searched = searched_in(run, file);
+    if !searched.is_empty() {
+        let last = &searched[searched.len().saturating_sub(2)..];
+        facts.push(format!("In a folder searched for {}", last.join(", ")));
+    }
+    if m::yes(&file["created"]) {
+        facts.push("Added (file_change)".into());
+    }
+    if m::yes(&file["deleted"]) {
+        facts.push("Deleted (file_change)".into());
+    }
+    match edits {
+        0 => {}
+        1 => facts.push("Edit reported ok".into()),
+        _ => facts.push(format!("Edit reported ok ×{edits}")),
+    }
+    if m::yes(&file["failed"]) {
+        facts.push("A tool reported an error".into());
+    }
+    if m::yes(&file["helper"]) {
+        facts.push("by a helper agent".into());
+    }
+    facts
+}
+/// A district's blocks in the order they appeared: the folders under it and their chips.
+type Blocks = Vec<(String, Vec<V>)>;
+/// The map as data: districts, their blocks and the chips in them, in the order the files were
+/// first touched. The filter dims the chips it leaves out, and while the launch runs a ring
+/// marks the files of the calls that are open.
+fn map(run: &V, filter: &str, running: bool) -> Vec<V> {
+    let mut open = std::collections::BTreeSet::new();
+    if running {
+        for call in run["calls"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(_, call)| call)
+        {
+            if m::yes(&call["open"]) {
+                open.extend(
+                    call["touched"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .map(|(path, _)| path.clone()),
+                );
+            }
+        }
+    }
+    let mut districts: Vec<(String, Blocks)> = vec![];
+    for file in files_of(run) {
+        let (district, block) = place_of(&file);
+        let path = m::text(&file, "path");
+        let now = open.contains(&path);
+        let reads = number(&file, "reads");
+        let mut label = vec![path.clone()];
+        label.extend(chip_words(&file));
+        if now {
+            label.push("in use now".into());
+        }
+        let mark = format!(
+            "{}{}",
+            if m::yes(&file["created"]) { "+" } else { "" },
+            if m::yes(&file["failed"]) { "!" } else { "" }
+        );
+        let chip = json!({
+            "path":path,
+            "name":path.rsplit('/').next().unwrap_or(&path),
+            "mark":mark,
+            "times":if reads > 1 { format!("×{reads}") } else { String::new() },
+            "edited":number(&file, "edits") > 0,
+            "failed":m::yes(&file["failed"]),
+            "created":m::yes(&file["created"]),
+            "deleted":m::yes(&file["deleted"]),
+            "helper":m::yes(&file["helper"]) && !m::yes(&file["main"]),
+            "dim":!matches(run, &file, filter),
+            "now":now,
+            "label":label.join(", "),
+        });
+        let at = match districts.iter().position(|(name, _)| *name == district) {
+            Some(at) => at,
+            None => {
+                districts.push((district, vec![]));
+                districts.len() - 1
+            }
+        };
+        let blocks = &mut districts[at].1;
+        match blocks.iter().position(|(name, _)| *name == block) {
+            Some(at) => blocks[at].1.push(chip),
+            None => blocks.push((block, vec![chip])),
+        }
+    }
+    districts
+        .into_iter()
+        .map(|(name, blocks)| {
+            let blocks: Vec<V> = blocks
+                .into_iter()
+                .map(|(block, files)| {
+                    let folder = match (name.as_str(), block.as_str()) {
+                        (OUTSIDE, _) => "Outside the project".to_owned(),
+                        ("", _) => "Project root".to_owned(),
+                        (district, "") => district.to_owned(),
+                        (district, block) => format!("{district}/{block}"),
+                    };
+                    let edited = files.iter().filter(|chip| m::yes(&chip["edited"])).count();
+                    let mut label = format!("{folder}, {}", count(files.len() as u64, "file"));
+                    if edited > 0 {
+                        label.push_str(&format!(", {edited} edited"));
+                    }
+                    json!({"name":block,"label":label,"files":files})
+                })
+                .collect();
+            json!({"name":name,"label":district_label(&name),"blocks":blocks})
+        })
+        .collect()
+}
+/// Where the file card goes: under its chip, above it when it would leave the window, and never
+/// past the window's edges. The chip is (left, top, bottom); sizes are (width, height).
+fn place(chip: (f64, f64, f64), card: (f64, f64), window: (f64, f64)) -> (f64, f64) {
+    let (left, top, bottom) = chip;
+    let x = (left - 8.).min(window.0 - card.0 - 8.).max(8.);
+    let y = if bottom + 8. + card.1 > window.1 - 8. {
+        (top - card.1 - 8.).max(8.)
+    } else {
+        bottom + 8.
+    };
+    (x, y)
+}
+/// The draft with `text` in place of its selection, a space apart from what surrounds it, and
+/// the caret after the text. Offsets are UTF-16 units, as the browser reports a selection.
+fn spliced(value: &str, start: u32, end: u32, text: &str) -> (String, u32) {
+    let at = |units: u32| {
+        let mut seen = 0;
+        for (index, c) in value.char_indices() {
+            if seen >= units {
+                return index;
+            }
+            seen += c.len_utf16() as u32;
+        }
+        value.len()
+    };
+    let (from, to) = (at(start), at(end.max(start)));
+    let (before, after) = (&value[..from], &value[to..]);
+    let lead = if before.is_empty() || before.ends_with(char::is_whitespace) {
+        ""
+    } else {
+        " "
+    };
+    let trail = if after.is_empty() || after.starts_with(char::is_whitespace) {
+        ""
+    } else {
+        " "
+    };
+    let caret = before.encode_utf16().count() + lead.len() + text.encode_utf16().count();
+    (format!("{before}{lead}{text}{trail}{after}"), caret as u32)
+}
 #[derive(Debug, PartialEq)]
 struct RunClock {
     started: Option<String>,
@@ -479,13 +889,8 @@ fn focus_within(ids: &[&str]) -> bool {
 /// Focus without scrolling: the view clips its content while it opens, and a scrolling focus
 /// would shift what it clips.
 fn focus(id: &str) {
-    let Some(e) = dom::get(id) else { return };
-    let options = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&options, &"preventScroll".into(), &true.into());
-    if let Ok(method) = js_sys::Reflect::get(&e, &"focus".into()) {
-        if let Some(method) = method.dyn_ref::<js_sys::Function>() {
-            let _ = method.call1(&e, &options);
-        }
+    if let Some(node) = dom::get(id) {
+        focus_node(&node);
     }
 }
 /// The Calm/Detailed switch that is on screen: a narrow window shows only the compact chip.
@@ -515,7 +920,7 @@ fn reveal(mode: Mode, detailed: bool) {
         focus(detail_switch());
     }
     if !panel {
-        dom::hidden("run-file-card", true);
+        hide_card(false);
     }
     dom::attr("run-view", "data-open", truth(mode != Mode::Closed));
     inert("run-view", mode == Mode::Closed);
@@ -551,11 +956,7 @@ fn turn_line(session: &V, run: &V) {
         }
         return;
     }
-    let text = format!(
-        "Last run · {} steps · {} messages",
-        m::string(&run["steps"]),
-        m::string(&run["messages"])
-    );
+    let text = format!("Last run · {}", counts(run));
     let signature = format!("{text}|{}", tabs.join(","));
     let Some(events) = dom::get("events") else {
         return;
@@ -610,6 +1011,385 @@ fn earlier(run: &V) -> V {
         m::data("run-before")
     } else {
         V::Null
+    }
+}
+fn bdi(class: &str, text: &str) -> web_sys::Element {
+    let node = dom::el("bdi", class, text);
+    let _ = node.set_attribute("dir", "ltr");
+    node
+}
+/// A part of a chip that its label already says.
+fn hushed(node: web_sys::Element) -> web_sys::Element {
+    let _ = node.set_attribute("aria-hidden", "true");
+    node
+}
+fn chip_node(chip: &V) -> web_sys::Element {
+    let path = m::text(chip, "path");
+    let node = dom::el("button", "run-file", "");
+    for (key, value) in [
+        ("type", "button".to_owned()),
+        ("data-action", "run-file".to_owned()),
+        ("data-payload", json!(path).to_string()),
+        ("data-focus-key", path.clone()),
+        ("title", path.clone()),
+        ("aria-label", m::text(chip, "label")),
+    ] {
+        let _ = node.set_attribute(key, &value);
+    }
+    for flag in ["edited", "failed", "created", "deleted", "helper", "dim"] {
+        let _ = node.set_attribute(&format!("data-{flag}"), truth(m::yes(&chip[flag])));
+    }
+    if m::yes(&chip["now"]) {
+        let _ = node.set_attribute("data-now", "static");
+    }
+    dom::add(
+        &node,
+        &hushed(dom::el("span", "run-file-mark", &m::text(chip, "mark"))),
+    );
+    dom::add(&node, &hushed(bdi("run-file-name", &m::text(chip, "name"))));
+    dom::add(
+        &node,
+        &hushed(dom::el("span", "run-file-count", &m::text(chip, "times"))),
+    );
+    node
+}
+fn district_node(district: &V) -> web_sys::Element {
+    let wrap = dom::el("div", "run-district", "");
+    let label = dom::el("div", "run-district-label", "");
+    dom::add(&label, &bdi("", &m::text(district, "label")));
+    dom::add(&wrap, &label);
+    let blocks = dom::el("div", "run-blocks", "");
+    for block in m::array(&district["blocks"]) {
+        let node = dom::el("div", "run-block", "");
+        let _ = node.set_attribute("role", "group");
+        let _ = node.set_attribute("aria-label", &m::text(&block, "label"));
+        let name = m::text(&block, "name");
+        if !name.is_empty() {
+            let head = dom::el("div", "run-block-head", "");
+            dom::add(&head, &bdi("run-block-name", &name));
+            dom::add(&node, &head);
+        }
+        let files = dom::el("div", "run-files", "");
+        for chip in m::array(&block["files"]) {
+            dom::add(&files, &chip_node(&chip));
+        }
+        dom::add(&node, &files);
+        dom::add(&blocks, &node);
+    }
+    dom::add(&wrap, &blocks);
+    wrap
+}
+/// The filter buttons are kept and relabelled, not rebuilt: the one just pressed keeps the focus.
+fn filter_buttons(items: &[V]) {
+    let Some(container) = dom::get("run-files-filters") else {
+        return;
+    };
+    let ids: Vec<String> = items
+        .iter()
+        .map(|item| format!("run-filter-{}", m::text(item, "id")))
+        .collect();
+    for child in dom::children(&container) {
+        if !ids.contains(&child.id()) {
+            child.remove();
+        }
+    }
+    for (index, item) in items.iter().enumerate() {
+        let node = dom::get(&ids[index]).unwrap_or_else(|| {
+            let node = dom::el("button", "run-filter", "");
+            let _ = node.set_attribute("type", "button");
+            let _ = node.set_attribute("id", &ids[index]);
+            node
+        });
+        let label = m::text(item, "label");
+        if node.text_content().as_deref() != Some(label.as_str()) {
+            node.set_text_content(Some(&label));
+        }
+        let _ = node.set_attribute("aria-pressed", truth(m::yes(&item["pressed"])));
+        let current = container.children().item(index as u32);
+        if current.as_ref() != Some(&node) {
+            let _ = container.insert_before(&node, current.as_ref().map(|e| e.as_ref()));
+        }
+    }
+}
+const CARD: &str = "run-file-card";
+/// The file whose card is open.
+fn card_path() -> Option<String> {
+    m::data("run-card").as_str().map(str::to_owned)
+}
+fn chip_of(path: &str) -> Option<web_sys::Element> {
+    dom::all("#run-map-main .run-file")
+        .into_iter()
+        .find(|chip| chip.get_attribute("data-focus-key").as_deref() == Some(path))
+}
+fn focus_node(node: &web_sys::Element) {
+    let options = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&options, &"preventScroll".into(), &true.into());
+    if let Ok(method) = js_sys::Reflect::get(node, &"focus".into()) {
+        if let Some(method) = method.dyn_ref::<js_sys::Function>() {
+            let _ = method.call1(node, &options);
+        }
+    }
+}
+/// Writes the card for a file. An unchanged card is left alone, and a rewritten one gives the
+/// focus back to the action that had it.
+fn fill_card(run: &V, file: &V) {
+    let Some(card) = dom::get(CARD) else {
+        return;
+    };
+    let path = m::text(file, "path");
+    let facts = card_facts(run, file).join(" · ");
+    let signature = format!("{file}|{facts}");
+    if card.get_attribute("data-signature").as_deref() == Some(signature.as_str()) {
+        return;
+    }
+    let focused = dom::document()
+        .active_element()
+        .filter(|node| card.contains(Some(node)))
+        .and_then(|node| node.get_attribute("data-action"));
+    card.set_text_content(None);
+    let _ = card.set_attribute("data-signature", &signature);
+    let _ = card.set_attribute("aria-label", &format!("File details: {path}"));
+    let line = dom::el("p", "run-card-path", "");
+    let shown = if m::yes(&file["outside"]) {
+        format!("{path} (outside the project, name only)")
+    } else {
+        path.clone()
+    };
+    dom::add(&line, &bdi("", &shown));
+    dom::add(&card, &line);
+    dom::add(&card, &dom::el("p", "run-card-facts", &facts));
+    dom::add(
+        &card,
+        &dom::el(
+            "p",
+            "run-card-meta",
+            &format!(
+                "First step {} · last step {}",
+                m::string(&file["first_step"]),
+                m::string(&file["last_step"])
+            ),
+        ),
+    );
+    let actions = dom::el("div", "run-card-actions", "");
+    for (label, action, payload) in [
+        (
+            "Show in conversation",
+            "run-reveal",
+            file["event_id"].clone(),
+        ),
+        ("Add path to message", "run-add-path", json!(path)),
+        ("Copy path", "run-copy-path", json!(path)),
+    ] {
+        let button = dom::button(label, action, payload);
+        button.set_class_name("button compact");
+        dom::add(&actions, &button);
+    }
+    dom::add(&card, &actions);
+    if let Some(action) = focused {
+        let selector = format!("#{CARD} [data-action=\"{action}\"]");
+        if let Ok(Some(node)) = dom::document().query_selector(&selector) {
+            focus_node(&node);
+        }
+    }
+}
+fn place_card(chip: &web_sys::Element) {
+    let Some(card) = dom::get(CARD).and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok()) else {
+        return;
+    };
+    let rect = chip.get_bounding_client_rect();
+    let window = dom::window();
+    let side = |value: Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>| {
+        value.ok().and_then(|value| value.as_f64()).unwrap_or(0.)
+    };
+    let (x, y) = place(
+        (rect.left(), rect.top(), rect.bottom()),
+        (card.offset_width() as f64, card.offset_height() as f64),
+        (side(window.inner_width()), side(window.inner_height())),
+    );
+    let _ = card.style().set_property("left", &format!("{x}px"));
+    let _ = card.style().set_property("top", &format!("{y}px"));
+}
+/// Opens the card of a file beside its chip; the first of its actions takes the focus.
+fn show_card(run: &V, path: &str) {
+    let Some(file) = run["files"].get(path) else {
+        return;
+    };
+    m::set("run-card", json!(path));
+    if let Some(card) = dom::get(CARD) {
+        let _ = card.remove_attribute("data-signature");
+    }
+    fill_card(run, file);
+    dom::hidden(CARD, false);
+    if let Some(chip) = chip_of(path) {
+        place_card(&chip);
+    }
+    let selector = format!("#{CARD} button");
+    if let Ok(Some(first)) = dom::document().query_selector(&selector) {
+        focus_node(&first);
+    }
+}
+/// Puts the card away; `restore` gives the focus back to the chip it belongs to.
+fn hide_card(restore: bool) {
+    let path = m::take("run-card");
+    dom::hidden(CARD, true);
+    if restore {
+        if let Some(chip) = path.as_str().and_then(chip_of) {
+            focus_node(&chip);
+        }
+    }
+}
+/// The launch the strip and the panel show: the one that runs, or at rest the last turn's.
+fn shown() -> V {
+    let (session, run) = (m::read(|s| s.selected.clone()), m::data("run"));
+    if m::active(&session) {
+        run
+    } else {
+        let before = earlier(&run);
+        turn(&run, &before).clone()
+    }
+}
+/// The Files tab: the summary, the filters, the map of touched files and the same set as a list.
+fn files_pane(run: &V, running: bool) {
+    let files = files_of(run);
+    let edited = files
+        .iter()
+        .filter(|file| number(file, "edits") > 0)
+        .count();
+    let failed = files.iter().filter(|file| m::yes(&file["failed"])).count();
+    let mut summary = format!("{} · {edited} edited", count(files.len() as u64, "file"));
+    if failed > 0 {
+        summary.push_str(&format!(" · {failed} failed"));
+    }
+    dom::text("run-badge-files", &files.len().to_string());
+    dom::text("run-files-summary", &summary);
+    let list = m::data("run-files-view") == "list";
+    let offered = filters(run, m::data("run-file-filter").as_str().unwrap_or("all"));
+    let filter = offered
+        .iter()
+        .find(|item| m::yes(&item["pressed"]))
+        .map(|item| m::text(item, "id"))
+        .unwrap_or_else(|| "all".into());
+    dom::attr("run-view-map", "aria-pressed", truth(!list));
+    dom::attr("run-view-list", "aria-pressed", truth(list));
+    dom::hidden("run-map", list);
+    dom::hidden("run-tree", !list);
+    dom::hidden("run-files-empty", !files.is_empty());
+    // The filters dim chips and the legend explains them: both belong to the map.
+    dom::hidden("run-files-filters", list || files.is_empty());
+    dom::hidden("run-legend", list || files.is_empty());
+    filter_buttons(&offered);
+    dom::keyed_render(
+        "run-map-main",
+        &map(run, &filter, running),
+        |district| m::text(district, "name"),
+        district_node,
+    );
+    let mut districts: BTreeMap<String, Vec<V>> = BTreeMap::new();
+    for file in &files {
+        let (district, _) = place_of(file);
+        let name = match district.as_str() {
+            OUTSIDE => "Outside project".to_owned(),
+            "" => "Project root".to_owned(),
+            _ => district,
+        };
+        districts.entry(name).or_default().push(file.clone());
+    }
+    let districts = districts
+        .into_iter()
+        .map(|(name, mut files)| {
+            files.sort_by_key(|file| m::text(file, "path"));
+            json!({"name":name,"files":files})
+        })
+        .collect::<Vec<_>>();
+    dom::keyed_render(
+        "run-tree",
+        &districts,
+        |v| m::text(v, "name"),
+        |v| {
+            let d = dom::el("details", "run-tree-folder", "");
+            let _ = d.set_attribute("open", "");
+            let _ = d.set_attribute("data-restore-key", &m::text(v, "name"));
+            let files = m::array(&v["files"]);
+            dom::add(
+                &d,
+                &dom::el(
+                    "summary",
+                    "",
+                    &format!("{} · {}", m::text(v, "name"), files.len()),
+                ),
+            );
+            for file in files {
+                let label = format!(
+                    "{} · {} · {}",
+                    m::text(&file, "path"),
+                    count(number(&file, "reads"), "read"),
+                    count(number(&file, "edits"), "edit")
+                );
+                let b = dom::button(&label, "run-reveal", file["event_id"].clone());
+                let _ = b.set_attribute("data-focus-key", &m::text(&file, "path"));
+                dom::add(&d, &b);
+            }
+            d
+        },
+    );
+    // An open card follows its file; a file that is gone, or a map that is, takes it along.
+    if let Some(path) = card_path() {
+        match run["files"].get(&path) {
+            Some(file) if !list => fill_card(run, file),
+            _ => hide_card(false),
+        }
+    }
+}
+/// Puts a path into the message being written, at the caret; Send stays the person's.
+fn insert_draft(text: &str) {
+    let Some(prompt) =
+        dom::get("prompt").and_then(|e| e.dyn_into::<web_sys::HtmlTextAreaElement>().ok())
+    else {
+        return;
+    };
+    if prompt.disabled() {
+        return;
+    }
+    let value = prompt.value();
+    let units = value.encode_utf16().count() as u32;
+    let start = prompt
+        .selection_start()
+        .ok()
+        .flatten()
+        .unwrap_or(units)
+        .min(units);
+    let end = prompt
+        .selection_end()
+        .ok()
+        .flatten()
+        .unwrap_or(start)
+        .clamp(start, units);
+    let (draft, caret) = spliced(&value, start, end, text);
+    prompt.set_value(&draft);
+    let _ = prompt.set_selection_range(caret, caret);
+    focus("prompt");
+    session::controls();
+    session::save_preferences();
+}
+/// Escape puts away the nearest thing the person opened: the file card, then the details.
+pub fn escape() {
+    if card_path().is_some() {
+        hide_card(true);
+    } else if m::yes(&m::data("run-detailed")) && focus_within(&["run-view"]) {
+        detail(false);
+        focus(detail_switch());
+    }
+}
+/// A press anywhere but the file card and the chips puts the card away.
+pub fn pointer_down(target: &web_sys::Element) {
+    if card_path().is_some()
+        && target
+            .closest("#run-file-card, .run-file")
+            .ok()
+            .flatten()
+            .is_none()
+    {
+        hide_card(false);
     }
 }
 pub fn render() {
@@ -682,105 +1462,18 @@ pub fn render() {
     dom::text("run-verb", &now);
     // The counts go into the chips' own box: the second line also holds the Calm/Detailed switch,
     // Close and the away summary, which a text written over the whole line would delete.
-    let counts = format!(
-        "{} steps · {} messages",
-        m::string(&run["steps"]),
-        m::string(&run["messages"])
-    );
+    let counts = counts(&run);
     chip(&counts);
     dom::text(
         "run-compact",
-        &format!("{} steps", m::string(&run["steps"])),
+        &count(run["steps"].as_u64().unwrap_or(0), "step"),
     );
     dom::attr(
         "run-compact",
         "aria-label",
         &format!("Run details. {counts}"),
     );
-    let files = run["files"].as_object().cloned().unwrap_or_default();
-    dom::text("run-badge-files", &files.len().to_string());
-    dom::text(
-        "run-files-summary",
-        &format!(
-            "{} files · {} edited",
-            files.len(),
-            files
-                .values()
-                .filter(|x| x["edits"].as_u64().unwrap_or(0) > 0)
-                .count()
-        ),
-    );
-    let filter = m::data("run-file-filter");
-    let mut districts: BTreeMap<String, Vec<V>> = BTreeMap::new();
-    for file in files.values() {
-        if filter == "edited" && file["edits"].as_u64().unwrap_or(0) == 0 {
-            continue;
-        }
-        let path = m::text(file, "path");
-        let district = if m::yes(&file["outside"]) {
-            "Outside project".into()
-        } else {
-            let p = path.split('/').collect::<Vec<_>>();
-            if p.len() > 3 && p[0] == "wp-content" && ["plugins", "themes"].contains(&p[1]) {
-                p[..3].join("/")
-            } else if p.len() > 1 {
-                p[0].into()
-            } else {
-                "Project root".into()
-            }
-        };
-        districts.entry(district).or_default().push(file.clone());
-    }
-    let districts = districts
-        .into_iter()
-        .map(|(name, files)| json!({"name":name,"files":files}))
-        .collect::<Vec<_>>();
-    dom::keyed_render(
-        "run-tree",
-        &districts,
-        |v| m::text(v, "name"),
-        |v| {
-            let d = dom::el("details", "run-tree-folder", "");
-            let _ = d.set_attribute("open", "");
-            let _ = d.set_attribute("data-restore-key", &m::text(v, "name"));
-            let files = m::array(&v["files"]);
-            dom::add(
-                &d,
-                &dom::el(
-                    "summary",
-                    "",
-                    &format!("{} · {}", m::text(v, "name"), files.len()),
-                ),
-            );
-            for file in files {
-                let label = format!(
-                    "{} · {} reads · {} edits",
-                    m::text(&file, "path"),
-                    m::string(&file["reads"]),
-                    m::string(&file["edits"])
-                );
-                let b = dom::button(&label, "run-reveal", file["event_id"].clone());
-                let _ = b.set_attribute("data-focus-key", &m::text(&file, "path"));
-                dom::add(&d, &b);
-            }
-            d
-        },
-    );
-    dom::keyed_render(
-        "run-map-rows",
-        &districts,
-        |v| m::text(v, "name"),
-        |v| {
-            let row = dom::el("div", "run-map-row", "");
-            dom::add(&row, &dom::el("strong", "", &m::text(v, "name")));
-            for file in m::array(&v["files"]) {
-                let b = dom::button(&m::text(&file, "path"), "run-file", file.clone());
-                let _ = b.set_attribute("data-focus-key", &m::text(&file, "path"));
-                dom::add(&row, &b);
-            }
-            row
-        },
-    );
+    files_pane(&run, mode == Mode::Now);
     let plan = m::array(&run["plan"]);
     dom::text("run-badge-plan", &plan.len().to_string());
     dom::keyed_render(
@@ -972,14 +1665,18 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, _value: &str
         "run-tab-files" | "run-tab-plan" | "run-tab-commands" => {
             m::set("run-tab", json!(action.trim_start_matches("run-tab-")));
             // The file card belongs to the Files tab.
-            dom::hidden("run-file-card", true);
+            hide_card(false);
             render();
         }
         "run-view-map" | "run-view-list" => {
-            let map = action == "run-view-map";
-            dom::hidden("run-map", !map);
-            dom::hidden("run-tree", map);
-            m::set("run-files-view", json!(if map { "map" } else { "list" }));
+            let view = if action == "run-view-map" {
+                "map"
+            } else {
+                "list"
+            };
+            m::set("run-files-view", json!(view));
+            hide_card(false);
+            render();
         }
         "run-prefill" => {
             dom::set_value("check-command", payload.as_str().unwrap_or(""));
@@ -1000,21 +1697,35 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, _value: &str
             focus("run-now");
         }
         "run-reveal" => {
+            hide_card(false);
             let selector = format!("[data-event-id=\"{}\"]", m::string(payload));
             if let Ok(Some(e)) = dom::document().query_selector(&selector) {
                 e.scroll_into_view();
             }
         }
         "run-file" => {
-            dom::clear("run-file-card");
-            dom::append(
-                "run-file-card",
-                &dom::details(
-                    &m::text(payload, "path"),
-                    &serde_json::to_string_pretty(payload).unwrap_or_default(),
-                ),
-            );
-            dom::hidden("run-file-card", false);
+            // A second press on the chip puts its card away again.
+            let path = payload.as_str().unwrap_or("");
+            if card_path().as_deref() == Some(path) {
+                hide_card(true);
+            } else {
+                show_card(&shown(), path);
+            }
+        }
+        "run-add-path" => {
+            hide_card(false);
+            insert_draft(payload.as_str().unwrap_or(""));
+        }
+        "run-copy-path" => {
+            let copying = dom::window()
+                .navigator()
+                .clipboard()
+                .write_text(payload.as_str().unwrap_or(""));
+            let copied = wasm_bindgen_futures::JsFuture::from(copying).await.is_ok();
+            let selector = format!("#{CARD} [data-action=\"run-copy-path\"]");
+            if let Ok(Some(button)) = dom::document().query_selector(&selector) {
+                button.set_text_content(Some(if copied { "Copied" } else { "Copy failed" }));
+            }
         }
         "run-notify" => {
             if let Ok(p) = web_sys::Notification::request_permission() {
@@ -1577,6 +2288,460 @@ mod check_tests {
         ] {
             assert!(!check_status(text), "{text}");
         }
+    }
+}
+
+#[cfg(test)]
+mod files_tests {
+    use super::*;
+
+    const L: &str = "a";
+    /// The launch after these events.
+    fn play(events: &[V]) -> V {
+        let mut run = V::Null;
+        for event in events {
+            run = advance(run, event).0;
+        }
+        run
+    }
+    fn tool(id: u64, name: &str, call: &str, state: &str, more: V) -> V {
+        let mut event = json!({"id":id,"kind":"tool","launch_id":L,"tool":name,"call":call,"state":state,"text":format!("{name}: {state}")});
+        for (key, value) in more.as_object().into_iter().flatten() {
+            event[key] = value.clone();
+        }
+        event
+    }
+    /// A call that starts and reports its result, as two events.
+    fn done(id: u64, name: &str, call: &str, more: V, ok: bool) -> Vec<V> {
+        let mut end = more.clone();
+        end["ok"] = json!(ok);
+        vec![
+            tool(id, name, call, "started", more),
+            tool(id + 1, name, call, "completed", end),
+        ]
+    }
+    fn file<'a>(run: &'a V, path: &str) -> &'a V {
+        &run["files"][path]
+    }
+
+    #[test]
+    fn a_call_counts_once_for_the_file_it_names() {
+        let mut events = done(1, "Read", "r1", json!({"path":"app/Order.php"}), true);
+        events.extend(done(3, "Edit", "e1", json!({"path":"app/Order.php"}), true));
+        events.extend(done(5, "Read", "r2", json!({"path":"app/Order.php"}), true));
+        let run = play(&events);
+        assert_eq!(file(&run, "app/Order.php")["reads"], 2);
+        assert_eq!(file(&run, "app/Order.php")["edits"], 1);
+        assert_eq!(run["steps"], 3);
+        // A result that arrives twice changes nothing.
+        events.push(tool(
+            9,
+            "Edit",
+            "e1",
+            "completed",
+            json!({"path":"app/Order.php","ok":true}),
+        ));
+        assert_eq!(file(&play(&events), "app/Order.php")["edits"], 1);
+    }
+
+    #[test]
+    fn an_edit_counts_when_the_tool_reports_it_done() {
+        let started = [tool(1, "Edit", "e1", "started", json!({"path":"a.php"}))];
+        let run = play(&started);
+        assert_eq!(file(&run, "a.php")["edits"], 0);
+        assert!(!m::yes(&file(&run, "a.php")["failed"]));
+        let run = play(&done(1, "Edit", "e1", json!({"path":"a.php"}), false));
+        assert_eq!(file(&run, "a.php")["edits"], 0);
+        assert!(m::yes(&file(&run, "a.php")["failed"]));
+        // A step that was never run reported nothing about its file.
+        let run = play(&[
+            tool(1, "Edit", "e1", "started", json!({"path":"a.php"})),
+            tool(
+                2,
+                "Edit",
+                "e1",
+                "completed",
+                json!({"path":"a.php","ok":false,"outcome":"not_run"}),
+            ),
+        ]);
+        assert_eq!(file(&run, "a.php")["edits"], 0);
+        assert!(!m::yes(&file(&run, "a.php")["failed"]));
+        // A failed read marks the file too.
+        let run = play(&done(1, "Read", "r1", json!({"path":"a.php"}), false));
+        assert_eq!(file(&run, "a.php")["reads"], 1);
+        assert!(m::yes(&file(&run, "a.php")["failed"]));
+    }
+
+    #[test]
+    fn a_result_without_a_start_is_the_whole_call() {
+        let run = play(&[tool(
+            1,
+            "Edit",
+            "e1",
+            "completed",
+            json!({"path":"a.php","ok":true}),
+        )]);
+        assert_eq!(file(&run, "a.php")["edits"], 1);
+        let run = play(&[tool(
+            1,
+            "Read",
+            "r1",
+            "completed",
+            json!({"path":"a.php","ok":true}),
+        )]);
+        assert_eq!(file(&run, "a.php")["reads"], 1);
+    }
+
+    #[test]
+    fn a_change_names_its_own_files() {
+        let changes = json!({"changes":[
+            {"path":"app/New.php","kind":"add"},
+            {"path":"app/Old.php","kind":"delete"},
+            {"path":"app\\Kept.php","kind":"update"},
+            {"path":"notes.txt","kind":"update","outside":true},
+        ],"ok":true});
+        // Codex reports a change when it is done: the start names nothing.
+        let run = play(&[
+            tool(1, "file_change", "c1", "started", json!({})),
+            tool(2, "file_change", "c1", "completed", changes),
+        ]);
+        assert!(m::yes(&file(&run, "app/New.php")["created"]));
+        assert!(m::yes(&file(&run, "app/Old.php")["deleted"]));
+        assert_eq!(file(&run, "app/Kept.php")["edits"], 1);
+        assert!(m::yes(&file(&run, "notes.txt")["outside"]));
+        for path in ["app/New.php", "app/Old.php", "app/Kept.php", "notes.txt"] {
+            assert_eq!(file(&run, path)["edits"], 1, "{path}");
+            assert_eq!(file(&run, path)["reads"], 0, "{path}");
+        }
+    }
+
+    #[test]
+    fn labels_without_call_ids_pair_in_order() {
+        let label = |id: u64, text: &str| json!({"id":id,"kind":"tool","launch_id":L,"text":text});
+        let run = play(&[
+            label(1, "Read: started"),
+            label(2, "Read: started"),
+            label(3, "Bash: started"),
+            label(4, "Read: completed"),
+        ]);
+        let open = |run: &V| {
+            run["calls"]
+                .as_object()
+                .map(|calls| calls.values().filter(|call| m::yes(&call["open"])).count())
+        };
+        assert_eq!(run["steps"], 3);
+        assert_eq!(open(&run), Some(2));
+        let run = play(&[
+            label(1, "Read: started"),
+            label(2, "Read: completed"),
+            label(3, "Read: completed"),
+        ]);
+        assert_eq!(open(&run), Some(0));
+    }
+
+    #[test]
+    fn the_map_keeps_the_order_files_were_touched() {
+        let mut events = done(1, "Read", "r1", json!({"path":"tests/OrderTest.php"}), true);
+        events.extend(done(
+            3,
+            "Read",
+            "r2",
+            json!({"path":"app/Models/Order.php"}),
+            true,
+        ));
+        events.extend(done(5, "Read", "r3", json!({"path":"composer.json"}), true));
+        events.extend(done(
+            7,
+            "Edit",
+            "e1",
+            json!({"path":"app/Http/Controllers/Api/V1/Admin/OrderController.php"}),
+            true,
+        ));
+        events.extend(done(
+            9,
+            "Read",
+            "r4",
+            json!({"path":"app/Models/User.php"}),
+            true,
+        ));
+        events.extend(done(
+            11,
+            "Read",
+            "r5",
+            json!({"path":"secrets.env","outside":true}),
+            true,
+        ));
+        let districts = map(&play(&events), "all", false);
+        let names: Vec<_> = districts.iter().map(|d| m::text(d, "label")).collect();
+        assert_eq!(names, ["tests/", "app/", "./", "Outside the project"]);
+        let app = &districts[1];
+        let blocks: Vec<_> = m::array(&app["blocks"])
+            .iter()
+            .map(|b| m::text(b, "name"))
+            .collect();
+        assert_eq!(blocks, ["Models", "Http/Controllers/Api/…"]);
+        let models = &app["blocks"][0];
+        assert_eq!(models["label"], "app/Models, 2 files");
+        assert_eq!(
+            app["blocks"][1]["label"],
+            "app/Http/Controllers/Api/…, 1 file, 1 edited"
+        );
+        let chips: Vec<_> = m::array(&models["files"])
+            .iter()
+            .map(|c| m::text(c, "name"))
+            .collect();
+        assert_eq!(chips, ["Order.php", "User.php"]);
+        assert_eq!(districts[2]["blocks"][0]["label"], "Project root, 1 file");
+        assert_eq!(
+            districts[3]["blocks"][0]["label"],
+            "Outside the project, 1 file"
+        );
+    }
+
+    #[test]
+    fn a_wordpress_plugin_is_a_district_of_its_own() {
+        let at = |path: &str| place_of(&json!({"path":path}));
+        assert_eq!(
+            at("wp-content/plugins/shop/includes/class-order.php"),
+            ("wp-content/plugins/shop".into(), "includes".into())
+        );
+        assert_eq!(
+            at("wp-content/themes/store/functions.php"),
+            ("wp-content/themes/store".into(), String::new())
+        );
+        assert_eq!(
+            at("wp-content/uploads/a.png"),
+            ("wp-content".into(), "uploads".into())
+        );
+        assert_eq!(at("composer.json"), (String::new(), String::new()));
+        assert_eq!(
+            place_of(&json!({"path":"outside","outside":true})),
+            (OUTSIDE.into(), String::new())
+        );
+    }
+
+    #[test]
+    fn a_chip_carries_what_happened_to_its_file() {
+        let mut events = done(1, "Read", "r1", json!({"path":"app/Order.php"}), true);
+        events.extend(done(3, "Read", "r2", json!({"path":"app/Order.php"}), true));
+        events.extend(done(5, "Edit", "e1", json!({"path":"app/Order.php"}), true));
+        events.extend(done(
+            7,
+            "Edit",
+            "e2",
+            json!({"path":"app/Broken.php"}),
+            false,
+        ));
+        events.extend(done(
+            9,
+            "Read",
+            "h1",
+            json!({"path":"app/Helper.php","parent":"task-1"}),
+            true,
+        ));
+        events.push(tool(11, "file_change", "c1", "completed", json!({"changes":[{"path":"app/New.php","kind":"add"},{"path":"app/Old.php","kind":"delete"}],"ok":true})));
+        events.push(tool(
+            12,
+            "Read",
+            "r9",
+            "started",
+            json!({"path":"app/Open.php"}),
+        ));
+        let run = play(&events);
+        let chip = |running: bool, name: &str| {
+            map(&run, "all", running)[0]["blocks"][0]["files"]
+                .as_array()
+                .and_then(|chips| chips.iter().find(|chip| chip["name"] == name).cloned())
+                .unwrap_or(V::Null)
+        };
+        let order = chip(true, "Order.php");
+        assert_eq!(order["times"], "×2");
+        assert_eq!(order["edited"], true);
+        assert_eq!(order["mark"], "");
+        assert_eq!(
+            order["label"],
+            "app/Order.php, opened 2 times, edit reported ok"
+        );
+        let broken = chip(true, "Broken.php");
+        assert_eq!(broken["mark"], "!");
+        assert_eq!(broken["edited"], false);
+        assert_eq!(broken["failed"], true);
+        assert_eq!(chip(true, "New.php")["mark"], "+");
+        assert_eq!(chip(true, "New.php")["created"], true);
+        assert_eq!(chip(true, "Old.php")["deleted"], true);
+        assert_eq!(chip(true, "Helper.php")["helper"], true);
+        assert_eq!(order["helper"], false);
+        // The ring follows the call that is open, and only while the launch runs.
+        assert_eq!(chip(true, "Open.php")["now"], true);
+        assert_eq!(
+            chip(true, "Open.php")["label"],
+            "app/Open.php, opened once, in use now"
+        );
+        assert_eq!(chip(false, "Open.php")["now"], false);
+        assert_eq!(order["now"], false);
+    }
+
+    #[test]
+    fn filters_offer_what_the_launch_has_and_dim_the_rest() {
+        let mut events = done(1, "Read", "r1", json!({"path":"app/Order.php"}), true);
+        events.extend(done(3, "Edit", "e1", json!({"path":"app/Order.php"}), true));
+        events.extend(done(
+            5,
+            "Read",
+            "r2",
+            json!({"path":"tests/OrderTest.php"}),
+            true,
+        ));
+        let run = play(&events);
+        let labels = |run: &V, chosen: &str| -> Vec<(String, bool)> {
+            filters(run, chosen)
+                .iter()
+                .map(|f| (m::text(f, "label"), m::yes(&f["pressed"])))
+                .collect()
+        };
+        assert_eq!(
+            labels(&run, "all"),
+            [("All".to_owned(), true), ("Edited 1".to_owned(), false)]
+        );
+        assert_eq!(
+            labels(&run, "edited"),
+            [("All".to_owned(), false), ("Edited 1".to_owned(), true)]
+        );
+        // A choice the launch has nothing for reads as All.
+        assert_eq!(labels(&run, "failed")[0], ("All".to_owned(), true));
+        let dim = |filter: &str| -> Vec<bool> {
+            map(&run, filter, false)
+                .iter()
+                .flat_map(|d| m::array(&d["blocks"]))
+                .flat_map(|b| m::array(&b["files"]))
+                .map(|chip| m::yes(&chip["dim"]))
+                .collect()
+        };
+        assert_eq!(dim("all"), [false, false]);
+        assert_eq!(dim("edited"), [false, true]);
+        // A search in a folder offers Searched for the files under it; one without a folder
+        // looked everywhere.
+        events.push(tool(
+            7,
+            "Grep",
+            "g1",
+            "started",
+            json!({"detail":"rules(","path":"app"}),
+        ));
+        let run = play(&events);
+        assert!(labels(&run, "all").contains(&("Searched 1".to_owned(), false)));
+        assert_eq!(searched_in(&run, file(&run, "app/Order.php")), ["rules("]);
+        assert!(searched_in(&run, file(&run, "tests/OrderTest.php")).is_empty());
+        events.push(tool(
+            8,
+            "Glob",
+            "g2",
+            "started",
+            json!({"detail":"**/*.php"}),
+        ));
+        let run = play(&events);
+        assert!(labels(&run, "all").contains(&("Searched 2".to_owned(), false)));
+    }
+
+    #[test]
+    fn the_card_says_what_the_page_knows_about_the_file() {
+        let mut events = done(1, "Read", "r1", json!({"path":"app/Order.php"}), true);
+        events.extend(done(3, "Edit", "e1", json!({"path":"app/Order.php"}), true));
+        events.extend(done(5, "Edit", "e2", json!({"path":"app/Order.php"}), true));
+        events.push(tool(
+            7,
+            "Grep",
+            "g1",
+            "started",
+            json!({"detail":"rules(","path":"app"}),
+        ));
+        let run = play(&events);
+        assert_eq!(
+            card_facts(&run, file(&run, "app/Order.php")),
+            [
+                "Opened ×1",
+                "In a folder searched for rules(",
+                "Edit reported ok ×2"
+            ]
+        );
+        assert_eq!(file(&run, "app/Order.php")["first_step"], 1);
+        assert_eq!(file(&run, "app/Order.php")["last_step"], 3);
+        let run = play(&[tool(
+            1,
+            "file_change",
+            "c1",
+            "completed",
+            json!({"changes":[{"path":"a.php","kind":"add"}],"ok":true}),
+        )]);
+        assert_eq!(
+            card_facts(&run, file(&run, "a.php")),
+            ["Added (file_change)", "Edit reported ok"]
+        );
+    }
+
+    #[test]
+    fn the_card_stays_inside_the_window() {
+        let (card, window) = ((360., 140.), (1280., 800.));
+        // Under the chip, a little to its left.
+        assert_eq!(place((400., 300., 324.), card, window), (392., 332.));
+        // Above it when there is no room below.
+        assert_eq!(place((400., 700., 724.), card, window), (392., 552.));
+        // Never past the right or the left edge, nor above the top.
+        assert_eq!(place((1200., 300., 324.), card, window).0, 912.);
+        assert_eq!(place((2., 300., 324.), card, window).0, 8.);
+        assert_eq!(place((400., 60., 84.), (360., 760.), window).1, 8.);
+        // A window narrower than the card keeps the card's left edge on screen.
+        assert_eq!(place((100., 300., 324.), card, (320., 800.)).0, 8.);
+    }
+
+    #[test]
+    fn a_path_goes_into_the_draft_at_the_caret() {
+        assert_eq!(spliced("", 0, 0, "app/a.php"), ("app/a.php".into(), 9));
+        assert_eq!(
+            spliced("Look at", 7, 7, "app/a.php"),
+            ("Look at app/a.php".into(), 17)
+        );
+        assert_eq!(
+            spliced("Look at ", 8, 8, "a.php"),
+            ("Look at a.php".into(), 13)
+        );
+        assert_eq!(
+            spliced("see here", 3, 3, "a.php"),
+            ("see a.php here".into(), 9)
+        );
+        assert_eq!(
+            spliced("see  here", 4, 4, "a.php"),
+            ("see a.php here".into(), 9)
+        );
+        // A selection is replaced.
+        assert_eq!(
+            spliced("see THIS here", 4, 8, "a.php"),
+            ("see a.php here".into(), 9)
+        );
+        // Offsets count UTF-16 units: Cyrillic is one each, an emoji two.
+        assert_eq!(
+            spliced("Посмотри тут", 8, 8, "a.php"),
+            ("Посмотри a.php тут".into(), 14)
+        );
+        assert_eq!(spliced("😀 x", 2, 2, "a.php"), ("😀 a.php x".into(), 8));
+        // A caret past the end, or an end before the start, still lands in the text.
+        assert_eq!(spliced("ab", 9, 9, "c"), ("ab c".into(), 4));
+        assert_eq!(spliced("ab", 2, 0, "c"), ("ab c".into(), 4));
+    }
+
+    #[test]
+    fn counts_read_as_english() {
+        assert_eq!(count(0, "step"), "0 steps");
+        assert_eq!(count(1, "step"), "1 step");
+        assert_eq!(count(2, "file"), "2 files");
+        assert_eq!(
+            counts(&json!({"steps":1,"messages":1})),
+            "1 step · 1 message"
+        );
+        assert_eq!(
+            counts(&json!({"steps":9,"messages":2})),
+            "9 steps · 2 messages"
+        );
     }
 }
 

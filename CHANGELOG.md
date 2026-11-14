@@ -357,10 +357,20 @@ edition's own files remain in that edition's changelog.
   turn in the page's model: it is now told from a turn by the two lines it
   writes, the launch it replaces is kept, and the **Last run** line and its
   details stay after one check or several, also when the session is opened
-  again. Whether the view is open, and as what, is one function with tests
+  again. The Files tab is a map again: folder blocks with a chip for each
+  file in the order it was first touched, marked as the legend says (edited,
+  created, failed, deleted, opened again, a helper's file, the call that is
+  open now). Filters dim the chips they leave out. A click on a chip opens
+  its card with **Show in conversation**, **Add path to message** and **Copy
+  path**; Escape, a second click or a press elsewhere puts it away, and
+  Escape with the focus in the view folds the details. A call now counts
+  once for the file it names (its start and its result used to count as two
+  reads or two edits), an edit counts when the tool reports it done, and
+  steps recorded as plain labels pair in order instead of staying open
+  forever. Whether the view is open, and as what, is one function with tests
   (`mode` in `infra-ui/src/run.rs`). Not brought back: the run receipt in the
-  conversation, details of turns before the last one, Escape and arrow keys
-  in the panel, and the notification button.
+  conversation, details of turns before the last one, the card on hover,
+  arrow keys in the tab list, and the notification button.
 - The Harness page shows its own updates again. Since the move to Rust the
   Update button never appeared: the Wasm interface waited for an `available`
   flag that `GET /api/app/update` does not send (it reports `state`), filled
