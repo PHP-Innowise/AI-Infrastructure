@@ -2115,6 +2115,139 @@ using the current filters. Open a link to inspect its details at the base
 revision. **Back to PR cycle** returns to the PR's chain, and **Back to map**
 returns to the map you started from.
 
+**Patterns** marks a picture with the design and architecture patterns the graph
+shows signs of. A box with ◆ is a part of a found pattern, or a folder or a file
+that holds one, with how many where there are more. The side panel lists what was
+found where the picture is open, architecture before design, each pattern with its
+first findings, and beside a selected place the findings it has a part in. Select a
+finding to draw it alone: its parts as boxes, each in the frame of what it is in
+the pattern, and between them what makes it one, as `implements`, `holds`, `takes`,
+`returns` and `makes`. The ringed box is the type the finding is named after. A
+finding too large for a picture draws a share of each kind of part and says how
+many it left out. **Back to map** returns to the picture the finding was opened
+from, and the choice of **Patterns** is kept for the next map.
+
+A pattern is told by how types stand to each other, which the graph says link by
+link: one type extends or implements another, holds it in a field, takes it as a
+parameter, returns it, makes it.
+
+| Pattern | What tells it |
+| --- | --- |
+| Strategy | An abstraction with two implementations or more, which another type holds or takes as the abstraction. State and Bridge are built the same way. Data behind a shared interface is no strategy: where most implementations, test doubles aside, are the model's own classes (named `…Entity`, `…Dto`, `…Model` or `…ValueObject`, or lying in a folder of them) or messages that have a handler of their own, as the commands a bus takes, they are what something takes, not ways of doing one thing. |
+| Decorator | A type that stands under an abstraction and keeps one of it, in a field or taken where it is built. Proxy and Composite are built the same way. |
+| Factory | A method that returns an abstraction and makes the types that implement it. A type named `…Factory` that makes other types is found by its name. |
+| Template method | A method of a base type that calls other methods of that type, which the types under it define. |
+| Builder | A type named `…Builder`, with the type its `build` method gives. |
+| Singleton | A type with a method named `getInstance`, `instance` or the like, with the types that call it. |
+| Events and listeners | A type that others take in a handling method (`handle`, `__invoke`, `on…`), where its name or folder says event, or theirs says listener, subscriber or observer. |
+| Commands and handlers | A message and the type named after it with `Handler`, which takes it. |
+| Repository | A type named `…Repository`, with the types its methods give and take and the types that hold it. |
+
+The first four are told by links alone. The others rest on a name as well, and
+such a finding says **by name**: a name is a promise, not a proof. What stands
+above other types is read from the source: a `trait`, an `interface`, a `protocol`,
+an `abstract` class, or a class that is extended. In Rust only a trait is
+implemented, so an `impl From<Other> for Type`, which the tool reads as
+implementing `Other`, tells nothing. **Only links read from the code** leaves out
+what rests on links the tool inferred, and **Without tests** what rests on test
+doubles. Nothing reads a method's body, and a type the graph does not hold, as one
+of a framework that is not indexed, is no part of a finding. Two patterns built the
+same way are one finding under the commoner name.
+
+**Layers** come first among the findings where the open folder is built in them:
+its files filed as entry points, services, data access and model, with how many
+there are and how much runs against their order. Nothing in a graph says which
+layer a file belongs to, so a file is filed by its name or, failing that, by the
+nearest folder named for a layer, and the finding says **by name**:
+
+| Layer | A name that ends in | Or a folder named |
+| --- | --- | --- |
+| Entry points | `Controller`, `Middleware`, `Endpoint` | `controller`, `controllers`, `console`, `middleware`, `resolver`, `resolvers`, `views`, `routes` |
+| Services | `Service`, `Manager`, `UseCase`, `Interactor`, `Handler`, `Listener`, `Subscriber`, `Job` | `service`, `services`, `usecase`, `usecases`, `handler`, `handlers`, `listener`, `listeners`, `subscribers`, `eventsubscriber`, `eventlistener`, `jobs`, `manager`, `managers`, `application` |
+| Data access | `Repository`, `Gateway`, `Mapper`, `Dao`, `Client` | `repository`, `repositories`, `gateways`, `mappers`, `persistence`, `infrastructure`, `dao`, `clients` |
+| Model | `Model`, `Entity`, `Dto`, `ValueObject` | `model`, `models`, `entity`, `entities`, `domain`, `dto`, `dtos`, `valueobject`, `valueobjects`, `event`, `events` |
+
+Inside a folder named `graphql` a folder of operations holds entry points too:
+`mutation`, `mutations`, `operation`, `operations`, `query`, `queries`,
+`subscription`, `subscriptions`. Anywhere else such a folder holds messages as
+often, and files nothing.
+
+The ending is a word of the name, in whatever case: `OrderService`,
+`order_service.py`, `orders.service.ts`, and not `Remodel` for `Model`.
+`Interface` and `Impl` after it are passed over. A file named as a whole like
+such a folder is filed too (`models.py`, `routes.rs`), except by the names that
+mean a folder only: `application`, `console`, `domain`, `infrastructure` and
+`persistence`. A name says more than a folder, and the nearest folder more than
+one above it, with these exceptions:
+
+- In a folder of the model's own classes (`entity`, `entities`, `model`, `models`,
+  `dto`, `dtos`, `valueobject`, `valueobjects`) an ending that is a plain noun as
+  well (`Client`, `Endpoint`, `Gateway`, `Job`, `Manager`, `Service`,
+  `Subscriber`) says nothing, because `Entity/OAuthClient` and `Models/Job` are
+  things of the model, called after what they are.
+- `Model` and `Entity` name a thing as often as a layer. They file a file only
+  where no folder says another layer: `GraphQL/Query/FindPhoneModel` is an
+  operation.
+- `application`, `domain` and `infrastructure` are folders of wide meaning. One
+  files what lies in it only where no narrower folder does, and the outermost
+  of them speaks: in `Application/Command/Domain/` the inner folder is named for
+  what the commands are about.
+- What passes between the layers is of none: a name that ends in `Exception`,
+  `Request` or `Response`, and what lies in a folder `exception` or
+  `exceptions`. Among the model's own classes such a name is a thing of the
+  model.
+- After a dot `client` says where a file runs, as in `analytics.client.ts`, and
+  files nothing.
+
+A test, a template (`*.blade.php`) and what is no code are filed in no layer. A folder is said to be in layers where they hold four files or more and
+a tenth of its code or more, and a file of one layer needs a file of another: a
+few files that happen to be named like a layer are no layered design.
+
+A design that keeps its domain at the heart is read by its rings instead of the
+four layers: **Adapters** (a folder named `infrastructure`, `infra`,
+`presentation`, `ui`, `adapters` or `adapter`), then **Application**, then
+**Domain**. A file lies in the ring of the outermost folder on its way that is
+named for one, whatever it is called itself, so the interface of a repository in
+`Domain/` is of the domain and what implements it in `Infrastructure/` is an
+adapter. A ring may use those inside it, and a link out of an inner ring runs
+against the order. A folder is read by its rings where they hold half of its code
+or more; inside one ring, and anywhere else, it is read by the four layers.
+
+Select the finding to draw the layers: one box a layer, in their order from left
+to right, each with how many files it holds. A layer may use those after it. A
+link to the next layer runs straight, one that passes a layer runs over the row,
+and a link back runs under it, in red, and says that it runs against the order.
+The links counted are those by which one file needs another: a call, an
+inheritance, and the type of a field, a parameter or a result. An import, and a
+class named in an attribute, say only that one file knows of another and are not
+counted, so a pair of files can show more links where it is looked into than it
+counts here. The side panel lists the pairs of files that run against the order,
+the most linked first; select a pair to see what makes up its link. Select a link
+between two layers to list the pairs of files it is made of in the same way, and
+select it again to let go of it. Select a layer to see what places a file in it,
+what it has with the other layers, and its files, each a way to that file among
+its neighbours; ↗ beside another layer selects the link with it. Whether a link
+against the order is a fault is for whoever knows the design to say; the map
+shows where such links are.
+
+With a change chosen in **Map of changes**, the picture of the layers also says
+what the change did to their order: the pairs of files that run against it now and
+did not where the change started, and those that did and no longer do. The line
+above the picture counts the links of both, a link back that holds added ones
+carries their number, and the side panel lists **Added by this change** and **Gone
+with this change** before all that runs against the order, where a pair the
+change added says so. A pair is told by its two files, whatever the number of its
+links, and a file Git knows to be renamed is the same file, so moving a file or
+renaming a folder adds nothing and takes nothing away. The change is measured from
+the base it shows for itself: the base of a pull request, the parent of a commit,
+the branch the checkout left or its last commit. That base is read the way the
+folder is read now, by the four layers or by its rings. Its graph is built when
+the picture is first opened and kept with the graphs of other commits; until then
+the picture says that it is being prepared. Two things are not compared, and the
+picture says so: a graph of the checkout that is older than its files, until it
+is rebuilt, and, with **Without tests**, a graph of a commit of a Rust project
+that was kept without the spans of its tests.
+
 The server reads `graph.json` in one streaming
 pass and keeps the last four graphs it read. On the development machine a 500 MB
 graph of 545,000 symbols took two seconds to read and 10 ms per folder after that.

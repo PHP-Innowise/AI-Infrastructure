@@ -24,6 +24,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Say in the picture of a folder's layers on the dependency map in Harness
+  what a chosen change did to their order: the pairs of files a pull request, a
+  commit, a branch or the checkout's own work set against it and those it took
+  away, measured from the base of the change. A renamed file is the same file.
+
+- Show the layers of a folder on the dependency map in Harness: its files filed
+  as entry points, services, data access and model by their names and folders,
+  the links between those layers in their order with the pairs of files each
+  is made of, and what runs against that order. A design that keeps its
+  domain at the heart is read by its rings instead: adapters, application,
+  domain.
+
+- Mark the dependency map in Harness with the design and architecture patterns
+  the graph shows signs of, list the findings where a picture is open, and draw
+  one finding with what each of its parts is in it.
+
 - View the existing cycle at the base of a pull request in Harness, inspect its
   links at that revision, and switch back to the PR cycle.
 
