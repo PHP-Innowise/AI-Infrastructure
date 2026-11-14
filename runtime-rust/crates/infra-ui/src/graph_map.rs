@@ -1559,11 +1559,20 @@ fn unopened(view: &V) -> String {
     html.push_str("<ul class=\"graph-map-rows\">");
     for row in &rows {
         let uses = row["uses"].as_u64().unwrap_or(0);
+        // The name of the file first: a long path would be cut at its end,
+        // where the name is. Its folder stands under it, with the links.
+        let path = m::text(row, "path");
+        let folder = parent(&path);
         html.push_str(&format!(
-            "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-open\" data-payload=\"{}\" title=\"{} · select to open it\"><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{}{}{}</span></button><button type=\"button\" class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with {}\">↗</button></li>",
+            "<li><button type=\"button\" class=\"graph-map-row\" data-unopened=\"true\" data-action=\"graph-map-open\" data-payload=\"{}\" title=\"{} · select to open it\"><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{}{}{}{}</span></button><button type=\"button\" class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with {}\">↗</button></li>",
             payload(&row["path"]),
-            escape(&m::text(row, "path")),
-            escape(&m::text(row, "path")),
+            escape(&path),
+            escape(base(&path)),
+            if folder.is_empty() {
+                String::new()
+            } else {
+                format!("{} · ", escape(folder))
+            },
             weight(
                 row["links"].as_u64().unwrap_or(0),
                 row["guessed"].as_u64().unwrap_or(0)
@@ -7075,10 +7084,14 @@ mod tests {
         let html = side(&view);
         assert!(html.starts_with(&side(&plain)), "{html}");
         let list = &html[side(&plain).len()..];
-        assert!(list.starts_with("<h4>Use the change, not opened by the run <span class=\"graph-map-total\">3</span></h4><ul class=\"graph-map-rows\"><li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-open\" data-payload=\"&quot;src/Order/Invoice&lt;b&gt;.php&quot;\" title=\"src/Order/Invoice&lt;b&gt;.php · select to open it\"><span class=\"graph-map-row-name\">src/Order/Invoice&lt;b&gt;.php</span><span class=\"graph-map-row-links\">3 links, 1 guessed · over 2 changed files</span></button><button type=\"button\" class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order/Invoice&lt;b&gt;.php&quot;,&quot;to&quot;:&quot;src/Cart/Cart&lt;c&gt;.php&quot;}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with Cart&lt;c&gt;.php\">↗</button></li>"), "{list}");
-        assert!(list.contains("<span class=\"graph-map-row-name\">src/Report/Report.php</span><span class=\"graph-map-row-links\">1 link guessed</span>"), "{list}");
-        assert!(list.ends_with("<span class=\"graph-map-row-name\">tests/Cart/CartTest.php</span><span class=\"graph-map-row-links\">1 link · test</span></button><button type=\"button\" class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;tests/Cart/CartTest.php&quot;,&quot;to&quot;:&quot;src/Cart/Cart.php&quot;}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with Cart.php\">↗</button></li></ul>"), "{list}");
+        assert!(list.starts_with("<h4>Use the change, not opened by the run <span class=\"graph-map-total\">3</span></h4><ul class=\"graph-map-rows\"><li><button type=\"button\" class=\"graph-map-row\" data-unopened=\"true\" data-action=\"graph-map-open\" data-payload=\"&quot;src/Order/Invoice&lt;b&gt;.php&quot;\" title=\"src/Order/Invoice&lt;b&gt;.php · select to open it\"><span class=\"graph-map-row-name\">Invoice&lt;b&gt;.php</span><span class=\"graph-map-row-links\">src/Order · 3 links, 1 guessed · over 2 changed files</span></button><button type=\"button\" class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order/Invoice&lt;b&gt;.php&quot;,&quot;to&quot;:&quot;src/Cart/Cart&lt;c&gt;.php&quot;}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with Cart&lt;c&gt;.php\">↗</button></li>"), "{list}");
+        assert!(list.contains("<span class=\"graph-map-row-name\">Report.php</span><span class=\"graph-map-row-links\">src/Report · 1 link guessed</span>"), "{list}");
+        assert!(list.ends_with("<span class=\"graph-map-row-name\">CartTest.php</span><span class=\"graph-map-row-links\">tests/Cart · 1 link · test</span></button><button type=\"button\" class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;tests/Cart/CartTest.php&quot;,&quot;to&quot;:&quot;src/Cart/Cart.php&quot;}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with Cart.php\">↗</button></li></ul>"), "{list}");
         assert_eq!(list.matches("data-action=\"graph-map-open\"").count(), 3);
+        // A file at the top of the project has no folder to name.
+        let mut top = view.clone();
+        top["run"]["reach"]["rows"][2]["path"] = json!("bootstrap<x>.php");
+        assert!(side(&top).contains("title=\"bootstrap&lt;x&gt;.php · select to open it\"><span class=\"graph-map-row-name\">bootstrap&lt;x&gt;.php</span><span class=\"graph-map-row-links\">1 link · test</span>"));
         // More than are listed are counted: the number is of all of them.
         let mut many = view.clone();
         many["run"]["reach"]["unopened"] = json!(1203);
