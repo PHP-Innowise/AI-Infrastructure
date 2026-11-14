@@ -684,6 +684,33 @@ impl RunLedger {
         }
         receipt
     }
+    /// The files of the project the run opened, and those it changed with
+    /// what was done to each: `A` for a file it made, `D` for one it
+    /// deleted, `M` for any other. All of them, where the receipt names the
+    /// first few; a file outside the project is counted there and left out
+    /// here.
+    pub fn files(&self) -> (Vec<&str>, Vec<(&str, char)>) {
+        let opened = self
+            .opened
+            .iter()
+            .filter_map(|(_, path)| path.as_deref())
+            .collect();
+        let edited = self
+            .edited
+            .iter()
+            .filter_map(|(key, path)| {
+                let done = if self.deleted.contains(key) {
+                    'D'
+                } else if self.created.contains(key) {
+                    'A'
+                } else {
+                    'M'
+                };
+                Some((path.as_deref()?, done))
+            })
+            .collect();
+        (opened, edited)
+    }
 }
 pub fn compaction_text(pre: Option<u64>, post: Option<u64>) -> String {
     fn grouped(value: u64) -> String {

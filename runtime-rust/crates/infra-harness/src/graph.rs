@@ -14,7 +14,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::Read,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -389,6 +389,14 @@ fn chosen(resolved: &Resolved) -> Value {
     let mut chosen = resolved.json();
     chosen["files"] = json!(resolved.files.len());
     chosen
+}
+/// A run of an agent as a change: the files it changed are what is mapped,
+/// the files it opened are laid over the map, and the rest is what a picture
+/// says of the run beside itself.
+struct RunChange {
+    resolved: Arc<Resolved>,
+    opened: BTreeSet<String>,
+    told: Value,
 }
 fn size(path: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(path) else {
@@ -1193,9 +1201,15 @@ impl Graphs {
             told(&mut view);
             return Ok(view);
         };
-        let resolved = match target {
+        // A run is read from its session every time: it may still be going.
+        let ran = match target {
+            Target::Run(session) => Some(self.ran(project, &root, session)?),
+            _ => None,
+        };
+        let resolved = match (target, &ran) {
+            (_, Some(ran)) => ran.resolved.clone(),
             // The checkout is asked every time: it is local, and it moves.
-            Target::Work | Target::Uncommitted => Arc::new(graph_changes::resolve(
+            (Target::Work | Target::Uncommitted, _) => Arc::new(graph_changes::resolve(
                 &root,
                 target,
                 &self.listed(project, &root),
@@ -1327,6 +1341,12 @@ impl Graphs {
                     }
                 };
                 marked(&index, &mut view);
+                // What a run opened is laid over whatever picture of its
+                // change is drawn.
+                if let Some(ran) = &ran {
+                    view["run"] = ran.told.clone();
+                    index.overlay_run(&mut view, &changed, &ran.opened, certain);
+                }
                 view
             }
             // Until the commit's own graph is there, the project's graph
@@ -1387,7 +1407,7 @@ impl Graphs {
         let root = PathBuf::from(record["path"].as_str().unwrap_or(""));
         let published = live(&self.store.state, project);
         let graph = match target {
-            None | Some(Target::Work | Target::Uncommitted) => {
+            None | Some(Target::Work | Target::Uncommitted | Target::Run(_)) => {
                 Some((project.to_owned(), published, root))
             }
             Some(target) => {
@@ -1927,6 +1947,89 @@ impl Graphs {
             },
         )
     }
+    /// Reads what a run did to the files of its project from the steps its
+    /// session recorded, as the run's own receipt counts them: the files it
+    /// changed, each with what was done to it, and the files it opened. A
+    /// session of another project is no run of this one.
+    fn ran(&self, project: &str, root: &Path, session: &str) -> Result<RunChange> {
+        let record = self.store.get(session)?;
+        if record["project_id"] != project {
+            return Err(HarnessError::missing("This project has no such run."));
+        }
+        let mut ledger = crate::run_activity::RunLedger::new(
+            record["provider"].as_str().unwrap_or(""),
+            None,
+            false,
+        );
+        let mut after = 0;
+        loop {
+            let events = self.store.events(session, after)?;
+            let Some(last) = events.last().and_then(|event| event["id"].as_i64()) else {
+                break;
+            };
+            for event in &events {
+                // Past this notice steps are counted and no longer named.
+                if event["targets"] == "limited" {
+                    ledger.limited = true;
+                }
+                if event["kind"] == "tool" {
+                    ledger.observe(event, event["state"].is_string().then_some(event));
+                }
+            }
+            after = last;
+        }
+        let plain = |path: &str| path.replace('\\', "/").trim_start_matches("./").to_owned();
+        let (opened, edited) = ledger.files();
+        let opened = opened.into_iter().map(plain).collect::<BTreeSet<_>>();
+        let files = edited
+            .into_iter()
+            .map(|(path, status)| graph_changes::Change {
+                path: plain(path),
+                status,
+                from: None,
+            })
+            .collect::<Vec<_>>();
+        let receipt = ledger.receipt();
+        let count = |key: &str| receipt[key].as_u64().unwrap_or(0);
+        // A run in a folder of its own, as a worktree, names its files as
+        // the project does; the graph is the project's all the same.
+        let folder = record["project_path"].as_str().unwrap_or("");
+        let elsewhere = !folder.is_empty() && Path::new(folder) != root;
+        let title = record["title"].as_str().unwrap_or("");
+        let told = json!({
+            "session": session,
+            "title": title,
+            "provider": record["provider"],
+            "status": record["status"],
+            "steps": receipt["steps"],
+            "opened": opened.len(),
+            "edited": files.len(),
+            "outside": (count("opened") + count("edited"))
+                .saturating_sub((opened.len() + files.len()) as u64),
+            "searched": receipt["searched"],
+            "commands": receipt["commands"],
+            "helpers": receipt["helpers"],
+            "limited": receipt["limited"],
+            "elsewhere": elsewhere,
+        });
+        Ok(RunChange {
+            resolved: Arc::new(Resolved {
+                target: Target::Run(session.to_owned()),
+                kind: "run",
+                name: title.chars().take(80).collect(),
+                title: None,
+                pull: None,
+                head: None,
+                base: None,
+                revision: None,
+                prefix: String::new(),
+                files,
+                notes: Vec::new(),
+            }),
+            opened,
+            told,
+        })
+    }
     /// Says in a picture of a folder's layers what the chosen change did
     /// to their order: the pairs of files that run against it now and did
     /// not where the change started, and those that did and no longer do.
@@ -2091,11 +2194,14 @@ impl Graphs {
     /// fetched here, so callers keep this off the runtime.
     pub fn choose(&self, project: &str, target: &Target) -> Result<Value> {
         let root = self.root(project)?;
-        let resolved = Arc::new(graph_changes::resolve(
-            &root,
-            target,
-            &self.listed(project, &root),
-        )?);
+        let resolved = match target {
+            Target::Run(session) => self.ran(project, &root, session)?.resolved,
+            _ => Arc::new(graph_changes::resolve(
+                &root,
+                target,
+                &self.listed(project, &root),
+            )?),
+        };
         lock(&self.chosen)?.insert((project.to_owned(), target.text()), resolved.clone());
         if let Some(commit) = &resolved.revision {
             self.revise(
@@ -3826,6 +3932,280 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert_eq!(
                 did(&rebuilt),
                 ("ready".to_owned(), head[..12].to_owned(), 2, 0)
+            );
+        }
+        /// A session of the project with the steps a run recorded, as the
+        /// store keeps them: each step started and completed under one call.
+        fn recorded(fixture: &Fixture, folder: &str, steps: &[Value]) -> String {
+            let session = store::id();
+            fixture
+                .store
+                .connection()
+                .unwrap()
+                .execute(
+                    "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at)VALUES(?1,'Round the totals once',?2,?3,'claude','edit','native',0,'completed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                    rusqlite::params![session, fixture.project, folder],
+                )
+                .unwrap();
+            for (call, step) in steps.iter().enumerate() {
+                if step["kind"] != "tool" {
+                    fixture.store.event(&session, step).unwrap();
+                    continue;
+                }
+                let mut started = step.clone();
+                started["state"] = json!("started");
+                started["call"] = json!(format!("call-{call}"));
+                let failed = started.as_object_mut().unwrap().remove("failed").is_some();
+                // What a step changed is known when it ends.
+                let changes = started.as_object_mut().unwrap().remove("changes");
+                fixture.store.event(&session, &started).unwrap();
+                let mut ended = json!({
+                    "kind": "tool", "tool": step["tool"], "state": "completed",
+                    "call": started["call"], "ok": !failed,
+                });
+                if let Some(changes) = changes {
+                    ended["changes"] = changes;
+                }
+                fixture.store.event(&session, &ended).unwrap();
+            }
+            session
+        }
+        fn step(tool: &str, path: &str) -> Value {
+            json!({"kind": "tool", "tool": tool, "path": path, "ok": true})
+        }
+        #[test]
+        fn a_run_is_mapped_as_what_it_changed_with_what_it_opened() {
+            let fixture = Fixture::new();
+            fixture.branched();
+            // A shop in which the service, the mailer and a line use the
+            // order.
+            let uses = [
+                &NEEDS[..],
+                &[("mailer", "order"), ("line", "order"), ("order", "line")],
+            ]
+            .concat();
+            let mut files = SHOP.to_vec();
+            files.push(("coupon", "src/Entity/Coupon.php"));
+            fixture.write("graph.fixture", &sketch(&files, &uses));
+            fixture.commit("a shop");
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+            let folder = fixture.folder.to_string_lossy().into_owned();
+            // The run read the order and the service, and a file outside the
+            // project; it edited the order, made a coupon, deleted a file,
+            // and failed to edit the mailer. It searched once and ran one
+            // command.
+            let mut failed = step("Edit", "src/Service/MailService.php");
+            failed["failed"] = json!(true);
+            let mut outside = step("Read", "/etc/hosts");
+            outside["outside"] = json!(true);
+            let mut patched = json!({"kind": "tool", "tool": "apply_patch", "ok": true});
+            patched["changes"] = json!([{"path": "src/Old.php", "kind": "delete"}]);
+            let mut searched = step("Grep", "src");
+            searched["detail"] = json!("Order");
+            let command = json!({"kind": "tool", "tool": "Bash", "detail": "php -l", "ok": true});
+            let session = recorded(
+                &fixture,
+                &folder,
+                &[
+                    json!({"kind": "text", "text": "Reading the order."}),
+                    step("Read", "src/Entity/Order.php"),
+                    step("Read", "src\\Service\\OrderService.php"),
+                    outside,
+                    step("Edit", "./src/Entity/Order.php"),
+                    step("Write", "src/Entity/Coupon.php"),
+                    patched,
+                    failed,
+                    searched,
+                    command,
+                ],
+            );
+            let target = Target::Run(session.clone());
+            let map = |shown| fixture.graphs.map(&fixture.project, Some(&target), &shown);
+            let view = map(Shown::default()).unwrap();
+            // The change is what the run changed, each file with what was
+            // done to it; the mailer it failed to edit is none of it.
+            assert_eq!(view["mode"], "changes");
+            assert_eq!(view["target"], format!("run:{session}"));
+            assert_eq!(
+                (
+                    &view["chosen"]["kind"],
+                    &view["chosen"]["name"],
+                    &view["chosen"]["files"]
+                ),
+                (&json!("run"), &json!("Round the totals once"), &json!(3))
+            );
+            assert_eq!(
+                (
+                    &view["change"]["files"],
+                    &view["change"]["removed"],
+                    &view["change"]["unknown"]
+                ),
+                (&json!(3), &json!(1), &json!(0))
+            );
+            let status = |path: &str| {
+                view["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|node| node["path"] == path)
+                    .map(|node| (node["status"].clone(), node["opened"].clone()))
+            };
+            assert_eq!(
+                status("src/Entity/Order.php"),
+                Some((json!("M"), json!(true)))
+            );
+            // A file the run wrote without having opened it is one it made.
+            assert_eq!(
+                status("src/Entity/Coupon.php"),
+                Some((json!("A"), Value::Null))
+            );
+            // What the run opened is laid over the picture: the service it
+            // read, and not the mailer or the line.
+            assert_eq!(
+                status("src/Service/OrderService.php"),
+                Some((Value::Null, json!(true)))
+            );
+            assert_eq!(
+                status("src/Service/MailService.php"),
+                Some((Value::Null, Value::Null))
+            );
+            // Beside the picture: what the run did, and of the three files
+            // that use the order the two it never opened.
+            let run = &view["run"];
+            assert_eq!(
+                json!({
+                    "session": run["session"], "title": run["title"], "provider": run["provider"],
+                    "status": run["status"], "opened": run["opened"], "edited": run["edited"],
+                    "outside": run["outside"], "searched": run["searched"],
+                    "commands": run["commands"], "helpers": run["helpers"],
+                    "limited": run["limited"], "elsewhere": run["elsewhere"],
+                }),
+                json!({
+                    "session": session, "title": "Round the totals once", "provider": "claude",
+                    "status": "completed", "opened": 2, "edited": 3, "outside": 1, "searched": 1,
+                    "commands": 1, "helpers": 0, "limited": false, "elsewhere": false,
+                })
+            );
+            let reach = &run["reach"];
+            assert_eq!(
+                (&reach["users"], &reach["opened"], &reach["unopened"]),
+                (&json!(3), &json!(1), &json!(2))
+            );
+            assert_eq!(
+                reach["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["path"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["src/Entity/Line.php", "src/Service/MailService.php"]
+            );
+            // The graph is the project's own, as for the checkout's work.
+            assert_eq!(
+                (&view["state"], &view["stale"], &view["rebuilding"]),
+                (&json!("ready"), &json!(false), &json!(false))
+            );
+            // A folder of the change and a selected file are overlaid alike.
+            let order = map(Shown {
+                focus: Some("src/Entity/Order.php"),
+                ..Shown::default()
+            })
+            .unwrap();
+            let used_by = order["focus"]["used_by"].as_array().unwrap();
+            assert_eq!(used_by.len(), 3);
+            assert_eq!(
+                used_by
+                    .iter()
+                    .filter(|row| row["opened"] == true)
+                    .map(|row| row["path"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["src/Service/OrderService.php"]
+            );
+            // The run is searched in the project's graph, chosen or not,
+            // and is chosen as it is mapped.
+            let found = fixture
+                .graphs
+                .find(&fixture.project, Some(&target), "Order", false)
+                .unwrap();
+            assert!(found["found"].as_u64().unwrap() > 0, "{found}");
+            let chosen = fixture.graphs.choose(&fixture.project, &target).unwrap();
+            assert_eq!(chosen["chosen"]["kind"], "run");
+            // A session that is not there, and one of another project, are
+            // no runs of this project.
+            let nowhere = Target::Run(store::id());
+            assert!(
+                fixture
+                    .graphs
+                    .map(&fixture.project, Some(&nowhere), &Shown::default())
+                    .is_err()
+            );
+            let other = tempfile::tempdir().unwrap();
+            let elsewhere = fixture.store.register(other.path()).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert_eq!(
+                fixture
+                    .graphs
+                    .map(&elsewhere, Some(&target), &Shown::default())
+                    .unwrap_err()
+                    .message,
+                "This project has no such run."
+            );
+        }
+        #[test]
+        fn a_long_run_and_one_in_a_folder_of_its_own_are_read_as_far_as_they_were_recorded() {
+            let fixture = Fixture::new();
+            fixture.branched();
+            fixture.write("graph.fixture", &sketch(&SHOP, &NEEDS));
+            fixture.commit("a shop");
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+            // More steps than the store hands out at once, and then the
+            // notice that later steps are no longer named: a step after it
+            // carries no file.
+            let mut steps = (0..300)
+                .map(|at| step("Read", &format!("docs/page{at:03}.md")))
+                .collect::<Vec<_>>();
+            steps.push(step("Edit", "src/Service/OrderService.php"));
+            steps.push(json!({
+                "kind": "status", "targets": "limited",
+                "text": "Step details are not recorded after this point; steps are still counted.",
+            }));
+            steps.push(json!({"kind": "tool", "text": "Edit: started"}));
+            // The run worked in a worktree: its files are named as the
+            // project's are.
+            let worktree = tempfile::tempdir().unwrap();
+            let session = recorded(&fixture, &worktree.path().to_string_lossy(), &steps);
+            let view = fixture
+                .graphs
+                .map(
+                    &fixture.project,
+                    Some(&Target::Run(session)),
+                    &Shown::default(),
+                )
+                .unwrap();
+            let run = &view["run"];
+            assert_eq!(
+                (
+                    &run["opened"],
+                    &run["edited"],
+                    &run["limited"],
+                    &run["elsewhere"]
+                ),
+                (&json!(300), &json!(1), &json!(true), &json!(true))
+            );
+            assert_eq!(view["chosen"]["files"], 1);
+            // The controller uses the service the run edited, and the run
+            // never opened it.
+            assert_eq!(
+                (&run["reach"]["users"], &run["reach"]["unopened"]),
+                (&json!(1), &json!(1))
+            );
+            assert_eq!(
+                run["reach"]["rows"][0]["path"],
+                "src/Controller/OrderController.php"
             );
         }
         #[test]

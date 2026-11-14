@@ -2046,6 +2046,22 @@ the links it has with the change.
   against the remote's default branch. **Uncommitted changes only** leaves the
   commits out. Both use the project's own graph, which is rebuilt when its files
   changed; until then the window says that it is older than the files.
+- **The run of this session** is offered under **Show** while a session is open:
+  what the agent of that session changed, as the session recorded it step by
+  step, whatever has been committed since. The map is then also a way to review
+  the run. A box with ◉ is a file the run opened, and a folder with ◉ says how
+  many of its files it opened; so do the files listed beside a selected one. With
+  nothing selected the side panel lists the files that **use the change and were
+  not opened by the run**, the most linked first: a file that depends on what was
+  changed and was never looked at is where a break the run did not see is looked
+  for first. A row opens its file, and ↗ beside it shows what makes up its link
+  with the changed file it uses most. The list is where to look, not a verdict:
+  a session records the files a step names, so what a run saw through a shell
+  command, a search or a helper is not counted as opened, and the note above the
+  map says how many of those it made. It also says where the record stops before
+  the end of a long run, and that a run in a worktree of its own is drawn on the
+  project's graph. A deleted file has no users in a graph built after it was
+  gone.
 - **Commits and pull requests…** opens a picker with three lists, as an editor's
   history and pull request views have them. **Commits** is the history of the
   checked-out branch, of every branch or of one local branch: message, the branches

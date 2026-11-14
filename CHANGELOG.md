@@ -24,6 +24,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Lay a run of an agent over the dependency map in Harness: **The run of this
+  session** under **Show** draws what the run changed, marks the files it
+  opened, and lists the files that use the change and were never opened by it.
+
 - Say in the picture of a folder's layers on the dependency map in Harness
   what a chosen change did to their order: the pairs of files a pull request, a
   commit, a branch or the checkout's own work set against it and those it took

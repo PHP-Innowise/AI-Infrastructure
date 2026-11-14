@@ -976,6 +976,26 @@ fn happened(status: &str) -> &'static str {
         _ => "changed",
     }
 }
+/// Adds to the Show list what the run of the session on the screen changed,
+/// as that session recorded it. Where that run is the one shown, the list
+/// has it already and calls it by what it is here. With no session on the
+/// screen the list stays as it is.
+pub fn with_run(list: String, chosen: &str, session: &str) -> String {
+    if session.is_empty() {
+        return list;
+    }
+    let own = format!("run:{session}");
+    if chosen == own {
+        return list.replace(
+            ">A run of an agent</option>",
+            ">The run of this session</option>",
+        );
+    }
+    format!(
+        "{list}<option value=\"{}\">The run of this session</option>",
+        escape(&own)
+    )
+}
 /// What the Show list offers: the whole project and the checkout's own
 /// work. A commit, a pull request or a branch chosen in the picker stays in
 /// the list while it is the one shown.
@@ -1017,6 +1037,7 @@ pub fn targets(place: &V, chosen: &str) -> String {
             Some(("commit", hash)) => {
                 format!("Commit {}", hash.chars().take(8).collect::<String>())
             }
+            Some(("run", _)) => "A run of an agent".to_owned(),
             Some((_, name)) => name.to_owned(),
             None => chosen.to_owned(),
         };
@@ -1068,6 +1089,9 @@ pub fn chosen(view: &V) -> String {
             format!("{head} and what is not committed, against {base}")
         }
         (Some("work"), ..) => format!("{name} and what is not committed"),
+        // What a run of an agent changed, as its session recorded it.
+        (Some("run"), ..) if name.is_empty() => "What a run changed".to_owned(),
+        (Some("run"), ..) => format!("What the run changed: {name}"),
         // One commit of the history: its own change, against its parent.
         (Some("commit"), ..) => format!(
             "commit {}",
@@ -1376,6 +1400,7 @@ fn shown(view: &V) -> String {
         if number("removed") > 0 {
             text.push_str(&format!(" · {} deleted", count(number("removed"))));
         }
+        text.push_str(&run_reach(view));
         return text;
     }
     let totals = &view["totals"];
@@ -1445,13 +1470,131 @@ fn cycle_revision(view: &V) -> String {
         cycle_comparison(view)
     }
 }
-/// What the map of a change says first: the notes of the change, and
-/// whether the graph is behind the files.
+/// How much of what uses a run's change the run left unopened, for the line
+/// above the map. Nothing where no run is shown, or where nothing uses its
+/// change here.
+fn run_reach(view: &V) -> String {
+    let reach = &view["run"]["reach"];
+    let number = |key: &str| reach[key].as_u64().unwrap_or(0);
+    match (number("users"), number("unopened")) {
+        (0, _) => String::new(),
+        (_, 0) => " · the run opened all that use them".to_owned(),
+        (_, unopened) => format!(
+            " · {} of those that use them not opened by the run",
+            count(unopened)
+        ),
+    }
+}
+/// What a picture of a run says of the run itself: how much it opened and
+/// changed, and what of its looking no step records.
+fn run_notes(view: &V) -> Vec<String> {
+    let run = &view["run"];
+    if !run.is_object() {
+        return vec![];
+    }
+    let number = |key: &str| run[key].as_u64().unwrap_or(0);
+    let mut parts = vec![format!(
+        "The run opened {} and changed {}.",
+        plural(number("opened"), "file", "files"),
+        plural(number("edited"), "file", "files")
+    )];
+    // A command, a search and a helper show files that no step names.
+    let unseen = [
+        ("commands", "ran", "command", "commands"),
+        ("searched", "searched", "time", "times"),
+        ("helpers", "started", "helper", "helpers"),
+    ]
+    .iter()
+    .filter(|(key, ..)| number(key) > 0)
+    .map(|(key, did, one, many)| format!("{did} {}", plural(number(key), one, many)))
+    .collect::<Vec<_>>();
+    if let Some((last, first)) = unseen.split_last() {
+        parts.push(format!(
+            "It also {}: what it saw that way is not recorded as opened.",
+            if first.is_empty() {
+                last.clone()
+            } else {
+                format!("{} and {last}", first.join(", "))
+            }
+        ));
+    }
+    if m::yes(&run["limited"]) {
+        parts.push("Its record stops before its end: what it did later is not known.".to_owned());
+    }
+    match number("outside") {
+        0 => {}
+        1 => parts.push("1 file it touched lies outside the project.".to_owned()),
+        outside => parts.push(format!(
+            "{} files it touched lie outside the project.",
+            count(outside)
+        )),
+    }
+    if m::yes(&run["elsewhere"]) {
+        parts.push(
+            "It worked in a folder of its own; the map is of the project's graph.".to_owned(),
+        );
+    }
+    parts
+}
+/// Beside a picture of what a run changed: the files that use the change
+/// where the picture is open and that the run never opened, the most linked
+/// first. Each opens to what it holds, and the mark beside it looks into its
+/// link with the changed file it uses most. Nothing where no run is shown
+/// or nothing uses its change here.
+fn unopened(view: &V) -> String {
+    let reach = &view["run"]["reach"];
+    let number = |key: &str| reach[key].as_u64().unwrap_or(0);
+    if number("users") == 0 {
+        return String::new();
+    }
+    let mut html = format!(
+        "<h4>Use the change, not opened by the run <span class=\"graph-map-total\">{}</span></h4>",
+        count(number("unopened"))
+    );
+    let rows = m::array(&reach["rows"]);
+    if rows.is_empty() {
+        html.push_str("<p class=\"knowledge-note\">The run opened every file that uses what it changed here.</p>");
+        return html;
+    }
+    html.push_str("<ul class=\"graph-map-rows\">");
+    for row in &rows {
+        let uses = row["uses"].as_u64().unwrap_or(0);
+        html.push_str(&format!(
+            "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-open\" data-payload=\"{}\" title=\"{} · select to open it\"><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{}{}{}</span></button><button type=\"button\" class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with {}\">↗</button></li>",
+            payload(&row["path"]),
+            escape(&m::text(row, "path")),
+            escape(&m::text(row, "path")),
+            weight(
+                row["links"].as_u64().unwrap_or(0),
+                row["guessed"].as_u64().unwrap_or(0)
+            ),
+            if uses > 1 {
+                format!(" · over {} changed files", count(uses))
+            } else {
+                String::new()
+            },
+            if m::yes(&row["test"]) { " · test" } else { "" },
+            payload(&json!({"from": row["path"], "to": row["to"]})),
+            escape(base(&m::text(row, "to"))),
+        ));
+    }
+    html.push_str("</ul>");
+    if number("more") > 0 {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">and {} more</p>",
+            count(number("more"))
+        ));
+    }
+    html
+}
+/// What the map of a change says first: the notes of the change, what a
+/// run did beside changing it, and whether the graph is behind the files.
 fn context(view: &V) -> Vec<String> {
     let mut parts = m::array(&view["chosen"]["notes"])
         .iter()
         .filter_map(|note| note.as_str().map(str::to_owned))
         .collect::<Vec<_>>();
+    parts.extend(run_notes(view));
     if m::yes(&view["stale"]) {
         parts.push(
             if m::yes(&view["rebuilding"]) {
@@ -2303,6 +2446,26 @@ pub fn canvas(view: &V) -> String {
         } else {
             ""
         };
+        // What a run opened: a file itself, a folder by its files.
+        let run_opened = match (&node["opened"], node["opened"].as_u64()) {
+            (_, Some(files)) => {
+                label.push_str(&format!(
+                    ", the run opened {} in it",
+                    plural(files, "file", "files")
+                ));
+                Some(count(files))
+            }
+            (seen, None) if m::yes(seen) => {
+                label.push_str(", opened by the run");
+                Some(String::new())
+            }
+            _ => None,
+        };
+        let run_mark = if run_opened.is_some() {
+            " data-run-opened=\"true\""
+        } else {
+            ""
+        };
         let pressed = if shared || pattern_view {
             format!(" aria-pressed=\"{}\"", chosen == Some(index))
         } else {
@@ -2418,7 +2581,7 @@ pub fn canvas(view: &V) -> String {
         };
         let (out, into) = flow[index];
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark} style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\"{pressed} aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark} style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\"{pressed} aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
             payload(&node["path"]),
             escape(kind),
             opened && !symbol,
@@ -2458,6 +2621,11 @@ pub fn canvas(view: &V) -> String {
                 } else {
                     String::new()
                 }
+            ));
+        }
+        if let Some(files) = &run_opened {
+            html.push_str(&format!(
+                "<span class=\"graph-map-node-opened\" aria-hidden=\"true\">◉{files}</span>"
             ));
         }
         if changed > 0 {
@@ -3070,10 +3238,15 @@ fn rows(title: &str, rows: &V, more: &V, look: Option<(&V, bool)>) -> String {
                 if guessed > 0 { ", guessed" } else { "" }
             ),
             (None, Some(links)) => format!(
-                "{}{}",
+                "{}{}{}",
                 weight(links, guessed),
                 if m::yes(&row["against"]) {
                     " · against the order"
+                } else {
+                    ""
+                },
+                if m::yes(&row["opened"]) {
+                    " · opened by the run"
                 } else {
                     ""
                 }
@@ -3187,7 +3360,10 @@ fn reached(symbol: &V, mut text: String) -> String {
 fn file_side(view: &V) -> String {
     let focus = &view["focus"];
     if !focus.is_object() {
-        return "<p class=\"knowledge-note\">Select a class, a method or a function to see what it uses and what uses it; Follow links then walks on from it, a step at a time, into whatever files they lead to. A box without a letter is another file that this one uses or is used by: select it again to open it.</p>".to_owned();
+        return format!(
+            "<p class=\"knowledge-note\">Select a class, a method or a function to see what it uses and what uses it; Follow links then walks on from it, a step at a time, into whatever files they lead to. A box without a letter is another file that this one uses or is used by: select it again to open it.</p>{}",
+            unopened(view)
+        );
     }
     if m::yes(&focus["symbol"]) {
         let line = focus["line"].as_u64().unwrap_or(0);
@@ -3826,7 +4002,11 @@ pub fn side(view: &V) -> String {
         return if followed {
             "<p class=\"knowledge-note\">Select a box to see what it uses and what uses it. + at the right corner of a box shows more of what it uses, + at the left corner more of what uses it, and − folds them back. Select a link to see what makes it up.</p>"
         } else if changes(view) {
-            "<p class=\"knowledge-note\">Select a file to see what it uses and what uses it. The highlighted ones changed; the others use them or are used by them. Select a file again to open it to its classes, methods and functions. Select a link to see what makes it up.</p>"
+            // A run says first what it left unopened of what uses its change.
+            return format!(
+                "<p class=\"knowledge-note\">Select a file to see what it uses and what uses it. The highlighted ones changed; the others use them or are used by them. Select a file again to open it to its classes, methods and functions. Select a link to see what makes it up.</p>{}",
+                unopened(view)
+            );
         } else {
             "<p class=\"knowledge-note\">Select a folder or a file to see what it uses and what uses it. Select it again to open it: a folder to what it holds, a file to its classes, methods and functions. + at the corner of a folder opens it here, among the others. Select a link to see what makes it up.</p>"
         }
@@ -4011,11 +4191,17 @@ fn legend(view: &V, change: bool) -> String {
     let patch = |side: &str| {
         format!("<span class=\"graph-map-key graph-map-key-{side}\" aria-hidden=\"true\"></span>")
     };
+    // The mark of what a run opened, where a run is shown.
+    let run = if view["run"].is_object() {
+        " ◉: opened by the run; on a folder, how many of its files."
+    } else {
+        ""
+    };
     let particular = match (symbols(view), change) {
-        (true, true) => format!("{FILE_LEGEND} Highlighted: touched by the change."),
+        (true, true) => format!("{FILE_LEGEND} Highlighted: touched by the change.{run}"),
         (true, false) => FILE_LEGEND.to_owned(),
         _ if changes(view) => {
-            "Highlighted: changed. The rest use the change or are used by it.".to_owned()
+            format!("Highlighted: changed. The rest use the change or are used by it.{run}")
         }
         _ if layered(view) => {
             let mut text = LAYER_LEGEND.to_owned();
@@ -5357,11 +5543,15 @@ fn blank() {
     html("graph-map-side", "");
     dom::text("graph-map-summary", "");
 }
-/// The Show list as it stands.
+/// The Show list as it stands, with the run of the session on the screen.
 fn list() {
     html(
         "graph-map-target",
-        &targets(&m::data("graph-map-place"), &m::text(&state(), "target")),
+        &with_run(
+            targets(&m::data("graph-map-place"), &m::text(&state(), "target")),
+            &m::text(&state(), "target"),
+            &m::read(|state| state.sid.clone()),
+        ),
     );
 }
 /// Draws the picker as it stands.
@@ -6766,6 +6956,264 @@ mod tests {
             "chosen": {"target": "pr:12", "kind": "pull", "name": "#12", "title": "Round totals once", "pull": 12,
                 "head": {"name": "fix/rounding", "commit": "1a2b3c4d5e6f"}, "base": {"name": "main", "commit": "9f8e7d6c5b4a"}, "notes": [], "files": 3}
         })
+    }
+    /// The change of the fixture as what a run did: the run opened the cart
+    /// it changed and the order, and of four files that use its change left
+    /// three unopened.
+    fn run_view() -> V {
+        let mut view = change();
+        view["chosen"] = json!({
+            "target": "run:0b0e7f3a-5c1d-4e2f-9a6b-7c8d9e0f1a2b", "kind": "run",
+            "name": "Round <totals> once", "title": null, "pull": null, "head": null,
+            "base": null, "notes": [], "files": 3
+        });
+        view["run"] = json!({
+            "session": "0b0e7f3a-5c1d-4e2f-9a6b-7c8d9e0f1a2b", "title": "Round <totals> once",
+            "provider": "claude", "status": "completed", "steps": 9, "opened": 12, "edited": 3,
+            "outside": 0, "searched": 0, "commands": 0, "helpers": 0, "limited": false,
+            "elsewhere": false,
+            "reach": {
+                "users": 4, "opened": 1, "unopened": 3, "more": 0,
+                "rows": [
+                    {"path": "src/Order/Invoice<b>.php", "name": "Invoice<b>.php", "links": 3,
+                     "guessed": 1, "uses": 2, "to": "src/Cart/Cart<c>.php", "test": false},
+                    {"path": "src/Report/Report.php", "name": "Report.php", "links": 1,
+                     "guessed": 1, "uses": 1, "to": "src/Cart/Cart.php", "test": false},
+                    {"path": "tests/Cart/CartTest.php", "name": "CartTest.php", "links": 1,
+                     "guessed": 0, "uses": 1, "to": "src/Cart/Cart.php", "test": true}
+                ]
+            }
+        });
+        view["nodes"][0]["opened"] = json!(true);
+        view["nodes"][2]["opened"] = json!(true);
+        view
+    }
+    #[test]
+    fn a_run_is_laid_over_the_map_of_what_it_changed() {
+        let (plain, view) = (change(), run_view());
+        assert_eq!(chosen(&view), "What the run changed: Round <totals> once");
+        let mut unnamed = view.clone();
+        unnamed["chosen"]["name"] = json!("");
+        assert_eq!(chosen(&unnamed), "What a run changed");
+        // Above the map: how far the run looked at what uses its change.
+        assert_eq!(
+            summary(&view),
+            format!(
+                "{} · 3 of those that use them not opened by the run",
+                summary(&plain)
+            )
+        );
+        // The note says first what the run did; the rest is the change's.
+        assert_eq!(note(&plain), "");
+        assert_eq!(note(&view), "The run opened 12 files and changed 3 files.");
+        let mut wide = view.clone();
+        wide["change"]["single"] = json!(false);
+        let mut wide_plain = plain.clone();
+        wide_plain["change"]["single"] = json!(false);
+        assert_eq!(
+            note(&wide),
+            format!(
+                "The run opened 12 files and changed 3 files. {}",
+                note(&wide_plain)
+            )
+        );
+        assert!(note(&wide_plain).starts_with("The change is too wide"));
+        // In the picture a box the run opened carries its mark and says so;
+        // any other box does not.
+        let html = canvas(&view);
+        assert_eq!(html.matches(" data-run-opened=\"true\"").count(), 2);
+        assert_eq!(
+            html.matches("<span class=\"graph-map-node-opened\" aria-hidden=\"true\">◉</span>")
+                .count(),
+            2
+        );
+        for (name, opened) in [
+            ("Cart.php", true),
+            ("Price.php", false),
+            ("Order.php", true),
+        ] {
+            let button = html
+                .split("<button ")
+                .find(|button| button.contains(&format!("aria-label=\"{name}, file")))
+                .unwrap();
+            assert_eq!(
+                button.contains("data-run-opened=\"true\""),
+                opened,
+                "{name}"
+            );
+            assert_eq!(
+                button.contains(", opened by the run"),
+                opened,
+                "{name}: {button}"
+            );
+        }
+        assert!(
+            html.contains("is used through 2 links, opened by the run, modified\">"),
+            "{html}"
+        );
+        assert!(!canvas(&plain).contains("run-opened") && !canvas(&plain).contains('◉'));
+        // A folder says how many of its files the run opened.
+        let mut folders = view.clone();
+        folders["nodes"][1]["folder"] = json!(true);
+        folders["nodes"][1]["opened"] = json!(1200);
+        let html = canvas(&folders);
+        assert!(html
+            .contains("<span class=\"graph-map-node-opened\" aria-hidden=\"true\">◉1,200</span>"));
+        assert!(
+            html.contains(", the run opened 1,200 files in it"),
+            "{html}"
+        );
+        folders["nodes"][1]["opened"] = json!(1);
+        assert!(canvas(&folders).contains(", the run opened 1 file in it"));
+        // The key says what the mark is, where a run is shown.
+        assert!(legend(&view, true)
+            .ends_with("The rest use the change or are used by it. ◉: opened by the run; on a folder, how many of its files."));
+        assert!(legend(&plain, true).ends_with("The rest use the change or are used by it."));
+        // Beside the map, with nothing selected: the files that use the
+        // change and were never opened. Each opens, and the mark beside it
+        // looks into its link with the changed file it uses most.
+        let html = side(&view);
+        assert!(html.starts_with(&side(&plain)), "{html}");
+        let list = &html[side(&plain).len()..];
+        assert!(list.starts_with("<h4>Use the change, not opened by the run <span class=\"graph-map-total\">3</span></h4><ul class=\"graph-map-rows\"><li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-open\" data-payload=\"&quot;src/Order/Invoice&lt;b&gt;.php&quot;\" title=\"src/Order/Invoice&lt;b&gt;.php · select to open it\"><span class=\"graph-map-row-name\">src/Order/Invoice&lt;b&gt;.php</span><span class=\"graph-map-row-links\">3 links, 1 guessed · over 2 changed files</span></button><button type=\"button\" class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/Order/Invoice&lt;b&gt;.php&quot;,&quot;to&quot;:&quot;src/Cart/Cart&lt;c&gt;.php&quot;}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with Cart&lt;c&gt;.php\">↗</button></li>"), "{list}");
+        assert!(list.contains("<span class=\"graph-map-row-name\">src/Report/Report.php</span><span class=\"graph-map-row-links\">1 link guessed</span>"), "{list}");
+        assert!(list.ends_with("<span class=\"graph-map-row-name\">tests/Cart/CartTest.php</span><span class=\"graph-map-row-links\">1 link · test</span></button><button type=\"button\" class=\"graph-map-row-look\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;tests/Cart/CartTest.php&quot;,&quot;to&quot;:&quot;src/Cart/Cart.php&quot;}\" title=\"See what makes up this link\" aria-label=\"See what makes up the link with Cart.php\">↗</button></li></ul>"), "{list}");
+        assert_eq!(list.matches("data-action=\"graph-map-open\"").count(), 3);
+        // More than are listed are counted: the number is of all of them.
+        let mut many = view.clone();
+        many["run"]["reach"]["unopened"] = json!(1203);
+        many["run"]["reach"]["more"] = json!(1200);
+        let html = side(&many);
+        assert!(html
+            .contains("not opened by the run <span class=\"graph-map-total\">1,203</span></h4>"));
+        assert!(html.ends_with("</ul><p class=\"knowledge-note\">and 1,200 more</p>"));
+        assert!(summary(&many).ends_with("· 1,203 of those that use them not opened by the run"));
+        // A run that opened all that uses its change says so; where nothing
+        // uses it, nothing is said.
+        let mut all = view.clone();
+        all["run"]["reach"] =
+            json!({"users": 4, "opened": 4, "unopened": 0, "more": 0, "rows": []});
+        assert_eq!(
+            summary(&all),
+            format!("{} · the run opened all that use them", summary(&plain))
+        );
+        assert_eq!(
+            side(&all),
+            format!("{}<h4>Use the change, not opened by the run <span class=\"graph-map-total\">0</span></h4><p class=\"knowledge-note\">The run opened every file that uses what it changed here.</p>", side(&plain))
+        );
+        let mut none = view.clone();
+        none["run"]["reach"] =
+            json!({"users": 0, "opened": 0, "unopened": 0, "more": 0, "rows": []});
+        assert_eq!(summary(&none), summary(&plain));
+        assert_eq!(side(&none), side(&plain));
+        // With a place selected the panel is of that place, and what uses
+        // it or is used by it says whether the run opened it.
+        let mut selected = view.clone();
+        selected["focus"] = json!({
+            "path": "src/Cart/Cart.php", "name": "Cart.php", "folder": false, "inside": true,
+            "files": 1, "symbols": 3, "within": 0, "out": 2, "in": 2, "changed": 1, "status": "M",
+            "role": "changed", "altered": false,
+            "uses": [{"path": "src/Cart/Price.php", "name": "src/Cart/Price.php", "folder": false, "inside": true, "links": 2, "guessed": 1, "changed": false}],
+            "uses_more": 0,
+            "used_by": [
+                {"path": "src/Order/Order.php", "name": "src/Order/Order.php", "folder": false, "inside": true, "links": 1, "guessed": 0, "changed": false, "opened": true},
+                {"path": "src/Order/Invoice.php", "name": "src/Order/Invoice.php", "folder": false, "inside": false, "links": 1, "guessed": 0, "changed": false}
+            ],
+            "used_by_more": 0, "kinds": []
+        });
+        let html = side(&selected);
+        assert!(!html.contains("not opened by the run"));
+        assert!(html.contains("src/Order/Order.php</span><span class=\"graph-map-row-links\">1 link · opened by the run</span>"), "{html}");
+        assert!(html.contains(
+            "src/Order/Invoice.php</span><span class=\"graph-map-row-links\">1 link</span>"
+        ));
+        assert_eq!(html.matches(" · opened by the run").count(), 1);
+        // An opened file of the run lists what uses it alike.
+        let mut opened = file();
+        opened["run"] = view["run"].clone();
+        let html = side(&opened);
+        assert!(html.contains("<h4>Use the change, not opened by the run <span class=\"graph-map-total\">3</span></h4>"), "{html}");
+        assert!(!side(&file()).contains("the run"));
+    }
+    #[test]
+    fn a_picture_of_a_run_says_what_of_its_looking_is_not_recorded() {
+        let (plain, view) = (change(), run_view());
+        let said = |change: &[(&str, V)]| {
+            let mut view = view.clone();
+            for (key, value) in change {
+                view["run"][*key] = value.clone();
+            }
+            note(&view)
+                .strip_suffix(&note(&plain))
+                .unwrap()
+                .trim_end()
+                .to_owned()
+        };
+        assert_eq!(said(&[]), "The run opened 12 files and changed 3 files.");
+        assert_eq!(
+            said(&[("opened", json!(1)), ("edited", json!(1))]),
+            "The run opened 1 file and changed 1 file."
+        );
+        // A command, a search and a helper show files that no step names.
+        assert_eq!(
+            said(&[("commands", json!(2))]),
+            "The run opened 12 files and changed 3 files. It also ran 2 commands: what it saw that way is not recorded as opened."
+        );
+        assert_eq!(
+            said(&[("commands", json!(1)), ("searched", json!(1200))]),
+            "The run opened 12 files and changed 3 files. It also ran 1 command and searched 1,200 times: what it saw that way is not recorded as opened."
+        );
+        assert_eq!(
+            said(&[("commands", json!(2)), ("searched", json!(1)), ("helpers", json!(3))]),
+            "The run opened 12 files and changed 3 files. It also ran 2 commands, searched 1 time and started 3 helpers: what it saw that way is not recorded as opened."
+        );
+        assert_eq!(
+            said(&[("helpers", json!(1))]),
+            "The run opened 12 files and changed 3 files. It also started 1 helper: what it saw that way is not recorded as opened."
+        );
+        // What else is not known of it.
+        assert_eq!(
+            said(&[("limited", json!(true))]),
+            "The run opened 12 files and changed 3 files. Its record stops before its end: what it did later is not known."
+        );
+        assert_eq!(
+            said(&[("outside", json!(1))]),
+            "The run opened 12 files and changed 3 files. 1 file it touched lies outside the project."
+        );
+        assert_eq!(
+            said(&[("outside", json!(1200)), ("elsewhere", json!(true))]),
+            "The run opened 12 files and changed 3 files. 1,200 files it touched lie outside the project. It worked in a folder of its own; the map is of the project's graph."
+        );
+        // A change that is no run says nothing of one.
+        assert!(!note(&plain).contains("run"));
+        // The Show list names a run that is shown, and the map is opened
+        // on what its button asks for.
+        let place = json!({"git": true, "branch": "main", "base": "origin/main"});
+        assert!(targets(&place, "run:0b0e7f3a")
+            .ends_with("<option value=\"run:0b0e7f3a\" selected>A run of an agent</option>"));
+        // With a session on the screen the list offers its run; where
+        // that run is the one shown it is called by what it is here, and
+        // another session's run stays a run of an agent.
+        let offered = with_run(targets(&place, "work"), "work", "0b0e7f3a");
+        assert_eq!(
+            offered,
+            format!(
+                "{}<option value=\"run:0b0e7f3a\">The run of this session</option>",
+                targets(&place, "work")
+            )
+        );
+        assert_eq!(
+            with_run(targets(&place, "work"), "work", ""),
+            targets(&place, "work")
+        );
+        let shown = with_run(targets(&place, "run:0b0e7f3a"), "run:0b0e7f3a", "0b0e7f3a");
+        assert!(shown
+            .ends_with("<option value=\"run:0b0e7f3a\" selected>The run of this session</option>"));
+        assert_eq!(shown.matches("run:0b0e7f3a").count(), 1);
+        let other = with_run(targets(&place, "run:ffff0000"), "run:ffff0000", "0b0e7f3a");
+        assert!(other.ends_with(
+            "<option value=\"run:ffff0000\" selected>A run of an agent</option><option value=\"run:0b0e7f3a\">The run of this session</option>"
+        ), "{other}");
     }
     #[test]
     fn the_show_list_offers_the_checkout_and_keeps_what_was_picked() {
