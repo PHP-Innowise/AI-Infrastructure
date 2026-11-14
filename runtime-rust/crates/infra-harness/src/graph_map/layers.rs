@@ -848,9 +848,9 @@ impl Layers {
     /// moved out takes nothing away; nor does renaming the folder itself.
     /// The base is read the way the folder is read now, by the four layers
     /// or by its rings, so that what differs is what the change did and not
-    /// how a folder is read. The rows of the picture that are among the
-    /// added say so, and a link between two layers says how many of its
-    /// links they are.
+    /// how a folder is read. In the lists of the picture the pairs that
+    /// are among the added come first and say so, and a link between two
+    /// layers says how many of its links they are.
     pub(super) fn compare(
         &self,
         index: &Index,
@@ -918,40 +918,57 @@ impl Layers {
                 "more": pairs.len().saturating_sub(LISTED),
             })
         };
-        // The rows already in the picture that the change added, and the
-        // links between two layers that hold some of them.
+        // A list of the picture shows no more than its first pairs, the
+        // most linked: in each of them what the change added comes first,
+        // so that it is never among those left out, and says so. The lists
+        // are of all that runs against the order in the folder, of a
+        // selected layer's own, and of a selected link back.
         let new = added
             .iter()
-            .map(|pair| here(index, pair))
+            .map(|pair| (pair.from, pair.to))
             .collect::<HashSet<_>>();
-        for rows in [
-            "/pattern/against/rows",
-            "/focus/against/rows",
-            "/focus/rows",
-        ] {
-            for row in view
-                .pointer_mut(rows)
-                .and_then(Value::as_array_mut)
+        let rows = |keep: &dyn Fn(&Backward) -> bool| {
+            let (first, rest): (Vec<_>, Vec<_>) = now
+                .iter()
+                .filter(|pair| within(here(index, pair)) && keep(pair))
+                .partition(|pair| new.contains(&(pair.from, pair.to)));
+            let told = first.len();
+            first
                 .into_iter()
-                .flatten()
+                .chain(rest)
+                .take(LISTED)
+                .enumerate()
+                .map(|(at, pair)| {
+                    let mut row = paired(index, table, pair);
+                    if at < told {
+                        row["added"] = json!(true);
+                    }
+                    row
+                })
+                .collect::<Vec<_>>()
+        };
+        let layer = |path: &Value| {
+            let id = path.as_str()?.strip_prefix("layer:")?;
+            table.iter().position(|layer| layer.id == id)
+        };
+        view["pattern"]["against"]["rows"] = json!(rows(&|_| true));
+        let focus = &view["focus"];
+        if focus["link"] == true {
+            if let Some((from, to)) = layer(&focus["from"]["path"]).zip(layer(&focus["to"]["path"]))
+                && from > to
             {
-                let end = |end: &str| row[end]["path"].as_str().unwrap_or("");
-                if new.contains(&(end("from"), end("to"))) {
-                    row["added"] = json!(true);
-                }
+                view["focus"]["rows"] = json!(rows(&|pair| pair.above == from && pair.below == to));
             }
+        } else if let Some(chosen) = layer(&focus["path"]) {
+            view["focus"]["against"]["rows"] = json!(rows(&|pair| pair.above == chosen));
         }
         let mut through: HashMap<(usize, usize), u64> = HashMap::new();
         for pair in &added {
             *through.entry((pair.above, pair.below)).or_default() += pair.flow.links;
         }
         for edge in view["edges"].as_array_mut().into_iter().flatten() {
-            let layer = |end: &str| {
-                let id = edge[end].as_str()?.strip_prefix("layer:")?;
-                table.iter().position(|layer| layer.id == id)
-            };
-            if let Some(links) = layer("from")
-                .zip(layer("to"))
+            if let Some(links) = layer(&edge["from"])
+                .zip(layer(&edge["to"]))
                 .and_then(|ends| through.get(&ends))
             {
                 edge["added"] = json!(links);

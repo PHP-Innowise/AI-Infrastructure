@@ -28,6 +28,7 @@ edition's own files remain in that edition's changelog.
   what a chosen change did to their order: the pairs of files a pull request, a
   commit, a branch or the checkout's own work set against it and those it took
   away, measured from the base of the change. A renamed file is the same file.
+  In a list of pairs those the change added come first.
 
 - Show the layers of a folder on the dependency map in Harness: its files filed
   as entry points, services, data access and model by their names and folders,

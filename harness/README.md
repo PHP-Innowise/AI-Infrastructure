@@ -2235,18 +2235,19 @@ what the change did to their order: the pairs of files that run against it now a
 did not where the change started, and those that did and no longer do. The line
 above the picture counts the links of both, a link back that holds added ones
 carries their number, and the side panel lists **Added by this change** and **Gone
-with this change** before all that runs against the order, where a pair the
-change added says so. A pair is told by its two files, whatever the number of its
-links, and a file Git knows to be renamed is the same file, so moving a file or
-renaming a folder adds nothing and takes nothing away. The change is measured from
-the base it shows for itself: the base of a pull request, the parent of a commit,
-the branch the checkout left or its last commit. That base is read the way the
-folder is read now, by the four layers or by its rings. Its graph is built when
+with this change** before all that runs against the order. A list shows its first
+30 pairs; in every one of them the pairs the change added come first and say so, so
+a long list never hides them. A pair is told by its two files, whatever the number
+of its links, and a file Git knows to be renamed is the same file, so moving a file
+or renaming a folder adds nothing and takes nothing away. The change is measured
+from the base it shows for itself: the base of a pull request, the parent of a
+commit, the branch the checkout left or its last commit. That base is read the way
+the folder is read now, by the four layers or by its rings. Its graph is built when
 the picture is first opened and kept with the graphs of other commits; until then
 the picture says that it is being prepared. Two things are not compared, and the
-picture says so: a graph of the checkout that is older than its files, until it
-is rebuilt, and, with **Without tests**, a graph of a commit of a Rust project
-that was kept without the spans of its tests.
+picture says so: a graph of the checkout that is older than its files, until it is
+rebuilt, and, with **Without tests**, a graph of a commit of a Rust project that
+was kept without the spans of its tests.
 
 The server reads `graph.json` in one streaming
 pass and keeps the last four graphs it read. On the development machine a 500 MB

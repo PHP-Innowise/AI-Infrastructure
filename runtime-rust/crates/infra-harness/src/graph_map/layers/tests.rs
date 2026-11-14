@@ -1393,7 +1393,8 @@ fn a_change_says_which_pairs_it_set_against_the_order_and_which_it_took_away() {
         [(REPOSITORY.to_owned(), CONTROLLER.to_owned(), 1)]
     );
     assert_eq!(change["removed"]["rows"][0]["from"]["layer"], "Data access");
-    // The rows of the picture that are among the added say so, and no other.
+    // The rows of the picture that are among the added say so, and no
+    // other, and they come first, before pairs with as many links.
     let marks = |rows: &Value| {
         rows.as_array()
             .unwrap()
@@ -1409,8 +1410,8 @@ fn a_change_says_which_pairs_it_set_against_the_order_and_which_it_took_away() {
     assert_eq!(
         marks(&view["pattern"]["against"]["rows"]),
         [
-            ("OrderPaid.php".to_owned(), false),
             ("Order.php".to_owned(), true),
+            ("OrderPaid.php".to_owned(), false),
             ("StripeGateway.php".to_owned(), false),
         ]
     );
@@ -1439,18 +1440,33 @@ fn a_change_says_which_pairs_it_set_against_the_order_and_which_it_took_away() {
     assert_eq!(
         marks(&layer["focus"]["against"]["rows"]),
         [
-            ("OrderPaid.php".to_owned(), false),
-            ("Order.php".to_owned(), true)
+            ("Order.php".to_owned(), true),
+            ("OrderPaid.php".to_owned(), false)
         ]
     );
     let link = compared(Some("layer:model>layer:services"), &moved);
     assert_eq!(
         marks(&link["focus"]["rows"]),
         [
-            ("OrderPaid.php".to_owned(), false),
-            ("Order.php".to_owned(), true)
+            ("Order.php".to_owned(), true),
+            ("OrderPaid.php".to_owned(), false)
         ]
     );
+    // A link that runs with the order has nothing the change set against
+    // it: its pairs stay as they were.
+    let forward = compared(Some("layer:services>layer:model"), &moved);
+    let plain = index
+        .pattern(
+            "demo",
+            "layers@app",
+            &[],
+            &|_| None,
+            Some("layer:services>layer:model"),
+            false,
+        )
+        .unwrap();
+    assert_eq!(forward["focus"]["rows"], plain["focus"]["rows"]);
+    assert!(!forward["focus"]["rows"].as_array().unwrap().is_empty());
     // Without knowing that the gateway was moved, it is a pair the change
     // added and another it took away.
     let unknown = compared(None, &HashMap::new());
@@ -1482,13 +1498,22 @@ fn a_change_says_which_pairs_it_set_against_the_order_and_which_it_took_away() {
     );
     assert_eq!(change["added"]["rows"], json!([]));
     assert!(added(&same).is_empty());
-    assert!(
-        same["pattern"]["against"]["rows"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| row["added"].is_null())
-    );
+    // Where nothing was added the lists of the picture are what they were,
+    // with nothing or with a layer or a link selected.
+    for focus in [
+        None,
+        Some("layer:model"),
+        Some("layer:model>layer:services"),
+    ] {
+        let plain = index
+            .pattern("demo", "layers@app", &[], &|_| None, focus, false)
+            .unwrap();
+        let mut compared = plain.clone();
+        index.compare_layers(&index, &mut compared, &HashMap::new(), false);
+        assert_eq!(compared["pattern"]["against"], plain["pattern"]["against"]);
+        assert_eq!(compared["focus"], plain["focus"], "{focus:?}");
+        assert_eq!(compared["edges"], plain["edges"]);
+    }
 }
 #[test]
 fn a_change_is_measured_against_whatever_its_base_was() {
@@ -1627,6 +1652,86 @@ fn a_change_is_measured_against_whatever_its_base_was() {
     assert_eq!(added["rows"].as_array().unwrap().len(), LISTED);
     assert_eq!(added["more"], 5);
     assert_eq!(added["rows"][0]["from"]["name"], "Thing07.php");
+    // A list shows its first pairs only. The one pair a change added is
+    // the last of them all by its links and its name: it comes first in
+    // every list that holds it, and what follows keeps its order.
+    let mut before = Graph::default();
+    for at in 0..LISTED + 5 {
+        let (service, model) = (
+            format!("app/Services/Step{at:02}Service.php"),
+            format!("app/Models/Thing{at:02}.php"),
+        );
+        before.file(&service).file(&model);
+        if at < LISTED + 4 {
+            before.link(&model, &service, "calls", None);
+        }
+        if at == 7 {
+            before.link(&model, &service, "references", Some("field"));
+        }
+    }
+    // At both ends a service uses a model, with the order, and a model
+    // asks a repository, against it and of no link with the services.
+    for graph in [&mut before, &mut many] {
+        graph
+            .file("app/Models/Other.php")
+            .file("app/Repositories/ThingRepository.php")
+            .link(
+                "app/Services/Step00Service.php",
+                "app/Models/Thing00.php",
+                "calls",
+                None,
+            )
+            .link(
+                "app/Models/Other.php",
+                "app/Repositories/ThingRepository.php",
+                "calls",
+                None,
+            );
+    }
+    let (index, base) = (many.index(), before.index());
+    let last = format!("Thing{:02}.php", LISTED + 4);
+    for (focus, rows) in [
+        (None, "/pattern/against"),
+        (Some("layer:model"), "/focus/against"),
+        (Some("layer:model>layer:services"), "/focus"),
+    ] {
+        let plain = index
+            .pattern("demo", "layers@app", &[], &|_| None, focus, false)
+            .unwrap();
+        let mut view = plain.clone();
+        index.compare_layers(&base, &mut view, &HashMap::new(), false);
+        assert_eq!(view["pattern"]["change"]["added"]["pairs"], 1);
+        let named = |view: &Value| {
+            view.pointer(rows).unwrap()["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    (
+                        row["from"]["name"].as_str().unwrap().to_owned(),
+                        row["added"] == true,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let (was, now) = (named(&plain), named(&view));
+        assert_eq!(was.len(), LISTED, "{rows}");
+        assert!(was.iter().all(|(name, added)| *name != last && !added));
+        assert_eq!(now.len(), LISTED, "{rows}");
+        assert_eq!(now[0], (last.clone(), true), "{rows}");
+        assert_eq!(now[1..], was[..LISTED - 1], "{rows}");
+        assert_eq!(
+            view.pointer(rows).unwrap()["more"],
+            plain.pointer(rows).unwrap()["more"]
+        );
+        // The pairs of a link are those of its two layers and no other.
+        let other = now.iter().any(|(name, _)| name == "Other.php");
+        assert_eq!(other, rows != "/focus", "{rows}");
+        assert_eq!(
+            view.pointer(rows).unwrap()["more"],
+            if rows == "/focus" { 5 } else { 6 }
+        );
+    }
 }
 #[test]
 fn what_is_moved_with_a_folder_or_a_file_is_neither_added_nor_taken_away() {
@@ -1676,7 +1781,26 @@ fn what_is_moved_with_a_folder_or_a_file_is_neither_added_nor_taken_away() {
                 false,
             )
             .unwrap();
+        // The pairs listed in the picture are those of its folder, before
+        // the comparison and after it.
+        let listed = |view: &Value| {
+            let mut pairs = view["pattern"]["against"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    (
+                        row["from"]["path"].as_str().unwrap().to_owned(),
+                        row["to"]["path"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            pairs.sort();
+            pairs
+        };
+        let was = listed(&view);
         index.compare_layers(&base, &mut view, &renamed.iter().copied().collect(), false);
+        assert_eq!(listed(&view), was, "{scope}");
         let change = &view["pattern"]["change"];
         (
             view["pattern"]["against"]["pairs"].as_u64().unwrap(),
