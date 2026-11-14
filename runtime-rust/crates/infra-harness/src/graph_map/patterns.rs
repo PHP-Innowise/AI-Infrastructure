@@ -1235,6 +1235,24 @@ impl Index {
         }
         view["patterns"] = json!({"found": total, "kinds": kinds});
     }
+    /// Says in a picture of a folder's layers what a change did to their
+    /// order, against `base`, the graph the change started from: see
+    /// `Layers::compare`.
+    pub fn compare_layers(
+        &self,
+        base: &Index,
+        view: &mut Value,
+        renamed: &HashMap<&str, &str>,
+        certain: bool,
+    ) {
+        self.patterns_of(certain).layers.compare(
+            self,
+            &base.patterns_of(certain).layers,
+            base,
+            view,
+            renamed,
+        );
+    }
     /// The picture of one finding: its parts as boxes, each with what it is
     /// in the pattern, and between them what makes the pattern. `None`
     /// where the graph has no such finding, as after it was built anew.

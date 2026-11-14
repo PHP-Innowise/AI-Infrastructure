@@ -1175,7 +1175,7 @@ fn shown(view: &V) -> String {
                 0 => "nothing against their order".to_owned(),
                 links => format!("{} against their order", plural(links, "link", "links")),
             }
-        );
+        ) + &changed_order(&pattern["change"]);
     }
     if patterned(view) {
         // The pattern, the type it is named after, and its other parts by
@@ -1811,6 +1811,93 @@ fn shared_note(view: &V) -> String {
     }
     parts.join(" ")
 }
+/// What a chosen change did to the order of the layers, for the line above
+/// their picture: through how many links it set files against the order,
+/// and how many such links it took away. Nothing where no change is chosen
+/// or the two ends of it are not compared yet.
+fn changed_order(change: &V) -> String {
+    if change["state"] != "ready" {
+        return String::new();
+    }
+    let links = |key: &str| change[key]["links"].as_u64().unwrap_or(0);
+    match (links("added"), links("removed")) {
+        (0, 0) => " · this change adds none".to_owned(),
+        (added, 0) => format!(" · this change adds {}", plural(added, "link", "links")),
+        (0, removed) => format!(
+            " · this change takes {} away",
+            plural(removed, "link", "links")
+        ),
+        (added, removed) => format!(
+            " · this change adds {} and takes {} away",
+            plural(added, "link", "links"),
+            count(removed)
+        ),
+    }
+}
+/// The middle of a link drawn as one curve, where a word about it can stand:
+/// the point halfway along `M x y C x y x y x y`. None for any other path.
+fn middle(path: &str) -> Option<(f64, f64)> {
+    let (start, curve) = path.strip_prefix('M')?.split_once(" C")?;
+    let at = start
+        .split(' ')
+        .chain(curve.split(' '))
+        .map(|number| number.parse::<f64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    let [x0, y0, x1, y1, x2, y2, x3, y3] = at[..] else {
+        return None;
+    };
+    Some((
+        (x0 + 3.0 * (x1 + x2) + x3) / 8.0,
+        (y0 + 3.0 * (y1 + y2) + y3) / 8.0,
+    ))
+}
+/// Whether what a change did to the order of the layers is still being found
+/// out, so that the picture is asked for again.
+fn comparing_order(view: &V) -> bool {
+    matches!(
+        view["pattern"]["change"]["state"].as_str(),
+        Some("building" | "waiting_head")
+    )
+}
+/// Where a change is chosen and what it did to the order of the layers is
+/// not told: why not, or what is waited for.
+fn order_comparison(change: &V) -> String {
+    let commit = m::text(&change["base"], "commit");
+    let at = if commit.is_empty() {
+        "the base of the change".to_owned()
+    } else {
+        format!("base {commit}")
+    };
+    match change["state"].as_str() {
+        Some("waiting_head") => {
+            "Waiting for the graph of the change before telling what it did to the order."
+                .to_owned()
+        }
+        Some("building") => {
+            format!("Preparing the graph at {at} to tell what the change did to the order…")
+        }
+        Some("unavailable") => match change["reason"].as_str() {
+            Some("tests") => {
+                "What the change did to the order cannot be told with Without tests for this cached revision."
+                    .to_owned()
+            }
+            Some("no_base") => {
+                "Where this change started could not be determined, so what it did to the order is not told."
+                    .to_owned()
+            }
+            Some("head") => {
+                "What the change did to the order needs the graph of the change itself."
+                    .to_owned()
+            }
+            Some("stale") => {
+                "What the change did to the order is told once the graph is of these files."
+                    .to_owned()
+            }
+            _ => format!("Could not compare with {at}."),
+        },
+        _ => String::new(),
+    }
+}
 /// Above the picture of one found pattern: what the pattern is, what tells
 /// it here, and how far that is to be believed.
 fn pattern_note(view: &V) -> String {
@@ -1823,6 +1910,10 @@ fn pattern_note(view: &V) -> String {
     );
     if m::yes(&pattern["guessed"]) {
         parts.push("A dashed link is one the tool only guessed.".to_owned());
+    }
+    let comparison = order_comparison(&pattern["change"]);
+    if !comparison.is_empty() {
+        parts.push(comparison);
     }
     parts.join(" ")
 }
@@ -2066,6 +2157,10 @@ pub fn canvas(view: &V) -> String {
             ));
         }
     }
+    // Beside a link against the order of the layers: how many of its links
+    // a chosen change added. They lie over all the links, and each is lit
+    // and steps back with its link.
+    let mut marks = String::new();
     for wire in &plan.wires {
         let edge = edges[wire.edge];
         let (links, guessed) = (
@@ -2076,6 +2171,7 @@ pub fn canvas(view: &V) -> String {
         // Among layers a link back is no weaker direction of a cycle: it
         // runs against their order, under the row.
         let against = layered_view && wire.back;
+        let grew = edge["added"].as_u64().filter(|_| against);
         let back = wire.back && cycles && !layered_view;
         let on_path = shared_edges.contains(&(from, to));
         let added = cycle_view && m::yes(&edge["added"]);
@@ -2116,10 +2212,24 @@ pub fn canvas(view: &V) -> String {
                 + if added { 1.5 } else { 0.0 },
             if against { "-against" } else { "" },
             if back { " · against the main direction, closes a cycle" } else { "" },
-            if against { " · against the order of the layers" } else { "" },
+            match grew {
+                Some(links) => format!(
+                    " · against the order of the layers · {} added by this change",
+                    plural(links, "link", "links")
+                ),
+                None if against => " · against the order of the layers".to_owned(),
+                None => String::new(),
+            },
             if added { " · added in PR" } else { "" },
         ));
+        if let Some((links, (x, y))) = grew.zip(middle(&wire.path)) {
+            marks.push_str(&format!(
+                "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" x=\"{x:.1}\" y=\"{y:.1}\">+{}</text>",
+                count(links)
+            ));
+        }
     }
+    html.push_str(&marks);
     // Over each link lies a wider one that cannot be seen and is easy to
     // hit: selecting a link looks into it. They lie over all the links, so
     // none of them is hidden under a link drawn later. A link between two
@@ -3347,6 +3457,11 @@ fn apart(view: &V) -> String {
 /// layers its two files are filed in, where the pairs are not all of the
 /// same two; `none` is said where there are no pairs.
 fn pair_rows(title: &str, pairs: &V, none: &str, layers: bool) -> String {
+    pair_rows_of(title, pairs, none, layers, false)
+}
+/// `gone` is for pairs a change took away: the link is no longer there to
+/// look into, so such a row is no button.
+fn pair_rows_of(title: &str, pairs: &V, none: &str, layers: bool, gone: bool) -> String {
     let rows = m::array(&pairs["rows"]);
     let more = pairs["more"].as_u64().unwrap_or(0);
     let mut html = format!(
@@ -3360,11 +3475,8 @@ fn pair_rows(title: &str, pairs: &V, none: &str, layers: bool) -> String {
     html.push_str("<ul class=\"graph-map-rows\">");
     for row in &rows {
         let (from, to) = (&row["from"], &row["to"]);
-        html.push_str(&format!(
-            "<li><button type=\"button\" class=\"graph-map-row\" data-pair=\"true\" data-action=\"graph-map-link\" data-payload=\"{}\" title=\"{} uses {} · select to see what makes up this link\"><span class=\"graph-map-row-name\">{} → {}</span><span class=\"graph-map-row-links\">{}{}</span></button></li>",
-            payload(&json!({"from": from["path"], "to": to["path"]})),
-            escape(&m::text(from, "path")),
-            escape(&m::text(to, "path")),
+        let told = format!(
+            "<span class=\"graph-map-row-name\">{} → {}</span><span class=\"graph-map-row-links\">{}{}{}</span>",
             escape(&m::text(from, "name")),
             escape(&m::text(to, "name")),
             if layers {
@@ -3380,7 +3492,26 @@ fn pair_rows(title: &str, pairs: &V, none: &str, layers: bool) -> String {
                 row["links"].as_u64().unwrap_or(0),
                 row["guessed"].as_u64().unwrap_or(0)
             ),
-        ));
+            if m::yes(&row["added"]) {
+                " · added by this change"
+            } else {
+                ""
+            },
+        );
+        html.push_str(&if gone {
+            format!(
+                "<li><span class=\"graph-map-row\" data-pair=\"true\" data-gone=\"true\" title=\"{} used {}\">{told}</span></li>",
+                escape(&m::text(from, "path")),
+                escape(&m::text(to, "path")),
+            )
+        } else {
+            format!(
+                "<li><button type=\"button\" class=\"graph-map-row\" data-pair=\"true\" data-action=\"graph-map-link\" data-payload=\"{}\" title=\"{} uses {} · select to see what makes up this link\">{told}</button></li>",
+                payload(&json!({"from": from["path"], "to": to["path"]})),
+                escape(&m::text(from, "path")),
+                escape(&m::text(to, "path")),
+            )
+        });
     }
     html.push_str("</ul>");
     if more > 0 {
@@ -3398,8 +3529,31 @@ fn pair_rows(title: &str, pairs: &V, none: &str, layers: bool) -> String {
 fn layers_side(view: &V) -> String {
     let focus = &view["focus"];
     if !focus.is_object() {
+        // What a chosen change did to the order comes first: it is what
+        // the change is looked at for.
+        let change = &view["pattern"]["change"];
+        let did = if change["state"] == "ready" {
+            let mut did = pair_rows(
+                "Added by this change",
+                &change["added"],
+                "This change sets nothing against the order.",
+                true,
+            );
+            if change["removed"]["pairs"].as_u64().unwrap_or(0) > 0 {
+                did.push_str(&pair_rows_of(
+                    "Gone with this change",
+                    &change["removed"],
+                    "",
+                    true,
+                    true,
+                ));
+            }
+            did
+        } else {
+            String::new()
+        };
         return format!(
-            "<p class=\"knowledge-note\">A box is a layer: the files a name or a folder places in it. Select a layer to see its files and what it has with the others, or a link to see the pairs of files it is made of. Select it again to let go of it.</p>{}",
+            "<p class=\"knowledge-note\">A box is a layer: the files a name or a folder places in it. Select a layer to see its files and what it has with the others, or a link to see the pairs of files it is made of. Select it again to let go of it.</p>{did}{}",
             pair_rows(
                 "Against the order",
                 &view["pattern"]["against"],
@@ -3863,7 +4017,16 @@ fn legend(view: &V, change: bool) -> String {
         _ if changes(view) => {
             "Highlighted: changed. The rest use the change or are used by it.".to_owned()
         }
-        _ if layered(view) => LAYER_LEGEND.to_owned(),
+        _ if layered(view) => {
+            let mut text = LAYER_LEGEND.to_owned();
+            if m::array(&view["edges"])
+                .iter()
+                .any(|edge| edge["added"].is_u64())
+            {
+                text.push_str(" The number beside one counts the links this change added.");
+            }
+            text
+        }
         _ if patterned(view) => format!(
             "A frame holds the parts that are one thing in the pattern; the ringed box is the type it is named after. {NAME_LEGEND}"
         ),
@@ -5763,7 +5926,8 @@ async fn load(quiet: bool) {
                     || matches!(
                         view["cycle"]["comparison"]["state"].as_str(),
                         Some("building" | "waiting_head")
-                    ))
+                    )
+                    || comparing_order(&view))
             {
                 dom::later("graph-map-poll", 1000, || {
                     spawn_local(async {
@@ -10482,6 +10646,306 @@ mod tests {
         assert!(side(&clean).ends_with("<h4>Against the order <span class=\"graph-map-total\">0</span></h4><p class=\"knowledge-note\">No layer here needs one before it.</p>"));
         clean["pattern"]["against"]["links"] = json!(1);
         assert!(summary(&clean).ends_with("· 1 link against their order"));
+    }
+    #[test]
+    fn the_layers_of_a_change_say_what_it_set_against_their_order_and_what_it_took_away() {
+        let end =
+            |path: &str, layer: &str| json!({"path": path, "name": base(path), "layer": layer});
+        let listed = |rows: V, links: u64, more: u64| {
+            json!({
+                "pairs": rows.as_array().unwrap().len() as u64 + more, "links": links,
+                "guessed": 0, "rows": rows, "more": more,
+            })
+        };
+        let plain = layers();
+        let mut view = plain.clone();
+        view["pattern"]["change"] = json!({
+            "state": "ready", "base": {"name": "main", "commit": "0123456789ab"},
+            "added": listed(json!([plain["pattern"]["against"]["rows"][0].clone()]), 2, 0),
+            "removed": listed(
+                json!([
+                    {
+                        "from": end("app/Models/Cart<i>.php", "Model"),
+                        "to": end("app/Http/Controllers/CartController.php", "Entry points"),
+                        "links": 2, "guessed": 0
+                    },
+                    {
+                        "from": end("app/Repositories/CartRepository.php", "Data access"),
+                        "to": end("app/Services/CartService.php", "Services"),
+                        "links": 1, "guessed": 1
+                    }
+                ]),
+                3,
+                0,
+            ),
+        });
+        view["pattern"]["against"]["rows"][0]["added"] = json!(true);
+        view["edges"][5]["added"] = json!(2);
+        // Above the picture: through how many links, as what stands
+        // against the order is counted there.
+        assert_eq!(
+            summary(&view),
+            "Layers: app · 4 layers · 1,206 files · 3 links against their order · this change adds 2 links and takes 3 away"
+        );
+        // Told, the comparison adds nothing to the note.
+        assert_eq!(note(&view), note(&plain));
+        // In the picture the link the change added to says so and carries
+        // the number of those links, at the middle of its arc, over all the
+        // links and under what is hit; no other link does.
+        let html = canvas(&view);
+        assert!(html.contains("<title>Model uses Services · 2 links · against the order of the layers · 2 links added by this change</title>"), "{html}");
+        assert!(html.contains("<title>Data access uses Entry points · 1 link guessed · against the order of the layers</title>"));
+        assert_eq!(html.matches("added by this change").count(), 1);
+        // It bears the ends of its link, by which the link is lit.
+        let mark =
+            "<text class=\"graph-map-edge-mark\" data-ends=\"3 1\" x=\"566.0\" y=\"90.0\">+2</text>";
+        assert_eq!(html.matches("<text ").count(), 1);
+        let at = html.find(mark).unwrap();
+        assert!(html.rfind("<path class=\"graph-map-edge").unwrap() < at);
+        assert!(at < html.find("<path class=\"graph-map-hit\"").unwrap());
+        assert_eq!(canvas(&plain).matches("graph-map-edge-mark").count(), 0);
+        // The number is of a link against the order: on any other link the
+        // word is not this picture's.
+        let mut forward = plain.clone();
+        forward["edges"][0]["added"] = json!(2);
+        assert_eq!(canvas(&forward), canvas(&plain));
+        // It steps back with its link when another is selected.
+        let mut other = view.clone();
+        other["focus"] = view["nodes"][0].clone();
+        assert!(canvas(&other).contains(
+            "<text class=\"graph-map-edge-mark graph-map-edge-off\" data-ends=\"3 1\" x=\"566.0\" y=\"90.0\">+2</text>"
+        ));
+        let mut one = view.clone();
+        one["edges"][5]["added"] = json!(1200);
+        let html = canvas(&one);
+        assert!(html.contains(
+            "· against the order of the layers · 1,200 links added by this change</title>"
+        ));
+        assert!(html.contains(">+1,200</text>"));
+        one["edges"][5]["added"] = json!(1);
+        assert!(canvas(&one).contains("· 1 link added by this change</title>"));
+        // The key says what the number is, where there is one.
+        assert!(legend(&view, true).ends_with(
+            "A link under the row, in red, runs back: against the order. The number beside one counts the links this change added."
+        ));
+        assert!(legend(&plain, true).ends_with("runs back: against the order."));
+        // Beside the picture what the change did comes first: the pairs it
+        // set against the order, each a way to what makes up its link, and
+        // those it took away, which are no links to look into any more.
+        let html = side(&view);
+        let (added, gone, all) = (
+            html.find("<h4>Added by this change <span class=\"graph-map-total\">1</span></h4>")
+                .unwrap(),
+            html.find("<h4>Gone with this change <span class=\"graph-map-total\">2</span></h4>")
+                .unwrap(),
+            html.find("<h4>Against the order <span class=\"graph-map-total\">2</span></h4>")
+                .unwrap(),
+        );
+        assert!(html.starts_with("<p class=\"knowledge-note\">A box is a layer:"));
+        assert!(added < gone && gone < all, "{html}");
+        let row = "title=\"app/Models/Order.php uses app/Services/Pay&lt;b&gt;.php · select to see what makes up this link\"><span class=\"graph-map-row-name\">Order.php → Pay&lt;b&gt;.php</span><span class=\"graph-map-row-links\">Model → Services · 2 links</span></button>";
+        assert_eq!(html[added..gone].matches(row).count(), 1, "{html}");
+        assert_eq!(
+            html[added..gone]
+                .matches("data-action=\"graph-map-link\"")
+                .count(),
+            1
+        );
+        assert!(html[gone..all].contains("<li><span class=\"graph-map-row\" data-pair=\"true\" data-gone=\"true\" title=\"app/Models/Cart&lt;i&gt;.php used app/Http/Controllers/CartController.php\"><span class=\"graph-map-row-name\">Cart&lt;i&gt;.php → CartController.php</span><span class=\"graph-map-row-links\">Model → Entry points · 2 links</span></span></li>"), "{html}");
+        assert!(html[gone..all].contains("<span class=\"graph-map-row-links\">Data access → Services · 1 link guessed</span></span></li>"));
+        assert_eq!(html[gone..all].matches("data-gone=\"true\"").count(), 2);
+        assert!(!html[gone..all].contains("<button") && !html[gone..all].contains("data-action"));
+        // Among all that runs against the order, what the change added
+        // says so.
+        assert!(html[all..].contains("<span class=\"graph-map-row-links\">Model → Services · 2 links · added by this change</span></button>"), "{html}");
+        assert!(html[all..].contains(
+            "<span class=\"graph-map-row-links\">Data access → Entry points · 1 link guessed</span></button>"
+        ));
+        assert_eq!(html.matches(" · added by this change").count(), 1);
+        assert_eq!(html.matches("data-action=\"graph-map-link\"").count(), 3);
+        assert!(!html[all..].contains("data-gone"));
+        // More than are listed are counted.
+        let mut many = view.clone();
+        many["pattern"]["change"]["added"]["more"] = json!(40);
+        many["pattern"]["change"]["removed"]["more"] = json!(1200);
+        let html = side(&many);
+        assert!(html
+            .contains("<h4>Added by this change <span class=\"graph-map-total\">41</span></h4>"));
+        assert!(html.contains("</ul><p class=\"knowledge-note\">and 40 more</p><h4>Gone with this change <span class=\"graph-map-total\">1,202</span></h4>"), "{html}");
+        assert!(html
+            .contains("</ul><p class=\"knowledge-note\">and 1,200 more</p><h4>Against the order "));
+        // A change that did nothing to the order says so, and one that
+        // only took away or only added says that.
+        let mut none = plain.clone();
+        none["pattern"]["change"] = json!({
+            "state": "ready", "base": {"name": "main", "commit": "0123456789ab"},
+            "added": listed(json!([]), 0, 0), "removed": listed(json!([]), 0, 0),
+        });
+        assert!(summary(&none).ends_with("· 3 links against their order · this change adds none"));
+        let html = side(&none);
+        assert!(html.contains("Select it again to let go of it.</p><h4>Added by this change <span class=\"graph-map-total\">0</span></h4><p class=\"knowledge-note\">This change sets nothing against the order.</p><h4>Against the order <span class=\"graph-map-total\">2</span></h4>"), "{html}");
+        assert!(!html.contains("Gone with this change"));
+        assert_eq!(canvas(&none), canvas(&plain));
+        assert_eq!(legend(&none, true), legend(&plain, true));
+        let mut took = none.clone();
+        took["pattern"]["change"]["removed"] = view["pattern"]["change"]["removed"].clone();
+        assert!(summary(&took).ends_with("· this change takes 3 links away"));
+        let html = side(&took);
+        assert!(html.contains("<p class=\"knowledge-note\">This change sets nothing against the order.</p><h4>Gone with this change <span class=\"graph-map-total\">2</span></h4>"), "{html}");
+        took["pattern"]["change"]["removed"]["links"] = json!(1);
+        assert!(summary(&took).ends_with("· this change takes 1 link away"));
+        let mut gave = view.clone();
+        gave["pattern"]["change"]["removed"] = listed(json!([]), 0, 0);
+        assert!(summary(&gave).ends_with("· this change adds 2 links"));
+        assert!(!side(&gave).contains("Gone with this change"));
+        gave["pattern"]["change"]["added"]["links"] = json!(1);
+        assert!(summary(&gave).ends_with("· this change adds 1 link"));
+        gave["pattern"]["change"]["removed"]["links"] = json!(1200);
+        assert!(summary(&gave).ends_with("· this change adds 1 link and takes 1,200 away"));
+        // With a layer or a link selected the panel is of what is
+        // selected, and its pairs that the change added say so.
+        let mut layer = view.clone();
+        let mut focus = view["nodes"][3].clone();
+        focus["signs"] = json!("a folder named models");
+        focus["against"] =
+            json!({"rows": [view["pattern"]["against"]["rows"][0].clone()], "more": 0});
+        layer["focus"] = focus;
+        let html = side(&layer);
+        assert!(!html.contains("Added by this change") && !html.contains("Gone with this change"));
+        assert!(html.contains(
+            "<h4>Against the order, from here <span class=\"graph-map-total\">1</span></h4>"
+        ));
+        assert!(html.contains("<span class=\"graph-map-row-links\">Model → Services · 2 links · added by this change</span>"), "{html}");
+        let mut link = view.clone();
+        link["focus"] = json!({
+            "path": "layer:model>layer:services", "link": true,
+            "from": {"path": "layer:model", "name": "Model"},
+            "to": {"path": "layer:services", "name": "Services"},
+            "links": 3, "guessed": 1, "against": true, "pairs": 2, "more": 0,
+            "rows": [
+                {
+                    "from": end("app/Models/Order.php", "Model"),
+                    "to": end("app/Services/Pay<b>.php", "Services"),
+                    "links": 2, "guessed": 1, "added": true
+                },
+                {
+                    "from": end("app/Events/OrderPaid.php", "Model"),
+                    "to": end("app/Listeners/SendReceipt.php", "Services"),
+                    "links": 1, "guessed": 0
+                }
+            ],
+        });
+        let html = side(&link);
+        assert!(!html.contains("Added by this change") && !html.contains("Gone with this change"));
+        assert!(html.contains("<span class=\"graph-map-row-links\">2 links, 1 guessed · added by this change</span>"), "{html}");
+        assert!(html.contains("<span class=\"graph-map-row-links\">1 link</span>"));
+    }
+    #[test]
+    fn what_a_change_did_to_the_order_is_waited_for_or_said_to_be_untold() {
+        let plain = layers();
+        let told = |change: V| {
+            let mut view = plain.clone();
+            view["pattern"]["change"] = change;
+            // Until the two ends are compared nothing of the comparison is
+            // counted or listed.
+            assert_eq!(summary(&view), summary(&plain));
+            assert_eq!(side(&view), side(&plain));
+            assert!(!side(&view).contains("this change"));
+            assert_eq!(canvas(&view), canvas(&plain));
+            let said = note(&view);
+            (
+                said.strip_prefix(&note(&plain))
+                    .unwrap()
+                    .trim_start()
+                    .to_owned(),
+                comparing_order(&view),
+            )
+        };
+        let base = json!({"name": "main", "commit": "0123456789ab"});
+        for (change, said, asked_again) in [
+            (
+                json!({"state": "waiting_head", "base": base}),
+                "Waiting for the graph of the change before telling what it did to the order.",
+                true,
+            ),
+            (
+                json!({"state": "building", "base": base}),
+                "Preparing the graph at base 0123456789ab to tell what the change did to the order…",
+                true,
+            ),
+            (
+                json!({"state": "building", "base": null}),
+                "Preparing the graph at the base of the change to tell what the change did to the order…",
+                true,
+            ),
+            (
+                json!({"state": "unavailable", "reason": "tests", "base": base}),
+                "What the change did to the order cannot be told with Without tests for this cached revision.",
+                false,
+            ),
+            (
+                json!({"state": "unavailable", "reason": "no_base", "base": null}),
+                "Where this change started could not be determined, so what it did to the order is not told.",
+                false,
+            ),
+            (
+                json!({"state": "unavailable", "reason": "head", "base": base}),
+                "What the change did to the order needs the graph of the change itself.",
+                false,
+            ),
+            // The graph is rebuilt and the map follows it: that is asked
+            // for again by what says so, not by the comparison.
+            (
+                json!({"state": "unavailable", "reason": "stale", "base": base}),
+                "What the change did to the order is told once the graph is of these files.",
+                false,
+            ),
+            (
+                json!({"state": "unavailable", "base": base}),
+                "Could not compare with base 0123456789ab.",
+                false,
+            ),
+            (
+                json!({"state": "unavailable", "base": null}),
+                "Could not compare with the base of the change.",
+                false,
+            ),
+        ] {
+            assert_eq!(told(change.clone()), (said.to_owned(), asked_again), "{change}");
+        }
+        // Told, or with no change chosen, the picture is not asked for
+        // again and the note says nothing more.
+        let mut ready = plain.clone();
+        ready["pattern"]["change"] = json!({
+            "state": "ready", "base": base,
+            "added": {"pairs": 0, "links": 0, "guessed": 0, "rows": [], "more": 0},
+            "removed": {"pairs": 0, "links": 0, "guessed": 0, "rows": [], "more": 0},
+        });
+        assert_eq!(note(&ready), note(&plain));
+        assert!(!comparing_order(&ready));
+        assert!(!comparing_order(&plain));
+        assert!(!comparing_order(
+            &json!({"pattern": {"change": {"state": "unavailable"}}})
+        ));
+    }
+    #[test]
+    fn the_middle_of_a_curve_is_where_a_word_about_it_stands() {
+        assert_eq!(
+            middle("M761.0 60.0 C761.0 100.0 371.0 100.0 371.0 60.0"),
+            Some((566.0, 90.0))
+        );
+        // Not the middle of its ends: the handles pull it.
+        assert_eq!(middle("M0 0 C0 8 8 16 16 16"), Some((5.0, 11.0)));
+        for other in [
+            "M10.0 10.0 L20.0 20.0",
+            "M1 2 C3 4 5 6 7",
+            "M1 2 C3 4 5 6 7 8 9",
+            "M1 2 C3 4 5 6 7 x",
+            "L1 2 C3 4 5 6 7 8",
+            "",
+        ] {
+            assert_eq!(middle(other), None, "{other}");
+        }
     }
     #[test]
     fn a_selected_layer_says_what_places_a_file_in_it_and_lists_its_files() {

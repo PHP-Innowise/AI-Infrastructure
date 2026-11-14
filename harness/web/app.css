@@ -246,6 +246,10 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-flow-used { stop-color:var(--map-used); }
 .graph-map-arrow path { fill:var(--map-used); }
 .graph-map-arrow-against path { fill:var(--error-dot); }
+.graph-map-edge-mark { fill:var(--error-dot); stroke:var(--soft); stroke-width:4px; stroke-linejoin:round; paint-order:stroke; font-size:11px; font-weight:600; font-variant-numeric:tabular-nums; text-anchor:middle; dominant-baseline:central; pointer-events:none; transition:opacity var(--motion-fast) var(--ease-standard); }
+.graph-map-plane[data-hover="true"] .graph-map-edge-mark { opacity:.14; }
+.graph-map-plane[data-hover="true"] .graph-map-edge-mark[data-lit="true"] { opacity:1; }
+@media (forced-colors:active) { .graph-map-edge-mark { fill:CanvasText; stroke:Canvas; } }
 .graph-map-caption { position:absolute; left:12px; color:var(--muted); font-size:var(--text-meta); }
 .graph-map-node { position:absolute; display:flex; align-items:center; gap:6px; width:164px; height:30px; padding:0 10px; border:1px solid var(--field-line); border-radius:var(--radius); background:var(--paper); color:var(--ink); font-size:var(--text-ui); text-align:left; }
 .graph-map-node:hover { border-color:var(--field-line-hover); }
@@ -303,6 +307,9 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-pattern-name { margin:8px 0 2px; font-weight:var(--weight-strong); }
 .graph-map-row:is([data-action="graph-map-pattern"],[data-pair="true"]) { flex-wrap:wrap; gap:0 8px; }
 .graph-map-row:is([data-action="graph-map-pattern"],[data-pair="true"]) .graph-map-row-links { flex:1 1 100%; }
+.graph-map-row[data-gone="true"] { color:var(--muted); }
+.graph-map-row[data-gone="true"]:hover { background:transparent; }
+.graph-map-row[data-gone="true"] .graph-map-row-name { text-decoration:line-through; }
 .graph-map-side { overflow:auto; padding:2px 4px 2px 0; font-size:var(--text-ui); }
 .graph-map-side h3 { margin:0; font-size:var(--text-title); overflow-wrap:anywhere; }
 .graph-map-side h4 { margin:16px 0 4px; font-size:var(--text-ui); }

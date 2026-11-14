@@ -796,6 +796,174 @@ impl Layers {
         Some(view)
     }
 }
+/// One pair of files of two layers as a row: the two files with the layers
+/// they are filed in, and through how many links the first needs the second.
+fn paired(index: &Index, table: &[Layer], pair: &Backward) -> Value {
+    let end = |file: u32, layer: usize| {
+        let path = index.files[file as usize].as_str();
+        json!({"path": path, "name": name(path), "layer": table[layer].name})
+    };
+    json!({
+        "from": end(pair.from, pair.above), "to": end(pair.to, pair.below),
+        "links": pair.flow.links, "guessed": pair.flow.guessed,
+    })
+}
+/// A pair of files of which the first needs the second against the order of
+/// their layers.
+struct Backward {
+    from: u32,
+    to: u32,
+    /// The layers of the two, the first the later in the order.
+    above: usize,
+    below: usize,
+    flow: Flow,
+}
+impl Layers {
+    /// What runs against the order of the layers of a graph read one way,
+    /// the most linked first. Whether a folder of it would be said to be in
+    /// layers is not asked: this is for measuring one graph against another
+    /// by the same way.
+    fn backward(&self, way: usize) -> Vec<Backward> {
+        let Way { of, cross } = &self.ways[way];
+        cross
+            .iter()
+            .map(|(from, to, flow)| Backward {
+                from: *from,
+                to: *to,
+                above: of[*from as usize] as usize,
+                below: of[*to as usize] as usize,
+                flow: *flow,
+            })
+            .filter(|pair| pair.above > pair.below)
+            .collect()
+    }
+    /// Says in the picture of a folder's layers what a change did to their
+    /// order: the pairs of files that run against it now and did not in
+    /// `base`, the graph the change started from, and those that did there
+    /// and no longer do. A pair is told by its two files, whatever the
+    /// number of its links; `renamed` gives, for a file the change moved,
+    /// the path it had in `base`. A pair is of the folder where both its
+    /// files lie in it after the change, so a file moved into the folder
+    /// with what it already had against the order adds nothing, and one
+    /// moved out takes nothing away; nor does renaming the folder itself.
+    /// The base is read the way the folder is read now, by the four layers
+    /// or by its rings, so that what differs is what the change did and not
+    /// how a folder is read. The rows of the picture that are among the
+    /// added say so, and a link between two layers says how many of its
+    /// links they are.
+    pub(super) fn compare(
+        &self,
+        index: &Index,
+        then: &Layers,
+        base: &Index,
+        view: &mut Value,
+        renamed: &HashMap<&str, &str>,
+    ) {
+        let scope = view["scope"].as_str().unwrap_or("").to_owned();
+        let way = self.held(index, &scope).map_or(LAYERED, |held| held.way);
+        let table = WAYS[way];
+        let moved = renamed
+            .iter()
+            .map(|(new, old)| (*old, *new))
+            .collect::<HashMap<_, _>>();
+        // The two files of a pair of either graph, by their paths before
+        // the change and after it.
+        let before = |pair: &Backward| {
+            let old = |file: u32| {
+                let path = index.files[file as usize].as_str();
+                renamed.get(path).copied().unwrap_or(path)
+            };
+            (old(pair.from), old(pair.to))
+        };
+        let after = |pair: &Backward| {
+            let new = |file: u32| {
+                let path = base.files[file as usize].as_str();
+                moved.get(path).copied().unwrap_or(path)
+            };
+            (new(pair.from), new(pair.to))
+        };
+        fn here<'a>(index: &'a Index, pair: &Backward) -> (&'a str, &'a str) {
+            (
+                index.files[pair.from as usize].as_str(),
+                index.files[pair.to as usize].as_str(),
+            )
+        }
+        let within = |(from, to): (&str, &str)| under(&scope, from) && under(&scope, to);
+        let (now, was) = (self.backward(way), then.backward(way));
+        let had = was
+            .iter()
+            .map(|pair| here(base, pair))
+            .collect::<HashSet<_>>();
+        let has = now.iter().map(before).collect::<HashSet<_>>();
+        let added = now
+            .iter()
+            .filter(|pair| within(here(index, pair)) && !had.contains(&before(pair)))
+            .collect::<Vec<_>>();
+        let removed = was
+            .iter()
+            .filter(|pair| within(after(pair)) && !has.contains(&here(base, pair)))
+            .collect::<Vec<_>>();
+        let listed = |index: &Index, pairs: &[&Backward]| {
+            let flow = pairs.iter().fold(Flow::default(), |sum, pair| Flow {
+                links: sum.links + pair.flow.links,
+                guessed: sum.guessed + pair.flow.guessed,
+            });
+            json!({
+                "pairs": pairs.len(), "links": flow.links, "guessed": flow.guessed,
+                "rows": pairs
+                    .iter()
+                    .take(LISTED)
+                    .map(|pair| paired(index, table, pair))
+                    .collect::<Vec<_>>(),
+                "more": pairs.len().saturating_sub(LISTED),
+            })
+        };
+        // The rows already in the picture that the change added, and the
+        // links between two layers that hold some of them.
+        let new = added
+            .iter()
+            .map(|pair| here(index, pair))
+            .collect::<HashSet<_>>();
+        for rows in [
+            "/pattern/against/rows",
+            "/focus/against/rows",
+            "/focus/rows",
+        ] {
+            for row in view
+                .pointer_mut(rows)
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                let end = |end: &str| row[end]["path"].as_str().unwrap_or("");
+                if new.contains(&(end("from"), end("to"))) {
+                    row["added"] = json!(true);
+                }
+            }
+        }
+        let mut through: HashMap<(usize, usize), u64> = HashMap::new();
+        for pair in &added {
+            *through.entry((pair.above, pair.below)).or_default() += pair.flow.links;
+        }
+        for edge in view["edges"].as_array_mut().into_iter().flatten() {
+            let layer = |end: &str| {
+                let id = edge[end].as_str()?.strip_prefix("layer:")?;
+                table.iter().position(|layer| layer.id == id)
+            };
+            if let Some(links) = layer("from")
+                .zip(layer("to"))
+                .and_then(|ends| through.get(&ends))
+            {
+                edge["added"] = json!(links);
+            }
+        }
+        view["pattern"]["change"] = json!({
+            "state": "ready",
+            "added": listed(index, &added),
+            "removed": listed(base, &removed),
+        });
+    }
+}
 impl Held {
     /// Through how many links a layer needs one before it.
     fn against(&self) -> Flow {

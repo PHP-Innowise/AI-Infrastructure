@@ -1297,6 +1297,463 @@ fn an_entity_called_after_a_plain_noun_is_no_layer_of_its_own() {
         json!([{"from": "layer:entry", "to": "layer:model", "links": 1, "guessed": 0, "against": false}])
     );
 }
+/// The shop as it was before a change, and as the change left it: the
+/// model's order reaches for a service where it did not, the repository no
+/// longer calls the controller, and the gateway was moved.
+fn changed() -> (Graph, Graph) {
+    let build = |gateway: &str, links: &[(&str, &str)]| {
+        let mut graph = Graph::default();
+        for path in [
+            CONTROLLER, MIDDLEWARE, SERVICE, LISTENER, REPOSITORY, ORDER, PAID,
+        ] {
+            graph.file(path);
+        }
+        graph.file(gateway);
+        graph
+            .link(CONTROLLER, SERVICE, "calls", None)
+            .link(SERVICE, REPOSITORY, "calls", None)
+            .link(SERVICE, ORDER, "calls", None)
+            .link(REPOSITORY, ORDER, "calls", None)
+            // Against the order at both ends of the change: the gateway
+            // asks a service.
+            .link(gateway, SERVICE, "calls", None);
+        for (from, to) in links {
+            graph.link(from, to, "calls", None);
+        }
+        graph
+    };
+    (
+        build(GATEWAY, &[(REPOSITORY, CONTROLLER), (PAID, LISTENER)]),
+        build(
+            "app/Billing/StripeGateway.php",
+            &[
+                (ORDER, SERVICE),
+                (ORDER, SERVICE),
+                (PAID, LISTENER),
+                (PAID, LISTENER),
+            ],
+        ),
+    )
+}
+#[test]
+fn a_change_says_which_pairs_it_set_against_the_order_and_which_it_took_away() {
+    let (before, after) = changed();
+    let (base, index) = (before.index(), after.index());
+    let moved = HashMap::from([("app/Billing/StripeGateway.php", GATEWAY)]);
+    let compared = |focus: Option<&str>, renamed: &HashMap<&str, &str>| {
+        let mut view = index
+            .pattern("demo", "layers@app", &[], &|_| None, focus, false)
+            .unwrap();
+        index.compare_layers(&base, &mut view, renamed, false);
+        view
+    };
+    let ends = |rows: &Value| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["from"]["path"].as_str().unwrap().to_owned(),
+                    row["to"]["path"].as_str().unwrap().to_owned(),
+                    row["links"].as_u64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let view = compared(None, &moved);
+    let change = &view["pattern"]["change"];
+    assert_eq!(change["state"], "ready");
+    // Added: the order and the service. The event and its listener ran
+    // against the order before, with one link where there are two now, and
+    // a pair is told by its files; so did the gateway, under another path.
+    assert_eq!(
+        (
+            &change["added"]["pairs"],
+            &change["added"]["links"],
+            &change["added"]["more"]
+        ),
+        (&json!(1), &json!(2), &json!(0))
+    );
+    assert_eq!(
+        ends(&change["added"]["rows"]),
+        [(ORDER.to_owned(), SERVICE.to_owned(), 2)]
+    );
+    assert_eq!(change["added"]["rows"][0]["from"]["layer"], "Model");
+    assert_eq!(
+        change["added"]["rows"][0]["to"]["name"],
+        "CheckoutService.php"
+    );
+    // Taken away: the repository and the controller, as the base has them.
+    assert_eq!(
+        (&change["removed"]["pairs"], &change["removed"]["links"]),
+        (&json!(1), &json!(1))
+    );
+    assert_eq!(
+        ends(&change["removed"]["rows"]),
+        [(REPOSITORY.to_owned(), CONTROLLER.to_owned(), 1)]
+    );
+    assert_eq!(change["removed"]["rows"][0]["from"]["layer"], "Data access");
+    // The rows of the picture that are among the added say so, and no other.
+    let marks = |rows: &Value| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["from"]["name"].as_str().unwrap().to_owned(),
+                    row["added"] == true,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        marks(&view["pattern"]["against"]["rows"]),
+        [
+            ("OrderPaid.php".to_owned(), false),
+            ("Order.php".to_owned(), true),
+            ("StripeGateway.php".to_owned(), false),
+        ]
+    );
+    // A link between two layers says how many of its links the change added.
+    let added = |view: &Value| {
+        view["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|edge| !edge["added"].is_null())
+            .map(|edge| {
+                (
+                    edge["from"].as_str().unwrap().to_owned(),
+                    edge["to"].as_str().unwrap().to_owned(),
+                    edge["added"].as_u64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        added(&view),
+        [("layer:model".to_owned(), "layer:services".to_owned(), 2)]
+    );
+    // So do the rows of a selected layer and of a selected link.
+    let layer = compared(Some("layer:model"), &moved);
+    assert_eq!(
+        marks(&layer["focus"]["against"]["rows"]),
+        [
+            ("OrderPaid.php".to_owned(), false),
+            ("Order.php".to_owned(), true)
+        ]
+    );
+    let link = compared(Some("layer:model>layer:services"), &moved);
+    assert_eq!(
+        marks(&link["focus"]["rows"]),
+        [
+            ("OrderPaid.php".to_owned(), false),
+            ("Order.php".to_owned(), true)
+        ]
+    );
+    // Without knowing that the gateway was moved, it is a pair the change
+    // added and another it took away.
+    let unknown = compared(None, &HashMap::new());
+    let change = &unknown["pattern"]["change"];
+    assert_eq!(
+        (&change["added"]["pairs"], &change["removed"]["pairs"]),
+        (&json!(2), &json!(2))
+    );
+    assert_eq!(
+        ends(&change["added"]["rows"]),
+        [
+            (ORDER.to_owned(), SERVICE.to_owned(), 2),
+            (
+                "app/Billing/StripeGateway.php".to_owned(),
+                SERVICE.to_owned(),
+                1
+            ),
+        ]
+    );
+    // The same graph at both ends, and the change did nothing to the order.
+    let mut same = index
+        .pattern("demo", "layers@app", &[], &|_| None, None, false)
+        .unwrap();
+    index.compare_layers(&index, &mut same, &HashMap::new(), false);
+    let change = &same["pattern"]["change"];
+    assert_eq!(
+        (&change["added"]["pairs"], &change["removed"]["pairs"]),
+        (&json!(0), &json!(0))
+    );
+    assert_eq!(change["added"]["rows"], json!([]));
+    assert!(added(&same).is_empty());
+    assert!(
+        same["pattern"]["against"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["added"].is_null())
+    );
+}
+#[test]
+fn a_change_is_measured_against_whatever_its_base_was() {
+    let (_, after) = changed();
+    let index = after.index();
+    let compared = |base: &Index, scope: &str, certain: bool| {
+        let mut view = index
+            .pattern(
+                "demo",
+                &format!("layers@{scope}"),
+                &[],
+                &|_| None,
+                None,
+                certain,
+            )
+            .unwrap();
+        index.compare_layers(base, &mut view, &HashMap::new(), certain);
+        view["pattern"]["change"].clone()
+    };
+    // A base without layers: every pair against the order is the change's.
+    let mut flat = Graph::default();
+    flat.file("app/Support/Report.php")
+        .file("app/Support/Money.php");
+    let change = compared(&flat.index(), "app", false);
+    assert_eq!(
+        (&change["added"]["pairs"], &change["removed"]["pairs"]),
+        (&json!(3), &json!(0))
+    );
+    // The base is read the way the folder is read now. A shop in rings
+    // gains pages enough to be read by the four layers: of the pairs that
+    // run against either order the change itself made none and took none
+    // away, and the picture says so, though by its rings the base had a
+    // handler against the order that the four layers have not.
+    let (handler, repository) = (
+        "src/Application/CommandHandler/PlaceOrderHandler.php",
+        "src/Infrastructure/Repository/OrderRepository.php",
+    );
+    let mut ringed = rings();
+    ringed.link(handler, repository, "calls", None);
+    let mut grown = rings();
+    grown.link(handler, repository, "calls", None);
+    for at in 0..8 {
+        grown
+            .file(&format!("src/Controller/Page{at}Controller.php"))
+            .file(&format!("src/Entity/Page{at}.php"))
+            .link(
+                &format!("src/Controller/Page{at}Controller.php"),
+                &format!("src/Entity/Page{at}.php"),
+                "calls",
+                None,
+            );
+    }
+    let (ringed, layered) = (ringed.index(), grown.index());
+    let read = |index: &Index, base: &Index| {
+        let mut view = index
+            .pattern("demo", "layers@src", &[], &|_| None, None, false)
+            .unwrap();
+        index.compare_layers(base, &mut view, &HashMap::new(), false);
+        (
+            view["pattern"]["rings"] == true,
+            view["pattern"]["against"]["pairs"].as_u64().unwrap(),
+            view["pattern"]["change"]["added"]["pairs"]
+                .as_u64()
+                .unwrap(),
+            view["pattern"]["change"]["removed"]["pairs"]
+                .as_u64()
+                .unwrap(),
+        )
+    };
+    assert_eq!(read(&layered, &ringed), (false, 4, 0, 0));
+    // A handler that takes a repository of the adapters runs against the
+    // rings and not against the four layers: read by its rings, the shop
+    // has it from the change.
+    assert_eq!(read(&ringed, &rings().index()), (true, 3, 1, 0));
+    assert_eq!(read(&rings().index(), &ringed), (true, 2, 0, 1));
+    // The other way round the pages are gone and the shop is read by its
+    // rings again: three pairs against their order, none of them new.
+    assert_eq!(read(&ringed, &layered), (true, 3, 0, 0));
+    // One more link out of the domain, and it is the one the change added.
+    let mut worse = rings();
+    worse.link(handler, repository, "calls", None).link(
+        "src/Domain/Entity/Line.php",
+        "src/Application/Bus/CommandBusInterface.php",
+        "calls",
+        None,
+    );
+    assert_eq!(read(&worse.index(), &layered), (true, 4, 1, 0));
+    // What the tool only inferred is left out at both ends when asked.
+    let mut guessing = Graph::default();
+    for path in [
+        CONTROLLER, MIDDLEWARE, SERVICE, LISTENER, REPOSITORY, ORDER, PAID, GATEWAY,
+    ] {
+        guessing.file(path);
+    }
+    guessing
+        .link(CONTROLLER, SERVICE, "calls", None)
+        .link(SERVICE, ORDER, "calls", None)
+        .guessed(ORDER, SERVICE);
+    let base = guessing.index();
+    let change = compared(&base, "app", false);
+    assert_eq!(change["added"]["pairs"], 2);
+    let change = compared(&base, "app", true);
+    assert_eq!(change["added"]["pairs"], 3);
+    // Of what a change added, what the tool only inferred is counted so.
+    let mut view = base
+        .pattern("demo", "layers@app", &[], &|_| None, None, false)
+        .unwrap();
+    base.compare_layers(&flat.index(), &mut view, &HashMap::new(), false);
+    let added = &view["pattern"]["change"]["added"];
+    assert_eq!(
+        (&added["pairs"], &added["links"], &added["guessed"]),
+        (&json!(1), &json!(1), &json!(1))
+    );
+    assert_eq!(added["rows"][0]["guessed"], 1);
+    // More pairs than fit are listed the most linked first and counted.
+    let mut many = Graph::default();
+    for at in 0..LISTED + 5 {
+        let (service, model) = (
+            format!("app/Services/Step{at:02}Service.php"),
+            format!("app/Models/Thing{at:02}.php"),
+        );
+        many.file(&service).file(&model);
+        many.link(&model, &service, "calls", None);
+        if at == 7 {
+            many.link(&model, &service, "references", Some("field"));
+        }
+    }
+    let index = many.index();
+    let mut view = index
+        .pattern("demo", "layers@app", &[], &|_| None, None, false)
+        .unwrap();
+    index.compare_layers(&flat.index(), &mut view, &HashMap::new(), false);
+    let added = &view["pattern"]["change"]["added"];
+    assert_eq!(added["pairs"], LISTED + 5);
+    assert_eq!(added["links"], LISTED + 6);
+    assert_eq!(added["rows"].as_array().unwrap().len(), LISTED);
+    assert_eq!(added["more"], 5);
+    assert_eq!(added["rows"][0]["from"]["name"], "Thing07.php");
+}
+#[test]
+fn what_is_moved_with_a_folder_or_a_file_is_neither_added_nor_taken_away() {
+    let files = [
+        "Http/Controllers/CheckoutController.php",
+        "Services/CheckoutService.php",
+        "Repositories/OrderRepository.php",
+        "Models/Order.php",
+    ];
+    // A shop under a folder, and beside it an invoice with its service in
+    // a folder of their own. `back` says which of the two models asks its
+    // service, against the order: the order, the invoice.
+    let shop = |root: &str, beside: &str, back: (bool, bool)| {
+        let at = |path: &str| format!("{root}/{path}");
+        let mut graph = Graph::default();
+        for path in files {
+            graph.file(&at(path));
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 3)] {
+            graph.link(&at(files[from]), &at(files[to]), "calls", None);
+        }
+        if back.0 {
+            graph.link(&at(files[3]), &at(files[1]), "calls", None);
+        }
+        let (invoice, invoices) = (
+            format!("{beside}/Models/Invoice.php"),
+            format!("{beside}/Services/InvoiceService.php"),
+        );
+        graph.file(&invoice).file(&invoices);
+        graph.link(&invoices, &invoice, "calls", None);
+        if back.1 {
+            graph.link(&invoice, &invoices, "calls", None);
+        }
+        graph
+    };
+    // Against the order in a folder now, added there by the change, and
+    // taken away there by it.
+    let did = |base: &Graph, head: &Graph, scope: &str, renamed: &[(&str, &str)]| {
+        let (base, index) = (base.index(), head.index());
+        let mut view = index
+            .pattern(
+                "demo",
+                &format!("layers@{scope}"),
+                &[],
+                &|_| None,
+                None,
+                false,
+            )
+            .unwrap();
+        index.compare_layers(&base, &mut view, &renamed.iter().copied().collect(), false);
+        let change = &view["pattern"]["change"];
+        (
+            view["pattern"]["against"]["pairs"].as_u64().unwrap(),
+            change["added"]["pairs"].as_u64().unwrap(),
+            change["removed"]["pairs"].as_u64().unwrap(),
+        )
+    };
+    let both = (true, true);
+    // The folder of the picture is renamed: what it had against the order
+    // it has still, and the change did none of it. Where the files are not
+    // known to be the same, the folder is all new, and the pair it had
+    // under its old name is gone from the project.
+    let moved = files
+        .iter()
+        .map(|path| (format!("shop/{path}"), format!("store/{path}")))
+        .collect::<Vec<_>>();
+    let moved = moved
+        .iter()
+        .map(|(new, old)| (new.as_str(), old.as_str()))
+        .collect::<Vec<_>>();
+    let (store, renamed) = (
+        shop("store", "billing", both),
+        shop("shop", "billing", both),
+    );
+    assert_eq!(did(&store, &renamed, "shop", &moved), (1, 0, 0));
+    assert_eq!(did(&store, &renamed, "", &moved), (2, 0, 0));
+    assert_eq!(did(&store, &renamed, "shop", &[]), (1, 1, 0));
+    assert_eq!(did(&store, &renamed, "", &[]), (2, 1, 1));
+    // What the renamed folder no longer has against the order is gone from
+    // it under its new name.
+    let mended = shop("shop", "billing", (false, true));
+    assert_eq!(did(&store, &mended, "shop", &moved), (0, 0, 1));
+    assert_eq!(did(&store, &mended, "", &moved), (1, 0, 1));
+    // A pair moved into the folder with what it had against the order is
+    // no pair the change added there, and one moved out of it is none the
+    // change took away: the project has as many as it had.
+    let into = [
+        ("store/Models/Invoice.php", "billing/Models/Invoice.php"),
+        (
+            "store/Services/InvoiceService.php",
+            "billing/Services/InvoiceService.php",
+        ),
+    ];
+    let out = [(into[0].1, into[0].0), (into[1].1, into[1].0)];
+    let (apart, together) = (shop("store", "billing", both), shop("store", "store", both));
+    assert_eq!(did(&apart, &together, "store", &into), (2, 0, 0));
+    assert_eq!(did(&apart, &together, "", &into), (2, 0, 0));
+    assert_eq!(did(&together, &apart, "store", &out), (1, 0, 0));
+    assert_eq!(did(&together, &apart, "", &out), (2, 0, 0));
+    // Unknown to be the same files, they are a pair added and a pair gone;
+    // in the folder they left, a pair gone and none added.
+    assert_eq!(did(&apart, &together, "store", &[]), (2, 1, 0));
+    assert_eq!(did(&apart, &together, "", &[]), (2, 1, 1));
+    assert_eq!(did(&together, &apart, "store", &[]), (1, 0, 1));
+    // Moved out and mended there, the pair is gone from the project, and
+    // not from the folder it had left.
+    let left = shop("store", "billing", (true, false));
+    assert_eq!(did(&together, &left, "store", &out), (1, 0, 0));
+    assert_eq!(did(&together, &left, "", &out), (1, 0, 1));
+    // What a change adds or takes away elsewhere is not of this folder.
+    assert_eq!(did(&left, &apart, "store", &[]), (1, 0, 0));
+    assert_eq!(did(&left, &apart, "", &[]), (2, 1, 0));
+    assert_eq!(did(&apart, &left, "store", &[]), (1, 0, 0));
+    assert_eq!(did(&apart, &left, "", &[]), (1, 0, 1));
+    // Nor is a pair with one of its files outside the folder.
+    let mut across = shop("store", "billing", (true, false));
+    across.link(
+        "billing/Models/Invoice.php",
+        "store/Services/CheckoutService.php",
+        "calls",
+        None,
+    );
+    assert_eq!(did(&left, &across, "store", &[]), (1, 0, 0));
+    assert_eq!(did(&left, &across, "", &[]), (2, 1, 0));
+    assert_eq!(did(&across, &left, "store", &[]), (1, 0, 0));
+    assert_eq!(did(&across, &left, "", &[]), (1, 0, 1));
+}
 #[test]
 fn a_few_files_named_like_layers_are_no_layered_design() {
     // Layers hold no fewer than four files, and no less than a tenth of the

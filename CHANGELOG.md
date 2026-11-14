@@ -24,6 +24,11 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Say in the picture of a folder's layers on the dependency map in Harness
+  what a chosen change did to their order: the pairs of files a pull request, a
+  commit, a branch or the checkout's own work set against it and those it took
+  away, measured from the base of the change. A renamed file is the same file.
+
 - Show the layers of a folder on the dependency map in Harness: its files filed
   as entry points, services, data access and model by their names and folders,
   the links between those layers in their order with the pairs of files each
