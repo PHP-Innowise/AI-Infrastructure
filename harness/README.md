@@ -1256,8 +1256,8 @@ Creator and System runs keep their own progress and show only their waiting line
 
 After the turn the strip closes. A **Last run** line under the conversation opens
 the same tabs for the launch that just ended (**Show files**, **Show plan**, **Show
-commands**), and **Close** puts them away. The page keeps the newest launch only, so
-the line goes when the next turn or a Harness check starts.
+commands**), and **Close** puts them away. The page keeps the last turn only: the
+line stays through a Harness check and goes when the next turn starts.
 
 ![Detailed › Files during a run: the file being read carries a ring, edits are filled, a created file has a plus](../docs/images/harness-run-view/files-map.jpg)
 

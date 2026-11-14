@@ -14,6 +14,7 @@ pub fn reset() {
         "agents",
         "run-file-filter",
         "run-command-filter",
+        "run-before",
         "run-after",
         "run-idle",
     ] {
@@ -64,14 +65,33 @@ pub fn classify(command: &str) -> V {
     crate::classify::classify(command)
 }
 pub fn observe(event: V) {
-    let mut run = m::data("run");
-    let launch = m::text(&event, "launch_id");
+    let (run, replaced) = advance(m::data("run"), &event);
+    if let Some(replaced) = replaced {
+        m::set("run-before", replaced);
+    }
+    m::set("run", run);
+    activity(&event);
+    conversation(&event);
+    // Poll controls render the derived panels once after all fresh events.
+    // Completion notifications must run before a later event can change launch.
+    notify_finished();
+}
+/// One event into the model. Returns the newest launch and, when the event began another one,
+/// the launch to remember in its place.
+fn advance(mut run: V, event: &V) -> (V, Option<V>) {
+    let launch = m::text(event, "launch_id");
+    let mut replaced = None;
     if !run.is_object() || (!launch.is_empty() && run["launch"] != launch) {
+        // A Harness check comes under a launch id of its own. The launch it replaces is kept, so
+        // the turn's details outlive the check; a check is never the launch to keep.
+        if run.is_object() && !is_check(&run) {
+            replaced = Some(run);
+        }
         run = initial();
         run["launch"] = json!(launch);
         run["started"] = event["at"].clone();
     }
-    let kind = m::text(&event, "kind");
+    let kind = m::text(event, "kind");
     let mut kinds = m::array(&run["kinds"]);
     if !kinds.iter().any(|k| k == &kind) {
         kinds.push(json!(kind));
@@ -79,13 +99,13 @@ pub fn observe(event: V) {
     run["kinds"] = json!(kinds);
     match kind.as_str() {
         "tool" => {
-            let name = tool_name(&event);
+            let name = tool_name(event);
             let key = name.to_lowercase();
             let call = event["call"]
                 .as_str()
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("anonymous-{}", m::string(&event["id"])));
-            let start = starts(&event);
+            let start = starts(event);
             let target = event["path"]
                 .as_str()
                 .or_else(|| event["detail"].as_str())
@@ -95,7 +115,7 @@ pub fn observe(event: V) {
             item["open"] = json!(start);
             item["ok"] = json!(event["ok"]
                 .as_bool()
-                .unwrap_or(!m::text(&event, "text").contains("failed")));
+                .unwrap_or(!m::text(event, "text").contains("failed")));
             item["event_id"] = event["id"].clone();
             calls.insert(call.clone(), item.clone());
             run["calls"] = json!(calls);
@@ -112,10 +132,10 @@ pub fn observe(event: V) {
             ]
             .contains(&key.as_str())
             {
-                record_file(&mut run, target, &key, &event);
+                record_file(&mut run, target, &key, event);
             }
             for change in m::array(&event["changes"]) {
-                record_file(&mut run, &m::text(&change, "path"), "edit", &event);
+                record_file(&mut run, &m::text(&change, "path"), "edit", event);
             }
             if ["grep", "glob", "ls"].contains(&key.as_str()) && start {
                 let mut searches = m::array(&run["searches"]);
@@ -157,6 +177,9 @@ pub fn observe(event: V) {
         "memory" => run["memory"] = event.clone(),
         "delegation" => run["delegation"] = event.clone(),
         "status" => {
+            if check_status(&m::text(event, "text")) {
+                run["check"] = json!(true);
+            }
             let status = event["status"]
                 .as_str()
                 .unwrap_or_else(|| event["text"].as_str().unwrap_or(""));
@@ -167,7 +190,7 @@ pub fn observe(event: V) {
         }
         "error" => {
             run["error"] = event.clone();
-            if m::text(&event, "text").starts_with("Run failed (") {
+            if m::text(event, "text").starts_with("Run failed (") {
                 run["finished"] = json!(true);
                 run["outcome"] = json!("failed");
             }
@@ -175,12 +198,7 @@ pub fn observe(event: V) {
         "result" => run["result"] = event.clone(),
         _ => {}
     }
-    m::set("run", run);
-    activity(&event);
-    conversation(&event);
-    // Poll controls render the derived panels once after all fresh events.
-    // Completion notifications must run before a later event can change launch.
-    notify_finished();
+    (run, replaced)
 }
 fn record_file(run: &mut V, path: &str, kind: &str, event: &V) {
     if path.is_empty() {
@@ -309,21 +327,60 @@ fn over(run: &V, idle: &V) -> bool {
         || idle.as_str() == Some(launch)
         || (!launch.is_empty() && kinds(run).any(|kind| kind == "user"))
 }
-/// Whether the Run view is open, and as what. `after` is the launch whose finished details the
-/// person opened; `idle` is the launch the page last saw at rest.
-fn mode(session: &V, run: &V, after: &V, idle: &V) -> Mode {
-    let native = run.is_object() && native_run(run) && !plain(session);
+/// The two lines a Harness check writes: its result and its end.
+fn check_status(text: &str) -> bool {
+    text == "Check finished."
+        || text.strip_prefix("Check ").is_some_and(|rest| {
+            rest.split_once(": ").is_some_and(|(word, _)| {
+                !word.is_empty() && word.chars().all(|c| c.is_alphanumeric() || c == '_')
+            })
+        })
+}
+/// A Harness check runs under a launch id of its own and writes only its status lines and, when
+/// it could not run, an error: it is not a turn. A launch the provider wrote to is never one.
+fn is_check(run: &V) -> bool {
+    m::yes(&run["check"])
+        && !kinds(run).any(|kind| {
+            matches!(
+                kind,
+                "session" | "text" | "tool" | "plan" | "usage" | "result"
+            )
+        })
+}
+/// The launch a finished turn's line and details describe: the newest one, or the one a Harness
+/// check replaced.
+fn turn<'a>(run: &'a V, before: &'a V) -> &'a V {
+    if is_check(run) {
+        before
+    } else {
+        run
+    }
+}
+/// A launch the Run view describes: a native one, in a session that keeps no progress of its own.
+fn described(session: &V, run: &V) -> bool {
+    run.is_object() && native_run(run) && !plain(session)
+}
+/// Whether the Run view is open, and as what. `before` is the launch the newest one replaced,
+/// `after` the launch whose finished details the person opened, and `idle` the launch the page
+/// last saw at rest.
+fn mode(session: &V, run: &V, before: &V, after: &V, idle: &V) -> Mode {
     if !m::active(session) {
         // A finished turn's details stay open only while nothing runs, and only for the launch
         // they were opened for.
-        let opened = after.as_str().is_some() && after.as_str() == run["launch"].as_str();
-        return if session.is_object() && native && opened {
+        let last = turn(run, before);
+        let opened = after.as_str().is_some() && after.as_str() == last["launch"].as_str();
+        return if session.is_object() && described(session, last) && opened {
             Mode::After
         } else {
             Mode::Closed
         };
     }
-    if session["status"] == "queued" || !native || over(run, idle) || !cli_started(run) {
+    if session["status"] == "queued"
+        || !described(session, run)
+        || is_check(run)
+        || over(run, idle)
+        || !cli_started(run)
+    {
         Mode::Waiting
     } else {
         Mode::Now
@@ -340,12 +397,7 @@ fn has(run: &V, tab: &str) -> bool {
 /// The tabs a finished turn can open from the line under the conversation: none while a turn
 /// runs, for a session that keeps its own progress, or when the launch recorded nothing.
 fn openers(session: &V, run: &V) -> Vec<&'static str> {
-    if !session.is_object()
-        || m::active(session)
-        || plain(session)
-        || !run.is_object()
-        || !native_run(run)
-    {
+    if !session.is_object() || m::active(session) || !described(session, run) {
         return vec![];
     }
     TABS.into_iter().filter(|tab| has(run, tab)).collect()
@@ -551,6 +603,15 @@ fn chip(text: &str) {
         None => dom::add(&chips, &dom::el("span", "run-chip", text)),
     }
 }
+/// The launch the newest one replaced, read only when the newest is a Harness check: nothing
+/// else looks behind the newest launch.
+fn earlier(run: &V) -> V {
+    if is_check(run) {
+        m::data("run-before")
+    } else {
+        V::Null
+    }
+}
 pub fn render() {
     let run = m::data("run");
     let session = m::read(|s| s.selected.clone());
@@ -561,9 +622,23 @@ pub fn render() {
         // The page has seen this launch at rest: whatever runs next is not it.
         m::set("run-idle", run["launch"].clone());
     }
-    let mode = mode(&session, &run, &m::data("run-after"), &m::data("run-idle"));
+    let before = earlier(&run);
+    let mode = mode(
+        &session,
+        &run,
+        &before,
+        &m::data("run-after"),
+        &m::data("run-idle"),
+    );
     reveal(mode, m::yes(&m::data("run-detailed")));
-    turn_line(&session, &run);
+    turn_line(&session, turn(&run, &before));
+    // At rest the strip and the panel hold the last turn, ready to be opened; a Harness check
+    // is not one.
+    let run = if m::active(&session) {
+        run
+    } else {
+        turn(&run, &before).clone()
+    };
     if !run.is_object() || !native_run(&run) {
         dom::cancel_timer("run-clock");
         return;
@@ -787,11 +862,13 @@ pub fn render() {
 /// Opens the finished turn's details on a tab; while a turn runs the strip is its own.
 fn open(tab: &str) {
     let (session, run) = (m::read(|s| s.selected.clone()), m::data("run"));
-    let tab = shown_tab(&run, tab);
-    if !openers(&session, &run).contains(&tab) {
+    let before = earlier(&run);
+    let last = turn(&run, &before);
+    let tab = shown_tab(last, tab);
+    if !openers(&session, last).contains(&tab) {
         return;
     }
-    m::set("run-after", run["launch"].clone());
+    m::set("run-after", last["launch"].clone());
     m::set("run-tab", json!(tab));
     m::set("run-detailed", json!(true));
     render();
@@ -1091,6 +1168,10 @@ mod mode_tests {
         json!({"id":"s","status":status,"workflow":"native"})
     }
     const NONE: V = V::Null;
+    /// The mode when the newest launch replaced none.
+    fn mode(session: &V, run: &V, after: &V, idle: &V) -> Mode {
+        super::mode(session, run, &NONE, after, idle)
+    }
 
     #[test]
     fn the_view_stays_closed_while_nothing_runs() {
@@ -1276,6 +1357,226 @@ mod mode_tests {
         // A plan event without a list leaves the tab out, as the pane would be empty.
         run["plan"] = json!({"note":"no items"});
         assert_eq!(shown_tab(&run, "plan"), "files");
+    }
+}
+
+#[cfg(test)]
+mod check_tests {
+    use super::*;
+
+    const NONE: V = V::Null;
+    /// The model after these events: the newest launch and the one it replaced.
+    fn play(events: &[V]) -> (V, V) {
+        let (mut run, mut before) = (V::Null, V::Null);
+        for event in events {
+            let (next, replaced) = advance(run, event);
+            run = next;
+            if let Some(replaced) = replaced {
+                before = replaced;
+            }
+        }
+        (run, before)
+    }
+    /// A turn that opened one file, under the launch id.
+    fn a_turn(launch: &str) -> Vec<V> {
+        vec![
+            json!({"id":1,"kind":"user","text":"Add the index."}),
+            json!({"id":2,"kind":"status","launch_id":launch,"text":"Starting Claude Code."}),
+            json!({"id":3,"kind":"text","launch_id":launch,"text":"Reading the model."}),
+            json!({"id":4,"kind":"tool","launch_id":launch,"tool":"Read","call":"r1","state":"started","path":"app/Order.php"}),
+            json!({"id":5,"kind":"tool","launch_id":launch,"tool":"Read","call":"r1","state":"completed","ok":true,"path":"app/Order.php"}),
+        ]
+    }
+    /// What the server writes for a check that ran: its result, then its end.
+    fn a_check(launch: &str, result: &str) -> Vec<V> {
+        vec![
+            json!({"id":10,"kind":"status","launch_id":launch,"text":format!("Check {result}: php artisan test. This is separate from the agent result.")}),
+            json!({"id":11,"kind":"status","launch_id":launch,"text":"Check finished.","status":"completed"}),
+        ]
+    }
+    fn done() -> V {
+        json!({"id":"s","status":"completed","workflow":"native"})
+    }
+
+    #[test]
+    fn the_model_follows_the_newest_launch() {
+        let (run, before) = play(&a_turn("a"));
+        assert_eq!(run["launch"], "a");
+        assert_eq!(run["steps"], 1);
+        assert_eq!(run["messages"], 1);
+        assert!(has(&run, "files"));
+        assert!(!is_check(&run));
+        // The first launch replaced only the record of the message that asked for it.
+        assert_eq!(before["launch"], "");
+        assert!(!has(&before, "files"));
+    }
+
+    #[test]
+    fn a_harness_check_leaves_the_turn_it_follows() {
+        let mut events = a_turn("a");
+        events.extend(a_check("c", "passed"));
+        let (run, before) = play(&events);
+        assert_eq!(run["launch"], "c");
+        assert!(is_check(&run));
+        let last = turn(&run, &before);
+        assert_eq!(last["launch"], "a");
+        assert_eq!(openers(&done(), last), ["files"]);
+        // The line opens the turn's details, not the check's, and Close puts them away.
+        assert_eq!(
+            mode(&done(), &run, &before, &json!("a"), &json!("c")),
+            Mode::After
+        );
+        assert_eq!(
+            mode(&done(), &run, &before, &json!("c"), &json!("c")),
+            Mode::Closed
+        );
+        assert_eq!(
+            mode(&done(), &run, &before, &NONE, &json!("c")),
+            Mode::Closed
+        );
+        // The same holds for a check that failed.
+        let mut events = a_turn("a");
+        events.extend(a_check("c", "failed"));
+        let (run, before) = play(&events);
+        assert_eq!(turn(&run, &before)["launch"], "a");
+    }
+
+    #[test]
+    fn a_check_that_could_not_run_is_still_a_check() {
+        let mut events = a_turn("a");
+        events.push(
+            json!({"id":10,"kind":"error","launch_id":"c","text":"The check worker is busy."}),
+        );
+        events.push(json!({"id":11,"kind":"status","launch_id":"c","text":"Check finished.","status":"completed"}));
+        let (run, before) = play(&events);
+        assert!(is_check(&run));
+        assert_eq!(turn(&run, &before)["launch"], "a");
+    }
+
+    #[test]
+    fn checks_in_a_row_keep_the_turn_before_them() {
+        let mut events = a_turn("a");
+        events.extend(a_check("c", "failed"));
+        events.extend(a_check("d", "passed"));
+        let (run, before) = play(&events);
+        assert_eq!(run["launch"], "d");
+        assert_eq!(before["launch"], "a");
+        assert_eq!(openers(&done(), turn(&run, &before)), ["files"]);
+    }
+
+    #[test]
+    fn a_running_check_only_waits() {
+        let running = json!({"id":"s","status":"running","workflow":"native"});
+        // Before the check writes, the model still holds the turn the page saw at rest.
+        let (run, before) = play(&a_turn("a"));
+        assert_eq!(
+            mode(&running, &run, &before, &NONE, &json!("a")),
+            Mode::Waiting
+        );
+        // Its result arrives while the session still settles.
+        let mut events = a_turn("a");
+        events.push(a_check("c", "passed").remove(0));
+        let (run, before) = play(&events);
+        assert_eq!(
+            mode(&running, &run, &before, &NONE, &json!("a")),
+            Mode::Waiting
+        );
+        // An error on its record does not make a check what the Now line describes.
+        events.push(
+            json!({"id":12,"kind":"error","launch_id":"c","text":"The command could not start."}),
+        );
+        let (run, before) = play(&events);
+        assert!(cli_started(&run));
+        assert_eq!(
+            mode(&running, &run, &before, &NONE, &json!("a")),
+            Mode::Waiting
+        );
+        // Nothing opens under a running check, and there is no line to open it from.
+        assert_eq!(
+            mode(&running, &run, &before, &json!("a"), &json!("a")),
+            Mode::Waiting
+        );
+        assert!(openers(&running, turn(&run, &before)).is_empty());
+    }
+
+    #[test]
+    fn the_turn_after_a_check_takes_over() {
+        let running = json!({"id":"s","status":"running","workflow":"native"});
+        let mut events = a_turn("a");
+        events.extend(a_check("c", "passed"));
+        events.push(json!({"id":20,"kind":"user","text":"Now the migration."}));
+        // The message is in, the new launch has written nothing: the strip waits.
+        let (run, before) = play(&events);
+        assert_eq!(
+            mode(&running, &run, &before, &NONE, &json!("c")),
+            Mode::Waiting
+        );
+        events.push(json!({"id":21,"kind":"text","launch_id":"b","text":"Writing it."}));
+        let (run, before) = play(&events);
+        assert_eq!(run["launch"], "b");
+        assert_eq!(mode(&running, &run, &before, &NONE, &json!("c")), Mode::Now);
+        // The check is not kept: behind the new turn stands the turn before the check.
+        assert_eq!(before["launch"], "a");
+        // At rest the new turn is the last one, and it opened no file.
+        assert_eq!(turn(&run, &before)["launch"], "b");
+        assert!(openers(&done(), turn(&run, &before)).is_empty());
+    }
+
+    #[test]
+    fn a_turn_without_details_does_not_borrow_the_earlier_one() {
+        let mut events = a_turn("a");
+        events.push(json!({"id":20,"kind":"user","text":"What did you change?"}));
+        events.push(json!({"id":21,"kind":"text","launch_id":"b","text":"Only the model."}));
+        let (run, before) = play(&events);
+        assert_eq!(before["launch"], "a");
+        assert_eq!(turn(&run, &before)["launch"], "b");
+        assert!(openers(&done(), turn(&run, &before)).is_empty());
+        assert_eq!(
+            mode(&done(), &run, &before, &json!("a"), &json!("b")),
+            Mode::Closed
+        );
+    }
+
+    #[test]
+    fn only_a_launch_the_provider_never_wrote_to_is_a_check() {
+        for kind in ["session", "text", "tool", "plan", "usage", "result"] {
+            let (run, _) = play(&[
+                json!({"id":1,"kind":kind,"launch_id":"a","text":"x"}),
+                json!({"id":2,"kind":"status","launch_id":"a","text":"Check passed: make test. Fine."}),
+            ]);
+            assert!(m::yes(&run["check"]));
+            assert!(!is_check(&run), "{kind}");
+        }
+        // A launch that wrote no such line is no check, however little it wrote.
+        let (run, _) = play(&[
+            json!({"id":1,"kind":"status","launch_id":"a","text":"Context prepared. Review it before starting the provider."}),
+            json!({"id":2,"kind":"error","launch_id":"a","text":"Provider is not installed."}),
+        ]);
+        assert!(!is_check(&run));
+    }
+
+    #[test]
+    fn the_check_lines_are_told_from_other_status_text() {
+        for text in [
+            "Check passed: php artisan test. This is separate from the agent result.",
+            "Check failed: vendor/bin/phpstan analyse. This is separate from the agent result.",
+            "Check cancelled: make test. This is separate from the agent result.",
+            "Check finished.",
+        ] {
+            assert!(check_status(text), "{text}");
+        }
+        for text in [
+            "",
+            "Check",
+            "Check finished",
+            "Checking composer.json",
+            "Checked 3 files: ok",
+            "Check : nothing",
+            "Check the plan: step one",
+            "Cancellation requested.",
+        ] {
+            assert!(!check_status(text), "{text}");
+        }
     }
 }
 

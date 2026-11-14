@@ -353,11 +353,14 @@ edition's own files remain in that edition's changelog.
   window, opens the Files, Plan and Commands tabs. After the turn a **Last
   run** line under the conversation opens the same tabs for it, and **Close**
   puts them away. An earlier launch never stands in for one that is starting.
-  Whether the view is open, and as what, is one function with tests
+  A Harness check runs under a launch id of its own and used to replace the
+  turn in the page's model: it is now told from a turn by the two lines it
+  writes, the launch it replaces is kept, and the **Last run** line and its
+  details stay after one check or several, also when the session is opened
+  again. Whether the view is open, and as what, is one function with tests
   (`mode` in `infra-ui/src/run.rs`). Not brought back: the run receipt in the
-  conversation, details of turns before the last launch (the page keeps one
-  launch, and a Harness check counts as one), Escape and arrow keys in the
-  panel, and the notification button.
+  conversation, details of turns before the last one, Escape and arrow keys
+  in the panel, and the notification button.
 - The Harness page shows its own updates again. Since the move to Rust the
   Update button never appeared: the Wasm interface waited for an `available`
   flag that `GET /api/app/update` does not send (it reports `state`), filled
