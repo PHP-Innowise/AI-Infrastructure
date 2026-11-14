@@ -1120,3 +1120,26 @@ fn patterns_are_those_of_the_graph_that_is_shown() {
     assert_eq!(how("call"), None);
     assert_eq!(index.ties.len(), 1);
 }
+
+#[test]
+fn adapter_requires_a_matching_interface_method_and_delegation_to_a_held_type() {
+    let mut graph = Graph::default();
+    graph
+        .class("Port", "Port.php", "interface Port")
+        .method("Port", "send")
+        .class("Relay", "Relay.php", "class Relay implements Port")
+        .method("Relay", "send")
+        .class("Transport", "Transport.php", "class Transport")
+        .method("Transport", "deliver")
+        .link("Relay", "Port", "implements")
+        .names("Relay", "Transport", "field");
+    let index = graph.index();
+    assert!(of(&index, &graph.found(&index, false), "adapter").is_empty());
+    graph.guessed("Relay.send", "Transport.deliver", "calls");
+    let index = graph.index();
+    let patterns = graph.found(&index, false);
+    let candidates = of(&index, &patterns, "adapter");
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].guessed());
+    assert!(of(&index, &graph.found(&index, true), "adapter").is_empty());
+}

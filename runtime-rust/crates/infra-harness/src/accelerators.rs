@@ -473,22 +473,25 @@ impl infra_host::provider::LaunchAdapter for ProjectLaunchAdapter {
                 &mut command,
             )?;
         }
-        if input.provider == "claude" && input.session.is_none() {
-            let db = self.accelerators.store.connection()?;
-            let mut q=db.prepare("SELECT id FROM sessions WHERE project_id=?1 AND project_path=?2 AND native_session_id IS NULL AND status='running'")?;
-            let ids = q
-                .query_map(params![self.project_id, requested.to_string_lossy()], |r| {
-                    r.get::<_, String>(0)
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            if ids.len() == 1 {
-                for dir in crate::chat_merge::ChatMerge::new(self.accelerators.store.clone())
-                    .directories(&ids[0])
-                {
-                    command
-                        .argv
-                        .extend(["--add-dir".into(), dir.to_string_lossy().into_owned()]);
-                }
+        if input.provider == "claude"
+            && let Some(session) = &self.session_id
+        {
+            // A merged task's first prompt names its archive, and every prompt
+            // lists each upload, by a path under the Harness state. Claude Code
+            // reads outside its working folder without asking only in Plan
+            // mode; in Edit mode it refuses that path unless the launch names
+            // the folder, on a first message and on every resumed one, whose
+            // conversation still holds those paths. Only this session's own
+            // folders are named, so a launch without a session names none.
+            let store = &self.accelerators.store;
+            let archive = crate::chat_merge::ChatMerge::new(store.clone()).directories(session);
+            for dir in archive
+                .into_iter()
+                .chain(crate::attachments::directories(store, session)?)
+            {
+                command
+                    .argv
+                    .extend(["--add-dir".into(), dir.to_string_lossy().into_owned()]);
             }
         }
         Ok(command)
@@ -611,6 +614,90 @@ mod system_launch_tests {
             remove: vec![],
         }
     }
+    /// A prompt lists every upload by its path under the Harness state. Claude
+    /// Code in Edit mode refuses to read there unless the launch names the
+    /// folder, so a context or file attached to an Edit chat never reached it.
+    #[test]
+    fn a_claude_launch_names_the_folders_of_its_session_uploads() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let registered = store.register(&project).unwrap();
+        let project_id = registered["id"].as_str().unwrap().to_owned();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions(id,title,project_id,project_path,provider,mode,workflow,project_context,status,created_at,updated_at) VALUES('chat','Example',?1,?2,'claude','edit','native',0,'running','created','updated')",
+                params![project_id, registered["path"].as_str().unwrap()],
+            )
+            .unwrap();
+        let saved = crate::attachments::save(
+            &store,
+            "chat",
+            crate::attachments::validate(&json!([
+                {"name":"context-example-0a1b2c3d.md","data":"IyBDb250ZXh0IGZyb20gYSB0YXNrCg=="},
+                {"name":"notes.txt","data":"bm90ZXM="}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let named: Vec<String> = saved
+            .iter()
+            .flat_map(|item| {
+                let folder = store
+                    .state
+                    .join("attachments")
+                    .join(item["id"].as_str().unwrap());
+                [
+                    "--add-dir".to_owned(),
+                    folder.to_string_lossy().into_owned(),
+                ]
+            })
+            .collect();
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(RwLock::new(BTreeMap::new())),
+        });
+        let accelerators =
+            Arc::new(Accelerators::new(store, root.path().into(), providers, Weak::new()).unwrap());
+        let adapter = |session: Option<&str>| ProjectLaunchAdapter {
+            accelerators: accelerators.clone(),
+            project_id: project_id.clone(),
+            session_id: session.map(String::from),
+        };
+        let claude = |resumed: Option<&str>| Launch {
+            provider: "claude".into(),
+            mode: "edit".into(),
+            session: resumed.map(String::from),
+            ..launch(&project)
+        };
+        // The first message and every resumed one: a resumed conversation still
+        // holds the paths its earlier messages listed.
+        for resumed in [None, Some("native-session")] {
+            let argv = adapter(Some("chat"))
+                .adapt(&claude(resumed), command())
+                .unwrap()
+                .argv;
+            assert_eq!(argv[..2], ["codex", "exec"]);
+            assert_eq!(argv[2..], named, "resumed: {resumed:?}");
+        }
+        // Codex reads what its sandbox shows it, and a launch of another session
+        // or of none names nothing.
+        for (session, launch) in [
+            (Some("chat"), launch(&project)),
+            (Some("other-chat"), claude(None)),
+            (None, claude(None)),
+        ] {
+            assert_eq!(
+                adapter(session).adapt(&launch, command()).unwrap().argv,
+                ["codex", "exec"],
+                "{session:?} {}",
+                launch.provider
+            );
+        }
+    }
+
     /// A session's prompt offers the project's published code graph as three
     /// commands. Claude Code in Edit mode refused them, a launch without a
     /// terminal having nobody to ask, so a session's launch permits exactly

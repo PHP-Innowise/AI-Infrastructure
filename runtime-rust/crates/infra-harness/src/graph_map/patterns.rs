@@ -90,6 +90,7 @@ const FACTORIES: usize = 5;
 const TEMPLATES: usize = 6;
 const BUILDERS: usize = 7;
 const SINGLETONS: usize = 8;
+const ADAPTERS: usize = 9;
 const SORTS: &[Sort] = &[
     Sort {
         id: "repository",
@@ -144,6 +145,12 @@ const SORTS: &[Sort] = &[
         name: "Singleton",
         architecture: false,
         tells: "A type with a method named for handing out its one instance, and the types that ask for it. Found by that name.",
+    },
+    Sort {
+        id: "adapter",
+        name: "Adapter",
+        architecture: false,
+        tells: "A type implements an abstraction and delegates a method to a different type it holds. This is a candidate based on the links shown.",
     },
 ];
 /// One pattern found in the graph.
@@ -610,6 +617,54 @@ impl<'a> Read<'a> {
             }
         }
     }
+    fn adapters(&self, found: &mut Vec<Found>) {
+        for (&adapter, interfaces) in &self.supers {
+            let mut finding = Finding::new(self, ADAPTERS, adapter, ("adapter", "adapters"));
+            for &(interface, implements, inferred) in interfaces {
+                if !implements && !self.above(interface) {
+                    continue;
+                }
+                for &method in self.members.get(&adapter).into_iter().flatten() {
+                    let name = bare(self.label(method));
+                    if CONSTRUCTORS.contains(&name)
+                        || name == plain(self.label(adapter))
+                        || !self
+                            .members
+                            .get(&interface)
+                            .into_iter()
+                            .flatten()
+                            .any(|&member| bare(self.label(member)) == name)
+                    {
+                        continue;
+                    }
+                    for &(target, guessed) in self.calls.get(&method).into_iter().flatten() {
+                        let adaptee = self.owner[target as usize];
+                        if adaptee == NONE
+                            || adaptee == adapter
+                            || adaptee == interface
+                            || self
+                                .supers
+                                .get(&adaptee)
+                                .is_some_and(|types| types.iter().any(|&(id, ..)| id == interface))
+                        {
+                            continue;
+                        }
+                        let Some(kept) = self.wraps(adapter, adaptee) else {
+                            continue;
+                        };
+                        finding.part(interface, ABSTRACTION);
+                        finding.part(adaptee, ("adapted type", "adapted types"));
+                        finding.link(adapter, interface, over(implements), inferred);
+                        finding.link(adapter, adaptee, "delegates to", guessed || kept);
+                    }
+                }
+            }
+            if finding.parts.len() > 1 {
+                found.push(finding.done(false));
+            }
+        }
+    }
+
     fn factories(&self, found: &mut Vec<Found>) {
         // By what holds the method: a type, or the function itself.
         let mut by: BTreeMap<u32, Finding> = BTreeMap::new();
@@ -1076,6 +1131,7 @@ impl Patterns {
         let handled = read.messages(&mut found);
         read.strategies(&mut found, &handled);
         read.decorators(&mut found);
+        read.adapters(&mut found);
         read.factories(&mut found);
         read.templates(&mut found);
         read.builders(&mut found);

@@ -940,6 +940,131 @@ fn logged(bytes: &[u8], remotes: &[&str]) -> Vec<Value> {
         })
         .collect()
 }
+/// Read the rules from the selected commit even for older cached graphs.
+pub(crate) fn architecture_at(
+    root: &Path,
+    revision: &str,
+    prefix: &str,
+) -> std::result::Result<Option<crate::graph_map::layer_rules::Rules>, String> {
+    use crate::graph_map::layer_rules::{FILE, Rules};
+    let path = if prefix.is_empty() {
+        FILE.to_owned()
+    } else {
+        format!("{prefix}/{FILE}")
+    };
+    let unavailable = || format!("Could not read {FILE} from the selected revision.");
+    let entry = raw(
+        root,
+        &[
+            "ls-tree",
+            "--full-tree",
+            "-z",
+            revision,
+            "--",
+            &format!(":(top,literal){path}"),
+        ],
+        QUERY,
+    )
+    .map_err(|_| unavailable())?
+    .ok_or_else(unavailable)?;
+    if entry.is_empty() {
+        return Ok(None);
+    }
+    let entry = std::str::from_utf8(&entry).map_err(|_| unavailable())?;
+    let metadata = entry
+        .split_once('\t')
+        .map(|(meta, _)| meta)
+        .ok_or_else(unavailable)?;
+    let mut fields = metadata.split_ascii_whitespace();
+    if !matches!(fields.next(), Some("100644" | "100755")) || fields.next() != Some("blob") {
+        return Err(format!("{FILE} must be a regular file of at most 64 KiB."));
+    }
+    let blob = fields.next().ok_or_else(unavailable)?;
+    let size = line(root, &["cat-file", "-s", blob])
+        .map_err(|_| unavailable())?
+        .and_then(|size| size.parse::<u64>().ok())
+        .ok_or_else(unavailable)?;
+    if size > 64 * 1024 {
+        return Err(format!("{FILE} exceeds 64 KiB."));
+    }
+    let bytes = raw(root, &["cat-file", "blob", blob], QUERY)
+        .map_err(|_| unavailable())?
+        .ok_or_else(unavailable)?;
+    Rules::parse(&bytes).map(Some)
+}
+
+pub(crate) struct History {
+    pub revision: String,
+    pub files: Vec<std::collections::BTreeSet<String>>,
+    pub skipped: usize,
+}
+
+/// Use a resolved commit as the cache key and as the history starting point.
+pub(crate) fn history_revision(root: &Path, revision: Option<&str>) -> Result<Option<String>> {
+    commit(root, revision.unwrap_or("HEAD"))
+}
+
+pub(crate) fn history(root: &Path, revision: &str) -> Result<History> {
+    let bytes = raw(
+        root,
+        &[
+            "log",
+            "--max-count=200",
+            "--first-parent",
+            "--diff-merges=first-parent",
+            "--relative",
+            "--no-renames",
+            "--name-only",
+            "--no-show-signature",
+            "--no-notes",
+            "--no-color",
+            "-z",
+            "--format=%x00%H",
+            revision,
+            "--",
+        ],
+        QUERY,
+    )?
+    .ok_or_else(|| HarnessError::unavailable("Git history could not be read."))?;
+    let mut parts = bytes.split(|byte| *byte == 0).peekable();
+    let mut history = History {
+        revision: short(revision),
+        files: Vec::new(),
+        skipped: 0,
+    };
+    // The extra NUL before each hash cannot occur in a pathname. Git adds
+    // exactly one separator newline before the first pathname of each commit.
+    while parts.next() == Some(b"") {
+        if parts.next().is_none_or(|hash| hash.is_empty()) {
+            break;
+        }
+        let mut first = true;
+        let mut paths = std::collections::BTreeSet::new();
+        let mut count = 0;
+        while parts.peek().is_some_and(|part| !part.is_empty()) {
+            let Some(path) = parts.next() else { break };
+            let path = if first {
+                path.strip_prefix(b"\n").unwrap_or(path)
+            } else {
+                path
+            };
+            first = false;
+            count += 1;
+            if count <= 100
+                && let Ok(path) = std::str::from_utf8(path)
+            {
+                paths.insert(path.to_owned());
+            }
+        }
+        if count > 100 {
+            history.skipped += 1;
+        } else if !paths.is_empty() {
+            history.files.push(paths);
+        }
+    }
+    Ok(history)
+}
+
 /// A page of the history for the picker, newest first: of the checked-out
 /// branch (`""`), of every branch (`"*"`) or of one named branch. `query`
 /// keeps the commits whose message contains it, whatever the case; a query
@@ -1184,6 +1309,35 @@ mod tests {
             self.git(&["rev-parse", "HEAD"])
         }
     }
+    #[test]
+    fn history_reads_nested_paths_and_skips_broad_commits() {
+        let repository = Repository::new();
+        let nested = repository.folder.join("src");
+        repository.write("src/with space.php", "one");
+        repository.write("outside.php", "outside");
+        let base = repository.commit("small");
+        repository.git(&["commit", "--quiet", "--allow-empty", "-m", "empty"]);
+        for at in 0..101 {
+            repository.write(&format!("src/broad/file-{at}.php"), "many");
+        }
+        repository.commit("broad");
+        repository.write("src/with space.php", "two");
+        repository.commit("latest");
+        let revision = history_revision(&nested, None).unwrap().unwrap();
+        let current = history(&nested, &revision).unwrap();
+        assert_eq!(current.skipped, 1);
+        assert_eq!(current.files.len(), 3);
+        assert_eq!(
+            current.files[0].iter().collect::<Vec<_>>(),
+            ["with space.php"]
+        );
+        assert_eq!(current.files[1], current.files[0]);
+        let old = history(&nested, &base).unwrap();
+        assert_eq!(old.skipped, 0);
+        assert_eq!(old.files.len(), 2);
+        assert_eq!(old.files[0], current.files[0]);
+    }
+
     fn paths(resolved: &Resolved) -> Vec<(char, &str)> {
         let mut paths = resolved
             .files

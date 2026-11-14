@@ -1,6 +1,6 @@
 use serde_json::Value as V;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 mod activity;
 mod api;
@@ -10,6 +10,7 @@ mod commands;
 mod dom;
 mod eval_viewer;
 mod graph;
+mod graph_explanation;
 mod graph_map;
 mod inbox;
 mod knowledge;
@@ -30,6 +31,7 @@ pub fn start() -> Result<(), JsValue> {
     }
     for kind in [
         "click",
+        "contextmenu",
         "change",
         "input",
         "submit",
@@ -51,6 +53,17 @@ pub fn start() -> Result<(), JsValue> {
             else {
                 return;
             };
+            if k == "contextmenu" {
+                if let Some(mouse) = event.dyn_ref::<web_sys::MouseEvent>() {
+                    if graph_explanation::context_menu(&target, mouse) {
+                        event.prevent_default();
+                    }
+                }
+                return;
+            }
+            if k == "click" && graph_explanation::click(&target) {
+                return;
+            }
             if k == "keyup" {
                 if target.id() == "prompt" {
                     spawn_local(async {
@@ -73,7 +86,11 @@ pub fn start() -> Result<(), JsValue> {
                     });
                     return;
                 }
-                if commands::key(key) || knowledge::key_event(key) || graph_map::key(key) {
+                if graph_explanation::key(key)
+                    || commands::key(key)
+                    || knowledge::key_event(key)
+                    || graph_map::key(key)
+                {
                     event.prevent_default();
                     return;
                 }

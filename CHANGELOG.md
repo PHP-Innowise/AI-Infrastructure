@@ -24,6 +24,38 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Preserve staged uploads when Harness changes the permissions of its private
+  copy to read-only. Include those uploads when launching Claude Code.
+
+- Attribute literal, successful `sed -n` reads on the Harness run map and
+  open the recorded shell event from the comparison.
+
+- Compare two launches of a Harness session on the dependency map. The first
+  supplies the changes, and the side panel shows recorded file activity in
+  both launches for the direct dependents of those changes.
+
+- Color layers on the Harness dependency map, flag layer violations and mutual
+  dependencies, and show Adapter candidates backed by delegation evidence.
+
+- Let projects declare layers and an allowed dependency matrix with
+  `.harness-architecture.json`. Harness shows violations in the Layers view.
+
+- Trace a scenario from a file or symbol on the Harness dependency map, with a
+  directed overview and a searchable list of reachable places by distance.
+
+- List files and symbols with no incoming links on the Harness dependency
+  map, with navigation to each candidate and the current graph filters.
+
+- Show Graphify communities as modules on the Harness dependency map, with
+  their internal links, member files and dependencies between modules.
+
+- Show repeated co-changes and hotspots from local Git history on the Harness
+  dependency map.
+
+- Show test candidates beside Harness change maps, with directed paths from
+  each candidate to the changed file. **Attach map context** adds the selected
+  place, its neighbors and any listed test candidates to the session draft.
+
 - Lay a run of an agent over the dependency map in Harness: **The run of this
   session** under **Show** draws what the run changed, marks the files it
   opened, and lists the files that use the change and were never opened by it.

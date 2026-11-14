@@ -4,13 +4,16 @@
 //! A session records the files a run opened and those it changed. A graph
 //! knows which files use the changed ones. A file that uses the change and
 //! was never opened is where a break the run did not see is looked for
-//! first. What a run saw through a shell command or a search is not
-//! recorded as opened, so the list is where to look, not a verdict.
+//! first. Shell evidence is limited to attributable commands, and a read
+//! does not establish that the run checked the behavior.
 use super::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Bound,
 };
+
+type Reads<'a> = (&'a BTreeSet<String>, &'a BTreeMap<String, u64>);
+type RunEvidence<'a> = (Reads<'a>, &'a BTreeSet<&'a str>);
 
 /// Unopened files listed at once; the rest are counted.
 pub const LISTED: usize = 30;
@@ -24,12 +27,24 @@ impl Index {
     /// them the run opened, and the unopened ones, the most linked first.
     /// A changed file is no user of the change, and a deleted file has no
     /// users in a graph built after it was gone.
+    #[cfg(test)]
     pub fn overlay_run(
         &self,
         view: &mut Value,
         changed: &[(String, char)],
         opened: &BTreeSet<String>,
         certain: bool,
+    ) {
+        self.overlay_run_with_comparison(view, changed, (opened, &BTreeMap::new()), certain, None);
+    }
+
+    pub fn overlay_run_with_comparison(
+        &self,
+        view: &mut Value,
+        changed: &[(String, char)],
+        (opened, shell_reads): Reads<'_>,
+        certain: bool,
+        comparison: Option<RunEvidence<'_>>,
     ) {
         let scope = view["scope"].as_str().unwrap_or("").to_owned();
         let within = |path: &str| {
@@ -99,6 +114,51 @@ impl Index {
                 .collect::<Vec<_>>(),
             "more": unopened.len().saturating_sub(LISTED),
         });
+        let mut in_scope = shell_reads.iter().filter(|(path, _)| within(path));
+        view["run"]["shell_reads"] = json!({
+            "rows": in_scope.by_ref().take(LISTED).map(|(path, id)| json!({"path": path,"event": id})).collect::<Vec<_>>(),
+            "more": in_scope.count(),
+        });
+        if let Some(((followup_opened, followup_shell_reads), followup_edited)) = comparison {
+            let mut rows = users
+                .iter()
+                .map(|(id, (flow, _))| {
+                    let path = self.files[*id as usize].as_str();
+                    (
+                        path,
+                        flow.links,
+                        opened.contains(path),
+                        followup_opened.contains(path),
+                        followup_edited.contains(path),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let newly_touched = rows
+                .iter()
+                .filter(|(_, _, first, read, edit)| !first && (*read || *edit))
+                .count();
+            let gaps = rows
+                .iter()
+                .filter(|(_, _, first, read, edit)| !first && !read && !edit)
+                .count();
+            rows.sort_by(|a, b| {
+                let order = |first, read, edit| (first, read || edit);
+                order(a.2, a.3, a.4)
+                    .cmp(&order(b.2, b.3, b.4))
+                    .then(b.1.cmp(&a.1))
+                    .then(a.0.cmp(b.0))
+            });
+            view["run"]["comparison"] = json!({
+                "newly_touched": newly_touched,
+                "gaps": gaps,
+                "more": rows.len().saturating_sub(LISTED),
+                "rows": rows.into_iter().take(LISTED).map(|(path, _, first, read, edit)| json!({
+                    "path": path, "opened": first, "followup_opened": read, "followup_edited": edit,
+                    "shell_read": shell_reads.get(path),
+                    "followup_shell_read": followup_shell_reads.get(path),
+                })).collect::<Vec<_>>(),
+            });
+        }
         // The boxes: a file by itself, a folder by the files in it. A
         // symbol is no file, and its path is none that a run opened.
         let inside = |folder: &str| {
@@ -118,7 +178,11 @@ impl Index {
                     place["opened"] = json!(files);
                 }
             } else if opened.contains(path) {
+                let shell = shell_reads.get(path).copied();
                 place["opened"] = json!(true);
+                if let Some(shell) = shell {
+                    place["shell_read"] = json!(shell);
+                }
             }
         };
         for places in ["/nodes", "/focus/uses", "/focus/used_by"] {

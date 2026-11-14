@@ -251,7 +251,10 @@ impl PublicationFiles {
     }
     pub fn set_mode(&mut self, relative: &str, mode: u32) -> Result<()> {
         let (parent, name) = self.parent(relative, false)?;
+        #[cfg(unix)]
         let file = native::file(&parent, &name, false)?;
+        #[cfg(windows)]
+        let file = native::file_for_mode(&parent, &name)?;
         let identity = native::identity(&file)?;
         if !file.metadata()?.is_file() || identity.links != 1 {
             return Err(RuntimeError::policy(
@@ -259,20 +262,25 @@ impl PublicationFiles {
             ));
         }
         self.check()?;
+        // Keep the pinned file's identity and account for our own mode change.
+        let mut expected = identity.namespace;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
+            let mode = mode & 0o777;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            expected.2 = (expected.2 & !0o7777) | mode;
         }
         #[cfg(windows)]
         {
             let mut permissions = file.metadata()?.permissions();
             permissions.set_readonly(mode & 0o200 == 0);
             file.set_permissions(permissions)?;
+            expected.2 = (expected.2 & !0o222) | (mode & 0o200);
         }
         self.check()?;
-        if native::identity(&native::file(&parent, &name, false)?)?.namespace != identity.namespace
-        {
+        let current = native::identity(&native::file(&parent, &name, false)?)?;
+        if current.namespace != expected || current.links != 1 {
             return Err(RuntimeError::conflict("Mode destination changed"));
         }
         Ok(())
@@ -1073,7 +1081,7 @@ mod native {
             name,
             directory,
             create,
-            delete,
+            if delete { 0x00010000 } else { 0 },
             private_acl,
             std::ptr::null_mut(),
         )
@@ -1083,7 +1091,7 @@ mod native {
         name: &std::ffi::OsStr,
         directory: bool,
         create: bool,
-        delete: bool,
+        extra_access: u32,
         private_acl: bool,
         descriptor: *mut c_void,
     ) -> io::Result<File> {
@@ -1128,7 +1136,7 @@ mod native {
             } else {
                 0
             }
-            | if delete { 0x00010000 } else { 0 }
+            | extra_access
             | if private_acl {
                 0x00020000 | 0x00040000 | 0x00080000
             } else {
@@ -1273,6 +1281,19 @@ mod native {
         )
     }
 
+    pub fn file_for_mode(parent: &File, value: &str) -> io::Result<File> {
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x00000100;
+        open_security(
+            Some(parent),
+            std::ffi::OsStr::new(value),
+            false,
+            false,
+            FILE_WRITE_ATTRIBUTES,
+            false,
+            std::ptr::null_mut(),
+        )
+    }
+
     pub(super) fn directory_native(parent: &File, value: &std::ffi::OsStr) -> io::Result<File> {
         open(Some(parent), value, true, false, false)
     }
@@ -1281,7 +1302,7 @@ mod native {
         value: &std::ffi::OsStr,
     ) -> io::Result<File> {
         crate::security::with_private_creation_descriptor(|descriptor| {
-            open_security(Some(parent), value, true, true, false, true, descriptor)
+            open_security(Some(parent), value, true, true, 0, true, descriptor)
         })
     }
     pub fn private_create_directory(parent: &File, value: &str) -> io::Result<File> {
@@ -1291,7 +1312,7 @@ mod native {
                 std::ffi::OsStr::new(value),
                 true,
                 true,
-                false,
+                0,
                 true,
                 descriptor,
             )
@@ -1498,6 +1519,31 @@ impl PublicationFiles {
 #[cfg(test)]
 mod kept_mode_tests {
     use super::{PublicationFiles, kept_mode};
+
+    #[test]
+    fn a_staged_file_can_be_made_read_only_and_remain_readable() {
+        let root = std::env::temp_dir().join(format!("infra-set-mode-{}", crate::domain::uuid4()));
+        std::fs::create_dir(&root).unwrap();
+        let mut files = PublicationFiles::new(&root).unwrap();
+        let name = "handoff.md";
+        let body = b"# Task handoff\n";
+        files
+            .write_expected_mode(name, body, None, 0o600, 64)
+            .unwrap();
+        assert_eq!(files.read_mode(name).unwrap(), Some(kept_mode(0o600)));
+        for _ in 0..2 {
+            files.set_mode(name, 0o400).unwrap();
+            assert_eq!(files.read_mode(name).unwrap(), Some(kept_mode(0o400)));
+            assert_eq!(
+                files.read(name, 64).unwrap().as_deref(),
+                Some(body.as_slice())
+            );
+        }
+        files.set_mode(name, 0o600).unwrap();
+        assert_eq!(files.read_mode(name).unwrap(), Some(kept_mode(0o600)));
+        drop(files);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_published_mode_reads_back_as_kept_mode_says() {
