@@ -948,6 +948,11 @@ pub struct Shown<'a> {
     /// Two places to find what they share, instead of a folder, with
     /// which part of that to draw.
     pub shared: Option<Sharing<'a>>,
+    /// Mark the picture with the patterns found where it is open.
+    pub patterns: bool,
+    /// One found pattern to draw, instead of a folder: its pattern and the
+    /// type it is named after.
+    pub pattern: Option<&'a str>,
 }
 /// How many places a request may name in one list, and in how many bytes.
 const UNFOLDED: usize = 256;
@@ -1084,12 +1089,15 @@ impl Graphs {
             cycle,
             shared,
             base,
+            patterns,
+            pattern,
         } = *shown;
         if base.is_some()
             && (!matches!(target, Some(Target::Pull(_)))
                 || cycle.is_some() == link.is_some()
                 || path.is_some()
                 || shared.is_some()
+                || pattern.is_some()
                 || followed.is_some())
         {
             return Err(HarnessError::invalid(
@@ -1120,6 +1128,13 @@ impl Graphs {
                 }
                 if let Some(place) = cycle {
                     return Some(index.cycle(name, place, changed, edited, focus, certain));
+                }
+                // One found pattern; a graph that no longer has it leaves
+                // what else was asked.
+                if let Some(id) = pattern
+                    && let Some(view) = index.pattern(name, id, changed, edited, focus, certain)
+                {
+                    return Some(view);
                 }
                 // The ways between two places, or what the two share, come
                 // before a followed place; a place the graph does not know
@@ -1156,6 +1171,14 @@ impl Graphs {
                 view["tests"] = json!({"files": files, "inside": inside});
             }
         };
+        // The patterns found where a picture is open, on its boxes and
+        // beside it, where they were asked for. A link looked into is no
+        // picture of places, and a pattern's own picture is the pattern.
+        let marked = |index: &crate::graph_map::Index, view: &mut Value| {
+            if patterns && link.is_none() && view["mode"] != "pattern" && view["nodes"].is_array() {
+                index.mark_patterns(view, certain);
+            }
+        };
         let Some(target) = target else {
             let index = asked(self.maps.index(
                 project,
@@ -1164,6 +1187,7 @@ impl Graphs {
             )?);
             let mut view = follow(&index, &[], &|_| None)
                 .unwrap_or_else(|| index.view_with(name, scope, spread, focus, certain, filter));
+            marked(&index, &mut view);
             view["project_id"] = json!(project);
             view["built"] = json!({"commit": built["commit"], "at": built["at"]});
             told(&mut view);
@@ -1242,12 +1266,41 @@ impl Graphs {
                     }
                     graph_changes::edited(&root, &resolved, path).ok().flatten()
                 };
-                if let Some(mut view) = follow(&index, &changed, &touched) {
+                let mut view = if let Some(mut view) = follow(&index, &changed, &touched) {
                     if pull_cycle && view["mode"] == "cycle" {
                         let snapshot = kept.contains('@');
                         self.compare_pr_cycle(
                             project, &root, &resolved, &raw, &index, snapshot, &mut view, shown,
                         );
+                    }
+                    // The layers of a folder say what the change did to
+                    // their order. A graph older than the files of the
+                    // checkout does not hold what they do to it yet. Tests
+                    // inside a Rust file are told by the spans kept beside
+                    // the graph of a commit: a graph without them cannot
+                    // be compared without its tests.
+                    if view["pattern"]["sort"] == "layers" {
+                        let untold = if stale {
+                            Some("stale")
+                        } else if notests
+                            && kept.contains('@')
+                            && raw.has_rust_sources()
+                            && !raw.has_test_spans()
+                        {
+                            Some("tests")
+                        } else {
+                            None
+                        };
+                        if let Some(reason) = untold {
+                            view["pattern"]["change"] = json!({
+                                "state": "unavailable", "reason": reason,
+                                "base": resolved.json()["base"],
+                            });
+                        } else {
+                            self.compare_layers(
+                                project, &root, &resolved, &index, &mut view, shown,
+                            );
+                        }
                     }
                     view
                 } else {
@@ -1272,7 +1325,9 @@ impl Graphs {
                         Some(view) => view,
                         None => index.changes(name, &changed, scope, focus, certain, filter),
                     }
-                }
+                };
+                marked(&index, &mut view);
+                view
             }
             // Until the commit's own graph is there, the project's graph
             // gives a first picture: the files changed are the commit's, the
@@ -1282,7 +1337,15 @@ impl Graphs {
                 let mut view = follow(&index, &changed, &|_| None).unwrap_or_else(|| {
                     index.changes(name, &changed, scope, focus, certain, filter)
                 });
+                marked(&index, &mut view);
                 view["preliminary"] = json!(true);
+                if view["pattern"]["sort"] == "layers" {
+                    view["pattern"]["change"] = if found.state == "failed" {
+                        json!({"state": "unavailable", "reason": "head"})
+                    } else {
+                        json!({"state": "waiting_head"})
+                    };
+                }
                 if pull_cycle && view["mode"] == "cycle" {
                     view["cycle"]["comparison"] = if found.state == "failed" {
                         json!({"state": "unavailable", "reason": "head"})
@@ -1863,6 +1926,79 @@ impl Graphs {
                 None => waiting("missing", Value::Null, None),
             },
         )
+    }
+    /// Says in a picture of a folder's layers what the chosen change did
+    /// to their order: the pairs of files that run against it now and did
+    /// not where the change started, and those that did and no longer do.
+    /// The graph of that base is one of the cached graphs of commits. Until
+    /// it is built the picture says that it is being prepared, and where
+    /// the base cannot be told or its graph cannot be built, that the
+    /// comparison is not to be had.
+    fn compare_layers(
+        &self,
+        project: &str,
+        root: &Path,
+        resolved: &Resolved,
+        head: &crate::graph_map::Index,
+        view: &mut Value,
+        shown: &Shown,
+    ) {
+        let base_side = resolved.json()["base"].clone();
+        let compare = |view: &mut Value| -> Result<Value> {
+            let Some(base) = &resolved.base else {
+                return Ok(json!({"state": "unavailable", "reason": "no_base"}));
+            };
+            let found =
+                self.graph_at(project, root, Some(&base.commit), &resolved.prefix, false)?;
+            let Some((key, graph, tree)) = found.graph else {
+                if found.state == "failed" {
+                    return Ok(json!({"state": "unavailable"}));
+                }
+                if found.state == "missing" {
+                    // Beside the graph of a revision the base is kept as
+                    // its pair; the checkout's own work has no revision.
+                    self.revise(
+                        project,
+                        root,
+                        &base.commit,
+                        &resolved.prefix,
+                        match &resolved.revision {
+                            Some(head) => RevisionBuild::Comparison { head },
+                            None => RevisionBuild::Normal,
+                        },
+                    )?;
+                }
+                return Ok(json!({"state": "building"}));
+            };
+            let base = self.maps.index(&key, &graph, &tree)?;
+            // The project's own graph, where it stands for the commit, is
+            // read with the files of the checkout; the graph of a commit
+            // tells its tests by the spans kept beside it.
+            if shown.notests
+                && key.contains('@')
+                && base.has_rust_sources()
+                && !base.has_test_spans()
+            {
+                return Ok(json!({"state": "unavailable", "reason": "tests"}));
+            }
+            let base = if shown.notests {
+                base.without_tests()
+            } else {
+                base
+            };
+            let renamed = resolved
+                .files
+                .iter()
+                .filter_map(|file| {
+                    (file.status == 'R').then_some((file.path.as_str(), file.from.as_deref()?))
+                })
+                .collect();
+            head.compare_layers(&base, view, &renamed, shown.certain);
+            Ok(view["pattern"]["change"].take())
+        };
+        let mut change = compare(view).unwrap_or_else(|_| json!({"state": "unavailable"}));
+        change["base"] = base_side;
+        view["pattern"]["change"] = change;
     }
     #[allow(clippy::too_many_arguments)]
     fn compare_pr_cycle(
@@ -2495,6 +2631,7 @@ impl Domain for Graphs {
                         Some(_) => Err(HarnessError::invalid("Invalid graph filter.")),
                     };
                     let (certain, notests) = (flag("certain")?, flag("notests")?);
+                    let patterns = flag("patterns")?;
                     let target = match query["target"].as_str() {
                         None | Some("") => None,
                         Some(text) => Some(Target::parse(text)?),
@@ -2551,6 +2688,18 @@ impl Domain for Graphs {
                     {
                         return Err(HarnessError::invalid("Invalid code graph cycle."));
                     }
+                    // One found pattern is asked for by itself.
+                    let pattern = text("pattern")?;
+                    if !pattern.is_empty()
+                        && (pattern.chars().any(char::is_control)
+                            || !from.is_empty()
+                            || !ends.is_empty()
+                            || !sharing.is_empty()
+                            || !cycle.is_empty()
+                            || followed.is_some())
+                    {
+                        return Err(HarnessError::invalid("Invalid code graph pattern."));
+                    }
                     // Of what they share one kind is drawn, and a request
                     // may say which.
                     let users = match query["side"].as_str() {
@@ -2606,6 +2755,8 @@ impl Domain for Graphs {
                                     }),
                                     _ => None,
                                 },
+                                patterns,
+                                pattern: (!pattern.is_empty()).then_some(pattern.as_str()),
                             },
                         )
                     })
@@ -2694,7 +2845,8 @@ mod tests {
             .unwrap();
         for part in [
             "scope", "focus", "certain", "filter", "target", "follow", "out", "into", "notests",
-            "spread", "from", "to", "path", "shared", "side", "skip", "cycle", "base",
+            "spread", "from", "to", "path", "shared", "side", "skip", "cycle", "base", "patterns",
+            "pattern",
         ] {
             assert!(route.query.contains(&part), "{part}");
         }
@@ -3225,6 +3377,456 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             );
             std::fs::remove_file(revision(&fixture.store.state, &fixture.project, &base)).unwrap();
             assert!(map(historical).is_err());
+        }
+        /// A shop in three layers, one type in each file.
+        const SHOP: [(&str, &str); 5] = [
+            ("controller", "src/Controller/OrderController.php"),
+            ("service", "src/Service/OrderService.php"),
+            ("mailer", "src/Service/MailService.php"),
+            ("order", "src/Entity/Order.php"),
+            ("line", "src/Entity/Line.php"),
+        ];
+        /// What the shop needs in the order of its layers.
+        const NEEDS: [(&str, &str); 3] = [
+            ("controller", "service"),
+            ("service", "order"),
+            ("service", "line"),
+        ];
+        /// A graph of types, each named with its file, and the calls between
+        /// them. A name may carry the line it stands at, after `:`, and a
+        /// call that ends in `?` is one the tool only inferred.
+        fn sketch(files: &[(&str, &str)], calls: &[(&str, &str)]) -> String {
+            let nodes = files
+                .iter()
+                .map(|(id, path)| match id.split_once(':') {
+                    Some((id, line)) => json!({
+                        "id": id, "source_file": path, "source_location": format!("L{line}"),
+                    }),
+                    None => json!({"id": id, "source_file": path}),
+                })
+                .collect::<Vec<_>>();
+            let links = calls
+                .iter()
+                .map(|(from, to)| {
+                    let (to, confidence) = match to.strip_suffix('?') {
+                        Some(to) => (to, "INFERRED"),
+                        None => (*to, "EXTRACTED"),
+                    };
+                    json!({
+                        "source": from, "target": to, "relation": "calls",
+                        "confidence": confidence,
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({"nodes": nodes, "links": links}).to_string()
+        }
+        /// Writes such a graph where the graph of a commit is kept.
+        fn draw(graph: &Path, files: &[(&str, &str)], calls: &[(&str, &str)]) {
+            std::fs::create_dir_all(graph.parent().unwrap()).unwrap();
+            std::fs::write(graph, sketch(files, calls)).unwrap();
+        }
+        /// Pull request 1 as chosen, of `head` over `base`, with the files
+        /// it is said to have changed; Git is not asked.
+        fn pull(
+            fixture: &Fixture,
+            base: Option<&str>,
+            head: &str,
+            files: Vec<graph_changes::Change>,
+        ) -> Target {
+            let target = Target::Pull(1);
+            let resolved = Resolved {
+                target: target.clone(),
+                kind: "pull",
+                name: "#1".to_owned(),
+                title: None,
+                pull: Some(1),
+                head: None,
+                base: base.map(|commit| graph_changes::Side {
+                    name: "main".to_owned(),
+                    commit: commit.to_owned(),
+                }),
+                revision: Some(head.to_owned()),
+                prefix: String::new(),
+                files,
+                notes: Vec::new(),
+            };
+            lock(&fixture.graphs.chosen)
+                .unwrap()
+                .insert((fixture.project.clone(), target.text()), Arc::new(resolved));
+            target
+        }
+        /// Waits for the build of a commit's graph to end. It publishes the
+        /// graph first, and only then prunes the graphs of other commits and
+        /// gives its place to the next build.
+        fn rested(fixture: &Fixture) {
+            let started = Instant::now();
+            while !lock(&fixture.graphs.revisions).unwrap().is_empty() {
+                assert!(started.elapsed() < Duration::from_secs(20));
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        /// The picture of the layers of the whole project.
+        fn layers() -> Shown<'static> {
+            Shown {
+                pattern: Some("layers@"),
+                ..Shown::default()
+            }
+        }
+        #[test]
+        fn the_layers_of_a_change_say_what_it_did_to_their_order() {
+            let fixture = Fixture::new();
+            let (base, head) = fixture.branched();
+            let at = |commit: &str| revision(&fixture.store.state, &fixture.project, commit);
+            // At the base a line of the model asks the mailer; at the head
+            // it no longer does, and the order asks the service.
+            draw(
+                &at(&base),
+                &SHOP,
+                &[&NEEDS[..], &[("line", "mailer")]].concat(),
+            );
+            draw(
+                &at(&head),
+                &SHOP,
+                &[&NEEDS[..], &[("order", "service")]].concat(),
+            );
+            let target = pull(&fixture, Some(&base), &head, Vec::new());
+            let map = |shown| fixture.graphs.map(&fixture.project, Some(&target), &shown);
+            let view = map(layers()).unwrap();
+            assert_eq!(view["mode"], "pattern");
+            let change = &view["pattern"]["change"];
+            assert_eq!(change["state"], "ready");
+            assert_eq!(
+                change["base"],
+                json!({"name": "main", "commit": &base[..12]})
+            );
+            assert_eq!(change["added"]["pairs"], 1);
+            assert_eq!(
+                change["added"]["rows"][0]["from"]["path"],
+                "src/Entity/Order.php"
+            );
+            assert_eq!(change["removed"]["pairs"], 1);
+            assert_eq!(
+                change["removed"]["rows"][0]["to"]["path"],
+                "src/Service/MailService.php"
+            );
+            assert_eq!(view["pattern"]["against"]["rows"][0]["added"], true);
+            // A selected link is compared as the picture is.
+            let link = map(Shown {
+                focus: Some("layer:model>layer:services"),
+                ..layers()
+            })
+            .unwrap();
+            assert_eq!(link["focus"]["rows"][0]["added"], true);
+            assert_eq!(link["pattern"]["change"]["added"]["pairs"], 1);
+            // Any other picture of the change is not compared.
+            let plain = map(Shown::default()).unwrap();
+            assert!(plain["pattern"].is_null());
+            // Without a base to measure from the picture says that it
+            // cannot tell, and stays what it was.
+            pull(&fixture, None, &head, Vec::new());
+            let view = map(layers()).unwrap();
+            assert_eq!(
+                view["pattern"]["change"],
+                json!({"state": "unavailable", "reason": "no_base", "base": null})
+            );
+            assert_eq!(view["pattern"]["against"]["pairs"], 1);
+            assert!(view["pattern"]["against"]["rows"][0]["added"].is_null());
+            // A base whose graph is not there yet is being prepared: the
+            // picture says so, and has what it was asked for once the graph
+            // is built. The tool gives that commit a graph without layers,
+            // so every pair against the order is then the change's own.
+            pull(&fixture, Some(&base), &head, Vec::new());
+            std::fs::remove_file(at(&base)).unwrap();
+            // The graph of the change is the oldest of more graphs than
+            // are kept: it stays, as the pair of the base built for it.
+            std::fs::File::options()
+                .write(true)
+                .open(at(&head))
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+                .unwrap();
+            for other in ["a", "b", "c"] {
+                draw(&at(&other.repeat(40)), &SHOP, &NEEDS);
+            }
+            let waiting = map(layers()).unwrap();
+            assert_eq!(waiting["pattern"]["change"]["state"], "building");
+            assert_eq!(waiting["pattern"]["change"]["base"]["commit"], &base[..12]);
+            assert!(waiting["pattern"]["change"]["added"].is_null());
+            let started = Instant::now();
+            let ready = loop {
+                let view = map(layers()).unwrap();
+                if view["pattern"]["change"]["state"] != "building" {
+                    break view;
+                }
+                assert!(started.elapsed() < Duration::from_secs(20), "{view}");
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert_eq!(ready["pattern"]["change"]["state"], "ready");
+            assert_eq!(ready["pattern"]["change"]["added"]["pairs"], 1);
+            assert_eq!(ready["pattern"]["change"]["removed"]["pairs"], 0);
+            rested(&fixture);
+            let kept = fixture.revisions();
+            assert_eq!(kept.len(), REVISIONS, "{kept:?}");
+            assert!(kept.contains(&head) && kept.contains(&base), "{kept:?}");
+        }
+        #[test]
+        fn the_layers_of_a_change_are_compared_as_far_as_its_two_ends_can_be_read() {
+            let fixture = Fixture::new();
+            let (base, head) = fixture.branched();
+            let at = |commit: &str| revision(&fixture.store.state, &fixture.project, commit);
+            let did = |target: &Target, shown: Shown| {
+                // The graphs of the two commits are rewritten between the
+                // cases, and may be of one size and one moment.
+                fixture.graphs.maps.forget(&fixture.project);
+                let view = fixture
+                    .graphs
+                    .map(&fixture.project, Some(target), &shown)
+                    .unwrap();
+                let change = view["pattern"]["change"].clone();
+                (
+                    change["state"].as_str().unwrap_or("").to_owned(),
+                    change["reason"].as_str().unwrap_or("").to_owned(),
+                    change["added"]["pairs"].as_u64().unwrap_or(0),
+                    change["removed"]["pairs"].as_u64().unwrap_or(0),
+                )
+            };
+            let told = |state: &str, reason: &str, added: u64, removed: u64| {
+                (state.to_owned(), reason.to_owned(), added, removed)
+            };
+            // The order asks the service at both ends, under the name it
+            // had at the base and under the one the change gave it.
+            let old = SHOP.map(|(id, path)| match id {
+                "order" => (id, "src/Entity/Purchase.php"),
+                _ => (id, path),
+            });
+            let against = [&NEEDS[..], &[("order", "service")]].concat();
+            draw(&at(&base), &old, &against);
+            draw(&at(&head), &SHOP, &against);
+            let moved = |status: char| {
+                vec![graph_changes::Change {
+                    path: "src/Entity/Order.php".to_owned(),
+                    status,
+                    from: Some("src/Entity/Purchase.php".to_owned()),
+                }]
+            };
+            // Known to be one file, it is one pair, and the change did
+            // nothing to the order. A copy is a file of its own, and so is
+            // one of which nothing says where it came from.
+            let renamed = pull(&fixture, Some(&base), &head, moved('R'));
+            assert_eq!(did(&renamed, layers()), told("ready", "", 0, 0));
+            let copied = pull(&fixture, Some(&base), &head, moved('C'));
+            assert_eq!(did(&copied, layers()), told("ready", "", 1, 1));
+            let unknown = pull(&fixture, Some(&base), &head, Vec::new());
+            assert_eq!(did(&unknown, layers()), told("ready", "", 1, 1));
+            // What the tool only inferred is left out of both ends where
+            // the picture leaves it out.
+            let sure = Shown {
+                certain: true,
+                ..layers()
+            };
+            draw(&at(&base), &SHOP, &NEEDS);
+            draw(
+                &at(&head),
+                &SHOP,
+                &[&NEEDS[..], &[("order", "service?")]].concat(),
+            );
+            assert_eq!(did(&unknown, layers()), told("ready", "", 1, 0));
+            assert_eq!(did(&unknown, sure), told("ready", "", 0, 0));
+            // Tests inside a Rust file are told by the spans kept beside
+            // the graph of a commit. A graph without them cannot be read
+            // without its tests, at either end, and with them it can.
+            let plain = Shown {
+                notests: true,
+                ..layers()
+            };
+            let rust = |spans: bool, commit: &str| {
+                let mut files = SHOP.to_vec();
+                files.push(("check:30", "src/Entity/order.rs"));
+                files.push(("total:4", "src/Entity/order.rs"));
+                // A test inside the model asks the service.
+                draw(
+                    &at(commit),
+                    &files,
+                    &[&NEEDS[..], &[("check", "service")]].concat(),
+                );
+                let beside = at(commit).with_file_name(crate::graph_map::TEST_SPANS);
+                if spans {
+                    std::fs::write(beside, r#"{"src/Entity/order.rs":[[25,40]]}"#).unwrap();
+                } else {
+                    let _ = std::fs::remove_file(beside);
+                }
+            };
+            let target = pull(&fixture, Some(&base), &head, Vec::new());
+            draw(&at(&head), &SHOP, &against);
+            rust(false, &base);
+            assert_eq!(did(&target, plain), told("unavailable", "tests", 0, 0));
+            assert_eq!(did(&target, layers()), told("ready", "", 1, 1));
+            rust(false, &head);
+            rust(true, &base);
+            assert_eq!(did(&target, plain), told("unavailable", "tests", 0, 0));
+            assert_eq!(did(&target, layers()), told("ready", "", 0, 0));
+            // With the spans at both ends the test is left out of both:
+            // without it nothing runs against the order, and with it one
+            // pair does that the change neither added nor took away.
+            rust(true, &head);
+            assert_eq!(did(&target, plain), told("ready", "", 0, 0));
+            assert_eq!(did(&target, layers()), told("ready", "", 0, 0));
+            let view = fixture
+                .graphs
+                .map(&fixture.project, Some(&target), &plain)
+                .unwrap();
+            assert_eq!(view["pattern"]["against"]["pairs"], 0);
+            // A base whose graph could not be built is not built again: the
+            // picture says that it cannot compare.
+            std::fs::remove_file(at(&base)).unwrap();
+            lock(&fixture.graphs.refused)
+                .unwrap()
+                .insert((fixture.project.clone(), base.clone()), "boom".to_owned());
+            assert_eq!(did(&target, layers()), told("unavailable", "", 0, 0));
+            assert!(lock(&fixture.graphs.revisions).unwrap().is_empty());
+            let view = fixture
+                .graphs
+                .map(&fixture.project, Some(&target), &layers())
+                .unwrap();
+            assert_eq!(view["pattern"]["change"]["base"]["commit"], &base[..12]);
+            // The project's own graph, built from a clean checkout of the
+            // base, stands for the graph of that commit. It is read with
+            // the files of the checkout and needs no spans beside it.
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+            let mut files = SHOP.to_vec();
+            files.push(("total:4", "src/Entity/order.rs"));
+            draw(
+                &live(&fixture.store.state, &fixture.project),
+                &files,
+                &[&NEEDS[..], &[("line", "mailer")]].concat(),
+            );
+            assert_eq!(did(&target, plain), told("ready", "", 0, 1));
+            // Until the graph of the change itself is there the picture is
+            // of the project's own graph, and waits for it before telling;
+            // a change whose graph could not be built is never told.
+            std::fs::remove_file(at(&head)).unwrap();
+            draw(
+                &live(&fixture.store.state, &fixture.project),
+                &SHOP,
+                &against,
+            );
+            let first = fixture
+                .graphs
+                .map(&fixture.project, Some(&target), &layers())
+                .unwrap();
+            assert_eq!(first["preliminary"], true);
+            assert_eq!(first["pattern"]["against"]["pairs"], 1);
+            assert_eq!(first["pattern"]["change"], json!({"state": "waiting_head"}));
+            lock(&fixture.graphs.refused)
+                .unwrap()
+                .insert((fixture.project.clone(), head.clone()), "boom".to_owned());
+            assert_eq!(did(&target, layers()), told("unavailable", "head", 0, 0));
+        }
+        #[test]
+        fn the_layers_of_the_checkouts_own_work_are_compared_with_where_it_started() {
+            let fixture = Fixture::new();
+            let (main, _) = fixture.branched();
+            // The tool gives each commit the graph its `graph.fixture` holds:
+            // a shop in layers is committed, one of its files in Rust, and
+            // then, not committed, its order asks the service.
+            let mut files = SHOP.to_vec();
+            files.push(("total:4", "src/Entity/order.rs"));
+            fixture.write("graph.fixture", &sketch(&files, &NEEDS));
+            let head = fixture.commit("a shop in layers");
+            let back = [&NEEDS[..], &[("order", "service")]].concat();
+            fixture.write("graph.fixture", &sketch(&files, &back));
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+            // The picture, once the graph of the base is built.
+            let asked = |target: &Target, shown: Shown| {
+                let started = Instant::now();
+                loop {
+                    let view = fixture
+                        .graphs
+                        .map(&fixture.project, Some(target), &shown)
+                        .unwrap();
+                    if view["pattern"]["change"]["state"] != "building" {
+                        return view;
+                    }
+                    assert!(started.elapsed() < Duration::from_secs(20), "{view}");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            };
+            let told = |target: &Target| asked(target, layers());
+            let did = |view: &Value| {
+                let change = &view["pattern"]["change"];
+                (
+                    change["state"].as_str().unwrap_or("").to_owned(),
+                    change["base"]["commit"].as_str().unwrap_or("").to_owned(),
+                    change["added"]["pairs"].as_u64().unwrap_or(0),
+                    change["removed"]["pairs"].as_u64().unwrap_or(0),
+                )
+            };
+            // What is not committed is measured from the last commit, whose
+            // graph is built for it: the first answer says that it is being
+            // prepared.
+            let first = fixture
+                .graphs
+                .map(&fixture.project, Some(&Target::Uncommitted), &layers())
+                .unwrap();
+            assert_eq!(first["mode"], "pattern");
+            assert_eq!(
+                first["pattern"]["change"],
+                json!({
+                    "state": "building",
+                    "base": {"name": "the last commit", "commit": &head[..12]},
+                })
+            );
+            assert_eq!(
+                did(&told(&Target::Uncommitted)),
+                ("ready".to_owned(), head[..12].to_owned(), 1, 0)
+            );
+            // The checkout's own graph is read with the files of the
+            // checkout, so without its tests it needs no spans beside it.
+            let plain = asked(
+                &Target::Uncommitted,
+                Shown {
+                    notests: true,
+                    ..layers()
+                },
+            );
+            assert_eq!(
+                did(&plain),
+                ("ready".to_owned(), head[..12].to_owned(), 1, 0)
+            );
+            // The whole of the work is measured from the branch it left,
+            // where there was no shop yet.
+            assert_eq!(
+                did(&told(&Target::Work)),
+                ("ready".to_owned(), main[..12].to_owned(), 1, 0)
+            );
+            // A graph older than the files does not hold what they do to
+            // the order: until it is rebuilt nothing is told of the change.
+            // The rebuild waits for the build of a commit to end.
+            rested(&fixture);
+            let worse = [&back[..], &[("line", "mailer")]].concat();
+            fixture.write("graph.fixture", &sketch(&files, &worse));
+            lock(&fixture.graphs.prints).unwrap().clear();
+            let stale = fixture
+                .graphs
+                .map(&fixture.project, Some(&Target::Uncommitted), &layers())
+                .unwrap();
+            assert_eq!(stale["stale"], true);
+            assert_eq!(
+                stale["pattern"]["change"],
+                json!({
+                    "state": "unavailable", "reason": "stale",
+                    "base": {"name": "the last commit", "commit": &head[..12]},
+                })
+            );
+            assert_eq!(fixture.settled()["state"], "ready");
+            let rebuilt = told(&Target::Uncommitted);
+            assert_eq!(rebuilt["stale"], false);
+            assert_eq!(
+                did(&rebuilt),
+                ("ready".to_owned(), head[..12].to_owned(), 2, 0)
+            );
         }
         #[test]
         fn switching_the_graph_on_builds_and_publishes_it() {
