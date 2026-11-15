@@ -2046,35 +2046,6 @@ the links it has with the change.
   against the remote's default branch. **Uncommitted changes only** leaves the
   commits out. Both use the project's own graph, which is rebuilt when its files
   changed; until then the window says that it is older than the files.
-- **Commits and pull requests…** opens a picker with three lists, as an editor's
-  history and pull request views have them. **Commits** is the history of the
-  checked-out branch, of every branch or of one local branch: message, the branches
-  and tags a commit carries, author, how long ago and hash, fifty at a time. The
-  search keeps the commits whose message contains the typed text, whatever the case,
-  and the start of a hash finds its commit on any branch. **Pull requests** lists
-  the open, merged or closed ones with their branches, author and last update; the
-  search is the forge's own, and a typed number is offered even when the list does
-  not hold it. **Branches** lists the local branches, then the remote ones no local
-  branch stands at, and marks the checked-out one and those with an open request;
-  typing filters them by name. The arrow keys walk a list, reading older commits at
-  its end, Enter chooses, and Escape closes the picker, not the map.
-- A commit picked from the history is its own change, against its parent. A branch
-  is everything since it left its base, and one with an open request is measured
-  against that request's base, as the current work is. A request is looked up with
-  the GitHub CLI (`gh`) when it is installed and signed in, which gives its title
-  and its base. Without it the Pull requests list says why, a number can still be
-  typed, and the head is fetched under the name GitHub, GitLab or Bitbucket
-  publishes it by and compared with the default branch. A fetch brings objects only
-  and moves no branch.
-- The links of a change are those of its own code, so a commit that is not the
-  checkout gets a graph of its own. Its files are written out under the Harness
-  state through an index of their own, so the checkout, its index and its branch
-  are not touched and large-file pointers stay pointers; Graphify reads them as it
-  reads the project. Of the files only what the graph is read with is kept beside
-  it, and that is small: the Cargo manifests and, of each Rust source, the lines
-  that name other sources. The window shows percent and time
-  left, estimated from the project's own build, and meanwhile draws a first picture
-  on the project's graph: the files changed are the commit's, the links are those
 - **The run of this session** is offered under **Show** while a session is open:
   what the agent of that session changed, as the session recorded it step by
   step, whatever has been committed since. The map is then also a way to review
@@ -2141,6 +2112,35 @@ the links it has with the change.
   for this project. Select a place to include it and its listed incoming and
   outgoing neighbors. Where available, the file also includes test candidates
   for the selected file. The attachment is sent with the next message.
+- **Commits and pull requests…** opens a picker with three lists, as an editor's
+  history and pull request views have them. **Commits** is the history of the
+  checked-out branch, of every branch or of one local branch: message, the branches
+  and tags a commit carries, author, how long ago and hash, fifty at a time. The
+  search keeps the commits whose message contains the typed text, whatever the case,
+  and the start of a hash finds its commit on any branch. **Pull requests** lists
+  the open, merged or closed ones with their branches, author and last update; the
+  search is the forge's own, and a typed number is offered even when the list does
+  not hold it. **Branches** lists the local branches, then the remote ones no local
+  branch stands at, and marks the checked-out one and those with an open request;
+  typing filters them by name. The arrow keys walk a list, reading older commits at
+  its end, Enter chooses, and Escape closes the picker, not the map.
+- A commit picked from the history is its own change, against its parent. A branch
+  is everything since it left its base, and one with an open request is measured
+  against that request's base, as the current work is. A request is looked up with
+  the GitHub CLI (`gh`) when it is installed and signed in, which gives its title
+  and its base. Without it the Pull requests list says why, a number can still be
+  typed, and the head is fetched under the name GitHub, GitLab or Bitbucket
+  publishes it by and compared with the default branch. A fetch brings objects only
+  and moves no branch.
+- The links of a change are those of its own code, so a commit that is not the
+  checkout gets a graph of its own. Its files are written out under the Harness
+  state through an index of their own, so the checkout, its index and its branch
+  are not touched and large-file pointers stay pointers; Graphify reads them as it
+  reads the project. Of the files only what the graph is read with is kept beside
+  it, and that is small: the Cargo manifests and, of each Rust source, the lines
+  that name other sources. The window shows percent and time
+  left, estimated from the project's own build, and meanwhile draws a first picture
+  on the project's graph: the files changed are the commit's, the links are those
   the files have in the checkout, and the note says so until the commit's own graph
   replaces it. On the development machine such a
   graph took 40 seconds for 3,800 files and 55 MB on disk. The three newest are

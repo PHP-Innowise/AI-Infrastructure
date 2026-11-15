@@ -396,6 +396,10 @@
         <p class="knowledge-note graph-pick-note" id="graph-pick-note" role="status"></p>
       </div>
     </div>
+    <div class="graph-map-pick" id="graph-map-launches" hidden>
+      <label class="graph-map-target">Map launch<select id="graph-map-launch"></select></label>
+      <label class="graph-map-target">Compare with<select id="graph-map-compare-launch"></select></label>
+    </div>
     <div class="graph-progress" id="graph-map-progress" hidden><progress id="graph-map-progress-bar" max="100" aria-label="Graph of the chosen commit"></progress><span class="graph-progress-amount" id="graph-map-progress-amount"></span><span class="graph-progress-left" id="graph-map-progress-left"></span></div>
     <nav class="graph-map-crumbs" id="graph-map-crumbs" aria-label="Open folder"></nav>
     <div class="graph-map-bar"><p class="knowledge-note" id="graph-map-summary" role="status" tabindex="-1"></p><label class="checkbox"><input id="graph-map-certain" type="checkbox">Only links read from the code</label><label class="checkbox"><input id="graph-map-notests" type="checkbox">Without tests</label><label class="checkbox"><input id="graph-map-patterns" type="checkbox">Patterns</label><label class="checkbox"><input id="graph-map-history" type="checkbox">Git history</label><label class="checkbox"><input id="graph-map-modules" type="checkbox">Modules</label><label class="checkbox"><input id="graph-map-no-incoming" type="checkbox">No incoming links</label><label class="checkbox"><input id="graph-map-fit" type="checkbox">Fit to window</label><label class="graph-map-filter">Filter names<input id="graph-map-filter" type="search" maxlength="100" autocomplete="off" spellcheck="false"></label></div>
@@ -405,10 +409,6 @@
     <p class="graph-map-legend" id="graph-map-legend">An arrow runs from what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span> to what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, and a box is tinted by which it does more here. Solid: read from the code. Dashed: guessed by name. Thicker: more links. Dotted: against the main direction, closing a cycle (↻).</p>
   </dialog>
   <dialog class="graph-map graph-link" id="graph-link" aria-labelledby="graph-link-title">
-    <div class="graph-map-pick" id="graph-map-launches" hidden>
-      <label class="graph-map-target">Map launch<select id="graph-map-launch"></select></label>
-      <label class="graph-map-target">Compare with<select id="graph-map-compare-launch"></select></label>
-    </div>
     <div class="graph-map-head"><h2 id="graph-link-title">Link</h2><button class="button" id="graph-link-close" type="button">Close</button></div>
     <p class="knowledge-note" id="graph-link-summary"></p>
     <p class="knowledge-note" id="graph-link-note" role="status"></p>
