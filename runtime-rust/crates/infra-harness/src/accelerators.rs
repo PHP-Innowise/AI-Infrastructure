@@ -698,6 +698,131 @@ mod system_launch_tests {
         }
     }
 
+    /// A merged task's first prompt names its archive under the Harness state,
+    /// and the conversation keeps that path. Claude Code in Edit mode reads it
+    /// only when the launch names the folder, so a follow-up that sent the
+    /// agent back to the archive was refused while the chat still completed.
+    #[test]
+    fn a_claude_launch_names_the_archive_folder_of_its_merged_task() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let registered = store.register(&project).unwrap();
+        let project_id = registered["id"].as_str().unwrap().to_owned();
+        let chat = |prompt: &str, reply: Option<&str>| {
+            let options = json!({"project_id":project_id,"provider":"claude","mode":"edit"});
+            let created = store.create(&options, prompt, &[]).unwrap();
+            let sid = created["id"].as_str().unwrap().to_owned();
+            if let Some(reply) = reply {
+                store
+                    .event(&sid, &json!({"kind":"text","text":reply}))
+                    .unwrap();
+                store.patch(&sid, &json!({"status":"completed"})).unwrap();
+            }
+            sid
+        };
+        let sources = [
+            chat("Why is the total off?", Some("Lines are rounded early.")),
+            chat("Where is the total summed?", Some("In src/Invoice.php.")),
+        ];
+        let merger = crate::chat_merge::ChatMerge::new(store.clone());
+        let merged = merger
+            .merge(
+                &json!({
+                    "source_ids": sources,
+                    "request_id": store::id(),
+                    "destination": {"project_id":project_id,"provider":"claude","mode":"edit","prompt":"Compare both diagnoses."},
+                }),
+                |destination, _| Ok(destination.clone()),
+            )
+            .unwrap();
+        let merged = merged["id"].as_str().unwrap().to_owned();
+        let archive = store.state.join("merges").join(&merged);
+        assert!(archive.join("context.json").is_file());
+        let upload = crate::attachments::save(
+            &store,
+            &merged,
+            crate::attachments::validate(&json!([{"name":"notes.txt","data":"bm90ZXM="}])).unwrap(),
+        )
+        .unwrap();
+        let upload = store
+            .state
+            .join("attachments")
+            .join(upload[0]["id"].as_str().unwrap());
+        let named = |folders: &[&Path]| -> Vec<String> {
+            ["codex", "exec"]
+                .into_iter()
+                .map(String::from)
+                .chain(folders.iter().flat_map(|folder| {
+                    [
+                        "--add-dir".to_owned(),
+                        folder.to_string_lossy().into_owned(),
+                    ]
+                }))
+                .collect()
+        };
+        let providers = Arc::new(ProviderDomain {
+            providers: Arc::new(RwLock::new(BTreeMap::new())),
+        });
+        let accelerators = Arc::new(
+            Accelerators::new(store.clone(), root.path().into(), providers, Weak::new()).unwrap(),
+        );
+        let adapter = |session: Option<&str>| ProjectLaunchAdapter {
+            accelerators: accelerators.clone(),
+            project_id: project_id.clone(),
+            session_id: session.map(String::from),
+        };
+        let claude = |resumed: Option<&str>| Launch {
+            provider: "claude".into(),
+            mode: "edit".into(),
+            session: resumed.map(String::from),
+            ..launch(&project)
+        };
+        let argv = |session: Option<&str>, launch: &Launch| {
+            adapter(session).adapt(launch, command()).unwrap().argv
+        };
+        // Its first message, as the runner launches it: running, no native session yet.
+        store.patch(&merged, &json!({"status":"running"})).unwrap();
+        assert_eq!(
+            argv(Some(&merged), &claude(None)),
+            named(&[&archive, &upload])
+        );
+        // The archive belongs to that task alone: a launch for no session (a
+        // system dispatch into the same project) and one for another chat name
+        // nothing, even while the merged task is the only one starting.
+        let other = chat("An unrelated question.", None);
+        assert_eq!(argv(None, &claude(None)), named(&[]));
+        assert_eq!(argv(Some(&other), &claude(None)), named(&[]));
+        // Another chat of the project starting at the same moment takes nothing
+        // from the merged task.
+        store.patch(&other, &json!({"status":"running"})).unwrap();
+        assert_eq!(
+            argv(Some(&merged), &claude(None)),
+            named(&[&archive, &upload])
+        );
+        // Every resumed message: the conversation still holds the archive path.
+        store
+            .patch(
+                &merged,
+                &json!({"status":"completed","native_session_id":"native-session"}),
+            )
+            .unwrap();
+        assert_eq!(
+            argv(Some(&merged), &claude(Some("native-session"))),
+            named(&[&archive, &upload])
+        );
+        // Codex reads what its sandbox shows it.
+        assert_eq!(argv(Some(&merged), &launch(&project)), named(&[]));
+        // A deleted saved context leaves no folder to name.
+        merger.delete(&merged).unwrap();
+        assert!(!archive.exists());
+        assert_eq!(
+            argv(Some(&merged), &claude(Some("native-session"))),
+            named(&[&upload])
+        );
+    }
+
     /// A session's prompt offers the project's published code graph as three
     /// commands. Claude Code in Edit mode refused them, a launch without a
     /// terminal having nobody to ask, so a session's launch permits exactly

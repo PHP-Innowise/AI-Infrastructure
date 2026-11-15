@@ -24,8 +24,29 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
-- Preserve staged uploads when Harness changes the permissions of its private
-  copy to read-only. Include those uploads when launching Claude Code.
+- Fix Harness file uploads, which Linux and macOS refused with "Mode
+  destination changed" since the move to the native runtime: making the staged
+  private copy read-only took Harness's own permission change for a different
+  file. The upload still checks that the named file is the same single-link
+  file after the change, and on Windows the copy is opened with the right to
+  change its attributes.
+
+- Fix Harness attachments for Claude Code in Edit mode. A message lists each
+  upload by its path under the Harness state, and Claude Code reads outside the
+  project folder without asking only in Plan mode: in Edit mode it refused the
+  file and a `cat` of it, so an attached file never reached the agent while the
+  chat still finished as completed. A Claude launch now names the chat's
+  attachment folders with `--add-dir`, on the first message and on every
+  follow-up.
+
+- Fix follow-ups of a merged Harness task on Claude Code in Edit mode. The
+  first prompt names the saved archive under the Harness state and the
+  conversation keeps that path, but only the first launch named the archive
+  folder with `--add-dir`: a follow-up that sent the agent back to the archive
+  was refused while the chat still finished as completed. Every Claude launch
+  of the task now names its own archive folder. The folder is taken from the
+  task being launched, not from the only chat of the project that happens to
+  be starting, so a system dispatch into that project no longer receives it.
 
 - Attribute literal, successful `sed -n` reads on the Harness run map and
   open the recorded shell event from the comparison.
