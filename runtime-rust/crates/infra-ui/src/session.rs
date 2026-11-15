@@ -1349,25 +1349,63 @@ fn add_files() {
         dom::get("attachment-input").and_then(|e| e.dyn_into::<web_sys::HtmlInputElement>().ok())
     {
         if let Some(files) = input.files() {
-            let mut all = FILES.with(|f| f.borrow().clone());
-            all.extend((0..files.length()).filter_map(|i| files.item(i)));
+            let chosen: Vec<_> = (0..files.length()).filter_map(|i| files.item(i)).collect();
             input.set_value("");
-            if all.len() > 5
-                || all.iter().any(|f| f.size() > 4194304.)
-                || all.iter().map(|f| f.size()).sum::<f64>() > 8388608.
-            {
-                dom::error(
-                    "attachment-error",
-                    "Choose up to 5 files, at most 4 MiB each and 8 MiB total.",
-                );
-                return;
-            }
-            FILES.with(|f| *f.borrow_mut() = all);
-            dom::error("attachment-error", "");
-            render_files();
+            stage_files(chosen, "attachment-error");
         }
     }
 }
+fn stage_files(files: impl IntoIterator<Item = web_sys::File>, error: &str) -> bool {
+    let mut all = FILES.with(|f| f.borrow().clone());
+    all.extend(files);
+    if all.len() > 5
+        || all.iter().any(|f| f.size() > 4194304.)
+        || all.iter().map(|f| f.size()).sum::<f64>() > 8388608.
+    {
+        dom::error(
+            error,
+            "Choose up to 5 files, at most 4 MiB each and 8 MiB total.",
+        );
+        return false;
+    }
+    FILES.with(|f| *f.borrow_mut() = all);
+    dom::error(error, "");
+    dom::error("attachment-error", "");
+    render_files();
+    true
+}
+
+pub fn attach_map_context(project: &str, text: &str) -> bool {
+    let error = "graph-map-error";
+    if project.is_empty()
+        || project != dom::value("project")
+        || m::read(|s| s.pending || s.auth_failed || s.boot.is_null() || m::active(&s.selected))
+    {
+        dom::error(
+            error,
+            "Open an available session draft for this project to attach map context.",
+        );
+        return false;
+    }
+    let name = "dependency-map.txt";
+    if FILES.with(|files| files.borrow().iter().any(|file| file.name() == name)) {
+        dom::error(
+            error,
+            "Remove the existing dependency-map attachment to replace it.",
+        );
+        return false;
+    }
+    let content = js_sys::Array::new();
+    content.push(&JsValue::from_str(text));
+    match web_sys::File::new_with_str_sequence(&content, name) {
+        Ok(file) => stage_files([file], error),
+        Err(_) => {
+            dom::error(error, "Could not create the dependency-map attachment.");
+            false
+        }
+    }
+}
+
 pub async fn send() {
     if inbox::needs_confirmation() || m::read(|s| m::active(&s.selected)) {
         if FILES.with(|files| !files.borrow().is_empty()) {

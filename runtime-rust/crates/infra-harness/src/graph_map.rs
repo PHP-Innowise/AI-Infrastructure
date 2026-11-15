@@ -25,9 +25,15 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
+mod history;
+mod incoming;
+pub(crate) mod layer_rules;
 mod layers;
+mod modules;
 mod patterns;
 mod runs;
+mod scenario;
+mod test_reach;
 /// Children of one folder drawn at once; the rest are reached by the filter.
 pub const SHOWN: usize = 40;
 /// Links drawn between those children, strongest first.
@@ -206,6 +212,10 @@ struct Node {
     file_type: Loose,
     #[serde(default)]
     node_kind: Loose,
+    #[serde(default)]
+    community: Loose,
+    #[serde(default)]
+    community_name: Loose,
     #[serde(default, rename = "_callable_class")]
     class: Loose,
 }
@@ -246,6 +256,7 @@ impl Kind {
 #[derive(Clone, Copy, Debug)]
 struct Symbol {
     file: u32,
+    community: Option<u32>,
     /// The symbol that holds it, or `NONE` at the top of the file.
     parent: u32,
     /// Where it starts, or 0 when the graph does not say.
@@ -398,6 +409,7 @@ struct Builder<'a> {
     file_ids: HashMap<String, u32>,
     node_symbol: HashMap<String, u32>,
     symbols: Vec<Symbol>,
+    community_names: BTreeMap<u32, String>,
     names: String,
     uses: Vec<Use>,
     /// Of the links, those that name a type as the type of something, with
@@ -463,8 +475,18 @@ impl Builder<'_> {
         } else {
             clip(label.trim(), NAME_LIMIT)
         };
+        let community = node.community.0.and_then(|value| value.parse::<u32>().ok());
+        if let Some((id, name)) = community.zip(node.community_name.0) {
+            let name = clip(name.trim(), NAME_LIMIT);
+            if !name.is_empty() {
+                self.community_names
+                    .entry(id)
+                    .or_insert_with(|| name.to_owned());
+            }
+        }
         let symbol = Symbol {
             file,
+            community,
             parent: NONE,
             line: line(node.source_location.0.as_deref()),
             at: self.names.len() as u32,
@@ -661,6 +683,7 @@ pub struct Index {
     /// Where the files of the graph lie, to read a source for its tests.
     root: PathBuf,
     revision_tests: Option<TestSpans>,
+    test_symbols: OnceLock<Vec<bool>>,
     /// The same graph without its tests, once it was asked for.
     plain: OnceLock<Arc<Index>>,
     /// The links of each symbol, once the links of one were followed.
@@ -679,6 +702,7 @@ pub struct Index {
     pairs: Vec<(u32, u32, Pair)>,
     /// Ordered by file: the symbols of file `n` are `first[n]..first[n + 1]`.
     symbols: Vec<Symbol>,
+    community_names: BTreeMap<u32, String>,
     first: Vec<u32>,
     names: String,
     uses: Vec<Use>,
@@ -800,6 +824,7 @@ impl Index {
             file_ids: HashMap::new(),
             node_symbol: HashMap::new(),
             symbols: Vec::new(),
+            community_names: BTreeMap::new(),
             names: String::new(),
             uses: Vec::new(),
             ties: Vec::new(),
@@ -892,6 +917,7 @@ impl Index {
         Ok(Self {
             root: base,
             revision_tests: None,
+            test_symbols: OnceLock::new(),
             plain: OnceLock::new(),
             wires: OnceLock::new(),
             patterns: Default::default(),
@@ -902,6 +928,7 @@ impl Index {
             symbols,
             first,
             names: builder.names,
+            community_names: builder.community_names,
             uses,
             ties,
             kinds: builder.kinds,
@@ -1800,14 +1827,7 @@ impl Index {
     pub fn left_out(&self) -> (u64, u64) {
         self.left
     }
-    /// The graph without its tests, with `source` giving the text of a file
-    /// where it can be read.
-    fn plain_with(&self, source: &dyn Fn(&str) -> Option<String>) -> Index {
-        let gone = self
-            .files
-            .iter()
-            .map(|path| is_test(path))
-            .collect::<Vec<_>>();
+    fn test_symbols(&self, gone: &[bool], source: &dyn Fn(&str) -> Option<String>) -> Vec<bool> {
         // A symbol goes with its file, with the test it is, or with the
         // test that holds it.
         let mut out = vec![false; self.symbols.len()];
@@ -1845,6 +1865,18 @@ impl Index {
                 holder = self.symbols[holder as usize].parent;
             }
         }
+        out
+    }
+
+    /// The graph without its tests, with `source` giving the text of a file
+    /// where it can be read.
+    fn plain_with(&self, source: &dyn Fn(&str) -> Option<String>) -> Index {
+        let gone = self
+            .files
+            .iter()
+            .map(|path| is_test(path))
+            .collect::<Vec<_>>();
+        let out = self.test_symbols(&gone, source);
         let mut files = Vec::new();
         let mut file_at = vec![NONE; self.files.len()];
         for (file, path) in self.files.iter().enumerate() {
@@ -1898,6 +1930,7 @@ impl Index {
         Index {
             root: self.root.clone(),
             revision_tests: None,
+            test_symbols: OnceLock::new(),
             plain: OnceLock::new(),
             wires: OnceLock::new(),
             patterns: Default::default(),
@@ -1909,6 +1942,7 @@ impl Index {
             symbols,
             first,
             names: self.names.clone(),
+            community_names: self.community_names.clone(),
             nodes: self.nodes.saturating_sub(dropped as u64),
             links: self.links.saturating_sub(unlinked as u64),
             uses,

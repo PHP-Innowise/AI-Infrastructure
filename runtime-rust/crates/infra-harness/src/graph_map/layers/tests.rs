@@ -1983,3 +1983,58 @@ fn many_files_and_many_pairs_are_listed_the_most_linked_first() {
     assert_eq!(forth["rows"][0]["to"]["name"], "Thing00.php");
     assert_eq!(forth["rows"][1]["to"]["name"], "Thing01.php");
 }
+/// Declared layers file what the rules name, with the exceptions of the
+/// layers read from names: a test under a layer's path reaches into the
+/// layers it tests, and what is no code has no dependencies to check.
+#[test]
+fn declared_layers_leave_out_tests_and_what_is_no_code() {
+    const SERVICE: &str = "src/App/OrderService.php";
+    const ORDER: &str = "src/Domain/Order.php";
+    const TEST: &str = "src/Domain/OrderTest.php";
+    let mut graph = Graph::default();
+    for path in [SERVICE, ORDER, TEST, "src/Domain/README.md"] {
+        graph.file(path);
+    }
+    graph
+        .link(SERVICE, ORDER, "calls", None)
+        .link(TEST, SERVICE, "calls", None)
+        // Against the rules: the domain may use no other layer.
+        .link(ORDER, SERVICE, "references", Some("field"));
+    let index = graph.index();
+    let rules = Rules::parse(
+        json!({"version": 1, "layers": [
+            {"id": "app", "name": "App", "paths": ["src/App"], "allows": ["domain"]},
+            {"id": "domain", "name": "Domain", "paths": ["src/Domain"], "allows": []},
+        ]})
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap();
+    let view = index.declared_layers("shop", "", None, false, &rules);
+    let against = &view["pattern"]["against"];
+    assert_eq!(
+        (&against["links"], &against["pairs"]),
+        (&json!(1), &json!(1)),
+        "{view}"
+    );
+    assert_eq!(against["rows"][0]["from"]["path"], ORDER);
+    assert_eq!(view["pattern"]["apart"], 0, "{view}");
+    // The row of the found pattern counts the classified code alone.
+    let mut marked = json!({"scope": "", "nodes": []});
+    index.mark_declared_layers(&mut marked, Some(&rules));
+    assert_eq!(
+        marked["patterns"]["kinds"][0]["instances"][0]["parts"],
+        "Project rules · 2 classified files"
+    );
+    // So do the colors of the boxes and the links marked on the map.
+    let mut map = json!({
+        "scope": "src/Domain",
+        "nodes": [{"path": ORDER}, {"path": TEST}, {"path": "src/Domain/README.md"}],
+        "edges": [],
+    });
+    index.mark_architecture(&mut map, false, Some(&rules));
+    assert_eq!(map["nodes"][0]["architecture_layer"]["name"], "Domain");
+    assert!(map["nodes"][1]["architecture_layer"].is_null(), "{map}");
+    assert!(map["nodes"][2]["architecture_layer"].is_null(), "{map}");
+    assert_eq!(map["architecture"]["violations"]["pairs"], 1, "{map}");
+}

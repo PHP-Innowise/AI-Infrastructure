@@ -396,9 +396,13 @@
         <p class="knowledge-note graph-pick-note" id="graph-pick-note" role="status"></p>
       </div>
     </div>
+    <div class="graph-map-pick" id="graph-map-launches" hidden>
+      <label class="graph-map-target">Map launch<select id="graph-map-launch"></select></label>
+      <label class="graph-map-target">Compare with<select id="graph-map-compare-launch"></select></label>
+    </div>
     <div class="graph-progress" id="graph-map-progress" hidden><progress id="graph-map-progress-bar" max="100" aria-label="Graph of the chosen commit"></progress><span class="graph-progress-amount" id="graph-map-progress-amount"></span><span class="graph-progress-left" id="graph-map-progress-left"></span></div>
     <nav class="graph-map-crumbs" id="graph-map-crumbs" aria-label="Open folder"></nav>
-    <div class="graph-map-bar"><p class="knowledge-note" id="graph-map-summary" role="status" tabindex="-1"></p><label class="checkbox"><input id="graph-map-certain" type="checkbox">Only links read from the code</label><label class="checkbox"><input id="graph-map-notests" type="checkbox">Without tests</label><label class="checkbox"><input id="graph-map-patterns" type="checkbox">Patterns</label><label class="checkbox"><input id="graph-map-fit" type="checkbox">Fit to window</label><label class="graph-map-filter">Filter names<input id="graph-map-filter" type="search" maxlength="100" autocomplete="off" spellcheck="false"></label></div>
+    <div class="graph-map-bar"><p class="knowledge-note" id="graph-map-summary" role="status" tabindex="-1"></p><label class="checkbox"><input id="graph-map-certain" type="checkbox">Only links read from the code</label><label class="checkbox"><input id="graph-map-notests" type="checkbox">Without tests</label><label class="checkbox"><input id="graph-map-patterns" type="checkbox">Patterns</label><label class="checkbox"><input id="graph-map-history" type="checkbox">Git history</label><label class="checkbox"><input id="graph-map-modules" type="checkbox">Modules</label><label class="checkbox"><input id="graph-map-no-incoming" type="checkbox">No incoming links</label><label class="checkbox"><input id="graph-map-fit" type="checkbox">Fit to window</label><label class="graph-map-filter">Filter names<input id="graph-map-filter" type="search" maxlength="100" autocomplete="off" spellcheck="false"></label></div>
     <p class="knowledge-note" id="graph-map-note" role="status"></p>
     <p class="error-text" id="graph-map-error" role="alert" hidden></p>
     <div class="graph-map-body"><div class="graph-map-canvas" id="graph-map-canvas" aria-busy="false"></div><aside class="graph-map-side" id="graph-map-side" aria-label="Selected place"></aside></div>
@@ -413,6 +417,20 @@
     <p class="graph-map-legend">On the left what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span>, on the right what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, each name in the frame of its file. Solid: read from the code. Dashed: guessed by name.</p>
   </dialog>
   <div class="run-file-card" id="run-file-card" role="dialog" aria-label="File details" hidden></div>
+  <dialog class="graph-map graph-explanation" id="graph-shell-event" aria-labelledby="graph-shell-event-title">
+    <div class="graph-map-head"><h2 id="graph-shell-event-title">Shell read evidence</h2><button class="button" type="button" id="graph-shell-event-close">Close</button></div>
+    <p class="knowledge-note" id="graph-shell-event-status" role="status"></p>
+    <p class="error-text" id="graph-shell-event-error" role="alert" hidden></p>
+    <pre class="knowledge-result" id="graph-shell-event-command"></pre>
+  </dialog>
+  <button class="button graph-explain-menu" id="graph-explain-action" type="button" hidden>Explain node</button>
+  <dialog class="graph-map graph-explanation" id="graph-explanation" aria-labelledby="graph-explanation-title">
+    <div class="graph-map-head"><h2 id="graph-explanation-title">Explanation</h2><button class="button" type="button" id="graph-explanation-close">Close</button></div>
+    <p class="knowledge-note graph-map-path" id="graph-explanation-subject"></p>
+    <p class="knowledge-note" id="graph-explanation-status" role="status"></p>
+    <p class="error-text" id="graph-explanation-error" role="alert" hidden></p>
+    <div class="knowledge-result graph-explanation-answer" id="graph-explanation-answer" tabindex="0" hidden></div>
+  </dialog>
   <script type="module" src="/boot.js"></script>
 </body>
 </html>

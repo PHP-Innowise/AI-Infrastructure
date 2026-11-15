@@ -940,7 +940,7 @@ fn what(symbol: &V) -> String {
     let (word, joined) = match symbol["kind"].as_str().unwrap_or("") {
         "file" => {
             return "the file itself, for what belongs to no symbol in it, such as its imports"
-                .to_owned()
+                .to_owned();
         }
         "type" => ("type", "in"),
         "method" => ("method", "of"),
@@ -1140,6 +1140,31 @@ fn left_out(view: &V) -> String {
     }
 }
 fn shown(view: &V) -> String {
+    if view["mode"] == "scenario" {
+        let scenario = &view["scenario"];
+        return if m::yes(&scenario["missing"]) {
+            "Scenario starting point unavailable".to_owned()
+        } else {
+            format!(
+                "Scenario from {} · {}",
+                m::text(&scenario["origin"], "name"),
+                plural(
+                    scenario["reachable"].as_u64().unwrap_or(0),
+                    "reachable place",
+                    "reachable places"
+                )
+            )
+        };
+    }
+    if view["mode"] == "modules" {
+        let all = view["children"].as_u64().unwrap_or(0);
+        let found = view["matching"].as_u64().unwrap_or(0);
+        let shown = m::array(&view["nodes"]).len() as u64;
+        return format!(
+            "{} · {shown} shown · {found} matching",
+            plural(all, "module", "modules")
+        );
+    }
     if symbols(view) {
         let file = &view["file"];
         let number = |key: &str| file[key].as_u64().unwrap_or(0);
@@ -1195,9 +1220,13 @@ fn shown(view: &V) -> String {
                 "file",
                 "files"
             ),
-            match pattern["against"]["links"].as_u64().unwrap_or(0) {
-                0 => "nothing against their order".to_owned(),
-                links => format!("{} against their order", plural(links, "link", "links")),
+            match (
+                m::yes(&pattern["declared"]),
+                pattern["against"]["links"].as_u64().unwrap_or(0)
+            ) {
+                (true, links) => plural(links, "rule violation", "rule violations"),
+                (false, 0) => "nothing against their order".to_owned(),
+                (false, links) => format!("{} against their order", plural(links, "link", "links")),
             }
         ) + &changed_order(&pattern["change"]);
     }
@@ -1499,6 +1528,12 @@ fn run_notes(view: &V) -> Vec<String> {
         plural(number("edited"), "file", "files")
     )];
     // A command, a search and a helper show files that no step names.
+    if number("shell_opened") > 0 {
+        parts.push(format!(
+            "{} read via shell.",
+            plural(number("shell_opened"), "file", "files")
+        ));
+    }
     let unseen = [
         ("commands", "ran", "command", "commands"),
         ("searched", "searched", "time", "times"),
@@ -1510,7 +1545,7 @@ fn run_notes(view: &V) -> Vec<String> {
     .collect::<Vec<_>>();
     if let Some((last, first)) = unseen.split_last() {
         parts.push(format!(
-            "It also {}: what it saw that way is not recorded as opened.",
+            "It also {}: some file reads may be missing.",
             if first.is_empty() {
                 last.clone()
             } else {
@@ -1542,6 +1577,9 @@ fn run_notes(view: &V) -> Vec<String> {
 /// link with the changed file it uses most. Nothing where no run is shown
 /// or nothing uses its change here.
 fn unopened(view: &V) -> String {
+    if view["run"]["comparison"].is_object() {
+        return String::new();
+    }
     let reach = &view["run"]["reach"];
     let number = |key: &str| reach[key].as_u64().unwrap_or(0);
     if number("users") == 0 {
@@ -2070,6 +2108,18 @@ fn pattern_note(view: &V) -> String {
     parts.join(" ")
 }
 pub fn note(view: &V) -> String {
+    if view["mode"] == "scenario" {
+        return String::new();
+    }
+    if view["mode"] == "modules" {
+        let shown = m::array(&view["nodes"]).len() as u64;
+        let matching = view["matching"].as_u64().unwrap_or(0);
+        return if matching > shown {
+            "Filter by module name, ID or file path to find other modules.".to_owned()
+        } else {
+            String::new()
+        };
+    }
     if symbols(view) {
         return file_note(view);
     }
@@ -2207,7 +2257,8 @@ pub fn canvas(view: &V) -> String {
         .map(|(first, second)| ([first, second], above(view)));
     // Layers stand in a row in their own order, whatever their links say.
     let layered_view = layered(view);
-    let plan = if layered_view {
+    let declared = m::yes(&view["pattern"]["declared"]);
+    let plan = if layered_view && !declared {
         plan_row(nodes.len(), &weighted)
     } else {
         plan_beside(nodes.len(), &weighted, &framed, pair)
@@ -2251,6 +2302,7 @@ pub fn canvas(view: &V) -> String {
     let shared = shares(view);
     let cycle_view = cycles(view);
     let pattern_view = patterned(view);
+    let scenario = view["mode"] == "scenario";
     let cycles = !changes(view) && !opened;
     let shared_edges: BTreeSet<_> = view["focus"]["shared_edges"]
         .as_array()
@@ -2279,7 +2331,11 @@ pub fn canvas(view: &V) -> String {
     let mut html = format!(
         "<div class=\"graph-map-plane\"{}{} style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>",
         if named { " data-names=\"true\"" } else { "" },
-        if cycle_view { " data-cycle-view=\"true\"" } else { "" },
+        if cycle_view {
+            " data-cycle-view=\"true\""
+        } else {
+            ""
+        },
         plan.width,
         plan.height,
         plan.width,
@@ -2292,7 +2348,7 @@ pub fn canvas(view: &V) -> String {
             "<linearGradient id=\"graph-map-flow-{index}\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
         ));
     }
-    if layered_view {
+    if layered_view || view["architecture"].is_object() {
         // The head of a link that runs against the order of the layers.
         html.push_str("<marker id=\"graph-map-arrow-against\" class=\"graph-map-arrow graph-map-arrow-against\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\"/></marker>");
     }
@@ -2322,7 +2378,14 @@ pub fn canvas(view: &V) -> String {
         let (from, to) = pairs[wire.edge];
         // Among layers a link back is no weaker direction of a cycle: it
         // runs against their order, under the row.
-        let against = layered_view && wire.back;
+        let violation = edge["architecture_violation"].as_u64().unwrap_or(0);
+        let against = if violation > 0 {
+            true
+        } else if declared {
+            m::yes(&edge["against"])
+        } else {
+            layered_view && wire.back
+        };
         let grew = edge["added"].as_u64().filter(|_| against);
         let back = wire.back && cycles && !layered_view;
         let on_path = shared_edges.contains(&(from, to));
@@ -2369,6 +2432,8 @@ pub fn canvas(view: &V) -> String {
                     " · against the order of the layers · {} added by this change",
                     plural(links, "link", "links")
                 ),
+                None if violation > 0 => format!(" · {} against layer rules", plural(violation, "link", "links")),
+                None if against && declared => " · forbidden by project rules".to_owned(),
                 None if against => " · against the order of the layers".to_owned(),
                 None => String::new(),
             },
@@ -2387,7 +2452,7 @@ pub fn canvas(view: &V) -> String {
     // none of them is hidden under a link drawn later. A link between two
     // layers is many links of many files: selecting it lists the pairs of
     // files it is made of beside the picture.
-    for wire in &plan.wires {
+    for wire in plan.wires.iter().filter(|_| view["mode"] != "modules") {
         let (from, to) = pairs[wire.edge];
         html.push_str(&format!(
             "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{} · select to see {}</title></path>",
@@ -2426,6 +2491,15 @@ pub fn canvas(view: &V) -> String {
                     0 => what(node),
                     line => format!("{}, line {line}", what(node)),
                 }
+            } else if m::yes(&node["module"]) {
+                format!(
+                    "module, {}",
+                    plural(
+                        node["within"].as_u64().unwrap_or(0),
+                        "internal link",
+                        "internal links"
+                    )
+                )
             } else if folder {
                 format!(
                     "{}, {}",
@@ -2495,6 +2569,8 @@ pub fn canvas(view: &V) -> String {
                 ", the cycle starts and ends here"
             } else if pattern_view {
                 ", the pattern is named after it"
+            } else if scenario {
+                ", scenario starting point"
             } else {
                 ", the links are followed from here"
             });
@@ -2565,11 +2641,15 @@ pub fn canvas(view: &V) -> String {
                 plural(patterns, "found pattern", "found patterns")
             ));
         }
+        if node["shell_read"].is_number() {
+            label.push_str(", read via shell");
+        }
         let kind = node["kind"].as_str().unwrap_or("");
         // A folder opens to its files, a file to what it holds. Among
         // followed links, on a path and in what two places share a box is
         // only selected: opening it would leave them.
-        let opens = !followed
+        let opens = !scenario
+            && !followed
             && !pathed
             && !shared
             && !cycle_view
@@ -2581,17 +2661,37 @@ pub fn canvas(view: &V) -> String {
             Some(file) => file.to_owned(),
             None => m::text(view, "scope"),
         };
+        let (node_action, node_payload) = if scenario {
+            (
+                "graph-map-scenario-open",
+                json!({
+                    "file": node["file"].as_str().or(node["path"].as_str()),
+                    "path": node["path"], "symbol": symbol
+                }),
+            )
+        } else {
+            ("graph-map-node", node["path"].clone())
+        };
         let title = match (symbol, line) {
             (true, 0) => format!("{} · {home}", m::text(node, "name")),
             (true, line) => format!("{} · {home}:{line}", m::text(node, "name")),
             // A layer is no place of the project: it has a name, no path.
-            _ if m::yes(&node["layer"]) => m::text(node, "name"),
+            _ if m::yes(&node["layer"]) || m::yes(&node["module"]) => m::text(node, "name"),
             _ => m::text(node, "path"),
+        };
+        let architecture = layer_color(&node["architecture_layer"]).map_or_else(String::new, |color| {
+            label.push_str(&format!(", layer {}", m::text(&node["architecture_layer"], "name")));
+            format!(" data-architecture-layer=\"true\" style=\"--architecture-color:{color};left:{:.0}px;top:{:.0}px\"", placed.x, placed.y)
+        });
+        let position = if architecture.is_empty() {
+            format!(" style=\"left:{:.0}px;top:{:.0}px\"", placed.x, placed.y)
+        } else {
+            architecture
         };
         let (out, into) = flow[index];
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-map-node\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark} style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\"{pressed} aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
-            payload(&node["path"]),
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark}{position} title=\"{}\"{pressed} aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
+            payload(&node_payload),
             escape(kind),
             opened && !symbol,
             changed > 0,
@@ -2603,8 +2703,6 @@ pub fn canvas(view: &V) -> String {
             into > 0,
             if end { " data-end=\"true\"" } else { "" },
             if both { " data-shared=\"true\"" } else { "" },
-            placed.x,
-            placed.y,
             escape(&title),
             escape(&label),
             match letter(kind) {
@@ -3712,6 +3810,7 @@ fn pair_rows_of(title: &str, pairs: &V, none: &str, layers: bool, gone: bool) ->
 /// layers, what of that runs against the order, and its files; or, of a
 /// selected link between two layers, the pairs of files it is made of.
 fn layers_side(view: &V) -> String {
+    let declared = m::yes(&view["pattern"]["declared"]);
     let focus = &view["focus"];
     if !focus.is_object() {
         // What a chosen change did to the order comes first: it is what
@@ -3737,12 +3836,25 @@ fn layers_side(view: &V) -> String {
         } else {
             String::new()
         };
+        let intro = if declared {
+            "Select a layer to see its files or a link to inspect its dependencies."
+        } else {
+            "A box is a layer: the files a name or a folder places in it. Select a layer to see its files and what it has with the others, or a link to see the pairs of files it is made of. Select it again to let go of it."
+        };
         return format!(
-            "<p class=\"knowledge-note\">A box is a layer: the files a name or a folder places in it. Select a layer to see its files and what it has with the others, or a link to see the pairs of files it is made of. Select it again to let go of it.</p>{did}{}",
+            "<p class=\"knowledge-note\">{intro}</p>{did}{}",
             pair_rows(
-                "Against the order",
+                if declared {
+                    "Rule violations"
+                } else {
+                    "Against the order"
+                },
                 &view["pattern"]["against"],
-                "No layer here needs one before it.",
+                if declared {
+                    "No forbidden dependencies found."
+                } else {
+                    "No layer here needs one before it."
+                },
                 true
             )
         );
@@ -3763,7 +3875,11 @@ fn layers_side(view: &V) -> String {
                 "pairs of files"
             ),
             if m::yes(&focus["against"]) {
-                " · against the order"
+                if declared {
+                    " · forbidden by project rules"
+                } else {
+                    " · against the order"
+                }
             } else {
                 ""
             },
@@ -3787,9 +3903,17 @@ fn layers_side(view: &V) -> String {
         Some((place, false)),
     ));
     html.push_str(&pair_rows(
-        "Against the order, from here",
+        if declared {
+            "Rule violations from this layer"
+        } else {
+            "Against the order, from here"
+        },
         &focus["against"],
-        "Nothing here needs a layer before this one.",
+        if declared {
+            "No forbidden dependencies found."
+        } else {
+            "Nothing here needs a layer before this one."
+        },
         true,
     ));
     html.push_str(&rows(
@@ -3837,7 +3961,11 @@ fn pattern_row(row: &V, whole: bool) -> String {
         "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-pattern\" data-payload=\"{}\" title=\"{}{}\"><span class=\"graph-map-row-name\">{}{}<span class=\"graph-map-row-file\">{}</span></span><span class=\"graph-map-row-links\">{}</span></button></li>",
         payload(&row["id"]),
         escape(&m::text(row, "file")),
-        if line > 0 { format!(":{line}") } else { String::new() },
+        if line > 0 {
+            format!(":{line}")
+        } else {
+            String::new()
+        },
         if whole {
             format!("{}: ", escape(&m::text(row, "name")))
         } else {
@@ -4213,7 +4341,11 @@ fn legend(view: &V, change: bool) -> String {
             format!("Highlighted: changed. The rest use the change or are used by it.{run}")
         }
         _ if layered(view) => {
-            let mut text = LAYER_LEGEND.to_owned();
+            let mut text = if m::yes(&view["pattern"]["declared"]) {
+                "A box is a declared layer. A red arrow is a dependency forbidden by the project rules.".to_owned()
+            } else {
+                LAYER_LEGEND.to_owned()
+            };
             if m::array(&view["edges"])
                 .iter()
                 .any(|edge| edge["added"].is_u64())
@@ -4245,9 +4377,13 @@ fn legend(view: &V, change: bool) -> String {
             if !shares(view) {
                 "The ringed boxes are the two ends of the path.".to_owned()
             } else if above(view) {
-                format!("{LEGEND} The ringed boxes are the two places. A name in bold is what uses both; a box with a plain name lies on its way to them.")
+                format!(
+                    "{LEGEND} The ringed boxes are the two places. A name in bold is what uses both; a box with a plain name lies on its way to them."
+                )
             } else {
-                format!("{LEGEND} The ringed boxes are the two places. A name in bold is what both use; a box with a plain name lies on the way to it.")
+                format!(
+                    "{LEGEND} The ringed boxes are the two places. A name in bold is what both use; a box with a plain name lies on the way to it."
+                )
             },
             if names(view) {
                 format!(" {NAME_LEGEND}")
@@ -4936,6 +5072,9 @@ fn anew(target: &str) -> V {
     state["notests"] = json!(dom::storage(NOTESTS).as_deref() == Some("1"));
     state["fit"] = json!(dom::storage(FIT).as_deref() == Some("1"));
     state["patterns"] = json!(dom::storage(PATTERNS).as_deref() == Some("1"));
+    state["history"] = json!(m::yes(&self::state()["history"]));
+    state["modules"] = json!(m::yes(&self::state()["modules"]));
+    state["no_incoming"] = json!(m::yes(&self::state()["no_incoming"]));
     state
 }
 /// The places a list of the state names: those whose side `key` (`out` or
@@ -4956,6 +5095,10 @@ fn unfollowed(mut state: V) -> V {
     state["out"] = json!([]);
     state["into"] = json!([]);
     state["path"] = json!([]);
+    state["test_path_return"] = V::Null;
+    state["scenario"] = V::Null;
+    state["scenario_return"] = V::Null;
+    state["scenario_skip"] = json!(0);
     state["cycle"] = V::Null;
     state["cycle_return"] = V::Null;
     state["cycle_base"] = V::Null;
@@ -5221,11 +5364,41 @@ fn draw_link() {
         return;
     }
     let chosen = m::text(&link, "chosen");
+    crate::graph_explanation::link_context(view, &state()["cycle_base"]["revision"]);
     dom::text("graph-link-title", &link_title(view));
     dom::text("graph-link-summary", &link_summary(view));
     dom::text("graph-link-note", &link_note(view));
     html("graph-link-canvas", &link_canvas(view, &chosen));
     html("graph-link-side", &link_side(view, &chosen));
+}
+pub(crate) fn link_request(project: &str, from: &str, to: &str, selection: &V) -> String {
+    graph_request(
+        project,
+        vec![("from", from.to_owned()), ("to", to.to_owned())],
+        selection,
+    )
+}
+
+pub(crate) fn graph_request(
+    project: &str,
+    mut query: Vec<(&str, String)>,
+    selection: &V,
+) -> String {
+    for key in ["target", "launch", "base"] {
+        if let Some(value) = selection[key].as_str().filter(|value| !value.is_empty()) {
+            query.push((key, value.to_owned()));
+        }
+    }
+    for key in ["certain", "notests"] {
+        if m::yes(&selection[key]) {
+            query.push((key, "1".to_owned()));
+        }
+    }
+    format!(
+        "/api/projects/{}/graph/map{}",
+        dom::enc(project),
+        dom::query(&query)
+    )
 }
 /// Opens the window of one link of the map and reads what makes the link
 /// up, on the graph the map is read from. The map stays as it is behind it.
@@ -5246,22 +5419,15 @@ async fn look(from: &str, to: &str) {
     html("graph-link-canvas", "");
     html("graph-link-side", "");
     dom::dialog("graph-link", true);
-    let mut query = vec![("from", from.to_owned()), ("to", to.to_owned())];
-    if !m::text(&state, "target").is_empty() {
-        query.push(("target", m::text(&state, "target")));
-    }
-    for key in ["certain", "notests"] {
-        if m::yes(&state[key]) {
-            query.push((key, "1".to_owned()));
-        }
-    }
-    if let Some(revision) = state["cycle_base"]["revision"].as_str() {
-        query.push(("base", revision.to_owned()));
-    }
-    let path = format!(
-        "/api/projects/{}/graph/map{}",
-        dom::enc(&project),
-        dom::query(&query)
+    let path = link_request(
+        &project,
+        from,
+        to,
+        &json!({
+            "target": state["target"], "launch": state["launch"],
+            "base": state["cycle_base"]["revision"],
+            "certain": state["certain"], "notests": state["notests"],
+        }),
     );
     match api::scoped("graph-link", &path).await {
         Ok((epoch, view)) => {
@@ -5550,6 +5716,8 @@ fn blank() {
     html("graph-map-crumbs", "");
     html("graph-map-canvas", "");
     html("graph-map-side", "");
+    dom::hidden("graph-map-launches", true);
+    m::take("graph-map-attachment");
     dom::text("graph-map-summary", "");
 }
 /// The Show list as it stands, with the run of the session on the screen.
@@ -5741,6 +5909,9 @@ fn shut() {
 /// open picker, where the arrows walk the list, Enter chooses the marked
 /// row and Escape closes the picker, not the map behind it.
 pub fn key(e: &web_sys::KeyboardEvent) -> bool {
+    if dom::get("graph-shell-event").is_some_and(|dialog| dialog.has_attribute("open")) {
+        return false;
+    }
     if e.is_composing() {
         return false;
     }
@@ -5812,7 +5983,661 @@ pub fn key(e: &web_sys::KeyboardEvent) -> bool {
         _ => false,
     }
 }
+fn test_paths(view: &V) -> String {
+    let rows = m::array(&view["test_reach"]);
+    if rows.is_empty() {
+        if (changes(view) || view["mode"] == "file")
+            && view["chosen"].is_object()
+            && (m::yes(&view["stale"]) || m::yes(&view["preliminary"]))
+            && !m::yes(&view["notests"])
+        {
+            return "<p class=\"knowledge-note\">Test paths need the graph for this change.</p>"
+                .to_owned();
+        }
+        return String::new();
+    }
+    let mut html = String::from(
+        "<h4>Tests reaching the change</h4><p class=\"knowledge-note\">Candidates from graph links. Review the path before running a test.</p>",
+    );
+    for row in &rows {
+        let tests = m::array(&row["tests"]);
+        let total = row["total"].as_u64().unwrap_or(0);
+        let path = m::text(row, "path");
+        let status = match row["state"].as_str() {
+            Some("deleted") => "Deleted file".to_owned(),
+            Some("missing") => "File missing from the graph".to_owned(),
+            Some("test_file") => "Changed test file".to_owned(),
+            Some("partial") => format!(
+                "{} · search limit reached",
+                plural(total, "candidate", "candidates")
+            ),
+            _ if tests.is_empty() => "No test path found in the graph".to_owned(),
+            _ => plural(total, "candidate", "candidates"),
+        };
+        html.push_str(&format!(
+            "<details><summary>{} · {}</summary><p class=\"graph-map-path\">{}</p>",
+            escape(base(&path)),
+            escape(&status),
+            escape(&path),
+        ));
+        for test in &tests {
+            let steps = test["steps"].as_u64().unwrap_or(0);
+            let name = m::text(test, "name");
+            let file = m::text(test, "file");
+            html.push_str(&format!(
+                "<p class=\"graph-map-path\"><button type=\"button\" class=\"button compact\" data-action=\"graph-map-test-path\" data-payload=\"{}\">{} · {}</button>{}</p>",
+                payload(&json!({"from": test["path"], "to": test["to"]})),
+                escape(&name),
+                plural(steps, "link", "links"),
+                if name == file { String::new() } else { format!(" · {}", escape(&file)) },
+            ));
+        }
+        if total > tests.len() as u64 {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">Showing the {} nearest candidates.</p>",
+                tests.len()
+            ));
+        }
+        html.push_str("</details>");
+    }
+    html
+}
+
+fn layer_color(layer: &V) -> Option<String> {
+    let id = layer["color"].as_u64().filter(|id| *id < 32)?;
+    Some(format!("hsl({} 68% 46%)", (id * 137 + 220) % 360))
+}
+
+fn architecture_side(view: &V) -> String {
+    let architecture = &view["architecture"];
+    if !architecture.is_object() {
+        return String::new();
+    }
+    let mut html = String::from("<h4>Architecture</h4>");
+    let layers = m::array(&architecture["layers"]);
+    if !layers.is_empty() {
+        html.push_str("<ul class=\"graph-map-layer-key\">");
+        for layer in layers {
+            if let Some(color) = layer_color(&layer) {
+                html.push_str(&format!("<li><span aria-hidden=\"true\" style=\"--architecture-color:{color}\"></span>{}</li>", escape(&m::text(&layer, "name"))));
+            }
+        }
+        html.push_str("</ul>");
+    }
+    html.push_str(&pair_rows(
+        if m::yes(&architecture["declared"]) {
+            "Rule violations"
+        } else {
+            "Against inferred layer order"
+        },
+        &architecture["violations"],
+        "No forbidden dependencies found here.",
+        true,
+    ));
+    let total = architecture["reciprocal_total"].as_u64().unwrap_or(0);
+    if total > 0 {
+        html.push_str(&format!("<h4>Mutual layer dependencies · {total}</h4><p class=\"knowledge-note\">The layers depend on each other through the links shown here.</p><ul>"));
+        for pair in m::array(&architecture["reciprocal"]) {
+            html.push_str(&format!(
+                "<li>{} → {} · {}<br>{} → {} · {}</li>",
+                escape(&m::text(&pair["from"], "name")),
+                escape(&m::text(&pair["to"], "name")),
+                weight(
+                    pair["forward"].as_u64().unwrap_or(0),
+                    pair["forward_guessed"].as_u64().unwrap_or(0)
+                ),
+                escape(&m::text(&pair["to"], "name")),
+                escape(&m::text(&pair["from"], "name")),
+                weight(
+                    pair["reverse"].as_u64().unwrap_or(0),
+                    pair["reverse_guessed"].as_u64().unwrap_or(0)
+                ),
+            ));
+        }
+        html.push_str("</ul>");
+    }
+    html
+}
+
+fn scenario_button(view: &V) -> String {
+    let focus = &view["focus"];
+    let place = if focus["path"].is_string() {
+        focus
+    } else {
+        &view["file"]
+    };
+    let Some(path) = place["path"].as_str().filter(|path| !path.is_empty()) else {
+        return String::new();
+    };
+    if m::yes(&place["folder"]) || patterned(view) || cycles(view) || at_base(view) {
+        return String::new();
+    }
+    format!(
+        "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-scenario\" data-payload=\"{}\">Scenario slice</button>",
+        payload(&json!(path))
+    )
+}
+
+fn scenario_side(view: &V) -> String {
+    let slice = &view["scenario"];
+    let mut html = String::from(
+        "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-scenario-back\">Back to map</button>",
+    );
+    if m::yes(&slice["missing"]) {
+        html.push_str(
+            "<p class=\"knowledge-note\">The starting point is absent from the current graph.</p>",
+        );
+        return html;
+    }
+    let drawn = m::array(&view["nodes"]).len().saturating_sub(1);
+    let total = slice["reachable"].as_u64().unwrap_or(0);
+    html.push_str(&format!("<p class=\"knowledge-note\">{} on the map. The list uses the shortest distance from the starting point. Filter by name or file path.</p>", plural(drawn as u64, "dependency", "dependencies")));
+    if total == 0 {
+        html.push_str("<p class=\"knowledge-note\">The graph found no outgoing dependencies.</p>");
+        return html;
+    }
+    let matching = slice["matching"].as_u64().unwrap_or(0);
+    let skip = slice["skip"].as_u64().unwrap_or(0);
+    let rows = m::array(&slice["rows"]);
+    if rows.is_empty() {
+        html.push_str("<p class=\"knowledge-note\">No dependencies match the filter.</p>");
+        return html;
+    }
+    html.push_str(&format!(
+        "<h4>Reachable places · {matching}</h4><ul class=\"graph-map-rows\">"
+    ));
+    for row in &rows {
+        let file = row["file"]
+            .as_str()
+            .unwrap_or_else(|| row["path"].as_str().unwrap_or(""));
+        html.push_str(&format!(
+            "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-scenario-open\" data-payload=\"{}\"><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{} · {}</span></button></li>",
+            payload(&json!({"file":file,"path":row["path"],"symbol":row["symbol"]})),
+            escape(&m::text(row, "name")), escape(file),
+            plural(row["steps"].as_u64().unwrap_or(0), "step", "steps")
+        ));
+    }
+    html.push_str("</ul>");
+    let end = skip + rows.len() as u64;
+    if skip > 0 || end < matching {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">{}–{end} of {matching}</p>",
+            skip + 1
+        ));
+        for (show, label, offset) in [
+            (skip > 0, "Previous", skip.saturating_sub(40)),
+            (end < matching, "Next", end),
+        ] {
+            if show {
+                html.push_str(&format!("<button type=\"button\" class=\"button compact\" data-action=\"graph-map-scenario-page\" data-payload=\"{offset}\">{label}</button>"));
+            }
+        }
+    }
+    html
+}
+
+fn without_incoming_side(view: &V) -> String {
+    let report = &view["without_incoming"];
+    if !report.is_object() {
+        return String::new();
+    }
+    let mut html = String::from(
+        "<h4>No incoming links</h4><p class=\"knowledge-note\">Review before removing. Entry points, configuration, dynamic calls and external callers can be missing from the graph. The active link and test filters affect this list.</p>",
+    );
+    for (key, total, title) in [
+        (
+            "files",
+            "file_total",
+            "Files without links from other files",
+        ),
+        ("symbols", "symbol_total", "Symbols without incoming links"),
+    ] {
+        let total = report[total].as_u64().unwrap_or(0);
+        let rows = m::array(&report[key]);
+        html.push_str(&format!("<h4>{title} · {}</h4>", count(total)));
+        if rows.is_empty() {
+            continue;
+        }
+        html.push_str("<ul class=\"graph-map-rows\">");
+        for row in &rows {
+            let path = m::text(row, "path");
+            let symbol = key == "symbols";
+            let (action, data, label) = if symbol {
+                (
+                    "graph-map-go",
+                    json!({"open":row["file"],"path":path}),
+                    m::text(row, "name"),
+                )
+            } else {
+                ("graph-map-open", json!(path), path)
+            };
+            let where_found = if symbol {
+                let mut file = m::text(row, "file");
+                if let Some(line) = row["line"].as_u64().filter(|line| *line > 0) {
+                    file.push_str(&format!(":{line}"));
+                }
+                format!(
+                    "<span class=\"graph-map-row-links\">{}</span>",
+                    escape(&file)
+                )
+            } else {
+                String::new()
+            };
+            html.push_str(&format!(
+                "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"{action}\" data-payload=\"{}\"><span class=\"graph-map-row-name\">{}</span>{where_found}</button></li>",
+                payload(&data), escape(&label)
+            ));
+        }
+        html.push_str("</ul>");
+        if total > rows.len() as u64 {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">Showing {} of {}. Filter by name or path to find more.</p>",
+                rows.len(), count(total)
+            ));
+        }
+    }
+    html
+}
+
+fn modules_side(view: &V) -> String {
+    if view["children"] == 0 {
+        return "<p class=\"knowledge-note\">This graph has no Graphify communities.</p>"
+            .to_owned();
+    }
+    let info = &view["module_info"];
+    let mut html = format!(
+        "<p class=\"knowledge-note\">{} without a community · {} involving unassigned nodes</p>",
+        plural(info["unassigned"].as_u64().unwrap_or(0), "node", "nodes"),
+        plural(info["outside"].as_u64().unwrap_or(0), "link", "links")
+    );
+    let focus = &view["focus"];
+    if !focus.is_object() {
+        html.push_str(
+            "<p class=\"knowledge-note\">Select a module to inspect its files and links.</p>",
+        );
+        return html;
+    }
+    let number = |key: &str| focus[key].as_u64().unwrap_or(0);
+    html.push_str(&format!(
+        "<h3>{}</h3><p class=\"knowledge-note\">{} · {} · {}</p>",
+        escape(&m::text(focus, "name")),
+        plural(number("files"), "file", "files"),
+        plural(number("symbols"), "node", "nodes"),
+        weight(number("within"), number("inside_guessed")),
+    ));
+    for (key, title) in [("uses", "Uses modules"), ("used_by", "Used by modules")] {
+        let rows = m::array(&focus[key]);
+        let total = number(&format!("{key}_total"));
+        html.push_str(&format!("<h4>{title} · {total}</h4>"));
+        for row in rows {
+            html.push_str(&format!(
+                "<p><button class=\"button compact\" type=\"button\" data-action=\"graph-map-module-select\" data-payload=\"{}\">{}</button> · {}</p>",
+                payload(&row["path"]), escape(&m::text(&row, "name")),
+                weight(row["links"].as_u64().unwrap_or(0), row["guessed"].as_u64().unwrap_or(0))
+            ));
+        }
+    }
+    html.push_str(&format!(
+        "<h4>Internal links · {}</h4>",
+        plural(number("internal_total"), "pair", "pairs")
+    ));
+    let endpoint = |end: &V| {
+        let line = end["line"]
+            .as_u64()
+            .filter(|line| *line > 0)
+            .map_or_else(String::new, |line| format!(":{line}"));
+        format!(
+            "{} ({line_file}{line})",
+            escape(&m::text(end, "name")),
+            line_file = escape(&m::text(end, "file"))
+        )
+    };
+    for row in m::array(&focus["internal"]) {
+        html.push_str(&format!(
+            "<p class=\"graph-map-path\">{} → {} · {}</p>",
+            endpoint(&row["from"]),
+            endpoint(&row["to"]),
+            weight(
+                row["links"].as_u64().unwrap_or(0),
+                row["guessed"].as_u64().unwrap_or(0)
+            )
+        ));
+    }
+    html.push_str(&format!("<h4>Files · {}</h4>", number("files")));
+    for file in m::array(&focus["members"]) {
+        html.push_str(&format!(
+            "<p class=\"graph-map-path\"><button class=\"button compact\" type=\"button\" data-action=\"graph-map-module-file\" data-payload=\"{}\">{}</button></p>",
+            payload(&file), escape(file.as_str().unwrap_or(""))
+        ));
+    }
+    html
+}
+
+fn history_side(view: &V) -> String {
+    let history = &view["git_history"];
+    match history["state"].as_str() {
+        Some("unavailable") => {
+            return "<p class=\"knowledge-note\">Git history could not be read.</p>".to_owned();
+        }
+        Some("empty") => {
+            return "<p class=\"knowledge-note\">No local Git commits found.</p>".to_owned();
+        }
+        Some("ready") => {}
+        _ => return String::new(),
+    }
+    let commits = history["commits"].as_u64().unwrap_or(0);
+    let skipped = history["skipped"].as_u64().unwrap_or(0);
+    let mut html = format!(
+        "<h4>Git history</h4><p class=\"knowledge-note\">{} analysed through {}. {} large commits skipped.</p>",
+        plural(commits, "commit", "commits"),
+        escape(&m::text(history, "revision")),
+        count(skipped)
+    );
+    let rows = |values: &V, field: &str, suffix: &str, total: u64| {
+        let values = values.as_array().map(Vec::as_slice).unwrap_or_default();
+        let number = |row: &V, key: &str| row[key].as_u64().unwrap_or(0);
+        let mut list = String::from("<ul class=\"graph-map-rows\">");
+        for row in values {
+            let path = m::text(row, "path");
+            list.push_str(&format!(
+                "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-open\" data-payload=\"{}\"><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{} · {} {suffix}</span></button></li>",
+                payload(&row["path"]), escape(&path), plural(number(row, "commits"), "commit", "commits"),
+                count(number(row, field)),
+            ));
+        }
+        list.push_str("</ul>");
+        if total > values.len() as u64 {
+            list.push_str(&format!(
+                "<p class=\"knowledge-note\">Showing {} of {}.</p>",
+                values.len(),
+                count(total)
+            ));
+        }
+        list
+    };
+    let cochanges = &history["cochanges"];
+    if cochanges.is_object() {
+        html.push_str("<h4>Frequently changed together</h4>");
+        let total = cochanges["total"].as_u64().unwrap_or(0);
+        if total == 0 {
+            html.push_str("<p class=\"knowledge-note\">No repeated co-changes outside direct graph links.</p>");
+        } else {
+            html.push_str(&rows(&cochanges["rows"], "together", "together", total));
+        }
+    } else {
+        html.push_str("<p class=\"knowledge-note\">Select a file to see which other files changed with it.</p>");
+    }
+    let total = history["hot_total"].as_u64().unwrap_or(0);
+    html.push_str("<h4>Hotspots</h4>");
+    if total == 0 {
+        html.push_str("<p class=\"knowledge-note\">No files here with at least two commits and two graph neighbors.</p>");
+    } else {
+        html.push_str(&rows(&history["hot"], "neighbors", "neighbors", total));
+    }
+    html
+}
+
+fn map_attachment(view: &V) -> Option<String> {
+    let focus = &view["focus"];
+    let place = if focus["path"].is_string() {
+        focus
+    } else {
+        &view["file"]
+    };
+    let path = place["path"].as_str().filter(|path| !path.is_empty())?;
+    let mut lines = vec![
+        "Dependency map context".to_owned(),
+        format!("Selected place: {}", json!(path)),
+    ];
+    if let Some(target) = view["target"].as_str().filter(|s| !s.is_empty()) {
+        lines.push(format!("Change selection: {}", json!(target)));
+    }
+    if let Some(commit) = view["built"]["commit"]
+        .as_str()
+        .or(view["chosen"]["head"]["commit"].as_str())
+    {
+        lines.push(format!("Graph revision: {}", json!(commit)));
+    }
+    if m::yes(&view["stale"]) || m::yes(&view["preliminary"]) {
+        lines.push("The displayed graph was stale or preliminary.".to_owned());
+    }
+    lines.push(if m::yes(&view["certain"]) {
+        "Link selection: links read from code.".to_owned()
+    } else {
+        "Link selection: includes links inferred by name.".to_owned()
+    });
+    for (key, label) in [("uses", "Uses"), ("used_by", "Used by")] {
+        let rows = m::array(&place[key]);
+        if rows.is_empty() {
+            continue;
+        }
+        lines.push(format!("\n{label} (up to 8 shown):"));
+        for row in rows.iter().take(8) {
+            if let Some(neighbor) = row["path"].as_str() {
+                lines.push(format!("- {}", json!(neighbor)));
+            }
+        }
+    }
+    let file = place["file"]
+        .as_str()
+        .or_else(|| {
+            m::yes(&place["symbol"])
+                .then(|| view["file"]["path"].as_str())
+                .flatten()
+        })
+        .unwrap_or(path);
+    if let Some(row) = m::array(&view["test_reach"])
+        .into_iter()
+        .find(|row| row["path"] == file)
+    {
+        if row["state"] == "partial" {
+            lines.push("The search for test paths reached its limit.".to_owned());
+        }
+        let tests = m::array(&row["tests"]);
+        if !tests.is_empty() {
+            lines.push("\nTest candidates from graph links:".to_owned());
+            for test in tests {
+                lines.push(format!("- {} ({} links)", test["path"], test["steps"]));
+            }
+        } else if row["state"] == "ready" {
+            lines.push("No test path found in the graph.".to_owned());
+        }
+    }
+    let text = lines.join("\n");
+    Some(text.chars().take(6000).collect())
+}
+
+fn launch_options(run: &V, comparison: bool) -> String {
+    let mut options = if comparison {
+        "<option value=\"\">No comparison</option>"
+    } else {
+        "<option value=\"\">All launches</option>"
+    }
+    .to_owned();
+    for launch in m::array(&run["launches"]) {
+        let id = m::text(&launch, "id");
+        if comparison && launch["id"] == run["launch"] {
+            continue;
+        }
+        let number = launch["number"].as_u64().unwrap_or(0);
+        let at = m::text(&launch, "at");
+        let at = at.get(..16).unwrap_or(&at).replace('T', " ");
+        let label = if at.is_empty() {
+            format!("Launch {number}")
+        } else {
+            format!("Launch {number} · {at} UTC")
+        };
+        options.push_str(&format!(
+            "<option value=\"{}\">{}</option>",
+            escape(&id),
+            escape(&label)
+        ));
+    }
+    options
+}
+
+fn show_launches(view: &V) {
+    let run = &view["run"];
+    let hidden = m::array(&run["launches"]).len() < 2;
+    dom::hidden("graph-map-launches", hidden);
+    if hidden {
+        return;
+    }
+    for (id, key, comparing) in [
+        ("graph-map-launch", "launch", false),
+        ("graph-map-compare-launch", "compare_launch", true),
+    ] {
+        html(id, &launch_options(run, comparing));
+        dom::set_value(id, &m::text(run, key));
+    }
+    dom::disabled("graph-map-compare-launch", !run["launch"].is_string());
+}
+
+fn shell_event_button(session: &V, event: &V, launch: &str) -> String {
+    if !session.is_string() || event.as_u64().is_none() {
+        return String::new();
+    }
+    format!(
+        "<button class=\"button compact\" type=\"button\" data-action=\"graph-map-shell-event\" data-payload=\"{}\" aria-label=\"Read via shell{launch}\">Read via shell</button>",
+        payload(&json!({"session":session,"event":event})),
+    )
+}
+
+fn shell_reads(view: &V) -> String {
+    if view["run"]["comparison"].is_object() {
+        return String::new();
+    }
+    let reads = &view["run"]["shell_reads"];
+    let rows = m::array(&reads["rows"]);
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut html = "<section><h4>Shell reads</h4><ul class=\"graph-map-rows\">".to_owned();
+    for row in rows {
+        html.push_str(&format!(
+            "<li><span class=\"graph-map-row-name\">{}</span>{}</li>",
+            escape(&m::text(&row, "path")),
+            shell_event_button(&view["run"]["session"], &row["event"], "")
+        ));
+    }
+    html.push_str("</ul>");
+    if let Some(more) = reads["more"].as_u64().filter(|more| *more > 0) {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">{} more files.</p>",
+            count(more)
+        ));
+    }
+    html.push_str("</section>");
+    html
+}
+
+async fn show_shell_event(selection: &V) {
+    let Some(session) = selection["session"].as_str() else {
+        return;
+    };
+    let Some(event) = selection["event"].as_u64().filter(|id| *id > 0) else {
+        return;
+    };
+    dom::text("graph-shell-event-command", "");
+    dom::text("graph-shell-event-status", "Reading the event…");
+    dom::error("graph-shell-event-error", "");
+    dom::dialog("graph-shell-event", true);
+    let path = format!("/api/sessions/{}?after={}", dom::enc(session), event - 1);
+    match api::scoped("graph-shell-event", &path).await {
+        Ok((epoch, page)) if m::current("graph-shell-event", epoch) => {
+            dom::text("graph-shell-event-status", "");
+            if let Some(command) = page["events"][0]["detail"].as_str().filter(|_| {
+                page["session"]["id"] == session
+                    && page["events"][0]["id"] == event
+                    && page["events"][0]["tool"] == "Shell"
+                    && page["events"][0]["state"] == "completed"
+            }) {
+                dom::text(
+                    "graph-shell-event-status",
+                    &format!("Event {event} · completed shell command"),
+                );
+                dom::text("graph-shell-event-command", command);
+            } else {
+                dom::error(
+                    "graph-shell-event-error",
+                    "The recorded shell event is unavailable.",
+                );
+            }
+        }
+        Err(error) if !error.aborted => {
+            dom::text("graph-shell-event-status", "");
+            dom::error("graph-shell-event-error", &error.message);
+        }
+        _ => {}
+    }
+}
+
+fn run_comparison(view: &V) -> String {
+    let comparison = &view["run"]["comparison"];
+    if !comparison.is_object() {
+        return String::new();
+    }
+    let number = |key: &str| count(comparison[key].as_u64().unwrap_or(0));
+    let mut html = format!(
+        "<section><h4>Dependent files across launches</h4><p class=\"knowledge-note\">{} newly opened or edited · {} with no recorded action in either launch. Shell reads are attributed where the command identifies a file.</p>",
+        number("newly_touched"),
+        number("gaps"),
+    );
+    let rows = m::array(&comparison["rows"]);
+    if rows.is_empty() {
+        html.push_str(
+            "<p class=\"knowledge-note\">The graph found no files that use these changes here.</p>",
+        );
+    } else {
+        html.push_str("<ul class=\"graph-map-rows\">");
+        for row in rows {
+            let evidence = |opened, edited, shell| match (opened, edited, shell) {
+                (_, true, true) => "Read via shell and edited",
+                (_, false, true) => "Read via shell",
+                (true, true, false) => "Opened and edited",
+                (true, false, false) => "Opened",
+                (false, true, false) => "Edited",
+                (false, false, false) => "No recorded action",
+            };
+            let path = m::text(&row, "path");
+            html.push_str(&format!(
+                "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-open\" data-payload=\"{}\" title=\"{}\"><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">Map launch · {}<br>Comparison · {}</span></button><div>{}{}</div></li>",
+                payload(&row["path"]), escape(&path), escape(&path),
+                evidence(m::yes(&row["opened"]), false, row["shell_read"].is_number()),
+                evidence(m::yes(&row["followup_opened"]), m::yes(&row["followup_edited"]), row["followup_shell_read"].is_number()),
+                shell_event_button(&view["run"]["session"], &row["shell_read"], " in map launch"),
+                shell_event_button(&view["run"]["session"], &row["followup_shell_read"], " in comparison launch"),
+            ));
+        }
+        html.push_str("</ul>");
+    }
+    if comparison["more"].as_u64().unwrap_or(0) > 0 {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">{} more dependent files.</p>",
+            number("more")
+        ));
+    }
+    html.push_str("</section>");
+    html
+}
+
 fn render(view: &V) {
+    crate::graph_explanation::map_context(view, &state()["cycle_base"]["revision"]);
+    show_launches(view);
+    let module_mode = m::yes(&state()["modules"]);
+    let scenario_mode = view["mode"] == "scenario";
+    dom::set_checked("graph-map-modules", module_mode);
+    dom::set_checked("graph-map-no-incoming", m::yes(&state()["no_incoming"]));
+    dom::disabled(
+        "graph-map-no-incoming",
+        module_mode
+            || scenario_mode
+            || follows(view)
+            || paths(view)
+            || cycles(view)
+            || shares(view)
+            || patterned(view),
+    );
     // A chosen change stays chosen while one of its files is open.
     let change = view["chosen"].is_object();
     dom::text("graph-map-chosen", &chosen(view));
@@ -5860,19 +6685,31 @@ fn render(view: &V) {
     dom::text("graph-map-summary", &summary(view));
     dom::text(
         "graph-map-note",
-        [before, note(view), cycle_revision(view)]
-            .iter()
-            .filter(|part| !part.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .as_str(),
+        [
+            before,
+            m::text(view, "architecture_error"),
+            note(view),
+            cycle_revision(view),
+        ]
+        .iter()
+        .filter(|part| !part.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .as_str(),
     );
     dom::set_checked("graph-map-certain", m::yes(&view["certain"]));
     dom::set_checked("graph-map-notests", m::yes(&view["notests"]));
+
+    dom::set_checked("graph-map-history", m::yes(&state()["history"]));
+    dom::disabled("graph-map-history", module_mode || scenario_mode);
+    dom::disabled("graph-map-patterns", module_mode || scenario_mode);
     dom::set_checked("graph-map-fit", m::yes(&state()["fit"]));
     dom::set_checked("graph-map-patterns", m::yes(&state()["patterns"]));
-    dom::disabled("graph-find-search", at_base(view));
+    dom::disabled(
+        "graph-find-search",
+        at_base(view) || module_mode || scenario_mode,
+    );
     // Of what two places share, the filter keeps the names that hold it.
     dom::disabled(
         "graph-map-filter",
@@ -5880,8 +6717,15 @@ fn render(view: &V) {
     );
     // Keep keyboard focus on the selected node through a repaint.
     const NODE_BUTTONS: &str = "#graph-map-canvas .graph-map-node";
-    let keyboard_key = dom::document()
-        .active_element()
+    let active = dom::document().active_element();
+    let module_focus = module_mode
+        && active.as_ref().is_some_and(|node| {
+            node.matches(
+                "#graph-map-canvas .graph-map-node, [data-action='graph-map-module-select']",
+            )
+            .unwrap_or(false)
+        });
+    let keyboard_key = active
         .filter(|node| {
             (shares(view)
                 || cycles(view)
@@ -5895,6 +6739,44 @@ fn render(view: &V) {
         .and_then(|node| node.get_attribute("data-payload"));
     html("graph-map-canvas", &canvas(view));
     fit();
+    if scenario_mode {
+        let focused = dom::document().active_element().is_some_and(|element| {
+            element
+                .get_attribute("data-action")
+                .is_some_and(|action| action.starts_with("graph-map-scenario"))
+        });
+        m::take("graph-map-attachment");
+        dom::attr("graph-map-canvas", "data-picking", "false");
+        html("graph-map-side", &scenario_side(view));
+        dom::text(
+            "graph-map-legend",
+            "Arrows follow dependencies away from the starting point.",
+        );
+        if focused {
+            dom::focus("graph-map-summary");
+        }
+        return;
+    }
+    if module_mode {
+        dom::attr("graph-map-canvas", "data-picking", "false");
+        m::take("graph-map-attachment");
+        html("graph-map-side", &modules_side(view));
+        dom::text(
+            "graph-map-legend",
+            "Arrows show dependencies between Graphify communities. Dashed links are inferred.",
+        );
+        if let Some(key) = view["focus"]["path"].as_str().filter(|_| module_focus) {
+            let key = json!(key).to_string();
+            if let Some(node) = dom::all(NODE_BUTTONS)
+                .into_iter()
+                .find(|node| node.get_attribute("data-payload").as_deref() == Some(key.as_str()))
+                .and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+            {
+                let _ = node.focus();
+            }
+        }
+        return;
+    }
     if let Some(node) = keyboard_key.and_then(|key| {
         dom::all(NODE_BUTTONS)
             .into_iter()
@@ -5952,17 +6834,49 @@ fn render(view: &V) {
     // the button that had the focus with it.
     let turned = (patterned(view) && active_action.as_deref() == Some("graph-map-pattern"))
         || (!patterned(view) && active_action.as_deref() == Some("graph-map-pattern-back"));
+    let attachment = map_attachment(view);
+    m::set(
+        "graph-map-attachment",
+        json!({"project": view["project_id"], "text": attachment}),
+    );
+    let attach = if attachment.is_some() {
+        "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-attach\">Attach map context</button>"
+    } else {
+        ""
+    };
+    let scenario_action = scenario_button(view);
+    let test_back = if paths(view) && state["test_path_return"].is_object() {
+        "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-test-back\">Back to changed files</button>"
+    } else {
+        ""
+    };
     html(
         "graph-map-side",
         &format!(
-            "{}{}{action}{}{}",
+            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}",
             choosing(&state),
             paging(view),
+            run_comparison(view),
+            shell_reads(view),
             side(view),
+            without_incoming_side(view),
+            test_paths(view),
+            history_side(view),
+            architecture_side(view),
             found_patterns(view, &unfolded(&state, "kinds")),
         ),
     );
-    if returning && show_cycle {
+    if matches!(
+        active_action.as_deref(),
+        Some(
+            "graph-map-test-path"
+                | "graph-map-test-back"
+                | "graph-map-scenario-back"
+                | "graph-map-scenario-open"
+        )
+    ) {
+        dom::focus("graph-map-summary");
+    } else if returning && show_cycle {
         dom::focus("graph-map-show-cycle");
     } else if opening_cycle || returning || turned {
         dom::focus("graph-map-summary");
@@ -6013,12 +6927,12 @@ async fn load(quiet: bool) {
     }
     let target = m::text(&state, "target");
     let mut query = vec![("scope", m::text(&state, "scope"))];
-    for key in ["focus", "filter", "target"] {
+    for key in ["focus", "filter", "target", "launch", "compare_launch"] {
         if !m::text(&state, key).is_empty() {
             query.push((key, m::text(&state, key)));
         }
     }
-    for key in ["certain", "notests"] {
+    for key in ["certain", "notests", "history", "modules", "no_incoming"] {
         if m::yes(&state[key]) {
             query.push((key, "1".to_owned()));
         }
@@ -6040,7 +6954,13 @@ async fn load(quiet: bool) {
             query.push((key, json!(places).to_string()));
         }
     }
-    if let (Some(place), Some(revision)) = (
+    if let Some(origin) = state["scenario"].as_str() {
+        query.push(("scenario", origin.to_owned()));
+        query.push((
+            "skip",
+            state["scenario_skip"].as_u64().unwrap_or(0).to_string(),
+        ));
+    } else if let (Some(place), Some(revision)) = (
         state["cycle_base"]["place"].as_str(),
         state["cycle_base"]["revision"].as_str(),
     ) {
@@ -6090,7 +7010,7 @@ async fn load(quiet: bool) {
             let mut state = state;
             // Fit can change locally while this request is in flight.
             state["fit"] = self::state()["fit"].clone();
-            if view["scope"].is_string() && !at_base(&view) {
+            if view["scope"].is_string() && !at_base(&view) && view["mode"] != "modules" {
                 state["scope"] = view["scope"].clone();
             }
             if follows(&view) {
@@ -6105,7 +7025,13 @@ async fn load(quiet: bool) {
                 }
             } else if shares(&view) {
                 state = begins(state, view["shared"]["skip"].as_u64().unwrap_or(0));
-            } else if !paths(&view) && !cycles(&view) && !patterned(&view) {
+            } else if view["mode"] == "scenario" {
+                state["scenario_skip"] = view["scenario"]["skip"].clone();
+            } else if !paths(&view)
+                && !cycles(&view)
+                && !patterned(&view)
+                && !state["scenario"].is_string()
+            {
                 // The graph does not know the place, or one of the two
                 // places, or the pattern, or they were left.
                 state = unfollowed(state);
@@ -6139,6 +7065,7 @@ async fn load(quiet: bool) {
         }
         Err(error) if error.aborted => return,
         Err(error) => {
+            m::take("graph-map-attachment");
             dom::cancel_timer("graph-map-poll");
             if state["cycle_base"].is_object() {
                 // A stale or pruned snapshot leaves a way back to the PR
@@ -6257,6 +7184,15 @@ pub async fn event(
             } else {
                 spawn_local(place());
             }
+        }
+        ("click", _, "graph-map-shell-event") => {
+            show_shell_event(payload).await;
+            return true;
+        }
+        ("click", "graph-shell-event-close", _) => {
+            m::next("graph-shell-event");
+            dom::dialog("graph-shell-event", false);
+            return true;
         }
         ("click", "graph-map-close", _) => {
             dom::cancel_timer("graph-map-poll");
@@ -6457,6 +7393,56 @@ pub async fn event(
             state = anew(value);
             chosen = true;
         }
+        ("change", "graph-map-launch", _) => {
+            state["launch"] = json!(value);
+            if value.is_empty() || state["compare_launch"] == value {
+                state["compare_launch"] = V::Null;
+            }
+        }
+        ("change", "graph-map-compare-launch", _) => {
+            state["compare_launch"] = json!(value);
+        }
+        ("click", _, "graph-map-attach") => {
+            if !open() || busy() || !m::data("graph-map-attachment")["text"].is_string() {
+                return true;
+            }
+            let context = m::data("graph-map-attachment");
+            if context["text"].as_str().is_some_and(|text| {
+                crate::session::attach_map_context(&m::text(&context, "project"), text)
+            }) {
+                dom::cancel_timer("graph-map-poll");
+                shut();
+                close_found();
+                dom::dialog("graph-map", false);
+                if m::read(|s| s.view != "sessions") {
+                    crate::session::open_view("sessions", true).await;
+                }
+                dom::focus("prompt");
+            }
+            return true;
+        }
+        ("click", _, "graph-map-test-path") => {
+            if busy() || map_failed() {
+                return true;
+            }
+            let previous = state.clone();
+            state["pick"] = json!({"path": payload["from"]});
+            let Some(mut showing) = led(state, payload["to"].as_str().unwrap_or("")) else {
+                return true;
+            };
+            showing["test_path_return"] = previous;
+            state = showing;
+            dom::set_value("graph-map-filter", "");
+        }
+        ("click", _, "graph-map-test-back") => {
+            let previous = state["test_path_return"].take();
+            if !previous.is_object() {
+                return true;
+            }
+            state = previous;
+            dom::set_value("graph-map-filter", &m::text(&state, "filter"));
+            dom::save(NOTESTS, m::yes(&state["notests"]).then_some("1"));
+        }
         ("click", _, "graph-map-path") => {
             // The other end is chosen next. The picture stays as it is.
             state["pick"] = json!({"path": payload["path"], "name": payload["name"]});
@@ -6517,6 +7503,24 @@ pub async fn event(
             }
             dom::set_value("graph-map-filter", &m::text(&state, "filter"));
         }
+        ("click", _, "graph-map-module-select" | "graph-map-node") if m::yes(&state["modules"]) => {
+            let path = payload.as_str().unwrap_or("");
+            if !path.starts_with("module:") {
+                return true;
+            }
+            state["focus"] = payload.clone();
+            if action == "graph-map-module-select" {
+                state["filter"] = json!("");
+                dom::set_value("graph-map-filter", "");
+            }
+        }
+        ("click", _, "graph-map-module-file") => {
+            state["modules"] = json!(false);
+            state["scope"] = payload.clone();
+            state["focus"] = json!("");
+            state["filter"] = json!("");
+            dom::set_value("graph-map-filter", "");
+        }
         ("click", _, "graph-map-node") if state["pick"].is_object() => {
             // The other end of a path is being chosen: this box is it. The
             // place the path is asked from is no end for it.
@@ -6550,6 +7554,47 @@ pub async fn event(
             state = unfollowed(state);
             state["scope"] = payload.clone();
             state["focus"] = json!("");
+            state["filter"] = json!("");
+            dom::set_value("graph-map-filter", "");
+        }
+        ("click", _, "graph-map-scenario") => {
+            let Some(origin) = payload.as_str().filter(|origin| !origin.is_empty()) else {
+                return true;
+            };
+            if busy() || map_failed() || state["pick"].is_object() {
+                return true;
+            }
+            let back = state.clone();
+            state = unfollowed(state);
+            state["scenario"] = json!(origin);
+            state["scenario_return"] = back;
+            state["focus"] = json!("");
+            state["filter"] = json!("");
+            dom::set_value("graph-map-filter", "");
+            close_found();
+        }
+        ("click", _, "graph-map-scenario-back") => {
+            let mut back = state["scenario_return"].take();
+            if !back.is_object() {
+                return true;
+            }
+            for key in ["notests", "certain", "fit"] {
+                back[key] = state[key].clone();
+            }
+            state = back;
+            dom::set_value("graph-map-filter", &m::text(&state, "filter"));
+        }
+        ("click", _, "graph-map-scenario-page") => {
+            state["scenario_skip"] = payload.clone();
+        }
+        ("click", _, "graph-map-scenario-open") => {
+            state = unfollowed(state);
+            state["scope"] = payload["file"].clone();
+            state["focus"] = if m::yes(&payload["symbol"]) {
+                payload["path"].clone()
+            } else {
+                json!("")
+            };
             state["filter"] = json!("");
             dom::set_value("graph-map-filter", "");
         }
@@ -6657,6 +7702,21 @@ pub async fn event(
             state["certain"] = json!(checked);
             state["skip"] = json!([]);
         }
+        ("change", "graph-map-no-incoming", _) => {
+            state["no_incoming"] = json!(checked);
+        }
+        ("change", "graph-map-modules", _) => {
+            state = unfollowed(state);
+            state["modules"] = json!(checked);
+            state["focus"] = json!("");
+            state["pick"] = V::Null;
+            state["filter"] = json!("");
+            dom::set_value("graph-map-filter", "");
+            close_found();
+        }
+        ("change", "graph-map-history", _) => {
+            state["history"] = json!(checked);
+        }
         ("change", "graph-map-notests", _) => {
             // The choice is the viewer's and holds for the next map too.
             state["notests"] = json!(checked);
@@ -6705,6 +7765,7 @@ pub async fn event(
         ("input", "graph-map-filter", _) => {
             // What a filter leaves begins with its nearest.
             state["filter"] = json!(value);
+            state["scenario_skip"] = json!(0);
             state["skip"] = json!([]);
         }
         _ => return false,
@@ -6966,6 +8027,72 @@ mod tests {
                 "head": {"name": "fix/rounding", "commit": "1a2b3c4d5e6f"}, "base": {"name": "main", "commit": "9f8e7d6c5b4a"}, "notes": [], "files": 3}
         })
     }
+    #[test]
+    fn modules_render_as_graph_nodes_with_links_and_file_actions() {
+        let view = json!({
+            "mode":"modules", "children":2, "matching":2,
+            "nodes":[
+                {"path":"module:0","name":"Cart <shop>","module":true,"within":1,"out":1},
+                {"path":"module:1","name":"Payment","module":true,"in":1}
+            ],
+            "edges":[{"from":"module:0","to":"module:1","links":1,"guessed":0}],
+            "focus":{
+                "name":"Cart <shop>","files":1,"symbols":2,"within":1,
+                "uses_total":1,"uses":[{"path":"module:1","name":"Payment","links":1}],
+                "members":["src/cart.php"],"internal_total":0
+            }
+        });
+        let picture = canvas(&view);
+        assert!(picture.contains("Cart &lt;shop&gt;, module, 1 internal link"));
+        assert!(picture.contains("Cart &lt;shop&gt; uses Payment"));
+        assert!(!picture.contains("graph-map-hit"));
+        let side = modules_side(&view);
+        assert!(side.contains("Uses modules · 1"));
+        assert!(side.contains("graph-map-module-select"));
+        assert!(side.contains("graph-map-module-file"));
+        assert!(side.contains("src/cart.php"));
+    }
+
+    #[test]
+    fn test_paths_and_task_context_use_the_selected_changed_file() {
+        let view = json!({
+            "mode":"changes", "target":"run:one", "certain":true,
+            "focus":{
+                "path":"src/changed.php",
+                "uses":[{"path":"src/dependency.php"}],
+                "used_by":[{"path":"src/caller.php"}]
+            },
+            "test_reach":[
+                {"path":"src/changed.php","state":"ready","total":1,"tests":[
+                    {"path":"tests/Cart<Test>.php","to":"src/changed.php",
+                     "file":"tests/Cart<Test>.php","name":"tests/Cart<Test>.php","steps":2}
+                ]},
+                {"path":"src/alone.php","state":"ready","total":0,"tests":[]},
+                {"path":"src/partial.php","state":"partial","total":0,"tests":[]},
+                {"path":"src/deleted.php","state":"deleted"}
+            ]
+        });
+        let html = test_paths(&view);
+        assert!(html.contains(r#"data-action="graph-map-test-path""#));
+        assert!(html.contains("tests/Cart&lt;Test&gt;.php · 2 links"));
+        assert!(html.contains("No test path found in the graph"));
+        assert!(html.contains("search limit reached"));
+        assert!(html.contains("Deleted file"));
+        let attachment = map_attachment(&view).unwrap();
+        for text in [
+            "src/changed.php",
+            "run:one",
+            "src/dependency.php",
+            "src/caller.php",
+            "tests/Cart<Test>.php",
+            "links read from code",
+        ] {
+            assert!(attachment.contains(text), "{attachment}");
+        }
+        assert!(!attachment.contains("src/alone.php"), "{attachment}");
+        assert!(map_attachment(&json!({"mode":"changes"})).is_none());
+    }
+
     /// The change of the fixture as what a run did: the run opened the cart
     /// it changed and the order, and of four files that use its change left
     /// three unopened.
@@ -7112,7 +8239,10 @@ mod tests {
         );
         assert_eq!(
             side(&all),
-            format!("{}<h4>Use the change, not opened by the run <span class=\"graph-map-total\">0</span></h4><p class=\"knowledge-note\">The run opened every file that uses what it changed here.</p>", side(&plain))
+            format!(
+                "{}<h4>Use the change, not opened by the run <span class=\"graph-map-total\">0</span></h4><p class=\"knowledge-note\">The run opened every file that uses what it changed here.</p>",
+                side(&plain)
+            )
         );
         let mut none = view.clone();
         none["run"]["reach"] =
@@ -7170,19 +8300,23 @@ mod tests {
         // A command, a search and a helper show files that no step names.
         assert_eq!(
             said(&[("commands", json!(2))]),
-            "The run opened 12 files and changed 3 files. It also ran 2 commands: what it saw that way is not recorded as opened."
+            "The run opened 12 files and changed 3 files. It also ran 2 commands: some file reads may be missing."
         );
         assert_eq!(
             said(&[("commands", json!(1)), ("searched", json!(1200))]),
-            "The run opened 12 files and changed 3 files. It also ran 1 command and searched 1,200 times: what it saw that way is not recorded as opened."
+            "The run opened 12 files and changed 3 files. It also ran 1 command and searched 1,200 times: some file reads may be missing."
         );
         assert_eq!(
-            said(&[("commands", json!(2)), ("searched", json!(1)), ("helpers", json!(3))]),
-            "The run opened 12 files and changed 3 files. It also ran 2 commands, searched 1 time and started 3 helpers: what it saw that way is not recorded as opened."
+            said(&[
+                ("commands", json!(2)),
+                ("searched", json!(1)),
+                ("helpers", json!(3))
+            ]),
+            "The run opened 12 files and changed 3 files. It also ran 2 commands, searched 1 time and started 3 helpers: some file reads may be missing."
         );
         assert_eq!(
             said(&[("helpers", json!(1))]),
-            "The run opened 12 files and changed 3 files. It also started 1 helper: what it saw that way is not recorded as opened."
+            "The run opened 12 files and changed 3 files. It also started 1 helper: some file reads may be missing."
         );
         // What else is not known of it.
         assert_eq!(
@@ -7327,7 +8461,10 @@ mod tests {
         );
         let mut none = commits();
         none["rows"] = json!([]);
-        assert_eq!(options(&none, 0), "<li class=\"graph-pick-more\" role=\"presentation\"><button type=\"button\" class=\"button compact\" data-action=\"graph-pick-more\">Show older commits</button></li>");
+        assert_eq!(
+            options(&none, 0),
+            "<li class=\"graph-pick-more\" role=\"presentation\"><button type=\"button\" class=\"button compact\" data-action=\"graph-pick-more\">Show older commits</button></li>"
+        );
         none["more"] = json!(false);
         assert_eq!(options(&none, 0), "");
         assert_eq!(remark(&none), "No commit matches.");
@@ -7766,8 +8903,11 @@ mod tests {
             Some("The change touched 3 of 9 symbols: 3 modified.")
         );
         assert_eq!(
-            reach(json!({"symbols": 0, "added": 0, "modified": 0, "between": 2, "top": true})).as_deref(),
-            Some("The change touched no symbol here, only lines outside them. Lines were also removed between symbols in 2 places.")
+            reach(json!({"symbols": 0, "added": 0, "modified": 0, "between": 2, "top": true}))
+                .as_deref(),
+            Some(
+                "The change touched no symbol here, only lines outside them. Lines were also removed between symbols in 2 places."
+            )
         );
         assert_eq!(
             reach(json!({"symbols": 0, "added": 0, "modified": 0, "between": 0, "top": false}))
@@ -8758,7 +9898,9 @@ mod tests {
         // Beside the picture: how to choose, and the kinds of the links.
         let idle = link_side(&view, "");
         assert!(idle.contains("Select a name to light its links."));
-        assert!(idle.contains("<p class=\"knowledge-note\">Links by kind: calls 2 · imports from 1 · references 1</p>"));
+        assert!(idle.contains(
+            "<p class=\"knowledge-note\">Links by kind: calls 2 · imports from 1 · references 1</p>"
+        ));
         // Or the chosen name, the way to its file, and what it is linked
         // with here.
         let told = link_side(&view, "src/Cart/Cart.php#L4:Cart");
@@ -9557,7 +10699,9 @@ mod tests {
         );
         assert_eq!(
             note(&view),
-            format!("What both use stands to the right of the two, each with one shortest way from either of them, the strongest of those as short. {THROUGH}")
+            format!(
+                "What both use stands to the right of the two, each with one shortest way from either of them, the strongest of those as short. {THROUGH}"
+            )
         );
         // The two close the path above the picture, with the kind that is
         // drawn; beside them stand the other kind and the way back to the
@@ -9584,7 +10728,9 @@ mod tests {
         );
         assert_eq!(
             note(&users),
-            format!("What uses both stands to the left of the two, each with one shortest way to either of them, the strongest of those as short. {THROUGH}")
+            format!(
+                "What uses both stands to the left of the two, each with one shortest way to either of them, the strongest of those as short. {THROUGH}"
+            )
         );
         assert!(
             crumbs(&users).ends_with(&format!(": what uses both</span>{ASK_USED}{ASK_PATH}")),
@@ -9670,7 +10816,10 @@ mod tests {
         );
         assert_eq!(
             note(&wide),
-            format!("{} The nearest come first: the fewest links to the two taken together, then the most linked. Filter names reaches a place by its name.", note(&common_users()))
+            format!(
+                "{} The nearest come first: the fewest links to the two taken together, then the most linked. Filter names reaches a place by its name.",
+                note(&common_users())
+            )
         );
         wide["shared"]["matching"] = json!(0);
         wide["shared"]["shown"] = json!(0);
@@ -9712,7 +10861,9 @@ mod tests {
         );
         assert_eq!(
             note(&asked),
-            format!("users.php and orders<1>.php use nothing in common. {THROUGH} What uses both is another picture: What uses both, beside the path above this one.")
+            format!(
+                "users.php and orders<1>.php use nothing in common. {THROUGH} What uses both is another picture: What uses both, beside the path above this one."
+            )
         );
         asked["shared"]["side"] = json!("uses_both");
         asked["shared"]["both_use"] = json!(1);
@@ -9723,7 +10874,9 @@ mod tests {
         );
         assert_eq!(
             note(&asked),
-            format!("Nothing uses both users.php and orders<1>.php. {THROUGH} What they use in common is another picture: What both use, beside the path above this one.")
+            format!(
+                "Nothing uses both users.php and orders<1>.php. {THROUGH} What they use in common is another picture: What both use, beside the path above this one."
+            )
         );
         // Nothing of either kind, with a hint where guesses are left out.
         // The path between the two can still be asked for.
@@ -9732,7 +10885,9 @@ mod tests {
         assert_eq!(summary(&none), "users.php and orders<1>.php share nothing");
         assert_eq!(
             note(&none),
-            format!("Nothing is used by both users.php and orders<1>.php, and nothing uses both. {THROUGH}")
+            format!(
+                "Nothing is used by both users.php and orders<1>.php, and nothing uses both. {THROUGH}"
+            )
         );
         none["certain"] = json!(true);
         assert!(note(&none)
@@ -9801,7 +10956,9 @@ mod tests {
         let html = canvas(&view);
         assert_eq!(html.matches("data-shared=\"true\"").count(), 1);
         assert!(
-            html.contains("aria-label=\"core.php, file, uses others through 2 links, is used through 1 link\""),
+            html.contains(
+                "aria-label=\"core.php, file, uses others through 2 links, is used through 1 link\""
+            ),
             "{html}"
         );
         // One of the two can be a folder among files, drawn as one.
@@ -10132,7 +11289,9 @@ mod tests {
         none["edges"] = json!([]);
         assert_eq!(
             side(&none),
-            format!("<p class=\"knowledge-note\">Nothing is drawn. What uses both is another picture. The path between them asks how one of the two reaches the other. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"&quot;uses_both&quot;\">What uses both</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"false\">The path between them</button>{ends}")
+            format!(
+                "<p class=\"knowledge-note\">Nothing is drawn. What uses both is another picture. The path between them asks how one of the two reaches the other. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"&quot;uses_both&quot;\">What uses both</button><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"false\">The path between them</button>{ends}"
+            )
         );
         none["shared"]["side"] = json!("uses_both");
         none["shared"]["both_use"] = json!(4);
@@ -10142,13 +11301,17 @@ mod tests {
         none["shared"]["both_use"] = json!(0);
         assert_eq!(
             side(&none),
-            format!("<p class=\"knowledge-note\">Nothing is drawn. The path between them asks how one of the two reaches the other. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"false\">The path between them</button>{ends}")
+            format!(
+                "<p class=\"knowledge-note\">Nothing is drawn. The path between them asks how one of the two reaches the other. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p><button type=\"button\" class=\"button compact\" data-action=\"graph-map-shared\" data-payload=\"false\">The path between them</button>{ends}"
+            )
         );
         // One of the two in the other leaves no path to ask for.
         none["shared"]["within"] = json!(true);
         assert_eq!(
             side(&none),
-            format!("<p class=\"knowledge-note\">Nothing is drawn. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p>{ends}")
+            format!(
+                "<p class=\"knowledge-note\">Nothing is drawn. Follow links shows what each of the two reaches, and Path to… asks for the way from it to another place.</p>{ends}"
+            )
         );
     }
     #[test]
@@ -10638,7 +11801,12 @@ mod tests {
         assert_eq!(html.matches("graph-map-edge-guess").count(), 1);
         // The way there ends in the finding, which is no place to open.
         let way = crumbs(&view);
-        assert!(way.ends_with("<span class=\"graph-map-crumb\" aria-current=\"location\">Strategy: Gateway</span>"), "{way}");
+        assert!(
+            way.ends_with(
+                "<span class=\"graph-map-crumb\" aria-current=\"location\">Strategy: Gateway</span>"
+            ),
+            "{way}"
+        );
         assert_eq!(way.matches("data-action=\"graph-map-open\"").count(), 2);
         assert!(legend(&view, false).contains("A frame holds the parts that are one thing in the pattern; the ringed box is the type it is named after. T type"));
         // Beside it: what to do, or the selected part with what it is in
@@ -11088,7 +12256,9 @@ mod tests {
             html.contains("<h4>Against the order <span class=\"graph-map-total\">2</span></h4>")
         );
         assert!(html.contains("data-pair=\"true\" data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;app/Models/Order.php&quot;,&quot;to&quot;:&quot;app/Services/Pay&lt;b&gt;.php&quot;}\" title=\"app/Models/Order.php uses app/Services/Pay&lt;b&gt;.php · select to see what makes up this link\"><span class=\"graph-map-row-name\">Order.php → Pay&lt;b&gt;.php</span><span class=\"graph-map-row-links\">Model → Services · 2 links</span>"), "{html}");
-        assert!(html.contains("<span class=\"graph-map-row-links\">Data access → Entry points · 1 link guessed</span>"));
+        assert!(html.contains(
+            "<span class=\"graph-map-row-links\">Data access → Entry points · 1 link guessed</span>"
+        ));
         assert_eq!(html.matches("data-action=\"graph-map-link\"").count(), 2);
         let mut more = view.clone();
         more["pattern"]["against"]["more"] = json!(1200);
@@ -11158,8 +12328,7 @@ mod tests {
         assert!(html.contains("<title>Data access uses Entry points · 1 link guessed · against the order of the layers</title>"));
         assert_eq!(html.matches("added by this change").count(), 1);
         // It bears the ends of its link, by which the link is lit.
-        let mark =
-            "<text class=\"graph-map-edge-mark\" data-ends=\"3 1\" x=\"566.0\" y=\"90.0\">+2</text>";
+        let mark = "<text class=\"graph-map-edge-mark\" data-ends=\"3 1\" x=\"566.0\" y=\"90.0\">+2</text>";
         assert_eq!(html.matches("<text ").count(), 1);
         let at = html.find(mark).unwrap();
         assert!(html.rfind("<path class=\"graph-map-edge").unwrap() < at);
@@ -11372,7 +12541,11 @@ mod tests {
                 false,
             ),
         ] {
-            assert_eq!(told(change.clone()), (said.to_owned(), asked_again), "{change}");
+            assert_eq!(
+                told(change.clone()),
+                (said.to_owned(), asked_again),
+                "{change}"
+            );
         }
         // Told, or with no change chosen, the picture is not asked for
         // again and the note says nothing more.

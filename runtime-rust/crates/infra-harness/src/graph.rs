@@ -4,6 +4,8 @@
 //! pass in the background and tells an agent that the result exists. A build
 //! starts without the previous graph, so a deleted file leaves no nodes behind,
 //! and the published graph is replaced only by a build that succeeded.
+mod shell_reads;
+
 use crate::{
     HarnessError, Result,
     graph_changes::{self, Pull, Resolved, Target},
@@ -396,6 +398,7 @@ fn chosen(resolved: &Resolved) -> Value {
 struct RunChange {
     resolved: Arc<Resolved>,
     opened: BTreeSet<String>,
+    shell_reads: BTreeMap<String, u64>,
     told: Value,
 }
 fn size(path: &Path) -> u64 {
@@ -958,6 +961,12 @@ pub struct Shown<'a> {
     pub shared: Option<Sharing<'a>>,
     /// Mark the picture with the patterns found where it is open.
     pub patterns: bool,
+    pub history: bool,
+    pub modules: bool,
+    pub no_incoming: bool,
+    pub scenario: Option<(&'a str, usize)>,
+    pub launch: Option<&'a str>,
+    pub compare_launch: Option<&'a str>,
     /// One found pattern to draw, instead of a folder: its pattern and the
     /// type it is named after.
     pub pattern: Option<&'a str>,
@@ -1031,6 +1040,7 @@ pub struct Graphs {
     writing: Mutex<()>,
     stopping: AtomicBool,
     maps: crate::graph_map::Maps,
+    history: Mutex<BTreeMap<String, HistoryEntry>>,
     /// Open pull requests of each project as last listed, or why not.
     pulls: Mutex<BTreeMap<String, Listing>>,
     /// Pull requests found for a project, a state and a search.
@@ -1043,6 +1053,11 @@ pub struct Graphs {
     refused: Mutex<BTreeMap<(String, String), String>>,
 }
 type Listing = (Instant, Vec<Pull>, Option<String>);
+struct HistoryEntry {
+    revision: String,
+    read_at: Instant,
+    data: Arc<graph_changes::History>,
+}
 impl Graphs {
     /// `HARNESS_GRAPHIFY` names the executable when it is not on `PATH`.
     pub fn new(store: SessionStore) -> Arc<Self> {
@@ -1065,6 +1080,7 @@ impl Graphs {
             writing: Mutex::new(()),
             stopping: AtomicBool::new(false),
             maps: crate::graph_map::Maps::default(),
+            history: Mutex::new(BTreeMap::new()),
             pulls: Mutex::new(BTreeMap::new()),
             searches: Mutex::new(BTreeMap::new()),
             chosen: Mutex::new(BTreeMap::new()),
@@ -1098,6 +1114,12 @@ impl Graphs {
             shared,
             base,
             patterns,
+            history,
+            modules,
+            no_incoming,
+            scenario,
+            launch,
+            compare_launch,
             pattern,
         } = *shown;
         if base.is_some()
@@ -1112,6 +1134,14 @@ impl Graphs {
                 "Choose a pull request to inspect a base cycle or link.",
             ));
         }
+        if (launch.is_some() || compare_launch.is_some())
+            && (!matches!(target, Some(Target::Run(_)))
+                || compare_launch.is_some() && (launch.is_none() || launch == compare_launch))
+        {
+            return Err(HarnessError::invalid(
+                "Choose two distinct launches of the mapped session to compare.",
+            ));
+        }
         // The graph as it was read, or as it is without its tests, with how
         // much that leaves out.
         let left = std::cell::Cell::new(None);
@@ -1124,53 +1154,72 @@ impl Graphs {
                 index
             }
         };
+        use crate::graph_map::layer_rules::Rules;
+        let wants_layers = pattern.is_some_and(|id| id.starts_with("layers@"));
+        let reads_rules =
+            wants_layers || (patterns && !modules && scenario.is_none() && link.is_none());
         // The links followed from a place, where one is followed and the
         // graph knows it; or, before that, one link looked into. `edited`
         // gives what the chosen change did to a file, where that can be told.
-        let follow =
-            |index: &crate::graph_map::Index,
-             changed: &[(String, char)],
-             edited: &dyn Fn(&str) -> Option<crate::graph_map::Edited>| {
-                if let Some((from, to)) = link {
-                    return Some(index.link(from, to, certain));
+        let follow = |index: &crate::graph_map::Index,
+                      changed: &[(String, char)],
+                      edited: &dyn Fn(&str) -> Option<crate::graph_map::Edited>,
+                      rules: &std::result::Result<Option<Rules>, String>| {
+            if let Some((origin, skip)) = scenario {
+                return Some(index.scenario(name, origin, certain, filter, skip));
+            }
+            if modules {
+                return Some(index.modules(name, focus, certain, filter));
+            }
+            if let Some((from, to)) = link {
+                return Some(index.link(from, to, certain));
+            }
+            if let Some(place) = cycle {
+                return Some(index.cycle(name, place, changed, edited, focus, certain));
+            }
+            if let Some(scope) = pattern.and_then(|id| id.strip_prefix("layers@")) {
+                match rules {
+                    Ok(Some(rules)) => {
+                        return Some(index.declared_layers(name, scope, focus, certain, rules));
+                    }
+                    Err(_) => return None,
+                    Ok(None) => {}
                 }
-                if let Some(place) = cycle {
-                    return Some(index.cycle(name, place, changed, edited, focus, certain));
-                }
-                // One found pattern; a graph that no longer has it leaves
-                // what else was asked.
-                if let Some(id) = pattern
-                    && let Some(view) = index.pattern(name, id, changed, edited, focus, certain)
-                {
-                    return Some(view);
-                }
-                // The ways between two places, or what the two share, come
-                // before a followed place; a place the graph does not know
-                // leaves what else was asked.
-                if let Some((from, to)) = path
-                    && let Some(view) = index.path(name, from, to, changed, edited, focus, certain)
-                {
-                    return Some(view);
-                }
-                if let Some(asked) = shared
-                    && let Some(view) =
-                        index.shared(name, asked, changed, edited, focus, certain, filter)
-                {
-                    return Some(view);
-                }
-                followed.and_then(|asked| {
-                    index.follow_with(
-                        name,
-                        &asked.root,
-                        &asked.out,
-                        &asked.into,
-                        changed,
-                        edited,
-                        focus,
-                        certain,
-                    )
-                })
-            };
+            }
+            // One found pattern; a graph that no longer has it leaves
+            // what else was asked.
+            if let Some(id) = pattern
+                && let Some(view) = index.pattern(name, id, changed, edited, focus, certain)
+            {
+                return Some(view);
+            }
+            // The ways between two places, or what the two share, come
+            // before a followed place; a place the graph does not know
+            // leaves what else was asked.
+            if let Some((from, to)) = path
+                && let Some(view) = index.path(name, from, to, changed, edited, focus, certain)
+            {
+                return Some(view);
+            }
+            if let Some(asked) = shared
+                && let Some(view) =
+                    index.shared(name, asked, changed, edited, focus, certain, filter)
+            {
+                return Some(view);
+            }
+            followed.and_then(|asked| {
+                index.follow_with(
+                    name,
+                    &asked.root,
+                    &asked.out,
+                    &asked.into,
+                    changed,
+                    edited,
+                    focus,
+                    certain,
+                )
+            })
+        };
         // What every answer says of the tests: whether they are left out,
         // and how many that is.
         let told = |view: &mut Value| {
@@ -1182,9 +1231,55 @@ impl Graphs {
         // The patterns found where a picture is open, on its boxes and
         // beside it, where they were asked for. A link looked into is no
         // picture of places, and a pattern's own picture is the pattern.
-        let marked = |index: &crate::graph_map::Index, view: &mut Value| {
-            if patterns && link.is_none() && view["mode"] != "pattern" && view["nodes"].is_array() {
+        let marked = |index: &crate::graph_map::Index,
+                      view: &mut Value,
+                      rules: &std::result::Result<Option<Rules>, String>| {
+            if let Err(error) = rules {
+                view["architecture_error"] = json!(error);
+            }
+            if patterns
+                && !modules
+                && scenario.is_none()
+                && link.is_none()
+                && view["mode"] != "pattern"
+                && view["nodes"].is_array()
+            {
                 index.mark_patterns(view, certain);
+                match rules {
+                    Ok(Some(rules)) => index.mark_declared_layers(view, Some(rules)),
+                    Err(_) => index.mark_declared_layers(view, None),
+                    Ok(None) => {}
+                }
+                if let Ok(rules) = rules {
+                    index.mark_architecture(view, certain, rules.as_ref());
+                }
+            }
+        };
+        let mark_history =
+            |index: &crate::graph_map::Index, view: &mut Value, revision: Option<&str>| {
+                if history
+                    && !modules
+                    && scenario.is_none()
+                    && link.is_none()
+                    && !view["path"].is_object()
+                    && !view["shared"].is_object()
+                    && !view["pattern"].is_object()
+                    && !view["cycle"].is_object()
+                {
+                    match self.git_history(project, &root, revision) {
+                        Ok(Some(found)) => index.mark_history(view, &found),
+                        Ok(None) => view["git_history"] = json!({"state": "empty"}),
+                        Err(_) => view["git_history"] = json!({"state": "unavailable"}),
+                    }
+                }
+            };
+        let mark_incoming = |index: &crate::graph_map::Index, view: &mut Value| {
+            if no_incoming
+                && link.is_none()
+                && matches!(view["mode"].as_str(), None | Some("changes" | "file"))
+                && view["nodes"].is_array()
+            {
+                index.mark_without_incoming(view, certain, filter);
             }
         };
         let Some(target) = target else {
@@ -1193,18 +1288,29 @@ impl Graphs {
                 &live(&self.store.state, project),
                 &root,
             )?);
-            let mut view = follow(&index, &[], &|_| None)
+            let rules = if reads_rules {
+                Rules::read(&root)
+            } else {
+                Ok(None)
+            };
+            let mut view = follow(&index, &[], &|_| None, &rules)
                 .unwrap_or_else(|| index.view_with(name, scope, spread, focus, certain, filter));
-            marked(&index, &mut view);
+            marked(&index, &mut view, &rules);
+            mark_history(&index, &mut view, None);
+            mark_incoming(&index, &mut view);
             view["project_id"] = json!(project);
             view["built"] = json!({"commit": built["commit"], "at": built["at"]});
             told(&mut view);
             return Ok(view);
         };
         // A run is read from its session every time: it may still be going.
-        let ran = match target {
-            Target::Run(session) => Some(self.ran(project, &root, session)?),
-            _ => None,
+        let (ran, comparison) = match target {
+            Target::Run(session) => {
+                let (ran, comparison) =
+                    self.run_launches(project, &root, session, launch, compare_launch)?;
+                (Some(ran), comparison)
+            }
+            _ => (None, None),
         };
         let resolved = match (target, &ran) {
             (_, Some(ran)) => ran.resolved.clone(),
@@ -1240,7 +1346,7 @@ impl Graphs {
                 ));
             }
             let index = asked(index);
-            let mut view = follow(&index, &[], &|_| None)
+            let mut view = follow(&index, &[], &|_| None, &Ok(None))
                 .ok_or_else(|| HarnessError::invalid("Choose a base cycle or link."))?;
             view["project_id"] = json!(project);
             view["target"] = json!(target.text());
@@ -1250,6 +1356,14 @@ impl Graphs {
             told(&mut view);
             return Ok(view);
         }
+        let rules = if reads_rules {
+            match &resolved.revision {
+                Some(revision) => graph_changes::architecture_at(&root, revision, &resolved.prefix),
+                None => Rules::read(&root),
+            }
+        } else {
+            Ok(None)
+        };
         let found = self.graph_of(project, &root, &resolved)?;
         let pull_cycle = cycle.is_some() && matches!(target, Target::Pull(_));
         let changed = resolved
@@ -1280,7 +1394,7 @@ impl Graphs {
                     }
                     graph_changes::edited(&root, &resolved, path).ok().flatten()
                 };
-                let mut view = if let Some(mut view) = follow(&index, &changed, &touched) {
+                let mut view = if let Some(mut view) = follow(&index, &changed, &touched, &rules) {
                     if pull_cycle && view["mode"] == "cycle" {
                         let snapshot = kept.contains('@');
                         self.compare_pr_cycle(
@@ -1293,7 +1407,7 @@ impl Graphs {
                     // inside a Rust file are told by the spans kept beside
                     // the graph of a commit: a graph without them cannot
                     // be compared without its tests.
-                    if view["pattern"]["sort"] == "layers" {
+                    if view["pattern"]["sort"] == "layers" && view["pattern"]["declared"] != true {
                         let untold = if stale {
                             Some("stale")
                         } else if notests
@@ -1340,12 +1454,37 @@ impl Graphs {
                         None => index.changes(name, &changed, scope, focus, certain, filter),
                     }
                 };
-                marked(&index, &mut view);
+                marked(&index, &mut view, &rules);
+                mark_history(&index, &mut view, resolved.revision.as_deref());
+                mark_incoming(&index, &mut view);
+                if !notests && !stale {
+                    index.tests_reaching_changes(&mut view, &changed, scope, certain);
+                }
                 // What a run opened is laid over whatever picture of its
                 // change is drawn.
-                if let Some(ran) = &ran {
+                if let Some(ran) = &ran
+                    && !modules
+                    && scenario.is_none()
+                {
                     view["run"] = ran.told.clone();
-                    index.overlay_run(&mut view, &changed, &ran.opened, certain);
+                    let followup = comparison.as_ref().map(|run| {
+                        let edited = run
+                            .resolved
+                            .files
+                            .iter()
+                            .map(|file| file.path.as_str())
+                            .collect();
+                        (run, edited)
+                    });
+                    index.overlay_run_with_comparison(
+                        &mut view,
+                        &changed,
+                        (&ran.opened, &ran.shell_reads),
+                        certain,
+                        followup
+                            .as_ref()
+                            .map(|(run, edited)| ((&run.opened, &run.shell_reads), edited)),
+                    );
                 }
                 view
             }
@@ -1354,12 +1493,12 @@ impl Graphs {
             // links are those the checkout's files have.
             None if published.is_file() => {
                 let index = asked(self.maps.index(project, &published, &root)?);
-                let mut view = follow(&index, &changed, &|_| None).unwrap_or_else(|| {
+                let mut view = follow(&index, &changed, &|_| None, &rules).unwrap_or_else(|| {
                     index.changes(name, &changed, scope, focus, certain, filter)
                 });
-                marked(&index, &mut view);
+                marked(&index, &mut view, &rules);
                 view["preliminary"] = json!(true);
-                if view["pattern"]["sort"] == "layers" {
+                if view["pattern"]["sort"] == "layers" && view["pattern"]["declared"] != true {
                     view["pattern"]["change"] = if found.state == "failed" {
                         json!({"state": "unavailable", "reason": "head"})
                     } else {
@@ -1391,6 +1530,32 @@ impl Graphs {
         told(&mut view);
         Ok(view)
     }
+    fn git_history(
+        &self,
+        project: &str,
+        root: &Path,
+        revision: Option<&str>,
+    ) -> Result<Option<Arc<graph_changes::History>>> {
+        let Some(revision) = graph_changes::history_revision(root, revision)? else {
+            return Ok(None);
+        };
+        if let Some(cached) = lock(&self.history)?.get(project).filter(|entry| {
+            entry.revision == revision && entry.read_at.elapsed() < Duration::from_secs(60)
+        }) {
+            return Ok(Some(cached.data.clone()));
+        }
+        let found = Arc::new(graph_changes::history(root, &revision)?);
+        lock(&self.history)?.insert(
+            project.to_owned(),
+            HistoryEntry {
+                revision,
+                read_at: Instant::now(),
+                data: found.clone(),
+            },
+        );
+        Ok(Some(found))
+    }
+
     /// What a search finds in the graph the map of `target` is drawn from:
     /// the project's own for the whole project and for the checkout's
     /// changes, a commit's own once it is built, and the project's until
@@ -1952,15 +2117,33 @@ impl Graphs {
     /// changed, each with what was done to it, and the files it opened. A
     /// session of another project is no run of this one.
     fn ran(&self, project: &str, root: &Path, session: &str) -> Result<RunChange> {
+        Ok(self.run_launches(project, root, session, None, None)?.0)
+    }
+
+    fn run_launches(
+        &self,
+        project: &str,
+        root: &Path,
+        session: &str,
+        launch: Option<&str>,
+        compare: Option<&str>,
+    ) -> Result<(RunChange, Option<RunChange>)> {
         let record = self.store.get(session)?;
         if record["project_id"] != project {
             return Err(HarnessError::missing("This project has no such run."));
         }
-        let mut ledger = crate::run_activity::RunLedger::new(
-            record["provider"].as_str().unwrap_or(""),
-            None,
-            false,
-        );
+        let ledger = || {
+            crate::run_activity::RunLedger::new(
+                record["provider"].as_str().unwrap_or(""),
+                None,
+                false,
+            )
+        };
+        let mut primary = (ledger(), BTreeMap::new());
+        let mut followup = compare.map(|_| (ledger(), BTreeMap::new()));
+        let workspace = Path::new(record["project_path"].as_str().unwrap_or(""));
+        let mut launches = Vec::new();
+        let mut known = BTreeSet::new();
         let mut after = 0;
         loop {
             let events = self.store.events(session, after)?;
@@ -1968,19 +2151,70 @@ impl Graphs {
                 break;
             };
             for event in &events {
-                // Past this notice steps are counted and no longer named.
-                if event["targets"] == "limited" {
-                    ledger.limited = true;
+                let id = event["launch_id"]
+                    .as_str()
+                    .filter(|value| !value.is_empty());
+                if let Some(id) = id
+                    && known.insert(id.to_owned())
+                {
+                    launches.push(json!({
+                        "id": id, "number": launches.len() + 1, "at": event["at"],
+                    }));
                 }
-                if event["kind"] == "tool" {
-                    ledger.observe(event, event["state"].is_string().then_some(event));
+                let selected = if launch.is_none() || launch == id {
+                    Some(&mut primary)
+                } else if compare == id {
+                    followup.as_mut()
+                } else {
+                    None
+                };
+                if let Some((ledger, reads)) = selected {
+                    if event["targets"] == "limited" {
+                        ledger.limited = true;
+                    }
+                    if event["kind"] == "tool" {
+                        ledger.observe(event, event["state"].is_string().then_some(event));
+                        if let Some((id, files)) = shell_reads::completed(event, workspace) {
+                            reads.extend(files.into_iter().map(|file| (file, id)));
+                        }
+                    }
                 }
             }
             after = last;
         }
+        if launch
+            .into_iter()
+            .chain(compare)
+            .any(|id| !known.contains(id))
+        {
+            return Err(HarnessError::missing(
+                "This session has no such recorded launch.",
+            ));
+        }
+        let mut primary = Self::run_change(root, session, &record, primary);
+        primary.told["launches"] = json!(launches);
+        primary.told["launch"] = json!(launch);
+        primary.told["compare_launch"] = json!(compare);
+        Ok((
+            primary,
+            followup.map(|run| Self::run_change(root, session, &record, run)),
+        ))
+    }
+
+    fn run_change(
+        root: &Path,
+        session: &str,
+        record: &Value,
+        (ledger, shell_reads): (crate::run_activity::RunLedger, BTreeMap<String, u64>),
+    ) -> RunChange {
         let plain = |path: &str| path.replace('\\', "/").trim_start_matches("./").to_owned();
         let (opened, edited) = ledger.files();
         let opened = opened.into_iter().map(plain).collect::<BTreeSet<_>>();
+        let explicit_opened = opened.len();
+        let opened = opened
+            .into_iter()
+            .chain(shell_reads.keys().cloned())
+            .collect::<BTreeSet<_>>();
         let files = edited
             .into_iter()
             .map(|(path, status)| graph_changes::Change {
@@ -2004,15 +2238,16 @@ impl Graphs {
             "steps": receipt["steps"],
             "opened": opened.len(),
             "edited": files.len(),
+            "shell_opened": shell_reads.len(),
             "outside": (count("opened") + count("edited"))
-                .saturating_sub((opened.len() + files.len()) as u64),
+                .saturating_sub((explicit_opened + files.len()) as u64),
             "searched": receipt["searched"],
             "commands": receipt["commands"],
             "helpers": receipt["helpers"],
             "limited": receipt["limited"],
             "elsewhere": elsewhere,
         });
-        Ok(RunChange {
+        RunChange {
             resolved: Arc::new(Resolved {
                 target: Target::Run(session.to_owned()),
                 kind: "run",
@@ -2027,8 +2262,9 @@ impl Graphs {
                 notes: Vec::new(),
             }),
             opened,
+            shell_reads,
             told,
-        })
+        }
     }
     /// Says in a picture of a folder's layers what the chosen change did
     /// to their order: the pairs of files that run against it now and did
@@ -2624,6 +2860,7 @@ impl Graphs {
                 lock(&self.chosen)?.retain(|(name, _), _| name != project);
                 lock(&self.refused)?.retain(|(name, _), _| name != project);
                 self.maps.forget(project);
+                lock(&self.history)?.remove(project);
             }
             _ => {
                 return Err(HarnessError::invalid(
@@ -2738,6 +2975,12 @@ impl Domain for Graphs {
                     };
                     let (certain, notests) = (flag("certain")?, flag("notests")?);
                     let patterns = flag("patterns")?;
+                    let history = flag("history")?;
+                    let modules = flag("modules")?;
+                    let no_incoming = flag("no_incoming")?;
+                    let origin = text("scenario")?;
+                    let launch = text("launch")?;
+                    let compare_launch = text("compare_launch")?;
                     let target = match query["target"].as_str() {
                         None | Some("") => None,
                         Some(text) => Some(Target::parse(text)?),
@@ -2806,6 +3049,18 @@ impl Domain for Graphs {
                     {
                         return Err(HarnessError::invalid("Invalid code graph pattern."));
                     }
+                    if !origin.is_empty()
+                        && (modules
+                            || !base.is_empty()
+                            || !from.is_empty()
+                            || !ends.is_empty()
+                            || !sharing.is_empty()
+                            || !cycle.is_empty()
+                            || !pattern.is_empty()
+                            || followed.is_some())
+                    {
+                        return Err(HarnessError::invalid("Invalid scenario view."));
+                    }
                     // Of what they share one kind is drawn, and a request
                     // may say which.
                     let users = match query["side"].as_str() {
@@ -2820,7 +3075,7 @@ impl Domain for Graphs {
                     // a request says.
                     let skip = match query["skip"].as_str() {
                         None | Some("") => 0,
-                        Some(text) if !sharing.is_empty() => text
+                        Some(text) if !sharing.is_empty() || !origin.is_empty() => text
                             .parse::<usize>()
                             .ok()
                             .filter(|skip| *skip <= 1_000_000)
@@ -2862,6 +3117,13 @@ impl Domain for Graphs {
                                     _ => None,
                                 },
                                 patterns,
+                                history,
+                                modules,
+                                no_incoming,
+                                launch: (!launch.is_empty()).then_some(launch.as_str()),
+                                compare_launch: (!compare_launch.is_empty())
+                                    .then_some(compare_launch.as_str()),
+                                scenario: (!origin.is_empty()).then_some((origin.as_str(), skip)),
                                 pattern: (!pattern.is_empty()).then_some(pattern.as_str()),
                             },
                         )
@@ -2950,9 +3212,32 @@ mod tests {
             .find(|route| route.operation == "graph.map")
             .unwrap();
         for part in [
-            "scope", "focus", "certain", "filter", "target", "follow", "out", "into", "notests",
-            "spread", "from", "to", "path", "shared", "side", "skip", "cycle", "base", "patterns",
+            "scope",
+            "focus",
+            "certain",
+            "filter",
+            "target",
+            "follow",
+            "out",
+            "into",
+            "notests",
+            "spread",
+            "from",
+            "to",
+            "path",
+            "shared",
+            "side",
+            "skip",
+            "cycle",
+            "base",
+            "patterns",
             "pattern",
+            "history",
+            "modules",
+            "no_incoming",
+            "launch",
+            "compare_launch",
+            "scenario",
         ] {
             assert!(route.query.contains(&part), "{part}");
         }
@@ -3934,6 +4219,137 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 ("ready".to_owned(), head[..12].to_owned(), 2, 0)
             );
         }
+        #[test]
+        fn map_git_history_finds_indirect_peers_and_ranks_hotspots() {
+            let fixture = Fixture::new();
+            fixture.git(&["init", "-q", "--initial-branch=main"]);
+            let files = [
+                ("a", "A.php"),
+                ("b", "B.php"),
+                ("c", "C.php"),
+                ("d", "D.php"),
+            ];
+            let links = [("a", "b"), ("b", "a"), ("c", "a"), ("b", "d")];
+            fixture.write("graph.fixture", &sketch(&files, &links));
+            for (_, path) in files {
+                fixture.write(path, "first");
+            }
+            fixture.commit("first");
+            for (_, path) in files {
+                fixture.write(path, "second");
+            }
+            fixture.commit("second");
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+            let map = |shown| fixture.graphs.map(&fixture.project, None, &shown).unwrap();
+            assert!(map(Shown::default())["git_history"].is_null());
+            let shown = Shown {
+                focus: Some("A.php"),
+                history: true,
+                ..Shown::default()
+            };
+            let view = map(shown);
+            let history = &view["git_history"];
+            assert_eq!(history["commits"], 2, "{view}");
+            assert_eq!(
+                history["cochanges"]["rows"],
+                json!([{"path":"D.php","together":2,"commits":2}])
+            );
+            assert_eq!(
+                history["hot"],
+                json!([
+                    {"path":"A.php","commits":2,"neighbors":2},
+                    {"path":"B.php","commits":2,"neighbors":2}
+                ])
+            );
+            fixture.write("A.php", "third");
+            fixture.commit("third");
+            assert_eq!(map(shown)["git_history"]["cochanges"]["commits"], 3);
+        }
+
+        #[test]
+        fn layers_use_the_project_rules_and_report_invalid_updates() {
+            let fixture = Fixture::new();
+            fixture.git(&["init", "-q", "--initial-branch=main"]);
+            let files = [("a", "X.php"), ("b", "Y.php"), ("c", "Z.php")];
+            fixture.write(
+                "graph.fixture",
+                &sketch(&files, &[("a", "b"), ("b", "a"), ("b", "c")]),
+            );
+            for (_, file) in files {
+                fixture.write(file, "<?php");
+            }
+            let rules = json!({"version":1,"layers":[
+                {"id":"first","name":"First","paths":["X.php"],"allows":[]},
+                {"id":"second","name":"Second","paths":["Y.php"],"allows":["first"]}
+            ]});
+            let file = crate::graph_map::layer_rules::FILE;
+            fixture.write(file, &rules.to_string());
+            let revision = fixture.commit("policy");
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+            let map = |shown| fixture.graphs.map(&fixture.project, None, &shown).unwrap();
+            let ordinary = map(Shown {
+                patterns: true,
+                ..Shown::default()
+            });
+            assert_eq!(
+                ordinary["patterns"]["kinds"][0]["instances"][0]["id"],
+                "layers@"
+            );
+            let nodes = ordinary["nodes"].as_array().unwrap();
+            let first = nodes.iter().find(|node| node["path"] == "X.php").unwrap();
+            assert_eq!(first["architecture_layer"]["name"], "First");
+            assert_eq!(ordinary["architecture"]["reciprocal_total"], 1);
+            assert_eq!(ordinary["architecture"]["violations"]["pairs"], 1);
+            let edges = ordinary["edges"].as_array().unwrap();
+            assert_eq!(
+                edges.iter().find(|edge| edge["from"] == "X.php").unwrap()["architecture_violation"],
+                1
+            );
+            assert!(
+                edges.iter().find(|edge| edge["to"] == "X.php").unwrap()["architecture_violation"]
+                    .is_null()
+            );
+            let file_view = map(Shown {
+                scope: "X.php",
+                patterns: true,
+                ..Shown::default()
+            });
+            assert!(
+                file_view["nodes"].as_array().unwrap().iter().any(|node| {
+                    node["symbol"] == true && node["architecture_layer"]["name"] == "First"
+                }),
+                "{file_view}"
+            );
+            let layers = |focus| Shown {
+                pattern: Some("layers@"),
+                focus,
+                ..Shown::default()
+            };
+            let view = map(layers(None));
+            assert_eq!(view["pattern"]["declared"], true);
+            assert_eq!(view["pattern"]["apart"], 1);
+            assert_eq!(view["pattern"]["against"]["pairs"], 1);
+            assert_eq!(
+                view["pattern"]["against"]["rows"][0]["from"]["path"],
+                "X.php"
+            );
+            assert_eq!(
+                map(layers(Some("layer:second>layer:first")))["focus"]["against"],
+                false
+            );
+            fixture.write(file, "{invalid");
+            let invalid = map(layers(None));
+            assert!(invalid["architecture_error"].is_string());
+            assert_ne!(invalid["mode"], "pattern");
+            assert!(
+                graph_changes::architecture_at(&fixture.folder, &revision, "")
+                    .unwrap()
+                    .is_some()
+            );
+        }
+
         /// A session of the project with the steps a run recorded, as the
         /// store keeps them: each step started and completed under one call.
         fn recorded(fixture: &Fixture, folder: &str, steps: &[Value]) -> String {
@@ -3981,11 +4397,19 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             // order.
             let uses = [
                 &NEEDS[..],
-                &[("mailer", "order"), ("line", "order"), ("order", "line")],
+                &[
+                    ("mailer", "order"),
+                    ("line", "order"),
+                    ("order", "line"),
+                    ("test", "controller"),
+                ],
             ]
             .concat();
             let mut files = SHOP.to_vec();
-            files.push(("coupon", "src/Entity/Coupon.php"));
+            files.extend([
+                ("coupon", "src/Entity/Coupon.php"),
+                ("test", "tests/OrderTest.php"),
+            ]);
             fixture.write("graph.fixture", &sketch(&files, &uses));
             fixture.commit("a shop");
             fixture.graphs.act(&fixture.project, "enable").unwrap();
@@ -4042,6 +4466,21 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                     &view["change"]["unknown"]
                 ),
                 (&json!(3), &json!(1), &json!(0))
+            );
+            let test_reach = view["test_reach"].as_array().unwrap();
+            let order_tests = test_reach
+                .iter()
+                .find(|row| row["path"] == "src/Entity/Order.php")
+                .unwrap();
+            assert_eq!(order_tests["tests"][0]["path"], "tests/OrderTest.php");
+            assert_eq!(order_tests["tests"][0]["steps"], 3);
+            assert!(
+                map(Shown {
+                    notests: true,
+                    ..Shown::default()
+                })
+                .unwrap()["test_reach"]
+                    .is_null()
             );
             let status = |path: &str| {
                 view["nodes"]
@@ -4154,6 +4593,98 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 "This project has no such run."
             );
         }
+        #[test]
+        fn comparing_launches_keeps_the_original_changes_and_attributes_followup_actions() {
+            let fixture = Fixture::new();
+            fixture.branched();
+            let links = [
+                ("service", "order"),
+                ("controller", "order"),
+                ("mailer", "order"),
+                ("line", "order"),
+            ];
+            fixture.write("graph.fixture", &sketch(&SHOP, &links));
+            fixture.commit("a shop");
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+            let order = "src/Entity/Order.php";
+            let service = "src/Service/OrderService.php";
+            let controller = SHOP.iter().find(|(id, _)| *id == "controller").unwrap().1;
+            let mailer = "src/Service/MailService.php";
+            let line = SHOP.iter().find(|(id, _)| *id == "line").unwrap().1;
+            let session = recorded(
+                &fixture,
+                fixture.folder.to_str().unwrap(),
+                &[step("Read", line)],
+            );
+            let first = store::hexid();
+            let second = store::hexid();
+            for (id, tool, path, call) in [
+                (&first, "Edit", order, "1"),
+                (&first, "Read", controller, "2"),
+                (&second, "Edit", service, "1"),
+                (&second, "Read", mailer, "2"),
+            ] {
+                for (state, fields) in [
+                    ("started", json!({"path": path})),
+                    ("completed", json!({"ok": true})),
+                ] {
+                    let mut event = fields;
+                    event["kind"] = json!("tool");
+                    event["tool"] = json!(tool);
+                    event["state"] = json!(state);
+                    event["call"] = json!(call);
+                    event["launch_id"] = json!(id);
+                    fixture.store.event(&session, &event).unwrap();
+                }
+            }
+            std::fs::create_dir_all(fixture.folder.join(line).parent().unwrap()).unwrap();
+            fixture.write(line, "<?php");
+            let shell = fixture.store.event(&session, &json!({
+                "kind":"tool", "tool":"Shell", "state":"completed", "ok":true, "exit_code":0,
+                "launch_id":second, "detail":format!("sed -n '1p' {line}"),
+            })).unwrap();
+            let target = Target::Run(session);
+            let map = |launch, compare_launch| {
+                fixture.graphs.map(
+                    &fixture.project,
+                    Some(&target),
+                    &Shown {
+                        launch,
+                        compare_launch,
+                        ..Shown::default()
+                    },
+                )
+            };
+            let view = map(Some(&first), Some(&second)).unwrap();
+            assert_eq!(view["chosen"]["files"], 1);
+            assert_eq!(view["run"]["opened"], 1);
+            assert_eq!(view["run"]["launches"][0]["id"], first);
+            assert_eq!(view["run"]["launches"][1]["id"], second);
+            let comparison = &view["run"]["comparison"];
+            assert_eq!(comparison["newly_touched"], 3);
+            assert_eq!(comparison["gaps"], 0);
+            let row = |path| {
+                comparison["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["path"] == path)
+                    .unwrap()
+            };
+            assert_eq!(row(service)["followup_edited"], true);
+            assert_eq!(row(service)["opened"], false);
+            assert_eq!(row(mailer)["followup_opened"], true);
+            assert_eq!(row(controller)["opened"], true);
+            assert_eq!(row(line)["opened"], false);
+            assert_eq!(row(line)["followup_opened"], true);
+            assert_eq!(row(line)["followup_shell_read"], shell);
+            assert!(row(line)["shell_read"].is_null());
+            assert!(map(None, None).unwrap()["run"]["comparison"].is_null());
+            assert!(map(Some(&first), Some(&first)).is_err());
+            assert!(map(Some(&first), Some("foreign")).is_err());
+        }
+
         #[test]
         fn a_long_run_and_one_in_a_folder_of_its_own_are_read_as_far_as_they_were_recorded() {
             let fixture = Fixture::new();

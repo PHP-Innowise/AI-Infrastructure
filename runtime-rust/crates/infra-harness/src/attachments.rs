@@ -123,6 +123,35 @@ pub fn read(store: &SessionStore, sid: &str, id: &str) -> Result<(Value, Vec<u8>
     ))
 }
 
+pub fn directories(store: &SessionStore, sid: &str) -> Result<Vec<PathBuf>> {
+    let root = store.state.join("attachments");
+    let ids = {
+        let db = store.connection()?;
+        let mut query =
+            db.prepare("SELECT id FROM attachments WHERE session_id=?1 ORDER BY rowid")?;
+        query
+            .query_map([sid], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let mut folders = Vec::new();
+    for id in ids {
+        if id.len() != 32
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            continue;
+        }
+        let folder = root.join(&id);
+        infra_core::fs::admit_descendant(&root, &folder)?;
+        // An upload whose folder is gone is reported when its message reads it.
+        if std::fs::symlink_metadata(&folder).is_ok_and(|metadata| metadata.is_dir()) {
+            folders.push(folder);
+        }
+    }
+    Ok(folders)
+}
+
 pub struct UploadGuard {
     pub folders: Vec<PathBuf>,
     pub committed: bool,

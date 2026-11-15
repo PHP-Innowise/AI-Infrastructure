@@ -22,7 +22,16 @@
 //! what implements it outside, so the four layers would call its every
 //! adapter a link against the order. A folder that keeps most of its code
 //! in such rings is read by them.
+use super::layer_rules::Rules;
 use super::*;
+
+const DECLARED: &str = "Layers and allowed dependencies from .harness-architecture.json. Counted: calls, inheritance and the types of fields, parameters and results.";
+
+#[derive(Clone, Copy)]
+struct DisplayLayer<'a> {
+    id: &'a str,
+    name: &'a str,
+}
 
 /// One layer, with what places a file in it: an ending of its name, or the
 /// name of a folder it lies in. All are in small letters.
@@ -239,6 +248,13 @@ pub(super) const TELLS: [&str; 2] = [
 ];
 /// Whether a file is code a layer can hold: no test, and no template that
 /// only wears the ending of a language, as `home.blade.php` does.
+/// The layer the project's rules file a file in. As with the layers read
+/// from names, a test, a template and what is no code are filed in none: a
+/// test reaches into every layer it tests, and its links are no dependency
+/// of the layer it lies in.
+fn declared(rules: &Rules, path: &str) -> Option<usize> {
+    code(path).then(|| rules.layer(path)).flatten()
+}
 fn code(path: &str) -> bool {
     let file = name(path);
     !is_test(path)
@@ -421,11 +437,11 @@ struct Held {
     /// The way its files are filed: by the four layers, or by the rings.
     way: usize,
     /// How many files each layer holds.
-    files: [u64; 4],
+    files: Vec<u64>,
     /// Code under the folder that no layer holds.
     apart: u64,
     /// Through how many links each layer needs each other one.
-    needs: [[Flow; 4]; 4],
+    needs: Vec<Vec<Flow>>,
     /// The pairs of files of two layers, the most linked first.
     pairs: Vec<(u32, u32, Flow)>,
 }
@@ -508,12 +524,20 @@ impl Layers {
             .find_map(|way| self.held_by(index, scope, way))
     }
     fn held_by(&self, index: &Index, scope: &str, way: usize) -> Option<Held> {
-        let Way { of, cross } = &self.ways[way];
+        let held = self.ways[way].held(index, scope, way, WAYS[way].len());
+        let filed = held.files.iter().sum::<u64>();
+        (!held.pairs.is_empty() && filed >= FEWEST && filed * SHARES[way] >= filed + held.apart)
+            .then_some(held)
+    }
+}
+impl Way {
+    fn held(&self, index: &Index, scope: &str, way: usize, layers: usize) -> Held {
+        let Way { of, cross } = self;
         let mut held = Held {
             way,
-            files: [0; 4],
+            files: vec![0; layers],
             apart: 0,
-            needs: [[Flow::default(); 4]; 4],
+            needs: vec![vec![Flow::default(); layers]; layers],
             pairs: Vec::new(),
         };
         for (file, path) in index.files.iter().enumerate() {
@@ -535,10 +559,10 @@ impl Layers {
                 held.pairs.push((*from, *to, *flow));
             }
         }
-        let filed = held.files.iter().sum::<u64>();
-        (!held.pairs.is_empty() && filed >= FEWEST && filed * SHARES[way] >= filed + held.apart)
-            .then_some(held)
+        held
     }
+}
+impl Layers {
     /// The layers of the open folder as a row of the list of found
     /// patterns, with what tells them: that differs by the way the folder
     /// is filed.
@@ -583,7 +607,244 @@ impl Layers {
         certain: bool,
     ) -> Option<Value> {
         let held = self.held(index, scope)?;
-        let (table, of) = (WAYS[held.way], &self.ways[held.way].of);
+        let way = &self.ways[held.way];
+        let table = WAYS[held.way]
+            .iter()
+            .map(|layer| DisplayLayer {
+                id: layer.id,
+                name: layer.name,
+            })
+            .collect::<Vec<_>>();
+        Some(held.view(index, project, scope, focus, certain, &table, &way.of, None))
+    }
+}
+
+impl Index {
+    pub(crate) fn declared_layers(
+        &self,
+        project: &str,
+        scope: &str,
+        focus: Option<&str>,
+        certain: bool,
+        rules: &Rules,
+    ) -> Value {
+        let way = Way::read(self, certain, &|path| declared(rules, path));
+        let held = way.held(self, scope, LAYERED, rules.layers.len());
+        let table = rules
+            .layers
+            .iter()
+            .map(|layer| DisplayLayer {
+                id: &layer.id,
+                name: &layer.name,
+            })
+            .collect::<Vec<_>>();
+        held.view(
+            self,
+            project,
+            scope,
+            focus,
+            certain,
+            &table,
+            &way.of,
+            Some(rules),
+        )
+    }
+
+    pub(crate) fn mark_architecture(&self, view: &mut Value, certain: bool, rules: Option<&Rules>) {
+        if !matches!(view["mode"].as_str(), None | Some("changes" | "file")) {
+            return;
+        }
+        let asked = view["scope"].as_str().unwrap_or("");
+        let scope = self.opens(asked).map_or(asked, holder);
+        let (way, table) = if let Some(rules) = rules {
+            (
+                Way::read(self, certain, &|path| declared(rules, path)),
+                rules
+                    .layers
+                    .iter()
+                    .map(|layer| (layer.id.as_str(), layer.name.as_str()))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            let layers = Layers::read(self, certain);
+            let Some(held) = layers.held(self, scope).or_else(|| layers.held(self, "")) else {
+                return;
+            };
+            let table = WAYS[held.way]
+                .iter()
+                .map(|layer| (layer.id, layer.name))
+                .collect();
+            let [layered, ringed] = layers.ways;
+            (if held.way == RINGED { ringed } else { layered }, table)
+        };
+        let opened = self.opens(asked);
+        let within = |path: &str| opened.map_or_else(|| under(scope, path), |file| file == path);
+        let path_id: HashMap<_, _> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(id, path)| (path.as_str(), id))
+            .collect();
+        let forbidden = |from, to| rules.map_or(from > to, |rules| rules.forbidden(from, to));
+        let mut pairs: BTreeMap<(usize, usize), Flow> = BTreeMap::new();
+        let mut violations = Vec::new();
+        let mut violation_links = 0;
+        let mut marked = HashMap::new();
+        for &(from, to, flow) in &way.cross {
+            let (a, b) = (from as usize, to as usize);
+            let (source, target) = (&self.files[a], &self.files[b]);
+            let (from_layer, to_layer) = (way.of[a] as usize, way.of[b] as usize);
+            if !within(source) && !within(target) {
+                continue;
+            }
+            let pair = pairs.entry((from_layer, to_layer)).or_default();
+            pair.links += flow.links;
+            pair.guessed += flow.guessed;
+            if forbidden(from_layer, to_layer) {
+                marked.insert((source.as_str(), target.as_str()), flow.links);
+                violation_links += flow.links;
+                if violations.len() < LISTED {
+                    let end = |path: &str, layer: usize| json!({"path":path, "name":name(path), "layer":table[layer].1});
+                    violations.push(json!({"from":end(source, from_layer), "to":end(target, to_layer), "links":flow.links, "guessed":flow.guessed}));
+                }
+            }
+        }
+        let layer_json = |id: usize| json!({"id":table[id].0, "name":table[id].1, "color":id});
+        let reciprocal: Vec<_> = pairs
+            .iter()
+            .filter_map(|(&(from, to), &forward)| {
+                if from >= to {
+                    return None;
+                }
+                let reverse = pairs.get(&(to, from))?;
+                Some(json!({"from":layer_json(from), "to":layer_json(to),
+                "forward":forward.links, "reverse":reverse.links,
+                "forward_guessed":forward.guessed, "reverse_guessed":reverse.guessed}))
+            })
+            .collect();
+        let mut visible = BTreeSet::new();
+        let mut file_nodes = HashSet::new();
+        let mut folder_nodes = HashSet::new();
+        for node in view["nodes"].as_array_mut().into_iter().flatten() {
+            let node_path = node["path"].as_str().unwrap_or("");
+            let path = node["file"]
+                .as_str()
+                .or_else(|| if node["symbol"] == true { opened } else { None })
+                .unwrap_or(node_path);
+            let layer = if node["folder"] == true {
+                folder_nodes.insert(node_path.to_owned());
+                let mut under = self
+                    .files
+                    .iter()
+                    .zip(&way.of)
+                    .filter(|(file, _)| under(path, file))
+                    .map(|(_, layer)| *layer);
+                under
+                    .next()
+                    .filter(|first| under.all(|next| next == *first))
+            } else {
+                if node["symbol"] != true {
+                    file_nodes.insert(node_path.to_owned());
+                }
+                path_id.get(path).map(|&file| way.of[file])
+            };
+            if let Some(layer) = layer.filter(|&id| id != NO) {
+                visible.insert(layer as usize);
+                node["architecture_layer"] = layer_json(layer as usize);
+            }
+        }
+        let box_for = |path| {
+            if let Some(file) = file_nodes.get(path) {
+                return Some(file.as_str());
+            }
+            let mut parent = holder(path);
+            while !parent.is_empty() {
+                if let Some(folder) = folder_nodes.get(parent) {
+                    return Some(folder.as_str());
+                }
+                parent = holder(parent);
+            }
+            None
+        };
+        let mut drawn = HashMap::new();
+        // Folder arrows represent many file links. Attribute a violation only
+        // to the boxes representing its two ends.
+        if view["mode"] != "file" {
+            for (&(source, target), links) in &marked {
+                if let Some(ends) = box_for(source).zip(box_for(target)) {
+                    *drawn.entry(ends).or_insert(0) += links;
+                }
+            }
+        }
+        for edge in view["edges"].as_array_mut().into_iter().flatten() {
+            let endpoints = edge["from"].as_str().zip(edge["to"].as_str());
+            if let Some(links) = endpoints.and_then(|ends| drawn.get(&ends)) {
+                edge["architecture_violation"] = json!(links);
+            }
+        }
+        view["architecture"] = json!({
+            "declared":rules.is_some(),
+            "layers":visible.into_iter().map(layer_json).collect::<Vec<_>>(),
+            "violations":{"links":violation_links, "pairs":marked.len(),
+                "more":marked.len().saturating_sub(violations.len()), "rows":violations},
+            "reciprocal_total":reciprocal.len(),
+            "reciprocal":reciprocal.into_iter().take(LISTED).collect::<Vec<_>>(),
+        });
+    }
+
+    pub(crate) fn mark_declared_layers(&self, view: &mut Value, rules: Option<&Rules>) {
+        let asked = view["scope"].as_str().unwrap_or("");
+        let scope = self.opens(asked).map_or(asked, holder);
+        let mut kinds = view["patterns"]["kinds"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let before = kinds.len();
+        kinds.retain(|kind| kind["id"] != "layers");
+        let mut found = view["patterns"]["found"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_sub((before - kinds.len()) as u64);
+        if let Some(rules) = rules {
+            let files = self
+                .files
+                .iter()
+                .filter(|path| under(scope, path) && declared(rules, path).is_some())
+                .count();
+            let row = json!({
+                "id": format!("layers@{scope}"), "sort": "layers", "name": "Layers",
+                "of": if scope.is_empty() { "the whole project" } else { name(scope) },
+                "file": "", "line": 0, "named": false, "guessed": false,
+                "parts": format!("Project rules · {files} classified files"),
+            });
+            kinds.insert(
+                0,
+                json!({
+                    "id": "layers", "name": "Layers", "family": "architecture",
+                    "tells": DECLARED, "found": 1, "more": 0, "instances": [row],
+                }),
+            );
+            found += 1;
+        }
+        view["patterns"] = json!({"found":found, "kinds":kinds});
+    }
+}
+
+impl Held {
+    #[allow(clippy::too_many_arguments)]
+    fn view(
+        &self,
+        index: &Index,
+        project: &str,
+        scope: &str,
+        focus: Option<&str>,
+        certain: bool,
+        table: &[DisplayLayer<'_>],
+        of: &[u8],
+        rules: Option<&Rules>,
+    ) -> Value {
+        let held = self;
+        let forbidden = |from, to| rules.map_or(from > to, |rules| rules.forbidden(from, to));
         let key = |layer: usize| format!("layer:{}", table[layer].id);
         let present = (0..table.len())
             .filter(|layer| held.files[*layer] > 0)
@@ -612,13 +873,14 @@ impl Layers {
             };
             json!({"from": end(from), "to": end(to), "links": flow.links, "guessed": flow.guessed})
         };
-        let back = |from: u32, to: u32| of[from as usize] > of[to as usize];
+        let back =
+            |from: u32, to: u32| forbidden(of[from as usize] as usize, of[to as usize] as usize);
         let against = held
             .pairs
             .iter()
             .filter(|(from, to, _)| back(*from, *to))
             .collect::<Vec<_>>();
-        let total = held.against();
+        let total = sum(&mut against.iter().map(|(_, _, flow)| *flow));
         let mut told = Vec::new();
         if held.apart > 0 {
             told.push(format!(
@@ -640,9 +902,10 @@ impl Layers {
                 "sort": "layers",
                 "name": "Layers",
                 "family": "architecture",
-                "tells": TELLS[held.way],
-                "rings": held.way == RINGED,
-                "named": true,
+                "tells": if rules.is_some() { DECLARED } else { TELLS[held.way] },
+                "declared": rules.is_some(),
+                "rings": rules.is_none() && held.way == RINGED,
+                "named": rules.is_none(),
                 "guessed": total.guessed > 0,
                 "of": if scope.is_empty() {
                     json!({"path": "", "name": project, "what": "project"})
@@ -680,7 +943,7 @@ impl Layers {
                     json!({
                         "from": key(from), "to": key(to),
                         "links": flow.links, "guessed": flow.guessed,
-                        "against": from > to,
+                        "against": forbidden(from, to),
                     })
                 })
                 .collect::<Vec<_>>(),
@@ -709,7 +972,7 @@ impl Layers {
                     "to": {"path": key(to), "name": table[to].name},
                     "links": flow.links,
                     "guessed": flow.guessed,
-                    "against": from > to,
+                    "against": forbidden(from, to),
                     "pairs": made.len(),
                     "rows": made
                         .iter()
@@ -719,10 +982,10 @@ impl Layers {
                     "more": made.len().saturating_sub(LISTED),
                 });
             }
-            return Some(view);
+            return view;
         }
         let Some(chosen) = focus.and_then(layer) else {
-            return Some(view);
+            return view;
         };
         // The files of the layer, by how much they have with other layers.
         let mut members: HashMap<u32, Flow> = HashMap::new();
@@ -757,16 +1020,31 @@ impl Layers {
         };
         let mut focus = node(chosen);
         focus["inside"] = json!(true);
-        focus["signs"] = json!(signs(held.way, chosen));
+        focus["signs"] = json!(rules.map_or_else(
+            || signs(held.way, chosen),
+            |rules| rules.layers[chosen].paths.join(", ")
+        ));
         focus["uses"] = present
             .iter()
             .filter(|other| held.needs[chosen][**other].links > 0)
-            .map(|other| beside(*other, held.needs[chosen][*other], chosen > *other))
+            .map(|other| {
+                beside(
+                    *other,
+                    held.needs[chosen][*other],
+                    forbidden(chosen, *other),
+                )
+            })
             .collect();
         focus["used_by"] = present
             .iter()
             .filter(|other| held.needs[**other][chosen].links > 0)
-            .map(|other| beside(*other, held.needs[*other][chosen], *other > chosen))
+            .map(|other| {
+                beside(
+                    *other,
+                    held.needs[*other][chosen],
+                    forbidden(*other, chosen),
+                )
+            })
             .collect();
         focus["members"] = members
             .iter()
@@ -793,7 +1071,7 @@ impl Layers {
             "more": own.len().saturating_sub(LISTED),
         });
         view["focus"] = focus;
-        Some(view)
+        view
     }
 }
 /// One pair of files of two layers as a row: the two files with the layers

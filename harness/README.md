@@ -2056,12 +2056,69 @@ the links it has with the change.
   changed and was never looked at is where a break the run did not see is looked
   for first. A row opens its file, and ↗ beside it shows what makes up its link
   with the changed file it uses most. The list is where to look, not a verdict:
-  a session records the files a step names, so what a run saw through a shell
-  command, a search or a helper is not counted as opened, and the note above the
-  map says how many of those it made. It also says where the record stops before
+  a session records the files a step names. The map also attributes successful
+  shell commands of the form `sed -n '1,20p' path` and chains of such commands
+  joined by `&&`, resolving paths against the run workspace. **Read via shell**
+  opens the recorded command. Other shell commands, searches and helpers can
+  leave file reads unrecorded. It also says where the record stops before
   the end of a long run, and that a run in a worktree of its own is drawn on the
   project's graph. A deleted file has no users in a graph built after it was
-  gone.
+  gone. When a session has multiple recorded launches, **Map launch** selects
+  which launch supplies the changes. **Compare with** shows which direct
+  dependents the second launch opened or edited, and which have no recorded
+  action in either launch. The dependency links come from the project's graph.
+- **Patterns** adds layer colors to files and to folders whose files all
+  belong to one layer. The Architecture panel gives the color key, links
+  that violate the layer rules, and layer pairs that depend on each other.
+  When a file or folder arrow includes a violation, it is marked red.
+  **Adapter** candidates require a type to implement an abstraction and
+  delegate an interface method to a different type it holds.
+- **Patterns → Layers** uses `.harness-architecture.json` from the project root
+  when present. Otherwise the map infers layers from names. A malformed rules
+  file is reported beside the map.
+- **Scenario slice** starts at a selected file or symbol and follows its
+  outgoing dependencies, including indirect ones. The graph draws the nearest
+  places and the list shows all reachable places by shortest distance, with
+  filtering and paging. A file uses the file-level graph. A selected symbol
+  follows symbol links. Test and link filters apply to the traversal.
+- **No incoming links** lists files in the open folder with no recorded
+  links from other files, and symbols with no recorded links to them, even
+  from their own file. Incoming links from elsewhere in the project count.
+  Filter by name or path and select an entry to open it. The current link and
+  test filters affect this list. Check entry points, configuration, dynamic
+  calls and external consumers before removing a candidate.
+- **Modules** draws Graphify communities as boxes and their dependencies as
+  directed arrows. Select a module to see its files, internal links and the
+  modules it uses or is used by. A file can contribute nodes to more than one
+  community. Filter by module name, ID or file path to find other modules.
+  The map reports unassigned nodes separately and uses the current graph's
+  test and link filters. Select a listed file to open its normal file map.
+- **Git history** uses up to 200 local first-parent commits through the chosen
+  revision, or the checkout's HEAD for its current changes and runs. It skips
+  commits that touch more than 100 project paths and counts paths as they were
+  named at the time. Select a file for peers that changed with it at least
+  twice and have no direct edge to it in the graph. The opened folder's
+  **Hotspots** rank files with at least two commits and two distinct neighbors
+  by commits multiplied by neighbors. Select a result to open its file.
+- **Tests reaching the change** lists changed files with test candidates that
+  reach them along directed links, nearest first. Expand a file and select a
+  candidate to see the path. The map says when it finds no path, a changed file
+  is absent from the graph, or the traversal reaches its limit. It uses test
+  naming conventions and test spans inside Rust files. The paths show what is
+  reachable in the graph. Execution coverage requires running the tests.
+  The section is available on a current change graph with **Without tests**
+  turned off.
+- **Attach map context** puts `dependency-map.txt` in the current session draft
+  for this project. Select a place to include it and its listed incoming and
+  outgoing neighbors. Where available, the file also includes test candidates
+  for the selected file. The attachment is sent with the next message.
+- **Explain node** or **Explain link** is in the context menu of a box or a
+  link: right click it, or press the Menu key or Shift+F10 on it. A Plan
+  session of the provider chosen for the next session answers from the graph
+  evidence of that place and from the source, without the project's
+  accelerator context, and appears in the session list like any other. It stops
+  after five minutes; closing the window or asking for another explanation
+  stops it sooner.
 - **Commits and pull requests…** opens a picker with three lists, as an editor's
   history and pull request views have them. **Commits** is the history of the
   checked-out branch, of every branch or of one local branch: message, the branches
@@ -2131,6 +2188,35 @@ using the current filters. Open a link to inspect its details at the base
 revision. **Back to PR cycle** returns to the PR's chain, and **Back to map**
 returns to the map you started from.
 
+The server reads `graph.json` in one streaming
+pass and keeps the last four graphs it read. On the development machine a 500 MB
+graph of 545,000 symbols took two seconds to read and 10 ms per folder after that.
+
+Whether a graph makes an agent cheaper or better is not established: published
+measurements show smaller answers per query, not better sessions. Compare runs with
+and without it before relying on it. On this repository, with the graph only
+offered, neither Codex nor Claude Code asked it in three Plan runs, and they answered
+correctly from the files; asked to start from it, both did, and Claude Code ran the
+commands in Edit mode as well, with no saving in time or tokens. The graph can also
+be incomplete: for a Rust function called from other crates by its path, Graphify
+0.9.105 listed the callers inside its own file and none of the four outside it, so
+an answer about what uses something still has to be confirmed in the files.
+
+### Fleet review setup and use
+
+Use the same native `infra-engine` and generated UI assets as the browser server. Fleet's durable workflow, provider workers and checkpoints are implemented in Rust; no separate Python environment or `HARNESS_FLEET_PYTHON` selection is used.
+
+1. Choose **Workflow → Fleet review**, a project/worktree and a provider.
+2. Select reviewers and enter the review scope in the task field. For real
+   reviews enable **Use additional agents**; its count caps concurrent reviewers.
+   Each reviewer gets the selected model/effort. Ultracode is unavailable because
+   this graph manages its own reviewers. **Offline dry-run** needs no authenticated
+   CLI and does not execute the project's memory runtime.
+3. Set a per-reviewer timeout if needed. **Budgets → Time** overrides the server
+   timeout for that graph invocation. An optional USD budget is available
+   for Claude; Codex/Cursor monetary cost is shown as unknown when unavailable.
+4. Review the findings at **Awaiting approval**, then **Approve report** to save
+   and download Markdown, or **Reject report** to finish without publishing it.
 **Patterns** marks a picture with the design and architecture patterns the graph
 shows signs of. A box with ◆ is a part of a found pattern, or a folder or a file
 that holds one, with how many where there are more. The side panel lists what was
@@ -2265,35 +2351,6 @@ picture says so: a graph of the checkout that is older than its files, until it 
 rebuilt, and, with **Without tests**, a graph of a commit of a Rust project that
 was kept without the spans of its tests.
 
-The server reads `graph.json` in one streaming
-pass and keeps the last four graphs it read. On the development machine a 500 MB
-graph of 545,000 symbols took two seconds to read and 10 ms per folder after that.
-
-Whether a graph makes an agent cheaper or better is not established: published
-measurements show smaller answers per query, not better sessions. Compare runs with
-and without it before relying on it. On this repository, with the graph only
-offered, neither Codex nor Claude Code asked it in three Plan runs, and they answered
-correctly from the files; asked to start from it, both did, and Claude Code ran the
-commands in Edit mode as well, with no saving in time or tokens. The graph can also
-be incomplete: for a Rust function called from other crates by its path, Graphify
-0.9.105 listed the callers inside its own file and none of the four outside it, so
-an answer about what uses something still has to be confirmed in the files.
-
-### Fleet review setup and use
-
-Use the same native `infra-engine` and generated UI assets as the browser server. Fleet's durable workflow, provider workers and checkpoints are implemented in Rust; no separate Python environment or `HARNESS_FLEET_PYTHON` selection is used.
-
-1. Choose **Workflow → Fleet review**, a project/worktree and a provider.
-2. Select reviewers and enter the review scope in the task field. For real
-   reviews enable **Use additional agents**; its count caps concurrent reviewers.
-   Each reviewer gets the selected model/effort. Ultracode is unavailable because
-   this graph manages its own reviewers. **Offline dry-run** needs no authenticated
-   CLI and does not execute the project's memory runtime.
-3. Set a per-reviewer timeout if needed. **Budgets → Time** overrides the server
-   timeout for that graph invocation. An optional USD budget is available
-   for Claude; Codex/Cursor monetary cost is shown as unknown when unavailable.
-4. Review the findings at **Awaiting approval**, then **Approve report** to save
-   and download Markdown, or **Reject report** to finish without publishing it.
    The preview is visible before approval. Reports stay in local server storage.
 
 Checkpoints live under `<state-dir>/fleet/<session-id>/`. A waiting review survives
@@ -2361,3 +2418,34 @@ create a Python virtualenv or install LangGraph. The source-first implementation
 phase is complete; [the migration report](../docs/RUST-MIGRATION.md) records
 subsequent native builds, tests and checks with their evidence limits. Provider
 runs require separate authentication and are not implied by those local checks.
+
+
+### Declaring architecture layers
+
+Put `.harness-architecture.json` in the Harness project root. For example:
+
+```json
+{
+  "version": 1,
+  "layers": [
+    {"id": "http", "name": "HTTP", "paths": ["src/Http"], "allows": ["app"]},
+    {"id": "app", "name": "Application", "paths": ["src/App"], "allows": ["domain"]},
+    {"id": "domain", "name": "Domain", "paths": ["src/Domain"], "allows": []}
+  ]
+}
+```
+
+Each path is an exact file path or a directory prefix relative to the project
+root, with forward slashes. The longest matching path wins. Identical paths
+cannot be declared twice. Dependencies within a layer are allowed. Each
+cross-layer dependency needs an entry in the source layer's `allows` list.
+The map checks calls, inheritance and type dependencies it finds in the graph.
+As with the layers read from names, a test, a template (`*.blade.php`) and a
+file that is no code are filed in no layer, whatever path holds them: a test
+reaches into the layers it tests. The Layers view checks both endpoints inside
+the open folder. It reports unclassified code separately. Open Layers at the
+project root to include links across folders.
+
+The current map reads the working copy's rules. A historical change uses the
+rules from its selected revision. Declared layers show violations in the chosen
+graph. The existing added/removed comparison applies to inferred layers.
