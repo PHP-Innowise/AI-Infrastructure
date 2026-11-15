@@ -2433,9 +2433,11 @@ root, with forward slashes. The longest matching path wins. Identical paths
 cannot be declared twice. Dependencies within a layer are allowed. Each
 cross-layer dependency needs an entry in the source layer's `allows` list.
 The map checks calls, inheritance and type dependencies it finds in the graph.
-The Layers view checks both endpoints inside the open folder. It reports
-unclassified code separately. Open Layers at the project root to include links
-across folders.
+As with the layers read from names, a test, a template (`*.blade.php`) and a
+file that is no code are filed in no layer, whatever path holds them: a test
+reaches into the layers it tests. The Layers view checks both endpoints inside
+the open folder. It reports unclassified code separately. Open Layers at the
+project root to include links across folders.
 
 The current map reads the working copy's rules. A historical change uses the
 rules from its selected revision. Declared layers show violations in the chosen

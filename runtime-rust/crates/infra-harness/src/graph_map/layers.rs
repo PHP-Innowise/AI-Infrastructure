@@ -248,6 +248,13 @@ pub(super) const TELLS: [&str; 2] = [
 ];
 /// Whether a file is code a layer can hold: no test, and no template that
 /// only wears the ending of a language, as `home.blade.php` does.
+/// The layer the project's rules file a file in. As with the layers read
+/// from names, a test, a template and what is no code are filed in none: a
+/// test reaches into every layer it tests, and its links are no dependency
+/// of the layer it lies in.
+fn declared(rules: &Rules, path: &str) -> Option<usize> {
+    code(path).then(|| rules.layer(path)).flatten()
+}
 fn code(path: &str) -> bool {
     let file = name(path);
     !is_test(path)
@@ -621,7 +628,7 @@ impl Index {
         certain: bool,
         rules: &Rules,
     ) -> Value {
-        let way = Way::read(self, certain, &|path| rules.layer(path));
+        let way = Way::read(self, certain, &|path| declared(rules, path));
         let held = way.held(self, scope, LAYERED, rules.layers.len());
         let table = rules
             .layers
@@ -651,7 +658,7 @@ impl Index {
         let scope = self.opens(asked).map_or(asked, holder);
         let (way, table) = if let Some(rules) = rules {
             (
-                Way::read(self, certain, &|path| rules.layer(path)),
+                Way::read(self, certain, &|path| declared(rules, path)),
                 rules
                     .layers
                     .iter()
@@ -802,7 +809,7 @@ impl Index {
             let files = self
                 .files
                 .iter()
-                .filter(|path| under(scope, path) && rules.layer(path).is_some())
+                .filter(|path| under(scope, path) && declared(rules, path).is_some())
                 .count();
             let row = json!({
                 "id": format!("layers@{scope}"), "sort": "layers", "name": "Layers",

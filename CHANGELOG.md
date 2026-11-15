@@ -39,6 +39,8 @@ edition's own files remain in that edition's changelog.
 
 - Let projects declare layers and an allowed dependency matrix with
   `.harness-architecture.json`. Harness shows violations in the Layers view.
+  As with the layers read from names, a test, a template and a file that is
+  no code are filed in no layer.
 
 - Trace a scenario from a file or symbol on the Harness dependency map, with a
   directed overview and a searchable list of reachable places by distance.
