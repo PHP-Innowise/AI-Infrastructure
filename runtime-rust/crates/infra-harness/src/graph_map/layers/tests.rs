@@ -492,11 +492,46 @@ fn a_folder_that_keeps_its_code_in_rings_is_read_by_them() {
     assert_eq!(
         view["edges"],
         json!([
-            {"from": "layer:adapters", "to": "layer:application", "links": 2, "guessed": 0, "against": false},
-            {"from": "layer:adapters", "to": "layer:domain", "links": 2, "guessed": 0, "against": false},
-            {"from": "layer:application", "to": "layer:adapters", "links": 1, "guessed": 1, "against": true},
-            {"from": "layer:application", "to": "layer:domain", "links": 2, "guessed": 0, "against": false},
-            {"from": "layer:domain", "to": "layer:adapters", "links": 1, "guessed": 0, "against": true},
+            {
+                "from": "layer:adapters",
+                "to": "layer:application",
+                "links": 2,
+                "guessed": 0,
+                "kinds": [{"kind": "calls", "links": 1}, {"kind": "implements", "links": 1}],
+                "against": false
+            },
+            {
+                "from": "layer:adapters",
+                "to": "layer:domain",
+                "links": 2,
+                "guessed": 0,
+                "kinds": [{"kind": "implements", "links": 1}, {"kind": "references", "links": 1}],
+                "against": false
+            },
+            {
+                "from": "layer:application",
+                "to": "layer:adapters",
+                "links": 1,
+                "guessed": 1,
+                "kinds": [{"kind": "calls", "links": 1}],
+                "against": true
+            },
+            {
+                "from": "layer:application",
+                "to": "layer:domain",
+                "links": 2,
+                "guessed": 0,
+                "kinds": [{"kind": "calls", "links": 1}, {"kind": "references", "links": 1}],
+                "against": false
+            },
+            {
+                "from": "layer:domain",
+                "to": "layer:adapters",
+                "links": 1,
+                "guessed": 0,
+                "kinds": [{"kind": "calls", "links": 1}],
+                "against": true
+            },
         ])
     );
     let against = &pattern["against"];
@@ -725,12 +760,54 @@ fn the_layers_of_a_folder_say_what_needs_what_and_what_runs_against_their_order(
     assert_eq!(
         view["edges"],
         json!([
-            {"from": "layer:entry", "to": "layer:services", "links": 3, "guessed": 0, "against": false},
-            {"from": "layer:services", "to": "layer:data", "links": 2, "guessed": 0, "against": false},
-            {"from": "layer:services", "to": "layer:model", "links": 3, "guessed": 0, "against": false},
-            {"from": "layer:data", "to": "layer:entry", "links": 1, "guessed": 1, "against": true},
-            {"from": "layer:data", "to": "layer:model", "links": 2, "guessed": 0, "against": false},
-            {"from": "layer:model", "to": "layer:services", "links": 2, "guessed": 0, "against": true},
+            {
+                "from": "layer:entry",
+                "to": "layer:services",
+                "links": 3,
+                "guessed": 0,
+                "kinds": [{"kind": "calls", "links": 2}, {"kind": "references", "links": 1}],
+                "against": false
+            },
+            {
+                "from": "layer:services",
+                "to": "layer:data",
+                "links": 2,
+                "guessed": 0,
+                "kinds": [{"kind": "calls", "links": 1}, {"kind": "references", "links": 1}],
+                "against": false
+            },
+            {
+                "from": "layer:services",
+                "to": "layer:model",
+                "links": 3,
+                "guessed": 0,
+                "kinds": [{"kind": "references", "links": 2}, {"kind": "calls", "links": 1}],
+                "against": false
+            },
+            {
+                "from": "layer:data",
+                "to": "layer:entry",
+                "links": 1,
+                "guessed": 1,
+                "kinds": [{"kind": "calls", "links": 1}],
+                "against": true
+            },
+            {
+                "from": "layer:data",
+                "to": "layer:model",
+                "links": 2,
+                "guessed": 0,
+                "kinds": [{"kind": "inherits", "links": 1}, {"kind": "references", "links": 1}],
+                "against": false
+            },
+            {
+                "from": "layer:model",
+                "to": "layer:services",
+                "links": 2,
+                "guessed": 0,
+                "kinds": [{"kind": "calls", "links": 1}, {"kind": "references", "links": 1}],
+                "against": true
+            },
         ])
     );
     // What runs against the order is listed pair by pair, the most linked
@@ -1294,7 +1371,14 @@ fn an_entity_called_after_a_plain_noun_is_no_layer_of_its_own() {
     assert_eq!(view["pattern"]["against"]["links"], 0);
     assert_eq!(
         view["edges"],
-        json!([{"from": "layer:entry", "to": "layer:model", "links": 1, "guessed": 0, "against": false}])
+        json!([{
+            "from": "layer:entry",
+            "to": "layer:model",
+            "links": 1,
+            "guessed": 0,
+            "kinds": [{"kind": "calls", "links": 1}],
+            "against": false
+        }])
     );
 }
 /// The shop as it was before a change, and as the change left it: the
@@ -2037,4 +2121,101 @@ fn declared_layers_leave_out_tests_and_what_is_no_code() {
     assert!(map["nodes"][1]["architecture_layer"].is_null(), "{map}");
     assert!(map["nodes"][2]["architecture_layer"].is_null(), "{map}");
     assert_eq!(map["architecture"]["violations"]["pairs"], 1, "{map}");
+}
+#[test]
+fn layer_edges_aggregate_multi_kind_dependencies_sorted_by_count_then_name() {
+    let mut graph = Graph::default();
+    for path in [
+        "src/Controller/OrderController.php",
+        "src/Service/OrderService.php",
+        "src/Repository/OrderRepository.php",
+        "src/Entity/Order.php",
+    ] {
+        graph.file(path);
+    }
+    graph
+        .link(
+            "src/Controller/OrderController.php",
+            "src/Service/OrderService.php",
+            "calls",
+            None,
+        )
+        .link(
+            "src/Controller/OrderController.php",
+            "src/Service/OrderService.php",
+            "extends",
+            None,
+        )
+        .link(
+            "src/Controller/OrderController.php",
+            "src/Service/OrderService.php",
+            "implements",
+            None,
+        )
+        .link(
+            "src/Controller/OrderController.php",
+            "src/Service/OrderService.php",
+            "references",
+            Some("field"),
+        )
+        .guessed(
+            "src/Controller/OrderController.php",
+            "src/Service/OrderService.php",
+        )
+        .link(
+            "src/Service/OrderService.php",
+            "src/Repository/OrderRepository.php",
+            "calls",
+            None,
+        )
+        .link(
+            "src/Repository/OrderRepository.php",
+            "src/Entity/Order.php",
+            "references",
+            Some("return_type"),
+        );
+    let index = graph.index();
+    let all = index
+        .pattern("demo", "layers@src", &[], &|_| None, None, false)
+        .unwrap();
+    let entry_to_svc = all["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|edge| edge["from"] == "layer:entry" && edge["to"] == "layer:services")
+        .unwrap();
+    assert_eq!(
+        entry_to_svc,
+        &json!({
+            "from": "layer:entry",
+            "to": "layer:services",
+            "links": 5,
+            "guessed": 1,
+            "kinds": [
+                {"kind": "calls", "links": 2},
+                {"kind": "extends", "links": 1},
+                {"kind": "implements", "links": 1},
+                {"kind": "references", "links": 1},
+            ],
+            "against": false,
+        })
+    );
+    let certain = index
+        .pattern("demo", "layers@src", &[], &|_| None, None, true)
+        .unwrap();
+    let entry_to_svc_certain = certain["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|edge| edge["from"] == "layer:entry" && edge["to"] == "layer:services")
+        .unwrap();
+    assert_eq!(
+        entry_to_svc_certain["kinds"],
+        json!([
+            {"kind": "calls", "links": 1},
+            {"kind": "extends", "links": 1},
+            {"kind": "implements", "links": 1},
+            {"kind": "references", "links": 1},
+        ])
+    );
 }

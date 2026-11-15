@@ -19,7 +19,7 @@ regex = "1"
 version = "0.3"
 features = [
 "Window","Document","Element","Node","NodeList","Event","EventTarget","KeyboardEvent",
-"MouseEvent","PointerEvent","HtmlElement","HtmlInputElement","HtmlSelectElement",
+"MouseEvent","PointerEvent","WheelEvent","AddEventListenerOptions","HtmlElement","HtmlInputElement","HtmlSelectElement",
 "HtmlTextAreaElement","HtmlFormElement","HtmlDialogElement","HtmlDetailsElement",
 "HtmlAnchorElement","HtmlCollection","DomTokenList","CssStyleDeclaration","DomRect",
 "Request","RequestInit","RequestCredentials","RequestCache","RequestMode","Response",

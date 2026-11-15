@@ -414,7 +414,7 @@ fn signs(way: usize, layer: usize) -> String {
 #[derive(Default)]
 struct Way {
     of: Vec<u8>,
-    cross: Vec<(u32, u32, Flow)>,
+    cross: Vec<(u32, u32, EdgeFlow)>,
 }
 /// The layers of a graph, by the four layers and by the rings.
 #[derive(Default)]
@@ -441,7 +441,7 @@ struct Held {
     /// Code under the folder that no layer holds.
     apart: u64,
     /// Through how many links each layer needs each other one.
-    needs: Vec<Vec<Flow>>,
+    needs: Vec<Vec<EdgeFlow>>,
     /// The pairs of files of two layers, the most linked first.
     pairs: Vec<(u32, u32, Flow)>,
 }
@@ -473,39 +473,55 @@ impl Way {
             .iter()
             .map(|path| filed(path).map_or(NO, |layer| layer as u8))
             .collect::<Vec<_>>();
-        let needing = ["calls", "inherits", "extends", "implements"]
+        let requiring = ["calls", "inherits", "extends", "implements"]
             .iter()
             .filter_map(|name| index.kinds.iter().position(|kind| kind == name))
             .collect::<Vec<_>>();
-        let mut cross: HashMap<(u32, u32), Flow> = HashMap::new();
+        let references = index
+            .kinds
+            .iter()
+            .position(|kind| kind == "references")
+            .map(|kind| kind as u16);
+        let mut cross: HashMap<(u32, u32), EdgeFlow> = HashMap::new();
         let links = index
             .uses
             .iter()
-            .filter(|(.., kind, _)| needing.contains(&(*kind as usize)))
-            .chain(index.ties.iter());
-        for (from, to, _, guessed) in links {
-            if certain && *guessed {
+            .filter(|(.., kind, _)| requiring.contains(&(*kind as usize)))
+            .map(|(from, to, kind, guessed)| (*from, *to, Some(*kind), *guessed))
+            .chain(
+                index
+                    .ties
+                    .iter()
+                    .map(|(from, to, _, guessed)| (*from, *to, references, *guessed)),
+            );
+        for (from, to, kind, guessed) in links {
+            if certain && guessed {
                 continue;
             }
             let (from, to) = (
-                index.symbols[*from as usize].file,
-                index.symbols[*to as usize].file,
+                index.symbols[from as usize].file,
+                index.symbols[to as usize].file,
             );
             let (above, below) = (of[from as usize], of[to as usize]);
             if from == to || above == NO || below == NO || above == below {
                 continue;
             }
-            let flow = cross.entry((from, to)).or_default();
-            flow.links += 1;
-            flow.guessed += u64::from(*guessed);
+            let entry = cross.entry((from, to)).or_default();
+            if let Some(kind) = kind {
+                entry.add_link(kind, guessed);
+            } else {
+                entry.flow.links += 1;
+                entry.flow.guessed += u64::from(guessed);
+            }
         }
         let mut cross = cross
             .into_iter()
-            .map(|((from, to), flow)| (from, to, flow))
+            .map(|((from, to), edge)| (from, to, edge))
             .collect::<Vec<_>>();
         cross.sort_by(|a, b| {
-            b.2.links
-                .cmp(&a.2.links)
+            b.2.flow
+                .links
+                .cmp(&a.2.flow.links)
                 .then_with(|| index.files[a.0 as usize].cmp(&index.files[b.0 as usize]))
                 .then_with(|| index.files[a.1 as usize].cmp(&index.files[b.1 as usize]))
         });
@@ -537,7 +553,7 @@ impl Way {
             way,
             files: vec![0; layers],
             apart: 0,
-            needs: vec![vec![Flow::default(); layers]; layers],
+            needs: vec![vec![EdgeFlow::default(); layers]; layers],
             pairs: Vec::new(),
         };
         for (file, path) in index.files.iter().enumerate() {
@@ -549,14 +565,12 @@ impl Way {
                 layer => held.files[layer as usize] += 1,
             }
         }
-        for (from, to, flow) in cross {
+        for (from, to, edge) in cross {
             if under(scope, &index.files[*from as usize])
                 && under(scope, &index.files[*to as usize])
             {
-                let needs = &mut held.needs[of[*from as usize] as usize][of[*to as usize] as usize];
-                needs.links += flow.links;
-                needs.guessed += flow.guessed;
-                held.pairs.push((*from, *to, *flow));
+                held.needs[of[*from as usize] as usize][of[*to as usize] as usize].merge(edge);
+                held.pairs.push((*from, *to, edge.flow));
             }
         }
         held
@@ -690,7 +704,8 @@ impl Index {
         let mut violations = Vec::new();
         let mut violation_links = 0;
         let mut marked = HashMap::new();
-        for &(from, to, flow) in &way.cross {
+        for &(from, to, ref edge) in &way.cross {
+            let flow = edge.flow;
             let (a, b) = (from as usize, to as usize);
             let (source, target) = (&self.files[a], &self.files[b]);
             let (from_layer, to_layer) = (way.of[a] as usize, way.of[b] as usize);
@@ -859,8 +874,8 @@ impl Held {
             json!({
                 "path": key(layer), "name": table[layer].name, "folder": true, "layer": true,
                 "files": held.files[layer], "symbols": 0, "within": 0, "changed": 0,
-                "out": sum(&mut held.needs[layer].iter().copied()).links,
-                "in": sum(&mut held.needs.iter().map(|row| row[layer])).links,
+                "out": sum(&mut held.needs[layer].iter().map(|edge| edge.flow)).links,
+                "in": sum(&mut held.needs.iter().map(|row| row[layer].flow)).links,
             })
         };
         let pair = |from: u32, to: u32, flow: Flow| {
@@ -937,14 +952,11 @@ impl Held {
             "edges": present
                 .iter()
                 .flat_map(|from| present.iter().map(move |to| (*from, *to)))
-                .filter(|(from, to)| held.needs[*from][*to].links > 0)
+                .filter(|(from, to)| held.needs[*from][*to].flow.links > 0)
                 .map(|(from, to)| {
-                    let flow = held.needs[from][to];
-                    json!({
-                        "from": key(from), "to": key(to),
-                        "links": flow.links, "guessed": flow.guessed,
-                        "against": forbidden(from, to),
-                    })
+                    let mut edge = index.edge_json(&key(from), &key(to), &held.needs[from][to]);
+                    edge["against"] = json!(forbidden(from, to));
+                    edge
                 })
                 .collect::<Vec<_>>(),
             "focus": null,
@@ -955,9 +967,9 @@ impl Held {
         // drawn selects nothing.
         if let Some((from, to)) = focus.and_then(|focus| focus.split_once('>')) {
             if let (Some(from), Some(to)) = (layer(from), layer(to))
-                && held.needs[from][to].links > 0
+                && held.needs[from][to].flow.links > 0
             {
-                let flow = held.needs[from][to];
+                let flow = held.needs[from][to].flow;
                 let made = held
                     .pairs
                     .iter()
@@ -1026,22 +1038,22 @@ impl Held {
         ));
         focus["uses"] = present
             .iter()
-            .filter(|other| held.needs[chosen][**other].links > 0)
+            .filter(|other| held.needs[chosen][**other].flow.links > 0)
             .map(|other| {
                 beside(
                     *other,
-                    held.needs[chosen][*other],
+                    held.needs[chosen][*other].flow,
                     forbidden(chosen, *other),
                 )
             })
             .collect();
         focus["used_by"] = present
             .iter()
-            .filter(|other| held.needs[**other][chosen].links > 0)
+            .filter(|other| held.needs[**other][chosen].flow.links > 0)
             .map(|other| {
                 beside(
                     *other,
-                    held.needs[*other][chosen],
+                    held.needs[*other][chosen].flow,
                     forbidden(*other, chosen),
                 )
             })
@@ -1105,12 +1117,12 @@ impl Layers {
         let Way { of, cross } = &self.ways[way];
         cross
             .iter()
-            .map(|(from, to, flow)| Backward {
+            .map(|(from, to, edge)| Backward {
                 from: *from,
                 to: *to,
                 above: of[*from as usize] as usize,
                 below: of[*to as usize] as usize,
-                flow: *flow,
+                flow: edge.flow,
             })
             .filter(|pair| pair.above > pair.below)
             .collect()
@@ -1264,9 +1276,9 @@ impl Held {
     fn against(&self) -> Flow {
         let mut sum = Flow::default();
         for (from, row) in self.needs.iter().enumerate() {
-            for flow in &row[..from] {
-                sum.links += flow.links;
-                sum.guessed += flow.guessed;
+            for edge in &row[..from] {
+                sum.links += edge.flow.links;
+                sum.guessed += edge.flow.guessed;
             }
         }
         sum

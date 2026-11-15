@@ -804,6 +804,32 @@ impl Sessions {
             let _ = graphs.refresh(project, trigger);
         }
     }
+    fn live_graph_index(&self, project: &str) -> Option<Arc<crate::graph_map::Index>> {
+        let graphs = lock(&self.graphs).ok().and_then(|slot| slot.clone())?;
+        graphs.live_index(project)
+    }
+    fn emit_initial_focus(
+        &self,
+        sid: &str,
+        session: &Value,
+        workspace: &Path,
+        prompt: &str,
+        emit: &Event,
+    ) -> Result<crate::graph_live::GraphFocus> {
+        let project_id = session["project_id"].as_str().unwrap_or("");
+        let live_index = self.live_graph_index(project_id);
+        let initial_focus = crate::graph_live::predict_session_targets(
+            &self.store,
+            sid,
+            session,
+            workspace,
+            live_index.as_deref(),
+            prompt,
+        );
+        let _ = crate::graph_live::save_session_focus(&self.store, sid, &initial_focus);
+        emit(initial_focus.to_event())?;
+        Ok(initial_focus)
+    }
     pub fn install_results(&self, value: Arc<crate::results::Results>) -> Result<()> {
         let mut slot = lock(&self.results)?;
         if slot.is_some() {
@@ -1303,6 +1329,7 @@ impl Sessions {
                 self.stop_failed(&cancel);
             }
         }
+        let _ = crate::graph_live::complete_stored_session_focus(&self.store, &job.sid);
         self.graph_moment(&job.sid, crate::graph::Trigger::Finish);
         self.remove_active(&job.sid, &cancel);
         self.inbox_wake.notify_one();
@@ -1473,6 +1500,8 @@ impl Sessions {
             {
                 fleet.decide(&job.sid, action == "approve")?;
             }
+            let _ =
+                self.emit_initial_focus(&job.sid, &session, &config.project, &job.prompt, &emit);
             let result = fleet.drive(&job.sid, &config, cancel, emit).await;
             if let Some(binding) = &graph_binding {
                 let _ = self.lifecycle.abort(
@@ -1510,6 +1539,7 @@ impl Sessions {
                     .into(),
                 adapter: self.launch_adapter(&session)?,
             };
+            let _ = self.emit_initial_focus(&job.sid, &session, &workspace, &job.prompt, &emit);
             let result = cycle
                 .drive(
                     &job.prompt,
@@ -1560,6 +1590,14 @@ impl Sessions {
         }
         session = binding.session.clone();
         self.graph_moment(&job.sid, crate::graph::Trigger::Launch);
+        let initial_focus =
+            self.emit_initial_focus(&job.sid, &session, &workspace, &route.text, &emit)?;
+        let live_focus = Arc::new(Mutex::new(crate::graph_live::LiveFocusTracker::new(
+            workspace.clone(),
+        )));
+        if let Ok(mut tracker) = live_focus.lock() {
+            tracker.seed_focus(initial_focus);
+        }
         let configured = (|| -> Result<Launch> {
             let mut launch = self.configure_launch(&session, &route.text)?;
             let prepared = crate::prompt::build(
@@ -1616,6 +1654,7 @@ impl Sessions {
         let sid = job.sid.clone();
         let generation = job.generation.clone();
         let emit_events = emit.clone();
+        let focus_for_stream = live_focus.clone();
         let observed = Box::pin(provider::run_monitored_locked(
             &launch,
             Limits {
@@ -1649,7 +1688,23 @@ impl Sessions {
                         &control,
                     )?;
                 }
-                emit_events(event)
+                let focus_delta = if event["kind"] == "tool"
+                    && let Ok(mut tracker) = focus_for_stream.lock()
+                {
+                    let delta = tracker.observe_tool_event(&event);
+                    if delta.is_some() {
+                        let _ =
+                            crate::graph_live::save_session_focus(&store, &sid, tracker.focus());
+                    }
+                    delta
+                } else {
+                    None
+                };
+                emit_events(event)?;
+                if let Some(delta) = focus_delta {
+                    emit_events(delta)?;
+                }
+                Ok(())
             },
         ))
         .await;
@@ -1685,6 +1740,18 @@ impl Sessions {
                         "failed"
                     },
                 );
+                if let Ok(mut tracker) = live_focus.lock()
+                    && tracker.complete()
+                {
+                    let _ = crate::graph_live::save_session_focus(
+                        &self.store,
+                        &job.sid,
+                        tracker.focus(),
+                    );
+                    if let Some(delta) = tracker.take_delta_event() {
+                        let _ = emit(delta);
+                    }
+                }
                 return Err(error);
             }
         };
@@ -1705,6 +1772,14 @@ impl Sessions {
             .lifecycle
             .finish(&binding, &result, &emit, &mut recovery)
             .await?;
+        if let Ok(mut tracker) = live_focus.lock()
+            && tracker.complete()
+        {
+            let _ = crate::graph_live::save_session_focus(&self.store, &job.sid, tracker.focus());
+            if let Some(delta) = tracker.take_delta_event() {
+                let _ = emit(delta);
+            }
+        }
         if !result.ok {
             return Err(HarnessError::unavailable(
                 result
@@ -3026,5 +3101,156 @@ mod followup_budget_contract_tests {
             save_budget_settings(&store, &sid, &json!({"budgets":{"usd":4.0},"revision":0}))
                 .unwrap();
         assert_eq!(saved["fleet"]["worker_timeout"], 300);
+    }
+}
+
+#[cfg(test)]
+mod graph_focus_tests {
+    use super::generation_completion_tests::Fixture;
+    use super::*;
+
+    #[tokio::test]
+    async fn run_job_emits_initial_graph_focus_before_provider_launch_and_completes_on_finish() {
+        let fixture = Fixture::new();
+        let project = fixture.temporary.path().join("project");
+        std::fs::create_dir_all(project.join("src/Auth")).unwrap();
+        std::fs::write(
+            project.join("src/Auth/TokenService.php"),
+            "<?php\nclass TokenService {\n    public function decode(): void {}\n}\n",
+        )
+        .unwrap();
+
+        let store = fixture.sessions.store.clone();
+        let registered = store.register(&project).unwrap();
+        let pid = registered["id"].as_str().unwrap().to_owned();
+
+        let graph_path = crate::graph::live(&store.state, &pid);
+        std::fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &graph_path,
+            json!({
+                "nodes": [
+                    {
+                        "id": "token",
+                        "label": "TokenService",
+                        "source_file": "src/Auth/TokenService.php",
+                        "node_kind": "class",
+                        "source_location": "line 2"
+                    }
+                ],
+                "links": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let graphs = crate::graph::Graphs::new(store.clone());
+        fixture.sessions.install_graphs(graphs).unwrap();
+
+        let created = store
+            .create(
+                &json!({
+                    "project_id": pid,
+                    "provider": "claude",
+                    "mode": "edit",
+                    "workflow": "text",
+                    "project_context": false
+                }),
+                "Update TokenService validation logic",
+                &[],
+            )
+            .unwrap();
+        let sid = created["id"].as_str().unwrap().to_owned();
+        store
+            .patch(&sid, &json!({"result_base": {"is_git": false}}))
+            .unwrap();
+        let generation = store.generation(&sid).unwrap();
+
+        let job = Job {
+            sid: sid.clone(),
+            generation,
+            prompt: "Update TokenService validation logic".to_owned(),
+            kind: JobKind::Run,
+        };
+        fixture.sessions.execute_job(job, None).await;
+
+        let events = store.events(&sid, 0).unwrap();
+        let focus_events: Vec<&Value> = events
+            .iter()
+            .filter(|e| e["kind"] == "graph_focus")
+            .collect();
+        assert!(
+            !focus_events.is_empty(),
+            "expected prompt-start graph_focus event before provider launch, events={events:?}"
+        );
+        assert_eq!(focus_events[0]["phase"], "predicting");
+        assert!(
+            focus_events[0]["target_folders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "src/Auth")
+        );
+        assert!(
+            focus_events[0]["target_paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "src/Auth/TokenService.php")
+        );
+
+        let stored_focus = crate::graph_live::session_focus_value(&store, &sid).unwrap();
+        assert_eq!(stored_focus["phase"], "completed");
+        assert!(
+            stored_focus["target_paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "src/Auth/TokenService.php")
+        );
+    }
+
+    #[test]
+    fn live_focus_tracker_handles_tool_stream_and_persists_deltas() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/Auth")).unwrap();
+        let file = root.join("src/Auth/JwtGuard.php");
+        std::fs::write(
+            &file,
+            "<?php\nclass JwtGuard {\n    public function oldCheck(): bool { return true; }\n}\n",
+        )
+        .unwrap();
+
+        let mut tracker = crate::graph_live::LiveFocusTracker::new(root.to_path_buf());
+        assert!(
+            tracker
+                .observe_tool_event(&json!({
+                    "kind": "tool",
+                    "state": "started",
+                    "tool": "Edit",
+                    "path": "src/Auth/JwtGuard.php"
+                }))
+                .is_some()
+        );
+        std::fs::write(
+            &file,
+            "<?php\nclass JwtGuard {\n    public function oldCheck(): bool { return true; }\n    public function verifyToken(): bool { return false; }\n}\n",
+        )
+        .unwrap();
+        let delta = tracker
+            .observe_tool_event(&json!({
+                "kind": "tool",
+                "state": "completed",
+                "ok": true,
+                "tool": "Edit",
+                "path": "src/Auth/JwtGuard.php"
+            }))
+            .expect("delta");
+        assert_eq!(delta["kind"], "graph_focus");
+        assert_eq!(delta["phase"], "active");
+        assert_eq!(delta["created_entities"].as_array().map(Vec::len), Some(1));
+        assert_eq!(delta["created_entities"][0]["name"], "verifyToken");
+        assert_eq!(delta["created_entities"][0]["parent"], "JwtGuard");
     }
 }

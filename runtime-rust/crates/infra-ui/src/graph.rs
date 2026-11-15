@@ -195,8 +195,115 @@ pub fn graph_view(status: &V) -> GraphView {
     }
     view
 }
+fn set_progress_bar(id: &str, percent: Option<u64>) {
+    if let Some(bar) = dom::get(id) {
+        // A bar without a value is the browser's indeterminate state.
+        let _ = match percent {
+            Some(percent) => bar.set_attribute("value", &percent.to_string()),
+            None => bar.remove_attribute("value"),
+        };
+    }
+}
+/// English build progress line carrying the exact percentage when known.
+pub fn build_progress_text(status: &V, view: &GraphView) -> String {
+    let custom = m::text(&status["build"], "message");
+    let custom = custom.trim();
+    if !custom.is_empty() {
+        return match view.percent {
+            Some(pct) if !custom.contains('%') => format!("{custom} — {pct}%"),
+            _ => custom.to_owned(),
+        };
+    }
+    let build = &status["build"];
+    let base = match build["phase"].as_str() {
+        Some("read") => match (build["done"].as_u64(), build["total"].as_u64()) {
+            (Some(done), Some(total)) => {
+                format!(
+                    "Building code graph: reading {} of {} files",
+                    count(done),
+                    count(total)
+                )
+            }
+            _ => "Building code graph: reading files".to_owned(),
+        },
+        Some("assemble") => "Building code graph: assembling and clustering".to_owned(),
+        Some("wait") => "Building code graph: waiting for project graph".to_owned(),
+        Some("export") => "Building code graph: exporting commit files".to_owned(),
+        _ => "Building code graph…".to_owned(),
+    };
+    match view.percent {
+        Some(pct) if base.ends_with('…') => format!("{base} {pct}%"),
+        Some(pct) => format!("{base} · {pct}%"),
+        None => base,
+    }
+}
+/// Compact `(data-state, label)` tuple for the app-wide sidebar graph pill.
+pub fn sidebar_status(project: &str, status: &V, view: &GraphView) -> (&'static str, String) {
+    if project.is_empty() {
+        return ("idle", "Code graph: select a project".to_owned());
+    }
+    if !status.is_object() {
+        return ("idle", "Code graph: loading…".to_owned());
+    }
+    if view.building {
+        let label = match view.percent {
+            Some(pct) => format!("Building code graph… {pct}%"),
+            None => "Building code graph…".to_owned(),
+        };
+        return ("building", label);
+    }
+    match status["state"].as_str().unwrap_or("") {
+        "ready" => ("ready", "Code graph ready".to_owned()),
+        "stale" => (
+            "stale",
+            if status["graph"].is_object() {
+                "Code graph stale"
+            } else {
+                "Code graph needs rebuild"
+            }
+            .to_owned(),
+        ),
+        "failed" => ("failed", "Code graph build failed".to_owned()),
+        "missing" => ("missing", "Graphify not installed".to_owned()),
+        "empty" => ("empty", "No code graph yet".to_owned()),
+        "off" => ("off", "Code graph off".to_owned()),
+        _ => ("idle", "Code graph: loading…".to_owned()),
+    }
+}
+/// True when the embedded Sessions dependency map should refresh from server.
+pub fn sync_needed(prev_project: &str, prev: &V, project: &str, next: &V) -> bool {
+    if prev_project != project {
+        return true;
+    }
+    if prev["state"] == "building" && next["state"] != "building" {
+        return true;
+    }
+    if prev["state"] != "ready" && next["state"] == "ready" {
+        return true;
+    }
+    if prev["build"].is_object() && !next["build"].is_object() {
+        return true;
+    }
+    if prev["graph"].is_object() && !next["graph"].is_object() {
+        return true;
+    }
+    next["graph"].is_object() && prev["graph"] != next["graph"]
+}
+fn apply_status(project: &str, status: V) {
+    let prev = m::data("graph");
+    let prev_project = m::text(&m::data("graph-sync-stamp"), "project");
+    let should_sync = sync_needed(&prev_project, &prev, project, &status);
+    m::set("graph", status);
+    m::set("graph-sync-stamp", json!({ "project": project }));
+    render();
+    follow();
+    if should_sync {
+        crate::graph_map::sync_embedded(true);
+    }
+}
 fn render() {
     let status = m::data("graph");
+    let project = dom::value("project");
     let view = graph_view(&status);
     dom::text("option-graph-value", &view.chip);
     dom::attr(
@@ -216,15 +323,30 @@ fn render() {
     dom::disabled("graph-agents", !view.on);
     dom::text("graph-agents-note", &view.offer);
     dom::hidden("graph-progress", !view.building);
-    if let Some(bar) = dom::get("graph-progress-bar") {
-        // A bar without a value is the browser's indeterminate state.
-        let _ = match view.percent {
-            Some(percent) => bar.set_attribute("value", &percent.to_string()),
-            None => bar.remove_attribute("value"),
-        };
-    }
+    set_progress_bar("graph-progress-bar", view.percent);
     dom::text("graph-progress-amount", &view.amount);
     dom::text("graph-progress-left", &view.left);
+    dom::hidden("session-graph-progress", !view.building);
+    let progress_text = build_progress_text(&status, &view);
+    dom::text("session-graph-progress-text", &progress_text);
+    set_progress_bar("session-graph-progress-bar", view.percent);
+    dom::text("session-graph-progress-amount", &view.amount);
+    dom::text("session-graph-progress-left", &view.left);
+    let (pill_state, pill_label) = sidebar_status(&project, &status, &view);
+    dom::attr("sidebar-graph-pill", "data-state", pill_state);
+    dom::text("sidebar-graph-label", &pill_label);
+    let pill_title = if view.note.is_empty() {
+        pill_label.clone()
+    } else {
+        view.note.clone()
+    };
+    dom::attr("sidebar-graph-pill", "title", &pill_title);
+    let pill_aria = if view.building && !view.left.is_empty() {
+        format!("{pill_label} ({})", view.left)
+    } else {
+        pill_label
+    };
+    dom::attr("sidebar-graph-pill", "aria-label", &pill_aria);
     dom::text("graph-detail", &view.detail);
     dom::hidden("graph-detail", view.detail.is_empty());
     // The map draws the published graph, also while a newer one is being built.
@@ -232,9 +354,11 @@ fn render() {
     dom::hidden("graph-changes", !status["graph"].is_object());
     dom::hidden("graph-rebuild", !view.rebuild);
     dom::hidden("graph-delete", !view.delete);
+    crate::session::sync_working_indicator();
 }
 fn follow() {
-    if m::data("graph")["build"].is_object() {
+    let status = m::data("graph");
+    if status["build"].is_object() || status["state"] == "building" {
         dom::later("graph-poll", 1000, || {
             spawn_local(async {
                 load(false).await;
@@ -249,9 +373,7 @@ fn follow() {
 pub async fn load(visit: bool) {
     let project = dom::value("project");
     if project.is_empty() {
-        m::set("graph", V::Null);
-        render();
-        follow();
+        apply_status("", V::Null);
         return;
     }
     let path = format!(
@@ -263,9 +385,7 @@ pub async fn load(visit: bool) {
         if !m::current("project-graph", epoch) || dom::value("project") != project {
             return;
         }
-        m::set("graph", status);
-        render();
-        follow();
+        apply_status(&project, status);
     }
 }
 /// A run starting or ending is when the server brings the graph up to date.
@@ -276,6 +396,9 @@ pub fn run_state(active: bool) {
         return;
     }
     m::set("graph-run-active", json!(active));
+    if !active {
+        crate::graph_map::sync_embedded_changes();
+    }
     if m::data("graph")["enabled"] != true {
         return;
     }
@@ -302,7 +425,8 @@ async fn act(action: &str) {
     let path = format!("/api/projects/{}/graph", dom::enc(&project));
     match api::post(&path, json!({ "action": action })).await {
         Ok(status) if dom::value("project") == project => {
-            m::set("graph", status);
+            apply_status(&project, status);
+            return;
         }
         Ok(_) => return,
         Err(error) => dom::error("graph-error", &error.message),
@@ -481,5 +605,80 @@ mod tests {
         assert_eq!(span(59), "59 s");
         assert_eq!(span(120), "2 min");
         assert_eq!(megabytes(5_242_880), "5.0 MB");
+    }
+    #[test]
+    fn sidebar_and_progress_use_clear_english_with_percent() {
+        let building = status(
+            "building",
+            json!({
+                "build": {
+                    "phase": "read",
+                    "done": 120,
+                    "total": 400,
+                    "percent": 30,
+                    "remaining_seconds": 18,
+                    "rough": false,
+                    "overdue": false
+                }
+            }),
+        );
+        let view = graph_view(&building);
+        assert_eq!(
+            sidebar_status("app", &building, &view),
+            ("building", "Building code graph… 30%".to_owned())
+        );
+        assert_eq!(
+            build_progress_text(&building, &view),
+            "Building code graph: reading 120 of 400 files · 30%"
+        );
+
+        let custom = status(
+            "building",
+            json!({
+                "build": {
+                    "phase": "assemble",
+                    "percent": 65,
+                    "message": "Indexing classes and methods"
+                }
+            }),
+        );
+        assert_eq!(
+            build_progress_text(&custom, &graph_view(&custom)),
+            "Indexing classes and methods — 65%"
+        );
+
+        let ready = status("ready", json!({ "graph": graph() }));
+        assert_eq!(
+            sidebar_status("app", &ready, &graph_view(&ready)),
+            ("ready", "Code graph ready".to_owned())
+        );
+        assert_eq!(
+            sidebar_status("", &V::Null, &GraphView::default()),
+            ("idle", "Code graph: select a project".to_owned())
+        );
+    }
+    #[test]
+    fn embedded_map_sync_triggers_on_completion_project_change_or_fingerprint_change() {
+        let building = status(
+            "building",
+            json!({ "build": { "phase": "read", "percent": 40 } }),
+        );
+        let ready = status("ready", json!({ "graph": graph() }));
+        let mut updated_graph = graph();
+        updated_graph["commit"] = json!("deadbeef");
+        let ready_next = status("ready", json!({ "graph": updated_graph }));
+
+        assert!(sync_needed("", &V::Null, "proj-a", &building));
+        assert!(!sync_needed("proj-a", &building, "proj-a", &building));
+        assert!(sync_needed("proj-a", &building, "proj-a", &ready));
+        assert!(!sync_needed("proj-a", &ready, "proj-a", &ready));
+        assert!(sync_needed("proj-a", &ready, "proj-a", &ready_next));
+        assert!(sync_needed("proj-a", &ready, "proj-b", &ready));
+
+        let off = status("off", json!({}));
+        let stale = status("stale", json!({ "graph": graph() }));
+        assert!(sync_needed("proj-a", &off, "proj-a", &ready));
+        assert!(sync_needed("proj-a", &stale, "proj-a", &ready));
+        assert!(sync_needed("proj-a", &ready, "proj-a", &off));
     }
 }

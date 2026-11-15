@@ -636,6 +636,7 @@ fn tool_controls(scope: &str) {
             || governed);
     dom::disabled(&format!("{scope}-knowledge-submit"), !can);
     dom::disabled(&format!("{scope}-knowledge-action"), !enabled);
+    crate::session::sync_working_indicator();
 }
 async fn select(scope: &str, path: &str) {
     if !knowledge_ready(scope) {
@@ -1257,6 +1258,89 @@ pub async fn load_memory_use() {
         Err(_) => {}
     }
 }
+fn metric_label(key: &str) -> String {
+    let label = m::label(key);
+    let mut chars = label.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+        None => label,
+    }
+}
+
+fn memory_stage_metrics(stage: &str, stage_model: &V) -> Option<Vec<(String, String, bool)>> {
+    let map = stage_model.as_object()?;
+    let order: &[&str] = match stage {
+        "brain" => &[
+            "total",
+            "open",
+            "resolved",
+            "not_promoted",
+            "archived",
+            "private",
+            "truncated",
+        ],
+        "promotion" => &[
+            "proposed", "applied", "auto", "human", "waiting", "stalled", "rejected",
+        ],
+        "bank" => &[
+            "active",
+            "files",
+            "person",
+            "auto",
+            "reattested",
+            "created",
+            "drafts",
+            "due",
+            "past_review",
+            "changed",
+            "retired",
+            "retired_in_window",
+            "superseded",
+            "archived",
+            "bytes",
+            "truncated",
+        ],
+        "selected" => &[
+            "retrievals",
+            "with_chunk",
+            "selections",
+            "distinct",
+            "reused",
+            "cut_total",
+            "dropped",
+            "measured",
+        ],
+        _ => &[],
+    };
+    let mut rows = Vec::new();
+    let mut push = |k: &str, value: &V| {
+        if !value.is_number() && !value.is_boolean() {
+            return;
+        }
+        let is_zero = value.as_u64() == Some(0)
+            || value.as_i64() == Some(0)
+            || value.as_f64() == Some(0.0)
+            || value.as_bool() == Some(false);
+        let formatted = match value.as_bool() {
+            Some(true) => "Yes".to_string(),
+            Some(false) => "No".to_string(),
+            None => m::string(value),
+        };
+        rows.push((metric_label(k), formatted, is_zero));
+    };
+    for &k in order {
+        if let Some(value) = map.get(k) {
+            push(k, value);
+        }
+    }
+    for (k, value) in map {
+        if !order.contains(&k.as_str()) {
+            push(k, value);
+        }
+    }
+    Some(rows)
+}
+
 fn render_memory() {
     let v = m::data("memory-use");
     let window = m::data("memory-window").as_u64().unwrap_or(30);
@@ -1273,19 +1357,19 @@ fn render_memory() {
         let card = dom::el("li", "memory-stage", "");
         let _ = card.set_attribute("data-stage", stage);
         dom::add(&card, &dom::el("h3", "", title));
-        if let Some(map) = model[stage].as_object() {
-            for (k, value) in map {
-                if value.is_number() || value.is_boolean() {
-                    dom::add(
-                        &card,
-                        &dom::el(
-                            "p",
-                            "memory-lead",
-                            &format!("{}: {}", m::label(k), m::string(value)),
-                        ),
-                    );
+        if let Some(metrics) =
+            memory_stage_metrics(stage, &model[stage]).filter(|rows| !rows.is_empty())
+        {
+            let list = dom::el("dl", "memory-metrics", "");
+            for (label, value, is_zero) in metrics {
+                dom::add(&list, &dom::el("dt", "", &label));
+                let dd = dom::el("dd", "", &value);
+                if is_zero {
+                    let _ = dd.set_attribute("data-zero", "true");
                 }
+                dom::add(&list, &dd);
             }
+            dom::add(&card, &list);
         } else {
             dom::add(
                 &card,
@@ -2576,4 +2660,64 @@ fn memory_changes(data: &V, before: &V) {
             }
         ),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::memory_stage_metrics;
+    use serde_json::json;
+
+    #[test]
+    fn selected_stage_metrics_follow_semantic_order_and_sentence_case() {
+        let stage = json!({
+            "cut_total": 0,
+            "distinct": 2,
+            "dropped": 0,
+            "measured": 1,
+            "retrievals": 4,
+            "reused": 1,
+            "selections": 5,
+            "with_chunk": 3,
+            "since": "2026-11-01",
+            "routes": {"context": 4}
+        });
+        let rows = memory_stage_metrics("selected", &stage).expect("object yields rows");
+        let labels = rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "Retrievals",
+                "With chunk",
+                "Selections",
+                "Distinct",
+                "Reused",
+                "Cut total",
+                "Dropped",
+                "Measured",
+            ]
+        );
+        assert_eq!(rows[0], ("Retrievals".into(), "4".into(), false));
+        assert_eq!(rows[5], ("Cut total".into(), "0".into(), true));
+    }
+
+    #[test]
+    fn stage_metrics_format_booleans_and_preserve_unknown_keys() {
+        let stage = json!({
+            "total": 9,
+            "open": 0,
+            "truncated": true,
+            "extra_flag": false
+        });
+        let rows = memory_stage_metrics("brain", &stage).expect("object yields rows");
+        assert_eq!(
+            rows,
+            vec![
+                ("Total".into(), "9".into(), false),
+                ("Open".into(), "0".into(), true),
+                ("Truncated".into(), "Yes".into(), false),
+                ("Extra flag".into(), "No".into(), true),
+            ]
+        );
+        assert!(memory_stage_metrics("brain", &json!(null)).is_none());
+    }
 }

@@ -336,3 +336,73 @@ fn more_unopened_users_than_fit_are_counted() {
     assert_eq!(listed[1].0, "lib/user01.php");
     assert!(listed.iter().all(|row| row.0 != "lib/user00.php"));
 }
+
+#[test]
+fn graph_focus_overlay_preserves_selected_focus_and_marks_live_targets() {
+    let index = Index::read(
+        json!({
+            "nodes": [
+                {"id": "a", "label": "JwtGuard", "source_file": "src/Auth/JwtGuard.php"},
+                {"id": "b", "label": "Invoice", "source_file": "src/Billing/Invoice.php"}
+            ],
+            "links": [
+                {"source": "b", "target": "a", "relation": "calls", "confidence": "EXTRACTED"}
+            ]
+        })
+        .to_string()
+        .as_bytes(),
+        Path::new("/work/app"),
+    )
+    .unwrap();
+    let mut view = index.view("app", "src/Auth", Some("src/Auth/JwtGuard.php"), false, "");
+    let selected_focus = view["focus"].clone();
+    assert_eq!(selected_focus["path"], "src/Auth/JwtGuard.php");
+
+    let live = crate::graph_live::GraphFocus {
+        phase: "active".into(),
+        summary: "Live: 2 new entities in src/Auth".into(),
+        target_folders: vec!["src/Auth".into()],
+        target_paths: vec!["src/Auth/JwtGuard.php".into()],
+        target_nodes: vec!["src/Auth".into(), "src/Auth/JwtGuard.php".into()],
+        created_entities: crate::graph_live::diff_new_entities(
+            "src/Auth/JwtGuard.php",
+            None,
+            "<?php\nclass JwtGuard {}\n",
+            true,
+        ),
+    };
+    index.overlay_graph_focus(&mut view, &live);
+
+    // Clicked-node `view["focus"]` remains intact while `graph_focus` carries targets + entities.
+    assert_eq!(view["focus"], selected_focus);
+    assert_eq!(view["graph_focus"]["phase"], "active");
+    assert_eq!(view["run"]["graph_focus"], view["graph_focus"]);
+    assert_eq!(
+        view["graph_focus"]["created_entities"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    let file_node = view["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|n| n["path"] == "src/Auth/JwtGuard.php")
+        .expect("file node");
+    assert_eq!(file_node["focus_target"], true);
+    assert_eq!(file_node["created_entities_count"], 2);
+
+    // At root scope, parent folder `src` inherits subtree target & created count.
+    let mut root_view = index.view("app", "", Some("src"), false, "");
+    let root_selected_focus = root_view["focus"].clone();
+    index.overlay_graph_focus(&mut root_view, &live);
+    assert_eq!(root_view["focus"], root_selected_focus);
+    let src_node = root_view["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|n| n["path"] == "src")
+        .expect("src folder node");
+    assert_eq!(src_node["focus_target"], true);
+    assert_eq!(src_node["created_entities_count"], 2);
+}

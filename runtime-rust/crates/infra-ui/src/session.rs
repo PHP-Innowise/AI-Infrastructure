@@ -3,7 +3,243 @@ use serde_json::{json, Value as V};
 use std::cell::RefCell;
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
-thread_local! {static FILES:RefCell<Vec<web_sys::File>>=const { RefCell::new(Vec::new()) };}
+thread_local! {
+    static FILES: RefCell<Vec<web_sys::File>> = const { RefCell::new(Vec::new()) };
+    static CAPTURED_GRAPH_CLICK: RefCell<Option<CapturedGraphClick>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ClickAttrs {
+    resolved_id: String,
+    resolved_action: String,
+    path: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    filter: Option<String>,
+    tab: Option<String>,
+    fallback_payload: Option<V>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CapturedGraphClick {
+    lib_id: String,
+    lib_action: String,
+    in_workspace: bool,
+    attrs: ClickAttrs,
+}
+
+fn closest_scoped_attr(
+    target: &web_sys::Element,
+    fallback: &web_sys::Element,
+    attr: &str,
+    require_workspace: bool,
+) -> Option<String> {
+    let selector = format!("[{attr}]");
+    if let Ok(Some(found)) = target.closest(&selector) {
+        if !require_workspace
+            || found
+                .closest("#session-graph-workspace")
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            if let Some(val) = found.get_attribute(attr).filter(|v| !v.is_empty()) {
+                return Some(val);
+            }
+        }
+    }
+    fallback.get_attribute(attr).filter(|v| !v.is_empty())
+}
+
+fn capture_graph_click(target: &web_sys::Element) {
+    let lib_el = target
+        .closest("[data-action],button,a[data-view],input[type=checkbox]")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| target.clone());
+    let lib_id = lib_el.id();
+    let lib_action = lib_el
+        .get_attribute("data-action")
+        .unwrap_or_else(|| lib_id.clone());
+    let in_workspace = target
+        .closest("#session-graph-workspace")
+        .ok()
+        .flatten()
+        .is_some()
+        || lib_el
+            .closest("#session-graph-workspace")
+            .ok()
+            .flatten()
+            .is_some();
+    let is_inspect = lib_action == "inspect-file-graph";
+    if !in_workspace && !is_inspect {
+        CAPTURED_GRAPH_CLICK.with(|c| *c.borrow_mut() = None);
+        return;
+    }
+    let sem_el = if in_workspace {
+        target
+            .closest("[data-action],button,.graph-side-tab,.graph-changes-file,.graph-changes-entity,.graph-impact-row,#session-graph-side,#session-graph-mode-whole,#session-graph-mode-changes,#session-graph-unfold,#session-graph-open-full,[data-path],[data-from],[data-to],[data-filter],[data-tab]")
+            .ok()
+            .flatten()
+            .filter(|el| {
+                el.closest("#session-graph-workspace")
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+            .unwrap_or_else(|| lib_el.clone())
+    } else {
+        lib_el.clone()
+    };
+    let resolved_id = if !lib_id.is_empty() {
+        lib_id.clone()
+    } else {
+        sem_el.id()
+    };
+    let resolved_action = sem_el
+        .get_attribute("data-action")
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| {
+            if !lib_action.is_empty() {
+                lib_action.clone()
+            } else {
+                resolved_id.clone()
+            }
+        });
+    let fallback_payload = sem_el
+        .get_attribute("data-payload")
+        .and_then(|raw| serde_json::from_str::<V>(&raw).ok());
+    let attrs = ClickAttrs {
+        resolved_id,
+        resolved_action,
+        path: closest_scoped_attr(target, &lib_el, "data-path", in_workspace),
+        from: closest_scoped_attr(target, &lib_el, "data-from", in_workspace),
+        to: closest_scoped_attr(target, &lib_el, "data-to", in_workspace),
+        filter: closest_scoped_attr(target, &lib_el, "data-filter", in_workspace),
+        tab: closest_scoped_attr(target, &lib_el, "data-tab", in_workspace),
+        fallback_payload,
+    };
+    CAPTURED_GRAPH_CLICK.with(|c| {
+        *c.borrow_mut() = Some(CapturedGraphClick {
+            lib_id,
+            lib_action,
+            in_workspace,
+            attrs,
+        });
+    });
+}
+
+fn merge_click_payload(payload: &V, attrs: &ClickAttrs, in_workspace: bool) -> V {
+    let base = if payload.is_null() {
+        attrs.fallback_payload.as_ref().unwrap_or(payload)
+    } else {
+        payload
+    };
+    let has_attrs = attrs.path.is_some()
+        || attrs.from.is_some()
+        || attrs.to.is_some()
+        || attrs.filter.is_some()
+        || attrs.tab.is_some();
+    if !base.is_null() && !base.is_object() {
+        return base.clone();
+    }
+    if !base.is_object() && !in_workspace && !has_attrs {
+        return base.clone();
+    }
+    let mut map = base.as_object().cloned().unwrap_or_default();
+    for (key, value) in [
+        ("path", &attrs.path),
+        ("from", &attrs.from),
+        ("to", &attrs.to),
+        ("filter", &attrs.filter),
+        ("tab", &attrs.tab),
+    ] {
+        if let Some(val) = value {
+            let empty_or_missing = map
+                .get(key)
+                .is_none_or(|cur| cur.is_null() || cur.as_str() == Some(""));
+            if !val.is_empty() && empty_or_missing {
+                map.insert(key.to_owned(), V::String(val.clone()));
+            }
+        }
+    }
+    if in_workspace && !map.contains_key("surface") {
+        map.insert("surface".to_owned(), json!("session"));
+    }
+    if map.is_empty() && base.is_null() {
+        V::Null
+    } else {
+        V::Object(map)
+    }
+}
+
+fn extract_inspect_file_path(payload: &V) -> Option<String> {
+    payload
+        .as_str()
+        .or_else(|| payload["path"].as_str())
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+}
+
+fn is_mutation_tool_event(ev: &V) -> bool {
+    if m::text(ev, "kind") != "tool" {
+        return false;
+    }
+    if ev["state"]
+        .as_str()
+        .is_some_and(|s| s == "started" || s == "in_progress")
+    {
+        return false;
+    }
+    let text = m::text(ev, "text");
+    let tail = text.split_once(": ").map(|(_, s)| s).unwrap_or("");
+    if tail.starts_with("failed") || tail.starts_with("declined") || ev["ok"] == json!(false) {
+        return false;
+    }
+    let still_starting = ev["state"].is_null()
+        && !["completed", "failed", "declined"]
+            .iter()
+            .any(|p| tail.starts_with(p));
+    if still_starting && m::array(&ev["changes"]).is_empty() {
+        return false;
+    }
+    let raw = ev["tool"]
+        .as_str()
+        .unwrap_or_else(|| text.split(": ").next().unwrap_or(""));
+    let norm = raw
+        .strip_suffix("ToolCall")
+        .unwrap_or(raw)
+        .to_ascii_lowercase();
+    matches!(
+        norm.as_str(),
+        "edit" | "write" | "multiedit" | "notebookedit" | "file_change" | "delete"
+    ) || !m::array(&ev["changes"]).is_empty()
+}
+
+fn should_sync_embedded_changes(
+    fresh_events: &[V],
+    focus_changed: bool,
+    was_active: bool,
+    is_active: bool,
+) -> bool {
+    if (was_active && !is_active) || focus_changed {
+        return true;
+    }
+    fresh_events.iter().any(|ev| {
+        let kind = m::text(ev, "kind");
+        if kind == "graph_focus" {
+            return true;
+        }
+        if kind == "status" {
+            let status = ev["status"]
+                .as_str()
+                .unwrap_or_else(|| ev["text"].as_str().unwrap_or(""));
+            return ["completed", "failed", "cancelled", "interrupted"].contains(&status);
+        }
+        is_mutation_tool_event(ev)
+    })
+}
 const PREFS: &str = "harness.sessions.preferences.v1";
 const PREF_FIELDS: &[&str] = &[
     "provider",
@@ -72,6 +308,22 @@ pub fn initialize() {
         let _ = media.add_event_listener_with_callback("change", c.as_ref().unchecked_ref());
         c.forget();
     }
+    let capture_click = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
+        if let Some(target) = event
+            .target()
+            .and_then(|v| v.dyn_into::<web_sys::Element>().ok())
+        {
+            capture_graph_click(&target);
+        } else {
+            CAPTURED_GRAPH_CLICK.with(|c| *c.borrow_mut() = None);
+        }
+    });
+    let _ = dom::document().add_event_listener_with_callback_and_bool(
+        "click",
+        capture_click.as_ref().unchecked_ref(),
+        true,
+    );
+    capture_click.forget();
 }
 fn apply_theme(preference: &str) {
     let dark = dom::window()
@@ -129,6 +381,12 @@ pub async fn bootstrap() {
             }
             let view = dom::hash_view();
             open_view(if view.is_empty() { "sessions" } else { &view }, false).await;
+            if m::read(|s| s.view != "sessions") && !dom::value("project").is_empty() {
+                crate::graph_map::sync_embedded(false);
+                spawn_local(async {
+                    crate::graph::load(true).await;
+                });
+            }
         }
         Ok(_) => dom::error(
             "connection-message",
@@ -759,6 +1017,143 @@ pub fn controls() {
     merge_controls();
     inbox::render();
     run::render();
+    sync_working_indicator();
+}
+
+struct WorkingSignals<'a> {
+    selected: &'a V,
+    sessions: &'a [V],
+    pending: bool,
+    booting: bool,
+    update_page: &'a V,
+    results: &'a V,
+    delivery_preview: &'a V,
+    creator_pending: bool,
+    creator_run: &'a V,
+    system_pending: bool,
+    editor_pending: bool,
+    discovery_active: bool,
+    system_run_active: bool,
+    graph_building: bool,
+    knowledge_pending: bool,
+    skills_pending: bool,
+    setup_pending: bool,
+    create_skill_pending: bool,
+    sign_in_pending: bool,
+    sdd_pending: bool,
+}
+
+fn working_message(signals: &WorkingSignals<'_>) -> Option<&'static str> {
+    if m::active(signals.selected) {
+        return Some(if signals.selected["status"] == "queued" {
+            "Queued — waiting for an available runner…"
+        } else {
+            "Agent is working on your task…"
+        });
+    }
+    if signals.pending {
+        return Some("Working on your request…");
+    }
+    if m::yes(&signals.update_page["restarting"]) {
+        return Some("Restarting Harness…");
+    }
+    if m::yes(&signals.update_page["pending"]) {
+        return Some("Updating Harness…");
+    }
+    if m::array(&signals.results["checks"]).iter().any(m::active)
+        || m::active(&signals.delivery_preview["check"])
+    {
+        return Some("Running verification checks…");
+    }
+    if signals.creator_pending
+        || matches!(
+            signals.creator_run["status"].as_str(),
+            Some("scanning" | "generating" | "applying" | "rolling_back")
+        )
+    {
+        return Some("Generator is running…");
+    }
+    if signals.discovery_active {
+        return Some("Scanning project services…");
+    }
+    if signals.system_pending || signals.editor_pending || signals.system_run_active {
+        return Some("System orchestration is running…");
+    }
+    if signals.graph_building {
+        return Some("Building dependency map…");
+    }
+    if signals.knowledge_pending
+        || signals.skills_pending
+        || signals.setup_pending
+        || signals.create_skill_pending
+        || signals.sign_in_pending
+        || signals.sdd_pending
+    {
+        return Some("Working in background…");
+    }
+    if signals.booting {
+        return Some("Loading workspace…");
+    }
+    if signals.sessions.iter().any(m::active) {
+        return Some("Another session is running…");
+    }
+    None
+}
+
+/// Synchronize the animated prompt-area working companion with active app work.
+pub fn sync_working_indicator() {
+    let update_page = m::data("app-update-page");
+    let results = m::data("results");
+    let delivery_preview = m::data("delivery-preview");
+    let creator_detail = m::data("creator-detail");
+    let system_run = m::data("system-run");
+    let graph_data = m::data("graph");
+    let creator_pending = m::yes(&m::data("creator-pending"));
+    let system_pending = m::yes(&m::data("system-pending"));
+    let editor_pending = m::yes(&m::data("editor-pending"));
+    let discovery_active = m::yes(&m::data("discovery-active"));
+    let knowledge_pending = m::yes(&m::data("knowledge-pending"));
+    let skills_pending = m::yes(&m::data("skills-pending"));
+    let setup_pending = m::yes(&m::data("setup-pending"));
+    let create_skill_pending = m::yes(&m::data("create-skill-pending"));
+    let sign_in_pending = m::yes(&m::data("sign-in-pending"));
+    let sdd_pending = m::yes(&m::data("sdd-documents-pending"));
+    let status = m::read(|s| {
+        let signals = WorkingSignals {
+            selected: &s.selected,
+            sessions: &s.sessions,
+            pending: s.pending,
+            booting: s.boot.is_null() && !s.auth_failed,
+            update_page: &update_page,
+            results: &results,
+            delivery_preview: &delivery_preview,
+            creator_pending,
+            creator_run: &creator_detail["run"],
+            system_pending,
+            editor_pending,
+            discovery_active,
+            system_run_active: m::yes(&system_run["active"]),
+            graph_building: graph_data["build"].is_object(),
+            knowledge_pending,
+            skills_pending,
+            setup_pending,
+            create_skill_pending,
+            sign_in_pending,
+            sdd_pending,
+        };
+        working_message(&signals)
+    });
+    let active = if status.is_some() { "true" } else { "false" };
+    dom::attr("composer-working", "data-working", active);
+    dom::attr(
+        "composer-working",
+        "aria-hidden",
+        if status.is_some() { "false" } else { "true" },
+    );
+    dom::attr("session-form", "data-working", active);
+    if let Some(message) = status {
+        dom::text("composer-working-text", message);
+    }
 }
 pub async fn open_view(view: &str, record: bool) {
     let previous_view = m::read(|state| state.view.clone());
@@ -1111,12 +1506,15 @@ pub fn new_session(project: Option<&str>) {
         s.cursor = 0;
     });
     m::take("merge-draft");
+    crate::graph_map::apply_focus(&V::Null);
+    crate::graph::run_state(false);
     clear_files();
     dom::clear("events");
     dom::set_value("prompt", "");
     if let Some(p) = project {
         sync_project(p);
     }
+    crate::graph_map::sync_embedded_changes();
     restore_draft(&dom::value("project"));
     let selected = preferences_selection(dom::json_storage(PREFS), &dom::value("project"), "");
     dom::save(PREFS, Some(&selected.to_string()));
@@ -1131,6 +1529,7 @@ pub async fn select(id: &str) {
     if m::read(|s| s.pending) {
         return;
     }
+    let before_project = dom::value("project");
     reset_results();
     save_preferences();
     stop_poll();
@@ -1158,6 +1557,13 @@ pub async fn select(id: &str) {
     let project = m::read(|s| m::text(&s.selected, "project_id"));
     if !project.is_empty() {
         sync_project(&project);
+        if project != before_project {
+            spawn_local(async {
+                load_git().await;
+            });
+        } else {
+            crate::graph_map::sync_embedded_changes();
+        }
     }
     history();
     save_preferences();
@@ -1169,11 +1575,75 @@ pub fn stop_poll() {
     inbox::stop();
     dom::error("inbox-error", "");
 }
+#[derive(Debug, Clone, PartialEq)]
+enum FocusUpdate {
+    Apply(V),
+    Clear,
+    Keep,
+}
+
+fn event_focus_payload(event: &V) -> Option<V> {
+    if event["kind"] != "graph_focus" {
+        return None;
+    }
+    for key in ["graph_focus", "focus", "data"] {
+        if event[key].is_object() {
+            return Some(event[key].clone());
+        }
+    }
+    if event.is_object()
+        && (event["phase"].is_string()
+            || event["summary"].is_string()
+            || event["target_folders"].is_array()
+            || event["target_paths"].is_array()
+            || event["target_nodes"].is_array()
+            || event["created_entities"].is_array())
+    {
+        return Some(event.clone());
+    }
+    None
+}
+
+fn should_keep_predicting(current_focus: &V, incoming: &V) -> bool {
+    m::text(current_focus, "phase") == "predicting"
+        && m::text(incoming, "phase") == "idle"
+        && m::array(&incoming["created_entities"]).is_empty()
+}
+
+fn select_poll_focus(
+    session: &V,
+    fresh_events: &[V],
+    initial_poll: bool,
+    current_focus: &V,
+) -> FocusUpdate {
+    let session_focus = &session["graph_focus"];
+    if let Some(event_focus) = fresh_events.iter().rev().find_map(event_focus_payload) {
+        if session_focus.is_object() && m::text(session_focus, "phase") != "idle" {
+            return FocusUpdate::Apply(session_focus.clone());
+        }
+        if should_keep_predicting(current_focus, &event_focus) {
+            return FocusUpdate::Keep;
+        }
+        return FocusUpdate::Apply(event_focus);
+    }
+    if session_focus.is_object() {
+        if should_keep_predicting(current_focus, session_focus) {
+            return FocusUpdate::Keep;
+        }
+        return FocusUpdate::Apply(session_focus.clone());
+    }
+    if initial_poll && !m::active(session) {
+        return FocusUpdate::Clear;
+    }
+    FocusUpdate::Keep
+}
+
 pub async fn poll(epoch: u64) {
     let (sid, cursor) = m::read(|s| (s.sid.clone(), s.cursor));
     if sid.is_empty() || epoch != m::read(|s| s.epoch) {
         return;
     }
+    let was_active = m::read(|s| s.selected["id"] == sid && m::active(&s.selected));
     let path = format!("/api/sessions/{}?after={cursor}", dom::enc(&sid));
     match api::scoped("session-poll", &path).await {
         Ok((e, data)) if m::current("session-poll", e) && epoch == m::read(|s| s.epoch) => {
@@ -1188,6 +1658,7 @@ pub async fn poll(epoch: u64) {
             apply_settings(&data["session"]);
             let events = m::array(&data["events"]);
             let length = events.len();
+            let mut fresh_events = Vec::new();
             for event in events {
                 let key = m::string(&event["id"]);
                 let fresh = m::write(|s| {
@@ -1205,8 +1676,22 @@ pub async fn poll(epoch: u64) {
                     }
                 });
                 if fresh {
+                    fresh_events.push(event.clone());
                     run::observe(event);
                 }
+            }
+            let current_focus = m::data("session-graph-focus");
+            let focus_update =
+                select_poll_focus(&data["session"], &fresh_events, cursor == 0, &current_focus);
+            let focus_changed = match &focus_update {
+                FocusUpdate::Apply(focus) => focus != &current_focus,
+                FocusUpdate::Clear => !current_focus.is_null(),
+                FocusUpdate::Keep => false,
+            };
+            match focus_update {
+                FocusUpdate::Apply(focus) => crate::graph_map::apply_focus(&focus),
+                FocusUpdate::Clear => crate::graph_map::apply_focus(&V::Null),
+                FocusUpdate::Keep => {}
             }
             inbox::refresh(&sid, epoch).await;
             if !m::current("session-poll", e)
@@ -1216,7 +1701,18 @@ pub async fn poll(epoch: u64) {
             }
             history();
             controls();
-            crate::graph::run_state(m::read(|s| m::active(&s.selected)));
+            run::render();
+            let is_active = m::read(|s| m::active(&s.selected));
+            crate::graph::run_state(is_active);
+            if was_active && !is_active {
+                spawn_local(async {
+                    crate::graph::load(true).await;
+                });
+                crate::graph_map::sync_embedded(true);
+            }
+            if should_sync_embedded_changes(&fresh_events, focus_changed, was_active, is_active) {
+                crate::graph_map::sync_embedded_changes();
+            }
             dom::error("events-error", "");
             if length == 250 || m::read(|s| m::active(&s.selected)) || inbox::watching(&sid) {
                 dom::later(
@@ -1581,6 +2077,8 @@ pub async fn send() {
     m::write(|s| s.pending = true);
     controls();
     dom::error("composer-error", "");
+    crate::graph_map::focus_from_prompt(&prompt);
+    crate::graph::run_state(true);
     match api::post(&path, turn).await {
         Ok(v) => {
             let session = &v["session"];
@@ -1591,6 +2089,14 @@ pub async fn send() {
                 );
             } else {
                 m::upsert(session.clone());
+                if session["graph_focus"].is_object()
+                    && !should_keep_predicting(
+                        &m::data("session-graph-focus"),
+                        &session["graph_focus"],
+                    )
+                {
+                    crate::graph_map::apply_focus(&session["graph_focus"]);
+                }
                 if follow {
                     inbox::clear_draft(&sid, &prompt);
                 }
@@ -1610,6 +2116,7 @@ pub async fn send() {
     }
     m::write(|s| s.pending = false);
     controls();
+    crate::graph::run_state(m::read(|s| m::active(&s.selected)));
 }
 pub async fn session_action(action: &str, body: V, error: &str) {
     let sid = m::read(|s| s.sid.clone());
@@ -1642,6 +2149,11 @@ pub async fn load_git() {
     if p.is_empty() {
         return;
     }
+    crate::graph_map::sync_embedded(false);
+    spawn_local(async {
+        crate::graph::load(true).await;
+    });
+    let mut synced_changes = false;
     for kind in ["git", "worktrees"] {
         let path = format!("/api/projects/{}/{kind}", dom::enc(&p));
         if let Ok((e, v)) = api::scoped(&format!("project-{kind}"), &path).await {
@@ -1651,6 +2163,8 @@ pub async fn load_git() {
             m::set(&format!("project-{kind}"), v.clone());
             if kind == "git" {
                 dom::text("project-git-status", &m::summary(&v));
+                crate::graph_map::sync_embedded_changes();
+                synced_changes = true;
             } else {
                 dom::options(
                     "existing-worktree",
@@ -1661,9 +2175,11 @@ pub async fn load_git() {
             }
         }
     }
+    if !synced_changes && dom::value("project") == p {
+        crate::graph_map::sync_embedded_changes();
+    }
     knowledge::load_brain_link().await;
     management::load_attachment().await;
-    crate::graph::load(true).await;
 }
 pub async fn sign_in(refresh: bool) {
     if m::read(|s| s.boot.is_null() || s.auth_failed) || m::yes(&m::data("sign-in-pending")) {
@@ -1677,6 +2193,7 @@ pub async fn sign_in(refresh: bool) {
         return;
     }
     m::set("sign-in-pending", json!(true));
+    sync_working_indicator();
     let path = format!(
         "/api/providers/sign-in{}",
         if refresh { "?refresh=1" } else { "" }
@@ -1705,6 +2222,7 @@ pub async fn sign_in(refresh: bool) {
         m::set("sign-in-at", json!(js_sys::Date::now()));
     }
     m::set("sign-in-pending", json!(false));
+    sync_working_indicator();
 }
 // Updates of this clone, offered as desktop applications offer theirs: an Update button in the
 // header while the branch the clone follows has moved on. A click fast-forwards the clone and
@@ -1834,6 +2352,7 @@ fn render_update() {
     }
     dom::hidden("app-update-banner", view.note.is_empty());
     dom::class("app-update-banner", "error", view.error);
+    sync_working_indicator();
 }
 async fn apply_update() {
     let page = m::data("app-update-page");
@@ -1921,6 +2440,34 @@ fn reset_results() {
     dom::clear("delivery-target");
     dom::text("delivery-status", "");
 }
+fn render_results_files(files: &[V]) {
+    let Some(container) = dom::get("results-files") else {
+        return;
+    };
+    dom::clear("results-files");
+    if files.is_empty() {
+        dom::text("results-files", "No changed files listed.");
+        return;
+    }
+    for file in files {
+        let status = m::text(file, "status");
+        let path = m::text(file, "path");
+        let row = dom::el("div", "results-file-row", "");
+        let label = dom::el("span", "results-file-name", &format!("{status}  {path}  "));
+        dom::add(&row, &label);
+        if !path.is_empty() {
+            let btn = dom::button(
+                "Inspect in graph",
+                "inspect-file-graph",
+                json!({"path": path}),
+            );
+            btn.set_class_name("button compact results-file-inspect");
+            let _ = btn.set_attribute("data-path", &path);
+            dom::add(&row, &btn);
+        }
+        dom::add(&container, &row);
+    }
+}
 pub async fn results() {
     dom::cancel_timer("results-poll");
     if !result_view() {
@@ -1991,19 +2538,7 @@ pub async fn results() {
                     }
                 ),
             );
-            let files = m::array(&snapshot["files"])
-                .iter()
-                .map(|f| format!("{}  {}", m::text(f, "status"), m::text(f, "path")))
-                .collect::<Vec<_>>()
-                .join("\n");
-            dom::text(
-                "results-files",
-                if files.is_empty() {
-                    "No changed files listed."
-                } else {
-                    &files
-                },
-            );
+            render_results_files(&m::array(&snapshot["files"]));
             dom::text(
                 "results-diff",
                 snapshot["diff"]
@@ -2253,6 +2788,7 @@ fn result_controls() {
                     || check["workspace_changed"] == true
                     || check["candidate"] != preview["candidate"]),
     );
+    sync_working_indicator();
 }
 async fn delivery_load(sid: &str) {
     let key = "delivery";
@@ -2393,10 +2929,15 @@ async fn delivery(action: &str, body: V) {
     m::write(|s| s.pending = false);
     controls();
 }
-fn resize(height: f64) {
-    let available = dom::get("sessions-view")
+fn resize_column_height() -> f64 {
+    dom::get("sessions-chat-column")
         .map(|e| e.client_height())
+        .filter(|&h| h > 0)
+        .or_else(|| dom::get("sessions-view").map(|e| e.client_height()))
         .unwrap_or(500) as f64
+}
+fn resize(height: f64) {
+    let available = resize_column_height()
         - dom::get("composer-area")
             .map(|e| e.client_height())
             .unwrap_or(0) as f64
@@ -2428,9 +2969,7 @@ pub fn resize_key(event: &web_sys::KeyboardEvent) {
         "ArrowUp" => h - 40.,
         "ArrowDown" => h + 40.,
         "Home" => 80.,
-        "End" => dom::get("sessions-view")
-            .map(|e| e.client_height())
-            .unwrap_or(500) as f64,
+        "End" => resize_column_height(),
         _ => return,
     };
     event.prevent_default();
@@ -2496,6 +3035,18 @@ pub async fn event(
     }
     if (kind == "input" || kind == "change") && ["check-command", "check-timeout"].contains(&id) {
         result_controls();
+        return true;
+    }
+    if (kind == "input" || kind == "change")
+        && id == "session-graph-filter"
+        && crate::graph_map::handle_session_graph_input(id, value, None)
+    {
+        return true;
+    }
+    if (kind == "input" || kind == "change")
+        && id == "session-graph-notests"
+        && crate::graph_map::handle_session_graph_input(id, value, Some(checked))
+    {
         return true;
     }
     if kind == "change" && action == "merge-choice" {
@@ -2620,6 +3171,57 @@ pub async fn event(
     if kind != "click" {
         return false;
     }
+    let captured = CAPTURED_GRAPH_CLICK.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        match guard.as_ref() {
+            Some(c) if c.lib_id == id && c.lib_action == action => guard.take(),
+            _ => {
+                *guard = None;
+                None
+            }
+        }
+    });
+    let (effective_id, effective_action, effective_payload) = if let Some(c) = captured {
+        let eid = if !id.is_empty() {
+            id.to_owned()
+        } else {
+            c.attrs.resolved_id.clone()
+        };
+        let eaction = if !action.is_empty() {
+            action.to_owned()
+        } else {
+            c.attrs.resolved_action.clone()
+        };
+        let epayload = merge_click_payload(payload, &c.attrs, c.in_workspace);
+        (eid, eaction, epayload)
+    } else {
+        (id.to_owned(), action.to_owned(), payload.clone())
+    };
+    let id = effective_id.as_str();
+    let action = effective_action.as_str();
+    let payload = &effective_payload;
+    if id == "sidebar-graph-pill" || action == "sidebar-graph-pill" {
+        dom::class("sidebar", "open", false);
+        dom::class("scrim", "open", false);
+        dom::attr("menu-toggle", "aria-expanded", "false");
+        if m::read(|s| s.view != "sessions") {
+            open_view("sessions", true).await;
+        } else {
+            crate::graph_map::sync_embedded(false);
+            spawn_local(async {
+                crate::graph::load(true).await;
+            });
+        }
+        dom::attr("session-graph-workspace", "tabindex", "-1");
+        if let Some(el) = dom::get("session-graph-workspace") {
+            el.scroll_into_view();
+        }
+        dom::focus("session-graph-workspace");
+        return true;
+    }
+    if crate::graph_map::handle_session_graph_click(id, action, payload) {
+        return true;
+    }
     if action.ends_with("-agent-apply") {
         split_budgets(repeated_suffix_removed(action, "-agent-apply"));
         controls();
@@ -2638,7 +3240,12 @@ pub async fn event(
         }
         "refresh-sessions" => refresh().await,
         "session-open" => {
-            select(payload.as_str().unwrap_or("")).await;
+            let target_id = payload.as_str().unwrap_or("");
+            if m::read(|s| s.sid != target_id) {
+                crate::graph_map::apply_focus(&V::Null);
+                crate::graph::run_state(false);
+            }
+            select(target_id).await;
             open_view("sessions", true).await;
         }
         "cancel-session" => session_action("cancel", json!({}), "composer-error").await,
@@ -2889,6 +3496,14 @@ pub async fn event(
             }
         }
         "app-update" => apply_update().await,
+        "inspect-file-graph" => {
+            if let Some(path) = extract_inspect_file_path(payload) {
+                if m::read(|s| s.view != "sessions") {
+                    open_view("sessions", true).await;
+                }
+                crate::graph_map::focus_file_in_session(&path);
+            }
+        }
         _ if action.starts_with("option-") => {
             let panel = action.trim_start_matches("option-");
             let open = m::data("option-open") != panel;
@@ -3427,5 +4042,333 @@ mod update_tests {
             vec![(false, "an unpaired ` stays")]
         );
         assert!(code_spans("").is_empty());
+    }
+    #[test]
+    fn working_indicator_reports_idle_and_active_operations() {
+        let null = V::Null;
+        let idle = WorkingSignals {
+            selected: &null,
+            sessions: &[],
+            pending: false,
+            booting: false,
+            update_page: &null,
+            results: &null,
+            delivery_preview: &null,
+            creator_pending: false,
+            creator_run: &null,
+            system_pending: false,
+            editor_pending: false,
+            discovery_active: false,
+            system_run_active: false,
+            graph_building: false,
+            knowledge_pending: false,
+            skills_pending: false,
+            setup_pending: false,
+            create_skill_pending: false,
+            sign_in_pending: false,
+            sdd_pending: false,
+        };
+        assert_eq!(working_message(&idle), None);
+
+        let running = json!({"id":"s1","status":"running"});
+        assert_eq!(
+            working_message(&WorkingSignals {
+                selected: &running,
+                ..idle
+            }),
+            Some("Agent is working on your task…")
+        );
+
+        let queued = json!({"id":"s1","status":"queued"});
+        assert_eq!(
+            working_message(&WorkingSignals {
+                selected: &queued,
+                ..idle
+            }),
+            Some("Queued — waiting for an available runner…")
+        );
+
+        assert_eq!(
+            working_message(&WorkingSignals {
+                pending: true,
+                ..idle
+            }),
+            Some("Working on your request…")
+        );
+
+        let creator_scan = json!({"status":"scanning"});
+        assert_eq!(
+            working_message(&WorkingSignals {
+                creator_run: &creator_scan,
+                ..idle
+            }),
+            Some("Generator is running…")
+        );
+
+        assert_eq!(
+            working_message(&WorkingSignals {
+                discovery_active: true,
+                ..idle
+            }),
+            Some("Scanning project services…")
+        );
+
+        assert_eq!(
+            working_message(&WorkingSignals {
+                graph_building: true,
+                ..idle
+            }),
+            Some("Building dependency map…")
+        );
+
+        let background = [json!({"id":"s2","status":"running"})];
+        assert_eq!(
+            working_message(&WorkingSignals {
+                sessions: &background,
+                ..idle
+            }),
+            Some("Another session is running…")
+        );
+    }
+
+    #[test]
+    fn poll_focus_selection_preserves_prompt_prediction_and_streams_updates() {
+        let running = json!({"id": "s1", "status": "running"});
+        let predicting = json!({
+            "phase": "predicting",
+            "target_paths": ["src/Domain/Service.php"]
+        });
+        assert_eq!(
+            select_poll_focus(&running, &[], true, &V::Null),
+            FocusUpdate::Keep
+        );
+
+        let completed = json!({"id": "s1", "status": "completed"});
+        assert_eq!(
+            select_poll_focus(&completed, &[], true, &V::Null),
+            FocusUpdate::Clear
+        );
+        assert_eq!(
+            select_poll_focus(&completed, &[], false, &V::Null),
+            FocusUpdate::Keep
+        );
+
+        let idle_session = json!({
+            "id": "s1",
+            "status": "running",
+            "graph_focus": {"phase": "idle", "created_entities": []}
+        });
+        assert_eq!(
+            select_poll_focus(&idle_session, &[], true, &predicting),
+            FocusUpdate::Keep
+        );
+        assert_eq!(
+            select_poll_focus(&idle_session, &[], false, &V::Null),
+            FocusUpdate::Apply(idle_session["graph_focus"].clone())
+        );
+
+        let nested_event = json!({
+            "id": 2,
+            "kind": "graph_focus",
+            "graph_focus": {
+                "phase": "active",
+                "target_paths": ["src/app.php"],
+                "created_entities": [{"id": "e1", "kind": "class", "name": "App"}]
+            }
+        });
+        assert_eq!(
+            select_poll_focus(
+                &running,
+                std::slice::from_ref(&nested_event),
+                true,
+                &predicting
+            ),
+            FocusUpdate::Apply(nested_event["graph_focus"].clone())
+        );
+
+        let inline_event = json!({
+            "id": 3,
+            "kind": "graph_focus",
+            "phase": "active",
+            "target_folders": ["src/Domain"],
+            "created_entities": [{"id": "e2", "kind": "method", "name": "handle"}]
+        });
+        assert_eq!(
+            select_poll_focus(
+                &idle_session,
+                &[nested_event, inline_event.clone()],
+                false,
+                &predicting
+            ),
+            FocusUpdate::Apply(inline_event)
+        );
+
+        let active_session = json!({
+            "id": "s1",
+            "status": "completed",
+            "graph_focus": {
+                "phase": "completed",
+                "summary": "2 entities created",
+                "target_paths": ["src/Domain/Service.php"]
+            }
+        });
+        assert_eq!(
+            select_poll_focus(&active_session, &[], false, &predicting),
+            FocusUpdate::Apply(active_session["graph_focus"].clone())
+        );
+    }
+
+    #[test]
+    fn poll_focus_preserves_created_and_modified_entity_change_kinds() {
+        let predicting = json!({
+            "phase": "predicting",
+            "target_paths": ["src/app.rs"]
+        });
+        let running = json!({"id": "s1", "status": "running"});
+        let nested_event = json!({
+            "id": 10,
+            "kind": "graph_focus",
+            "graph_focus": {
+                "phase": "idle",
+                "target_paths": ["src/app.rs", "src/new.rs"],
+                "created_entities": [
+                    {"id": "e1", "kind": "function", "name": "boot", "change": "created"},
+                    {"id": "e2", "kind": "struct", "name": "Config", "change": "modified"}
+                ]
+            }
+        });
+        assert_eq!(
+            select_poll_focus(
+                &running,
+                std::slice::from_ref(&nested_event),
+                false,
+                &predicting
+            ),
+            FocusUpdate::Apply(nested_event["graph_focus"].clone())
+        );
+
+        let inline_event = json!({
+            "id": 11,
+            "kind": "graph_focus",
+            "phase": "active",
+            "created_entities": [
+                {"id": "e3", "kind": "method", "name": "save", "change": "modified"}
+            ]
+        });
+        let extracted = event_focus_payload(&inline_event).expect("inline graph_focus payload");
+        assert_eq!(extracted["created_entities"][0]["change"], "modified");
+    }
+
+    #[test]
+    fn merge_click_payload_forwards_graph_data_attributes_without_clobbering() {
+        let attrs = ClickAttrs {
+            resolved_id: "session-graph-side".into(),
+            resolved_action: "graph-impact-row".into(),
+            path: Some("src/session.rs".into()),
+            from: Some("src/lib.rs".into()),
+            to: Some("src/session.rs".into()),
+            filter: Some("session".into()),
+            tab: Some("changes".into()),
+            fallback_payload: None,
+        };
+        assert_eq!(
+            merge_click_payload(&V::Null, &attrs, true),
+            json!({
+                "path": "src/session.rs",
+                "from": "src/lib.rs",
+                "to": "src/session.rs",
+                "filter": "session",
+                "tab": "changes",
+                "surface": "session"
+            })
+        );
+
+        let existing = json!({"path": "custom/file.rs", "surface": "modal"});
+        assert_eq!(
+            merge_click_payload(&existing, &attrs, true),
+            json!({
+                "path": "custom/file.rs",
+                "surface": "modal",
+                "from": "src/lib.rs",
+                "to": "src/session.rs",
+                "filter": "session",
+                "tab": "changes"
+            })
+        );
+
+        assert_eq!(
+            merge_click_payload(&json!("sess-123"), &ClickAttrs::default(), false),
+            json!("sess-123")
+        );
+    }
+
+    #[test]
+    fn sync_embedded_changes_triggers_only_on_relevant_updates() {
+        assert!(!should_sync_embedded_changes(&[], false, false, false));
+        assert!(!should_sync_embedded_changes(&[], false, true, true));
+        assert!(should_sync_embedded_changes(&[], false, true, false));
+        assert!(should_sync_embedded_changes(&[], true, true, true));
+
+        let focus_ev = json!({"kind": "graph_focus", "phase": "active"});
+        assert!(should_sync_embedded_changes(&[focus_ev], false, true, true));
+
+        let done_status = json!({"kind": "status", "status": "completed"});
+        assert!(should_sync_embedded_changes(
+            &[done_status],
+            false,
+            true,
+            true
+        ));
+
+        let started_edit = json!({"kind": "tool", "tool": "Edit", "state": "started"});
+        assert!(!should_sync_embedded_changes(
+            &[started_edit],
+            false,
+            true,
+            true
+        ));
+
+        let finished_edit = json!({"kind": "tool", "tool": "Edit", "state": "completed"});
+        assert!(should_sync_embedded_changes(
+            &[finished_edit],
+            false,
+            true,
+            true
+        ));
+
+        let file_change = json!({
+            "kind": "tool",
+            "tool": "file_change",
+            "state": "completed",
+            "changes": [{"path": "src/session.rs"}]
+        });
+        assert!(should_sync_embedded_changes(
+            &[file_change],
+            false,
+            true,
+            true
+        ));
+
+        let failed_edit = json!({"kind": "tool", "tool": "Edit", "state": "failed", "ok": false});
+        assert!(!should_sync_embedded_changes(
+            &[failed_edit],
+            false,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn extract_inspect_file_path_handles_object_and_string_payloads() {
+        assert_eq!(
+            extract_inspect_file_path(&json!({"path": " src/session.rs "})).as_deref(),
+            Some("src/session.rs")
+        );
+        assert_eq!(
+            extract_inspect_file_path(&json!("src/graph_map.rs")).as_deref(),
+            Some("src/graph_map.rs")
+        );
+        assert_eq!(extract_inspect_file_path(&json!({"path": "   "})), None);
+        assert_eq!(extract_inspect_file_path(&V::Null), None);
     }
 }

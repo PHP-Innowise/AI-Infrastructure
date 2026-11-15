@@ -79,7 +79,7 @@ impl Index {
         let mut rest = Vec::new();
         let mut kept = Vec::new();
         for (from, to, flow) in edges {
-            let edge = json!({"from":keys[from], "to":keys[to], "links":flow.links, "guessed":flow.guessed});
+            let edge = net.edge_json(&[shown[from]], &[shown[to]], &keys[from], &keys[to], flow);
             if distance[shown[from] as usize] + 1 == distance[shown[to] as usize]
                 && parent.insert(to)
             {

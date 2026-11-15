@@ -3,6 +3,7 @@
 //! points gather on the left edge and foundations on the right. A file opens
 //! in turn to its classes, methods and functions and the files around them.
 use crate::{api, dom, model as m};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as V};
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_bindgen::{closure::Closure, JsCast};
@@ -29,6 +30,13 @@ const LINK_BETWEEN: f64 = 10.0;
 /// How small a picture is made to fit its room. Smaller than this its boxes
 /// cannot be told apart, and the rest of it is scrolled to.
 const SMALLEST: f64 = 0.25;
+const CAMERA_MIN: f64 = 0.25;
+const CAMERA_MAX: f64 = 2.4;
+const FOCUS_CAMERA_MAX: f64 = 1.75;
+const ZOOM_STEP: f64 = 1.25;
+const DRAG_THRESHOLD_PX: f64 = 4.0;
+const ENTITY_WIDTH: f64 = 156.0;
+const ENTITY_HEIGHT: f64 = 24.0;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placed {
     pub x: f64,
@@ -73,6 +81,635 @@ pub struct Plan {
     pub height: f64,
     /// Where the grid of unlinked nodes begins, when there is one under a map.
     pub apart: Option<f64>,
+}
+/// A symbol or file created during a live session turn, anchored inside the map.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CreatedEntity {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub parent: String,
+    pub path: String,
+    pub folder: String,
+    pub line: u64,
+    pub change: Option<String>,
+    #[serde(default)]
+    pub visibility: Option<String>,
+    #[serde(default)]
+    pub modifiers: Vec<String>,
+}
+/// Live focus targets & newly created entities overlaid onto the Sessions map.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiveFocus {
+    pub phase: String,
+    pub summary: String,
+    pub target_folders: Vec<String>,
+    pub target_paths: Vec<String>,
+    pub target_nodes: Vec<String>,
+    pub created_entities: Vec<CreatedEntity>,
+}
+/// Plane-space position computed for a live created entity overlay badge.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlacedEntity {
+    pub x: f64,
+    pub y: f64,
+    pub entity: CreatedEntity,
+}
+/// Resolved graph elements and bounding box for a `LiveFocus` on a laid-out `Plan`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FocusOverlay {
+    pub nodes: BTreeSet<usize>,
+    pub frames: BTreeSet<usize>,
+    pub entities: Vec<PlacedEntity>,
+    pub bbox: Option<(f64, f64, f64, f64)>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EntityAnchor {
+    Node(usize),
+    Frame(usize),
+    Dock,
+}
+fn normalize_rel_path(raw: &str) -> String {
+    let mut s = raw.trim().replace('\\', "/");
+    while let Some(rest) = s.strip_prefix("./") {
+        s = rest.to_owned();
+    }
+    s.trim_matches('/').to_owned()
+}
+fn strip_symbol_suffix(path: &str) -> &str {
+    path.split('#').next().unwrap_or(path)
+}
+fn normalize_entity_kind(kind: &str) -> String {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "file" => "file",
+        "class" => "class",
+        "interface" => "interface",
+        "trait" => "trait",
+        "enum" => "enum",
+        "struct" => "struct",
+        "property" | "prop" => "property",
+        "field" => "field",
+        "const" | "constant" | "class_const" => "const",
+        "method" => "method",
+        "function" | "fn" => "function",
+        _ => "symbol",
+    }
+    .to_owned()
+}
+fn entity_kind_badge(kind: &str) -> &'static str {
+    match kind {
+        "file" => "F",
+        "class" => "C",
+        "interface" => "I",
+        "trait" => "T",
+        "enum" => "E",
+        "struct" => "S",
+        "property" | "prop" | "field" => "P",
+        "const" | "constant" | "class_const" => "K",
+        "method" => "M",
+        "function" | "fn" => "fn",
+        _ => "+",
+    }
+}
+fn string_list(value: &V) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str())
+        .map(normalize_rel_path)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+/// Parses a backend or local `GraphFocus` JSON value into `LiveFocus`, or `None` when idle/empty.
+pub fn parse_live_focus(value: &V) -> Option<LiveFocus> {
+    if !value.is_object() {
+        return None;
+    }
+    let phase = m::text(value, "phase").trim().to_ascii_lowercase();
+    let summary = m::text(value, "summary").trim().to_owned();
+    let target_folders = string_list(&value["target_folders"]);
+    let target_paths = string_list(&value["target_paths"]);
+    let target_nodes = string_list(&value["target_nodes"]);
+    let created_entities = value["created_entities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.is_object() && !m::text(entry, "name").trim().is_empty())
+        .map(|entry| {
+            let path = normalize_rel_path(&m::text(entry, "path"));
+            let parent = normalize_rel_path(&m::text(entry, "parent"));
+            let folder = {
+                let explicit = normalize_rel_path(&m::text(entry, "folder"));
+                if explicit.is_empty() {
+                    let base = if !parent.is_empty() { &parent } else { &path };
+                    self::parent(strip_symbol_suffix(base)).to_owned()
+                } else {
+                    explicit
+                }
+            };
+            let visibility = entry["visibility"]
+                .as_str()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned);
+            let modifiers = entry["modifiers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            CreatedEntity {
+                id: m::text(entry, "id"),
+                kind: normalize_entity_kind(&m::text(entry, "kind")),
+                name: m::text(entry, "name").trim().to_owned(),
+                parent,
+                path,
+                folder,
+                line: entry["line"].as_u64().unwrap_or(0),
+                change: entry["change"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned),
+                visibility,
+                modifiers,
+            }
+        })
+        .collect::<Vec<_>>();
+    if (phase.is_empty() || phase == "idle")
+        && summary.is_empty()
+        && target_folders.is_empty()
+        && target_paths.is_empty()
+        && target_nodes.is_empty()
+        && created_entities.is_empty()
+    {
+        return None;
+    }
+    Some(LiveFocus {
+        phase: if phase.is_empty() {
+            "active".to_owned()
+        } else {
+            phase
+        },
+        summary,
+        target_folders,
+        target_paths,
+        target_nodes,
+        created_entities,
+    })
+}
+fn best_ancestor_node(target: &str, nodes: &[V], limit: usize) -> Option<usize> {
+    let target_file = normalize_rel_path(strip_symbol_suffix(target));
+    if target_file.is_empty() {
+        return None;
+    }
+    let mut best: Option<(usize, usize)> = None;
+    for (index, node) in nodes.iter().take(limit).enumerate() {
+        let node_path = normalize_rel_path(&m::text(node, "path"));
+        if node_path.is_empty() {
+            continue;
+        }
+        let matches = target_file == node_path
+            || target_file
+                .strip_prefix(&node_path)
+                .is_some_and(|rest| rest.starts_with('/'));
+        if matches {
+            let score = node_path.len() + if m::yes(&node["folder"]) { 1 } else { 2 };
+            if best.is_none_or(|(_, prev)| score > prev) {
+                best = Some((index, score));
+            }
+        }
+    }
+    best.map(|(index, _)| index)
+}
+fn find_entity_anchor(
+    entity: &CreatedEntity,
+    nodes: &[V],
+    frames: &[V],
+    plan: &Plan,
+    fallback_node: Option<usize>,
+) -> EntityAnchor {
+    let limit = plan.nodes.len().min(nodes.len());
+    let mut candidates = Vec::new();
+    for raw in [&entity.parent, &entity.path, &entity.folder] {
+        let norm = normalize_rel_path(raw);
+        if !norm.is_empty() {
+            candidates.push(norm.clone());
+            let stripped = normalize_rel_path(strip_symbol_suffix(&norm));
+            if stripped != norm && !stripped.is_empty() {
+                candidates.push(stripped);
+            }
+        }
+    }
+    // First look for an exact node match (file or symbol container).
+    for candidate in &candidates {
+        if let Some(index) = nodes.iter().take(limit).position(|node| {
+            let path = normalize_rel_path(&m::text(node, "path"));
+            !path.is_empty() && (path == *candidate || strip_symbol_suffix(&path) == candidate)
+        }) {
+            return EntityAnchor::Node(index);
+        }
+    }
+    // Fall back to the deepest enclosing folder/file node, then an open frame.
+    for candidate in &candidates {
+        if let Some(index) = best_ancestor_node(candidate, nodes, limit) {
+            return EntityAnchor::Node(index);
+        }
+    }
+    for candidate in &candidates {
+        let cand_file = normalize_rel_path(strip_symbol_suffix(candidate));
+        if let Some((fi, _)) =
+            frames
+                .iter()
+                .enumerate()
+                .take(plan.frames.len())
+                .find(|(fi, frame)| {
+                    if plan.frames[*fi].width <= 0.0 {
+                        return false;
+                    }
+                    let fpath = normalize_rel_path(&m::text(frame, "path"));
+                    !fpath.is_empty()
+                        && (cand_file == fpath
+                            || cand_file
+                                .strip_prefix(&fpath)
+                                .is_some_and(|rest| rest.starts_with('/')))
+                })
+        {
+            return EntityAnchor::Frame(fi);
+        }
+    }
+    match fallback_node {
+        Some(idx) => EntityAnchor::Node(idx),
+        None => EntityAnchor::Dock,
+    }
+}
+fn union_bbox(
+    bbox: Option<(f64, f64, f64, f64)>,
+    rect: (f64, f64, f64, f64),
+) -> (f64, f64, f64, f64) {
+    match bbox {
+        Some((x0, y0, x1, y1)) => (
+            x0.min(rect.0),
+            y0.min(rect.1),
+            x1.max(rect.2),
+            y1.max(rect.3),
+        ),
+        None => rect,
+    }
+}
+/// Maps `LiveFocus` targets & created entities onto drawn `Plan` coordinates.
+pub fn resolve_focus(view: &V, plan: &Plan, focus: &LiveFocus) -> FocusOverlay {
+    let nodes = m::array(&view["nodes"]);
+    let frames = m::array(&view["frames"]);
+    let node_limit = plan.nodes.len().min(nodes.len());
+    let frame_limit = plan.frames.len().min(frames.len());
+    let mut overlay = FocusOverlay::default();
+
+    let mut exact_targets = BTreeSet::new();
+    let mut exact_files = BTreeSet::new();
+    let mut all_targets = Vec::new();
+    for list in [
+        &focus.target_nodes,
+        &focus.target_paths,
+        &focus.target_folders,
+    ] {
+        for raw in list {
+            let norm = normalize_rel_path(raw);
+            if !norm.is_empty() {
+                exact_targets.insert(norm.clone());
+                let file = normalize_rel_path(strip_symbol_suffix(&norm));
+                if !file.is_empty() {
+                    exact_files.insert(file);
+                }
+                all_targets.push(norm);
+            }
+        }
+    }
+    let mut directly_matched_targets = BTreeSet::new();
+    for (index, node) in nodes.iter().take(node_limit).enumerate() {
+        let path = normalize_rel_path(&m::text(node, "path"));
+        let file = normalize_rel_path(&m::text(node, "file"));
+        let path_file = normalize_rel_path(strip_symbol_suffix(&path));
+        if (!path.is_empty()
+            && (exact_targets.contains(&path)
+                || exact_files.contains(&path)
+                || exact_targets.contains(&path_file)))
+            || (!file.is_empty() && exact_files.contains(&file))
+        {
+            overlay.nodes.insert(index);
+            if !path.is_empty() {
+                directly_matched_targets.insert(path);
+            }
+            if !file.is_empty() {
+                directly_matched_targets.insert(file);
+            }
+        }
+    }
+    // When a target lives inside a collapsed folder at root overview, highlight that ancestor folder.
+    for target in &all_targets {
+        let target_file = normalize_rel_path(strip_symbol_suffix(target));
+        if directly_matched_targets.contains(target)
+            || directly_matched_targets.contains(&target_file)
+        {
+            continue;
+        }
+        if let Some(ancestor) = best_ancestor_node(target, &nodes, node_limit) {
+            overlay.nodes.insert(ancestor);
+        }
+    }
+    for (fi, frame) in frames.iter().take(frame_limit).enumerate() {
+        if plan.frames[fi].width <= 0.0 {
+            continue;
+        }
+        let fpath = normalize_rel_path(&m::text(frame, "path"));
+        if fpath.is_empty() {
+            continue;
+        }
+        let frame_matches = all_targets.iter().any(|target| {
+            let t_file = normalize_rel_path(strip_symbol_suffix(target));
+            t_file == fpath
+                || t_file
+                    .strip_prefix(&fpath)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        });
+        if frame_matches {
+            overlay.frames.insert(fi);
+        }
+    }
+    let fallback_node = overlay.nodes.iter().next().copied();
+    let mut anchor_counts: BTreeMap<EntityAnchor, usize> = BTreeMap::new();
+    for entity in &focus.created_entities {
+        let anchor = find_entity_anchor(entity, &nodes, &frames, plan, fallback_node);
+        let slot = *anchor_counts.get(&anchor).unwrap_or(&0);
+        anchor_counts.insert(anchor, slot + 1);
+        let col = slot / 3;
+        let row = slot % 3;
+        let (x, y) = match anchor {
+            EntityAnchor::Node(idx) => {
+                overlay.nodes.insert(idx);
+                let placed = &plan.nodes[idx];
+                (
+                    (placed.x + 8.0 + col as f64 * (ENTITY_WIDTH + 8.0)).max(MARGIN),
+                    placed.y + BOX_HEIGHT + 6.0 + row as f64 * (ENTITY_HEIGHT + 4.0),
+                )
+            }
+            EntityAnchor::Frame(fi) => {
+                overlay.frames.insert(fi);
+                let fr = &plan.frames[fi];
+                (
+                    fr.x + 12.0 + col as f64 * (ENTITY_WIDTH + 8.0),
+                    fr.y + FRAME_HEAD + 8.0 + row as f64 * (ENTITY_HEIGHT + 4.0),
+                )
+            }
+            EntityAnchor::Dock => (
+                MARGIN + col as f64 * (ENTITY_WIDTH + 8.0),
+                MARGIN + row as f64 * (ENTITY_HEIGHT + 6.0),
+            ),
+        };
+        overlay.entities.push(PlacedEntity {
+            x,
+            y,
+            entity: entity.clone(),
+        });
+    }
+    for &idx in &overlay.nodes {
+        let p = &plan.nodes[idx];
+        overlay.bbox = Some(union_bbox(
+            overlay.bbox,
+            (p.x, p.y, p.x + BOX_WIDTH, p.y + BOX_HEIGHT),
+        ));
+    }
+    for placed_entity in &overlay.entities {
+        overlay.bbox = Some(union_bbox(
+            overlay.bbox,
+            (
+                placed_entity.x,
+                placed_entity.y,
+                placed_entity.x + ENTITY_WIDTH,
+                placed_entity.y + ENTITY_HEIGHT,
+            ),
+        ));
+    }
+    // Include targeted enclosing frames (and header padding when zooming onto nodes inside a frame).
+    for &fi in &overlay.frames {
+        let fr = &plan.frames[fi];
+        let fpath = normalize_rel_path(&m::text(&frames[fi], "path"));
+        let explicit_folder_only = focus.target_folders.iter().any(|folder| folder == &fpath)
+            && !focus
+                .target_paths
+                .iter()
+                .chain(&focus.target_nodes)
+                .any(|t| {
+                    t.strip_prefix(&fpath)
+                        .is_some_and(|rest| rest.starts_with('/'))
+                });
+        if overlay.bbox.is_none() || explicit_folder_only {
+            overlay.bbox = Some(union_bbox(
+                overlay.bbox,
+                (fr.x, fr.y, fr.x + fr.width, fr.y + fr.height),
+            ));
+        } else if let Some((x0, y0, x1, y1)) = overlay.bbox {
+            // Keep folder header readable above top matched nodes inside the frame.
+            if (y0 - fr.y).abs() <= 48.0 {
+                overlay.bbox = Some((x0.min(fr.x + 4.0), fr.y, x1, y1));
+            }
+        }
+    }
+    overlay
+}
+/// Computes camera `(scale, pan_x, pan_y)` to fit the entire plane inside `viewport`.
+pub fn camera_for_fit(plane: (f64, f64), viewport: (f64, f64)) -> (f64, f64, f64) {
+    if plane.0 <= 0.0 || plane.1 <= 0.0 || viewport.0 <= 0.0 || viewport.1 <= 0.0 {
+        return (1.0, 0.0, 0.0);
+    }
+    let scale = ((viewport.0 * 0.94) / plane.0)
+        .min((viewport.1 * 0.94) / plane.1)
+        .clamp(CAMERA_MIN, 1.0);
+    let scaled_w = plane.0 * scale;
+    let scaled_h = plane.1 * scale;
+    let pan_x = if scaled_w <= viewport.0 {
+        ((viewport.0 - scaled_w) / 2.0).round()
+    } else {
+        12.0
+    };
+    let pan_y = if scaled_h <= viewport.1 {
+        ((viewport.1 - scaled_h) / 2.0).round()
+    } else {
+        12.0
+    };
+    (scale, pan_x, pan_y)
+}
+/// Computes camera `(scale, pan_x, pan_y)` focusing and centering `bbox` inside `viewport`.
+pub fn camera_for_bbox(
+    bbox: (f64, f64, f64, f64),
+    viewport: (f64, f64),
+    focus_max: f64,
+) -> (f64, f64, f64) {
+    if viewport.0 <= 0.0 || viewport.1 <= 0.0 {
+        return (1.0, 0.0, 0.0);
+    }
+    let bw = ((bbox.2 - bbox.0).abs() + 112.0).max(BOX_WIDTH + 96.0);
+    let bh = ((bbox.3 - bbox.1).abs() + 88.0).max(BOX_HEIGHT + 80.0);
+    let cap = focus_max.clamp(CAMERA_MIN, CAMERA_MAX);
+    let scale = ((viewport.0 * 0.90) / bw)
+        .min((viewport.1 * 0.90) / bh)
+        .clamp(CAMERA_MIN, cap);
+    let cx = (bbox.0 + bbox.2) / 2.0;
+    let cy = (bbox.1 + bbox.3) / 2.0;
+    (
+        scale,
+        (viewport.0 / 2.0 - cx * scale).round(),
+        (viewport.1 / 2.0 - cy * scale).round(),
+    )
+}
+/// Zooms around a viewport-relative anchor `(ax, ay)` while keeping that logical point fixed.
+pub fn zoom_at(
+    scale0: f64,
+    pan_x0: f64,
+    pan_y0: f64,
+    anchor: (f64, f64),
+    next_scale: f64,
+) -> (f64, f64, f64) {
+    let s0 = scale0.clamp(CAMERA_MIN, CAMERA_MAX);
+    let s1 = next_scale.clamp(CAMERA_MIN, CAMERA_MAX);
+    let lx = (anchor.0 - pan_x0) / s0;
+    let ly = (anchor.1 - pan_y0) / s0;
+    (
+        s1,
+        (anchor.0 - lx * s1).round(),
+        (anchor.1 - ly * s1).round(),
+    )
+}
+fn prompt_tokens(prompt: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "add", "and", "app", "can", "class", "code", "create", "delete", "edit", "file", "files",
+        "find", "fix", "for", "from", "function", "get", "graph", "help", "into", "make", "map",
+        "method", "please", "remove", "set", "show", "test", "tests", "that", "the", "this",
+        "update", "using", "with", "work",
+    ];
+    let mut out = Vec::new();
+    for raw in
+        prompt.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '/' && c != '.')
+    {
+        let cleaned = raw.trim_matches(|c: char| c == '.' || c == '/' || c == '-');
+        if cleaned.len() < 2 {
+            continue;
+        }
+        let lower = cleaned.to_ascii_lowercase();
+        if !STOP.contains(&lower.as_str()) && !out.contains(&lower) {
+            out.push(lower);
+        }
+        if cleaned.contains('/') {
+            for seg in cleaned.split('/') {
+                let seg_l = seg.to_ascii_lowercase();
+                if seg_l.len() >= 3 && !STOP.contains(&seg_l.as_str()) && !out.contains(&seg_l) {
+                    out.push(seg_l);
+                }
+            }
+        }
+    }
+    out
+}
+/// Fast local prompt-to-graph matcher for immediate 0ms predictive focus when user sends a prompt.
+pub fn match_prompt_targets(view: &V, prompt: &str) -> Option<LiveFocus> {
+    let tokens = prompt_tokens(prompt);
+    if tokens.is_empty() {
+        return None;
+    }
+    let nodes = m::array(&view["nodes"]);
+    let frames = m::array(&view["frames"]);
+    if nodes.is_empty() && frames.is_empty() {
+        return None;
+    }
+    let mut scored: Vec<(u64, bool, String, String)> = Vec::new();
+    for node in &nodes {
+        let path = normalize_rel_path(&m::text(node, "path"));
+        if path.is_empty() {
+            continue;
+        }
+        let name = m::text(node, "name");
+        let name_l = name.to_ascii_lowercase();
+        let path_l = path.to_ascii_lowercase();
+        let file_l = normalize_rel_path(&m::text(node, "file")).to_ascii_lowercase();
+        let path_segs: Vec<&str> = path_l.split(['/', '.', '#', ':']).collect();
+        let mut score = 0u64;
+        for tok in &tokens {
+            if tok == &path_l || tok == &name_l || (!file_l.is_empty() && tok == &file_l) {
+                score += 120;
+            } else if path_segs.iter().any(|seg| !seg.is_empty() && *seg == tok) {
+                score += 80;
+            } else if tok.len() >= 3 && (name_l.contains(tok) || path_l.contains(tok)) {
+                score += 25 + (tok.len() as u64).min(20);
+            }
+        }
+        if score >= 25 {
+            scored.push((score, m::yes(&node["folder"]), path, name));
+        }
+    }
+    for frame in &frames {
+        let path = normalize_rel_path(&m::text(frame, "path"));
+        if path.is_empty() || path.starts_with("role:") {
+            continue;
+        }
+        let name = m::text(frame, "name");
+        let name_l = name.to_ascii_lowercase();
+        let path_l = path.to_ascii_lowercase();
+        let mut score = 0u64;
+        for tok in &tokens {
+            if tok == &path_l || tok == &name_l {
+                score += 100;
+            } else if tok.len() >= 3 && (name_l.contains(tok) || path_l.contains(tok)) {
+                score += 25;
+            }
+        }
+        if score >= 25 && !scored.iter().any(|(_, _, p, _)| p == &path) {
+            scored.push((score, true, path, name));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+    let top_score = scored.first()?.0;
+    let cutoff = (top_score / 2).max(25);
+    let mut target_folders = Vec::new();
+    let mut target_paths = Vec::new();
+    let mut target_nodes = Vec::new();
+    let mut labels = Vec::new();
+    for (score, folder, path, name) in scored.into_iter().take(5) {
+        if score < cutoff {
+            break;
+        }
+        target_nodes.push(path.clone());
+        if folder {
+            if !target_folders.contains(&path) {
+                target_folders.push(path);
+            }
+        } else if !target_paths.contains(&path) {
+            target_paths.push(path);
+        }
+        let label = if name.is_empty() {
+            "target".to_owned()
+        } else {
+            name
+        };
+        if !labels.contains(&label) && labels.len() < 3 {
+            labels.push(label);
+        }
+    }
+    if target_nodes.is_empty() {
+        return None;
+    }
+    Some(LiveFocus {
+        phase: "predicting".to_owned(),
+        summary: format!("Focusing near {}", labels.join(", ")),
+        target_folders,
+        target_paths,
+        target_nodes,
+        created_entities: Vec::new(),
+    })
 }
 /// Groups of nodes that all reach each other, as a group number per node.
 fn groups(count: usize, out: &[Vec<usize>]) -> Vec<usize> {
@@ -926,25 +1563,43 @@ fn names(view: &V) -> bool {
 /// The letter a symbol's box carries for what it is. The file's own node
 /// and a name the graph says nothing more about carry none.
 fn letter(kind: &str) -> &'static str {
-    match kind {
+    match kind.trim().to_ascii_lowercase().as_str() {
         "type" => "T",
+        "property" | "prop" | "field" => "P",
+        "const" | "constant" | "class_const" => "K",
         "method" => "m",
-        "function" => "f",
+        "function" | "fn" => "f",
         "case" => "c",
         "heading" => "#",
         _ => "",
     }
 }
+fn resolved_member_kind(value: &V) -> &str {
+    value["member_kind"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            value["kind"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or("")
+}
 /// What a symbol is, in words: its kind and what holds it.
 fn what(symbol: &V) -> String {
-    let (word, joined) = match symbol["kind"].as_str().unwrap_or("") {
+    let (word, joined) = match resolved_member_kind(symbol) {
         "file" => {
             return "the file itself, for what belongs to no symbol in it, such as its imports"
                 .to_owned();
         }
         "type" => ("type", "in"),
+        "property" | "prop" => ("property", "of"),
+        "field" => ("field", "of"),
+        "const" | "constant" | "class_const" => ("constant", "of"),
         "method" => ("method", "of"),
-        "function" => ("function", "in"),
+        "function" | "fn" => ("function", "in"),
         "case" => ("case", "of"),
         "heading" => ("heading", "under"),
         _ => ("name (a constant, a field or a plain type)", "in"),
@@ -953,6 +1608,342 @@ fn what(symbol: &V) -> String {
         Some(owner) => format!("{word} {joined} {owner}"),
         None => word.to_owned(),
     }
+}
+fn normalize_visibility(vis: Option<&str>) -> Option<(&'static str, &'static str, &'static str)> {
+    let raw = vis?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let lower = raw.to_ascii_lowercase();
+    if lower == "public" || lower == "pub" || lower == "export" || lower == "open" {
+        Some(("public", "◎ pub", "pub"))
+    } else if lower == "protected" || lower.starts_with("protected(") {
+        Some(("protected", "◈ prot", "prot"))
+    } else if lower == "private"
+        || lower == "#private"
+        || lower.starts_with("private(")
+        || lower == "pub(self)"
+    {
+        Some(("private", "⊗ priv", "priv"))
+    } else if lower == "internal"
+        || lower == "package"
+        || lower == "package-private"
+        || lower == "package private"
+        || lower == "fileprivate"
+        || lower == "pub(crate)"
+        || lower == "pub(super)"
+        || lower.starts_with("pub(in")
+    {
+        Some(("internal", "◉ pkg", "pkg"))
+    } else {
+        None
+    }
+}
+fn visibility_pill_html(vis: Option<&str>, compact: bool) -> String {
+    let Some(raw) = vis.map(str::trim).filter(|s| !s.is_empty()) else {
+        return String::new();
+    };
+    let Some((bucket, full_label, compact_label)) = normalize_visibility(Some(raw)) else {
+        return String::new();
+    };
+    let label = if compact { compact_label } else { full_label };
+    let compact_attr = if compact { "true" } else { "false" };
+    let title = format!("Visibility: {}", escape(raw));
+    format!(
+        "<span class=\"graph-vis-pill\" data-vis=\"{bucket}\" data-compact=\"{compact_attr}\" title=\"{title}\" aria-label=\"{title}\">{}</span>",
+        escape(label),
+    )
+}
+fn member_kind_tag(kind: &str) -> Option<(&'static str, &'static str)> {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "property" | "prop" => Some(("prop", "prop")),
+        "field" => Some(("field", "field")),
+        "const" | "constant" | "class_const" => Some(("const", "const")),
+        "method" => Some(("method", "method")),
+        "function" | "fn" => Some(("fn", "fn")),
+        _ => None,
+    }
+}
+fn member_kind_pill_html(kind: &str) -> String {
+    let Some((attr, label)) = member_kind_tag(kind) else {
+        return String::new();
+    };
+    format!("<span class=\"graph-member-kind\" data-member-kind=\"{attr}\">{label}</span>")
+}
+fn vis_delta_badge_html(prev: Option<&str>, curr: Option<&str>, narrowed: bool) -> String {
+    let prev_text = prev.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("?");
+    let curr_text = curr.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("?");
+    let status = if narrowed { "broken_risk" } else { "modified" };
+    let title = format!("{} → {}", escape(prev_text), escape(curr_text));
+    let aria = if narrowed {
+        format!("Visibility narrowed: {title}")
+    } else {
+        format!("Visibility changed: {title}")
+    };
+    format!(
+        "<span class=\"graph-status-pill graph-member-vis-delta\" data-status=\"{status}\" title=\"{title}\" aria-label=\"{aria}\">vis!</span>"
+    )
+}
+fn member_has_risk(member: &V) -> bool {
+    let change = m::text(member, "change").trim().to_ascii_lowercase();
+    let access_risk = m::text(member, "access_risk").trim().to_ascii_lowercase();
+    m::yes(&member["visibility_narrowed"])
+        || m::yes(&member["visibility_changed"])
+        || m::yes(&member["signature_changed"])
+        || !access_risk.is_empty()
+        || (!change.is_empty() && change != "unchanged")
+        || (member["previous_visibility"].as_str().is_some()
+            && member["visibility"].as_str().is_some()
+            && member["previous_visibility"].as_str() != member["visibility"].as_str())
+}
+fn member_has_severe_risk(member: &V) -> bool {
+    let change = m::text(member, "change").trim().to_ascii_lowercase();
+    let access_risk = m::text(member, "access_risk").trim().to_ascii_lowercase();
+    m::yes(&member["visibility_narrowed"])
+        || matches!(
+            access_risk.as_str(),
+            "deleted" | "inaccessible" | "visibility_narrowed" | "signature_changed"
+        )
+        || change == "removed"
+}
+fn member_rows_html(members: &[V], member_filter: &str) -> String {
+    let risk_only = member_filter == "risk";
+    let filtered: Vec<&V> = members
+        .iter()
+        .filter(|member| !risk_only || member_has_risk(member))
+        .collect();
+    if filtered.is_empty() {
+        return String::new();
+    }
+    let mut html = String::from("<ul class=\"graph-member-list\">");
+    for member in filtered {
+        let vis_pill = visibility_pill_html(member["visibility"].as_str(), false);
+        let kind_pill = member_kind_pill_html(resolved_member_kind(member));
+        let name = m::text(member, "name").trim().to_owned();
+        let signature = m::text(member, "signature").trim().to_owned();
+        let display_sig = if signature.is_empty() {
+            name.clone()
+        } else if !name.is_empty() && !signature.contains(&name) {
+            format!("{name}{signature}")
+        } else {
+            signature.clone()
+        };
+        let sig_title = if signature.is_empty() {
+            name.clone()
+        } else {
+            signature
+        };
+        let access = m::text(member, "access").trim().to_owned();
+        let access_html = if access.is_empty() {
+            String::new()
+        } else {
+            let access_esc = escape(&access);
+            format!("<span class=\"graph-member-access\" data-access=\"{access_esc}\">{access_esc}</span>")
+        };
+        let prev_vis = member["previous_visibility"].as_str();
+        let curr_vis = member["visibility"].as_str();
+        let change = m::text(member, "change").trim().to_ascii_lowercase();
+        let access_risk = m::text(member, "access_risk").trim().to_ascii_lowercase();
+        let vis_changed = m::yes(&member["visibility_narrowed"])
+            || m::yes(&member["visibility_changed"])
+            || change == "visibility_changed"
+            || access_risk == "visibility_narrowed"
+            || access_risk == "inaccessible"
+            || (prev_vis.is_some() && curr_vis.is_some() && prev_vis != curr_vis);
+        let narrowed = m::yes(&member["visibility_narrowed"])
+            || matches!(access_risk.as_str(), "visibility_narrowed" | "inaccessible");
+        let mut badges = String::new();
+        if vis_changed {
+            badges.push_str(&vis_delta_badge_html(prev_vis, curr_vis, narrowed));
+        }
+        match access_risk.as_str() {
+            "deleted" => badges.push_str(
+                "<span class=\"graph-status-pill\" data-status=\"broken_risk\" title=\"Referenced member was deleted\">deleted</span>",
+            ),
+            "inaccessible" => badges.push_str(
+                "<span class=\"graph-status-pill\" data-status=\"broken_risk\" title=\"Referenced member is no longer accessible\">inaccessible</span>",
+            ),
+            "signature_changed" => badges.push_str(
+                "<span class=\"graph-status-pill\" data-status=\"modified\" title=\"Signature changed\">sig</span>",
+            ),
+            _ if m::yes(&member["signature_changed"]) => badges.push_str(
+                "<span class=\"graph-status-pill\" data-status=\"modified\" title=\"Signature changed\">sig</span>",
+            ),
+            _ => {}
+        }
+        match change.as_str() {
+            "added" => {
+                badges.push_str("<span class=\"graph-status-pill\" data-status=\"added\">+</span>")
+            }
+            "removed" => badges
+                .push_str("<span class=\"graph-status-pill\" data-status=\"removed\">-</span>"),
+            "modified" => badges
+                .push_str("<span class=\"graph-status-pill\" data-status=\"modified\">~</span>"),
+            _ => {}
+        }
+        let line = member["line"]
+            .as_u64()
+            .filter(|&l| l > 0)
+            .map(|l| format!("<span class=\"graph-member-line\">:{l}</span>"))
+            .unwrap_or_default();
+        let risk_attr = if member_has_risk(member) {
+            " data-risk=\"true\""
+        } else {
+            ""
+        };
+        let narrowed_attr = if narrowed {
+            " data-narrowed=\"true\""
+        } else {
+            ""
+        };
+        let change_attr = if change.is_empty() {
+            String::new()
+        } else {
+            format!(" data-change=\"{}\"", escape(&change))
+        };
+        html.push_str(&format!(
+            "<li class=\"graph-member-row\"{risk_attr}{narrowed_attr}{change_attr}>{vis_pill}{kind_pill}<span class=\"graph-member-sig\" title=\"{}\">{}</span>{access_html}{badges}{line}</li>",
+            escape(&sig_title),
+            escape(&display_sig),
+        ));
+    }
+    html.push_str("</ul>");
+    html
+}
+fn vis_warnings_html(warnings: &[V]) -> String {
+    if warnings.is_empty() {
+        return String::new();
+    }
+    let mut html = String::from("<div class=\"graph-vis-warning-box\" role=\"note\">");
+    for w in warnings {
+        let member = m::text(w, "member");
+        let kind_pill = member_kind_pill_html(resolved_member_kind(w));
+        let vis_pill = visibility_pill_html(w["visibility"].as_str(), true);
+        let prev_vis = w["previous_visibility"].as_str();
+        let curr_vis = w["visibility"].as_str();
+        let delta = if prev_vis.is_some() && curr_vis.is_some() && prev_vis != curr_vis {
+            vis_delta_badge_html(prev_vis, curr_vis, true)
+        } else {
+            String::new()
+        };
+        let reason = m::text(w, "reason");
+        let detail = if reason.is_empty() {
+            "visibility risk"
+        } else {
+            reason.as_str()
+        };
+        let line = w["line"]
+            .as_u64()
+            .filter(|&l| l > 0)
+            .map(|l| format!(":{l}"))
+            .unwrap_or_default();
+        html.push_str(&format!(
+            "<div class=\"graph-vis-warning-row\">{vis_pill}{kind_pill}<strong class=\"graph-vis-warning-member\">{}{}</strong>{delta}<span class=\"graph-vis-warning-detail\">{}</span></div>",
+            escape(&member),
+            line,
+            escape(detail),
+        ));
+    }
+    html.push_str("</div>");
+    html
+}
+struct MemberDetailsOpts<'a> {
+    member_filter: &'a str,
+    used_title: &'a str,
+    exposed_title: &'a str,
+    summary_title: &'a str,
+    force_open: bool,
+}
+fn impact_members_details_html(
+    used: &[V],
+    exposed: &[V],
+    warnings: &[V],
+    opts: MemberDetailsOpts<'_>,
+) -> String {
+    if used.is_empty() && exposed.is_empty() && warnings.is_empty() {
+        return String::new();
+    }
+    let filter = match opts.member_filter {
+        "used" | "exposed" | "risk" => opts.member_filter,
+        _ => "all",
+    };
+    let show_used = matches!(filter, "all" | "used" | "risk");
+    let show_exposed = matches!(filter, "all" | "exposed" | "risk");
+    let used_list = if show_used {
+        member_rows_html(used, filter)
+    } else {
+        String::new()
+    };
+    let exposed_list = if show_exposed {
+        member_rows_html(exposed, filter)
+    } else {
+        String::new()
+    };
+    let warnings_html = if matches!(filter, "all" | "used" | "risk") {
+        vis_warnings_html(warnings)
+    } else {
+        String::new()
+    };
+    let shown_used = if show_used {
+        used.iter()
+            .filter(|item| filter != "risk" || member_has_risk(item))
+            .count()
+    } else {
+        0
+    };
+    let shown_exposed = if show_exposed {
+        exposed
+            .iter()
+            .filter(|item| filter != "risk" || member_has_risk(item))
+            .count()
+    } else {
+        0
+    };
+    let has_risk = !warnings.is_empty()
+        || used.iter().any(member_has_severe_risk)
+        || exposed.iter().any(member_has_severe_risk);
+    let open_attr = if opts.force_open || has_risk || filter == "risk" {
+        " open"
+    } else {
+        ""
+    };
+    let mut body = String::new();
+    if !warnings_html.is_empty() {
+        body.push_str(&warnings_html);
+    }
+    if !used_list.is_empty() {
+        body.push_str(&format!(
+            "<div class=\"graph-member-section-title\">{} ({shown_used})</div>{used_list}",
+            opts.used_title,
+        ));
+    }
+    if !exposed_list.is_empty() {
+        body.push_str(&format!(
+            "<div class=\"graph-member-section-title\">{} ({shown_exposed})</div>{exposed_list}",
+            opts.exposed_title,
+        ));
+    }
+    if body.is_empty() {
+        body.push_str("<p class=\"knowledge-note\">No members match this filter.</p>");
+    }
+    let total_shown = shown_used + shown_exposed;
+    let count_badge = if filter == "all" {
+        if !used.is_empty() && !exposed.is_empty() {
+            format!("{} used · {} exposed", used.len(), exposed.len())
+        } else if !used.is_empty() {
+            format!("{} used", used.len())
+        } else if !exposed.is_empty() {
+            format!("{} exposed", exposed.len())
+        } else {
+            format!("{} warnings", warnings.len())
+        }
+    } else {
+        format!("{total_shown}")
+    };
+    format!(
+        "<details class=\"graph-impact-members\"{open_attr}><summary class=\"graph-impact-members-summary\"><span class=\"graph-impact-members-label\">{} ({count_badge})</span></summary>{body}</details>",
+        opts.summary_title,
+    )
 }
 fn capital(text: &str) -> String {
     let mut letters = text.chars();
@@ -2219,12 +3210,620 @@ fn leaning(uses: u64, used: u64) -> &'static str {
         "used"
     }
 }
+/// Classifies a node in an overview map (`patterns` enabled) by which pattern
+/// families (`arch`, `design`, or `both`) have listed findings inside it.
+fn pattern_family_of(view: &V, path: &str) -> Option<&'static str> {
+    if path.is_empty() {
+        return None;
+    }
+    let prefix = format!("{path}/");
+    let (mut arch, mut design) = (false, false);
+    for kind in m::array(&view["patterns"]["kinds"]) {
+        let is_arch = kind["family"] == "architecture";
+        let hits = m::array(&kind["instances"]).into_iter().any(|row| {
+            let file = row["file"].as_str().unwrap_or("");
+            let id = row["id"].as_str().unwrap_or("");
+            file == path
+                || file.starts_with(&prefix)
+                || (is_arch && kind["id"] == "layers" && id == format!("layers@{path}"))
+        });
+        if hits {
+            if is_arch {
+                arch = true;
+            } else {
+                design = true;
+            }
+        }
+    }
+    match (arch, design) {
+        (true, true) => Some("both"),
+        (true, false) => Some("arch"),
+        (false, true) => Some("design"),
+        (false, false) => None,
+    }
+}
+/// Shortens verbose edge relationship phrases for compact canvas badges.
+fn short_tie(tie: &str) -> String {
+    tie.replace(" and ", " & ")
+}
+/// Finds a non-overlapping label coordinate near an edge's midpoint, or
+/// returns `None` if all small vertical offsets would collide.
+fn place_tie(placed: &mut Vec<(f64, f64)>, (x, y): (f64, f64)) -> Option<(f64, f64)> {
+    for dy in [0.0, -10.0, 10.0] {
+        let candidate = (x, y + dy);
+        let clear = placed
+            .iter()
+            .all(|&(px, py)| (px - candidate.0).abs() >= 64.0 || (py - candidate.1).abs() >= 14.0);
+        if clear {
+            placed.push(candidate);
+            return Some(candidate);
+        }
+    }
+    None
+}
+/// Accent color shared by overview layer chips and dedicated layer view nodes.
+fn layer_accent(id: u64) -> String {
+    format!("hsl({} 68% 46%)", (id * 137 + 220) % 360)
+}
 /// The map itself: links as curves underneath, one button per folder or
 /// file, or, in an opened file, per symbol and per file around. Colour tells
 /// the direction: a link runs from the colour of using to the colour of being
 /// used, and a box is tinted by which of the two it does more here.
+fn entity_change_badge(change: Option<&str>) -> (&'static str, &'static str, &'static str) {
+    match change.map(str::to_ascii_lowercase).as_deref() {
+        Some("modified") => ("modified", "MOD", "Modified"),
+        Some("deleted") => ("deleted", "DEL", "Deleted"),
+        _ => ("created", "NEW", "New"),
+    }
+}
+
+fn change_status_badge(status: &str) -> (&'static str, &'static str) {
+    match status.to_ascii_lowercase().as_str() {
+        "created" | "added" => ("NEW", "Created"),
+        "modified" => ("MOD", "Modified"),
+        "deleted" | "removed" => ("DEL", "Deleted"),
+        "renamed" => ("REN", "Renamed"),
+        _ => ("", "Unchanged"),
+    }
+}
+
+fn path_matches_node(node_path: &str, is_folder: bool, file_path: &str) -> bool {
+    let norm_node = normalize_rel_path(node_path);
+    let norm_file = normalize_rel_path(strip_symbol_suffix(file_path));
+    if norm_node.is_empty() || norm_file.is_empty() {
+        return false;
+    }
+    if norm_node == norm_file {
+        return true;
+    }
+    is_folder && norm_file.starts_with(&format!("{norm_node}/"))
+}
+
+fn resolve_canvas_node_by_path(nodes: &[V], target_path: &str) -> Option<usize> {
+    let norm_target = normalize_rel_path(strip_symbol_suffix(target_path));
+    if norm_target.is_empty() {
+        return None;
+    }
+    if let Some(exact) = nodes
+        .iter()
+        .position(|node| normalize_rel_path(&m::text(node, "path")) == norm_target)
+    {
+        return Some(exact);
+    }
+    nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| m::yes(&node["folder"]))
+        .filter_map(|(idx, node)| {
+            let folder_path = normalize_rel_path(&m::text(node, "path"));
+            if !folder_path.is_empty() && norm_target.starts_with(&format!("{folder_path}/")) {
+                Some((folder_path.len(), idx))
+            } else {
+                None
+            }
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, idx)| idx)
+}
+
+struct ChangesLookup {
+    exact: BTreeMap<String, String>,
+    files: Vec<(String, String)>,
+}
+
+impl ChangesLookup {
+    fn from_value(doc: &V) -> Option<Self> {
+        let arr = doc["files"].as_array()?;
+        let mut exact = BTreeMap::new();
+        let mut files = Vec::new();
+        for item in arr {
+            let path = normalize_rel_path(&m::text(item, "path"));
+            let status = m::text(item, "status").to_ascii_lowercase();
+            if path.is_empty() || status.is_empty() {
+                continue;
+            }
+            exact.insert(path.clone(), status.clone());
+            files.push((path, status));
+        }
+        Some(Self { exact, files })
+    }
+
+    fn status_for(&self, node_path: &str, folder: bool) -> Option<String> {
+        let norm = normalize_rel_path(strip_symbol_suffix(node_path));
+        if norm.is_empty() {
+            return None;
+        }
+        if let Some(status) = self.exact.get(&norm) {
+            return Some(status.clone());
+        }
+        if !folder {
+            return None;
+        }
+        let prefix = format!("{norm}/");
+        let mut seen = BTreeSet::new();
+        for (file, status) in &self.files {
+            if file.starts_with(&prefix) {
+                seen.insert(status.as_str());
+            }
+        }
+        if seen.is_empty() {
+            None
+        } else if seen.len() == 1 {
+            seen.into_iter().next().map(str::to_owned)
+        } else {
+            Some("modified".to_owned())
+        }
+    }
+}
+
+struct ImpactLookup {
+    selected_path: String,
+    selected_idx: Option<usize>,
+    uses_added: Vec<String>,
+    uses_removed: Vec<String>,
+    uses_unchanged: Vec<String>,
+    callers_risk: Vec<String>,
+    callers_impacted: Vec<String>,
+    callers_added: Vec<String>,
+    callers_unchanged: Vec<String>,
+}
+
+impl ImpactLookup {
+    fn from_value(doc: &V, nodes: &[V]) -> Option<Self> {
+        let selected_path = normalize_rel_path(strip_symbol_suffix(&m::text(doc, "path")));
+        if selected_path.is_empty() {
+            return None;
+        }
+        let selected_idx = resolve_canvas_node_by_path(nodes, &selected_path);
+        let collect_deps = |arr: &V| -> Vec<String> {
+            m::array(arr)
+                .into_iter()
+                .filter_map(|dep| {
+                    let target = normalize_rel_path(strip_symbol_suffix(&m::text(&dep, "target")));
+                    (!target.is_empty()).then_some(target)
+                })
+                .collect()
+        };
+        let mut callers_risk = Vec::new();
+        let mut callers_impacted = Vec::new();
+        let mut callers_added = Vec::new();
+        let mut callers_unchanged = Vec::new();
+        for caller in m::array(&doc["used_by"]) {
+            let path = normalize_rel_path(strip_symbol_suffix(&m::text(&caller, "path")));
+            if path.is_empty() {
+                continue;
+            }
+            match m::text(&caller, "impact").as_str() {
+                "broken_risk" => callers_risk.push(path),
+                "impacted" => callers_impacted.push(path),
+                "added_caller" => callers_added.push(path),
+                _ => callers_unchanged.push(path),
+            }
+        }
+        Some(Self {
+            selected_path,
+            selected_idx,
+            uses_added: collect_deps(&doc["uses"]["added"]),
+            uses_removed: collect_deps(&doc["uses"]["removed"]),
+            uses_unchanged: collect_deps(&doc["uses"]["unchanged"]),
+            callers_risk,
+            callers_impacted,
+            callers_added,
+            callers_unchanged,
+        })
+    }
+
+    fn node_matches_any(&self, node: &V, paths: &[String]) -> bool {
+        let node_path = m::text(node, "path");
+        let is_folder = m::yes(&node["folder"]);
+        paths
+            .iter()
+            .any(|path| path_matches_node(&node_path, is_folder, path))
+    }
+
+    fn edge_diff(&self, nodes: &[V], from: usize, to: usize) -> Option<&'static str> {
+        let from_node = &nodes[from];
+        let to_node = &nodes[to];
+        let from_is_selected = path_matches_node(
+            &m::text(from_node, "path"),
+            m::yes(&from_node["folder"]),
+            &self.selected_path,
+        );
+        let to_is_selected = path_matches_node(
+            &m::text(to_node, "path"),
+            m::yes(&to_node["folder"]),
+            &self.selected_path,
+        );
+        if from_is_selected {
+            if self.node_matches_any(to_node, &self.uses_added) {
+                return Some("added");
+            }
+            if self.node_matches_any(to_node, &self.uses_removed) {
+                return Some("removed");
+            }
+            if self.node_matches_any(to_node, &self.uses_unchanged) {
+                return Some("unchanged");
+            }
+        }
+        if to_is_selected {
+            if self.node_matches_any(from_node, &self.callers_added) {
+                return Some("added");
+            }
+            if self.node_matches_any(from_node, &self.callers_risk) {
+                return Some("removed");
+            }
+            if self.node_matches_any(from_node, &self.callers_impacted)
+                || self.node_matches_any(from_node, &self.callers_unchanged)
+            {
+                return Some("unchanged");
+            }
+        }
+        None
+    }
+
+    fn node_impact(&self, nodes: &[V], idx: usize) -> Option<&'static str> {
+        if Some(idx) == self.selected_idx {
+            return None;
+        }
+        let node = &nodes[idx];
+        if self.node_matches_any(node, &self.callers_risk) {
+            Some("caller-risk")
+        } else if self.node_matches_any(node, &self.uses_removed) {
+            Some("removed-dep")
+        } else if self.node_matches_any(node, &self.uses_added) {
+            Some("added-dep")
+        } else if self.node_matches_any(node, &self.callers_impacted)
+            || self.node_matches_any(node, &self.callers_added)
+        {
+            Some("caller-impacted")
+        } else {
+            None
+        }
+    }
+}
+
+fn synthetic_edge_points(from_place: &Placed, to_place: &Placed) -> ((f64, f64), (f64, f64)) {
+    let mid_y = BOX_HEIGHT / 2.0;
+    if from_place.x <= to_place.x {
+        (
+            (from_place.x + BOX_WIDTH, from_place.y + mid_y),
+            (to_place.x, to_place.y + mid_y),
+        )
+    } else {
+        (
+            (from_place.x, from_place.y + mid_y),
+            (to_place.x + BOX_WIDTH, to_place.y + mid_y),
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EdgeArrowSpec {
+    kind: &'static str,
+    label: &'static str,
+    description: &'static str,
+    dash_array: Option<&'static str>,
+    marker_body: &'static str,
+    swatch_line_end: f64,
+}
+
+const EDGE_ARROW_SPECS: [EdgeArrowSpec; 7] = [
+    EdgeArrowSpec {
+        kind: "calls",
+        label: "Calls",
+        description: "Calls, instantiations, or default dependencies (solid, filled triangle)",
+        dash_array: None,
+        marker_body: "<path d=\"M0 0 L8 4 L0 8 z\"/>",
+        swatch_line_end: 21.0,
+    },
+    EdgeArrowSpec {
+        kind: "imports",
+        label: "Imports",
+        description: "Imports, includes, or requires (dashed, open chevron)",
+        dash_array: Some("8 4"),
+        marker_body: "<path d=\"M1 1 L7.5 4 L1 7\"/>",
+        swatch_line_end: 26.5,
+    },
+    EdgeArrowSpec {
+        kind: "extends",
+        label: "Extends",
+        description: "Inherits from a parent class or interface (solid, hollow triangle)",
+        dash_array: None,
+        marker_body: "<path d=\"M0.8 0.8 L7.8 4 L0.8 7.2 Z\"/>",
+        swatch_line_end: 21.0,
+    },
+    EdgeArrowSpec {
+        kind: "implements",
+        label: "Implements",
+        description: "Implements an interface or uses a trait (dash-dot, hollow triangle)",
+        dash_array: Some("6 3 2 3"),
+        marker_body: "<path d=\"M0.8 0.8 L7.8 4 L0.8 7.2 Z\"/>",
+        swatch_line_end: 21.0,
+    },
+    EdgeArrowSpec {
+        kind: "writes",
+        label: "Writes",
+        description: "Writes, mutates, or sets state (solid, filled diamond)",
+        dash_array: None,
+        marker_body: "<path d=\"M0.5 4 L4 1 L7.5 4 L4 7 Z\"/>",
+        swatch_line_end: 21.0,
+    },
+    EdgeArrowSpec {
+        kind: "reads",
+        label: "Reads",
+        description: "Reads properties, static state, or constants (dotted, hollow diamond)",
+        dash_array: Some("2 3"),
+        marker_body: "<path d=\"M0.8 4 L4 1.2 L7.2 4 L4 6.8 Z\"/>",
+        swatch_line_end: 21.0,
+    },
+    EdgeArrowSpec {
+        kind: "uses",
+        label: "Uses",
+        description: "Type hints or references (solid, barbed tip)",
+        dash_array: None,
+        marker_body: "<path d=\"M0.5 1 L7.8 4 L0.5 7 L2.4 4 z\"/>",
+        swatch_line_end: 22.0,
+    },
+];
+
+fn edge_arrow_spec_index(kind: &str) -> usize {
+    EDGE_ARROW_SPECS
+        .iter()
+        .position(|spec| spec.kind == kind)
+        .unwrap_or(0)
+}
+
+/// Normalizes a raw dependency relation name to one of the 7 canonical arrow kinds.
+pub fn normalize_edge_arrow_kind(raw: &str) -> &'static str {
+    let key = raw.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    match key.as_str() {
+        "calls" | "call" | "instantiates" | "indirect_call" => "calls",
+        "imports" | "imports_from" | "includes" | "requires" | "re_exports"
+        | "crate_depends_on" | "depends_on" => "imports",
+        "extends" | "inherits" => "extends",
+        "implements" | "uses_trait" | "trait" => "implements",
+        "writes" | "mutates" | "sets" => "writes",
+        "reads"
+        | "static_read"
+        | "uses_const"
+        | "const"
+        | "references_constant"
+        | "uses_static_prop" => "reads",
+        "uses" | "references" | "type_hint" | "uses_component" | "binds_method" | "bound_to" => {
+            "uses"
+        }
+        _ => "calls",
+    }
+}
+
+fn pick_precedence_kind(counts: &[u64; 7]) -> &'static str {
+    if counts[2] > 0 {
+        return "extends";
+    }
+    if counts[3] > 0 {
+        return "implements";
+    }
+    let mut best: Option<(&'static str, u64)> = None;
+    for &(idx, kind) in &[(4usize, "writes"), (0, "calls"), (5, "reads"), (6, "uses")] {
+        let count = counts[idx];
+        if count == 0 {
+            continue;
+        }
+        match best {
+            None => best = Some((kind, count)),
+            Some((_, best_count)) if count > best_count => best = Some((kind, count)),
+            _ => {}
+        }
+    }
+    if let Some((kind, _)) = best {
+        return kind;
+    }
+    if counts[1] > 0 {
+        return "imports";
+    }
+    "calls"
+}
+
+fn edge_kind_stats(edge: &V) -> (&'static str, bool, Option<String>) {
+    if let Some(kinds) = edge["kinds"].as_array().filter(|arr| !arr.is_empty()) {
+        let mut counts = [0u64; 7];
+        let mut items: Vec<(String, u64)> = Vec::with_capacity(kinds.len());
+        for entry in kinds {
+            let raw = entry
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| m::text(entry, "kind"));
+            if raw.is_empty() {
+                continue;
+            }
+            let links = entry["links"].as_u64().unwrap_or(1);
+            let norm = normalize_edge_arrow_kind(&raw);
+            let idx = edge_arrow_spec_index(norm);
+            counts[idx] = counts[idx].saturating_add(links.max(1));
+            items.push((raw.replace('_', " "), links));
+        }
+        if !items.is_empty() {
+            let multi = counts.iter().filter(|&&c| c > 0).count() > 1;
+            let primary = pick_precedence_kind(&counts);
+            items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let breakdown = items
+                .into_iter()
+                .map(|(label, count)| format!("{label} {count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return (primary, multi, Some(breakdown));
+        }
+    }
+    if let Some(kind) = edge["kind"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return (normalize_edge_arrow_kind(kind), false, None);
+    }
+    if let Some(tie) = edge["tie"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let mut counts = [0u64; 7];
+        let mut any = false;
+        for part in tie
+            .split(" and ")
+            .flat_map(|s| s.split(','))
+            .flat_map(|s| s.split('&'))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let norm = normalize_edge_arrow_kind(part);
+            let idx = edge_arrow_spec_index(norm);
+            counts[idx] = counts[idx].saturating_add(1);
+            any = true;
+        }
+        if any {
+            let multi = counts.iter().filter(|&&c| c > 0).count() > 1;
+            return (pick_precedence_kind(&counts), multi, None);
+        }
+    }
+    ("calls", false, None)
+}
+
+/// Resolves the canonical arrow kind for an aggregated or link-level dependency edge.
+#[cfg(test)]
+pub fn arrow_kind_for_edge(edge: &V) -> &'static str {
+    edge_kind_stats(edge).0
+}
+
+fn arrow_marker_suffix(kind: &str, against: bool) -> String {
+    if against {
+        "-against".to_owned()
+    } else if kind == "calls" {
+        String::new()
+    } else {
+        format!("-{kind}")
+    }
+}
+
+fn arrow_class_for_kind(kind: &str) -> String {
+    if kind == "calls" {
+        "graph-map-arrow".to_owned()
+    } else {
+        format!("graph-map-arrow graph-map-arrow-{kind}")
+    }
+}
+
+fn arrow_defs_svg(id_prefix: &str, include_against: bool) -> String {
+    let mut defs = String::new();
+    for spec in EDGE_ARROW_SPECS {
+        let suffix = arrow_marker_suffix(spec.kind, false);
+        let class_name = arrow_class_for_kind(spec.kind);
+        defs.push_str(&format!(
+            "<marker id=\"{id_prefix}-arrow{suffix}\" class=\"{class_name}\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\">{}</marker>",
+            spec.marker_body,
+        ));
+    }
+    if include_against {
+        // The head of a link that runs against the order of the layers.
+        defs.push_str(&format!(
+            "<marker id=\"{id_prefix}-arrow-against\" class=\"graph-map-arrow graph-map-arrow-against\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\"/></marker>"
+        ));
+    }
+    defs
+}
+
+/// Renders an accessible compact key of all 7 canonical dependency arrow styles.
+pub fn arrow_kinds_legend_html() -> String {
+    let mut html = String::from(
+        "<div class=\"graph-arrow-legend\" role=\"list\" aria-label=\"Dependency arrow types\"><span class=\"graph-arrow-legend-title\">Arrows:</span>",
+    );
+    for spec in EDGE_ARROW_SPECS {
+        let dash = spec
+            .dash_array
+            .map(|d| format!(" stroke-dasharray=\"{d}\""))
+            .unwrap_or_default();
+        let arrow_class = arrow_class_for_kind(spec.kind);
+        html.push_str(&format!(
+            "<span class=\"graph-arrow-legend-item\" role=\"listitem\" title=\"{}\"><svg class=\"graph-arrow-swatch\" data-edge-kind=\"{}\" viewBox=\"0 0 30 12\" width=\"30\" height=\"12\" aria-hidden=\"true\"><line class=\"graph-arrow-swatch-line\" x1=\"2\" y1=\"6\" x2=\"{:.1}\" y2=\"6\"{dash}/><g transform=\"translate(20 2)\" class=\"{arrow_class}\">{}</g></svg><span>{}</span></span>",
+            escape(spec.description),
+            spec.kind,
+            spec.swatch_line_end,
+            spec.marker_body,
+            spec.label,
+        ));
+    }
+    html.push_str("</div>");
+    html
+}
+
+/// Optional live focus, changed-files catalog, and selected file-impact overlays for `canvas_with_overlays`.
+#[derive(Clone, Debug, Default)]
+pub struct CanvasOverlayContext<'a> {
+    pub live_focus: Option<&'a LiveFocus>,
+    pub changes: Option<&'a V>,
+    pub impact: Option<&'a V>,
+}
+
+/// Canvas markup plus resolved plane size and live focus overlay coordinates.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RenderedCanvas {
+    pub html: String,
+    pub width: f64,
+    pub height: f64,
+    pub focus: FocusOverlay,
+    pub selected_bbox: Option<(f64, f64, f64, f64)>,
+}
+/// Renders a dependency map view using the default `"graph-map"` SVG ID prefix.
+#[cfg(test)]
 pub fn canvas(view: &V) -> String {
+    canvas_with(view, "graph-map", None).html
+}
+/// Renders a dependency map plane with parameterized SVG IDs and optional live focus overlays.
+#[cfg(test)]
+pub fn canvas_with(view: &V, id_prefix: &str, live_focus: Option<&LiveFocus>) -> RenderedCanvas {
+    canvas_with_overlays(
+        view,
+        id_prefix,
+        CanvasOverlayContext {
+            live_focus,
+            changes: None,
+            impact: None,
+        },
+    )
+}
+/// Renders a dependency map plane with live focus, changed-files markers, and file-impact diff edges.
+pub fn canvas_with_overlays(
+    view: &V,
+    id_prefix: &str,
+    overlay: CanvasOverlayContext<'_>,
+) -> RenderedCanvas {
+    let live_focus = overlay.live_focus;
     let nodes = m::array(&view["nodes"]);
+    let changes_lookup = overlay.changes.and_then(ChangesLookup::from_value);
+    let impact_lookup = overlay
+        .impact
+        .and_then(|doc| ImpactLookup::from_value(doc, &nodes));
     let edges = m::array(&view["edges"]);
     let at = |path: &V| nodes.iter().position(|node| &node["path"] == path);
     // A link whose end is not drawn is not drawn either.
@@ -2328,35 +3927,96 @@ pub fn canvas(view: &V) -> String {
     // Among followed symbols a name too long for its box keeps its end,
     // where the method stands after its class.
     let named = names(view);
-    let mut html = format!(
-        "<div class=\"graph-map-plane\"{}{} style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>",
-        if named { " data-names=\"true\"" } else { "" },
-        if cycle_view {
-            " data-cycle-view=\"true\""
-        } else {
-            ""
-        },
-        plan.width,
-        plan.height,
-        plan.width,
-        plan.height
-    );
-    // The head of an arrow lies at what is used.
-    html.push_str("<marker id=\"graph-map-arrow\" class=\"graph-map-arrow\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\"/></marker>");
-    for (index, (start, end)) in spans.iter().enumerate() {
-        html.push_str(&format!(
-            "<linearGradient id=\"graph-map-flow-{index}\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
+    let pattern_family = pattern_view
+        .then(|| m::text(&view["pattern"], "family"))
+        .filter(|family| !family.is_empty());
+    let mut plane_attrs = String::new();
+    if named {
+        plane_attrs.push_str(" data-names=\"true\"");
+    }
+    if cycle_view {
+        plane_attrs.push_str(" data-cycle-view=\"true\"");
+    }
+    if let Some(family) = &pattern_family {
+        plane_attrs.push_str(&format!(
+            " data-pattern-family=\"{}\" data-pattern-sort=\"{}\"",
+            escape(family),
+            escape(&m::text(&view["pattern"], "sort")),
         ));
     }
-    if layered_view || view["architecture"].is_object() {
-        // The head of a link that runs against the order of the layers.
-        html.push_str("<marker id=\"graph-map-arrow-against\" class=\"graph-map-arrow graph-map-arrow-against\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\"/></marker>");
+    if layered_view {
+        plane_attrs.push_str(" data-layered=\"true\"");
+        if m::yes(&view["pattern"]["rings"]) {
+            plane_attrs.push_str(" data-rings=\"true\"");
+        }
+        if declared {
+            plane_attrs.push_str(" data-declared=\"true\"");
+        }
+    }
+    if view["architecture"].is_object() {
+        plane_attrs.push_str(" data-architecture=\"true\"");
+    }
+    if view["patterns"].is_object() {
+        plane_attrs.push_str(" data-patterns-on=\"true\"");
+    }
+    let focus_overlay = live_focus
+        .map(|focus| resolve_focus(view, &plan, focus))
+        .unwrap_or_default();
+    let (mut plane_w, mut plane_h) = (plan.width, plan.height);
+    for entity in &focus_overlay.entities {
+        plane_w = plane_w.max(entity.x + ENTITY_WIDTH + MARGIN);
+        plane_h = plane_h.max(entity.y + ENTITY_HEIGHT + MARGIN);
+    }
+    let mut html = format!(
+        "<div class=\"graph-map-plane\"{plane_attrs} style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>",
+        plane_w, plane_h, plane_w, plane_h
+    );
+    // The head of an arrow lies at what is used.
+    let include_against = layered_view
+        || view["architecture"].is_object()
+        || edges
+            .iter()
+            .any(|edge| edge["architecture_violation"].as_u64().unwrap_or(0) > 0);
+    html.push_str(&arrow_defs_svg(id_prefix, include_against));
+    for (index, (start, end)) in spans.iter().enumerate() {
+        html.push_str(&format!(
+            "<linearGradient id=\"{id_prefix}-flow-{index}\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
+        ));
     }
     html.push_str("</defs>");
+    if layered_view {
+        if let (Some(first), Some(last)) = (plan.nodes.first(), plan.nodes.last()) {
+            html.push_str(&format!(
+                "<rect class=\"graph-map-arch-band\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"10\"/>",
+                first.x - 6.0,
+                first.y - 6.0,
+                (last.x + BOX_WIDTH - first.x) + 12.0,
+                BOX_HEIGHT + 12.0,
+            ));
+        }
+    }
     for (index, place) in plan.frames.iter().enumerate() {
         if place.width > 0.0 {
+            let role_attrs = pattern_family
+                .as_deref()
+                .map_or_else(String::new, |family| {
+                    let role_frame = if frames[index]["path"] == "role:0" {
+                        "anchor"
+                    } else {
+                        "part"
+                    };
+                    format!(
+                        " data-pattern-family=\"{}\" data-role-frame=\"{role_frame}\"",
+                        escape(family)
+                    )
+                });
+            let focus_attr = if focus_overlay.frames.contains(&index) {
+                " data-focus-target=\"true\""
+            } else {
+                ""
+            };
             html.push_str(&format!(
-                "<rect class=\"graph-map-frame\" data-inner=\"{}\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"8\"/>",
+                "<rect class=\"graph-map-frame\" data-inner=\"{}\"{role_attrs}{focus_attr} x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"8\"/>",
                 framed.holder[index].is_some(),
                 place.x,
                 place.y,
@@ -2365,10 +4025,21 @@ pub fn canvas(view: &V) -> String {
             ));
         }
     }
+    if let Some((x0, y0, x1, y1)) = focus_overlay.bbox {
+        let pad = 14.0;
+        let zx = (x0 - pad).max(2.0);
+        let zy = (y0 - pad).max(2.0);
+        let zw = (x1 + pad - zx).max(BOX_WIDTH);
+        let zh = (y1 + pad - zy).max(BOX_HEIGHT);
+        html.push_str(&format!(
+            "<rect class=\"graph-map-target-zone\" x=\"{zx:.1}\" y=\"{zy:.1}\" width=\"{zw:.1}\" height=\"{zh:.1}\" rx=\"12\"/>"
+        ));
+    }
     // Beside a link against the order of the layers: how many of its links
     // a chosen change added. They lie over all the links, and each is lit
     // and steps back with its link.
     let mut marks = String::new();
+    let mut placed_ties = Vec::new();
     for wire in &plan.wires {
         let edge = edges[wire.edge];
         let (links, guessed) = (
@@ -2390,14 +4061,24 @@ pub fn canvas(view: &V) -> String {
         let back = wire.back && cycles && !layered_view;
         let on_path = shared_edges.contains(&(from, to));
         let added = cycle_view && m::yes(&edge["added"]);
-        let state = if cycle_view || selected {
+        let edge_state = if cycle_view || selected {
             if lit((from, to)) {
-                " graph-map-edge-on"
+                "on"
             } else {
-                " graph-map-edge-off"
+                "off"
             }
         } else {
             ""
+        };
+        let state = match edge_state {
+            "on" => " graph-map-edge-on",
+            "off" => " graph-map-edge-off",
+            _ => "",
+        };
+        let edge_state_attr = if edge_state.is_empty() {
+            String::new()
+        } else {
+            format!(" data-edge-state=\"{edge_state}\"")
         };
         // Between two parts of a pattern a link says how the one stands to
         // the other.
@@ -2413,8 +4094,31 @@ pub fn canvas(view: &V) -> String {
             ),
             None => format!("{user} uses {used} · {}", weight(links, guessed)),
         };
+        let edge_diff = impact_lookup
+            .as_ref()
+            .and_then(|lookup| lookup.edge_diff(&nodes, from, to));
+        let edge_diff_attr = edge_diff
+            .map(|diff| format!(" data-diff=\"{diff}\""))
+            .unwrap_or_default();
+        if against {
+            html.push_str(&format!(
+                "<path class=\"graph-map-violation-halo\"{edge_state_attr} data-ends=\"{from} {to}\" d=\"{}\"/>",
+                wire.path,
+            ));
+        }
+        let (arrow_kind, multi_kind, kinds_breakdown) = edge_kind_stats(edge);
+        let multi_attr = if multi_kind {
+            " data-edge-multi=\"true\""
+        } else {
+            ""
+        };
+        let marker_suffix = arrow_marker_suffix(arrow_kind, against);
+        let breakdown_note = kinds_breakdown
+            .as_deref()
+            .map(|text| format!(" · {}", escape(text)))
+            .unwrap_or_default();
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}{}{}\" data-ends=\"{from} {to}\"{}{} d=\"{}\" stroke=\"url(#graph-map-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#graph-map-arrow{})\"><title>{told}{}{}{}</title></path>",
+            "<path class=\"graph-map-edge{state}{}{}{}\" data-ends=\"{from} {to}\"{edge_diff_attr}{}{} d=\"{}\" data-edge-kind=\"{arrow_kind}\"{multi_attr} stroke=\"url(#{id_prefix}-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#{id_prefix}-arrow{marker_suffix})\"><title>{told}{}{}{}{breakdown_note}</title></path>",
             if guessed == links { " graph-map-edge-guess" } else { "" },
             if back { " graph-map-edge-back" } else { "" },
             if against { " graph-map-edge-against" } else { "" },
@@ -2425,7 +4129,6 @@ pub fn canvas(view: &V) -> String {
             // A link that closes a cycle is a row of dots, kept thin.
             (1.0 + ((links.max(1) as f64).log2() * 0.5).min(2.5)).min(if back { 1.8 } else { 3.5 })
                 + if added { 1.5 } else { 0.0 },
-            if against { "-against" } else { "" },
             if back { " · against the main direction, closes a cycle" } else { "" },
             match grew {
                 Some(links) => format!(
@@ -2439,11 +4142,81 @@ pub fn canvas(view: &V) -> String {
             },
             if added { " · added in PR" } else { "" },
         ));
+        if pattern_view && !layered_view {
+            if let Some((tie, (x, y))) = edge["tie"]
+                .as_str()
+                .zip(middle(&wire.path).and_then(|mid| place_tie(&mut placed_ties, mid)))
+            {
+                marks.push_str(&format!(
+                    "<text class=\"graph-map-edge-tie\"{edge_state_attr} data-ends=\"{from} {to}\" data-pattern-family=\"{}\" x=\"{x:.1}\" y=\"{y:.1}\">{}</text>",
+                    escape(pattern_family.as_deref().unwrap_or("design")),
+                    escape(&short_tie(tie)),
+                ));
+            }
+        }
         if let Some((links, (x, y))) = grew.zip(middle(&wire.path)) {
             marks.push_str(&format!(
                 "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" x=\"{x:.1}\" y=\"{y:.1}\">+{}</text>",
                 count(links)
             ));
+        } else if let Some((diff, (x, y))) = edge_diff
+            .filter(|diff| matches!(*diff, "added" | "removed"))
+            .zip(middle(&wire.path))
+        {
+            let symbol = if diff == "added" { "+" } else { "-" };
+            marks.push_str(&format!(
+                "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" data-diff=\"{diff}\" x=\"{x:.1}\" y=\"{y:.1}\">{symbol}</text>"
+            ));
+        }
+    }
+    if let Some(lookup) = impact_lookup.as_ref() {
+        if let Some(sel_idx) = lookup.selected_idx {
+            let rendered_pairs: BTreeSet<(usize, usize)> = pairs.iter().copied().collect();
+            let mut synthetic_drawn: BTreeSet<(usize, usize, &'static str)> = BTreeSet::new();
+            let mut add_synthetic = |from_idx: usize,
+                                     to_idx: usize,
+                                     diff: &'static str,
+                                     label: &str| {
+                if from_idx == to_idx
+                    || rendered_pairs.contains(&(from_idx, to_idx))
+                    || !synthetic_drawn.insert((from_idx, to_idx, diff))
+                {
+                    return;
+                }
+                let (fp, tp) = synthetic_edge_points(&plan.nodes[from_idx], &plan.nodes[to_idx]);
+                let mut d = format!("M{:.1} {:.1}", fp.0, fp.1);
+                curve(&mut d, fp, tp);
+                let mark_symbol = if diff == "added" { "+" } else { "-" };
+                html.push_str(&format!(
+                    "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\" data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"calls\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow)\"><title>{} ({label})</title></path>",
+                    escape(&m::text(&nodes[from_idx], "name")),
+                ));
+                if let Some((mx, my)) = middle(&d) {
+                    marks.push_str(&format!(
+                        "<text class=\"graph-map-edge-mark\" data-ends=\"{from_idx} {to_idx}\" data-diff=\"{diff}\" x=\"{mx:.1}\" y=\"{my:.1}\">{mark_symbol}</text>"
+                    ));
+                }
+            };
+            for target in &lookup.uses_added {
+                if let Some(target_idx) = resolve_canvas_node_by_path(&nodes, target) {
+                    add_synthetic(sel_idx, target_idx, "added", "added dependency");
+                }
+            }
+            for target in &lookup.uses_removed {
+                if let Some(target_idx) = resolve_canvas_node_by_path(&nodes, target) {
+                    add_synthetic(sel_idx, target_idx, "removed", "removed dependency");
+                }
+            }
+            for caller in &lookup.callers_added {
+                if let Some(caller_idx) = resolve_canvas_node_by_path(&nodes, caller) {
+                    add_synthetic(caller_idx, sel_idx, "added", "added caller");
+                }
+            }
+            for caller in &lookup.callers_risk {
+                if let Some(caller_idx) = resolve_canvas_node_by_path(&nodes, caller) {
+                    add_synthetic(caller_idx, sel_idx, "removed", "caller at risk");
+                }
+            }
         }
     }
     html.push_str(&marks);
@@ -2454,13 +4227,19 @@ pub fn canvas(view: &V) -> String {
     // files it is made of beside the picture.
     for wire in plan.wires.iter().filter(|_| view["mode"] != "modules") {
         let (from, to) = pairs[wire.edge];
+        let edge = edges[wire.edge];
+        let (_, _, kinds_breakdown) = edge_kind_stats(edge);
+        let breakdown_note = kinds_breakdown
+            .as_deref()
+            .map(|text| format!(" · {}", escape(text)))
+            .unwrap_or_default();
         html.push_str(&format!(
-            "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{} · select to see {}</title></path>",
+            "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{}{breakdown_note} · select to see {}</title></path>",
             wire.path,
             payload(&json!({"from": nodes[from]["path"], "to": nodes[to]["path"]})),
             escape(&m::text(&nodes[from], "name")),
             escape(&m::text(&nodes[to], "name")),
-            if cycle_view && m::yes(&edges[wire.edge]["added"]) { " · added in PR" } else { "" },
+            if cycle_view && m::yes(&edge["added"]) { " · added in PR" } else { "" },
             if layered_view {
                 "the pairs of files it is made of"
             } else {
@@ -2644,7 +4423,7 @@ pub fn canvas(view: &V) -> String {
         if node["shell_read"].is_number() {
             label.push_str(", read via shell");
         }
-        let kind = node["kind"].as_str().unwrap_or("");
+        let kind = resolved_member_kind(node);
         // A folder opens to its files, a file to what it holds. Among
         // followed links, on a path and in what two places share a box is
         // only selected: opening it would leave them.
@@ -2672,6 +4451,13 @@ pub fn canvas(view: &V) -> String {
         } else {
             ("graph-map-node", node["path"].clone())
         };
+        let node_vis = node["visibility"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(vis) = node_vis {
+            label.push_str(&format!(", visibility {vis}"));
+        }
         let title = match (symbol, line) {
             (true, 0) => format!("{} · {home}", m::text(node, "name")),
             (true, line) => format!("{} · {home}:{line}", m::text(node, "name")),
@@ -2679,18 +4465,103 @@ pub fn canvas(view: &V) -> String {
             _ if m::yes(&node["layer"]) || m::yes(&node["module"]) => m::text(node, "name"),
             _ => m::text(node, "path"),
         };
-        let architecture = layer_color(&node["architecture_layer"]).map_or_else(String::new, |color| {
-            label.push_str(&format!(", layer {}", m::text(&node["architecture_layer"], "name")));
-            format!(" data-architecture-layer=\"true\" style=\"--architecture-color:{color};left:{:.0}px;top:{:.0}px\"", placed.x, placed.y)
-        });
+        let title = if let Some(vis) = node_vis {
+            format!("{title} · {vis}")
+        } else {
+            title
+        };
+        let node_vis_attr = node_vis
+            .and_then(|v| normalize_visibility(Some(v)))
+            .map(|(bucket, _, _)| format!(" data-visibility=\"{bucket}\""))
+            .unwrap_or_default();
+        let node_vis_pill = visibility_pill_html(node_vis, true);
+        let arch_color = layer_color(&node["architecture_layer"]);
+        let arch_layer_id = if arch_color.is_some() {
+            m::text(&node["architecture_layer"], "id")
+        } else if layered_view {
+            let path = m::text(node, "path");
+            path.strip_prefix("layer:").unwrap_or(&path).to_owned()
+        } else {
+            String::new()
+        };
+        let layer_color_value = arch_color
+            .clone()
+            .or_else(|| layered_view.then(|| layer_accent(index as u64)));
+        let architecture = match (arch_color.is_some(), layered_view, &layer_color_value) {
+            (true, _, Some(color)) => {
+                label.push_str(&format!(
+                    ", layer {}",
+                    m::text(&node["architecture_layer"], "name")
+                ));
+                format!(
+                    " data-architecture-layer=\"true\" data-arch-layer-id=\"{}\" style=\"--architecture-color:{color};left:{:.0}px;top:{:.0}px\"",
+                    escape(&arch_layer_id),
+                    placed.x,
+                    placed.y
+                )
+            }
+            (false, true, Some(color)) => format!(
+                " data-layer=\"true\" data-arch-layer-id=\"{}\" data-layer-order=\"{}\" style=\"--architecture-color:{color};left:{:.0}px;top:{:.0}px\"",
+                escape(&arch_layer_id),
+                index + 1,
+                placed.x,
+                placed.y
+            ),
+            _ => String::new(),
+        };
         let position = if architecture.is_empty() {
             format!(" style=\"left:{:.0}px;top:{:.0}px\"", placed.x, placed.y)
         } else {
             architecture
         };
+        let mut pattern_node_attrs = String::new();
+        if patterns > 0 {
+            pattern_node_attrs.push_str(" data-has-patterns=\"true\"");
+            if let Some(found_family) = pattern_family_of(view, &m::text(node, "path")) {
+                pattern_node_attrs.push_str(&format!(" data-pattern-family=\"{found_family}\""));
+            }
+        } else if !layered_view {
+            if let Some(family) = &pattern_family {
+                pattern_node_attrs
+                    .push_str(&format!(" data-pattern-family=\"{}\"", escape(family)));
+                if let Some(role) = node["role"].as_str() {
+                    pattern_node_attrs
+                        .push_str(&format!(" data-pattern-role=\"{}\"", escape(role)));
+                }
+            }
+        }
+        let prefix_badge = if layered_view {
+            let badge = if m::yes(&view["pattern"]["rings"]) && index == 0 {
+                "◎".to_owned()
+            } else {
+                format!("{}", index + 1)
+            };
+            format!("<span class=\"graph-map-layer-order\" aria-hidden=\"true\">{badge}</span>")
+        } else if arch_color.is_some() {
+            "<span class=\"graph-map-node-layer\" aria-hidden=\"true\"></span>".to_owned()
+        } else {
+            String::new()
+        };
+        let node_change_status = changes_lookup
+            .as_ref()
+            .and_then(|lookup| lookup.status_for(&m::text(node, "path"), folder));
+        let node_change_attr = node_change_status
+            .as_deref()
+            .map(|status| format!(" data-change-status=\"{}\"", escape(status)))
+            .unwrap_or_default();
+        let node_impact_attr = impact_lookup
+            .as_ref()
+            .and_then(|lookup| lookup.node_impact(&nodes, index))
+            .map(|impact| format!(" data-impact=\"{impact}\""))
+            .unwrap_or_default();
         let (out, into) = flow[index];
+        let focus_target_attr = if focus_overlay.nodes.contains(&index) {
+            " data-focus-target=\"true\""
+        } else {
+            ""
+        };
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark}{position} title=\"{}\"{pressed} aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark}{focus_target_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{position} title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>{node_vis_pill}",
             payload(&node_payload),
             escape(kind),
             opened && !symbol,
@@ -2717,6 +4588,9 @@ pub fn canvas(view: &V) -> String {
                 escape(&m::text(node, "name"))
             },
         ));
+        if pattern_view && !layered_view && start {
+            html.push_str("<span class=\"graph-map-node-anchor\" aria-hidden=\"true\">★</span>");
+        }
         if cycle {
             html.push_str("<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻</span>");
         }
@@ -2747,6 +4621,14 @@ pub fn canvas(view: &V) -> String {
                     None => count(changed),
                 }
             ));
+        } else if let Some(status) = node_change_status.as_deref() {
+            let (badge, _) = change_status_badge(status);
+            if !badge.is_empty() {
+                html.push_str(&format!(
+                    "<span class=\"graph-map-node-status\" data-status=\"{}\" aria-hidden=\"true\">{badge}</span>",
+                    escape(status)
+                ));
+            }
         } else if folder {
             html.push_str(&format!(
                 "<span class=\"graph-map-node-count\" aria-hidden=\"true\">{}</span>",
@@ -2799,8 +4681,21 @@ pub fn canvas(view: &V) -> String {
                 place.y + 11.0,
             ));
         }
+        let role_attrs = pattern_family
+            .as_deref()
+            .map_or_else(String::new, |family| {
+                let role_frame = if held["path"] == "role:0" {
+                    "anchor"
+                } else {
+                    "part"
+                };
+                format!(
+                    " data-pattern-family=\"{}\" data-role-frame=\"{role_frame}\"",
+                    escape(family)
+                )
+            });
         html.push_str(&format!(
-            "<span class=\"graph-map-frame-name\" style=\"left:{:.0}px;top:{:.0}px;max-width:{:.0}px\" title=\"{}\">{name}{}</span>",
+            "<span class=\"graph-map-frame-name\"{role_attrs} style=\"left:{:.0}px;top:{:.0}px;max-width:{:.0}px\" title=\"{}\">{name}{}</span>",
             place.x + if fixed { 8.0 } else { 26.0 },
             place.y + 3.0,
             (place.width - if fixed { 14.0 } else { 32.0 }).max(40.0),
@@ -2816,8 +4711,108 @@ pub fn canvas(view: &V) -> String {
             },
         ));
     }
+    for placed_entity in &focus_overlay.entities {
+        let entity = &placed_entity.entity;
+        let kind_short = entity_kind_badge(&entity.kind);
+        let (change_key, badge_label, title_prefix) = entity_change_badge(entity.change.as_deref());
+        let loc = if !entity.path.is_empty() && entity.line > 0 {
+            format!(" · {}:{}", entity.path, entity.line)
+        } else if !entity.path.is_empty() {
+            format!(" · {}", entity.path)
+        } else {
+            String::new()
+        };
+        let vis_attr = entity
+            .visibility
+            .as_deref()
+            .and_then(|v| normalize_visibility(Some(v)))
+            .map(|(bucket, _, _)| format!(" data-visibility=\"{bucket}\""))
+            .unwrap_or_default();
+        let vis_pill = visibility_pill_html(entity.visibility.as_deref(), true);
+        let vis_word = entity
+            .visibility
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("{s} "))
+            .unwrap_or_default();
+        let title = format!(
+            "{title_prefix} {vis_word}{} {}{loc}",
+            entity.kind, entity.name
+        );
+        let entity_payload = payload(&json!({
+            "id": entity.id,
+            "kind": entity.kind,
+            "name": entity.name,
+            "parent": entity.parent,
+            "path": entity.path,
+            "folder": entity.folder,
+            "line": entity.line,
+            "change": change_key,
+            "visibility": entity.visibility,
+            "modifiers": entity.modifiers,
+            "x": placed_entity.x,
+            "y": placed_entity.y,
+        }));
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-map-node graph-map-entity-node is-blinking\" data-entity-id=\"{}\" data-entity-kind=\"{}\" data-entity-change=\"{change_key}\"{vis_attr} data-action=\"session-graph-entity\" data-payload=\"{entity_payload}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\"><span class=\"graph-map-entity-dot\" aria-hidden=\"true\"></span><span class=\"graph-map-entity-kind\" aria-hidden=\"true\">{kind_short}</span>{vis_pill}<span class=\"graph-map-entity-name\">{}</span><span class=\"graph-map-entity-badge\">{badge_label}</span></button>",
+            escape(&entity.id),
+            escape(&entity.kind),
+            placed_entity.x,
+            placed_entity.y,
+            escape(&title),
+            escape(&title),
+            escape(&entity.name),
+        ));
+    }
     html.push_str("</div>");
-    html
+    let selected_idx = chosen.or_else(|| {
+        impact_lookup
+            .as_ref()
+            .and_then(|lookup| lookup.selected_idx)
+    });
+    let selected_bbox = selected_idx.and_then(|idx| plan.nodes.get(idx)).map(|p| {
+        let mut min_x = p.x;
+        let mut min_y = p.y;
+        let mut max_x = p.x + BOX_WIDTH;
+        let mut max_y = p.y + BOX_HEIGHT;
+        let sel = selected_idx.unwrap_or(0);
+        let mut include_node = |n_idx: usize| {
+            if let Some(np) = plan.nodes.get(n_idx) {
+                min_x = min_x.min(np.x);
+                min_y = min_y.min(np.y);
+                max_x = max_x.max(np.x + BOX_WIDTH);
+                max_y = max_y.max(np.y + BOX_HEIGHT);
+            }
+        };
+        for (from, to) in &pairs {
+            if *from == sel {
+                include_node(*to);
+            } else if *to == sel {
+                include_node(*from);
+            }
+        }
+        if let Some(lookup) = impact_lookup.as_ref() {
+            for target in lookup.uses_added.iter().chain(&lookup.uses_removed) {
+                if let Some(target_idx) = resolve_canvas_node_by_path(&nodes, target) {
+                    include_node(target_idx);
+                }
+            }
+            for caller in lookup.callers_added.iter().chain(&lookup.callers_risk) {
+                if let Some(caller_idx) = resolve_canvas_node_by_path(&nodes, caller) {
+                    include_node(caller_idx);
+                }
+            }
+        }
+        (min_x, min_y, max_x, max_y)
+    });
+    RenderedCanvas {
+        html,
+        width: plane_w,
+        height: plane_h,
+        focus: focus_overlay,
+        selected_bbox,
+    }
 }
 /// How far past a corner the second handle of a side hangs.
 const HANDLE_GAP: f64 = 11.0;
@@ -3013,10 +5008,188 @@ fn link_names(view: &V) -> (Vec<(V, V)>, [Vec<usize>; 2]) {
     }
     (names, held)
 }
+#[derive(Default)]
+struct LinkDiffInfo {
+    pair_diff: Option<&'static str>,
+    symbol_diffs: BTreeMap<String, &'static str>,
+    symbol_risks: BTreeMap<String, String>,
+    warnings: Vec<V>,
+}
+
+fn paths_overlap(a: &str, b: &str) -> bool {
+    let na = normalize_rel_path(strip_symbol_suffix(a));
+    let nb = normalize_rel_path(strip_symbol_suffix(b));
+    if na.is_empty() || nb.is_empty() {
+        return false;
+    }
+    na == nb || nb.starts_with(&format!("{na}/")) || na.starts_with(&format!("{nb}/"))
+}
+
+fn merge_diff_priority(current: Option<&'static str>, next: &'static str) -> &'static str {
+    match (current, next) {
+        (Some("added"), _) | (_, "added") => "added",
+        (Some("removed"), _) | (_, "removed") => "removed",
+        _ => "unchanged",
+    }
+}
+
+fn norm_sym_token(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches('.')
+        .trim_end_matches("()")
+        .to_ascii_lowercase()
+}
+
+impl LinkDiffInfo {
+    fn record_member_ref(&mut self, mref: &V, fallback_diff: Option<&'static str>) {
+        let tok = norm_sym_token(&m::text(mref, "name"));
+        if tok.is_empty() {
+            return;
+        }
+        let change = m::text(mref, "change").trim().to_ascii_lowercase();
+        let mapped = match change.as_str() {
+            "added" => Some("added"),
+            "removed" => Some("removed"),
+            "modified" | "visibility_changed" | "unchanged" => Some("unchanged"),
+            _ => fallback_diff,
+        };
+        if let Some(diff) = mapped {
+            let merged = merge_diff_priority(self.symbol_diffs.get(&tok).copied(), diff);
+            self.symbol_diffs.insert(tok.clone(), merged);
+        }
+        let risk = m::text(mref, "access_risk").trim().to_owned();
+        if !risk.is_empty() {
+            self.symbol_risks.insert(tok, risk);
+        } else if m::yes(&mref["visibility_narrowed"]) {
+            self.symbol_risks
+                .insert(tok, "visibility_narrowed".to_owned());
+        }
+    }
+
+    fn record_syms(&mut self, syms: &V, diff: &'static str) {
+        for sym in m::array(syms) {
+            if let Some(name) = sym.as_str().map(norm_sym_token).filter(|s| !s.is_empty()) {
+                let merged = merge_diff_priority(self.symbol_diffs.get(&name).copied(), diff);
+                self.symbol_diffs.insert(name, merged);
+            }
+        }
+    }
+
+    fn record_warning(&mut self, w: V) {
+        let tok = norm_sym_token(&m::text(&w, "member"));
+        if !tok.is_empty() {
+            let reason = m::text(&w, "reason");
+            self.symbol_risks.insert(
+                tok,
+                if reason.is_empty() {
+                    "visibility risk".to_owned()
+                } else {
+                    reason
+                },
+            );
+        }
+        self.warnings.push(w);
+    }
+
+    fn from_view(link_view: &V, impact: Option<&V>) -> Self {
+        let mut info = Self::default();
+        for w in m::array(&link_view["visibility_warnings"]) {
+            info.record_warning(w);
+        }
+        for mref in m::array(&link_view["member_refs"]) {
+            info.record_member_ref(&mref, None);
+        }
+        let Some(impact) = impact.filter(|v| v.is_object()) else {
+            return info;
+        };
+        let impact_path = normalize_rel_path(strip_symbol_suffix(&m::text(impact, "path")));
+        if impact_path.is_empty() {
+            return info;
+        }
+        let from_path = normalize_rel_path(&m::text(&link_view["from"], "path"));
+        let to_path = normalize_rel_path(&m::text(&link_view["to"], "path"));
+        if paths_overlap(&from_path, &impact_path) {
+            for (diff, list) in [
+                ("added", &impact["uses"]["added"]),
+                ("removed", &impact["uses"]["removed"]),
+                ("unchanged", &impact["uses"]["unchanged"]),
+            ] {
+                for dep in m::array(list) {
+                    let target = m::text(&dep, "target");
+                    if paths_overlap(&to_path, &target) {
+                        info.pair_diff = Some(merge_diff_priority(info.pair_diff, diff));
+                        info.record_syms(&dep["symbols"], diff);
+                        for mref in m::array(&dep["member_refs"]) {
+                            info.record_member_ref(&mref, Some(diff));
+                        }
+                        for w in m::array(&dep["visibility_warnings"]) {
+                            info.record_warning(w);
+                        }
+                    }
+                }
+            }
+        }
+        if paths_overlap(&to_path, &impact_path) {
+            for caller in m::array(&impact["used_by"]) {
+                let caller_path = m::text(&caller, "path");
+                if paths_overlap(&from_path, &caller_path) {
+                    let diff = match m::text(&caller, "impact").as_str() {
+                        "broken_risk" => "removed",
+                        "added_caller" => "added",
+                        _ => "unchanged",
+                    };
+                    info.pair_diff = Some(merge_diff_priority(info.pair_diff, diff));
+                    info.record_syms(&caller["changed_symbols"], diff);
+                    info.record_syms(&caller["symbols"], diff);
+                    for mref in m::array(&caller["used_members"]) {
+                        info.record_member_ref(&mref, Some(diff));
+                    }
+                    for w in m::array(&caller["visibility_warnings"]) {
+                        info.record_warning(w);
+                    }
+                }
+            }
+        }
+        info
+    }
+
+    fn diff_for_names(&self, from_name: &str, to_name: &str) -> Option<&'static str> {
+        for candidate in [norm_sym_token(from_name), norm_sym_token(to_name)] {
+            if let Some(diff) = self.symbol_diffs.get(&candidate) {
+                return Some(diff);
+            }
+        }
+        self.pair_diff
+    }
+
+    fn risk_for_names(&self, from_name: &str, to_name: &str) -> Option<&str> {
+        for candidate in [norm_sym_token(to_name), norm_sym_token(from_name)] {
+            if let Some(risk) = self.symbol_risks.get(&candidate) {
+                return Some(risk.as_str());
+            }
+        }
+        None
+    }
+}
+
+fn diff_badge_sign(diff: &str) -> &'static str {
+    match diff {
+        "added" => "+",
+        "removed" => "-",
+        _ => "=",
+    }
+}
+
 /// The picture of one link, looked into: the names that use on the left,
 /// the names that are used on the right, each in the frame of its file, and
 /// every link between two of them. `chosen` is the name whose links are lit.
+#[cfg(test)]
 pub fn link_canvas(view: &V, chosen: &str) -> String {
+    link_canvas_with(view, chosen, None)
+}
+/// Renders the link detail canvas with optional change-impact diff annotations (`+`/`-`/`=`).
+pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
+    let diff_info = LinkDiffInfo::from_view(view, impact);
     let (names, held) = link_names(view);
     let at = |key: &V| names.iter().position(|(name, _)| &name["key"] == key);
     let edges = m::array(&view["edges"]);
@@ -3043,11 +5216,12 @@ pub fn link_canvas(view: &V, chosen: &str) -> String {
         })
     };
     let mut html = format!(
-        "<div class=\"graph-map-plane\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs><marker id=\"graph-link-arrow\" class=\"graph-map-arrow\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\"/></marker><linearGradient id=\"graph-link-flow\" gradientUnits=\"userSpaceOnUse\" x1=\"{:.0}\" y1=\"0\" x2=\"{:.0}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient></defs>",
+        "<div class=\"graph-map-plane\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>{}<linearGradient id=\"graph-link-flow\" gradientUnits=\"userSpaceOnUse\" x1=\"{:.0}\" y1=\"0\" x2=\"{:.0}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient></defs>",
         plan.width,
         plan.height,
         plan.width,
         plan.height,
+        arrow_defs_svg("graph-link", false),
         MARGIN + FRAME_PAD + LINK_BOX,
         MARGIN + FRAME_PAD + LINK_BOX + LINK_GAP,
     );
@@ -3066,13 +5240,75 @@ pub fn link_canvas(view: &V, chosen: &str) -> String {
             None => "",
         };
         let guessed = m::yes(&edge["guessed"]);
+        let from_name = m::text(&names[*from].0, "name");
+        let to_name = m::text(&names[*to].0, "name");
+        let edge_diff = diff_info.diff_for_names(&from_name, &to_name);
+        let diff_attr = edge_diff
+            .map(|diff| format!(" data-diff=\"{diff}\""))
+            .unwrap_or_default();
+        let diff_note = match edge_diff {
+            Some("added") => " · + added",
+            Some("removed") => " · - removed",
+            Some("unchanged") => " · = unchanged",
+            _ => "",
+        };
+        let from_vis = names[*from].0["visibility"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let to_vis = names[*to].0["visibility"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let vis_note = match (from_vis, to_vis) {
+            (Some(fv), Some(tv)) => format!(" · {fv} → {tv}"),
+            (None, Some(tv)) => format!(" · visibility: {tv}"),
+            (Some(fv), None) => format!(" · visibility: {fv}"),
+            (None, None) => String::new(),
+        };
+        let edge_risk = edge["access_risk"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                edge["visibility_warning"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| diff_info.risk_for_names(&from_name, &to_name));
+        let risk_note = edge_risk
+            .map(|r| format!(" · risk: {r}"))
+            .unwrap_or_default();
+        let (arrow_kind, multi_kind, kinds_breakdown) = edge_kind_stats(edge);
+        let raw_kind = m::text(edge, "kind");
+        let kind_label = match (raw_kind.is_empty(), kinds_breakdown) {
+            (true, Some(breakdown)) => breakdown,
+            (false, Some(breakdown)) => {
+                if multi_kind {
+                    breakdown
+                } else {
+                    raw_kind.replace('_', " ")
+                }
+            }
+            (false, None) => raw_kind.replace('_', " "),
+            (true, None) => arrow_kind.to_owned(),
+        };
+        let multi_attr = if multi_kind {
+            " data-edge-multi=\"true\""
+        } else {
+            ""
+        };
+        let marker_suffix = arrow_marker_suffix(arrow_kind, false);
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}\" data-ends=\"{from} {to}\" d=\"{wire}\" stroke=\"url(#graph-link-flow)\" stroke-width=\"1.4\" marker-end=\"url(#graph-link-arrow)\"><title>{} uses {} · {}{}</title></path>",
+            "<path class=\"graph-map-edge{state}{}\" data-ends=\"{from} {to}\"{diff_attr} d=\"{wire}\" data-edge-kind=\"{arrow_kind}\"{multi_attr} stroke=\"url(#graph-link-flow)\" stroke-width=\"1.4\" marker-end=\"url(#graph-link-arrow{marker_suffix})\"><title>{} uses {} · {}{}{diff_note}{}{}</title></path>",
             if guessed { " graph-map-edge-guess" } else { "" },
-            escape(&m::text(&names[*from].0, "name")),
-            escape(&m::text(&names[*to].0, "name")),
-            escape(&m::text(edge, "kind").replace('_', " ")),
+            escape(&from_name),
+            escape(&to_name),
+            escape(&kind_label),
             if guessed { ", guessed by name" } else { "" },
+            escape(&vis_note),
+            escape(&risk_note),
         ));
     }
     html.push_str("</svg>");
@@ -3094,14 +5330,33 @@ pub fn link_canvas(view: &V, chosen: &str) -> String {
     for (index, (name, file)) in names.iter().enumerate() {
         let (x, y) = plan.names[index];
         let uses = index < users;
-        let kind = name["kind"].as_str().unwrap_or("");
+        let kind = resolved_member_kind(name);
         let line = name["line"].as_u64().unwrap_or(0);
         let links = name["links"].as_u64().unwrap_or(0);
+        let node_vis = name["visibility"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let node_vis_attr = node_vis
+            .and_then(|v| normalize_visibility(Some(v)))
+            .map(|(bucket, _, _)| format!(" data-visibility=\"{bucket}\""))
+            .unwrap_or_default();
+        let node_vis_pill = visibility_pill_html(node_vis, true);
+        let node_risk = name["access_risk"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or_else(|| diff_info.risk_for_names(&m::text(name, "name"), &m::text(name, "name")));
         let place = match line {
             0 => m::text(file, "path"),
             line => format!("{}:{line}", m::text(file, "path")),
         };
-        let label = format!(
+        let title_place = if let Some(vis) = node_vis {
+            format!("{place} · {vis}")
+        } else {
+            place.clone()
+        };
+        let mut label = format!(
             "{}, {}, {}, {} here",
             m::text(name, "name"),
             what(name),
@@ -3112,15 +5367,21 @@ pub fn link_canvas(view: &V, chosen: &str) -> String {
                 format!("is used through {}", plural(links, "link", "links"))
             }
         );
+        if let Some(vis) = node_vis {
+            label.push_str(&format!(", visibility {vis}"));
+        }
+        if let Some(risk) = node_risk {
+            label.push_str(&format!(", visibility risk: {risk}"));
+        }
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-link-node\" data-payload=\"{}\" data-folder=\"false\" data-kind=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-flow=\"{}\" data-out=\"{uses}\" data-in=\"{}\" style=\"left:{x:.0}px;top:{y:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>{}</button>",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"graph-link-node\" data-payload=\"{}\" data-folder=\"false\" data-kind=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-flow=\"{}\" data-out=\"{uses}\" data-in=\"{}\"{node_vis_attr} style=\"left:{x:.0}px;top:{y:.0}px\" title=\"{}\" aria-label=\"{}\">{}<span class=\"graph-map-node-name\">{}</span>{node_vis_pill}{}</button>",
             payload(&name["key"]),
             escape(kind),
             picked == Some(index),
             picked.is_some() && !near(index),
             if uses { "uses" } else { "used" },
             !uses,
-            escape(&place),
+            escape(&title_place),
             escape(&label),
             match letter(kind) {
                 "" => String::new(),
@@ -3235,7 +5496,78 @@ pub fn link_note(view: &V) -> String {
 /// Beside the picture of a link: what the chosen name is and what it is
 /// linked with here; with no name chosen, how to choose one and of which
 /// kinds the links are.
+#[cfg(test)]
 pub fn link_side(view: &V, chosen: &str) -> String {
+    link_side_with(view, chosen, None)
+}
+fn link_group_members_html(view: &V) -> String {
+    let mut html = String::new();
+    for (side_key, side_label) in [("users", "Caller"), ("used", "Target")] {
+        for group in m::array(&view[side_key]["groups"]) {
+            let ref_members = m::array(&group["referenced_members"]);
+            let decl_members = m::array(&group["declared_members"]);
+            let gwarnings = m::array(&group["visibility_warnings"]);
+            if ref_members.is_empty() && decl_members.is_empty() && gwarnings.is_empty() {
+                continue;
+            }
+            let gname = m::text(&group, "name");
+            let label = if gname.is_empty() {
+                side_label.to_owned()
+            } else {
+                format!("{} ({side_label})", escape(&gname))
+            };
+            html.push_str(&impact_members_details_html(
+                &ref_members,
+                &decl_members,
+                &gwarnings,
+                MemberDetailsOpts {
+                    member_filter: "all",
+                    used_title: "Referenced members",
+                    exposed_title: "Declared members",
+                    summary_title: &label,
+                    force_open: !gwarnings.is_empty(),
+                },
+            ));
+        }
+    }
+    html
+}
+/// Renders the link detail sidebar with optional change-impact diff badges (`+`/`-`/`=`).
+pub fn link_side_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
+    let diff_info = LinkDiffInfo::from_view(view, impact);
+    let banner = diff_info
+        .pair_diff
+        .map(|diff| {
+            let label = match diff {
+                "added" => "Added dependency in this change",
+                "removed" => "Removed or changed dependency",
+                _ => "Kept dependency",
+            };
+            format!(
+                "<p class=\"knowledge-note\"><span class=\"graph-status-pill\" data-status=\"{diff}\">{}</span> {label}</p>",
+                diff_badge_sign(diff)
+            )
+        })
+        .unwrap_or_default();
+    let link_refs = m::array(&view["member_refs"]);
+    let link_warnings = if diff_info.warnings.is_empty() {
+        String::new()
+    } else {
+        vis_warnings_html(&diff_info.warnings)
+    };
+    let link_refs_html = impact_members_details_html(
+        &link_refs,
+        &[],
+        &[],
+        MemberDetailsOpts {
+            member_filter: "all",
+            used_title: "Member references",
+            exposed_title: "",
+            summary_title: "Member references",
+            force_open: !diff_info.warnings.is_empty(),
+        },
+    );
+    let group_members_html = link_group_members_html(view);
     let (names, _) = link_names(view);
     let Some((name, file)) = names.iter().find(|(name, _)| name["key"] == chosen) else {
         let kinds = m::array(&view["kinds"])
@@ -3249,7 +5581,7 @@ pub fn link_side(view: &V, chosen: &str) -> String {
             })
             .collect::<Vec<_>>();
         return format!(
-            "<p class=\"knowledge-note\">Select a name to light its links.{}</p>{}",
+            "{banner}<p class=\"knowledge-note\">Select a name to light its links.{}</p>{}{link_warnings}{link_refs_html}{group_members_html}",
             if at_base(view) {
                 ""
             } else {
@@ -3267,7 +5599,7 @@ pub fn link_side(view: &V, chosen: &str) -> String {
     };
     let line = name["line"].as_u64().unwrap_or(0);
     let mut html = format!(
-        "<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p>",
+        "{banner}<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p>{}{link_warnings}",
         escape(&m::text(name, "name")),
         escape(&m::text(file, "path")),
         if line > 0 {
@@ -3276,6 +5608,7 @@ pub fn link_side(view: &V, chosen: &str) -> String {
             String::new()
         },
         escape(&capital(&what(name))),
+        focus_member_meta_html(name),
     );
     if !at_base(view) {
         html.push_str(&format!(
@@ -3285,6 +5618,7 @@ pub fn link_side(view: &V, chosen: &str) -> String {
     }
     // What it is linked with in this link, each with the way it is.
     let edges = m::array(&view["edges"]);
+    let self_name = m::text(name, "name");
     for (title, own, other) in [("Uses here", "from", "to"), ("Used by here", "to", "from")] {
         let linked = edges
             .iter()
@@ -3302,16 +5636,49 @@ pub fn link_side(view: &V, chosen: &str) -> String {
             count(linked.len() as u64)
         ));
         for (other, edge) in linked {
+            let other_name = m::text(other, "name");
+            let other_vis = visibility_pill_html(other["visibility"].as_str(), true);
+            let okind = resolved_member_kind(other);
+            let other_kind = if !other_vis.is_empty()
+                || matches!(
+                    okind.trim().to_ascii_lowercase().as_str(),
+                    "property" | "prop" | "field" | "const" | "constant" | "class_const"
+                ) {
+                member_kind_pill_html(okind)
+            } else {
+                String::new()
+            };
+            let risk_pill = diff_info
+                .risk_for_names(&self_name, &other_name)
+                .or_else(|| edge["access_risk"].as_str().filter(|s| !s.is_empty()))
+                .map(|risk| {
+                    format!(
+                        " <span class=\"graph-status-pill\" data-status=\"broken_risk\" title=\"{}\">vis!</span>",
+                        escape(risk)
+                    )
+                })
+                .unwrap_or_default();
+            let diff_pill = diff_info
+                .diff_for_names(&self_name, &other_name)
+                .map(|diff| {
+                    format!(
+                        " <span class=\"graph-status-pill\" data-status=\"{diff}\">{}</span>",
+                        diff_badge_sign(diff)
+                    )
+                })
+                .unwrap_or_default();
             html.push_str(&format!(
-                "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-link-node\" data-payload=\"{}\"><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{}{}</span></button></li>",
+                "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-link-node\" data-payload=\"{}\"><span class=\"graph-map-row-name\">{other_vis}{other_kind}{}</span><span class=\"graph-map-row-links\">{}{}{risk_pill}{diff_pill}</span></button></li>",
                 payload(&other["key"]),
-                escape(&m::text(other, "name")),
+                escape(&other_name),
                 escape(&m::text(edge, "kind").replace('_', " ")),
                 if m::yes(&edge["guessed"]) { ", guessed" } else { "" },
             ));
         }
         html.push_str("</ul>");
     }
+    html.push_str(&link_refs_html);
+    html.push_str(&group_members_html);
     html
 }
 /// The rows of one side of a selected place. `look` names the selected
@@ -3363,8 +5730,53 @@ fn rows(title: &str, rows: &V, more: &V, look: Option<(&V, bool)>) -> String {
                 _ => String::new(),
             },
         };
+        let vis_pill = visibility_pill_html(row["visibility"].as_str(), true);
+        let row_kind = resolved_member_kind(row);
+        let kind_pill = if !vis_pill.is_empty()
+            || matches!(
+                row_kind.trim().to_ascii_lowercase().as_str(),
+                "property" | "prop" | "field" | "const" | "constant" | "class_const"
+            ) {
+            member_kind_pill_html(row_kind)
+        } else {
+            String::new()
+        };
+        let ref_members = {
+            let r = m::array(&row["referenced_members"]);
+            if !r.is_empty() {
+                r
+            } else {
+                let refs = m::array(&row["member_refs"]);
+                if !refs.is_empty() {
+                    refs
+                } else {
+                    m::array(&row["used_members"])
+                }
+            }
+        };
+        let decl_members = {
+            let d = m::array(&row["declared_members"]);
+            if !d.is_empty() {
+                d
+            } else {
+                m::array(&row["target_members"])
+            }
+        };
+        let row_warnings = m::array(&row["visibility_warnings"]);
+        let members_details = impact_members_details_html(
+            &ref_members,
+            &decl_members,
+            &row_warnings,
+            MemberDetailsOpts {
+                member_filter: "all",
+                used_title: "Referenced members",
+                exposed_title: "Exposed members",
+                summary_title: "Properties &amp; methods",
+                force_open: false,
+            },
+        );
         html.push_str(&format!(
-            "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-go\" data-changed=\"{}\" data-payload=\"{}\" title=\"{}\"><span class=\"graph-map-row-name\">{}{}{}</span><span class=\"graph-map-row-links\">{}</span></button>{}</li>",
+            "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-go\" data-changed=\"{}\" data-payload=\"{}\" title=\"{}\"><span class=\"graph-map-row-name\">{vis_pill}{kind_pill}{}{}{}</span><span class=\"graph-map-row-links\">{}</span></button>{}{members_details}</li>",
             m::yes(&row["changed"]),
             payload(&json!({"path": row["path"], "inside": row["inside"], "open": elsewhere})),
             escape(&m::text(row, "path")),
@@ -3462,20 +5874,122 @@ fn reached(symbol: &V, mut text: String) -> String {
     }
     text
 }
+fn symbol_focus_payload(member: &V, nodes: &[V]) -> Option<V> {
+    let explicit_path = m::text(member, "path");
+    if !explicit_path.is_empty() {
+        return Some(json!({ "path": explicit_path, "inside": true }));
+    }
+    let mname = m::text(member, "name");
+    let mline = member["line"].as_u64().unwrap_or(0);
+    if mname.is_empty() {
+        return None;
+    }
+    nodes.iter().find_map(|node| {
+        if !m::yes(&node["symbol"]) {
+            return None;
+        }
+        let nname = m::text(node, "name");
+        let nline = node["line"].as_u64().unwrap_or(0);
+        let name_matches = nname == mname
+            || nname.ends_with(&format!("::{mname}"))
+            || nname.ends_with(&format!(".{mname}"));
+        let line_matches = mline > 0 && nline == mline;
+        if name_matches || line_matches {
+            Some(json!({ "path": node["path"], "inside": true }))
+        } else {
+            None
+        }
+    })
+}
+fn file_declared_members_html(members: &[V], view: &V) -> String {
+    if members.is_empty() {
+        return String::new();
+    }
+    let nodes = m::array(&view["nodes"]);
+    let mut html = format!(
+        "<details class=\"graph-impact-members\" open><summary class=\"graph-impact-members-summary\"><span class=\"graph-impact-members-label\">File properties &amp; methods ({})</span></summary><ul class=\"graph-member-list\">",
+        members.len()
+    );
+    for member in members {
+        let vis_pill = visibility_pill_html(member["visibility"].as_str(), false);
+        let kind_pill = member_kind_pill_html(resolved_member_kind(member));
+        let name = m::text(member, "name");
+        let sig = m::text(member, "signature");
+        let display_sig = if sig.is_empty() {
+            name.clone()
+        } else if !name.is_empty() && !sig.contains(&name) {
+            format!("{name}{sig}")
+        } else {
+            sig.clone()
+        };
+        let title = if sig.is_empty() { &name } else { &sig };
+        let line = member["line"]
+            .as_u64()
+            .filter(|&l| l > 0)
+            .map(|l| format!("<span class=\"graph-member-line\">:{l}</span>"))
+            .unwrap_or_default();
+        if let Some(go_payload) = symbol_focus_payload(member, &nodes) {
+            html.push_str(&format!(
+                "<li><button type=\"button\" class=\"graph-map-row graph-member-row graph-member-row-btn\" data-action=\"graph-map-go\" data-payload=\"{}\" title=\"{}\">{vis_pill}{kind_pill}<span class=\"graph-member-sig\">{}</span>{line}</button></li>",
+                payload(&go_payload),
+                escape(title),
+                escape(&display_sig),
+            ));
+        } else {
+            html.push_str(&format!(
+                "<li class=\"graph-member-row\">{vis_pill}{kind_pill}<span class=\"graph-member-sig\" title=\"{}\">{}</span>{line}</li>",
+                escape(title),
+                escape(&display_sig),
+            ));
+        }
+    }
+    html.push_str("</ul></details>");
+    html
+}
+fn focus_member_meta_html(focus: &V) -> String {
+    let vis_pill = visibility_pill_html(focus["visibility"].as_str(), false);
+    let kind_str = resolved_member_kind(focus);
+    let kind_pill = if !vis_pill.is_empty()
+        || matches!(
+            kind_str.trim().to_ascii_lowercase().as_str(),
+            "property" | "prop" | "field" | "const" | "constant" | "class_const"
+        ) {
+        member_kind_pill_html(kind_str)
+    } else {
+        String::new()
+    };
+    let prev_vis = focus["previous_visibility"].as_str();
+    let curr_vis = focus["visibility"].as_str();
+    let vis_changed = m::yes(&focus["visibility_narrowed"])
+        || m::yes(&focus["visibility_changed"])
+        || (prev_vis.is_some() && curr_vis.is_some() && prev_vis != curr_vis);
+    let vis_delta = if vis_changed {
+        vis_delta_badge_html(prev_vis, curr_vis, m::yes(&focus["visibility_narrowed"]))
+    } else {
+        String::new()
+    };
+    if vis_pill.is_empty() && kind_pill.is_empty() && vis_delta.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=\"graph-member-meta\">{vis_pill}{kind_pill}{vis_delta}</div>")
+    }
+}
 /// The side panel of an opened file: what the selected symbol uses and what
 /// uses it, or which symbols of a file around are linked with this one.
 fn file_side(view: &V) -> String {
     let focus = &view["focus"];
     if !focus.is_object() {
+        let declared = m::array(&view["declared_members"]);
+        let members_html = file_declared_members_html(&declared, view);
         return format!(
-            "<p class=\"knowledge-note\">Select a class, a method or a function to see what it uses and what uses it; Follow links then walks on from it, a step at a time, into whatever files they lead to. A box without a letter is another file that this one uses or is used by: select it again to open it.</p>{}",
+            "<p class=\"knowledge-note\">Select a class, a method or a function to see what it uses and what uses it; Follow links then walks on from it, a step at a time, into whatever files they lead to. A box without a letter is another file that this one uses or is used by: select it again to open it.</p>{members_html}{}",
             unopened(view)
         );
     }
     if m::yes(&focus["symbol"]) {
         let line = focus["line"].as_u64().unwrap_or(0);
         let mut html = format!(
-            "<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p>",
+            "<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p>{}",
             escape(&m::text(focus, "name")),
             escape(&m::text(focus, "file")),
             if line > 0 {
@@ -3484,6 +5998,7 @@ fn file_side(view: &V) -> String {
                 String::new()
             },
             escape(&reached(focus, capital(&what(focus)))),
+            focus_member_meta_html(focus),
         );
         // What is linked with nothing has no links to follow, and no path
         // leads from it.
@@ -3499,6 +6014,21 @@ fn file_side(view: &V) -> String {
                 None,
             ));
         }
+        let ref_members = m::array(&focus["referenced_members"]);
+        let decl_members = m::array(&focus["declared_members"]);
+        let vis_warnings = m::array(&focus["visibility_warnings"]);
+        html.push_str(&impact_members_details_html(
+            &ref_members,
+            &decl_members,
+            &vis_warnings,
+            MemberDetailsOpts {
+                member_filter: "all",
+                used_title: "Referenced members",
+                exposed_title: "Declared members",
+                summary_title: "Properties &amp; methods",
+                force_open: false,
+            },
+        ));
         html.push_str(&rows("Uses", &focus["uses"], &focus["uses_more"], None));
         html.push_str(&rows(
             "Used by",
@@ -3530,6 +6060,22 @@ fn file_side(view: &V) -> String {
     }
     html.push_str(&follow_links(&focus["path"]));
     html.push_str(&path_to(focus));
+    let vis_warnings = m::array(&focus["visibility_warnings"]);
+    html.push_str(&vis_warnings_html(&vis_warnings));
+    let ref_members = m::array(&focus["referenced_members"]);
+    let decl_members = m::array(&focus["declared_members"]);
+    html.push_str(&impact_members_details_html(
+        &ref_members,
+        &decl_members,
+        &[],
+        MemberDetailsOpts {
+            member_filter: "all",
+            used_title: "Referenced members",
+            exposed_title: "Declared members",
+            summary_title: "Properties &amp; methods",
+            force_open: !vis_warnings.is_empty(),
+        },
+    ));
     // Its own symbols at the other end of the links with this file.
     html.push_str(&rows(
         "Uses this file",
@@ -3612,7 +6158,7 @@ fn name_side(view: &V, focus: &V, ways: bool, role: &str) -> String {
     let mut told = reached(focus, capital(&what(focus)));
     told.push_str(role);
     let mut html = format!(
-        "<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p>",
+        "<h3>{}</h3><p class=\"graph-map-path\">{}{}</p><p class=\"knowledge-note\">{}</p>{}",
         escape(&m::text(focus, "name")),
         escape(&m::text(focus, "file")),
         if line > 0 {
@@ -3621,6 +6167,7 @@ fn name_side(view: &V, focus: &V, ways: bool, role: &str) -> String {
             String::new()
         },
         escape(&told),
+        focus_member_meta_html(focus),
     );
     if !at_base(view) {
         html.push_str(&format!(
@@ -3641,6 +6188,21 @@ fn name_side(view: &V, focus: &V, ways: bool, role: &str) -> String {
         &focus["used_by"],
         &focus["used_by_more"],
         look(false),
+    ));
+    let ref_members = m::array(&focus["referenced_members"]);
+    let decl_members = m::array(&focus["declared_members"]);
+    let vis_warnings = m::array(&focus["visibility_warnings"]);
+    html.push_str(&impact_members_details_html(
+        &ref_members,
+        &decl_members,
+        &vis_warnings,
+        MemberDetailsOpts {
+            member_filter: "all",
+            used_title: "Referenced members",
+            exposed_title: "Declared members",
+            summary_title: "Properties &amp; methods",
+            force_open: false,
+        },
     ));
     html.push_str(&kinds(focus));
     html
@@ -3924,6 +6486,101 @@ fn layers_side(view: &V) -> String {
     ));
     html
 }
+/// Structured summary card shown in the side panel for one focused pattern
+/// (`architecture` or `design`), including its family, confidence badges, and
+/// interactive role participant chips.
+fn pattern_brief(view: &V) -> String {
+    let pattern = &view["pattern"];
+    if !pattern.is_object() {
+        return String::new();
+    }
+    let family = match pattern["family"].as_str() {
+        Some("architecture") => "architecture",
+        _ => "design",
+    };
+    let family_label = if family == "architecture" {
+        "Architecture pattern"
+    } else {
+        "Design pattern"
+    };
+    let mut badges = format!(
+        "<span class=\"graph-map-family-pill\" data-family=\"{family}\">{family_label}</span>"
+    );
+    if m::yes(&pattern["named"]) {
+        badges
+            .push_str("<span class=\"graph-map-evidence-pill\" data-tone=\"named\">By name</span>");
+    }
+    if m::yes(&pattern["guessed"]) {
+        badges.push_str("<span class=\"graph-map-evidence-pill\" data-tone=\"guessed\">Includes guessed links</span>");
+    } else {
+        badges.push_str("<span class=\"graph-map-evidence-pill\" data-tone=\"verified\">Verified from code</span>");
+    }
+    let mut html = format!(
+        "<section class=\"graph-map-pattern-brief\" data-family=\"{family}\"><div class=\"graph-map-badges\">{badges}</div><h4>{} <span class=\"graph-map-total\">{}</span></h4>",
+        escape(&m::text(pattern, "name")),
+        escape(&m::text(&pattern["of"], "name")),
+    );
+    let tells = m::text(pattern, "tells");
+    if !tells.is_empty() {
+        html.push_str(&format!(
+            "<p class=\"graph-map-pattern-tells\">{}</p>",
+            escape(&tells)
+        ));
+    }
+    let told = m::array(&pattern["told"]);
+    if !told.is_empty() {
+        html.push_str("<ul class=\"graph-map-told-list\">");
+        for item in told {
+            if let Some(text) = item.as_str().filter(|t| !t.is_empty()) {
+                html.push_str(&format!("<li>{}</li>", escape(text)));
+            }
+        }
+        html.push_str("</ul>");
+    }
+    let frames = m::array(&view["frames"]);
+    let nodes = m::array(&view["nodes"]);
+    if !frames.is_empty() && !nodes.is_empty() {
+        html.push_str("<div class=\"graph-map-role-groups\">");
+        for frame in frames {
+            let holder_path = m::text(&frame, "path");
+            let members: Vec<_> = nodes
+                .iter()
+                .filter(|node| m::text(node, "holder") == holder_path)
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let anchor_frame = holder_path == "role:0";
+            let (places, drawn) = (
+                frame["places"].as_u64().unwrap_or(members.len() as u64),
+                frame["drawn"].as_u64().unwrap_or(members.len() as u64),
+            );
+            let count_text = if drawn < places {
+                format!("{} of {}", count(drawn), count(places))
+            } else {
+                count(places)
+            };
+            html.push_str(&format!(
+                "<div class=\"graph-map-role-group\" data-anchor=\"{anchor_frame}\"><div class=\"graph-map-role-head\"><span>{}</span><span class=\"graph-map-total\">{count_text}</span></div><div class=\"graph-map-role-chips\">",
+                escape(&m::text(&frame, "name")),
+            ));
+            for member in members {
+                let start = m::yes(&member["start"]);
+                html.push_str(&format!(
+                    "<button type=\"button\" class=\"graph-map-part-chip\" data-action=\"graph-map-node\" data-payload=\"{}\" data-family=\"{family}\" data-anchor=\"{start}\" title=\"{}\">{}{}</button>",
+                    payload(&member["path"]),
+                    escape(&m::text(member, "file")),
+                    if start { "★ " } else { "" },
+                    escape(&m::text(member, "name")),
+                ));
+            }
+            html.push_str("</div></div>");
+        }
+        html.push_str("</div>");
+    }
+    html.push_str("</section>");
+    html
+}
 /// The side panel of one found pattern: the selected part with what it is
 /// in the pattern and what joins it to the others, or what to do.
 fn pattern_side(view: &V) -> String {
@@ -3932,7 +6589,10 @@ fn pattern_side(view: &V) -> String {
     }
     let focus = &view["focus"];
     if !focus.is_object() {
-        return "<p class=\"knowledge-note\">A frame holds the parts that are one thing in the pattern. Select a part to see what joins it to the others, and select it again to let go of it. Select a link to see what makes it up.</p>".to_owned();
+        return format!(
+            "<p class=\"knowledge-note\">A frame holds the parts that are one thing in the pattern. Select a part to see what joins it to the others, and select it again to let go of it. Select a link to see what makes it up.</p>{}",
+            pattern_brief(view),
+        );
     }
     name_side(
         view,
@@ -3946,7 +6606,7 @@ const FIRST: usize = 3;
 /// One found pattern as a row that opens its picture. Beside a selected
 /// place the row begins with the pattern, in a list of one pattern with the
 /// type the finding is named after.
-fn pattern_row(row: &V, whole: bool) -> String {
+fn pattern_row(row: &V, whole: bool, family: Option<&str>) -> String {
     let line = row["line"].as_u64().unwrap_or(0);
     let mut told = m::text(row, "parts");
     for (key, tag) in [("named", "by name"), ("guessed", "guessed")] {
@@ -3957,8 +6617,17 @@ fn pattern_row(row: &V, whole: bool) -> String {
             told.push_str(tag);
         }
     }
+    let family_attr = family.map_or_else(String::new, |fam| {
+        format!(" data-family=\"{}\"", escape(fam))
+    });
+    let sort = m::text(row, "sort");
+    let sort_attr = if sort.is_empty() {
+        String::new()
+    } else {
+        format!(" data-sort=\"{}\"", escape(&sort))
+    };
     format!(
-        "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-pattern\" data-payload=\"{}\" title=\"{}{}\"><span class=\"graph-map-row-name\">{}{}<span class=\"graph-map-row-file\">{}</span></span><span class=\"graph-map-row-links\">{}</span></button></li>",
+        "<li><button type=\"button\" class=\"graph-map-row\"{family_attr}{sort_attr} data-action=\"graph-map-pattern\" data-payload=\"{}\" title=\"{}{}\"><span class=\"graph-map-row-name\">{}{}<span class=\"graph-map-row-file\">{}</span></span><span class=\"graph-map-row-links\">{}</span></button></li>",
         payload(&row["id"]),
         escape(&m::text(row, "file")),
         if line > 0 {
@@ -3999,7 +6668,12 @@ pub fn found_patterns(view: &V, open: &[String]) -> String {
         }
         html.push_str("<ul class=\"graph-map-rows\">");
         for row in &rows {
-            html.push_str(&pattern_row(row, true));
+            let row_family = match row["sort"].as_str() {
+                Some("layers" | "repository" | "events" | "commands") => Some("architecture"),
+                Some(_) => Some("design"),
+                None => None,
+            };
+            html.push_str(&pattern_row(row, true, row_family));
         }
         html.push_str("</ul>");
         return html;
@@ -4027,9 +6701,12 @@ pub fn found_patterns(view: &V, open: &[String]) -> String {
         if of.is_empty() {
             continue;
         }
-        html.push_str(&format!("<p class=\"graph-map-family\">{title}</p>"));
+        html.push_str(&format!(
+            "<section class=\"graph-map-family-group\" data-family=\"{family}\"><p class=\"graph-map-family\">{title}</p>"
+        ));
         for kind in of {
             let id = m::text(kind, "id");
+            let tells = m::text(kind, "tells");
             let rows = m::array(&kind["instances"]);
             let all = open.contains(&id);
             let (found, more) = (
@@ -4037,13 +6714,21 @@ pub fn found_patterns(view: &V, open: &[String]) -> String {
                 kind["more"].as_u64().unwrap_or(0),
             );
             html.push_str(&format!(
-                "<p class=\"graph-map-pattern-name\" title=\"{}\">{} <span class=\"graph-map-total\">{}</span></p><ul class=\"graph-map-rows\">",
-                escape(&m::text(kind, "tells")),
+                "<div class=\"graph-map-kind-card\" data-family=\"{family}\" data-kind=\"{}\"><p class=\"graph-map-pattern-name\" title=\"{}\">{} <span class=\"graph-map-total\">{}</span></p>",
+                escape(&id),
+                escape(&tells),
                 escape(&m::text(kind, "name")),
                 count(found),
             ));
+            if !tells.is_empty() {
+                html.push_str(&format!(
+                    "<p class=\"graph-map-pattern-tells\">{}</p>",
+                    escape(&tells),
+                ));
+            }
+            html.push_str("<ul class=\"graph-map-rows\">");
             for row in rows.iter().take(if all { rows.len() } else { FIRST }) {
-                html.push_str(&pattern_row(row, false));
+                html.push_str(&pattern_row(row, false, Some(family)));
             }
             html.push_str("</ul>");
             if rows.len() > FIRST {
@@ -4063,7 +6748,9 @@ pub fn found_patterns(view: &V, open: &[String]) -> String {
                     count(more)
                 ));
             }
+            html.push_str("</div>");
         }
+        html.push_str("</section>");
     }
     html
 }
@@ -4318,8 +7005,8 @@ fn html(id: &str, markup: &str) {
     }
 }
 const LEGEND: &str = "Dotted: against the main direction, closing a cycle (↻).";
-const FILE_LEGEND: &str = "T type · m method · f function · c case · # heading. A box without a letter is another file, a plain name, or the open file itself for its imports.";
-const NAME_LEGEND: &str = "T type · m method · f function · c case · # heading. A box without a letter is a plain name, or a file itself for its imports.";
+const FILE_LEGEND: &str = "T type · m method · f function · P property · K const · c case · # heading. A box without a letter is another file, a plain name, or the open file itself for its imports.";
+const NAME_LEGEND: &str = "T type · m method · f function · P property · K const · c case · # heading. A box without a letter is a plain name, or a file itself for its imports.";
 const LAYER_LEGEND: &str = "A box is a layer; the layers stand in their order, and each may use those after it. A link to the next layer runs straight, one that passes a layer runs over the row. A link under the row, in red, runs back: against the order.";
 /// What the colours and the lines of the map mean, each colour beside a
 /// patch of it, then what is particular to the picture: a folder, an opened
@@ -4837,17 +7524,200 @@ pub fn scale(picture: (f64, f64), room: (f64, f64)) -> f64 {
 /// takes the room of its smaller size, so nothing is scrolled to but it.
 pub fn scaled(size: (f64, f64), scale: f64) -> String {
     let plain = format!("width:{:.0}px;height:{:.0}px", size.0, size.1);
-    if scale >= 1.0 {
+    if (scale - 1.0).abs() < 1e-4 {
         return plain;
     }
+    let dx = size.0 * (scale - 1.0);
+    let dy = size.1 * (scale - 1.0);
+    let dx = if dx.abs() < 0.5 { 0.0 } else { dx };
+    let dy = if dy.abs() < 0.5 { 0.0 } else { dy };
     format!(
-        "{plain};transform:scale({scale:.4});transform-origin:0 0;margin:0 -{:.0}px -{:.0}px 0",
-        size.0 * (1.0 - scale),
-        size.1 * (1.0 - scale)
+        "{plain};transform:scale({scale:.4});transform-origin:0 0;margin:0 {dx:.0}px {dy:.0}px 0"
     )
 }
-/// Draws the picture of the map at the scale the viewer asked for: fitted
-/// to the room it has, or as it is.
+/// Computes the multiplicative zoom factor for a single DOM `wheel` event.
+/// Returns `None` for zero or non-finite vertical deltas so pure horizontal
+/// trackpad swipes pass through unintercepted.
+pub fn wheel_zoom_factor(delta_y: f64, delta_mode: u32) -> Option<f64> {
+    if !delta_y.is_finite() || delta_y == 0.0 {
+        return None;
+    }
+    let normalized = match delta_mode {
+        1 => delta_y * 24.0,
+        2 => delta_y * 160.0,
+        _ => delta_y,
+    };
+    let clamped = normalized.clamp(-240.0, 240.0);
+    Some((-clamped * 0.0022).exp())
+}
+/// Computes the new `(scroll_left, scroll_top)` for an overflow-scroll canvas
+/// so the logical map point under `anchor` stays pinned after scaling from
+/// `scale0` to `scale1`.
+pub fn scroll_after_zoom(
+    scroll_left0: f64,
+    scroll_top0: f64,
+    scale0: f64,
+    scale1: f64,
+    anchor: (f64, f64),
+) -> (f64, f64) {
+    let s0 = if scale0.is_finite() && scale0 > 0.0 {
+        scale0
+    } else {
+        1.0
+    };
+    let s1 = if scale1.is_finite() && scale1 > 0.0 {
+        scale1
+    } else {
+        1.0
+    };
+    let ratio = s1 / s0;
+    (
+        ((scroll_left0 + anchor.0) * ratio - anchor.0).max(0.0),
+        ((scroll_top0 + anchor.1) * ratio - anchor.1).max(0.0),
+    )
+}
+fn scroll_canvas_label_id(canvas_id: &str) -> Option<&'static str> {
+    match canvas_id {
+        "graph-map-canvas" => Some("graph-map-zoom-level"),
+        "graph-link-canvas" => Some("graph-link-zoom-level"),
+        _ => None,
+    }
+}
+fn apply_scroll_canvas_scale(
+    canvas: &web_sys::Element,
+    plane: &web_sys::HtmlElement,
+    canvas_id: &str,
+    scale_value: f64,
+) -> f64 {
+    let scale_value = scale_value.clamp(CAMERA_MIN, CAMERA_MAX);
+    let size = (plane.offset_width() as f64, plane.offset_height() as f64);
+    let scale_text = format!("{scale_value:.4}");
+    let _ = plane.set_attribute("style", &scaled(size, scale_value));
+    let _ = plane.set_attribute("data-scale", &scale_text);
+    let _ = canvas.set_attribute("data-scale", &scale_text);
+    if let Some(label_id) = scroll_canvas_label_id(canvas_id) {
+        dom::text(
+            label_id,
+            &format!("{}%", (scale_value * 100.0).round() as i64),
+        );
+    }
+    scale_value
+}
+fn current_scroll_canvas_scale(plane: &web_sys::HtmlElement, canvas_id: &str) -> f64 {
+    if let Some(scale_value) = plane
+        .get_attribute("data-scale")
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+    {
+        return scale_value.clamp(CAMERA_MIN, CAMERA_MAX);
+    }
+    match canvas_id {
+        "graph-map-canvas" => state()["zoom"]
+            .as_f64()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(1.0)
+            .clamp(CAMERA_MIN, CAMERA_MAX),
+        "graph-link-canvas" => looked()["zoom"]
+            .as_f64()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(1.0)
+            .clamp(CAMERA_MIN, CAMERA_MAX),
+        _ => 1.0,
+    }
+}
+fn persist_scroll_canvas_zoom(canvas_id: &str, scale_value: Option<f64>) {
+    match canvas_id {
+        "graph-map-canvas" => {
+            let mut st = state();
+            if let Some(z) = scale_value {
+                st["zoom"] = json!(z);
+                st["fit"] = json!(false);
+                dom::set_checked("graph-map-fit", false);
+            } else {
+                st["zoom"] = V::Null;
+            }
+            m::set("graph-map", st);
+        }
+        "graph-link-canvas" => {
+            let mut link = looked();
+            if link.is_object() {
+                link["zoom"] = scale_value.map(|z| json!(z)).unwrap_or(V::Null);
+                m::set("graph-link", link);
+            }
+        }
+        _ => {}
+    }
+}
+fn zoom_scroll_canvas(canvas_id: &str, factor: f64, client_anchor: Option<(f64, f64)>) -> bool {
+    let Some(canvas) = dom::get(canvas_id) else {
+        return false;
+    };
+    let Some(plane) = canvas
+        .query_selector(".graph-map-plane")
+        .ok()
+        .flatten()
+        .and_then(|plane| plane.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+        return false;
+    };
+    let size = (plane.offset_width() as f64, plane.offset_height() as f64);
+    if size.0 <= 0.0 || size.1 <= 0.0 {
+        return false;
+    }
+    let scale0 = current_scroll_canvas_scale(&plane, canvas_id);
+    let scale1 = (scale0 * factor).clamp(CAMERA_MIN, CAMERA_MAX);
+    persist_scroll_canvas_zoom(canvas_id, Some(scale1));
+    if (scale1 - scale0).abs() < 1e-6 {
+        let _ = apply_scroll_canvas_scale(&canvas, &plane, canvas_id, scale1);
+        return true;
+    }
+    let canvas_rect = canvas.get_bounding_client_rect();
+    let plane_rect = plane.get_bounding_client_rect();
+    let scroll_left0 = canvas.scroll_left() as f64;
+    let scroll_top0 = canvas.scroll_top() as f64;
+    let pad_x = plane_rect.left() - canvas_rect.left() + scroll_left0;
+    let pad_y = plane_rect.top() - canvas_rect.top() + scroll_top0;
+    let view_anchor = match client_anchor {
+        Some((cx, cy)) => (cx - canvas_rect.left(), cy - canvas_rect.top()),
+        None => (
+            canvas.client_width() as f64 / 2.0,
+            canvas.client_height() as f64 / 2.0,
+        ),
+    };
+    let anchor = (view_anchor.0 - pad_x, view_anchor.1 - pad_y);
+    let applied = apply_scroll_canvas_scale(&canvas, &plane, canvas_id, scale1);
+    let _ = canvas.scroll_width();
+    let (next_left, next_top) =
+        scroll_after_zoom(scroll_left0, scroll_top0, scale0, applied, anchor);
+    canvas.set_scroll_left(next_left.round() as i32);
+    canvas.set_scroll_top(next_top.round() as i32);
+    true
+}
+fn reset_scroll_canvas_zoom(canvas_id: &str) {
+    let Some(canvas) = dom::get(canvas_id) else {
+        return;
+    };
+    let Some(plane) = canvas
+        .query_selector(".graph-map-plane")
+        .ok()
+        .flatten()
+        .and_then(|plane| plane.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+        return;
+    };
+    if canvas_id == "graph-map-canvas" {
+        let mut st = state();
+        st["zoom"] = V::Null;
+        st["fit"] = json!(false);
+        dom::set_checked("graph-map-fit", false);
+        m::set("graph-map", st);
+    } else {
+        persist_scroll_canvas_zoom(canvas_id, None);
+    }
+    let _ = apply_scroll_canvas_scale(&canvas, &plane, canvas_id, 1.0);
+}
+/// Draws the picture of the map at the scale the viewer asked for: explicit
+/// manual/wheel zoom when set, fitted to the room it has, or as it is.
 fn fit() {
     let Some(canvas) = dom::get("graph-map-canvas") else {
         return;
@@ -4862,20 +7732,24 @@ fn fit() {
     };
     // A box is as large as it is laid out, whatever scale it is drawn at.
     let size = (plane.offset_width() as f64, plane.offset_height() as f64);
-    let scale = if m::yes(&state()["fit"]) {
-        // A little less than the room, so that no rounding brings up a
-        // scroll bar.
-        scale(
-            size,
-            (
-                canvas.client_width() as f64 - 2.0,
-                canvas.client_height() as f64 - 2.0,
-            ),
-        )
-    } else {
-        1.0
-    };
-    let _ = plane.set_attribute("style", &scaled(size, scale));
+    let st = state();
+    let scale_value =
+        if let Some(manual) = st["zoom"].as_f64().filter(|v| v.is_finite() && *v > 0.0) {
+            manual.clamp(CAMERA_MIN, CAMERA_MAX)
+        } else if m::yes(&st["fit"]) {
+            // A little less than the room, so that no rounding brings up a
+            // scroll bar.
+            scale(
+                size,
+                (
+                    canvas.client_width() as f64 - 2.0,
+                    canvas.client_height() as f64 - 2.0,
+                ),
+            )
+        } else {
+            1.0
+        };
+    let _ = apply_scroll_canvas_scale(&canvas, &plane, "graph-map-canvas", scale_value);
 }
 /// What the pointer rests on in a picture: a box, by its number there, or a
 /// link, by the numbers of its two ends.
@@ -4981,44 +7855,212 @@ fn point(canvas: &str, target: Option<web_sys::Element>) {
     }
     let _ = plane.set_attribute("data-hover", "true");
 }
+/// Highlights all nodes belonging to one architecture layer on `canvas_id`
+/// while the pointer or keyboard rests on that layer's pill in the side panel.
+fn highlight_layer(canvas_id: &str, layer: Option<&str>) {
+    let Some(plane) = dom::all(&format!("#{canvas_id} .graph-map-plane"))
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    let nodes = dom::all(&format!("#{canvas_id} .graph-map-node[data-arch-layer-id]"));
+    for node in &nodes {
+        let _ = node.remove_attribute("data-layer-lit");
+    }
+    let Some(layer) = layer.filter(|id| !id.is_empty()) else {
+        let _ = plane.remove_attribute("data-layer-hover");
+        return;
+    };
+    let _ = plane.set_attribute("data-layer-hover", layer);
+    for node in nodes {
+        if node.get_attribute("data-arch-layer-id").as_deref() == Some(layer) {
+            let _ = node.set_attribute("data-layer-lit", "true");
+        }
+    }
+}
+/// Spotlights the canvas node whose payload matches a hovered side-panel chip.
+fn point_part(canvas_id: &str, path: Option<&str>) {
+    let target = path.and_then(|key| {
+        dom::all(&format!("#{canvas_id} .graph-map-node"))
+            .into_iter()
+            .find(|node| node.get_attribute("data-payload").as_deref() == Some(key))
+    });
+    point(canvas_id, target);
+}
+fn attach_canvas_hover(canvas_id: &'static str) {
+    let Some(element) = dom::get(canvas_id) else {
+        return;
+    };
+    // Entering a part lights it; leaving the picture puts it out.
+    for (kind, rests) in [
+        ("mouseover", true),
+        ("focusin", true),
+        ("mouseleave", false),
+        ("focusout", false),
+    ] {
+        let moved = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let target = event
+                .target()
+                .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+            point(canvas_id, target.filter(|_| rests));
+        });
+        let _ = element.add_event_listener_with_callback(kind, moved.as_ref().unchecked_ref());
+        moved.forget();
+    }
+}
+fn attach_side_hover(side_id: &'static str, canvas_id: &'static str) {
+    let Some(side_panel) = dom::get(side_id) else {
+        return;
+    };
+    for (kind, rests) in [
+        ("mouseover", true),
+        ("focusin", true),
+        ("mouseleave", false),
+        ("focusout", false),
+    ] {
+        let moved = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let target = rests
+                .then(|| {
+                    event
+                        .target()
+                        .and_then(|el| el.dyn_into::<web_sys::Element>().ok())
+                })
+                .flatten();
+            let layer = target
+                .as_ref()
+                .and_then(|el| el.closest("[data-arch-layer]").ok().flatten())
+                .and_then(|el| el.get_attribute("data-arch-layer"));
+            highlight_layer(canvas_id, layer.as_deref());
+            let chip = target
+                .as_ref()
+                .and_then(|el| {
+                    el.closest(".graph-map-part-chip[data-action='graph-map-node']")
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|el| el.get_attribute("data-payload"));
+            point_part(canvas_id, chip.as_deref());
+        });
+        let _ = side_panel.add_event_listener_with_callback(kind, moved.as_ref().unchecked_ref());
+        moved.forget();
+    }
+}
+fn ensure_resize_watch() {
+    if m::yes(&m::data("graph-map-resize-watched")) {
+        return;
+    }
+    m::set("graph-map-resize-watched", json!(true));
+    let resized = Closure::<dyn FnMut()>::new(|| {
+        if open() {
+            fit();
+        }
+        refit_embedded_if_visible();
+    });
+    let _ =
+        dom::window().add_event_listener_with_callback("resize", resized.as_ref().unchecked_ref());
+    resized.forget();
+}
+fn wheel_event(canvas_id: &str, event: &web_sys::WheelEvent) -> bool {
+    let Some(factor) = wheel_zoom_factor(event.delta_y(), event.delta_mode()) else {
+        return false;
+    };
+    let Some(canvas) = dom::get(canvas_id) else {
+        return false;
+    };
+    let Some(plane) = canvas
+        .query_selector(".graph-map-plane")
+        .ok()
+        .flatten()
+        .and_then(|plane| plane.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+        return false;
+    };
+    if canvas_id == "session-graph-canvas" {
+        let cam = load_camera();
+        if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
+            return false;
+        }
+        event.prevent_default();
+        event.stop_propagation();
+        let rect = canvas.get_bounding_client_rect();
+        let anchor = (
+            event.client_x() as f64 - rect.left(),
+            event.client_y() as f64 - rect.top(),
+        );
+        dom::attr("session-graph-canvas", "data-wheeling", "true");
+        dom::later("session-graph-wheel-end", 140, || {
+            dom::attr("session-graph-canvas", "data-wheeling", "false");
+        });
+        zoom_camera_at(factor, Some(anchor));
+        return true;
+    }
+    if plane.offset_width() <= 0 || plane.offset_height() <= 0 {
+        return false;
+    }
+    event.prevent_default();
+    event.stop_propagation();
+    zoom_scroll_canvas(
+        canvas_id,
+        factor,
+        Some((event.client_x() as f64, event.client_y() as f64)),
+    )
+}
+fn attach_canvas_wheel(canvas_id: &'static str) {
+    let Some(canvas) = dom::get(canvas_id) else {
+        return;
+    };
+    if canvas.get_attribute("data-wheel-bound").as_deref() == Some("true") {
+        return;
+    }
+    let _ = canvas.set_attribute("data-wheel-bound", "true");
+    let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        if let Ok(wheel) = event.dyn_into::<web_sys::WheelEvent>() {
+            wheel_event(canvas_id, &wheel);
+        }
+    });
+    let options = web_sys::AddEventListenerOptions::new();
+    options.set_passive(false);
+    if canvas
+        .add_event_listener_with_callback_and_add_event_listener_options(
+            "wheel",
+            callback.as_ref().unchecked_ref(),
+            &options,
+        )
+        .is_ok()
+    {
+        callback.forget();
+    }
+}
+pub fn attach_wheel_listeners() {
+    attach_canvas_wheel("session-graph-canvas");
+    attach_canvas_wheel("graph-map-canvas");
+    attach_canvas_wheel("graph-link-canvas");
+}
+fn ensure_embedded_watch() {
+    attach_wheel_listeners();
+    if m::yes(&m::data("session-graph-watched")) {
+        return;
+    }
+    m::set("session-graph-watched", json!(true));
+    ensure_resize_watch();
+    attach_canvas_hover("session-graph-canvas");
+    attach_side_hover("session-graph-side", "session-graph-canvas");
+}
 /// Fits the picture again when the window changes its size, lights what
 /// the pointer or the keyboard rests on in the map and in the window of a
 /// link, and closes what a search found when the keyboard leaves the
 /// search. Asked for each time the map opens, and set up once.
 fn watch() {
+    attach_wheel_listeners();
     if m::yes(&m::data("graph-map-watched")) {
         return;
     }
     m::set("graph-map-watched", json!(true));
-    let resized = Closure::<dyn FnMut()>::new(|| {
-        if open() {
-            fit();
-        }
-    });
-    let _ =
-        dom::window().add_event_listener_with_callback("resize", resized.as_ref().unchecked_ref());
-    resized.forget();
-    for canvas in ["graph-map-canvas", "graph-link-canvas"] {
-        let Some(element) = dom::get(canvas) else {
-            continue;
-        };
-        // Entering a part lights it; leaving the picture puts it out.
-        for (kind, rests) in [
-            ("mouseover", true),
-            ("focusin", true),
-            ("mouseleave", false),
-            ("focusout", false),
-        ] {
-            let moved = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
-                let target = event
-                    .target()
-                    .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
-                point(canvas, target.filter(|_| rests));
-            });
-            let _ = element.add_event_listener_with_callback(kind, moved.as_ref().unchecked_ref());
-            moved.forget();
-        }
-    }
+    ensure_resize_watch();
+    attach_canvas_hover("graph-map-canvas");
+    attach_canvas_hover("graph-link-canvas");
+    attach_side_hover("graph-map-side", "graph-map-canvas");
     // What a search found is closed once the keyboard leaves the search;
     // moving on into the list keeps it open.
     if let Some(search) = dom::get("graph-find") {
@@ -5037,7 +8079,7 @@ fn watch() {
     }
 }
 fn fresh(target: &str) -> V {
-    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "filter": "", "follow": "", "out": [], "into": [], "spread": [], "path": [], "shared": false, "side": "", "skip": [], "pick": null, "patterns": false, "pattern": null, "pattern_return": null, "kinds": []})
+    json!({"target": target, "scope": "", "focus": "", "certain": false, "notests": false, "fit": false, "whole": false, "side_tab": "details", "changes_filter": "all", "member_filter": "all", "side_pinned": false, "filter": "", "follow": "", "out": [], "into": [], "spread": [], "path": [], "shared": false, "side": "", "skip": [], "pick": null, "patterns": false, "pattern": null, "pattern_return": null, "kinds": []})
 }
 /// How many folders a picture keeps spread out; the oldest gives way.
 const SPREAD: usize = 32;
@@ -5338,10 +8380,37 @@ pub fn choosing(state: &V) -> String {
         escape(&m::text(pick, "name"))
     )
 }
+fn normalize_map_state(mut state: V) -> V {
+    if !state.is_object() {
+        return fresh("");
+    }
+    if !state["whole"].is_boolean() {
+        state["whole"] = json!(false);
+    }
+    if !matches!(state["side_tab"].as_str(), Some("details" | "changes")) {
+        state["side_tab"] = json!("details");
+    }
+    if !matches!(
+        state["changes_filter"].as_str(),
+        Some("all" | "created" | "modified" | "deleted")
+    ) {
+        state["changes_filter"] = json!("all");
+    }
+    if !matches!(
+        state["member_filter"].as_str(),
+        Some("all" | "used" | "exposed" | "risk")
+    ) {
+        state["member_filter"] = json!("all");
+    }
+    if !state["side_pinned"].is_boolean() {
+        state["side_pinned"] = json!(false);
+    }
+    state
+}
 fn state() -> V {
     let state = m::data("graph-map");
     if state.is_object() {
-        state
+        normalize_map_state(state)
     } else {
         fresh("")
     }
@@ -5353,7 +8422,7 @@ fn looked() -> V {
     if link.is_object() {
         link
     } else {
-        json!({"from": "", "to": "", "chosen": "", "view": null})
+        json!({"from": "", "to": "", "chosen": "", "view": null, "surface": "modal"})
     }
 }
 /// Draws the window of the link as it stands.
@@ -5364,12 +8433,45 @@ fn draw_link() {
         return;
     }
     let chosen = m::text(&link, "chosen");
-    crate::graph_explanation::link_context(view, &state()["cycle_base"]["revision"]);
+    let surface = if link["surface"].as_str() == Some("session") {
+        SESSION_SURFACE
+    } else {
+        MODAL_SURFACE
+    };
+    let st = surface_state(surface);
+    let view_cached = m::data(surface.view_key);
+    let impact = cached_impact_for_selection(
+        surface,
+        &st,
+        view_cached.is_object().then_some(&view_cached),
+    );
+    crate::graph_explanation::link_context(view, &st["cycle_base"]["revision"]);
     dom::text("graph-link-title", &link_title(view));
     dom::text("graph-link-summary", &link_summary(view));
     dom::text("graph-link-note", &link_note(view));
-    html("graph-link-canvas", &link_canvas(view, &chosen));
-    html("graph-link-side", &link_side(view, &chosen));
+    html(
+        "graph-link-canvas",
+        &link_canvas_with(view, &chosen, impact.as_ref()),
+    );
+    if let Some(canvas) = dom::get("graph-link-canvas") {
+        if let Some(plane) = canvas
+            .query_selector(".graph-map-plane")
+            .ok()
+            .flatten()
+            .and_then(|plane| plane.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let z = looked()["zoom"]
+                .as_f64()
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(1.0);
+            let _ = apply_scroll_canvas_scale(&canvas, &plane, "graph-link-canvas", z);
+        }
+    }
+    html(
+        "graph-link-side",
+        &link_side_with(view, &chosen, impact.as_ref()),
+    );
+    html("graph-link-arrow-legend", &arrow_kinds_legend_html());
 }
 pub(crate) fn link_request(project: &str, from: &str, to: &str, selection: &V) -> String {
     graph_request(
@@ -5389,36 +8491,39 @@ pub(crate) fn graph_request(
             query.push((key, value.to_owned()));
         }
     }
-    for key in ["certain", "notests"] {
+    for key in ["certain", "notests", "whole"] {
         if m::yes(&selection[key]) {
             query.push((key, "1".to_owned()));
         }
     }
     format!(
         "/api/projects/{}/graph/map{}",
-        dom::enc(project),
-        dom::query(&query)
+        encode_part(project),
+        encode_query(&query)
     )
 }
 /// Opens the window of one link of the map and reads what makes the link
 /// up, on the graph the map is read from. The map stays as it is behind it.
-async fn look(from: &str, to: &str) {
-    let state = state();
+async fn look_from(surface: MapSurface, from: &str, to: &str) {
+    let state = surface_state(surface);
     let project = dom::value("project");
     if project.is_empty() || from.is_empty() || to.is_empty() {
         return;
     }
     m::set(
         "graph-link",
-        json!({"from": from, "to": to, "chosen": "", "view": null}),
+        json!({"from": from, "to": to, "chosen": "", "view": null, "surface": surface.name, "zoom": null}),
     );
+    dom::text("graph-link-zoom-level", "100%");
     dom::text("graph-link-title", "Link");
     dom::text("graph-link-summary", "");
     dom::text("graph-link-note", "Reading the link…");
     dom::error("graph-link-error", "");
     html("graph-link-canvas", "");
     html("graph-link-side", "");
+    html("graph-link-arrow-legend", "");
     dom::dialog("graph-link", true);
+    attach_wheel_listeners();
     let path = link_request(
         &project,
         from,
@@ -5427,6 +8532,7 @@ async fn look(from: &str, to: &str) {
             "target": state["target"], "launch": state["launch"],
             "base": state["cycle_base"]["revision"],
             "certain": state["certain"], "notests": state["notests"],
+            "whole": state["whole"],
         }),
     );
     match api::scoped("graph-link", &path).await {
@@ -5445,6 +8551,10 @@ async fn look(from: &str, to: &str) {
             dom::error("graph-link-error", &error.message);
         }
     }
+}
+#[allow(dead_code)]
+async fn look(from: &str, to: &str) {
+    look_from(MODAL_SURFACE, from, to).await;
 }
 /// The search of the project as it stands: what is typed, what the server
 /// found, for which words and which request, which row is marked, and
@@ -5716,6 +8826,7 @@ fn blank() {
     html("graph-map-crumbs", "");
     html("graph-map-canvas", "");
     html("graph-map-side", "");
+    html("graph-map-arrow-legend", "");
     dom::hidden("graph-map-launches", true);
     m::take("graph-map-attachment");
     dom::text("graph-map-summary", "");
@@ -6045,7 +9156,7 @@ fn test_paths(view: &V) -> String {
 
 fn layer_color(layer: &V) -> Option<String> {
     let id = layer["color"].as_u64().filter(|id| *id < 32)?;
-    Some(format!("hsl({} 68% 46%)", (id * 137 + 220) % 360))
+    Some(layer_accent(id))
 }
 
 fn architecture_side(view: &V) -> String {
@@ -6053,19 +9164,43 @@ fn architecture_side(view: &V) -> String {
     if !architecture.is_object() {
         return String::new();
     }
-    let mut html = String::from("<h4>Architecture</h4>");
+    let declared = m::yes(&architecture["declared"]);
+    let mode_label = if declared {
+        "Declared rules"
+    } else {
+        "Inferred layers"
+    };
+    let mut html = format!(
+        "<h4>Architecture <span class=\"graph-map-arch-mode\" data-declared=\"{declared}\">{mode_label}</span></h4>"
+    );
     let layers = m::array(&architecture["layers"]);
     if !layers.is_empty() {
         html.push_str("<ul class=\"graph-map-layer-key\">");
-        for layer in layers {
-            if let Some(color) = layer_color(&layer) {
-                html.push_str(&format!("<li><span aria-hidden=\"true\" style=\"--architecture-color:{color}\"></span>{}</li>", escape(&m::text(&layer, "name"))));
+        for layer in &layers {
+            if let Some(color) = layer_color(layer) {
+                let id = escape(&m::text(layer, "id"));
+                html.push_str(&format!(
+                    "<li data-arch-layer=\"{id}\" style=\"--architecture-color:{color}\"><span aria-hidden=\"true\" style=\"--architecture-color:{color}\"></span>{}</li>",
+                    escape(&m::text(layer, "name"))
+                ));
             }
         }
         html.push_str("</ul>");
     }
+    if view["scope"].is_string() && !layered(view) {
+        if let Some(layers_row) = m::array(&view["patterns"]["kinds"])
+            .into_iter()
+            .find(|kind| kind["id"] == "layers")
+            .and_then(|kind| m::array(&kind["instances"]).into_iter().next())
+        {
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"button compact graph-map-arch-open\" data-action=\"graph-map-pattern\" data-payload=\"{}\">Inspect layers diagram</button>",
+                payload(&layers_row["id"]),
+            ));
+        }
+    }
     html.push_str(&pair_rows(
-        if m::yes(&architecture["declared"]) {
+        if declared {
             "Rule violations"
         } else {
             "Against inferred layer order"
@@ -6076,25 +9211,32 @@ fn architecture_side(view: &V) -> String {
     ));
     let total = architecture["reciprocal_total"].as_u64().unwrap_or(0);
     if total > 0 {
-        html.push_str(&format!("<h4>Mutual layer dependencies · {total}</h4><p class=\"knowledge-note\">The layers depend on each other through the links shown here.</p><ul>"));
+        html.push_str(&format!(
+            "<h4>Mutual layer dependencies <span class=\"graph-map-total\">{}</span></h4><p class=\"knowledge-note\">The layers depend on each other through the links shown here.</p><div class=\"graph-map-arch-pairs\">",
+            count(total)
+        ));
         for pair in m::array(&architecture["reciprocal"]) {
+            let from_name = escape(&m::text(&pair["from"], "name"));
+            let to_name = escape(&m::text(&pair["to"], "name"));
+            let from_color = layer_color(&pair["from"])
+                .map(|c| format!(" style=\"--architecture-color:{c}\""))
+                .unwrap_or_default();
+            let to_color = layer_color(&pair["to"])
+                .map(|c| format!(" style=\"--architecture-color:{c}\""))
+                .unwrap_or_default();
             html.push_str(&format!(
-                "<li>{} → {} · {}<br>{} → {} · {}</li>",
-                escape(&m::text(&pair["from"], "name")),
-                escape(&m::text(&pair["to"], "name")),
+                "<div class=\"graph-map-arch-pair\"><div class=\"graph-map-arch-pair-head\"><span class=\"graph-map-arch-tag\"{from_color}>{from_name}</span><span aria-hidden=\"true\">⇄</span><span class=\"graph-map-arch-tag\"{to_color}>{to_name}</span></div><div class=\"graph-map-arch-pair-flows\"><span>→ {}</span><span>← {}</span></div></div>",
                 weight(
                     pair["forward"].as_u64().unwrap_or(0),
                     pair["forward_guessed"].as_u64().unwrap_or(0)
                 ),
-                escape(&m::text(&pair["to"], "name")),
-                escape(&m::text(&pair["from"], "name")),
                 weight(
                     pair["reverse"].as_u64().unwrap_or(0),
                     pair["reverse_guessed"].as_u64().unwrap_or(0)
                 ),
             ));
         }
-        html.push_str("</ul>");
+        html.push_str("</div>");
     }
     html
 }
@@ -6621,6 +9763,1514 @@ fn run_comparison(view: &V) -> String {
     html
 }
 
+#[derive(Clone, Copy)]
+struct MapSurface {
+    name: &'static str,
+    id_prefix: &'static str,
+    canvas: &'static str,
+    side: &'static str,
+    note: &'static str,
+    attachment_key: &'static str,
+    view_key: &'static str,
+    changes_key: &'static str,
+    changes_epoch: &'static str,
+    impact_key: &'static str,
+    impact_epoch: &'static str,
+    embedded: bool,
+}
+const MODAL_SURFACE: MapSurface = MapSurface {
+    name: "modal",
+    id_prefix: "graph-map",
+    canvas: "graph-map-canvas",
+    side: "graph-map-side",
+    note: "graph-map-note",
+    attachment_key: "graph-map-attachment",
+    view_key: "graph-map-view",
+    changes_key: "graph-map-changes",
+    changes_epoch: "graph-map-changes-fetch",
+    impact_key: "graph-map-impact",
+    impact_epoch: "graph-map-impact-fetch",
+    embedded: false,
+};
+const SESSION_SURFACE: MapSurface = MapSurface {
+    name: "session",
+    id_prefix: "session-graph",
+    canvas: "session-graph-canvas",
+    side: "session-graph-side",
+    note: "session-graph-note",
+    attachment_key: "session-graph-attachment",
+    view_key: "session-graph-view",
+    changes_key: "session-graph-changes",
+    changes_epoch: "session-graph-changes-fetch",
+    impact_key: "session-graph-impact",
+    impact_epoch: "session-graph-impact-fetch",
+    embedded: true,
+};
+fn surface_state(surface: MapSurface) -> V {
+    if surface.embedded {
+        embedded_state()
+    } else {
+        state()
+    }
+}
+fn surface_changes_doc(surface: MapSurface, state: &V) -> Option<V> {
+    let raw = m::data(surface.changes_key);
+    let data = if raw["data"].is_object() {
+        let project = dom::value("project");
+        let target = m::text(state, "target");
+        let target_key = if target.is_empty() {
+            "work"
+        } else {
+            target.as_str()
+        };
+        if !project.is_empty()
+            && m::text(&raw, "project") == project
+            && m::text(&raw, "target") == target_key
+        {
+            raw["data"].clone()
+        } else {
+            return None;
+        }
+    } else if raw["files"].is_array() {
+        raw
+    } else {
+        return None;
+    };
+    Some(data)
+}
+fn impact_cache_key(project: &str, path: &str, state: &V) -> String {
+    let raw_target = m::text(state, "target");
+    let target = if raw_target.is_empty() {
+        "work"
+    } else {
+        raw_target.as_str()
+    };
+    let certain = if m::yes(&state["certain"]) { "1" } else { "0" };
+    format!(
+        "{project}\n{}\n{target}\n{certain}",
+        normalize_rel_path(path)
+    )
+}
+fn looks_like_file_path(path: &str) -> bool {
+    let norm = normalize_rel_path(strip_symbol_suffix(path));
+    if norm.is_empty()
+        || norm.starts_with("module:")
+        || norm.starts_with("layer:")
+        || norm.starts_with("role:")
+    {
+        return false;
+    }
+    norm.rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains('.'))
+}
+fn is_explicit_folder(path: &str, view: Option<&V>) -> bool {
+    let Some(view) = view else {
+        return false;
+    };
+    if normalize_rel_path(&m::text(&view["focus"], "path")) == path
+        && m::yes(&view["focus"]["folder"])
+    {
+        return true;
+    }
+    m::array(&view["nodes"])
+        .iter()
+        .any(|node| normalize_rel_path(&m::text(node, "path")) == path && m::yes(&node["folder"]))
+}
+fn is_known_file(path: &str, view: Option<&V>, changes: Option<&V>) -> bool {
+    if let Some(view) = view {
+        if normalize_rel_path(&m::text(&view["focus"], "path")) == path
+            && view["focus"].is_object()
+            && !m::yes(&view["focus"]["folder"])
+        {
+            return true;
+        }
+        if m::array(&view["nodes"]).iter().any(|node| {
+            normalize_rel_path(&m::text(node, "path")) == path
+                && !m::yes(&node["folder"])
+                && !m::yes(&node["symbol"])
+        }) {
+            return true;
+        }
+    }
+    if let Some(changes) = changes {
+        if m::array(&changes["files"])
+            .iter()
+            .any(|file| normalize_rel_path(&m::text(file, "path")) == path)
+        {
+            return true;
+        }
+    }
+    looks_like_file_path(path)
+}
+pub fn selected_impact_file(state: &V, view: Option<&V>, changes: Option<&V>) -> Option<String> {
+    let focus = normalize_rel_path(strip_symbol_suffix(&m::text(state, "focus")));
+    if !focus.is_empty() {
+        if is_explicit_folder(&focus, view) {
+            return None;
+        }
+        if is_known_file(&focus, view, changes) {
+            return Some(focus);
+        }
+        return None;
+    }
+    let scope = normalize_rel_path(strip_symbol_suffix(&m::text(state, "scope")));
+    if !scope.is_empty()
+        && !is_explicit_folder(&scope, view)
+        && is_known_file(&scope, view, changes)
+    {
+        return Some(scope);
+    }
+    None
+}
+fn cached_impact_for_selection(surface: MapSurface, state: &V, view: Option<&V>) -> Option<V> {
+    let changes = surface_changes_doc(surface, state);
+    let path = selected_impact_file(state, view, changes.as_ref())?;
+    let project = dom::value("project");
+    let raw = m::data(surface.impact_key);
+    if !raw.is_object() {
+        return None;
+    }
+    if raw["key"].is_string() {
+        let wanted = impact_cache_key(&project, &path, state);
+        if m::text(&raw, "key") == wanted && raw["data"].is_object() {
+            return Some(raw["data"].clone());
+        }
+        return None;
+    }
+    if normalize_rel_path(strip_symbol_suffix(&m::text(&raw, "path"))) == path {
+        return Some(raw);
+    }
+    None
+}
+#[cfg(target_arch = "wasm32")]
+fn encode_part(value: &str) -> String {
+    dom::enc(value)
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn encode_part(value: &str) -> String {
+    let mut out = String::new();
+    for b in value.as_bytes() {
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')' => out.push(*b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+#[cfg(target_arch = "wasm32")]
+fn encode_query(params: &[(&str, String)]) -> String {
+    dom::query(params)
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn encode_query(params: &[(&str, String)]) -> String {
+    if params.is_empty() {
+        return String::new();
+    }
+    let parts = params
+        .iter()
+        .map(|(k, v)| format!("{}={}", encode_part(k), encode_part(v)))
+        .collect::<Vec<_>>();
+    format!("?{}", parts.join("&"))
+}
+pub fn build_changes_path(
+    project: &str,
+    target: &str,
+    focus_session: &str,
+    notests: bool,
+) -> String {
+    let effective_target = if target.is_empty() { "work" } else { target };
+    let mut query = vec![("target", effective_target.to_owned())];
+    if !focus_session.is_empty() {
+        query.push(("focus_session", focus_session.to_owned()));
+    }
+    if notests {
+        query.push(("notests", "1".to_owned()));
+    }
+    format!(
+        "/api/projects/{}/graph/changes{}",
+        encode_part(project),
+        encode_query(&query)
+    )
+}
+pub fn build_file_impact_path(
+    project: &str,
+    path: &str,
+    target: &str,
+    focus_session: &str,
+    certain: bool,
+) -> String {
+    let effective_target = if target.is_empty() { "work" } else { target };
+    let mut query = vec![
+        ("path", normalize_rel_path(strip_symbol_suffix(path))),
+        ("target", effective_target.to_owned()),
+    ];
+    if !focus_session.is_empty() {
+        query.push(("focus_session", focus_session.to_owned()));
+    }
+    if certain {
+        query.push(("certain", "1".to_owned()));
+    }
+    format!(
+        "/api/projects/{}/graph/file-impact{}",
+        encode_part(project),
+        encode_query(&query)
+    )
+}
+pub fn state_focus_file(mut state: V, raw_path: &str, view: &V) -> (V, bool) {
+    let file_path = normalize_rel_path(strip_symbol_suffix(raw_path));
+    if file_path.is_empty() {
+        return (state, false);
+    }
+    state = normalize_map_state(unfollowed(state));
+    state["modules"] = json!(false);
+    state["cycle"] = V::Null;
+    state["pattern"] = V::Null;
+    state["scenario"] = V::Null;
+    let visible = m::array(&view["nodes"])
+        .iter()
+        .any(|node| normalize_rel_path(&m::text(node, "path")) == file_path);
+    if !visible {
+        state["scope"] = json!("");
+        if !m::yes(&state["whole"]) {
+            let folder = parent(&file_path);
+            if !folder.is_empty() {
+                let mut acc = String::new();
+                for part in folder.split('/').filter(|p| !p.is_empty()) {
+                    if !acc.is_empty() {
+                        acc.push('/');
+                    }
+                    acc.push_str(part);
+                    state = spread(state, &acc, false);
+                }
+            }
+        }
+        if !m::text(&state, "filter").is_empty() {
+            state["filter"] = json!("");
+        }
+    }
+    let already_focused = normalize_rel_path(strip_symbol_suffix(&m::text(&state, "focus")))
+        == file_path
+        && normalize_rel_path(&m::text(&view["focus"], "path")) == file_path;
+    state["focus"] = json!(file_path);
+    state["side_tab"] = json!("details");
+    state["side_pinned"] = json!(true);
+    let needs_reload = !visible || !already_focused;
+    (state, needs_reload)
+}
+fn changes_count_of(changes: Option<&V>) -> u64 {
+    let Some(doc) = changes.filter(|v| v.is_object()) else {
+        return 0;
+    };
+    doc["total_files"]
+        .as_u64()
+        .unwrap_or_else(|| m::array(&doc["files"]).len() as u64)
+}
+fn update_embedded_changes_badge(changes: Option<&V>) {
+    let n = changes_count_of(changes);
+    dom::text("session-graph-changes-count", &n.to_string());
+    dom::hidden("session-graph-changes-count", n == 0);
+}
+fn sync_embedded_toolbar(state: &V, changes: Option<&V>) {
+    let target = m::text(state, "target");
+    let changes_mode = !target.is_empty();
+    let whole = m::yes(&state["whole"]);
+    dom::attr(
+        "session-graph-mode-whole",
+        "aria-pressed",
+        if changes_mode { "false" } else { "true" },
+    );
+    dom::attr(
+        "session-graph-mode-changes",
+        "aria-pressed",
+        if changes_mode { "true" } else { "false" },
+    );
+    dom::attr(
+        "session-graph-unfold",
+        "aria-pressed",
+        if whole { "true" } else { "false" },
+    );
+    dom::set_checked("session-graph-notests", m::yes(&state["notests"]));
+    let wanted_filter = m::text(state, "filter");
+    if dom::value("session-graph-filter") != wanted_filter {
+        dom::set_value("session-graph-filter", &wanted_filter);
+    }
+    update_embedded_changes_badge(changes);
+}
+fn side_tabs_html(side_tab: &str, changes_count: u64, surface: &str) -> String {
+    let changes_selected = side_tab == "changes";
+    let details_payload = payload(&json!({"tab": "details", "surface": surface}));
+    let changes_payload = payload(&json!({"tab": "changes", "surface": surface}));
+    format!(
+        "<div class=\"graph-side-tabs\" role=\"tablist\" aria-label=\"Graph inspector tabs\"><button type=\"button\" class=\"graph-side-tab\" role=\"tab\" aria-selected=\"{}\" data-action=\"graph-side-tab\" data-tab=\"details\" data-payload=\"{details_payload}\">Details</button><button type=\"button\" class=\"graph-side-tab\" role=\"tab\" aria-selected=\"{}\" data-action=\"graph-side-tab\" data-tab=\"changes\" data-payload=\"{changes_payload}\">Changes <span class=\"graph-map-total\">({changes_count})</span></button></div>",
+        if !changes_selected { "true" } else { "false" },
+        if changes_selected { "true" } else { "false" },
+    )
+}
+fn side_top_html(side_tab: &str, changes_count: u64, surface: &str, show_close: bool) -> String {
+    let tabs = side_tabs_html(side_tab, changes_count, surface);
+    if !show_close {
+        return format!("<div class=\"graph-side-top\">{tabs}</div>");
+    }
+    format!(
+        "<div class=\"graph-side-top\">{tabs}<button type=\"button\" class=\"button compact graph-side-close\" data-action=\"session-graph-side-close\" title=\"Close details\" aria-label=\"Close details\">Close</button></div>"
+    )
+}
+pub fn changes_side_html(changes: &V, filter: &str, active_focus: &str, surface: &str) -> String {
+    if !changes.is_object() {
+        return "<div class=\"graph-side-panel\" data-tab=\"changes\"><p class=\"knowledge-note\">Reading workspace changes…</p></div>".to_owned();
+    }
+    let files = m::array(&changes["files"]);
+    let mut created_count = 0u64;
+    let mut modified_count = 0u64;
+    let mut deleted_count = 0u64;
+    for file in &files {
+        match m::text(file, "status").to_ascii_lowercase().as_str() {
+            "created" => created_count += 1,
+            "deleted" => deleted_count += 1,
+            "modified" | "renamed" => modified_count += 1,
+            _ => {}
+        }
+    }
+    let total_files = changes["total_files"]
+        .as_u64()
+        .unwrap_or(files.len() as u64);
+    let created_entities = changes["created_entities"].as_u64().unwrap_or(0);
+    let modified_entities = changes["modified_entities"].as_u64().unwrap_or(0);
+    let deleted_entities = changes["deleted_entities"].as_u64().unwrap_or(0);
+    let total_vis_warnings: u64 = changes["visibility_warnings"]
+        .as_u64()
+        .or_else(|| changes["summary"]["visibility_warnings"].as_u64())
+        .unwrap_or_else(|| {
+            files
+                .iter()
+                .map(|file| file["summary"]["visibility_warnings"].as_u64().unwrap_or(0))
+                .sum()
+        });
+    let vis_warning_badge = if total_vis_warnings > 0 {
+        format!(
+            "<span class=\"graph-status-pill\" data-status=\"broken_risk\">!{} visibility {}</span>",
+            count(total_vis_warnings),
+            if total_vis_warnings == 1 {
+                "warning"
+            } else {
+                "warnings"
+            }
+        )
+    } else {
+        String::new()
+    };
+    let mut html = format!(
+        "<div class=\"graph-side-panel\" data-tab=\"changes\"><div class=\"graph-changes-summary\"><span>{} changed {}</span><span>+{} ~{} -{} entities</span>{vis_warning_badge}</div>",
+        count(total_files),
+        if total_files == 1 { "file" } else { "files" },
+        count(created_entities),
+        count(modified_entities),
+        count(deleted_entities),
+    );
+    let active_filter = match filter {
+        "created" | "modified" | "deleted" => filter,
+        _ => "all",
+    };
+    html.push_str(
+        "<div class=\"graph-changes-filters\" role=\"group\" aria-label=\"Filter changed files\">",
+    );
+    for (key, label, n) in [
+        ("all", "All", files.len() as u64),
+        ("created", "Created", created_count),
+        ("modified", "Modified", modified_count),
+        ("deleted", "Deleted", deleted_count),
+    ] {
+        let fpayload = payload(&json!({"filter": key, "surface": surface}));
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-changes-filter\" aria-pressed=\"{}\" data-action=\"graph-changes-filter\" data-filter=\"{key}\" data-payload=\"{fpayload}\">{label} <span class=\"graph-map-total\">{}</span></button>",
+            if active_filter == key { "true" } else { "false" },
+            count(n),
+        ));
+    }
+    html.push_str("</div>");
+    let matching: Vec<&V> = files
+        .iter()
+        .filter(|file| {
+            let status = m::text(file, "status").to_ascii_lowercase();
+            match active_filter {
+                "created" => status == "created",
+                "modified" => matches!(status.as_str(), "modified" | "renamed"),
+                "deleted" => status == "deleted",
+                _ => true,
+            }
+        })
+        .collect();
+    if matching.is_empty() {
+        html.push_str("<p class=\"knowledge-note\">No changed files match this filter.</p></div>");
+        return html;
+    }
+    let norm_active = normalize_rel_path(strip_symbol_suffix(active_focus));
+    html.push_str("<div class=\"graph-changes-list\">");
+    for file in matching {
+        let path = normalize_rel_path(&m::text(file, "path"));
+        let prev = normalize_rel_path(&m::text(file, "previous_path"));
+        let status = m::text(file, "status").to_ascii_lowercase();
+        let (badge, status_word) = change_status_badge(&status);
+        let exists = file["exists"].as_bool().unwrap_or(status != "deleted");
+        let in_graph = file["in_graph"].as_bool().unwrap_or(true);
+        let sum = &file["summary"];
+        let uses_added = sum["uses_added"].as_u64().unwrap_or(0);
+        let uses_removed = sum["uses_removed"].as_u64().unwrap_or(0);
+        let at_risk = sum["callers_at_risk"].as_u64().unwrap_or(0);
+        let impacted = sum["impacted_callers"].as_u64().unwrap_or(0);
+        let vis_warnings = sum["visibility_warnings"].as_u64().unwrap_or(0);
+        let selected = !norm_active.is_empty() && norm_active == path;
+        let file_payload = payload(&json!({"path": path, "surface": surface}));
+        html.push_str(&format!(
+            "<div class=\"graph-changes-file\" data-selected=\"{selected}\"><button type=\"button\" class=\"graph-changes-file-btn\" data-action=\"graph-map-impact-focus\" data-path=\"{}\" data-payload=\"{file_payload}\" aria-label=\"{}, {status_word}\"><div class=\"graph-changes-file-head\"><span class=\"graph-changes-file-path\">{}</span><span class=\"graph-status-pill\" data-status=\"{}\">{badge}</span></div><div class=\"graph-changes-file-meta\">",
+            escape(&path),
+            escape(&path),
+            escape(&path),
+            escape(&status),
+        ));
+        if !prev.is_empty() && prev != path {
+            html.push_str(&format!("<span>from {}</span>", escape(&prev)));
+        }
+        if !exists {
+            html.push_str("<span class=\"graph-status-pill\" data-status=\"broken_risk\">Missing on disk</span>");
+        } else if !in_graph {
+            html.push_str(
+                "<span class=\"graph-status-pill\" data-status=\"unchanged\">Not indexed</span>",
+            );
+        }
+        if uses_added > 0 {
+            html.push_str(&format!(
+                "<span class=\"graph-status-pill\" data-status=\"added\">+{}</span>",
+                count(uses_added)
+            ));
+        }
+        if uses_removed > 0 {
+            html.push_str(&format!(
+                "<span class=\"graph-status-pill\" data-status=\"removed\">-{}</span>",
+                count(uses_removed)
+            ));
+        }
+        if at_risk > 0 {
+            html.push_str(&format!(
+                "<span class=\"graph-status-pill\" data-status=\"broken_risk\">!{} {}</span>",
+                count(at_risk),
+                if at_risk == 1 { "caller" } else { "callers" }
+            ));
+        } else if impacted > 0 {
+            html.push_str(&format!(
+                "<span class=\"graph-status-pill\" data-status=\"impacted\">~{} callers</span>",
+                count(impacted)
+            ));
+        }
+        if vis_warnings > 0 {
+            html.push_str(&format!(
+                "<span class=\"graph-status-pill\" data-status=\"broken_risk\">!{} visibility {}</span>",
+                count(vis_warnings),
+                if vis_warnings == 1 {
+                    "warning"
+                } else {
+                    "warnings"
+                }
+            ));
+        }
+        html.push_str("</div></button>");
+        let entities = m::array(&file["entities"]);
+        if !entities.is_empty() {
+            html.push_str("<div class=\"graph-changes-entities\">");
+            for entity in &entities {
+                let ename = m::text(entity, "name");
+                let ekind = normalize_entity_kind(&m::text(entity, "kind"));
+                let echange = m::text(entity, "change").to_ascii_lowercase();
+                let (ebadge, _) = change_status_badge(&echange);
+                let line = entity["line"].as_u64().unwrap_or(0);
+                let sig = m::yes(&entity["signature_changed"]);
+                let vis_pill = visibility_pill_html(entity["visibility"].as_str(), true);
+                let prev_vis = entity["previous_visibility"].as_str();
+                let curr_vis = entity["visibility"].as_str();
+                let vis_changed = m::yes(&entity["visibility_narrowed"])
+                    || m::yes(&entity["visibility_changed"])
+                    || (prev_vis.is_some() && curr_vis.is_some() && prev_vis != curr_vis);
+                let vis_delta = if vis_changed {
+                    vis_delta_badge_html(prev_vis, curr_vis, m::yes(&entity["visibility_narrowed"]))
+                } else {
+                    String::new()
+                };
+                let epayload = payload(&json!({
+                    "path": path,
+                    "entity_id": m::text(entity, "id"),
+                    "line": line,
+                    "surface": surface,
+                }));
+                let loc = if line > 0 {
+                    format!(":{line}")
+                } else {
+                    String::new()
+                };
+                html.push_str(&format!(
+                    "<button type=\"button\" class=\"graph-changes-entity\" data-action=\"graph-map-impact-focus\" data-path=\"{}\" data-payload=\"{epayload}\"><span class=\"graph-changes-entity-kind\">{}</span>{vis_pill}<span class=\"graph-changes-entity-name\">{}{}</span>{vis_delta}{}<span class=\"graph-status-pill\" data-status=\"{}\">{ebadge}</span></button>",
+                    escape(&path),
+                    escape(entity_kind_badge(&ekind)),
+                    escape(&ename),
+                    loc,
+                    if sig {
+                        "<span class=\"graph-status-pill\" data-status=\"modified\">sig</span>"
+                    } else {
+                        ""
+                    },
+                    escape(if echange.is_empty() { "modified" } else { &echange }),
+                ));
+            }
+            html.push_str("</div>");
+        }
+        html.push_str("</div>");
+    }
+    html.push_str("</div></div>");
+    html
+}
+fn metric_count(val: &V) -> u64 {
+    val.as_u64()
+        .or_else(|| val.as_array().map(|arr| arr.len() as u64))
+        .unwrap_or(0)
+}
+#[allow(clippy::too_many_arguments)]
+fn impact_dep_group_html(
+    title: &str,
+    diff_key: &str,
+    deps: &[V],
+    self_path: &str,
+    surface: &str,
+    member_filter: &str,
+    default_open: bool,
+    collapsible: bool,
+) -> String {
+    if deps.is_empty() {
+        return String::new();
+    }
+    let mut html = String::new();
+    if collapsible {
+        html.push_str(&format!(
+            "<details class=\"graph-impact-group\"{}><summary><span class=\"graph-impact-group-title\">{title} <span class=\"graph-map-total\">{}</span></span></summary>",
+            if default_open { " open" } else { "" },
+            count(deps.len() as u64)
+        ));
+    } else {
+        html.push_str(&format!(
+            "<div class=\"graph-impact-group\"><h4>{title} <span class=\"graph-map-total\">{}</span></h4>",
+            count(deps.len() as u64)
+        ));
+    }
+    for dep in deps {
+        let target = normalize_rel_path(strip_symbol_suffix(&m::text(dep, "target")));
+        let resolved = dep["resolved"].as_bool().unwrap_or(!target.is_empty());
+        let exists = dep["exists"].as_bool().unwrap_or(true);
+        let kind = m::text(dep, "kind").replace('_', " ");
+        let line = dep["line"].as_u64().unwrap_or(0);
+        let evidence = m::text(dep, "evidence");
+        let symbols: Vec<String> = m::array(&dep["symbols"])
+            .iter()
+            .filter_map(|s| s.as_str().map(str::to_owned))
+            .collect();
+        let member_refs = {
+            let refs = m::array(&dep["member_refs"]);
+            if refs.is_empty() {
+                m::array(&dep["referenced_members"])
+            } else {
+                refs
+            }
+        };
+        let target_members = {
+            let exposed = m::array(&dep["target_members"]);
+            if exposed.is_empty() {
+                m::array(&dep["declared_members"])
+            } else {
+                exposed
+            }
+        };
+        let warnings = m::array(&dep["visibility_warnings"]);
+        let has_vis_risk = !warnings.is_empty()
+            || member_refs.iter().any(member_has_severe_risk)
+            || target_members.iter().any(member_has_severe_risk);
+        let jump_payload = payload(&json!({"path": target, "surface": surface}));
+        let link_payload = payload(&json!({"from": self_path, "to": target, "surface": surface}));
+        let can_jump = !target.is_empty() && (resolved || exists);
+        html.push_str(&format!(
+            "<div class=\"graph-impact-row\" data-diff=\"{diff_key}\"><div class=\"graph-impact-row-main\">"
+        ));
+        if can_jump {
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"graph-impact-row-btn\" data-action=\"graph-map-impact-focus\" data-path=\"{}\" data-payload=\"{jump_payload}\"><span class=\"graph-status-pill\" data-status=\"{diff_key}\">{}</span> <span>{}</span></button>",
+                escape(&target),
+                diff_badge_sign(diff_key),
+                escape(&target),
+            ));
+        } else {
+            html.push_str(&format!(
+                "<span class=\"graph-impact-row-btn\"><span class=\"graph-status-pill\" data-status=\"{diff_key}\">{}</span> <span>{}</span></span>",
+                diff_badge_sign(diff_key),
+                escape(&target),
+            ));
+        }
+        html.push_str("<div class=\"graph-impact-row-actions\">");
+        if !exists {
+            html.push_str(
+                "<span class=\"graph-status-pill\" data-status=\"broken_risk\">missing</span>",
+            );
+        } else if !resolved {
+            html.push_str(
+                "<span class=\"graph-status-pill\" data-status=\"unchanged\">unresolved</span>",
+            );
+        } else if !target.is_empty() && target != self_path && looks_like_file_path(&target) {
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-link\" data-payload=\"{link_payload}\">Links</button>"
+            ));
+        }
+        html.push_str("</div></div>");
+        let mut meta = Vec::new();
+        if !kind.is_empty() {
+            meta.push(escape(&kind));
+        }
+        if line > 0 {
+            meta.push(format!("L{line}"));
+        }
+        if !symbols.is_empty() {
+            meta.push(escape(&symbols.join(", ")));
+        }
+        if !member_refs.is_empty() || !target_members.is_empty() {
+            meta.push(format!(
+                "{} used · {} exposed",
+                member_refs.len(),
+                target_members.len()
+            ));
+        }
+        if has_vis_risk {
+            meta.push(
+                "<span class=\"graph-status-pill\" data-status=\"broken_risk\">vis risk</span>"
+                    .to_owned(),
+            );
+        }
+        if !meta.is_empty() {
+            html.push_str(&format!(
+                "<div class=\"graph-impact-symbols\">{}</div>",
+                meta.join(" · ")
+            ));
+        }
+        if !evidence.is_empty() {
+            html.push_str(&format!(
+                "<p class=\"graph-impact-evidence\">{}</p>",
+                escape(&evidence)
+            ));
+        }
+        html.push_str(&impact_members_details_html(
+            &member_refs,
+            &target_members,
+            &warnings,
+            MemberDetailsOpts {
+                member_filter,
+                used_title: "Called / Referenced",
+                exposed_title: "Exposed by target",
+                summary_title: "Properties &amp; methods",
+                force_open: has_vis_risk,
+            },
+        ));
+        html.push_str("</div>");
+    }
+    html.push_str(if collapsible { "</details>" } else { "</div>" });
+    html
+}
+fn caller_rank(impact: &str) -> u8 {
+    match impact {
+        "broken_risk" => 0,
+        "impacted" => 1,
+        "added_caller" => 2,
+        _ => 3,
+    }
+}
+fn member_filter_bar_html(active: &str, surface: &str) -> String {
+    let items = [
+        ("all", "All"),
+        ("used", "Used"),
+        ("exposed", "Exposed"),
+        ("risk", "Δ/Risk"),
+    ];
+    let mut html = String::from(
+        "<div class=\"graph-member-filters\" role=\"group\" aria-label=\"Member filter\">",
+    );
+    for (key, label) in items {
+        let pressed = if active == key { "true" } else { "false" };
+        let filter_payload = payload(&json!({ "filter": key, "surface": surface }));
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-member-filter\" data-action=\"graph-map-member-filter\" data-payload=\"{filter_payload}\" aria-pressed=\"{pressed}\">{label}</button>"
+        ));
+    }
+    html.push_str("</div>");
+    html
+}
+#[cfg(test)]
+pub fn impact_side_html(impact: &V, view: &V, surface: &str) -> String {
+    impact_side_html_with_filter(impact, view, surface, "all")
+}
+pub fn impact_side_html_with_filter(
+    impact: &V,
+    view: &V,
+    surface: &str,
+    member_filter: &str,
+) -> String {
+    let member_filter = match member_filter {
+        "used" | "exposed" | "risk" => member_filter,
+        _ => "all",
+    };
+    let path = normalize_rel_path(strip_symbol_suffix(&m::text(impact, "path")));
+    if path.is_empty() {
+        return String::new();
+    }
+    let prev = normalize_rel_path(&m::text(impact, "previous_path"));
+    let status = m::text(impact, "status").to_ascii_lowercase();
+    let status = if status.is_empty() {
+        "unchanged".to_owned()
+    } else {
+        status
+    };
+    let exists = impact["exists"].as_bool().unwrap_or(status != "deleted");
+    let in_graph = impact["in_graph"].as_bool().unwrap_or(true);
+    let (_, status_label) = change_status_badge(&status);
+    let mut html = format!(
+        "<section class=\"graph-impact-card\"><div class=\"graph-impact-head\"><h3>{}</h3><span class=\"graph-status-pill\" data-status=\"{}\">{status_label}</span></div><p class=\"graph-map-path\">{}</p>",
+        escape(base(&path)),
+        escape(&status),
+        escape(&path),
+    );
+    if !prev.is_empty() && prev != path {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">Renamed from {}</p>",
+            escape(&prev)
+        ));
+    }
+    html.push_str("<div class=\"graph-impact-meta\">");
+    if exists {
+        html.push_str(
+            "<span class=\"graph-status-pill\" data-status=\"created\">Exists in workspace</span>",
+        );
+    } else {
+        html.push_str("<span class=\"graph-status-pill\" data-status=\"broken_risk\">Deleted — missing on disk</span>");
+    }
+    if m::yes(&impact["baseline"]["available"]) {
+        let label = m::text(&impact["baseline"], "label");
+        if !label.is_empty() {
+            html.push_str(&format!("<span>Baseline: {}</span>", escape(&label)));
+        }
+    } else {
+        let reason = m::text(&impact["baseline"], "reason");
+        if !reason.is_empty() {
+            html.push_str(&format!("<span>{}</span>", escape(&reason)));
+        }
+    }
+    html.push_str("</div>");
+    if !exists {
+        html.push_str("<p class=\"graph-impact-missing\">File does not exist on disk in the current workspace.</p>");
+    } else if !in_graph {
+        html.push_str("<p class=\"graph-impact-missing\">Not yet in Graphify index — workspace dependency evidence shown below.</p>");
+    }
+    let sum = &impact["summary"];
+    let uses_added_n = sum["uses_added"]
+        .as_u64()
+        .unwrap_or_else(|| m::array(&impact["uses"]["added"]).len() as u64);
+    let uses_removed_n = sum["uses_removed"]
+        .as_u64()
+        .unwrap_or_else(|| m::array(&impact["uses"]["removed"]).len() as u64);
+    let uses_unchanged_n = sum["uses_unchanged"]
+        .as_u64()
+        .unwrap_or_else(|| m::array(&impact["uses"]["unchanged"]).len() as u64);
+    let callers_risk_n = sum["callers_at_risk"].as_u64().unwrap_or(0);
+    let callers_impacted_n = sum["callers_impacted"].as_u64().unwrap_or(0);
+    let added_callers_n = sum["added_callers"].as_u64().unwrap_or(0);
+    let vis_warnings_n = sum["visibility_warnings"].as_u64().unwrap_or(0);
+    let arch = &impact["architecture_impact"];
+    let new_cycles = metric_count(&arch["new_cycles"]).max(sum["new_cycles"].as_u64().unwrap_or(0));
+    let resolved_cycles =
+        metric_count(&arch["resolved_cycles"]).max(sum["resolved_cycles"].as_u64().unwrap_or(0));
+    let new_violations =
+        metric_count(&arch["new_violations"]).max(sum["new_violations"].as_u64().unwrap_or(0));
+    let resolved_violations = metric_count(&arch["resolved_violations"])
+        .max(sum["resolved_violations"].as_u64().unwrap_or(0));
+    html.push_str("<div class=\"graph-impact-summary\">");
+    html.push_str(&format!(
+        "<span class=\"graph-status-pill\" data-status=\"added\">+{} added</span><span class=\"graph-status-pill\" data-status=\"removed\">-{} removed</span><span class=\"graph-status-pill\" data-status=\"unchanged\">={} unchanged</span>",
+        count(uses_added_n),
+        count(uses_removed_n),
+        count(uses_unchanged_n),
+    ));
+    if callers_risk_n > 0 {
+        html.push_str(&format!(
+            "<span class=\"graph-status-pill\" data-status=\"broken_risk\">!{} callers at risk</span>",
+            count(callers_risk_n)
+        ));
+    }
+    if vis_warnings_n > 0 {
+        html.push_str(&format!(
+            "<span class=\"graph-status-pill\" data-status=\"broken_risk\">!{} visibility warnings</span>",
+            count(vis_warnings_n)
+        ));
+    }
+    if callers_impacted_n > 0 {
+        html.push_str(&format!(
+            "<span class=\"graph-status-pill\" data-status=\"impacted\">~{} impacted callers</span>",
+            count(callers_impacted_n)
+        ));
+    }
+    if added_callers_n > 0 {
+        html.push_str(&format!(
+            "<span class=\"graph-status-pill\" data-status=\"added_caller\">+{} new callers</span>",
+            count(added_callers_n)
+        ));
+    }
+    if new_cycles > 0 || resolved_cycles > 0 {
+        html.push_str(&format!(
+            "<span class=\"graph-impact-arch\">↻ {} new / {} resolved cycles</span>",
+            count(new_cycles),
+            count(resolved_cycles)
+        ));
+    }
+    html.push_str("</div>");
+    html.push_str(&member_filter_bar_html(member_filter, surface));
+    // Preserve Graphify open/follow/path actions when indexed and focused in the current view.
+    let view_focus = &view["focus"];
+    if view_focus.is_object()
+        && normalize_rel_path(&m::text(view_focus, "path")) == path
+        && !m::yes(&view_focus["folder"])
+        && !at_base(view)
+    {
+        html.push_str("<div class=\"graph-impact-row-actions\">");
+        if view_focus["symbols"].as_u64().unwrap_or(0) > 0 {
+            html.push_str(&open_file(&view_focus["path"]));
+        }
+        if follows(view) || paths(view) || shares(view) || !m::yes(&view_focus["start"]) {
+            html.push_str(&follow_links(&view_focus["path"]));
+        }
+        html.push_str(&path_to(view_focus));
+        html.push_str("</div>");
+    }
+    let entities = m::array(&impact["entities"]);
+    if !entities.is_empty() {
+        html.push_str(&format!(
+            "<div class=\"graph-impact-group\"><h4>Changed entities <span class=\"graph-map-total\">{}</span></h4>",
+            count(entities.len() as u64)
+        ));
+        for ent in &entities {
+            let echange = m::text(ent, "change").to_ascii_lowercase();
+            let (ebadge, _) = change_status_badge(&echange);
+            let ekind = normalize_entity_kind(&m::text(ent, "kind"));
+            let line = ent["line"].as_u64().unwrap_or(0);
+            let sig = m::yes(&ent["signature_changed"]);
+            let vis_pill = visibility_pill_html(ent["visibility"].as_str(), false);
+            let kind_pill = member_kind_pill_html(&ekind);
+            let prev_vis = ent["previous_visibility"].as_str();
+            let curr_vis = ent["visibility"].as_str();
+            let vis_changed = m::yes(&ent["visibility_narrowed"])
+                || m::yes(&ent["visibility_changed"])
+                || (prev_vis.is_some() && curr_vis.is_some() && prev_vis != curr_vis);
+            let vis_delta = if vis_changed {
+                vis_delta_badge_html(prev_vis, curr_vis, m::yes(&ent["visibility_narrowed"]))
+            } else {
+                String::new()
+            };
+            html.push_str(&format!(
+                "<div class=\"graph-impact-row\" data-diff=\"{}\"><div class=\"graph-impact-row-main\"><span class=\"graph-impact-row-btn\">{vis_pill}{kind_pill}<span class=\"graph-changes-entity-kind\">{}</span> <span class=\"graph-impact-entity-name\">{}{}</span></span><div class=\"graph-impact-row-actions\">{vis_delta}{}<span class=\"graph-status-pill\" data-status=\"{}\">{ebadge}</span></div></div></div>",
+                escape(if echange.is_empty() { "unchanged" } else { &echange }),
+                escape(entity_kind_badge(&ekind)),
+                escape(&m::text(ent, "name")),
+                if line > 0 { format!(":{line}") } else { String::new() },
+                if sig {
+                    "<span class=\"graph-status-pill\" data-status=\"modified\" title=\"signature changed\" aria-label=\"signature changed\">sig</span>"
+                } else {
+                    ""
+                },
+                escape(if echange.is_empty() { "unchanged" } else { &echange }),
+            ));
+        }
+        html.push_str("</div>");
+    }
+    let added_deps = m::array(&impact["uses"]["added"]);
+    let removed_deps = m::array(&impact["uses"]["removed"]);
+    let unchanged_deps = m::array(&impact["uses"]["unchanged"]);
+    html.push_str(&impact_dep_group_html(
+        "Added dependencies (+)",
+        "added",
+        &added_deps,
+        &path,
+        surface,
+        member_filter,
+        true,
+        false,
+    ));
+    html.push_str(&impact_dep_group_html(
+        "Removed dependencies (-)",
+        "removed",
+        &removed_deps,
+        &path,
+        surface,
+        member_filter,
+        true,
+        false,
+    ));
+    let mut callers = m::array(&impact["used_by"]);
+    callers.sort_by(|a, b| {
+        let ra = caller_rank(&m::text(a, "impact"));
+        let rb = caller_rank(&m::text(b, "impact"));
+        ra.cmp(&rb)
+            .then_with(|| {
+                b["links"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .cmp(&a["links"].as_u64().unwrap_or(0))
+            })
+            .then_with(|| m::text(a, "path").cmp(&m::text(b, "path")))
+    });
+    if !callers.is_empty() {
+        html.push_str(&format!(
+            "<div class=\"graph-impact-group\"><h4>Used by (reverse dependents) <span class=\"graph-map-total\">{}</span></h4>",
+            count(callers.len() as u64)
+        ));
+        for caller in &callers {
+            let cpath = normalize_rel_path(strip_symbol_suffix(&m::text(caller, "path")));
+            let cimpact = m::text(caller, "impact").to_ascii_lowercase();
+            let cimpact = if cimpact.is_empty() {
+                "unchanged".to_owned()
+            } else {
+                cimpact
+            };
+            let pill_label = match cimpact.as_str() {
+                "broken_risk" => "Broken risk",
+                "impacted" => "Impacted",
+                "added_caller" => "Added caller",
+                _ => "Unchanged",
+            };
+            let cexists = caller["exists"].as_bool().unwrap_or(true);
+            let reason = m::text(caller, "reason");
+            let links = caller["links"].as_u64().unwrap_or(0);
+            let guessed = m::yes(&caller["guessed"]);
+            let used_members = {
+                let direct = m::array(&caller["used_members"]);
+                if direct.is_empty() {
+                    m::array(&caller["member_refs"])
+                } else {
+                    direct
+                }
+            };
+            let caller_target_members = m::array(&caller["target_members"]);
+            let vis_warnings = m::array(&caller["visibility_warnings"]);
+            let has_vis_risk = !vis_warnings.is_empty()
+                || used_members.iter().any(member_has_severe_risk)
+                || caller_target_members.iter().any(member_has_severe_risk);
+            let mut syms: Vec<String> = Vec::new();
+            for sym in m::array(&caller["changed_symbols"])
+                .into_iter()
+                .chain(m::array(&caller["symbols"]))
+                .filter_map(|item| {
+                    item.as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                })
+            {
+                if !syms.iter().any(|existing| existing == &sym) {
+                    syms.push(sym);
+                }
+            }
+            let jump_payload = payload(&json!({"path": cpath, "surface": surface}));
+            let link_payload = payload(&json!({"from": cpath, "to": path, "surface": surface}));
+            html.push_str(&format!(
+                "<div class=\"graph-impact-row\" data-risk=\"{}\" data-diff=\"{}\"><div class=\"graph-impact-row-main\"><button type=\"button\" class=\"graph-impact-row-btn\" data-action=\"graph-map-impact-focus\" data-path=\"{}\" data-payload=\"{jump_payload}\"><span class=\"graph-status-pill\" data-status=\"{}\">{pill_label}</span> <span>{}</span></button><div class=\"graph-impact-row-actions\">",
+                cimpact == "broken_risk",
+                if cimpact == "broken_risk" {
+                    "risk"
+                } else if cimpact == "added_caller" {
+                    "added"
+                } else {
+                    "unchanged"
+                },
+                escape(&cpath),
+                escape(&cimpact),
+                escape(&cpath),
+            ));
+            if !cexists {
+                html.push_str(
+                    "<span class=\"graph-status-pill\" data-status=\"broken_risk\">missing</span>",
+                );
+            }
+            if cexists && !cpath.is_empty() && cpath != path {
+                html.push_str(&format!(
+                    "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-link\" data-payload=\"{link_payload}\">Links</button>"
+                ));
+            }
+            html.push_str("</div></div>");
+            let mut meta = Vec::new();
+            if links > 0 {
+                meta.push(format!(
+                    "{}{}",
+                    plural(links, "link", "links"),
+                    if guessed { " · guessed" } else { "" }
+                ));
+            }
+            if !syms.is_empty() {
+                meta.push(escape(&syms.join(", ")));
+            }
+            if !used_members.is_empty() {
+                meta.push(format!("{} used", used_members.len()));
+            }
+            if has_vis_risk {
+                meta.push(
+                    "<span class=\"graph-status-pill\" data-status=\"broken_risk\">vis risk</span>"
+                        .to_owned(),
+                );
+            }
+            if !meta.is_empty() {
+                html.push_str(&format!(
+                    "<div class=\"graph-impact-symbols\">{}</div>",
+                    meta.join(" · ")
+                ));
+            }
+            if !reason.is_empty() {
+                html.push_str(&format!(
+                    "<p class=\"graph-impact-evidence\">{}</p>",
+                    escape(&reason)
+                ));
+            }
+            html.push_str(&impact_members_details_html(
+                &used_members,
+                &caller_target_members,
+                &vis_warnings,
+                MemberDetailsOpts {
+                    member_filter,
+                    used_title: "Referenced here",
+                    exposed_title: "Exposed by target",
+                    summary_title: "Properties &amp; methods",
+                    force_open: cimpact == "broken_risk" || has_vis_risk,
+                },
+            ));
+            html.push_str("</div>");
+        }
+        html.push_str("</div>");
+    }
+    html.push_str(&format!(
+        "<div class=\"graph-impact-group\"><h4>Architecture &amp; cycles</h4><div class=\"graph-impact-arch\"><span>↻ {} new cycles · {} resolved</span><span>· {} new violations · {} resolved</span></div></div>",
+        count(new_cycles),
+        count(resolved_cycles),
+        count(new_violations),
+        count(resolved_violations),
+    ));
+    html.push_str(&impact_dep_group_html(
+        "Unchanged dependencies (=)",
+        "unchanged",
+        &unchanged_deps,
+        &path,
+        surface,
+        member_filter,
+        added_deps.is_empty() && removed_deps.is_empty(),
+        true,
+    ));
+    html.push_str("</section>");
+    html
+}
+async fn fetch_surface_changes(surface: MapSurface, state: V) {
+    let project = dom::value("project");
+    if project.is_empty() {
+        m::set(surface.changes_key, V::Null);
+        if surface.embedded {
+            update_embedded_changes_badge(None);
+        }
+        return;
+    }
+    let raw_target = m::text(&state, "target");
+    let effective_target = if raw_target.is_empty() {
+        "work"
+    } else {
+        raw_target.as_str()
+    };
+    let sid = if surface.embedded {
+        m::read(|s| s.sid.clone())
+    } else {
+        String::new()
+    };
+    let notests = m::yes(&state["notests"]);
+    let url = build_changes_path(&project, effective_target, &sid, notests);
+    match api::scoped(surface.changes_epoch, &url).await {
+        Ok((epoch, doc)) => {
+            if !m::current(surface.changes_epoch, epoch) || dom::value("project") != project {
+                return;
+            }
+            m::set(
+                surface.changes_key,
+                json!({"project": project, "target": effective_target, "data": doc}),
+            );
+            rerender_surface_preserving_camera(surface);
+        }
+        Err(error) if error.aborted => {}
+        Err(_) => {}
+    }
+}
+async fn fetch_surface_impact(surface: MapSurface, state: V, path: String, key: String) {
+    let project = dom::value("project");
+    if project.is_empty() || path.is_empty() {
+        return;
+    }
+    let raw_target = m::text(&state, "target");
+    let effective_target = if raw_target.is_empty() {
+        "work"
+    } else {
+        raw_target.as_str()
+    };
+    let sid = if surface.embedded {
+        m::read(|s| s.sid.clone())
+    } else {
+        String::new()
+    };
+    let certain = m::yes(&state["certain"]);
+    let url = build_file_impact_path(&project, &path, effective_target, &sid, certain);
+    match api::scoped(surface.impact_epoch, &url).await {
+        Ok((epoch, doc)) => {
+            if !m::current(surface.impact_epoch, epoch) || dom::value("project") != project {
+                return;
+            }
+            m::set(
+                surface.impact_key,
+                json!({"key": key, "loading": false, "data": doc}),
+            );
+            rerender_surface_preserving_camera(surface);
+            if dom::get("graph-link").is_some_and(|d| d.has_attribute("open")) {
+                draw_link();
+            }
+        }
+        Err(error) if error.aborted => {}
+        Err(_) => {
+            let cur = m::data(surface.impact_key);
+            if m::text(&cur, "key") == key {
+                m::set(surface.impact_key, V::Null);
+            }
+        }
+    }
+}
+fn ensure_surface_impact(surface: MapSurface, state: &V, view: Option<&V>, force: bool) {
+    let project = dom::value("project");
+    if project.is_empty() {
+        return;
+    }
+    let changes = surface_changes_doc(surface, state);
+    let Some(path) = selected_impact_file(state, view, changes.as_ref()) else {
+        return;
+    };
+    let wanted_key = impact_cache_key(&project, &path, state);
+    let cached = m::data(surface.impact_key);
+    if !force && m::text(&cached, "key") == wanted_key {
+        return;
+    }
+    m::set(
+        surface.impact_key,
+        json!({"key": wanted_key.clone(), "loading": true}),
+    );
+    let state_clone = state.clone();
+    spawn_local(async move {
+        fetch_surface_impact(surface, state_clone, path, wanted_key).await;
+    });
+}
+fn embedded_unindexed_side_html(state: &V, changes: Option<&V>) -> String {
+    if dom::value("project").is_empty() {
+        return String::new();
+    }
+    let side_tab = m::text(state, "side_tab");
+    let changes_count = changes_count_of(changes);
+    if side_tab == "changes" {
+        let active = selected_impact_file(state, None, changes);
+        return format!(
+            "{}{}",
+            side_top_html("changes", changes_count, "session", true),
+            changes_side_html(
+                changes.unwrap_or(&V::Null),
+                &m::text(state, "changes_filter"),
+                active.as_deref().unwrap_or(""),
+                "session",
+            ),
+        );
+    }
+    if let Some(impact) = cached_impact_for_selection(SESSION_SURFACE, state, None) {
+        return format!(
+            "{}{}",
+            side_top_html("details", changes_count, "session", true),
+            impact_side_html_with_filter(
+                &impact,
+                &V::Null,
+                "session",
+                &m::text(state, "member_filter")
+            ),
+        );
+    }
+    String::new()
+}
+fn rerender_surface_preserving_camera(surface: MapSurface) {
+    let view = m::data(surface.view_key);
+    if surface.embedded {
+        let state = embedded_state();
+        let changes = surface_changes_doc(SESSION_SURFACE, &state);
+        sync_embedded_toolbar(&state, changes.as_ref());
+        if view["nodes"].is_array() {
+            render_embedded(&view, false, false);
+        } else {
+            html(
+                "session-graph-side",
+                &embedded_unindexed_side_html(&state, changes.as_ref()),
+            );
+        }
+    } else if open() && view.is_object() {
+        render(&view);
+    }
+}
+fn build_map_path(project: &str, state: &V, embedded: bool) -> String {
+    let mut query = vec![("scope", m::text(state, "scope"))];
+    if embedded {
+        let sid = m::read(|s| s.sid.clone());
+        if !sid.is_empty() {
+            query.push(("focus_session", sid));
+        }
+    }
+    for key in ["focus", "filter", "target", "launch", "compare_launch"] {
+        if !m::text(state, key).is_empty() {
+            query.push((key, m::text(state, key)));
+        }
+    }
+    for key in [
+        "certain",
+        "notests",
+        "history",
+        "modules",
+        "no_incoming",
+        "whole",
+    ] {
+        if m::yes(&state[key]) {
+            query.push((key, "1".to_owned()));
+        }
+    }
+    // The patterns found where the picture is open; the picture of one of
+    // them is that pattern alone.
+    if m::yes(&state["patterns"]) && !state["pattern"].is_string() {
+        query.push(("patterns", "1".to_owned()));
+    }
+    let ends = unfolded(state, "path");
+    let pathed = ends.len() == 2;
+    for key in ["out", "into"] {
+        let places = unfolded(state, key);
+        if !pathed && !m::text(state, "follow").is_empty() && !places.is_empty() {
+            query.push((key, json!(places).to_string()));
+        }
+    }
+    if let Some(origin) = state["scenario"].as_str() {
+        query.push(("scenario", origin.to_owned()));
+        query.push((
+            "skip",
+            state["scenario_skip"].as_u64().unwrap_or(0).to_string(),
+        ));
+    } else if let (Some(place), Some(revision)) = (
+        state["cycle_base"]["place"].as_str(),
+        state["cycle_base"]["revision"].as_str(),
+    ) {
+        query.push(("cycle", place.to_owned()));
+        query.push(("base", revision.to_owned()));
+    } else if let Some(cycle) = state["cycle"].as_str() {
+        query.push(("cycle", cycle.to_owned()));
+    } else if let Some(pattern) = state["pattern"].as_str() {
+        query.push(("pattern", pattern.to_owned()));
+    } else if pathed {
+        let asked = if m::yes(&state["shared"]) {
+            "shared"
+        } else {
+            "path"
+        };
+        query.push((asked, json!(ends).to_string()));
+        if asked == "shared" && !m::text(state, "side").is_empty() {
+            query.push(("side", m::text(state, "side")));
+        }
+        if let Some(skip) = begun(state).last().filter(|_| asked == "shared") {
+            query.push(("skip", skip.to_string()));
+        }
+    } else if !m::text(state, "follow").is_empty() {
+        query.push(("follow", m::text(state, "follow")));
+    } else if !unfolded(state, "spread").is_empty() {
+        query.push(("spread", json!(unfolded(state, "spread")).to_string()));
+    }
+    format!(
+        "/api/projects/{}/graph/map{}",
+        encode_part(project),
+        encode_query(&query)
+    )
+}
+fn combine_note(before: String, view: &V) -> String {
+    [
+        before,
+        m::text(view, "architecture_error"),
+        note(view),
+        cycle_revision(view),
+    ]
+    .iter()
+    .filter(|part| !part.is_empty())
+    .cloned()
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+fn map_side_html(
+    surface: MapSurface,
+    view: &V,
+    state: &V,
+    action: &str,
+    scenario_action: &str,
+    test_back: &str,
+    attach_action: &str,
+) -> String {
+    let attachment = map_attachment(view);
+    m::set(
+        surface.attachment_key,
+        json!({"project": view["project_id"], "text": attachment}),
+    );
+    let attach = if attachment.is_some() {
+        format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"{attach_action}\">Attach map context</button>"
+        )
+    } else {
+        String::new()
+    };
+    let changes_doc = surface_changes_doc(surface, state);
+    let changes_count = changes_count_of(changes_doc.as_ref());
+    let side_tab = m::text(state, "side_tab");
+    let changes_tab = side_tab == "changes";
+    let active_focus = selected_impact_file(state, Some(view), changes_doc.as_ref());
+    let impact_doc = cached_impact_for_selection(surface, state, Some(view));
+    if surface.embedded
+        && !changes_tab
+        && !m::yes(&state["side_pinned"])
+        && !view["focus"].is_object()
+        && active_focus.is_none()
+        && impact_doc.is_none()
+        && !cycles(view)
+        && !patterned(view)
+        && view["mode"] != "scenario"
+        && !state["pick"].is_object()
+        && !view["chosen"].is_object()
+    {
+        return String::new();
+    }
+    let show_close = surface.embedded
+        && (view["focus"].is_object()
+            || active_focus.is_some()
+            || changes_tab
+            || m::yes(&state["side_pinned"]));
+    let header = side_top_html(
+        if changes_tab { "changes" } else { "details" },
+        changes_count,
+        surface.name,
+        show_close,
+    );
+    if changes_tab {
+        return format!(
+            "{header}{}",
+            changes_side_html(
+                changes_doc.as_ref().unwrap_or(&V::Null),
+                &m::text(state, "changes_filter"),
+                active_focus.as_deref().unwrap_or(""),
+                surface.name,
+            ),
+        );
+    }
+    let details_body = if let Some(impact) = impact_doc.as_ref() {
+        format!(
+            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}",
+            choosing(state),
+            paging(view),
+            run_comparison(view),
+            shell_reads(view),
+            impact_side_html_with_filter(
+                impact,
+                view,
+                surface.name,
+                &m::text(state, "member_filter")
+            ),
+            without_incoming_side(view),
+            test_paths(view),
+            history_side(view),
+            architecture_side(view),
+            found_patterns(view, &unfolded(state, "kinds")),
+        )
+    } else if let Some(focused_path) = active_focus.as_deref() {
+        if view["focus"].is_object() {
+            format!(
+                "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}<p class=\"knowledge-note\">Reading dependency impact…</p>{}{}{}{}",
+                choosing(state),
+                paging(view),
+                run_comparison(view),
+                shell_reads(view),
+                side(view),
+                without_incoming_side(view),
+                test_paths(view),
+                history_side(view),
+                architecture_side(view),
+                found_patterns(view, &unfolded(state, "kinds")),
+            )
+        } else {
+            format!(
+                "{}{}<section class=\"graph-impact-card\"><div class=\"graph-impact-head\"><h3>{}</h3></div><p class=\"graph-map-path\">{}</p><p class=\"knowledge-note\">Reading file dependency impact…</p></section>",
+                choosing(state),
+                attach,
+                escape(base(focused_path)),
+                escape(focused_path),
+            )
+        }
+    } else if surface.embedded
+        && !view["focus"].is_object()
+        && !cycles(view)
+        && !patterned(view)
+        && view["mode"] != "scenario"
+        && !state["pick"].is_object()
+        && !view["chosen"].is_object()
+    {
+        "<p class=\"knowledge-note\">Select a file or folder on the map to inspect its dependencies and change impact.</p>".to_owned()
+    } else {
+        format!(
+            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}",
+            choosing(state),
+            paging(view),
+            run_comparison(view),
+            shell_reads(view),
+            side(view),
+            without_incoming_side(view),
+            test_paths(view),
+            history_side(view),
+            architecture_side(view),
+            found_patterns(view, &unfolded(state, "kinds")),
+        )
+    };
+    format!("{header}<div class=\"graph-side-panel\" data-tab=\"details\">{details_body}</div>")
+}
+fn set_surface_attrs(surface: MapSurface, view: &V) {
+    let side_family = if patterned(view) {
+        m::text(&view["pattern"], "family")
+    } else {
+        String::new()
+    };
+    let side_layered = if layered(view) { "true" } else { "false" };
+    for target_id in [surface.side, surface.note, surface.canvas] {
+        dom::attr(target_id, "data-pattern-family", &side_family);
+        dom::attr(target_id, "data-layered", side_layered);
+    }
+}
+
 fn render(view: &V) {
     crate::graph_explanation::map_context(view, &state()["cycle_base"]["revision"]);
     show_launches(view);
@@ -6683,21 +11333,7 @@ fn render(view: &V) {
     }
     html("graph-map-crumbs", &crumbs(view));
     dom::text("graph-map-summary", &summary(view));
-    dom::text(
-        "graph-map-note",
-        [
-            before,
-            m::text(view, "architecture_error"),
-            note(view),
-            cycle_revision(view),
-        ]
-        .iter()
-        .filter(|part| !part.is_empty())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .as_str(),
-    );
+    dom::text("graph-map-note", &combine_note(before, view));
     dom::set_checked("graph-map-certain", m::yes(&view["certain"]));
     dom::set_checked("graph-map-notests", m::yes(&view["notests"]));
 
@@ -6705,6 +11341,7 @@ fn render(view: &V) {
     dom::disabled("graph-map-history", module_mode || scenario_mode);
     dom::disabled("graph-map-patterns", module_mode || scenario_mode);
     dom::set_checked("graph-map-fit", m::yes(&state()["fit"]));
+    dom::set_checked("graph-map-whole", m::yes(&state()["whole"]));
     dom::set_checked("graph-map-patterns", m::yes(&state()["patterns"]));
     dom::disabled(
         "graph-find-search",
@@ -6737,9 +11374,23 @@ fn render(view: &V) {
                     .unwrap_or(false)
         })
         .and_then(|node| node.get_attribute("data-payload"));
-    html("graph-map-canvas", &canvas(view));
+    let modal_state = state();
+    let modal_changes = surface_changes_doc(MODAL_SURFACE, &modal_state);
+    let modal_impact = cached_impact_for_selection(MODAL_SURFACE, &modal_state, Some(view));
+    let rendered = canvas_with_overlays(
+        view,
+        MODAL_SURFACE.id_prefix,
+        CanvasOverlayContext {
+            live_focus: None,
+            changes: modal_changes.as_ref(),
+            impact: modal_impact.as_ref(),
+        },
+    );
+    html("graph-map-canvas", &rendered.html);
     fit();
-    if scenario_mode {
+    html("graph-map-arrow-legend", &arrow_kinds_legend_html());
+    let changes_tab = m::text(&modal_state, "side_tab") == "changes";
+    if scenario_mode && !changes_tab {
         let focused = dom::document().active_element().is_some_and(|element| {
             element
                 .get_attribute("data-action")
@@ -6747,7 +11398,14 @@ fn render(view: &V) {
         });
         m::take("graph-map-attachment");
         dom::attr("graph-map-canvas", "data-picking", "false");
-        html("graph-map-side", &scenario_side(view));
+        html(
+            "graph-map-side",
+            &format!(
+                "{}{}",
+                side_tabs_html("details", changes_count_of(modal_changes.as_ref()), "modal"),
+                scenario_side(view)
+            ),
+        );
         dom::text(
             "graph-map-legend",
             "Arrows follow dependencies away from the starting point.",
@@ -6757,10 +11415,17 @@ fn render(view: &V) {
         }
         return;
     }
-    if module_mode {
+    if module_mode && !changes_tab {
         dom::attr("graph-map-canvas", "data-picking", "false");
         m::take("graph-map-attachment");
-        html("graph-map-side", &modules_side(view));
+        html(
+            "graph-map-side",
+            &format!(
+                "{}{}",
+                side_tabs_html("details", changes_count_of(modal_changes.as_ref()), "modal"),
+                modules_side(view)
+            ),
+        );
         dom::text(
             "graph-map-legend",
             "Arrows show dependencies between Graphify communities. Dashed links are inferred.",
@@ -6834,36 +11499,23 @@ fn render(view: &V) {
     // the button that had the focus with it.
     let turned = (patterned(view) && active_action.as_deref() == Some("graph-map-pattern"))
         || (!patterned(view) && active_action.as_deref() == Some("graph-map-pattern-back"));
-    let attachment = map_attachment(view);
-    m::set(
-        "graph-map-attachment",
-        json!({"project": view["project_id"], "text": attachment}),
-    );
-    let attach = if attachment.is_some() {
-        "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-attach\">Attach map context</button>"
-    } else {
-        ""
-    };
     let scenario_action = scenario_button(view);
     let test_back = if paths(view) && state["test_path_return"].is_object() {
         "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-test-back\">Back to changed files</button>"
     } else {
         ""
     };
+    set_surface_attrs(MODAL_SURFACE, view);
     html(
         "graph-map-side",
-        &format!(
-            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}",
-            choosing(&state),
-            paging(view),
-            run_comparison(view),
-            shell_reads(view),
-            side(view),
-            without_incoming_side(view),
-            test_paths(view),
-            history_side(view),
-            architecture_side(view),
-            found_patterns(view, &unfolded(&state, "kinds")),
+        &map_side_html(
+            MODAL_SURFACE,
+            view,
+            &state,
+            &action,
+            &scenario_action,
+            test_back,
+            "graph-map-attach",
         ),
     );
     if matches!(
@@ -6918,6 +11570,49 @@ async fn choose(target: &str) -> bool {
     }
 }
 /// Reads the map as the Show list and the folder stand. `quiet` is a repeat
+fn reconcile_view_state(mut state: V, view: &V, current_fit: V, target: &str) -> (V, bool) {
+    let pinned_file_focus =
+        if m::yes(&state["side_pinned"]) && looks_like_file_path(&m::text(&state, "focus")) {
+            Some(state["focus"].clone())
+        } else {
+            None
+        };
+    // Fit can change locally while this request is in flight.
+    state["fit"] = current_fit;
+    if view["scope"].is_string() && !at_base(view) && view["mode"] != "modules" {
+        state["scope"] = view["scope"].clone();
+    }
+    if follows(view) {
+        // What is no longer drawn is no longer unfolded.
+        let drawn = m::array(&view["nodes"]);
+        for key in ["out", "into"] {
+            let kept = unfolded(&state, key)
+                .into_iter()
+                .filter(|place| drawn.iter().any(|node| node["path"] == place.as_str()))
+                .collect::<Vec<_>>();
+            state[key] = json!(kept);
+        }
+    } else if shares(view) {
+        state = begins(state, view["shared"]["skip"].as_u64().unwrap_or(0));
+    } else if view["mode"] == "scenario" {
+        state["scenario_skip"] = view["scenario"]["skip"].clone();
+    } else if !paths(view) && !cycles(view) && !patterned(view) && !state["scenario"].is_string() {
+        // The graph does not know the place, or one of the two
+        // places, or the pattern, or they were left.
+        state = unfollowed(state);
+        if let Some(pinned) = pinned_file_focus {
+            state["focus"] = pinned;
+        }
+    }
+    // A graph that was never started, as after a restart of the
+    // Harness, is asked for once more.
+    let again = view["state"] == "missing" && state["asked"] != json!(target);
+    if again {
+        state["asked"] = json!(target);
+    }
+    (state, again)
+}
+/// Reads one picture of the map and draws it. `quiet` is set while polling
 /// while a graph is being built, which leaves the picture as it is.
 async fn load(quiet: bool) {
     let state = state();
@@ -6926,79 +11621,18 @@ async fn load(quiet: bool) {
         return;
     }
     let target = m::text(&state, "target");
-    let mut query = vec![("scope", m::text(&state, "scope"))];
-    for key in ["focus", "filter", "target", "launch", "compare_launch"] {
-        if !m::text(&state, key).is_empty() {
-            query.push((key, m::text(&state, key)));
-        }
-    }
-    for key in ["certain", "notests", "history", "modules", "no_incoming"] {
-        if m::yes(&state[key]) {
-            query.push((key, "1".to_owned()));
-        }
-    }
-    // The patterns found where the picture is open; the picture of one of
-    // them is that pattern alone.
-    if m::yes(&state["patterns"]) && !state["pattern"].is_string() {
-        query.push(("patterns", "1".to_owned()));
-    }
-    // The unfolded places of each side, as a list a URL can carry whatever
-    // the paths hold.
-    // Two places, asked for the path between them or for what they share,
-    // come before a followed place.
-    let ends = unfolded(&state, "path");
-    let pathed = ends.len() == 2;
-    for key in ["out", "into"] {
-        let places = unfolded(&state, key);
-        if !pathed && !m::text(&state, "follow").is_empty() && !places.is_empty() {
-            query.push((key, json!(places).to_string()));
-        }
-    }
-    if let Some(origin) = state["scenario"].as_str() {
-        query.push(("scenario", origin.to_owned()));
-        query.push((
-            "skip",
-            state["scenario_skip"].as_u64().unwrap_or(0).to_string(),
-        ));
-    } else if let (Some(place), Some(revision)) = (
-        state["cycle_base"]["place"].as_str(),
-        state["cycle_base"]["revision"].as_str(),
-    ) {
-        query.push(("cycle", place.to_owned()));
-        query.push(("base", revision.to_owned()));
-    } else if let Some(cycle) = state["cycle"].as_str() {
-        query.push(("cycle", cycle.to_owned()));
-    } else if let Some(pattern) = state["pattern"].as_str() {
-        query.push(("pattern", pattern.to_owned()));
-    } else if pathed {
-        let asked = if m::yes(&state["shared"]) {
-            "shared"
-        } else {
-            "path"
-        };
-        query.push((asked, json!(ends).to_string()));
-        // Of what they share one kind is drawn: the one that was asked
-        // for, or, unasked, whichever there is.
-        if asked == "shared" && !m::text(&state, "side").is_empty() {
-            query.push(("side", m::text(&state, "side")));
-        }
-        // It begins with the nearest, or after those that were passed.
-        if let Some(skip) = begun(&state).last().filter(|_| asked == "shared") {
-            query.push(("skip", skip.to_string()));
-        }
-    } else if !m::text(&state, "follow").is_empty() {
-        query.push(("follow", m::text(&state, "follow")));
-    } else if !unfolded(&state, "spread").is_empty() {
-        // The folders spread out in the picture of the open one.
-        query.push(("spread", json!(unfolded(&state, "spread")).to_string()));
-    }
-    let path = format!(
-        "/api/projects/{}/graph/map{}",
-        dom::enc(&project),
-        dom::query(&query)
-    );
+    let path = build_map_path(&project, &state, false);
     if !quiet {
         dom::attr("graph-map-canvas", "aria-busy", "true");
+        let ch_state = state.clone();
+        spawn_local(async move {
+            fetch_surface_changes(MODAL_SURFACE, ch_state).await;
+        });
+    } else if surface_changes_doc(MODAL_SURFACE, &state).is_none() {
+        let ch_state = state.clone();
+        spawn_local(async move {
+            fetch_surface_changes(MODAL_SURFACE, ch_state).await;
+        });
     }
     let mut again = false;
     match api::scoped("graph-map", &path).await {
@@ -7006,45 +11640,14 @@ async fn load(quiet: bool) {
             if !m::current("graph-map", epoch) || dom::value("project") != project {
                 return;
             }
-            // The server opens the project when the asked folder is gone.
-            let mut state = state;
-            // Fit can change locally while this request is in flight.
-            state["fit"] = self::state()["fit"].clone();
-            if view["scope"].is_string() && !at_base(&view) && view["mode"] != "modules" {
-                state["scope"] = view["scope"].clone();
-            }
-            if follows(&view) {
-                // What is no longer drawn is no longer unfolded.
-                let drawn = m::array(&view["nodes"]);
-                for key in ["out", "into"] {
-                    let kept = unfolded(&state, key)
-                        .into_iter()
-                        .filter(|place| drawn.iter().any(|node| node["path"] == place.as_str()))
-                        .collect::<Vec<_>>();
-                    state[key] = json!(kept);
-                }
-            } else if shares(&view) {
-                state = begins(state, view["shared"]["skip"].as_u64().unwrap_or(0));
-            } else if view["mode"] == "scenario" {
-                state["scenario_skip"] = view["scenario"]["skip"].clone();
-            } else if !paths(&view)
-                && !cycles(&view)
-                && !patterned(&view)
-                && !state["scenario"].is_string()
-            {
-                // The graph does not know the place, or one of the two
-                // places, or the pattern, or they were left.
-                state = unfollowed(state);
-            }
-            // A graph that was never started, as after a restart of the
-            // Harness, is asked for once more.
-            again = view["state"] == "missing" && state["asked"] != json!(target);
-            if again {
-                state["asked"] = json!(target);
-            }
-            m::set("graph-map", state);
+            let (next_state, retry) =
+                reconcile_view_state(state, &view, self::state()["fit"].clone(), &target);
+            again = retry;
+            m::set("graph-map", next_state.clone());
+            m::set(MODAL_SURFACE.view_key, view.clone());
             dom::error("graph-map-error", "");
             render(&view);
+            ensure_surface_impact(MODAL_SURFACE, &next_state, Some(&view), false);
             if open()
                 && (view["state"] == "building"
                     || m::yes(&view["rebuilding"])
@@ -7078,6 +11681,7 @@ async fn load(quiet: bool) {
                 }
                 html("graph-map-side", &actions);
                 html("graph-map-legend", "");
+                html("graph-map-arrow-legend", "");
                 dom::hidden("graph-map-progress", true);
                 dom::text("graph-map-note", "");
                 dom::text("graph-map-summary", "PR base cycle");
@@ -7120,6 +11724,380 @@ async fn place() {
 fn parent(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(parent, _)| parent)
 }
+struct ClickOutcome {
+    handled: bool,
+    reload: bool,
+    rerender: bool,
+    force_impact: bool,
+    clear_filter: Option<String>,
+    clear_find: bool,
+    disable_find: Option<bool>,
+    save_notests: Option<bool>,
+    save_fit: Option<bool>,
+    open_link: Option<(String, String)>,
+}
+impl ClickOutcome {
+    fn unhandled() -> Self {
+        Self {
+            handled: false,
+            reload: false,
+            rerender: false,
+            force_impact: false,
+            clear_filter: None,
+            clear_find: false,
+            disable_find: None,
+            save_notests: None,
+            save_fit: None,
+            open_link: None,
+        }
+    }
+    fn stay() -> Self {
+        Self {
+            handled: true,
+            ..Self::unhandled()
+        }
+    }
+    fn reload() -> Self {
+        Self {
+            handled: true,
+            reload: true,
+            ..Self::unhandled()
+        }
+    }
+}
+fn apply_click_action(
+    state: &mut V,
+    action: &str,
+    payload: &V,
+    surface: MapSurface,
+    busy: bool,
+    map_failed: bool,
+) -> ClickOutcome {
+    let mut out = ClickOutcome::reload();
+    match action {
+        "graph-side-tab" => {
+            let tab = if payload["tab"].as_str() == Some("changes") {
+                "changes"
+            } else {
+                "details"
+            };
+            state["side_tab"] = json!(tab);
+            state["side_pinned"] = json!(true);
+            return ClickOutcome {
+                handled: true,
+                rerender: true,
+                ..ClickOutcome::unhandled()
+            };
+        }
+        "graph-changes-filter" => {
+            let filter = payload["filter"]
+                .as_str()
+                .filter(|k| matches!(*k, "all" | "created" | "modified" | "deleted"))
+                .unwrap_or("all");
+            state["changes_filter"] = json!(filter);
+            return ClickOutcome {
+                handled: true,
+                rerender: true,
+                ..ClickOutcome::unhandled()
+            };
+        }
+        "graph-map-member-filter" => {
+            let filter = payload["filter"]
+                .as_str()
+                .filter(|k| matches!(*k, "all" | "used" | "exposed" | "risk"))
+                .unwrap_or("all");
+            state["member_filter"] = json!(filter);
+            return ClickOutcome {
+                handled: true,
+                rerender: true,
+                ..ClickOutcome::unhandled()
+            };
+        }
+        "graph-map-impact-focus" => {
+            let path = payload["path"].as_str().unwrap_or("");
+            let view = m::data(surface.view_key);
+            let (next_state, needs_reload) = state_focus_file(state.clone(), path, &view);
+            *state = next_state;
+            let file_path = normalize_rel_path(strip_symbol_suffix(path));
+            if surface.embedded && !file_path.is_empty() {
+                m::set("session-graph-pan-target", json!(file_path));
+            }
+            return ClickOutcome {
+                handled: true,
+                reload: needs_reload,
+                rerender: !needs_reload,
+                force_impact: true,
+                clear_filter: Some(m::text(state, "filter")),
+                ..ClickOutcome::unhandled()
+            };
+        }
+        "graph-map-test-path" => {
+            if busy || map_failed {
+                return ClickOutcome::stay();
+            }
+            let previous = state.clone();
+            state["pick"] = json!({"path": payload["from"]});
+            let Some(mut showing) = led(state.clone(), payload["to"].as_str().unwrap_or("")) else {
+                return ClickOutcome::stay();
+            };
+            showing["test_path_return"] = previous;
+            *state = showing;
+            out.clear_filter = Some(String::new());
+        }
+        "graph-map-test-back" => {
+            let previous = state["test_path_return"].take();
+            if !previous.is_object() {
+                return ClickOutcome::stay();
+            }
+            *state = previous;
+            out.clear_filter = Some(m::text(state, "filter"));
+            out.save_notests = Some(m::yes(&state["notests"]));
+        }
+        "graph-map-path" => {
+            state["pick"] = json!({"path": payload["path"], "name": payload["name"]});
+        }
+        "graph-map-path-cancel" => {
+            state["pick"] = V::Null;
+        }
+        "graph-map-cycle" => {
+            if busy {
+                return ClickOutcome::stay();
+            }
+            let place = payload.as_str().unwrap_or("");
+            if state["cycle"].as_str() != Some(place) {
+                if map_failed {
+                    return ClickOutcome::stay();
+                }
+                let Some(cycle) = showing_cycle(state.clone(), place) else {
+                    return ClickOutcome::stay();
+                };
+                *state = cycle;
+            }
+            out.clear_filter = Some(String::new());
+        }
+        "graph-map-cycle-switch" => {
+            let Some(cycle) = switch_cycle(state.clone(), payload) else {
+                return ClickOutcome::stay();
+            };
+            *state = cycle;
+            out.clear_find = true;
+            out.disable_find = Some(state["cycle_base"].is_object());
+        }
+        "graph-map-cycle-back" => {
+            let previous = state["cycle_return"].take();
+            if previous.is_object() {
+                *state = previous;
+                out.clear_filter = Some(m::text(state, "filter"));
+                out.save_notests = Some(m::yes(&state["notests"]));
+                out.save_fit = Some(m::yes(&state["fit"]));
+            } else if state["cycle"].is_string() {
+                return ClickOutcome::stay();
+            }
+        }
+        "graph-map-path-swap" => {
+            let mut ends = unfolded(state, "path");
+            ends.reverse();
+            state["path"] = json!(ends);
+            state["focus"] = json!("");
+        }
+        "graph-map-shared" => {
+            match sharing(state.clone(), payload) {
+                Some(shown) => *state = shown,
+                None => return ClickOutcome::stay(),
+            }
+            out.clear_filter = Some(m::text(state, "filter"));
+        }
+        "graph-map-module-select" | "graph-map-node" if m::yes(&state["modules"]) => {
+            let path = payload.as_str().unwrap_or("");
+            if !path.starts_with("module:") {
+                return ClickOutcome::stay();
+            }
+            state["focus"] = payload.clone();
+            if action == "graph-map-module-select" {
+                state["filter"] = json!("");
+                out.clear_filter = Some(String::new());
+            }
+        }
+        "graph-map-module-file" => {
+            state["modules"] = json!(false);
+            state["scope"] = payload.clone();
+            state["focus"] = json!("");
+            state["filter"] = json!("");
+            out.clear_filter = Some(String::new());
+        }
+        "graph-map-node" if state["pick"].is_object() => {
+            match led(state.clone(), payload.as_str().unwrap_or("")) {
+                Some(shown) => *state = shown,
+                None => return ClickOutcome::stay(),
+            }
+            out.clear_filter = Some(String::new());
+        }
+        "graph-map-node" => {
+            let path = payload.as_str().unwrap_or("");
+            let wanted = payload.to_string();
+            let again = dom::all(&format!(
+                "#{} .graph-map-node[data-selected=\"true\"][data-open=\"true\"]",
+                surface.canvas
+            ))
+            .iter()
+            .any(|node| node.get_attribute("data-payload").as_deref() == Some(wanted.as_str()));
+            if again {
+                state["scope"] = json!(path);
+                state["focus"] = json!("");
+                state["filter"] = json!("");
+                state["side_tab"] = json!("details");
+                out.clear_filter = Some(String::new());
+            } else if (m::yes(&state["shared"]) || state["pattern"].is_string())
+                && state["focus"] == path
+            {
+                state["focus"] = json!("");
+            } else {
+                state["focus"] = json!(path);
+                state["side_tab"] = json!("details");
+                state["side_pinned"] = json!(true);
+            }
+        }
+        "graph-map-open" => {
+            *state = unfollowed(state.clone());
+            state["scope"] = payload.clone();
+            state["focus"] = json!("");
+            state["filter"] = json!("");
+            out.clear_filter = Some(String::new());
+        }
+        "graph-map-scenario" => {
+            let Some(origin) = payload.as_str().filter(|origin| !origin.is_empty()) else {
+                return ClickOutcome::stay();
+            };
+            if busy || map_failed || state["pick"].is_object() {
+                return ClickOutcome::stay();
+            }
+            let back = state.clone();
+            *state = unfollowed(state.clone());
+            state["scenario"] = json!(origin);
+            state["scenario_return"] = back;
+            state["focus"] = json!("");
+            state["filter"] = json!("");
+            out.clear_filter = Some(String::new());
+            out.clear_find = true;
+        }
+        "graph-map-scenario-back" => {
+            let mut back = state["scenario_return"].take();
+            if !back.is_object() {
+                return ClickOutcome::stay();
+            }
+            for key in ["notests", "certain", "fit"] {
+                back[key] = state[key].clone();
+            }
+            *state = back;
+            out.clear_filter = Some(m::text(state, "filter"));
+        }
+        "graph-map-scenario-page" => {
+            state["scenario_skip"] = payload.clone();
+        }
+        "graph-map-scenario-open" => {
+            *state = unfollowed(state.clone());
+            state["scope"] = payload["file"].clone();
+            state["focus"] = if m::yes(&payload["symbol"]) {
+                payload["path"].clone()
+            } else {
+                json!("")
+            };
+            state["filter"] = json!("");
+            out.clear_filter = Some(String::new());
+        }
+        "graph-map-follow" => {
+            *state = unfollowed(state.clone());
+            state["follow"] = payload.clone();
+            state["out"] = json!([payload]);
+            state["into"] = json!([payload]);
+            state["focus"] = json!("");
+            state["filter"] = json!("");
+            out.clear_filter = Some(String::new());
+        }
+        "graph-map-unfold" | "graph-map-fold" => {
+            let key = if payload["side"] == "in" {
+                "into"
+            } else {
+                "out"
+            };
+            let mut places = unfolded(state, key);
+            let place = payload["path"].as_str().unwrap_or("");
+            if action == "graph-map-fold" {
+                places.retain(|other| other != place);
+            } else {
+                places.push(place.to_owned());
+            }
+            state[key] = json!(places);
+        }
+        "graph-map-link" => {
+            let (from, to) = (
+                payload["from"].as_str().unwrap_or(""),
+                payload["to"].as_str().unwrap_or(""),
+            );
+            match between(state.clone(), from, to) {
+                Some(selected) => *state = selected,
+                None => {
+                    return ClickOutcome {
+                        handled: true,
+                        reload: false,
+                        open_link: Some((from.to_owned(), to.to_owned())),
+                        ..ClickOutcome::unhandled()
+                    };
+                }
+            }
+        }
+        "graph-map-spread" | "graph-map-gather" => {
+            *state = spread(
+                state.clone(),
+                payload.as_str().unwrap_or(""),
+                action == "graph-map-gather",
+            );
+        }
+        "graph-map-go" => {
+            let path = payload["path"].as_str().unwrap_or("");
+            if let Some(file) = payload["open"].as_str() {
+                *state = unfollowed(state.clone());
+                state["scope"] = json!(file);
+                state["filter"] = json!("");
+            } else if !m::yes(&payload["inside"]) {
+                *state = unfollowed(state.clone());
+                state["target"] = json!("");
+                state["scope"] = json!(parent(path));
+                state["filter"] = json!("");
+            }
+            state["focus"] = json!(path);
+        }
+        "graph-map-shared-page" => {
+            *state = paged(state.clone(), payload.as_u64());
+        }
+        "graph-map-pattern" => {
+            match showing_pattern(state.clone(), payload.as_str().unwrap_or("")) {
+                Some(shown) => *state = shown,
+                None => return ClickOutcome::stay(),
+            }
+            out.clear_filter = Some(String::new());
+        }
+        "graph-map-pattern-back" => {
+            match left_pattern(state.clone()) {
+                Some(previous) => *state = previous,
+                None => return ClickOutcome::stay(),
+            }
+            out.clear_filter = Some(m::text(state, "filter"));
+        }
+        "graph-map-pattern-kind" => {
+            let kind = payload.as_str().unwrap_or("");
+            let mut open = unfolded(state, "kinds");
+            if open.iter().any(|known| known == kind) {
+                open.retain(|known| known != kind);
+            } else {
+                open.push(kind.to_owned());
+            }
+            state["kinds"] = json!(open);
+        }
+        _ => return ClickOutcome::unhandled(),
+    }
+    out
+}
 pub async fn event(
     kind: &str,
     id: &str,
@@ -7128,6 +12106,20 @@ pub async fn event(
     value: &str,
     checked: bool,
 ) -> bool {
+    if id.starts_with("session-graph-")
+        || action.starts_with("session-graph-")
+        || payload["surface"].as_str() == Some("session")
+    {
+        return false;
+    }
+    if kind == "click"
+        && !open()
+        && (action.starts_with("graph-map-")
+            || matches!(action, "graph-side-tab" | "graph-changes-filter"))
+        && action != "graph-map-shell-event"
+    {
+        return false;
+    }
     let mut state = state();
     // A pull request, a branch or a commit is worked out before it is mapped.
     let mut chosen = false;
@@ -7154,8 +12146,12 @@ pub async fn event(
             dom::disabled("graph-find-search", false);
             let changes = id == "graph-changes";
             state = anew(if changes { "work" } else { "" });
+            if changes {
+                state["side_tab"] = json!("changes");
+            }
             m::set("graph-map", state.clone());
             dom::set_value("graph-map-filter", "");
+            dom::set_checked("graph-map-whole", false);
             // A map begun anew has nothing searched in it.
             m::next("graph-find");
             dom::cancel_timer("graph-find-search");
@@ -7164,6 +12160,7 @@ pub async fn event(
             show_found();
             dom::error("graph-map-error", "");
             dom::hidden("graph-map-progress", true);
+            dom::text("graph-map-zoom-level", "100%");
             blank();
             dom::text("graph-map-chosen", "");
             dom::text(
@@ -7421,225 +12418,6 @@ pub async fn event(
             }
             return true;
         }
-        ("click", _, "graph-map-test-path") => {
-            if busy() || map_failed() {
-                return true;
-            }
-            let previous = state.clone();
-            state["pick"] = json!({"path": payload["from"]});
-            let Some(mut showing) = led(state, payload["to"].as_str().unwrap_or("")) else {
-                return true;
-            };
-            showing["test_path_return"] = previous;
-            state = showing;
-            dom::set_value("graph-map-filter", "");
-        }
-        ("click", _, "graph-map-test-back") => {
-            let previous = state["test_path_return"].take();
-            if !previous.is_object() {
-                return true;
-            }
-            state = previous;
-            dom::set_value("graph-map-filter", &m::text(&state, "filter"));
-            dom::save(NOTESTS, m::yes(&state["notests"]).then_some("1"));
-        }
-        ("click", _, "graph-map-path") => {
-            // The other end is chosen next. The picture stays as it is.
-            state["pick"] = json!({"path": payload["path"], "name": payload["name"]});
-        }
-        ("click", _, "graph-map-path-cancel") => {
-            state["pick"] = V::Null;
-        }
-        ("click", _, "graph-map-cycle") => {
-            // The old map remains visible while a new page or filter loads.
-            if busy() {
-                return true;
-            }
-            let place = payload.as_str().unwrap_or("");
-            if state["cycle"].as_str() != Some(place) {
-                // A failed map request also leaves the old picture visible.
-                if map_failed() {
-                    return true;
-                }
-                let Some(cycle) = showing_cycle(state, place) else {
-                    return true;
-                };
-                state = cycle;
-            }
-            dom::set_value("graph-map-filter", "");
-        }
-        ("click", _, "graph-map-cycle-switch") => {
-            let Some(cycle) = switch_cycle(state, payload) else {
-                return true;
-            };
-            state = cycle;
-            close_found();
-            dom::cancel_timer("graph-map-poll");
-            dom::disabled("graph-find-search", state["cycle_base"].is_object());
-        }
-        ("click", _, "graph-map-cycle-back") => {
-            let previous = state["cycle_return"].take();
-            if previous.is_object() {
-                state = previous;
-                dom::set_value("graph-map-filter", &m::text(&state, "filter"));
-                dom::save(NOTESTS, m::yes(&state["notests"]).then_some("1"));
-                dom::save(FIT, m::yes(&state["fit"]).then_some("1"));
-            } else if state["cycle"].is_string() {
-                return true;
-            }
-        }
-        ("click", _, "graph-map-path-swap") => {
-            let mut ends = unfolded(&state, "path");
-            ends.reverse();
-            state["path"] = json!(ends);
-            state["focus"] = json!("");
-        }
-        ("click", _, "graph-map-shared") => {
-            // The same two places, asked what they share, for one kind of
-            // it, or again for the path between them.
-            match sharing(state.clone(), payload) {
-                Some(shown) => state = shown,
-                None => return true,
-            }
-            dom::set_value("graph-map-filter", &m::text(&state, "filter"));
-        }
-        ("click", _, "graph-map-module-select" | "graph-map-node") if m::yes(&state["modules"]) => {
-            let path = payload.as_str().unwrap_or("");
-            if !path.starts_with("module:") {
-                return true;
-            }
-            state["focus"] = payload.clone();
-            if action == "graph-map-module-select" {
-                state["filter"] = json!("");
-                dom::set_value("graph-map-filter", "");
-            }
-        }
-        ("click", _, "graph-map-module-file") => {
-            state["modules"] = json!(false);
-            state["scope"] = payload.clone();
-            state["focus"] = json!("");
-            state["filter"] = json!("");
-            dom::set_value("graph-map-filter", "");
-        }
-        ("click", _, "graph-map-node") if state["pick"].is_object() => {
-            // The other end of a path is being chosen: this box is it. The
-            // place the path is asked from is no end for it.
-            match led(state.clone(), payload.as_str().unwrap_or("")) {
-                Some(shown) => state = shown,
-                None => return true,
-            }
-            dom::set_value("graph-map-filter", "");
-        }
-        ("click", _, "graph-map-node") => {
-            let path = payload.as_str().unwrap_or("");
-            let wanted = payload.to_string();
-            let again = dom::all(".graph-map-node[data-selected=\"true\"][data-open=\"true\"]")
-                .iter()
-                .any(|node| node.get_attribute("data-payload").as_deref() == Some(wanted.as_str()));
-            if again {
-                // A selected folder or file that is selected again opens.
-                state["scope"] = json!(path);
-                state["focus"] = json!("");
-                state["filter"] = json!("");
-                dom::set_value("graph-map-filter", "");
-            } else if (m::yes(&state["shared"]) || state["pattern"].is_string())
-                && state["focus"] == path
-            {
-                state["focus"] = json!("");
-            } else {
-                state["focus"] = json!(path);
-            }
-        }
-        ("click", _, "graph-map-open") => {
-            state = unfollowed(state);
-            state["scope"] = payload.clone();
-            state["focus"] = json!("");
-            state["filter"] = json!("");
-            dom::set_value("graph-map-filter", "");
-        }
-        ("click", _, "graph-map-scenario") => {
-            let Some(origin) = payload.as_str().filter(|origin| !origin.is_empty()) else {
-                return true;
-            };
-            if busy() || map_failed() || state["pick"].is_object() {
-                return true;
-            }
-            let back = state.clone();
-            state = unfollowed(state);
-            state["scenario"] = json!(origin);
-            state["scenario_return"] = back;
-            state["focus"] = json!("");
-            state["filter"] = json!("");
-            dom::set_value("graph-map-filter", "");
-            close_found();
-        }
-        ("click", _, "graph-map-scenario-back") => {
-            let mut back = state["scenario_return"].take();
-            if !back.is_object() {
-                return true;
-            }
-            for key in ["notests", "certain", "fit"] {
-                back[key] = state[key].clone();
-            }
-            state = back;
-            dom::set_value("graph-map-filter", &m::text(&state, "filter"));
-        }
-        ("click", _, "graph-map-scenario-page") => {
-            state["scenario_skip"] = payload.clone();
-        }
-        ("click", _, "graph-map-scenario-open") => {
-            state = unfollowed(state);
-            state["scope"] = payload["file"].clone();
-            state["focus"] = if m::yes(&payload["symbol"]) {
-                payload["path"].clone()
-            } else {
-                json!("")
-            };
-            state["filter"] = json!("");
-            dom::set_value("graph-map-filter", "");
-        }
-        ("click", _, "graph-map-follow") => {
-            // The first picture is one step each way: what it uses and
-            // what uses it. Nothing is selected, so no box of it is dimmed.
-            state = unfollowed(state);
-            state["follow"] = payload.clone();
-            state["out"] = json!([payload]);
-            state["into"] = json!([payload]);
-            state["focus"] = json!("");
-            state["filter"] = json!("");
-            dom::set_value("graph-map-filter", "");
-        }
-        ("click", _, "graph-map-unfold" | "graph-map-fold") => {
-            let key = if payload["side"] == "in" {
-                "into"
-            } else {
-                "out"
-            };
-            let mut places = unfolded(&state, key);
-            let place = payload["path"].as_str().unwrap_or("");
-            if action == "graph-map-fold" {
-                places.retain(|other| other != place);
-            } else {
-                // Named once more, a place shows the next of that side.
-                places.push(place.to_owned());
-            }
-            state[key] = json!(places);
-        }
-        ("click", _, "graph-map-link") => {
-            let (from, to) = (
-                payload["from"].as_str().unwrap_or(""),
-                payload["to"].as_str().unwrap_or(""),
-            );
-            // A link between two layers is many links of many files: it is
-            // selected, and the pairs of files it is made of are listed.
-            match between(state.clone(), from, to) {
-                Some(selected) => state = selected,
-                None => {
-                    look(from, to).await;
-                    return true;
-                }
-            }
-        }
         ("click", "graph-link-close", _) => {
             dom::dialog("graph-link", false);
             return true;
@@ -7662,45 +12440,39 @@ pub async fn event(
                 return true;
             };
             dom::dialog("graph-link", false);
-            state = unfollowed(state);
+            if link["surface"].as_str() == Some("session") {
+                let mut emb = unfollowed(embedded_state());
+                emb["scope"] = file["path"].clone();
+                emb["focus"] = json!(key);
+                emb["side_tab"] = json!("details");
+                emb["side_pinned"] = json!(true);
+                emb["filter"] = json!("");
+                dom::set_value("session-graph-filter", "");
+                save_embedded_state(&emb);
+                ensure_surface_impact(SESSION_SURFACE, &emb, None, true);
+                load_embedded(false).await;
+                return true;
+            }
+            state = normalize_map_state(unfollowed(state));
             state["scope"] = file["path"].clone();
             state["focus"] = json!(key);
+            state["side_tab"] = json!("details");
             state["filter"] = json!("");
             dom::set_value("graph-map-filter", "");
-        }
-        ("click", _, "graph-map-spread" | "graph-map-gather") => {
-            state = spread(
-                state,
-                payload.as_str().unwrap_or(""),
-                action == "graph-map-gather",
-            );
-        }
-        ("click", _, "graph-map-go") => {
-            let path = payload["path"].as_str().unwrap_or("");
-            if let Some(file) = payload["open"].as_str() {
-                // A symbol of another file: that file opens on it.
-                state = unfollowed(state);
-                state["scope"] = json!(file);
-                state["filter"] = json!("");
-            } else if !m::yes(&payload["inside"]) {
-                // It is not drawn here: show it among its own neighbours,
-                // in the whole project.
-                state = unfollowed(state);
-                state["target"] = json!("");
-                state["scope"] = json!(parent(path));
-                state["filter"] = json!("");
-            }
-            state["focus"] = json!(path);
-        }
-        ("click", _, "graph-map-shared-page") => {
-            // Further on among what the two share, or back to the picture
-            // before.
-            state = paged(state, payload.as_u64());
         }
         ("change", "graph-map-certain", _) => {
             // Another set of links: what two places share begins anew.
             state["certain"] = json!(checked);
             state["skip"] = json!([]);
+        }
+        ("change", "graph-map-whole", _) => {
+            state["whole"] = json!(checked);
+            if checked && !m::text(&state, "scope").is_empty() {
+                state = normalize_map_state(unfollowed(state));
+                state["scope"] = json!("");
+                state["filter"] = json!("");
+                dom::set_value("graph-map-filter", "");
+            }
         }
         ("change", "graph-map-no-incoming", _) => {
             state["no_incoming"] = json!(checked);
@@ -7728,38 +12500,38 @@ pub async fn event(
             state["patterns"] = json!(checked);
             dom::save(PATTERNS, checked.then_some("1"));
         }
-        ("click", _, "graph-map-pattern") => {
-            match showing_pattern(state.clone(), payload.as_str().unwrap_or("")) {
-                Some(shown) => state = shown,
-                None => return true,
-            }
-            dom::set_value("graph-map-filter", "");
-        }
-        ("click", _, "graph-map-pattern-back") => {
-            match left_pattern(state.clone()) {
-                Some(previous) => state = previous,
-                None => return true,
-            }
-            dom::set_value("graph-map-filter", &m::text(&state, "filter"));
-        }
-        ("click", _, "graph-map-pattern-kind") => {
-            // All the listed findings of one pattern, or its first few again.
-            let kind = payload.as_str().unwrap_or("");
-            let mut open = unfolded(&state, "kinds");
-            if open.iter().any(|known| known == kind) {
-                open.retain(|known| known != kind);
-            } else {
-                open.push(kind.to_owned());
-            }
-            state["kinds"] = json!(open);
-        }
         ("change", "graph-map-fit", _) => {
             // So does this one, and it asks the server for nothing: the
             // picture that is there is drawn at another scale.
             state["fit"] = json!(checked);
+            state["zoom"] = V::Null;
             dom::save(FIT, checked.then_some("1"));
             m::set("graph-map", state);
             fit();
+            return true;
+        }
+        ("click", "graph-map-zoom-in", _) => {
+            zoom_scroll_canvas("graph-map-canvas", ZOOM_STEP, None);
+            return true;
+        }
+        ("click", "graph-map-zoom-out", _) => {
+            zoom_scroll_canvas("graph-map-canvas", 1.0 / ZOOM_STEP, None);
+            return true;
+        }
+        ("click", "graph-map-zoom-level", _) => {
+            reset_scroll_canvas_zoom("graph-map-canvas");
+            return true;
+        }
+        ("click", "graph-link-zoom-in", _) => {
+            zoom_scroll_canvas("graph-link-canvas", ZOOM_STEP, None);
+            return true;
+        }
+        ("click", "graph-link-zoom-out", _) => {
+            zoom_scroll_canvas("graph-link-canvas", 1.0 / ZOOM_STEP, None);
+            return true;
+        }
+        ("click", "graph-link-zoom-level", _) => {
+            reset_scroll_canvas_zoom("graph-link-canvas");
             return true;
         }
         ("input", "graph-map-filter", _) => {
@@ -7767,6 +12539,64 @@ pub async fn event(
             state["filter"] = json!(value);
             state["scenario_skip"] = json!(0);
             state["skip"] = json!([]);
+        }
+        ("click", _, _) => {
+            let outcome = apply_click_action(
+                &mut state,
+                action,
+                payload,
+                MODAL_SURFACE,
+                busy(),
+                map_failed(),
+            );
+            if !outcome.handled {
+                return false;
+            }
+            if let Some(filter) = outcome.clear_filter {
+                dom::set_value("graph-map-filter", &filter);
+            }
+            if outcome.clear_find {
+                close_found();
+                dom::cancel_timer("graph-map-poll");
+            }
+            if let Some(disabled) = outcome.disable_find {
+                dom::disabled("graph-find-search", disabled);
+            }
+            if let Some(notests) = outcome.save_notests {
+                dom::save(NOTESTS, notests.then_some("1"));
+            }
+            if let Some(save_fit) = outcome.save_fit {
+                dom::save(FIT, save_fit.then_some("1"));
+            }
+            if let Some((from, to)) = outcome.open_link {
+                m::set("graph-map", state);
+                look_from(MODAL_SURFACE, &from, &to).await;
+                return true;
+            }
+            let view_cached = m::data(MODAL_SURFACE.view_key);
+            ensure_surface_impact(
+                MODAL_SURFACE,
+                &state,
+                view_cached.is_object().then_some(&view_cached),
+                outcome.force_impact,
+            );
+            if outcome.rerender && !outcome.reload {
+                m::set("graph-map", state.clone());
+                if m::text(&state, "side_tab") == "changes"
+                    && surface_changes_doc(MODAL_SURFACE, &state).is_none()
+                {
+                    let ch_state = state;
+                    spawn_local(async move {
+                        fetch_surface_changes(MODAL_SURFACE, ch_state).await;
+                    });
+                }
+                rerender_surface_preserving_camera(MODAL_SURFACE);
+                return true;
+            }
+            if !outcome.reload {
+                m::set("graph-map", state);
+                return true;
+            }
         }
         _ => return false,
     }
@@ -7785,6 +12615,1373 @@ pub async fn event(
         reveal();
     }
     true
+}
+
+#[derive(Clone, Debug)]
+struct Camera {
+    scale: f64,
+    pan_x: f64,
+    pan_y: f64,
+    fit_mode: bool,
+    follow: bool,
+    paused: bool,
+    expanded: bool,
+    plane_w: f64,
+    plane_h: f64,
+    needs_measure: bool,
+    bbox: Option<(f64, f64, f64, f64)>,
+}
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            fit_mode: true,
+            follow: true,
+            paused: false,
+            expanded: false,
+            plane_w: 0.0,
+            plane_h: 0.0,
+            needs_measure: false,
+            bbox: None,
+        }
+    }
+}
+fn load_camera() -> Camera {
+    let raw = m::data("session-graph-camera");
+    if !raw.is_object() {
+        return Camera::default();
+    }
+    let bbox = raw["bbox"].as_array().and_then(|arr| {
+        if arr.len() == 4 {
+            Some((
+                arr[0].as_f64()?,
+                arr[1].as_f64()?,
+                arr[2].as_f64()?,
+                arr[3].as_f64()?,
+            ))
+        } else {
+            None
+        }
+    });
+    Camera {
+        scale: raw["scale"]
+            .as_f64()
+            .unwrap_or(1.0)
+            .clamp(CAMERA_MIN, CAMERA_MAX),
+        pan_x: raw["pan_x"].as_f64().unwrap_or(0.0),
+        pan_y: raw["pan_y"].as_f64().unwrap_or(0.0),
+        fit_mode: raw["fit_mode"].as_bool().unwrap_or(true),
+        follow: raw["follow"].as_bool().unwrap_or(true),
+        paused: raw["paused"].as_bool().unwrap_or(false),
+        expanded: raw["expanded"].as_bool().unwrap_or(false),
+        plane_w: raw["plane_w"].as_f64().unwrap_or(0.0),
+        plane_h: raw["plane_h"].as_f64().unwrap_or(0.0),
+        needs_measure: raw["needs_measure"].as_bool().unwrap_or(false),
+        bbox,
+    }
+}
+fn save_camera(cam: &Camera) {
+    let bbox_val = match cam.bbox {
+        Some((x0, y0, x1, y1)) => json!([x0, y0, x1, y1]),
+        None => V::Null,
+    };
+    m::set(
+        "session-graph-camera",
+        json!({
+            "scale": cam.scale,
+            "pan_x": cam.pan_x,
+            "pan_y": cam.pan_y,
+            "fit_mode": cam.fit_mode,
+            "follow": cam.follow,
+            "paused": cam.paused,
+            "expanded": cam.expanded,
+            "plane_w": cam.plane_w,
+            "plane_h": cam.plane_h,
+            "needs_measure": cam.needs_measure,
+            "bbox": bbox_val,
+        }),
+    );
+}
+fn embedded_state() -> V {
+    let state = m::data("session-graph-state");
+    if state.is_object() {
+        normalize_map_state(state)
+    } else {
+        fresh("")
+    }
+}
+fn save_embedded_state(state: &V) {
+    m::set("session-graph-state", normalize_map_state(state.clone()));
+}
+fn current_live_focus() -> Option<LiveFocus> {
+    parse_live_focus(&m::data("session-graph-focus"))
+}
+fn viewport_size(canvas_id: &str) -> (f64, f64, bool) {
+    let Some(el) = dom::get(canvas_id) else {
+        return (640.0, 420.0, false);
+    };
+    let (w, h) = (el.client_width() as f64, el.client_height() as f64);
+    if w >= 24.0 && h >= 24.0 {
+        (w, h, true)
+    } else {
+        (640.0, 420.0, false)
+    }
+}
+fn apply_plane_transform(cam: &Camera) {
+    dom::text(
+        "session-graph-zoom-level",
+        &format!("{}%", (cam.scale * 100.0).round() as i64),
+    );
+    let Some(canvas) = dom::get("session-graph-canvas") else {
+        return;
+    };
+    let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") else {
+        return;
+    };
+    if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
+        return;
+    }
+    let style = format!(
+        "width:{:.0}px;height:{:.0}px;--graph-scale:{:.4};--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;transform:translate({:.1}px,{:.1}px) scale({:.4});transform-origin:0 0",
+        cam.plane_w, cam.plane_h, cam.scale, cam.pan_x, cam.pan_y, cam.pan_x, cam.pan_y, cam.scale
+    );
+    let _ = plane.set_attribute("style", &style);
+}
+fn apply_camera(cam: &Camera) {
+    apply_plane_transform(cam);
+    dom::attr(
+        "session-graph-fit",
+        "aria-pressed",
+        if cam.fit_mode { "true" } else { "false" },
+    );
+    dom::attr(
+        "session-graph-follow",
+        "aria-pressed",
+        if cam.follow { "true" } else { "false" },
+    );
+    dom::attr(
+        "session-graph-pause-motion",
+        "aria-pressed",
+        if cam.paused { "true" } else { "false" },
+    );
+    dom::attr(
+        "session-graph-expand",
+        "aria-expanded",
+        if cam.expanded { "true" } else { "false" },
+    );
+    dom::attr(
+        "session-graph-workspace",
+        "data-motion-paused",
+        if cam.paused { "true" } else { "false" },
+    );
+    dom::attr(
+        "sidebar-graph-pill",
+        "data-motion-paused",
+        if cam.paused { "true" } else { "false" },
+    );
+    dom::attr(
+        "session-graph-workspace",
+        "data-expanded",
+        if cam.expanded { "true" } else { "false" },
+    );
+    dom::attr(
+        "session-graph-workspace",
+        "data-following",
+        if cam.follow { "true" } else { "false" },
+    );
+}
+fn fit_camera(cam: &mut Camera) {
+    let (vw, vh, measured) = viewport_size("session-graph-canvas");
+    cam.needs_measure = !measured;
+    cam.fit_mode = true;
+    if cam.plane_w > 0.0 && cam.plane_h > 0.0 {
+        let (s, px, py) = camera_for_fit((cam.plane_w, cam.plane_h), (vw, vh));
+        cam.scale = s;
+        cam.pan_x = px;
+        cam.pan_y = py;
+    }
+    save_camera(cam);
+    apply_camera(cam);
+}
+fn zoom_camera_to_bbox(cam: &mut Camera, bbox: (f64, f64, f64, f64)) {
+    let (vw, vh, measured) = viewport_size("session-graph-canvas");
+    cam.needs_measure = !measured;
+    let (s, px, py) = camera_for_bbox(bbox, (vw, vh), FOCUS_CAMERA_MAX);
+    cam.scale = s;
+    cam.pan_x = px;
+    cam.pan_y = py;
+    cam.fit_mode = false;
+    save_camera(cam);
+    apply_camera(cam);
+}
+fn zoom_camera_at(factor: f64, anchor: Option<(f64, f64)>) {
+    let mut cam = load_camera();
+    let (vw, vh, measured) = viewport_size("session-graph-canvas");
+    cam.needs_measure = !measured;
+    let anchor = anchor.unwrap_or((vw / 2.0, vh / 2.0));
+    let (s, px, py) = zoom_at(cam.scale, cam.pan_x, cam.pan_y, anchor, cam.scale * factor);
+    cam.scale = s;
+    cam.pan_x = px;
+    cam.pan_y = py;
+    cam.fit_mode = false;
+    save_camera(&cam);
+    apply_camera(&cam);
+}
+fn reset_camera_100() {
+    let mut cam = load_camera();
+    let (vw, vh, measured) = viewport_size("session-graph-canvas");
+    cam.needs_measure = !measured;
+    cam.scale = 1.0;
+    cam.pan_x = if cam.plane_w > 0.0 && cam.plane_w < vw {
+        ((vw - cam.plane_w) / 2.0).round()
+    } else {
+        12.0
+    };
+    cam.pan_y = if cam.plane_h > 0.0 && cam.plane_h < vh {
+        ((vh - cam.plane_h) / 2.0).round()
+    } else {
+        12.0
+    };
+    cam.fit_mode = false;
+    save_camera(&cam);
+    apply_camera(&cam);
+}
+fn refit_embedded_if_visible() {
+    let (_, _, measured) = viewport_size("session-graph-canvas");
+    if !measured {
+        return;
+    }
+    let mut cam = load_camera();
+    if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
+        return;
+    }
+    if (cam.follow || !cam.fit_mode) && (cam.needs_measure || cam.fit_mode) {
+        if let Some(bbox) = cam.bbox {
+            zoom_camera_to_bbox(&mut cam, bbox);
+            return;
+        }
+    }
+    if cam.fit_mode || cam.needs_measure {
+        fit_camera(&mut cam);
+    }
+}
+fn embedded_drag_data() -> V {
+    m::data("session-graph-drag")
+}
+fn clear_embedded_drag_suppress() {
+    let mut drag = embedded_drag_data();
+    if drag.is_object() {
+        drag["suppress_click"] = json!(false);
+        m::set("session-graph-drag", drag);
+    }
+}
+/// Builds clickable chips markup for `#session-graph-focus-entities`.
+pub fn focus_strip_chips_html(focus: &LiveFocus) -> String {
+    let mut html = String::new();
+    for entity in focus.created_entities.iter().take(8) {
+        let (change_attr, badge, change_verb) = entity_change_badge(entity.change.as_deref());
+        let vis_pill = visibility_pill_html(entity.visibility.as_deref(), true);
+        let vis_word = entity
+            .visibility
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("{s} "))
+            .unwrap_or_default();
+        let entity_payload = payload(&json!({
+            "id": entity.id,
+            "kind": entity.kind,
+            "name": entity.name,
+            "parent": entity.parent,
+            "path": entity.path,
+            "folder": entity.folder,
+            "line": entity.line,
+            "change": entity.change,
+            "visibility": entity.visibility,
+            "modifiers": entity.modifiers,
+        }));
+        let title = if entity.path.is_empty() {
+            format!("{change_verb} {vis_word}{} {}", entity.kind, entity.name)
+        } else {
+            format!(
+                "{change_verb} {vis_word}{} {} · {}",
+                entity.kind, entity.name, entity.path
+            )
+        };
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"session-graph-focus-chip\" data-action=\"session-graph-focus-jump\" data-entity-kind=\"{}\" data-entity-change=\"{}\" data-payload=\"{entity_payload}\" title=\"{}\"><span class=\"graph-map-entity-dot\" aria-hidden=\"true\"></span><span class=\"graph-map-entity-badge\">{badge}</span>{vis_pill}<span>{}: {}</span></button>",
+            escape(&entity.kind),
+            escape(change_attr),
+            escape(&title),
+            escape(&entity.kind),
+            escape(&entity.name),
+        ));
+    }
+    if html.is_empty() {
+        let mut seen = BTreeSet::new();
+        for target in focus.target_paths.iter().chain(&focus.target_folders) {
+            if seen.len() >= 5 || !seen.insert(target.clone()) {
+                continue;
+            }
+            let short = target.rsplit('/').next().unwrap_or(target);
+            let chip_payload = payload(&json!({ "path": target }));
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"session-graph-focus-chip\" data-action=\"session-graph-focus-jump\" data-entity-kind=\"target\" data-payload=\"{chip_payload}\" title=\"{}\"><span>{}</span></button>",
+                escape(target),
+                escape(short),
+            ));
+        }
+    }
+    html
+}
+fn render_focus_strip(focus: Option<&LiveFocus>) {
+    let Some(focus) = focus else {
+        dom::hidden("session-graph-focus", true);
+        dom::text("session-graph-focus-label", "");
+        html("session-graph-focus-entities", "");
+        return;
+    };
+    let label = if !focus.summary.is_empty() {
+        focus.summary.clone()
+    } else if focus.phase == "predicting" {
+        "Predicting target area…".to_owned()
+    } else if !focus.created_entities.is_empty() {
+        "Live created entities".to_owned()
+    } else {
+        "Focusing on live target area".to_owned()
+    };
+    dom::text("session-graph-focus-label", &label);
+    html(
+        "session-graph-focus-entities",
+        &focus_strip_chips_html(focus),
+    );
+    dom::hidden("session-graph-focus", false);
+}
+fn blank_embedded(note_text: &str) {
+    let state = embedded_state();
+    let changes = surface_changes_doc(SESSION_SURFACE, &state);
+    sync_embedded_toolbar(&state, changes.as_ref());
+    html("session-graph-crumbs", "");
+    dom::hidden("session-graph-crumbs", true);
+    html("session-graph-canvas", "");
+    html("session-graph-arrow-legend", "");
+    dom::hidden("session-graph-arrow-legend", true);
+    html(
+        "session-graph-side",
+        &embedded_unindexed_side_html(&state, changes.as_ref()),
+    );
+    m::take(SESSION_SURFACE.attachment_key);
+    dom::text("session-graph-summary", "");
+    dom::text("session-graph-note", note_text);
+    dom::hidden("session-graph-note", note_text.is_empty());
+}
+fn render_embedded(view: &V, auto_focus_camera: bool, scope_changed: bool) {
+    ensure_embedded_watch();
+    let live = current_live_focus();
+    render_focus_strip(live.as_ref());
+    if !view.is_object() || !view["nodes"].is_array() {
+        let fallback = if m::text(view, "state") == "failed" {
+            format!("Could not build code graph: {}", m::text(view, "failure"))
+        } else {
+            note(view)
+        };
+        blank_embedded(if fallback.is_empty() {
+            "Code graph will appear once indexed for this project."
+        } else {
+            &fallback
+        });
+        let mut cam = load_camera();
+        cam.plane_w = 0.0;
+        cam.plane_h = 0.0;
+        cam.bbox = None;
+        save_camera(&cam);
+        apply_camera(&cam);
+        return;
+    }
+    let state = embedded_state();
+    let changes_doc = surface_changes_doc(SESSION_SURFACE, &state);
+    sync_embedded_toolbar(&state, changes_doc.as_ref());
+    let impact_doc = cached_impact_for_selection(SESSION_SURFACE, &state, Some(view));
+    let changes_tab = m::text(&state, "side_tab") == "changes";
+    let module_mode = m::yes(&state["modules"]);
+    let scenario_mode = view["mode"] == "scenario";
+    let crumbs_html = crumbs(view);
+    html("session-graph-crumbs", &crumbs_html);
+    dom::hidden("session-graph-crumbs", crumbs_html.is_empty());
+    dom::text("session-graph-summary", &summary(view));
+    let before = interim(view, "");
+    let note_text = combine_note(before, view);
+    dom::text("session-graph-note", &note_text);
+    dom::hidden("session-graph-note", note_text.is_empty());
+
+    let rendered = canvas_with_overlays(
+        view,
+        SESSION_SURFACE.id_prefix,
+        CanvasOverlayContext {
+            live_focus: live.as_ref(),
+            changes: changes_doc.as_ref(),
+            impact: impact_doc.as_ref(),
+        },
+    );
+    html("session-graph-canvas", &rendered.html);
+    html("session-graph-arrow-legend", &arrow_kinds_legend_html());
+    dom::hidden("session-graph-arrow-legend", false);
+    let was_empty = dom::get("session-graph-side").is_none_or(|el| el.inner_html().is_empty());
+    let side_html = if scenario_mode && !changes_tab {
+        m::take(SESSION_SURFACE.attachment_key);
+        dom::attr("session-graph-canvas", "data-picking", "false");
+        scenario_side(view)
+    } else if module_mode && !changes_tab {
+        m::take(SESSION_SURFACE.attachment_key);
+        dom::attr("session-graph-canvas", "data-picking", "false");
+        modules_side(view)
+    } else {
+        dom::attr(
+            "session-graph-canvas",
+            "data-picking",
+            if state["pick"].is_object() {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        let action = if cycles(view) {
+            let mut actions = base_cycle_button(view, at_base(view));
+            if state["cycle_return"].is_object() {
+                actions.push_str(CYCLE_BACK);
+            }
+            actions
+        } else if patterned(view) && state["pattern_return"].is_object() {
+            PATTERN_BACK.to_owned()
+        } else {
+            String::new()
+        };
+        let test_back = if paths(view) && state["test_path_return"].is_object() {
+            "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-test-back\">Back to changed files</button>"
+        } else {
+            ""
+        };
+        set_surface_attrs(SESSION_SURFACE, view);
+        map_side_html(
+            SESSION_SURFACE,
+            view,
+            &state,
+            &action,
+            &scenario_button(view),
+            test_back,
+            "session-graph-attach",
+        )
+    };
+    html("session-graph-side", &side_html);
+    let now_empty = side_html.is_empty();
+    let side_changed = was_empty != now_empty;
+    let pan_target = m::take("session-graph-pan-target");
+    let mut cam = load_camera();
+    cam.plane_w = rendered.width;
+    cam.plane_h = rendered.height;
+    cam.bbox = rendered.selected_bbox.or(rendered.focus.bbox);
+    let (_, _, measured) = viewport_size("session-graph-canvas");
+    cam.needs_measure = !measured || side_changed;
+    let mut zoomed_bbox = false;
+    if !pan_target.is_null() {
+        if let Some(bbox) = rendered.selected_bbox {
+            zoom_camera_to_bbox(&mut cam, bbox);
+            zoomed_bbox = true;
+        }
+    }
+    if !zoomed_bbox && auto_focus_camera && cam.follow {
+        if let Some(bbox) = cam.bbox {
+            zoom_camera_to_bbox(&mut cam, bbox);
+            zoomed_bbox = true;
+        }
+    }
+    if !zoomed_bbox {
+        if cam.fit_mode || scope_changed || side_changed {
+            fit_camera(&mut cam);
+        } else {
+            save_camera(&cam);
+            apply_camera(&cam);
+        }
+    }
+    if side_changed {
+        cam.needs_measure = true;
+        save_camera(&cam);
+        dom::later("session-graph-refit", 60, || {
+            refit_embedded_if_visible();
+        });
+    }
+}
+fn redraw_embedded_overlay(auto_focus_camera: bool) {
+    let view = m::data("session-graph-view");
+    if view["nodes"].is_array() {
+        render_embedded(&view, auto_focus_camera, false);
+    } else {
+        render_focus_strip(current_live_focus().as_ref());
+    }
+}
+fn embedded_error_is_unbuilt(graph_status: &V, error_message: &str) -> bool {
+    let state = m::text(graph_status, "state");
+    if !graph_status["graph"].is_object()
+        && matches!(state.as_str(), "building" | "empty" | "missing" | "off")
+    {
+        return true;
+    }
+    let lower = error_message.to_ascii_lowercase();
+    lower.contains("no published")
+        || lower.contains("not built")
+        || lower.contains("building")
+        || lower.contains("not enabled")
+        || lower.contains("turned off")
+}
+fn embedded_unbuilt_note(graph_status: &V) -> &'static str {
+    match m::text(graph_status, "state").as_str() {
+        "building" => "Building code graph and dependency map…",
+        "off" => "Code graph is turned off for this project.",
+        _ => "No published code graph yet for this project.",
+    }
+}
+async fn load_embedded(quiet: bool) {
+    let state = embedded_state();
+    let project = dom::value("project");
+    if project.is_empty() {
+        m::next(SESSION_SURFACE.changes_epoch);
+        m::next(SESSION_SURFACE.impact_epoch);
+        m::take(SESSION_SURFACE.changes_key);
+        m::take(SESSION_SURFACE.impact_key);
+        m::take("session-graph-pan-target");
+        m::set("session-graph-view", V::Null);
+        dom::error("session-graph-error", "");
+        blank_embedded("Select a project to view its code graph.");
+        return;
+    }
+    let target = m::text(&state, "target");
+    let prev_scope = m::text(&m::data("session-graph-view"), "scope");
+    let path = build_map_path(&project, &state, true);
+    if !quiet {
+        dom::attr("session-graph-canvas", "aria-busy", "true");
+    }
+    if !quiet || surface_changes_doc(SESSION_SURFACE, &state).is_none() {
+        let ch_state = state.clone();
+        spawn_local(async move {
+            fetch_surface_changes(SESSION_SURFACE, ch_state).await;
+        });
+    }
+    match api::scoped("session-graph", &path).await {
+        Ok((epoch, view)) => {
+            if !m::current("session-graph", epoch) || dom::value("project") != project {
+                return;
+            }
+            let (next_state, _) =
+                reconcile_view_state(state, &view, json!(load_camera().fit_mode), &target);
+            save_embedded_state(&next_state);
+            dom::error("session-graph-error", "");
+            let next_scope = m::text(&view, "scope");
+            let scope_changed = !prev_scope.is_empty() && prev_scope != next_scope;
+            let mut auto_focus = false;
+            if view["graph_focus"].is_object() {
+                let incoming_phase = m::text(&view["graph_focus"], "phase");
+                let current = m::data("session-graph-focus");
+                let keep_predicting =
+                    m::text(&current, "phase") == "predicting" && incoming_phase == "idle";
+                if !keep_predicting && current != view["graph_focus"] {
+                    m::set("session-graph-focus", view["graph_focus"].clone());
+                    auto_focus = true;
+                }
+            }
+            m::set("session-graph-view", view.clone());
+            render_embedded(&view, auto_focus, scope_changed);
+            ensure_surface_impact(SESSION_SURFACE, &next_state, Some(&view), false);
+        }
+        Err(error) if error.aborted => return,
+        Err(error) => {
+            let graph_status = m::data("graph");
+            if embedded_error_is_unbuilt(&graph_status, &error.message) {
+                dom::error("session-graph-error", "");
+                blank_embedded(embedded_unbuilt_note(&graph_status));
+            } else {
+                dom::error("session-graph-error", &error.message);
+                if !m::data("session-graph-view")["nodes"].is_array() {
+                    blank_embedded("");
+                }
+            }
+        }
+    }
+    dom::attr("session-graph-canvas", "aria-busy", "false");
+}
+/// Refreshes the inline Sessions graph `/graph/changes` catalog and toolbar badge.
+pub fn sync_embedded_changes() {
+    let project = dom::value("project");
+    let state = embedded_state();
+    if project.is_empty() {
+        m::next(SESSION_SURFACE.changes_epoch);
+        m::take(SESSION_SURFACE.changes_key);
+        sync_embedded_toolbar(&state, None);
+        return;
+    }
+    spawn_local(async move {
+        fetch_surface_changes(SESSION_SURFACE, state).await;
+    });
+}
+/// Syncs the inline Sessions dependency map for the active project, fetching `/graph/map` when needed.
+pub fn sync_embedded(force: bool) {
+    ensure_embedded_watch();
+    let project = dom::value("project");
+    let current = embedded_state();
+    if project.is_empty() {
+        m::next("session-graph");
+        m::next(SESSION_SURFACE.changes_epoch);
+        m::next(SESSION_SURFACE.impact_epoch);
+        let reset = fresh("");
+        save_embedded_state(&reset);
+        m::set("session-graph-view", V::Null);
+        m::set("session-graph-focus", V::Null);
+        m::take(SESSION_SURFACE.changes_key);
+        m::take(SESSION_SURFACE.impact_key);
+        m::take("session-graph-pan-target");
+        render_focus_strip(None);
+        dom::error("session-graph-error", "");
+        blank_embedded("Select a project to view its code graph.");
+        dom::attr("session-graph-canvas", "aria-busy", "false");
+        return;
+    }
+    let project_changed = m::text(&current, "project") != project;
+    if project_changed {
+        m::next(SESSION_SURFACE.changes_epoch);
+        m::next(SESSION_SURFACE.impact_epoch);
+        m::take(SESSION_SURFACE.changes_key);
+        m::take(SESSION_SURFACE.impact_key);
+        m::take("session-graph-pan-target");
+        let mut next = fresh("");
+        next["project"] = json!(project);
+        save_embedded_state(&next);
+        m::set("session-graph-view", V::Null);
+        m::set("session-graph-focus", V::Null);
+        let mut cam = load_camera();
+        cam.fit_mode = true;
+        cam.needs_measure = true;
+        cam.bbox = None;
+        cam.plane_w = 0.0;
+        cam.plane_h = 0.0;
+        save_camera(&cam);
+        render_focus_strip(None);
+        dom::error("session-graph-error", "");
+        blank_embedded("Loading code graph…");
+        apply_camera(&cam);
+    }
+    let loaded_view = m::data("session-graph-view");
+    let has_rendered = dom::get("session-graph-canvas").is_some_and(|el| {
+        el.query_selector(".graph-map-plane")
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    if !force && !project_changed && loaded_view["nodes"].is_array() && has_rendered {
+        sync_embedded_toolbar(
+            &current,
+            surface_changes_doc(SESSION_SURFACE, &current).as_ref(),
+        );
+        if surface_changes_doc(SESSION_SURFACE, &current).is_none() {
+            sync_embedded_changes();
+        }
+        refit_embedded_if_visible();
+        return;
+    }
+    let quiet = loaded_view["nodes"].is_array() && !project_changed;
+    spawn_local(async move {
+        load_embedded(quiet).await;
+    });
+}
+/// Immediately highlights and zooms onto graph nodes matching `prompt` on Send (0ms local match).
+pub fn focus_from_prompt(prompt: &str) {
+    let view = m::data("session-graph-view");
+    let Some(matched) = match_prompt_targets(&view, prompt) else {
+        return;
+    };
+    let focus_json = json!({
+        "phase": matched.phase,
+        "summary": matched.summary,
+        "target_folders": matched.target_folders,
+        "target_paths": matched.target_paths,
+        "target_nodes": matched.target_nodes,
+        "created_entities": [],
+    });
+    if m::data("session-graph-focus") == focus_json {
+        return;
+    }
+    m::set("session-graph-focus", focus_json);
+    redraw_embedded_overlay(true);
+}
+/// Applies a backend `GraphFocus` update (`Value::Null` clears) to the Sessions map & camera.
+pub fn apply_focus(focus: &V) {
+    let parsed = parse_live_focus(focus);
+    let next_val = if parsed.is_some() {
+        focus.clone()
+    } else {
+        V::Null
+    };
+    if m::data("session-graph-focus") == next_val {
+        return;
+    }
+    m::set("session-graph-focus", next_val);
+    redraw_embedded_overlay(parsed.is_some());
+}
+fn jump_to_entity_or_target(payload: &V) -> bool {
+    let raw_path = m::text(payload, "path");
+    let raw_parent = m::text(payload, "parent");
+    let raw_folder = m::text(payload, "folder");
+    let entity_file = normalize_rel_path(strip_symbol_suffix(if !raw_path.is_empty() {
+        &raw_path
+    } else if looks_like_file_path(&raw_parent) {
+        &raw_parent
+    } else {
+        ""
+    }));
+    let is_entity_item = !m::text(payload, "id").is_empty()
+        || (!m::text(payload, "kind").is_empty() && m::text(payload, "kind") != "target");
+    if !entity_file.is_empty() && (is_entity_item || looks_like_file_path(&entity_file)) {
+        return focus_file_on_session(&entity_file);
+    }
+
+    let target_x = payload["x"].as_f64();
+    let target_y = payload["y"].as_f64();
+    let view = m::data("session-graph-view");
+    if let (Some(x), Some(y)) = (target_x, target_y) {
+        let mut cam = load_camera();
+        zoom_camera_to_bbox(&mut cam, (x, y, x + ENTITY_WIDTH, y + ENTITY_HEIGHT));
+        return true;
+    }
+    if view["nodes"].is_array() {
+        let mut probe_targets = Vec::new();
+        for item in [&raw_path, &raw_parent, &raw_folder] {
+            let norm = normalize_rel_path(item);
+            if !norm.is_empty() && !probe_targets.contains(&norm) {
+                probe_targets.push(norm);
+            }
+        }
+        let probe = LiveFocus {
+            phase: "active".to_owned(),
+            summary: String::new(),
+            target_folders: if raw_folder.is_empty() {
+                Vec::new()
+            } else {
+                vec![normalize_rel_path(&raw_folder)]
+            },
+            target_paths: probe_targets.clone(),
+            target_nodes: probe_targets,
+            created_entities: Vec::new(),
+        };
+        let nodes = m::array(&view["nodes"]);
+        let edges = m::array(&view["edges"]);
+        let frames = m::array(&view["frames"]);
+        let at = |p: &V| nodes.iter().position(|node| &node["path"] == p);
+        let weighted: Vec<(usize, usize, u64)> = edges
+            .iter()
+            .filter_map(|e| {
+                Some((
+                    at(&e["from"])?,
+                    at(&e["to"])?,
+                    e["links"].as_u64().unwrap_or(1),
+                ))
+            })
+            .collect();
+        let framed = Frames {
+            of: nodes
+                .iter()
+                .map(|n| frames.iter().position(|f| f["path"] == n["holder"]))
+                .collect(),
+            holder: frames
+                .iter()
+                .map(|f| frames.iter().position(|h| h["path"] == f["holder"]))
+                .collect(),
+        };
+        let plan = if layered(&view) && !m::yes(&view["pattern"]["declared"]) {
+            plan_row(nodes.len(), &weighted)
+        } else {
+            plan_beside(nodes.len(), &weighted, &framed, None)
+        };
+        if let Some(bbox) = resolve_focus(&view, &plan, &probe).bbox {
+            let mut cam = load_camera();
+            zoom_camera_to_bbox(&mut cam, bbox);
+            return true;
+        }
+    }
+    let next_scope = if !raw_folder.is_empty() {
+        raw_folder
+    } else if !raw_parent.is_empty() {
+        normalize_rel_path(strip_symbol_suffix(&raw_parent))
+    } else {
+        normalize_rel_path(parent(strip_symbol_suffix(&raw_path)))
+    };
+    if !next_scope.is_empty() {
+        let mut state = embedded_state();
+        state = unfollowed(state);
+        state["scope"] = json!(next_scope);
+        state["focus"] = json!("");
+        state["filter"] = json!("");
+        save_embedded_state(&state);
+        spawn_local(async {
+            load_embedded(false).await;
+        });
+        return true;
+    }
+    false
+}
+fn focus_file_on_session(raw_path: &str) -> bool {
+    let file_path = normalize_rel_path(strip_symbol_suffix(raw_path));
+    if file_path.is_empty() {
+        return false;
+    }
+    let view = m::data(SESSION_SURFACE.view_key);
+    let (next_state, needs_reload) = state_focus_file(embedded_state(), &file_path, &view);
+    save_embedded_state(&next_state);
+    m::set("session-graph-pan-target", json!(file_path));
+    dom::set_value("session-graph-filter", &m::text(&next_state, "filter"));
+    sync_embedded_toolbar(
+        &next_state,
+        surface_changes_doc(SESSION_SURFACE, &next_state).as_ref(),
+    );
+    let view_opt = view["nodes"].is_array().then_some(&view);
+    ensure_surface_impact(SESSION_SURFACE, &next_state, view_opt, true);
+    if needs_reload {
+        spawn_local(async {
+            load_embedded(false).await;
+        });
+    } else {
+        rerender_surface_preserving_camera(SESSION_SURFACE);
+    }
+    true
+}
+/// Focuses a workspace-relative file path on the embedded Sessions dependency map.
+pub fn focus_file_in_session(path: &str) {
+    let _ = focus_file_on_session(path);
+}
+async fn open_full_from_embedded() {
+    let emb = embedded_state();
+    let target = m::text(&emb, "target");
+    let mut modal = anew(&target);
+    modal["whole"] = json!(m::yes(&emb["whole"]));
+    modal["notests"] = json!(m::yes(&emb["notests"]));
+    modal["certain"] = json!(m::yes(&emb["certain"]));
+    modal["filter"] = json!(m::text(&emb, "filter"));
+    modal["scope"] = json!(m::text(&emb, "scope"));
+    modal["spread"] = emb["spread"].clone();
+    modal["focus"] = emb["focus"].clone();
+    modal["side_tab"] = json!(if m::text(&emb, "side_tab") == "changes" {
+        "changes"
+    } else {
+        "details"
+    });
+    modal["changes_filter"] = json!(match m::text(&emb, "changes_filter").as_str() {
+        k @ ("all" | "created" | "modified" | "deleted") => k,
+        _ => "all",
+    });
+    modal["member_filter"] = json!(match m::text(&emb, "member_filter").as_str() {
+        k @ ("all" | "used" | "exposed" | "risk") => k,
+        _ => "all",
+    });
+    modal["side_pinned"] = json!(m::yes(&emb["side_pinned"]));
+    modal = normalize_map_state(modal);
+    m::set("graph-map", modal.clone());
+
+    let emb_changes = m::data(SESSION_SURFACE.changes_key);
+    if emb_changes.is_object() {
+        m::set(MODAL_SURFACE.changes_key, emb_changes);
+    }
+    let emb_impact = m::data(SESSION_SURFACE.impact_key);
+    if emb_impact.is_object() {
+        m::set(MODAL_SURFACE.impact_key, emb_impact);
+    }
+
+    dom::disabled("graph-find-search", false);
+    dom::set_value("graph-map-filter", &m::text(&modal, "filter"));
+    dom::set_checked("graph-map-whole", m::yes(&modal["whole"]));
+    dom::set_checked("graph-map-notests", m::yes(&modal["notests"]));
+    dom::set_checked("graph-map-certain", m::yes(&modal["certain"]));
+    m::next("graph-find");
+    dom::cancel_timer("graph-find-search");
+    m::set("graph-find", V::Null);
+    dom::set_value("graph-find-search", "");
+    show_found();
+    dom::error("graph-map-error", "");
+    dom::hidden("graph-map-progress", true);
+    blank();
+    dom::text("graph-map-chosen", "");
+    dom::text(
+        "graph-map-note",
+        if !target.is_empty() {
+            "Reading the change…"
+        } else {
+            "Reading the graph…"
+        },
+    );
+    shut();
+    list();
+    dom::dialog("graph-map", true);
+    watch();
+    spawn_local(place());
+    load(false).await;
+}
+/// Handles input/change events on embedded Sessions graph toolbar controls (`#session-graph-filter`, `#session-graph-notests`).
+pub fn handle_session_graph_input(id: &str, value: &str, checked: Option<bool>) -> bool {
+    match id {
+        "session-graph-filter" => {
+            let mut state = embedded_state();
+            if m::text(&state, "filter") == value {
+                return true;
+            }
+            state["filter"] = json!(value);
+            state["scenario_skip"] = json!(0);
+            state["skip"] = json!([]);
+            save_embedded_state(&state);
+            dom::later(
+                "session-graph-filter",
+                if value.is_empty() { 0 } else { 140 },
+                || {
+                    spawn_local(async {
+                        load_embedded(false).await;
+                    });
+                },
+            );
+            true
+        }
+        "session-graph-notests" => {
+            let next = checked.unwrap_or_else(|| dom::checked("session-graph-notests"));
+            let mut state = embedded_state();
+            if m::yes(&state["notests"]) == next {
+                return true;
+            }
+            state["notests"] = json!(next);
+            state["skip"] = json!([]);
+            dom::save(NOTESTS, next.then_some("1"));
+            save_embedded_state(&state);
+            sync_embedded_toolbar(
+                &state,
+                surface_changes_doc(SESSION_SURFACE, &state).as_ref(),
+            );
+            let ch_state = state;
+            spawn_local(async move {
+                fetch_surface_changes(SESSION_SURFACE, ch_state).await;
+            });
+            spawn_local(async {
+                load_embedded(false).await;
+            });
+            true
+        }
+        _ => false,
+    }
+}
+/// Handles clicks inside `#session-graph-workspace` (toolbar zoom/pan/focus + embedded map navigation).
+pub fn handle_session_graph_click(id: &str, action: &str, payload: &V) -> bool {
+    let is_toolbar_or_strip = matches!(
+        id,
+        "session-graph-zoom-in"
+            | "session-graph-zoom-out"
+            | "session-graph-zoom-level"
+            | "session-graph-fit"
+            | "session-graph-follow"
+            | "session-graph-pause-motion"
+            | "session-graph-expand"
+            | "session-graph-mode-whole"
+            | "session-graph-mode-changes"
+            | "session-graph-changes-count"
+            | "session-graph-unfold"
+            | "session-graph-open-full"
+    ) || matches!(
+        action,
+        "session-graph-zoom-in"
+            | "session-graph-zoom-out"
+            | "session-graph-zoom-reset"
+            | "session-graph-fit"
+            | "session-graph-follow"
+            | "session-graph-pause-motion"
+            | "session-graph-expand"
+            | "session-graph-mode-whole"
+            | "session-graph-mode-changes"
+            | "session-graph-unfold"
+            | "session-graph-open-full"
+            | "session-graph-focus-jump"
+            | "session-graph-side-close"
+            | "graph-side-tab"
+            | "graph-changes-filter"
+            | "graph-map-member-filter"
+            | "graph-map-impact-focus"
+    );
+    if !is_toolbar_or_strip && m::yes(&embedded_drag_data()["suppress_click"]) {
+        clear_embedded_drag_suppress();
+        return true;
+    }
+    match (id, action) {
+        ("session-graph-zoom-in", _) | (_, "session-graph-zoom-in") => {
+            zoom_camera_at(ZOOM_STEP, None);
+            return true;
+        }
+        ("session-graph-zoom-out", _) | (_, "session-graph-zoom-out") => {
+            zoom_camera_at(1.0 / ZOOM_STEP, None);
+            return true;
+        }
+        ("session-graph-zoom-level", _) | (_, "session-graph-zoom-reset") => {
+            reset_camera_100();
+            return true;
+        }
+        ("session-graph-fit", _) | (_, "session-graph-fit") => {
+            let mut cam = load_camera();
+            fit_camera(&mut cam);
+            return true;
+        }
+        ("session-graph-follow", _) | (_, "session-graph-follow") => {
+            let mut cam = load_camera();
+            cam.follow = !cam.follow;
+            if cam.follow {
+                if let Some(bbox) = cam.bbox {
+                    zoom_camera_to_bbox(&mut cam, bbox);
+                    return true;
+                }
+            }
+            save_camera(&cam);
+            apply_camera(&cam);
+            return true;
+        }
+        ("session-graph-pause-motion", _) | (_, "session-graph-pause-motion") => {
+            let mut cam = load_camera();
+            cam.paused = !cam.paused;
+            save_camera(&cam);
+            apply_camera(&cam);
+            return true;
+        }
+        ("session-graph-expand", _) | (_, "session-graph-expand") => {
+            let mut cam = load_camera();
+            cam.expanded = !cam.expanded;
+            cam.needs_measure = true;
+            save_camera(&cam);
+            apply_camera(&cam);
+            dom::later("session-graph-refit", 60, || {
+                refit_embedded_if_visible();
+            });
+            return true;
+        }
+        ("session-graph-mode-whole", _) | (_, "session-graph-mode-whole") => {
+            let mut state = embedded_state();
+            state["target"] = json!("");
+            state["scope"] = json!("");
+            state["focus"] = json!("");
+            state["filter"] = json!("");
+            state["side_tab"] = json!("details");
+            state["side_pinned"] = json!(false);
+            state["modules"] = json!(false);
+            state["cycle"] = V::Null;
+            state["pattern"] = V::Null;
+            state["pick"] = V::Null;
+            state["scenario"] = V::Null;
+            state["skip"] = json!([]);
+            save_embedded_state(&state);
+            m::take(SESSION_SURFACE.impact_key);
+            m::take("session-graph-pan-target");
+            dom::set_value("session-graph-filter", "");
+            let mut cam = load_camera();
+            cam.follow = false;
+            cam.fit_mode = true;
+            save_camera(&cam);
+            sync_embedded_toolbar(
+                &state,
+                surface_changes_doc(SESSION_SURFACE, &state).as_ref(),
+            );
+            sync_embedded_changes();
+            spawn_local(async {
+                load_embedded(false).await;
+            });
+            return true;
+        }
+        ("session-graph-mode-changes" | "session-graph-changes-count", _)
+        | (_, "session-graph-mode-changes") => {
+            let mut state = embedded_state();
+            state["target"] = json!("work");
+            state["side_tab"] = json!("changes");
+            state["side_pinned"] = json!(true);
+            state["modules"] = json!(false);
+            state["cycle"] = V::Null;
+            state["pattern"] = V::Null;
+            state["pick"] = V::Null;
+            state["scenario"] = V::Null;
+            state["skip"] = json!([]);
+            save_embedded_state(&state);
+            rerender_surface_preserving_camera(SESSION_SURFACE);
+            let ch_state = state;
+            spawn_local(async move {
+                fetch_surface_changes(SESSION_SURFACE, ch_state).await;
+            });
+            spawn_local(async {
+                load_embedded(false).await;
+            });
+            return true;
+        }
+        ("session-graph-unfold", _) | (_, "session-graph-unfold") => {
+            let mut state = embedded_state();
+            let next_whole = !m::yes(&state["whole"]);
+            state["whole"] = json!(next_whole);
+            if next_whole {
+                state["scope"] = json!("");
+                state["modules"] = json!(false);
+                state["cycle"] = V::Null;
+                state["pattern"] = V::Null;
+                state["scenario"] = V::Null;
+            }
+            save_embedded_state(&state);
+            let mut cam = load_camera();
+            cam.follow = false;
+            cam.fit_mode = true;
+            save_camera(&cam);
+            sync_embedded_toolbar(
+                &state,
+                surface_changes_doc(SESSION_SURFACE, &state).as_ref(),
+            );
+            spawn_local(async {
+                load_embedded(false).await;
+            });
+            return true;
+        }
+        ("session-graph-open-full", _) | (_, "session-graph-open-full") => {
+            spawn_local(async {
+                open_full_from_embedded().await;
+            });
+            return true;
+        }
+        (_, "session-graph-side-close") => {
+            let mut state = embedded_state();
+            state["focus"] = json!("");
+            state["side_tab"] = json!("details");
+            state["side_pinned"] = json!(false);
+            save_embedded_state(&state);
+            m::take(SESSION_SURFACE.impact_key);
+            m::take("session-graph-pan-target");
+            sync_embedded_toolbar(
+                &state,
+                surface_changes_doc(SESSION_SURFACE, &state).as_ref(),
+            );
+            if m::data(SESSION_SURFACE.view_key)["nodes"].is_array() {
+                spawn_local(async {
+                    load_embedded(false).await;
+                });
+            } else {
+                blank_embedded("");
+            }
+            return true;
+        }
+        (_, "session-graph-entity" | "session-graph-focus-jump") => {
+            return jump_to_entity_or_target(payload);
+        }
+        (_, "session-graph-attach") => {
+            let context = m::data(SESSION_SURFACE.attachment_key);
+            if context["text"].as_str().is_some_and(|text| {
+                crate::session::attach_map_context(&m::text(&context, "project"), text)
+            }) {
+                dom::focus("prompt");
+            }
+            return true;
+        }
+        _ => {}
+    }
+    if open()
+        || !(action.starts_with("graph-map-")
+            || matches!(action, "graph-side-tab" | "graph-changes-filter"))
+    {
+        return false;
+    }
+    let busy = dom::get("session-graph-canvas")
+        .and_then(|el| el.get_attribute("aria-busy"))
+        .as_deref()
+        == Some("true");
+    let map_failed =
+        dom::get("session-graph-error").is_some_and(|error| !error.has_attribute("hidden"));
+    let mut state = embedded_state();
+    let outcome = apply_click_action(
+        &mut state,
+        action,
+        payload,
+        SESSION_SURFACE,
+        busy,
+        map_failed,
+    );
+    if !outcome.handled {
+        return false;
+    }
+    save_embedded_state(&state);
+    if let Some(filter_val) = outcome.clear_filter.as_deref() {
+        dom::set_value("session-graph-filter", filter_val);
+    }
+    if let Some(notests) = outcome.save_notests {
+        dom::save(NOTESTS, notests.then_some("1"));
+    }
+    sync_embedded_toolbar(
+        &state,
+        surface_changes_doc(SESSION_SURFACE, &state).as_ref(),
+    );
+    if let Some((from, to)) = outcome.open_link {
+        spawn_local(async move {
+            look_from(SESSION_SURFACE, &from, &to).await;
+        });
+        return true;
+    }
+    let view = m::data(SESSION_SURFACE.view_key);
+    let view_opt = view["nodes"].is_array().then_some(&view);
+    ensure_surface_impact(SESSION_SURFACE, &state, view_opt, outcome.force_impact);
+    if m::text(&state, "side_tab") == "changes"
+        && surface_changes_doc(SESSION_SURFACE, &state).is_none()
+    {
+        let ch_state = state;
+        spawn_local(async move {
+            fetch_surface_changes(SESSION_SURFACE, ch_state).await;
+        });
+    }
+    if outcome.reload {
+        spawn_local(async {
+            load_embedded(false).await;
+        });
+    } else if outcome.rerender {
+        rerender_surface_preserving_camera(SESSION_SURFACE);
+    }
+    true
+}
+/// Handles pointer pan (`pointerdown`/`pointermove`/`pointerup`/`pointercancel`) and `dblclick` zoom on `#session-graph-canvas`.
+pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
+    let target_el = event
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+    let in_canvas = target_el
+        .as_ref()
+        .and_then(|el| el.closest("#session-graph-canvas").ok().flatten())
+        .is_some();
+    let drag = embedded_drag_data();
+    let drag_active = m::yes(&drag["active"]);
+    match kind {
+        "pointerdown" => {
+            if !in_canvas {
+                return false;
+            }
+            let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
+                return false;
+            };
+            if pe.button() != 0 {
+                return true;
+            }
+            let cam = load_camera();
+            m::set(
+                "session-graph-drag",
+                json!({
+                    "active": true,
+                    "pointer_id": pe.pointer_id(),
+                    "start_x": pe.client_x() as f64,
+                    "start_y": pe.client_y() as f64,
+                    "orig_pan_x": cam.pan_x,
+                    "orig_pan_y": cam.pan_y,
+                    "moved": false,
+                    "suppress_click": false,
+                }),
+            );
+            true
+        }
+        "pointermove" => {
+            if !drag_active {
+                return false;
+            }
+            let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
+                return true;
+            };
+            if pe.pointer_id() as i64 != drag["pointer_id"].as_i64().unwrap_or(-1) {
+                return true;
+            }
+            let dx = pe.client_x() as f64 - drag["start_x"].as_f64().unwrap_or(0.0);
+            let dy = pe.client_y() as f64 - drag["start_y"].as_f64().unwrap_or(0.0);
+            let mut moved = m::yes(&drag["moved"]);
+            if !moved {
+                if (dx * dx + dy * dy).sqrt() <= DRAG_THRESHOLD_PX {
+                    return true;
+                }
+                moved = true;
+                dom::attr("session-graph-canvas", "data-panning", "true");
+                if let Some(canvas) = dom::get("session-graph-canvas") {
+                    let _ = canvas.set_pointer_capture(pe.pointer_id());
+                }
+            }
+            let orig_pan_x = drag["orig_pan_x"].as_f64().unwrap_or(0.0);
+            let orig_pan_y = drag["orig_pan_y"].as_f64().unwrap_or(0.0);
+            let mut next_drag = drag;
+            next_drag["moved"] = json!(moved);
+            m::set("session-graph-drag", next_drag);
+            let mut cam = load_camera();
+            cam.pan_x = (orig_pan_x + dx).round();
+            cam.pan_y = (orig_pan_y + dy).round();
+            cam.fit_mode = false;
+            cam.needs_measure = false;
+            save_camera(&cam);
+            apply_camera(&cam);
+            true
+        }
+        "pointerup" | "pointercancel" => {
+            if !drag_active {
+                return false;
+            }
+            dom::attr("session-graph-canvas", "data-panning", "false");
+            if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
+                if m::yes(&drag["moved"]) {
+                    if let Some(canvas) = dom::get("session-graph-canvas") {
+                        let _ = canvas.release_pointer_capture(pe.pointer_id());
+                    }
+                }
+            }
+            let suppress = kind == "pointerup" && m::yes(&drag["moved"]);
+            m::set(
+                "session-graph-drag",
+                json!({
+                    "active": false,
+                    "moved": false,
+                    "suppress_click": suppress,
+                }),
+            );
+            if suppress {
+                dom::later("session-graph-drag-clear", 60, clear_embedded_drag_suppress);
+            }
+            true
+        }
+        "dblclick" => {
+            if !in_canvas {
+                return false;
+            }
+            if target_el
+                .as_ref()
+                .and_then(|el| {
+                    el.closest(
+                        ".graph-map-node, .graph-map-entity-node, .graph-map-spread, button, a",
+                    )
+                    .ok()
+                    .flatten()
+                })
+                .is_some()
+            {
+                return false;
+            }
+            let Ok(me) = event.clone().dyn_into::<web_sys::MouseEvent>() else {
+                return false;
+            };
+            let cam = load_camera();
+            if cam.scale < 1.35 {
+                let anchor = dom::get("session-graph-canvas").map(|canvas| {
+                    let rect = canvas.get_bounding_client_rect();
+                    (
+                        me.client_x() as f64 - rect.left(),
+                        me.client_y() as f64 - rect.top(),
+                    )
+                });
+                zoom_camera_at(1.5, anchor);
+            } else {
+                let mut cam = cam;
+                fit_camera(&mut cam);
+            }
+            true
+        }
+        _ => false,
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -9116,8 +15313,8 @@ mod tests {
             "<linearGradient id=\"graph-map-flow-0\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
         )), "{html}");
         assert_eq!(html.matches("stroke=\"url(#graph-map-flow-0)\"").count(), 2);
-        // Every arrow has the one head, in the colour of being used.
-        assert_eq!(html.matches("<marker ").count(), 1);
+        // All 7 dependency arrow markers are registered; default edges use the calls arrowhead.
+        assert_eq!(html.matches("<marker ").count(), 7);
         assert_eq!(
             html.matches("marker-end=\"url(#graph-map-arrow)\"").count(),
             2
@@ -10149,7 +16346,7 @@ mod tests {
         let path = crumbs(&view);
         assert!(path.ends_with("<button type=\"button\" class=\"graph-map-crumb\" data-action=\"graph-map-open\" data-payload=\"&quot;src/Cart/Cart.php&quot;\">Cart.php</button><span aria-hidden=\"true\">/</span><span class=\"graph-map-crumb\" aria-current=\"location\">Cart.total(): links</span>"), "{path}");
         let told = legend(&view, false);
-        assert!(told.ends_with("on the left. T type · m method · f function · c case · # heading. A box without a letter is a plain name, or a file itself for its imports."), "{told}");
+        assert!(told.ends_with("on the left. T type · m method · f function · P property · K const · c case · # heading. A box without a letter is a plain name, or a file itself for its imports."), "{told}");
         assert!(
             legend(&view, true).ends_with("for its imports. Highlighted: touched by the change.")
         );
@@ -10439,7 +16636,7 @@ mod tests {
         assert!(html.contains("title=\"Price.of() · src/Cart/Price.php:9\" aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links, the path ends here\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Price.of()</bdi></span></button>"), "{html}");
         assert!(html.contains("the path starts here\""));
         assert!(!html.contains("graph-map-more"));
-        assert!(legend(&named, true).ends_with("the two ends of the path. T type · m method · f function · c case · # heading. A box without a letter is a plain name, or a file itself for its imports. Highlighted: touched by the change."));
+        assert!(legend(&named, true).ends_with("the two ends of the path. T type · m method · f function · P property · K const · c case · # heading. A box without a letter is a plain name, or a file itself for its imports. Highlighted: touched by the change."));
         assert_eq!(
             summary(&named),
             "Path from CartTest.testTotal() to Price.of() · 2 links · 3 places on the shortest ways"
@@ -10909,7 +17106,7 @@ mod tests {
             summary(&named),
             "users.php and orders<1>.php both use 2 other names · 1 other name uses both"
         );
-        assert!(legend(&named, true).ends_with("lies on the way to it. T type · m method · f function · c case · # heading. A box without a letter is a plain name, or a file itself for its imports. Highlighted: touched by the change."));
+        assert!(legend(&named, true).ends_with("lies on the way to it. T type · m method · f function · P property · K const · c case · # heading. A box without a letter is a plain name, or a file itself for its imports. Highlighted: touched by the change."));
         // Inside a chosen change the graph may be behind the files.
         let mut stale = common();
         stale["stale"] = json!(true);
@@ -12767,5 +18964,1877 @@ mod tests {
         assert!(between(map.clone(), "layer:services", "layer:model").is_none());
         let strategy = showing_pattern(map, "strategy@app/Pay/Gateway.php#L3:Gateway").unwrap();
         assert!(between(strategy, "layer:services", "layer:model").is_none());
+    }
+    #[test]
+    fn overview_groups_pattern_families_marks_nodes_and_enriches_architecture_side() {
+        let mut view = marked_folder();
+        view["nodes"] = json!([
+            {"path": "app/Pay", "name": "Pay", "folder": true, "files": 9, "inside": true, "out": 2, "in": 0, "patterns": 1200, "architecture_layer": {"id": "services", "name": "Services", "color": 1}},
+            {"path": "app/Repo.php", "name": "Repo.php", "folder": false, "files": 1, "symbols": 2, "inside": true, "out": 0, "in": 1, "patterns": 1},
+            {"path": "app/Kernel.php", "name": "Kernel.php", "folder": false, "files": 1, "symbols": 2, "inside": true, "out": 0, "in": 0, "patterns": 1}
+        ]);
+        view["edges"] = json!([
+            {"from": "app/Pay", "to": "app/Repo.php", "links": 2, "guessed": 0, "architecture_violation": 2}
+        ]);
+        view["patterns"]["kinds"][0]["instances"] = json!([
+            {"id": "repository@app/Pay/Orders<T>.php#L3:Orders<T>", "sort": "repository", "name": "Repository", "of": "Orders<T>", "file": "app/Pay/Orders<T>.php", "line": 3, "named": true, "guessed": false, "parts": "2 implementations"},
+            {"id": "repository@app/Repo.php#L1:Repo", "sort": "repository", "name": "Repository", "of": "Repo", "file": "app/Repo.php", "line": 1, "named": true, "guessed": false, "parts": "1 user"}
+        ]);
+        view["patterns"]["kinds"][1]["instances"] = json!([
+            {"id": "strategy@app/Pay/Gateway.php#L3:Gateway", "sort": "strategy", "name": "Strategy", "of": "Gateway", "file": "app/Pay/Gateway.php", "line": 3, "named": false, "guessed": true, "parts": "2 implementations · 1 user"},
+            {"id": "strategy@app/Kernel.php#L1:Kernel", "sort": "strategy", "name": "Strategy", "of": "Kernel", "file": "app/Kernel.php", "line": 1, "named": false, "guessed": false, "parts": "1 implementation"}
+        ]);
+        let mut kinds = view["patterns"]["kinds"].as_array().unwrap().clone();
+        kinds.push(json!({
+            "id": "layers", "name": "Layers", "family": "architecture",
+            "tells": "Files filed in layers by their names.", "found": 1, "more": 0,
+            "instances": [{"id": "layers@app", "sort": "layers", "name": "Layers", "of": "app", "file": "app", "line": 0, "named": true, "guessed": false, "parts": "2 layers"}]
+        }));
+        view["patterns"]["kinds"] = json!(kinds);
+        view["architecture"] = json!({
+            "declared": true,
+            "layers": [
+                {"id": "entry", "name": "Entry points", "color": 0},
+                {"id": "services", "name": "Services", "color": 1}
+            ],
+            "violations": {"links": 2, "guessed": 0, "pairs": 1, "more": 0, "rows": [
+                {"from": {"path": "app/Pay/A.php", "name": "A.php", "layer": "Services"}, "to": {"path": "app/Repo.php", "name": "Repo.php", "layer": "Entry points"}, "links": 2, "guessed": 0}
+            ]},
+            "reciprocal_total": 1,
+            "reciprocal": [{
+                "from": {"id": "entry", "name": "Entry points", "color": 0},
+                "to": {"id": "services", "name": "Services", "color": 1},
+                "forward": 3, "forward_guessed": 0,
+                "reverse": 1, "reverse_guessed": 1
+            }]
+        });
+
+        assert_eq!(pattern_family_of(&view, "app/Pay"), Some("both"));
+        assert_eq!(pattern_family_of(&view, "app/Repo.php"), Some("arch"));
+        assert_eq!(pattern_family_of(&view, "app/Kernel.php"), Some("design"));
+        assert_eq!(pattern_family_of(&view, ""), None);
+
+        let html = canvas(&view);
+        assert!(html.contains("data-patterns-on=\"true\""), "{html}");
+        assert!(html.contains("data-architecture=\"true\""), "{html}");
+        assert!(html.contains("data-has-patterns=\"true\""), "{html}");
+        assert!(html.contains("data-pattern-family=\"both\""), "{html}");
+        assert!(html.contains("data-pattern-family=\"arch\""), "{html}");
+        assert!(html.contains("data-pattern-family=\"design\""), "{html}");
+        assert!(html.contains("data-arch-layer-id=\"services\""), "{html}");
+        assert!(html.contains("class=\"graph-map-node-layer\""), "{html}");
+        assert!(
+            html.contains("class=\"graph-map-violation-halo\""),
+            "{html}"
+        );
+
+        let patterns_html = found_patterns(&view, &[]);
+        assert!(
+            patterns_html.contains(
+                "<section class=\"graph-map-family-group\" data-family=\"architecture\">"
+            ),
+            "{patterns_html}"
+        );
+        assert!(
+            patterns_html
+                .contains("<section class=\"graph-map-family-group\" data-family=\"design\">"),
+            "{patterns_html}"
+        );
+        assert!(
+            patterns_html.contains("class=\"graph-map-kind-card\""),
+            "{patterns_html}"
+        );
+        assert!(
+            patterns_html.contains(
+                "<p class=\"graph-map-pattern-tells\">A type named a &lt;repository&gt;.</p>"
+            ),
+            "{patterns_html}"
+        );
+        assert!(
+            patterns_html.contains("data-family=\"architecture\" data-sort=\"repository\""),
+            "{patterns_html}"
+        );
+        assert!(
+            patterns_html.contains("data-family=\"design\" data-sort=\"strategy\""),
+            "{patterns_html}"
+        );
+
+        let arch_html = architecture_side(&view);
+        assert!(
+            arch_html.contains(
+                "class=\"graph-map-arch-mode\" data-declared=\"true\">Declared rules</span>"
+            ),
+            "{arch_html}"
+        );
+        assert!(
+            arch_html.contains(
+                "<li data-arch-layer=\"entry\" style=\"--architecture-color:hsl(220 68% 46%)\">"
+            ),
+            "{arch_html}"
+        );
+        assert!(
+            arch_html.contains(
+                "class=\"button compact graph-map-arch-open\" data-action=\"graph-map-pattern\""
+            ),
+            "{arch_html}"
+        );
+        assert!(
+            arch_html.contains("Inspect layers diagram</button>"),
+            "{arch_html}"
+        );
+        assert!(
+            arch_html.contains("class=\"graph-map-arch-pairs\""),
+            "{arch_html}"
+        );
+        assert!(arch_html.contains("3 links"), "{arch_html}");
+        assert!(arch_html.contains("1 link guessed"), "{arch_html}");
+    }
+    #[test]
+    fn focused_pattern_canvas_and_side_highlight_family_roles_and_ties() {
+        let design = strategy();
+        let html = canvas(&design);
+        assert!(html.contains("data-pattern-family=\"design\""), "{html}");
+        assert!(html.contains("data-pattern-sort=\"strategy\""), "{html}");
+        assert!(html.contains("data-role-frame=\"anchor\""), "{html}");
+        assert!(html.contains("data-role-frame=\"part\""), "{html}");
+        assert!(html.contains("data-pattern-role=\"abstraction\""), "{html}");
+        assert!(
+            html.contains("<span class=\"graph-map-node-anchor\" aria-hidden=\"true\">★</span>"),
+            "{html}"
+        );
+        assert!(html.contains("class=\"graph-map-edge-tie\""), "{html}");
+        assert!(html.contains(">implements</text>"), "{html}");
+        assert!(html.contains(">holds &amp; takes</text>"), "{html}");
+
+        let design_side = side(&design);
+        assert!(
+            design_side.contains("class=\"graph-map-pattern-brief\" data-family=\"design\""),
+            "{design_side}"
+        );
+        assert!(design_side.contains("Design pattern"), "{design_side}");
+        assert!(
+            design_side.contains("Includes guessed links"),
+            "{design_side}"
+        );
+        assert!(
+            design_side.contains("12 implementations stand under Gateway."),
+            "{design_side}"
+        );
+        assert!(
+            design_side.contains("class=\"graph-map-part-chip\" data-action=\"graph-map-node\""),
+            "{design_side}"
+        );
+        assert!(design_side.contains("Gateway"), "{design_side}");
+        assert!(design_side.contains("Pay&lt;b&gt;"), "{design_side}");
+
+        let mut arch = design.clone();
+        arch["pattern"]["sort"] = json!("repository");
+        arch["pattern"]["name"] = json!("Repository");
+        arch["pattern"]["family"] = json!("architecture");
+        arch["pattern"]["named"] = json!(true);
+        arch["pattern"]["guessed"] = json!(false);
+        let arch_html = canvas(&arch);
+        assert!(
+            arch_html.contains("data-pattern-family=\"architecture\""),
+            "{arch_html}"
+        );
+        let arch_side = side(&arch);
+        assert!(
+            arch_side.contains("class=\"graph-map-pattern-brief\" data-family=\"architecture\""),
+            "{arch_side}"
+        );
+        assert!(arch_side.contains("Architecture pattern"), "{arch_side}");
+        assert!(arch_side.contains("By name"), "{arch_side}");
+        assert!(arch_side.contains("Verified from code"), "{arch_side}");
+
+        let mut placed = Vec::new();
+        assert_eq!(place_tie(&mut placed, (100.0, 100.0)), Some((100.0, 100.0)));
+        assert_eq!(place_tie(&mut placed, (105.0, 95.0)), Some((105.0, 85.0)));
+        assert_eq!(place_tie(&mut placed, (105.0, 105.0)), Some((105.0, 115.0)));
+        assert_eq!(place_tie(&mut placed, (105.0, 95.0)), None);
+        assert_eq!(place_tie(&mut placed, (180.0, 95.0)), Some((180.0, 95.0)));
+    }
+    #[test]
+    fn layers_diagram_renders_tier_bands_order_badges_and_violation_halos() {
+        let view = layers();
+        let html = canvas(&view);
+        assert!(html.contains("data-layered=\"true\""), "{html}");
+        assert!(
+            html.contains("data-pattern-family=\"architecture\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("<rect class=\"graph-map-arch-band\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("class=\"graph-map-arch-band\"").count(), 1);
+        assert!(html.contains("data-layer=\"true\""), "{html}");
+        for order in 1..=4 {
+            assert!(
+                html.contains(&format!("data-layer-order=\"{order}\"")),
+                "{html}"
+            );
+            assert!(
+                html.contains(&format!(
+                    "<span class=\"graph-map-layer-order\" aria-hidden=\"true\">{order}</span>"
+                )),
+                "{html}"
+            );
+        }
+        assert_eq!(
+            html.matches("class=\"graph-map-violation-halo\"").count(),
+            2
+        );
+
+        let mut focused_violation = view;
+        focused_violation["focus"] = json!({
+            "path": "layer:model>layer:services", "link": true,
+            "from": {"path": "layer:model", "name": "Model"},
+            "to": {"path": "layer:services", "name": "Services"},
+            "links": 2, "guessed": 0, "against": true, "pairs": 1, "more": 0,
+            "rows": []
+        });
+        let focused_html = canvas(&focused_violation);
+        assert!(
+            focused_html.contains(
+                "<path class=\"graph-map-violation-halo\" data-edge-state=\"on\" data-ends=\"3 1\""
+            ),
+            "{focused_html}"
+        );
+        assert!(
+            focused_html.contains(
+                "<path class=\"graph-map-violation-halo\" data-edge-state=\"off\" data-ends=\"2 0\""
+            ),
+            "{focused_html}"
+        );
+    }
+    #[test]
+    fn camera_fit_bbox_zoom_and_pan_stay_within_bounds() {
+        let (fit_s, _, _) = camera_for_fit((2000.0, 1200.0), (800.0, 500.0));
+        assert!((0.25..=1.0).contains(&fit_s), "fit scale={fit_s}");
+
+        let (small_s, small_x, small_y) = camera_for_fit((300.0, 200.0), (800.0, 500.0));
+        assert_eq!(small_s, 1.0);
+        assert_eq!((small_x, small_y), (250.0, 150.0));
+
+        let bbox = (200.0, 100.0, 364.0, 130.0);
+        let (focus_s, focus_x, focus_y) = camera_for_bbox(bbox, (800.0, 500.0), FOCUS_CAMERA_MAX);
+        assert!(
+            (1.0..=FOCUS_CAMERA_MAX).contains(&focus_s),
+            "focus scale={focus_s}"
+        );
+        // Logical midpoint of bbox maps cleanly onto viewport center (400, 250).
+        let mid_x = (bbox.0 + bbox.2) / 2.0;
+        let mid_y = (bbox.1 + bbox.3) / 2.0;
+        assert!(((mid_x * focus_s + focus_x) - 400.0).abs() <= 1.0);
+        assert!(((mid_y * focus_s + focus_y) - 250.0).abs() <= 1.0);
+
+        // Zoom at anchor keeps the logical point fixed and clamps to [0.25, 2.4].
+        let (z_max, zx, zy) = zoom_at(1.0, 40.0, 20.0, (400.0, 250.0), 9.0);
+        assert_eq!(z_max, 2.4);
+        let lx = (400.0 - 40.0) / 1.0;
+        let ly = (250.0 - 20.0) / 1.0;
+        assert!(((lx * z_max + zx) - 400.0).abs() <= 1.0);
+        assert!(((ly * z_max + zy) - 250.0).abs() <= 1.0);
+
+        let (z_min, _, _) = zoom_at(1.0, 0.0, 0.0, (400.0, 250.0), 0.05);
+        assert_eq!(z_min, 0.25);
+    }
+    #[test]
+    fn prompt_matcher_finds_matching_nodes_and_ignores_unrelated_text() {
+        let view = json!({
+            "nodes": [
+                {"path": "src/Auth/JwtGuard.php", "name": "JwtGuard.php", "folder": false, "out": 2, "in": 1},
+                {"path": "src/Auth", "name": "Auth", "folder": true, "files": 4, "out": 3, "in": 2},
+                {"path": "src/Billing/Invoice.php", "name": "Invoice.php", "folder": false, "out": 1, "in": 0}
+            ],
+            "frames": []
+        });
+        let matched =
+            match_prompt_targets(&view, "Please update JwtGuard token validation in Auth")
+                .expect("should match Auth & JwtGuard");
+        assert_eq!(matched.phase, "predicting");
+        assert!(matched.summary.starts_with("Focusing near "));
+        assert!(matched
+            .target_paths
+            .iter()
+            .any(|p| p == "src/Auth/JwtGuard.php"));
+        assert!(matched.target_folders.iter().any(|p| p == "src/Auth"));
+        assert!(match_prompt_targets(&view, "please explain this code").is_none());
+    }
+    #[test]
+    fn focus_overlay_renders_target_zone_entity_badges_and_unique_svg_ids() {
+        let view = json!({
+            "scope": "",
+            "nodes": [
+                {"path": "src/Auth", "name": "Auth", "folder": true, "files": 3, "out": 1, "in": 0},
+                {"path": "src/Billing", "name": "Billing", "folder": true, "files": 2, "out": 0, "in": 1}
+            ],
+            "edges": [
+                {"from": "src/Auth", "to": "src/Billing", "links": 2, "guessed": 0}
+            ],
+            "frames": []
+        });
+        // Without live focus, default modal canvas stays completely unchanged.
+        let modal_html = canvas(&view);
+        assert!(!modal_html.contains("graph-map-target-zone"));
+        assert!(!modal_html.contains("graph-map-entity-node"));
+        assert!(!modal_html.contains("data-focus-target=\"true\""));
+
+        let focus = parse_live_focus(&json!({
+            "phase": "active",
+            "summary": "Building Auth token classes",
+            "target_folders": ["src/Auth"],
+            "target_paths": ["src/Auth/JwtToken.php"],
+            "target_nodes": ["src/Auth/JwtToken.php"],
+            "created_entities": [
+                {"id": "e1", "kind": "file", "name": "JwtToken.php", "parent": "src/Auth", "path": "src/Auth/JwtToken.php"},
+                {"id": "e2", "kind": "class", "name": "JwtToken", "parent": "src/Auth/JwtToken.php", "path": "src/Auth/JwtToken.php#L3:JwtToken"},
+                {"id": "e3", "kind": "interface", "name": "TokenSigner", "parent": "src/Auth", "path": "src/Auth/TokenSigner.php"},
+                {"id": "e4", "kind": "trait", "name": "TokenClaims", "parent": "src/Auth", "path": "src/Auth/TokenClaims.php"},
+                {"id": "e5", "kind": "enum", "name": "TokenKind", "parent": "src/Auth", "path": "src/Auth/TokenKind.php"},
+                {"id": "e6", "kind": "struct", "name": "Header", "parent": "src/Auth", "path": "src/Auth/Header.rs"},
+                {"id": "e7", "kind": "method", "name": "issue", "parent": "src/Auth", "path": "src/Auth/JwtToken.php#L10:issue"},
+                {"id": "e8", "kind": "function", "name": "parse_jwt", "parent": "src/Auth", "path": "src/Auth/helpers.php#L4:parse_jwt"}
+            ]
+        }))
+        .expect("live focus parses cleanly");
+
+        let rendered = canvas_with(&view, "session-graph", Some(&focus));
+        assert!(rendered.html.contains("id=\"session-graph-arrow\""));
+        assert!(rendered.html.contains("url(#session-graph-flow-0)"));
+        assert!(!rendered.html.contains("id=\"graph-map-arrow\""));
+        assert!(rendered
+            .html
+            .contains("<rect class=\"graph-map-target-zone\""));
+        assert!(rendered.html.contains("data-focus-target=\"true\""));
+        assert_eq!(rendered.focus.entities.len(), 8);
+        assert!(rendered.focus.bbox.is_some());
+        for kind in [
+            "file",
+            "class",
+            "interface",
+            "trait",
+            "enum",
+            "struct",
+            "method",
+            "function",
+        ] {
+            assert!(
+                rendered
+                    .html
+                    .contains(&format!("data-entity-kind=\"{kind}\"")),
+                "missing kind {kind} in {}",
+                rendered.html
+            );
+        }
+        assert!(rendered
+            .html
+            .contains("class=\"graph-map-node graph-map-entity-node is-blinking\""));
+        assert!(rendered
+            .html
+            .contains("<span class=\"graph-map-entity-badge\">NEW</span>"));
+
+        let chips = focus_strip_chips_html(&focus);
+        assert!(chips.contains("session-graph-focus-chip"));
+        assert!(chips.contains("data-action=\"session-graph-focus-jump\""));
+        assert!(chips.contains("class: JwtToken"));
+    }
+
+    #[test]
+    fn unbuilt_or_building_map_errors_show_calm_note_not_alert() {
+        let building = json!({ "state": "building" });
+        let off = json!({ "state": "off" });
+        let ready = json!({ "state": "ready", "graph": { "commit": "abc" } });
+
+        assert!(embedded_error_is_unbuilt(
+            &building,
+            "This project has no published code graph."
+        ));
+        assert_eq!(
+            embedded_unbuilt_note(&building),
+            "Building code graph and dependency map…"
+        );
+        assert!(embedded_error_is_unbuilt(&off, "Forbidden"));
+        assert_eq!(
+            embedded_unbuilt_note(&off),
+            "Code graph is turned off for this project."
+        );
+        assert!(embedded_error_is_unbuilt(
+            &V::Null,
+            "This project has no published code graph."
+        ));
+        assert!(!embedded_error_is_unbuilt(&ready, "Internal server error"));
+    }
+
+    #[test]
+    fn created_entities_with_modified_or_deleted_change_render_accurate_badges() {
+        let view = json!({
+            "project_id": "proj",
+            "scope": "src",
+            "nodes": [
+                {
+                    "path": "src/Auth.php",
+                    "name": "Auth.php",
+                    "folder": false,
+                    "kind": "file",
+                    "line": 1,
+                    "changed": 1,
+                    "links": 1
+                }
+            ],
+            "edges": [],
+            "frames": []
+        });
+        let focus = parse_live_focus(&json!({
+            "phase": "active",
+            "target_paths": ["src/Auth.php"],
+            "created_entities": [
+                {
+                    "id": "e1",
+                    "kind": "method",
+                    "change": "modified",
+                    "name": "refreshToken",
+                    "parent": "src/Auth.php",
+                    "path": "src/Auth.php",
+                    "folder": "src",
+                    "line": 42
+                },
+                {
+                    "id": "e2",
+                    "kind": "class",
+                    "change": "created",
+                    "name": "JwtClaim",
+                    "parent": "src/Auth.php",
+                    "path": "src/Auth.php",
+                    "folder": "src",
+                    "line": 10
+                },
+                {
+                    "id": "e3",
+                    "kind": "function",
+                    "change": "deleted",
+                    "name": "legacyHash",
+                    "parent": "src/Auth.php",
+                    "path": "src/Auth.php",
+                    "folder": "src",
+                    "line": 88
+                }
+            ]
+        }))
+        .expect("focus should parse");
+
+        let rendered = canvas_with(&view, "session-graph", Some(&focus));
+        assert!(rendered.html.contains("data-entity-change=\"modified\""));
+        assert!(rendered
+            .html
+            .contains("<span class=\"graph-map-entity-badge\">MOD</span>"));
+        assert!(rendered.html.contains("data-entity-change=\"created\""));
+        assert!(rendered
+            .html
+            .contains("<span class=\"graph-map-entity-badge\">NEW</span>"));
+        assert!(rendered.html.contains("data-entity-change=\"deleted\""));
+        assert!(rendered
+            .html
+            .contains("<span class=\"graph-map-entity-badge\">DEL</span>"));
+
+        let chips = focus_strip_chips_html(&focus);
+        assert!(chips.contains("data-entity-change=\"modified\""));
+        assert!(chips.contains("<span class=\"graph-map-entity-badge\">MOD</span>"));
+        assert!(chips.contains("method: refreshToken"));
+        assert!(chips.contains("<span class=\"graph-map-entity-badge\">NEW</span>"));
+    }
+
+    #[test]
+    fn normalize_and_request_paths_handle_whole_changes_and_impact_params() {
+        let state = fresh("");
+        assert_eq!(state["whole"], json!(false));
+        assert_eq!(state["side_tab"], json!("details"));
+        assert_eq!(state["changes_filter"], json!("all"));
+
+        let whole_state = normalize_map_state(json!({
+            "scope": "",
+            "target": "work",
+            "whole": true
+        }));
+        let map_url = build_map_path("my/proj", &whole_state, true);
+        assert!(map_url.contains("/api/projects/my%2Fproj/graph/map?"));
+        assert!(map_url.contains("whole=1"));
+        assert!(map_url.contains("target=work"));
+
+        let changes_url = build_changes_path("my/proj", "work", "sess-1", true);
+        assert_eq!(
+            changes_url,
+            "/api/projects/my%2Fproj/graph/changes?target=work&focus_session=sess-1&notests=1"
+        );
+
+        let impact_url =
+            build_file_impact_path("my/proj", "src/Auth.php#L10:Auth", "", "sess-1", true);
+        assert_eq!(
+            impact_url,
+            "/api/projects/my%2Fproj/graph/file-impact?path=src%2FAuth.php&target=work&focus_session=sess-1&certain=1"
+        );
+    }
+
+    #[test]
+    fn state_focus_file_unfolds_collapsed_ancestors_and_selects_details() {
+        let hidden_view = json!({
+            "nodes": [
+                { "path": "src", "name": "src", "folder": true }
+            ],
+            "edges": []
+        });
+        let initial = normalize_map_state(json!({
+            "scope": "docs",
+            "spread": [],
+            "filter": "old",
+            "whole": false,
+            "side_tab": "changes",
+            "modules": true
+        }));
+        let (next, needs_reload) =
+            state_focus_file(initial, "src/auth/jwt/Token.php", &hidden_view);
+        assert!(needs_reload);
+        assert_eq!(next["scope"], json!(""));
+        assert_eq!(next["filter"], json!(""));
+        assert_eq!(next["focus"], json!("src/auth/jwt/Token.php"));
+        assert_eq!(next["side_tab"], json!("details"));
+        assert_eq!(next["side_pinned"], json!(true));
+        assert_eq!(next["modules"], json!(false));
+        let spread = unfolded(&next, "spread");
+        assert_eq!(spread, vec!["src", "src/auth", "src/auth/jwt"]);
+
+        let visible_view = json!({
+            "scope": "",
+            "focus": { "path": "src/auth/jwt/Token.php", "folder": false },
+            "nodes": [
+                { "path": "src/auth/jwt/Token.php", "name": "Token.php", "folder": false }
+            ],
+            "edges": []
+        });
+        let (same, already_there) =
+            state_focus_file(next.clone(), "src/auth/jwt/Token.php", &visible_view);
+        assert!(!already_there);
+        assert_eq!(same["focus"], json!("src/auth/jwt/Token.php"));
+        assert_eq!(same["side_tab"], json!("details"));
+    }
+
+    #[test]
+    fn changes_side_html_renders_filters_badges_missing_disk_and_entities() {
+        let changes = json!({
+            "target": "work",
+            "total_files": 3,
+            "created_entities": 2,
+            "modified_entities": 1,
+            "deleted_entities": 1,
+            "files": [
+                {
+                    "path": "src/NewService.php",
+                    "status": "created",
+                    "exists": true,
+                    "in_graph": false,
+                    "summary": { "uses_added": 2, "uses_removed": 0, "callers_at_risk": 0, "impacted_callers": 0 },
+                    "entities": [
+                        { "id": "c1", "kind": "class", "change": "created", "name": "NewService", "line": 5 }
+                    ]
+                },
+                {
+                    "path": "src/Auth.php",
+                    "status": "modified",
+                    "exists": true,
+                    "in_graph": true,
+                    "summary": { "uses_added": 1, "uses_removed": 1, "callers_at_risk": 2, "impacted_callers": 1 },
+                    "entities": [
+                        { "id": "m1", "kind": "method", "change": "modified", "name": "login", "line": 22 }
+                    ]
+                },
+                {
+                    "path": "src/Legacy.php",
+                    "status": "deleted",
+                    "exists": false,
+                    "in_graph": true,
+                    "summary": { "uses_added": 0, "uses_removed": 3, "callers_at_risk": 1, "impacted_callers": 0 },
+                    "entities": []
+                }
+            ]
+        });
+
+        let all_html = changes_side_html(&changes, "all", "src/Auth.php", "session");
+        assert!(all_html.contains("data-action=\"graph-changes-filter\""));
+        assert!(all_html.contains("src/NewService.php"));
+        assert!(all_html.contains("Not indexed"));
+        assert!(all_html.contains("data-selected=\"true\""));
+        assert!(all_html.contains("Missing on disk"));
+        assert!(all_html.contains("data-action=\"graph-map-impact-focus\""));
+        assert!(all_html.contains("NewService"));
+        assert!(all_html.contains("login"));
+
+        let deleted_html = changes_side_html(&changes, "deleted", "", "modal");
+        assert!(deleted_html.contains("src/Legacy.php"));
+        assert!(!deleted_html.contains("src/Auth.php"));
+        assert!(!deleted_html.contains("src/NewService.php"));
+    }
+
+    #[test]
+    fn impact_side_html_sorts_callers_and_renders_unindexed_and_dependencies() {
+        let impact = json!({
+            "path": "src/NewAuth.php",
+            "status": "created",
+            "exists": true,
+            "in_graph": false,
+            "baseline": { "available": true, "label": "HEAD" },
+            "summary": {
+                "uses_added": 1,
+                "uses_removed": 1,
+                "uses_unchanged": 1,
+                "callers_at_risk": 1,
+                "callers_impacted": 1,
+                "added_callers": 1,
+                "new_cycles": 1,
+                "resolved_cycles": 0,
+                "new_violations": 0,
+                "resolved_violations": 0
+            },
+            "entities": [
+                { "id": "e1", "kind": "method", "change": "modified", "name": "verify", "line": 14, "signature_changed": true }
+            ],
+            "uses": {
+                "added": [{ "target": "src/Token.php", "resolved": true, "exists": true, "kind": "imports", "symbols": ["Token"], "line": 3, "evidence": "use App\\Token;" }],
+                "removed": [{ "target": "src/OldToken.php", "resolved": false, "exists": false, "kind": "imports", "symbols": ["OldToken"], "line": 4 }],
+                "unchanged": [{ "target": "src/Config.php", "resolved": true, "exists": true, "kind": "imports", "symbols": ["Config"], "line": 2 }]
+            },
+            "used_by": [
+                { "path": "src/SafeCaller.php", "exists": true, "impact": "unchanged", "reason": "signature unaffected", "symbols": ["info"], "changed_symbols": [], "links": 1, "guessed": false },
+                { "path": "src/WarmCaller.php", "exists": true, "impact": "impacted", "reason": "body changed", "symbols": ["verify"], "changed_symbols": ["verify"], "links": 1, "guessed": true },
+                { "path": "src/BrokenCaller.php", "exists": true, "impact": "broken_risk", "reason": "signature changed", "symbols": ["verify"], "changed_symbols": ["verify"], "links": 1, "guessed": false }
+            ],
+            "architecture_impact": { "new_cycles": 1, "resolved_cycles": 0, "new_violations": 0, "resolved_violations": 0 }
+        });
+
+        let html = impact_side_html(&impact, &V::Null, "session");
+        assert!(html.contains("class=\"graph-impact-card\""));
+        assert!(html.contains("Exists in workspace"));
+        assert!(html.contains("Not yet in Graphify index"));
+        assert!(html.contains("Baseline: HEAD"));
+        assert!(html.contains("src/Token.php"));
+        assert!(html.contains("src/OldToken.php"));
+        assert!(html.contains("src/Config.php"));
+        assert!(html.contains("class=\"graph-impact-entity-name\">verify:14</span>"));
+        assert!(html.contains("title=\"signature changed\""));
+        assert!(html.contains(">sig</span>"));
+        assert!(!html.contains("verify, verify"));
+        assert!(html.contains("guessed"));
+        assert!(html.contains("data-action=\"graph-map-link\""));
+
+        let pos_broken = html
+            .find("src/BrokenCaller.php")
+            .expect("broken caller present");
+        let pos_warm = html
+            .find("src/WarmCaller.php")
+            .expect("warm caller present");
+        let pos_safe = html
+            .find("src/SafeCaller.php")
+            .expect("safe caller present");
+        assert!(pos_broken < pos_warm && pos_warm < pos_safe);
+    }
+
+    #[test]
+    fn canvas_with_overlays_tags_changes_diff_edges_and_synthetic_folder_edges() {
+        let view = json!({
+            "project_id": "proj",
+            "scope": "",
+            "focus": { "path": "src/Auth.php", "folder": false },
+            "nodes": [
+                { "path": "src/Auth.php", "name": "Auth.php", "folder": false, "selected": true, "changed": 0, "links": 2 },
+                { "path": "src/Token.php", "name": "Token.php", "folder": false, "changed": 0, "links": 1 },
+                { "path": "src/billing", "name": "billing", "folder": true, "changed": 0, "links": 1 }
+            ],
+            "edges": [
+                { "from": "src/Auth.php", "to": "src/Token.php", "links": 1, "kinds": [{ "kind": "calls", "links": 1 }] }
+            ],
+            "frames": []
+        });
+        let changes = json!({
+            "files": [
+                { "path": "src/Auth.php", "status": "modified", "exists": true },
+                { "path": "src/billing/Invoice.php", "status": "created", "exists": true }
+            ]
+        });
+        let impact = json!({
+            "path": "src/Auth.php",
+            "uses": {
+                "added": [{ "target": "src/Token.php" }],
+                "removed": [{ "target": "src/billing/Invoice.php" }],
+                "unchanged": []
+            },
+            "used_by": []
+        });
+
+        let rendered = canvas_with_overlays(
+            &view,
+            "session-graph",
+            CanvasOverlayContext {
+                live_focus: None,
+                changes: Some(&changes),
+                impact: Some(&impact),
+            },
+        );
+        let bbox = rendered.selected_bbox.expect("selected_bbox present");
+        assert!(bbox.2 - bbox.0 > BOX_WIDTH);
+        assert!(rendered.html.contains("data-change-status=\"modified\""));
+        assert!(rendered.html.contains("data-diff=\"added\""));
+        assert!(rendered
+            .html
+            .contains("class=\"graph-map-edge graph-map-edge-synthetic\""));
+        assert!(rendered.html.contains("data-diff=\"removed\" d=\"M"));
+        assert!(rendered.html.contains("data-impact=\"added-dep\""));
+        assert!(rendered.html.contains("data-impact=\"removed-dep\""));
+    }
+
+    #[test]
+    fn link_canvas_and_side_with_render_diff_marks_from_impact() {
+        let view = json!({
+            "mode": "link",
+            "from": { "path": "src/Auth.php", "name": "Auth.php", "what": "file" },
+            "to": { "path": "src/Token.php", "name": "Token.php", "what": "file" },
+            "users": {
+                "names": 1,
+                "files": 1,
+                "groups": [
+                    {
+                        "path": "src/Auth.php",
+                        "name": "Auth.php",
+                        "names": [
+                            { "key": "src/Auth.php#L10:login", "name": "login", "kind": "method", "line": 10, "links": 1 }
+                        ]
+                    }
+                ]
+            },
+            "used": {
+                "names": 1,
+                "files": 1,
+                "groups": [
+                    {
+                        "path": "src/Token.php",
+                        "name": "Token.php",
+                        "names": [
+                            { "key": "src/Token.php#L5:issue", "name": "issue", "kind": "method", "line": 5, "links": 1 }
+                        ]
+                    }
+                ]
+            },
+            "edges": [
+                { "from": "src/Auth.php#L10:login", "to": "src/Token.php#L5:issue", "kind": "calls" }
+            ],
+            "kinds": [{ "kind": "calls", "links": 1 }]
+        });
+        let impact = json!({
+            "path": "src/Auth.php",
+            "uses": {
+                "added": [{ "target": "src/Token.php", "symbols": ["issue"] }],
+                "removed": [],
+                "unchanged": []
+            },
+            "used_by": []
+        });
+        let canvas_html = link_canvas_with(&view, "", Some(&impact));
+        assert!(canvas_html.contains("data-diff=\"added\""));
+
+        let side_html = link_side_with(&view, "", Some(&impact));
+        assert!(side_html.contains("Added dependency in this change"));
+        assert!(side_html.contains("data-status=\"added\""));
+    }
+
+    #[test]
+    fn visibility_taxonomy_and_kind_badges_handle_properties_consts_and_languages() {
+        assert_eq!(normalize_entity_kind("property"), "property");
+        assert_eq!(normalize_entity_kind("field"), "field");
+        assert_eq!(normalize_entity_kind("constant"), "const");
+        assert_eq!(normalize_entity_kind("class_const"), "const");
+        assert_eq!(normalize_entity_kind("fn"), "function");
+        assert_eq!(entity_kind_badge("property"), "P");
+        assert_eq!(entity_kind_badge("field"), "P");
+        assert_eq!(entity_kind_badge("const"), "K");
+        assert_eq!(entity_kind_badge("method"), "M");
+        assert_eq!(entity_kind_badge("function"), "fn");
+        assert_eq!(letter("property"), "P");
+        assert_eq!(letter("field"), "P");
+        assert_eq!(letter("const"), "K");
+        assert_eq!(letter("method"), "m");
+        assert_eq!(letter("function"), "f");
+
+        assert_eq!(
+            normalize_visibility(Some("public")),
+            Some(("public", "◎ pub", "pub"))
+        );
+        assert_eq!(
+            normalize_visibility(Some("pub")),
+            Some(("public", "◎ pub", "pub"))
+        );
+        assert_eq!(
+            normalize_visibility(Some("export")),
+            Some(("public", "◎ pub", "pub"))
+        );
+        assert_eq!(
+            normalize_visibility(Some("protected")),
+            Some(("protected", "◈ prot", "prot"))
+        );
+        assert_eq!(
+            normalize_visibility(Some("protected(set)")),
+            Some(("protected", "◈ prot", "prot"))
+        );
+        assert_eq!(
+            normalize_visibility(Some("private")),
+            Some(("private", "⊗ priv", "priv"))
+        );
+        assert_eq!(
+            normalize_visibility(Some("#private")),
+            Some(("private", "⊗ priv", "priv"))
+        );
+        assert_eq!(
+            normalize_visibility(Some("private(set)")),
+            Some(("private", "⊗ priv", "priv"))
+        );
+        assert_eq!(
+            normalize_visibility(Some("pub(crate)")),
+            Some(("internal", "◉ pkg", "pkg"))
+        );
+        assert_eq!(
+            normalize_visibility(Some("pub(super)")),
+            Some(("internal", "◉ pkg", "pkg"))
+        );
+        assert_eq!(
+            normalize_visibility(Some("pub(in crate::api)")),
+            Some(("internal", "◉ pkg", "pkg"))
+        );
+        assert_eq!(
+            normalize_visibility(Some("package")),
+            Some(("internal", "◉ pkg", "pkg"))
+        );
+
+        let full_pill = visibility_pill_html(Some("pub(crate)"), false);
+        assert!(full_pill.contains("data-vis=\"internal\""));
+        assert!(full_pill.contains("data-compact=\"false\""));
+        assert!(full_pill.contains("title=\"Visibility: pub(crate)\""));
+        assert!(full_pill.contains("aria-label=\"Visibility: pub(crate)\""));
+        assert!(full_pill.contains(">◉ pkg</span>"));
+
+        let compact_pill = visibility_pill_html(Some("#private"), true);
+        assert!(compact_pill.contains("data-vis=\"private\""));
+        assert!(compact_pill.contains("data-compact=\"true\""));
+        assert!(compact_pill.contains("aria-label=\"Visibility: #private\""));
+        assert!(compact_pill.contains(">priv</span>"));
+
+        let narrowed = vis_delta_badge_html(Some("public"), Some("protected"), true);
+        assert!(narrowed.contains("data-status=\"broken_risk\""));
+        assert!(narrowed.contains("title=\"public → protected\""));
+        assert!(narrowed.contains(">vis!</span>"));
+
+        let widened = vis_delta_badge_html(Some("private"), Some("public"), false);
+        assert!(widened.contains("data-status=\"modified\""));
+        assert!(widened.contains("title=\"private → public\""));
+
+        let entity: CreatedEntity = serde_json::from_value(json!({
+            "id": "ce1",
+            "kind": "property",
+            "name": "$rate",
+            "visibility": "protected",
+            "modifiers": ["readonly"]
+        }))
+        .expect("deserialize CreatedEntity with visibility and modifiers");
+        assert_eq!(entity.visibility.as_deref(), Some("protected"));
+        assert_eq!(entity.modifiers, vec!["readonly"]);
+    }
+
+    #[test]
+    fn impact_card_renders_member_filters_visibility_warnings_and_accessible_groups() {
+        let impact = json!({
+            "path": "src/Billing/TaxService.php",
+            "status": "modified",
+            "exists": true,
+            "in_graph": true,
+            "summary": {
+                "uses_added": 1,
+                "uses_removed": 0,
+                "uses_unchanged": 1,
+                "callers_at_risk": 1,
+                "callers_impacted": 0,
+                "added_callers": 0,
+                "visibility_warnings": 2
+            },
+            "entities": [
+                {
+                    "id": "e-prop",
+                    "kind": "property",
+                    "change": "visibility_changed",
+                    "name": "$defaultRate",
+                    "line": 12,
+                    "visibility": "private",
+                    "previous_visibility": "public",
+                    "visibility_changed": true,
+                    "visibility_narrowed": true
+                },
+                {
+                    "id": "e-const",
+                    "kind": "const",
+                    "change": "modified",
+                    "name": "MAX_RATE",
+                    "line": 8,
+                    "visibility": "public",
+                    "signature_changed": true
+                }
+            ],
+            "uses": {
+                "added": [
+                    {
+                        "target": "src/Config/TaxRules.php",
+                        "resolved": true,
+                        "exists": true,
+                        "kind": "uses",
+                        "line": 22,
+                        "member_refs": [
+                            {
+                                "name": "rateFor",
+                                "kind": "method",
+                                "access": "call",
+                                "line": 22,
+                                "visibility": "public",
+                                "signature": "rateFor(string $country): float",
+                                "change": "added"
+                            }
+                        ],
+                        "target_members": [
+                            {
+                                "name": "currency",
+                                "kind": "property",
+                                "line": 5,
+                                "visibility": "protected",
+                                "change": "unchanged"
+                            }
+                        ]
+                    }
+                ],
+                "removed": [],
+                "unchanged": [
+                    {
+                        "target": "src/Shared/Clock.php",
+                        "resolved": true,
+                        "exists": true,
+                        "kind": "calls",
+                        "member_refs": [
+                            {
+                                "name": "now",
+                                "kind": "method",
+                                "access": "call",
+                                "visibility": "public",
+                                "change": "unchanged"
+                            }
+                        ],
+                        "target_members": []
+                    }
+                ]
+            },
+            "used_by": [
+                {
+                    "path": "src/Billing/Checkout.php",
+                    "exists": true,
+                    "impact": "broken_risk",
+                    "reason": "Direct property read becomes inaccessible",
+                    "links": 1,
+                    "used_members": [
+                        {
+                            "name": "$defaultRate",
+                            "kind": "property",
+                            "access": "read",
+                            "line": 48,
+                            "visibility": "private",
+                            "previous_visibility": "public",
+                            "visibility_narrowed": true,
+                            "access_risk": "inaccessible",
+                            "change": "visibility_changed"
+                        }
+                    ],
+                    "visibility_warnings": [
+                        {
+                            "member": "$defaultRate",
+                            "kind": "property",
+                            "visibility": "private",
+                            "previous_visibility": "public",
+                            "line": 48,
+                            "reason": "Narrowed from public to private; Checkout reads property directly"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let html = impact_side_html_with_filter(&impact, &V::Null, "modal", "all");
+        assert!(!html.contains("<summary><h4>"));
+        assert!(html.contains("class=\"graph-impact-group-title\""));
+        assert!(html.contains("!2 visibility warnings"));
+        assert!(html.contains("data-action=\"graph-map-member-filter\""));
+        assert!(html.contains("class=\"graph-impact-entity-name\">$defaultRate:12</span>"));
+        assert!(html.contains("class=\"graph-impact-entity-name\">MAX_RATE:8</span>"));
+        assert!(html.contains("data-member-kind=\"prop\""));
+        assert!(html.contains("data-member-kind=\"const\""));
+        assert!(html.contains("title=\"public → private\""));
+        assert!(html.contains("1 used · 1 exposed"));
+        assert!(html.contains("vis risk"));
+        assert!(html.contains("<details class=\"graph-impact-members\" open>"));
+        assert!(html.contains("class=\"graph-vis-warning-row\""));
+        assert!(
+            html.contains("<strong class=\"graph-vis-warning-member\">$defaultRate:48</strong>")
+        );
+        assert!(html.contains("<span class=\"graph-vis-warning-detail\">Narrowed from public to private; Checkout reads property directly</span>"));
+        assert!(html.contains("Checkout reads property directly"));
+        assert!(html.contains("data-narrowed=\"true\""));
+        assert!(html.contains("data-access=\"read\""));
+        assert!(html.contains("inaccessible"));
+
+        let used_only = impact_side_html_with_filter(&impact, &V::Null, "modal", "used");
+        assert!(used_only.contains("Called / Referenced"));
+        assert!(!used_only.contains("Exposed by target"));
+
+        let exposed_only = impact_side_html_with_filter(&impact, &V::Null, "modal", "exposed");
+        assert!(exposed_only.contains("Exposed by target"));
+        assert!(!exposed_only.contains("Called / Referenced"));
+
+        let risk_only = impact_side_html_with_filter(&impact, &V::Null, "modal", "risk");
+        assert!(risk_only.contains("rateFor"));
+        assert!(!risk_only.contains("now</span><span class=\"graph-member-access\""));
+
+        let mut click_state = fresh("");
+        let outcome = apply_click_action(
+            &mut click_state,
+            "graph-map-member-filter",
+            &json!({ "filter": "risk" }),
+            MODAL_SURFACE,
+            false,
+            false,
+        );
+        assert!(outcome.handled);
+        assert!(outcome.rerender);
+        assert!(!outcome.reload);
+        assert_eq!(click_state["member_filter"], "risk");
+    }
+
+    #[test]
+    fn normal_graph_map_surfaces_render_visibility_and_member_disclosures() {
+        let view_overview = json!({
+            "project_id": "proj",
+            "scope": "src/Billing/Invoice.php",
+            "nodes": [
+                {
+                    "path": "src/Billing/Invoice.php#L10:total",
+                    "name": "total",
+                    "kind": "method",
+                    "symbol": true,
+                    "inside": true,
+                    "visibility": "public",
+                    "line": 10,
+                    "links": 1
+                },
+                {
+                    "path": "src/Billing/Invoice.php#L4:$subtotal",
+                    "name": "$subtotal",
+                    "kind": "property",
+                    "symbol": true,
+                    "inside": true,
+                    "visibility": "protected",
+                    "line": 4,
+                    "links": 1
+                },
+                {
+                    "path": "src/Billing/Invoice.php#L3:TAX_RATE",
+                    "name": "TAX_RATE",
+                    "kind": "const",
+                    "symbol": true,
+                    "inside": true,
+                    "visibility": "pub(crate)",
+                    "line": 3,
+                    "links": 0
+                }
+            ],
+            "edges": [],
+            "frames": [],
+            "declared_members": [
+                {
+                    "name": "$subtotal",
+                    "kind": "property",
+                    "visibility": "protected",
+                    "line": 4,
+                    "signature": "protected float $subtotal"
+                },
+                {
+                    "name": "VERSION",
+                    "kind": "const",
+                    "visibility": "public",
+                    "line": 2
+                }
+            ]
+        });
+
+        let focus = LiveFocus {
+            phase: "editing".to_owned(),
+            summary: "Added tax property".to_owned(),
+            target_folders: vec![],
+            target_paths: vec!["src/Billing/Invoice.php".to_owned()],
+            target_nodes: vec![],
+            created_entities: vec![CreatedEntity {
+                id: "ce-prop".to_owned(),
+                kind: "property".to_owned(),
+                name: "$taxAmount".to_owned(),
+                parent: "Invoice".to_owned(),
+                path: "src/Billing/Invoice.php".to_owned(),
+                folder: "src/Billing".to_owned(),
+                line: 6,
+                change: Some("created".to_owned()),
+                visibility: Some("private".to_owned()),
+                modifiers: vec![],
+            }],
+        };
+        let rendered = canvas_with_overlays(
+            &view_overview,
+            "session-graph",
+            CanvasOverlayContext {
+                live_focus: Some(&focus),
+                changes: None,
+                impact: None,
+            },
+        );
+        assert!(rendered.html.contains("data-visibility=\"protected\""));
+        assert!(rendered.html.contains("data-visibility=\"internal\""));
+        assert!(rendered.html.contains("visibility pub(crate)"));
+        assert!(rendered.html.contains(">P</span>"));
+        assert!(rendered.html.contains(">K</span>"));
+        assert!(rendered.html.contains("data-compact=\"true\""));
+        assert!(rendered.html.contains(">priv</span>"));
+
+        let strip = focus_strip_chips_html(&focus);
+        assert!(strip.contains("data-vis=\"private\""));
+        assert!(strip.contains("private property $taxAmount"));
+
+        let fs_overview = file_side(&view_overview);
+        assert!(fs_overview.contains("<details class=\"graph-impact-members\" open>"));
+        assert!(fs_overview.contains("File properties &amp; methods (2)"));
+        assert!(
+            fs_overview.contains("class=\"graph-map-row graph-member-row graph-member-row-btn\"")
+        );
+        assert!(fs_overview.contains("data-action=\"graph-map-go\""));
+        assert!(fs_overview.contains("VERSION"));
+
+        let view_focused = json!({
+            "project_id": "proj",
+            "scope": "src/Billing/Invoice.php",
+            "focus": {
+                "path": "src/Billing/Invoice.php#L4:$subtotal",
+                "file": "src/Billing/Invoice.php",
+                "name": "$subtotal",
+                "kind": "property",
+                "owner": "Invoice",
+                "symbol": true,
+                "visibility": "protected",
+                "line": 4,
+                "out": 1,
+                "in": 1,
+                "uses": [
+                    {
+                        "path": "src/Money/Amount.php",
+                        "name": "Amount.php",
+                        "links": 1,
+                        "visibility": "public",
+                        "referenced_members": [
+                            { "name": "cents", "kind": "field", "access": "read", "visibility": "public" }
+                        ],
+                        "declared_members": [
+                            { "name": "currency", "kind": "const", "visibility": "public" }
+                        ]
+                    }
+                ],
+                "used_by": []
+            }
+        });
+        let fs_focused = file_side(&view_focused);
+        assert!(fs_focused.contains("Property of Invoice"));
+        assert!(fs_focused.contains("class=\"graph-member-meta\""));
+        assert!(fs_focused.contains("Referenced members (1)"));
+        assert!(fs_focused.contains("Exposed members (1)"));
+        assert!(fs_focused.contains("cents"));
+
+        let changes = json!({
+            "files": [{
+                "path": "src/Billing/Invoice.php",
+                "status": "modified",
+                "exists": true,
+                "entities": [{
+                    "id": "ent1",
+                    "kind": "const",
+                    "change": "modified",
+                    "name": "MAX_ITEMS",
+                    "line": 5,
+                    "visibility": "private",
+                    "previous_visibility": "public",
+                    "visibility_narrowed": true
+                }]
+            }]
+        });
+        let ch = changes_side_html(&changes, "all", "", "session");
+        assert!(ch.contains("class=\"graph-changes-entity-kind\">K</span>"));
+        assert!(ch.contains("data-vis=\"private\""));
+        assert!(ch.contains(">vis!</span>"));
+    }
+
+    #[test]
+    fn link_modal_renders_property_const_letters_visibility_and_warnings() {
+        let view = json!({
+            "mode": "link",
+            "from": { "path": "src/Billing/Checkout.php", "name": "Checkout.php", "what": "file" },
+            "to": { "path": "src/Billing/Invoice.php", "name": "Invoice.php", "what": "file" },
+            "users": {
+                "names": 1,
+                "files": 1,
+                "groups": [
+                    {
+                        "path": "src/Billing/Checkout.php",
+                        "name": "Checkout.php",
+                        "referenced_members": [
+                            { "name": "$total", "kind": "property", "access": "read", "visibility": "private", "access_risk": "inaccessible" }
+                        ],
+                        "names": [
+                            { "key": "src/Billing/Checkout.php#L18:apply", "name": "apply", "kind": "method", "visibility": "public", "line": 18, "links": 2 }
+                        ]
+                    }
+                ]
+            },
+            "used": {
+                "names": 2,
+                "files": 1,
+                "groups": [
+                    {
+                        "path": "src/Billing/Invoice.php",
+                        "name": "Invoice.php",
+                        "declared_members": [
+                            { "name": "$total", "kind": "property", "visibility": "private", "line": 7 },
+                            { "name": "PRECISION", "kind": "const", "visibility": "public", "line": 3 }
+                        ],
+                        "names": [
+                            { "key": "src/Billing/Invoice.php#L7:$total", "name": "$total", "kind": "property", "visibility": "private", "line": 7, "links": 1 },
+                            { "key": "src/Billing/Invoice.php#L3:PRECISION", "name": "PRECISION", "kind": "const", "visibility": "public", "line": 3, "links": 1 }
+                        ]
+                    }
+                ]
+            },
+            "edges": [
+                {
+                    "from": "src/Billing/Checkout.php#L18:apply",
+                    "to": "src/Billing/Invoice.php#L7:$total",
+                    "kind": "reads",
+                    "access_risk": "inaccessible"
+                },
+                {
+                    "from": "src/Billing/Checkout.php#L18:apply",
+                    "to": "src/Billing/Invoice.php#L3:PRECISION",
+                    "kind": "uses_const"
+                }
+            ],
+            "member_refs": [
+                { "name": "$total", "kind": "property", "access": "read", "visibility": "private", "access_risk": "inaccessible" }
+            ],
+            "visibility_warnings": [
+                {
+                    "member": "$total",
+                    "kind": "property",
+                    "visibility": "private",
+                    "previous_visibility": "public",
+                    "line": 7,
+                    "reason": "Property became private"
+                }
+            ],
+            "kinds": [{ "kind": "reads", "links": 1 }, { "kind": "uses_const", "links": 1 }]
+        });
+
+        let canvas = link_canvas_with(&view, "src/Billing/Checkout.php#L18:apply", None);
+        assert!(canvas.contains(">P</span>"));
+        assert!(canvas.contains(">K</span>"));
+        assert!(canvas.contains("data-visibility=\"private\""));
+        assert!(canvas.contains("data-compact=\"true\""));
+        assert!(canvas.contains(">priv</span>"));
+        assert!(canvas.contains("public → private"));
+        assert!(
+            canvas.contains("risk: Property became private")
+                || canvas.contains("risk: inaccessible")
+        );
+        assert!(canvas.contains("visibility private"));
+
+        let side = link_side_with(&view, "src/Billing/Checkout.php#L18:apply", None);
+        assert!(side.contains("class=\"graph-member-meta\""));
+        assert!(side.contains("Uses here"));
+        assert!(side.contains("data-member-kind=\"prop\""));
+        assert!(side.contains("data-member-kind=\"const\""));
+        assert!(side.contains(">vis!</span>"));
+        assert!(side.contains("Property became private"));
+        assert!(side.contains("Checkout.php (Caller)"));
+        assert!(side.contains("Invoice.php (Target)"));
+    }
+
+    #[test]
+    fn member_kind_fallback_neighbor_file_focus_and_changes_warnings() {
+        let prop_sym = json!({ "name": "rate", "kind": "name", "member_kind": "property", "owner": "TaxRules" });
+        let field_sym =
+            json!({ "name": "cents", "kind": "name", "member_kind": "field", "owner": "Money" });
+        let const_sym =
+            json!({ "name": "MAX", "kind": "name", "member_kind": "const", "owner": "TaxRules" });
+        assert_eq!(what(&prop_sym), "property of TaxRules");
+        assert_eq!(what(&field_sym), "field of Money");
+        assert_eq!(what(&const_sym), "constant of TaxRules");
+
+        let canvas_view = json!({
+            "project_id": "proj",
+            "scope": "src/Billing/TaxRules.php",
+            "nodes": [
+                {
+                    "path": "src/Billing/TaxRules.php#L4:rate",
+                    "name": "rate",
+                    "kind": "name",
+                    "member_kind": "property",
+                    "owner": "TaxRules",
+                    "symbol": true,
+                    "inside": true,
+                    "visibility": "protected",
+                    "line": 4,
+                    "links": 1
+                },
+                {
+                    "path": "src/Billing/TaxRules.php#L2:MAX",
+                    "name": "MAX",
+                    "kind": "name",
+                    "member_kind": "const",
+                    "owner": "TaxRules",
+                    "symbol": true,
+                    "inside": true,
+                    "visibility": "public",
+                    "line": 2,
+                    "links": 1
+                }
+            ],
+            "edges": [
+                { "from": "src/Billing/TaxRules.php#L4:rate", "to": "src/Billing/TaxRules.php#L2:MAX", "links": 1 }
+            ],
+            "frames": []
+        });
+        let rendered =
+            canvas_with_overlays(&canvas_view, "graph-map", CanvasOverlayContext::default());
+        assert!(rendered.html.contains(">P</span>"));
+        assert!(rendered.html.contains(">K</span>"));
+        assert!(rendered.html.contains("property of TaxRules"));
+        assert!(rendered.html.contains("constant of TaxRules"));
+
+        let link_view = json!({
+            "mode": "link",
+            "from": { "path": "src/Billing/Checkout.php", "name": "Checkout.php", "what": "file" },
+            "to": { "path": "src/Billing/TaxRules.php", "name": "TaxRules.php", "what": "file" },
+            "users": {
+                "names": 1,
+                "files": 1,
+                "groups": [{
+                    "path": "src/Billing/Checkout.php",
+                    "name": "Checkout.php",
+                    "names": [
+                        { "key": "src/Billing/Checkout.php#L10:calc", "name": "calc", "kind": "method", "visibility": "public", "line": 10, "links": 2 }
+                    ]
+                }]
+            },
+            "used": {
+                "names": 2,
+                "files": 1,
+                "groups": [{
+                    "path": "src/Billing/TaxRules.php",
+                    "name": "TaxRules.php",
+                    "names": [
+                        { "key": "src/Billing/TaxRules.php#L4:rate", "name": "rate", "kind": "name", "member_kind": "field", "owner": "TaxRules", "visibility": "private", "line": 4, "links": 1 },
+                        { "key": "src/Billing/TaxRules.php#L2:MAX", "name": "MAX", "kind": "name", "member_kind": "const", "owner": "TaxRules", "visibility": "public", "line": 2, "links": 1 }
+                    ]
+                }]
+            },
+            "edges": [
+                { "from": "src/Billing/Checkout.php#L10:calc", "to": "src/Billing/TaxRules.php#L4:rate", "kind": "reads" },
+                { "from": "src/Billing/Checkout.php#L10:calc", "to": "src/Billing/TaxRules.php#L2:MAX", "kind": "uses_const" }
+            ],
+            "kinds": []
+        });
+        let link_canvas_html =
+            link_canvas_with(&link_view, "src/Billing/Checkout.php#L10:calc", None);
+        assert!(link_canvas_html.contains(">P</span>"));
+        assert!(link_canvas_html.contains(">K</span>"));
+        assert!(link_canvas_html.contains("field of TaxRules"));
+        assert!(link_canvas_html.contains("constant of TaxRules"));
+
+        let link_side_html = link_side_with(&link_view, "src/Billing/Checkout.php#L10:calc", None);
+        assert!(link_side_html.contains("data-member-kind=\"field\""));
+        assert!(link_side_html.contains("data-member-kind=\"const\""));
+
+        let symbol_focus_view = json!({
+            "project_id": "proj",
+            "scope": "src/Billing/TaxRules.php",
+            "focus": {
+                "path": "src/Billing/TaxRules.php#L4:rate",
+                "file": "src/Billing/TaxRules.php",
+                "name": "rate",
+                "kind": "name",
+                "member_kind": "property",
+                "owner": "TaxRules",
+                "symbol": true,
+                "visibility": "protected",
+                "line": 4,
+                "out": 1,
+                "in": 0,
+                "members": [
+                    { "path": "src/Billing/TaxRules.php#L2:MAX", "name": "MAX", "kind": "name", "member_kind": "const", "visibility": "public", "line": 2 }
+                ],
+                "uses": [
+                    { "path": "src/Money/Amount.php#L3:cents", "name": "cents", "file": "src/Money/Amount.php", "kind": "name", "member_kind": "field", "symbol": true, "visibility": "public", "relation": "reads" }
+                ],
+                "used_by": []
+            }
+        });
+        let fs_sym = file_side(&symbol_focus_view);
+        assert!(fs_sym.contains("Property of TaxRules"));
+        assert!(fs_sym.contains("class=\"graph-member-meta\""));
+        assert!(fs_sym.contains("data-member-kind=\"prop\""));
+        assert!(fs_sym.contains("data-member-kind=\"const\""));
+        assert!(fs_sym.contains("data-member-kind=\"field\""));
+
+        let neighbor_file_view = json!({
+            "project_id": "proj",
+            "scope": "src/Billing/Checkout.php",
+            "focus": {
+                "path": "src/Billing/TaxRules.php",
+                "name": "TaxRules.php",
+                "symbol": false,
+                "role": "used",
+                "symbols": 2,
+                "declared_members": [
+                    { "name": "rate", "kind": "property", "visibility": "private", "line": 4 }
+                ],
+                "referenced_members": [
+                    { "name": "rate", "kind": "property", "access": "read", "visibility": "private", "access_risk": "inaccessible" }
+                ],
+                "visibility_warnings": [
+                    { "member": "rate", "kind": "property", "visibility": "private", "previous_visibility": "public", "line": 4, "reason": "Narrowed visibility breaks Checkout" }
+                ],
+                "uses": [],
+                "used_by": []
+            }
+        });
+        let fs_neighbor = file_side(&neighbor_file_view);
+        assert!(fs_neighbor.contains("class=\"graph-vis-warning-box\""));
+        assert!(fs_neighbor.contains("Narrowed visibility breaks Checkout"));
+        assert!(fs_neighbor.contains("<details class=\"graph-impact-members\" open>"));
+        assert!(fs_neighbor.contains("Referenced members (1)"));
+        assert!(fs_neighbor.contains("Declared members (1)"));
+
+        let changes = json!({
+            "total_files": 1,
+            "modified_entities": 1,
+            "files": [{
+                "path": "src/Billing/TaxRules.php",
+                "status": "modified",
+                "exists": true,
+                "summary": {
+                    "uses_added": 0,
+                    "uses_removed": 0,
+                    "callers_at_risk": 1,
+                    "visibility_warnings": 2
+                },
+                "entities": []
+            }]
+        });
+        let ch = changes_side_html(&changes, "all", "", "session");
+        assert!(ch.contains("!2 visibility warnings"));
+    }
+
+    #[test]
+    fn scaled_supports_zoom_in_and_out_without_negative_zero() {
+        assert_eq!(
+            scaled((700.0, 300.0), 1.5),
+            "width:700px;height:300px;transform:scale(1.5000);transform-origin:0 0;margin:0 350px 150px 0"
+        );
+        assert_eq!(
+            scaled((0.0, 400.0), 0.5),
+            "width:0px;height:400px;transform:scale(0.5000);transform-origin:0 0;margin:0 0px -200px 0"
+        );
+    }
+
+    #[test]
+    fn wheel_zoom_factor_handles_directions_modes_and_horizontal_swipes() {
+        assert_eq!(wheel_zoom_factor(0.0, 0), None);
+        assert_eq!(wheel_zoom_factor(f64::NAN, 0), None);
+        assert_eq!(wheel_zoom_factor(f64::INFINITY, 0), None);
+
+        let up = wheel_zoom_factor(-100.0, 0).expect("wheel up factor");
+        let down = wheel_zoom_factor(100.0, 0).expect("wheel down factor");
+        assert!(up > 1.15 && up < 1.35);
+        assert!((up * down - 1.0).abs() < 1e-9);
+
+        let line_up = wheel_zoom_factor(-3.0, 1).expect("line wheel up");
+        let page_up = wheel_zoom_factor(-1.0, 2).expect("page wheel up");
+        assert!(line_up > 1.0);
+        assert!(page_up > 1.0);
+
+        let clamped = wheel_zoom_factor(-5000.0, 0).expect("clamped zoom");
+        assert!(clamped <= 2.0);
+    }
+
+    #[test]
+    fn scroll_after_zoom_keeps_cursor_anchor_stationary() {
+        let (left, top) = scroll_after_zoom(50.0, 40.0, 1.0, 2.0, (100.0, 80.0));
+        assert!((left - 200.0).abs() < 1e-9);
+        assert!((top - 160.0).abs() < 1e-9);
+        assert!(((left + 100.0) / 2.0 - (50.0 + 100.0)).abs() < 1e-9);
+
+        let (clamped_l, clamped_t) = scroll_after_zoom(10.0, 10.0, 2.0, 0.25, (200.0, 200.0));
+        assert_eq!(clamped_l, 0.0);
+        assert_eq!(clamped_t, 0.0);
+    }
+
+    #[test]
+    fn normalize_edge_arrow_kind_maps_all_canonical_aliases() {
+        for (raw, expected) in [
+            ("calls", "calls"),
+            ("call", "calls"),
+            ("instantiates", "calls"),
+            ("indirect_call", "calls"),
+            ("CALL", "calls"),
+            ("unknown_rel", "calls"),
+            ("", "calls"),
+            ("imports", "imports"),
+            ("imports_from", "imports"),
+            ("includes", "imports"),
+            ("requires", "imports"),
+            ("re_exports", "imports"),
+            ("crate_depends_on", "imports"),
+            ("depends_on", "imports"),
+            ("Imports-From", "imports"),
+            ("extends", "extends"),
+            ("inherits", "extends"),
+            ("implements", "implements"),
+            ("uses_trait", "implements"),
+            ("trait", "implements"),
+            ("writes", "writes"),
+            ("mutates", "writes"),
+            ("sets", "writes"),
+            ("reads", "reads"),
+            ("static_read", "reads"),
+            ("uses_const", "reads"),
+            ("const", "reads"),
+            ("references_constant", "reads"),
+            ("uses_static_prop", "reads"),
+            ("uses", "uses"),
+            ("references", "uses"),
+            ("type_hint", "uses"),
+            ("type hint", "uses"),
+            ("uses_component", "uses"),
+            ("binds_method", "uses"),
+            ("bound_to", "uses"),
+        ] {
+            assert_eq!(normalize_edge_arrow_kind(raw), expected, "raw={raw:?}");
+        }
+    }
+
+    #[test]
+    fn arrow_kind_for_edge_precedence_and_fallbacks() {
+        let extends_wins = json!({
+            "kinds": [
+                {"kind": "calls", "links": 10},
+                {"kind": "implements", "links": 5},
+                {"kind": "extends", "links": 1}
+            ]
+        });
+        assert_eq!(arrow_kind_for_edge(&extends_wins), "extends");
+
+        let implements_wins = json!({
+            "kinds": [
+                {"kind": "writes", "links": 8},
+                {"kind": "implements", "links": 1}
+            ]
+        });
+        assert_eq!(arrow_kind_for_edge(&implements_wins), "implements");
+
+        let highest_count = json!({
+            "kinds": [
+                {"kind": "imports", "links": 9},
+                {"kind": "uses", "links": 1},
+                {"kind": "calls", "links": 3},
+                {"kind": "reads", "links": 4}
+            ]
+        });
+        assert_eq!(arrow_kind_for_edge(&highest_count), "reads");
+
+        let tie_writes = json!({
+            "kinds": [
+                {"kind": "calls", "links": 2},
+                {"kind": "writes", "links": 2},
+                {"kind": "reads", "links": 2}
+            ]
+        });
+        assert_eq!(arrow_kind_for_edge(&tie_writes), "writes");
+
+        let tie_calls = json!({
+            "kinds": [
+                {"kind": "reads", "links": 2},
+                {"kind": "calls", "links": 2},
+                {"kind": "uses", "links": 2}
+            ]
+        });
+        assert_eq!(arrow_kind_for_edge(&tie_calls), "calls");
+
+        let tie_reads = json!({
+            "kinds": [
+                {"kind": "uses", "links": 2},
+                {"kind": "reads", "links": 2}
+            ]
+        });
+        assert_eq!(arrow_kind_for_edge(&tie_reads), "reads");
+
+        let import_plus_call = json!({
+            "kinds": [
+                {"kind": "imports", "links": 1},
+                {"kind": "calls", "links": 1}
+            ]
+        });
+        assert_eq!(arrow_kind_for_edge(&import_plus_call), "calls");
+
+        let imports_alone = json!({
+            "kinds": [{"kind": "imports_from", "links": 2}]
+        });
+        assert_eq!(arrow_kind_for_edge(&imports_alone), "imports");
+
+        let empty_kinds_uses_kind = json!({"kinds": [], "kind": "uses_const"});
+        assert_eq!(arrow_kind_for_edge(&empty_kinds_uses_kind), "reads");
+
+        let empty_kinds_uses_tie = json!({"kinds": [], "tie": "implements and holds"});
+        assert_eq!(arrow_kind_for_edge(&empty_kinds_uses_tie), "implements");
+
+        assert_eq!(arrow_kind_for_edge(&json!({})), "calls");
+    }
+
+    #[test]
+    fn canvas_with_overlays_renders_distinct_markers_attributes_and_breakdowns() {
+        let view = json!({
+            "scope": "src",
+            "architecture": {"rules": []},
+            "nodes": [
+                {"path": "src/A.php", "name": "A", "folder": false},
+                {"path": "src/B.php", "name": "B", "folder": false},
+                {"path": "src/C.php", "name": "C", "folder": false},
+                {"path": "src/D.php", "name": "D", "folder": false},
+                {"path": "src/E.php", "name": "E", "folder": false},
+                {"path": "src/F.php", "name": "F", "folder": false},
+                {"path": "src/G.php", "name": "G", "folder": false},
+                {"path": "src/H.php", "name": "H", "folder": false}
+            ],
+            "edges": [
+                {
+                    "from": "src/A.php",
+                    "to": "src/B.php",
+                    "links": 3,
+                    "guessed": 0,
+                    "kinds": [{"kind": "calls", "links": 2}, {"kind": "imports", "links": 1}]
+                },
+                {
+                    "from": "src/B.php",
+                    "to": "src/C.php",
+                    "links": 2,
+                    "guessed": 0,
+                    "kinds": [{"kind": "calls", "links": 1}, {"kind": "instantiates", "links": 1}]
+                },
+                {
+                    "from": "src/C.php",
+                    "to": "src/D.php",
+                    "links": 1,
+                    "guessed": 0,
+                    "kinds": [{"kind": "imports_from", "links": 1}]
+                },
+                {
+                    "from": "src/D.php",
+                    "to": "src/E.php",
+                    "links": 1,
+                    "guessed": 0,
+                    "kinds": [{"kind": "extends", "links": 1}]
+                },
+                {
+                    "from": "src/E.php",
+                    "to": "src/F.php",
+                    "links": 1,
+                    "guessed": 0,
+                    "kinds": [{"kind": "implements", "links": 1}]
+                },
+                {
+                    "from": "src/F.php",
+                    "to": "src/G.php",
+                    "links": 1,
+                    "guessed": 0,
+                    "kinds": [{"kind": "writes", "links": 1}]
+                },
+                {
+                    "from": "src/G.php",
+                    "to": "src/H.php",
+                    "links": 1,
+                    "guessed": 0,
+                    "kinds": [{"kind": "reads", "links": 1}]
+                },
+                {
+                    "from": "src/H.php",
+                    "to": "src/A.php",
+                    "links": 1,
+                    "guessed": 0,
+                    "kinds": [{"kind": "uses", "links": 1}]
+                },
+                {
+                    "from": "src/H.php",
+                    "to": "src/B.php",
+                    "links": 1,
+                    "guessed": 0,
+                    "architecture_violation": 1,
+                    "kinds": [{"kind": "extends", "links": 1}]
+                }
+            ]
+        });
+
+        let html = canvas_with(&view, "session-graph", None).html;
+        assert_eq!(html.matches("<marker ").count(), 8);
+        for suffix in [
+            "",
+            "-imports",
+            "-extends",
+            "-implements",
+            "-writes",
+            "-reads",
+            "-uses",
+            "-against",
+        ] {
+            assert!(
+                html.contains(&format!("<marker id=\"session-graph-arrow{suffix}\"")),
+                "missing marker suffix {suffix} in {html}"
+            );
+        }
+        assert!(html.contains("<path d=\"M1 1 L7.5 4 L1 7\"/>"));
+        assert!(html.contains("<path d=\"M0.8 0.8 L7.8 4 L0.8 7.2 Z\"/>"));
+        assert!(html.contains("<path d=\"M0.5 4 L4 1 L7.5 4 L4 7 Z\"/>"));
+        assert!(html.contains("<path d=\"M0.8 4 L4 1.2 L7.2 4 L4 6.8 Z\"/>"));
+        assert!(html.contains("<path d=\"M0.5 1 L7.8 4 L0.5 7 L2.4 4 z\"/>"));
+
+        // Multi-kind vs alias-only edges
+        assert!(html.contains(
+            "data-ends=\"0 1\" d=\"M"
+        ) && html.contains("data-edge-kind=\"calls\" data-edge-multi=\"true\" stroke=\"url(#session-graph-flow-"));
+        assert!(html.contains(
+            "marker-end=\"url(#session-graph-arrow)\"><title>A uses B · 3 links · calls 2, imports 1</title>"
+        ));
+        assert!(html.contains(
+            "data-action=\"graph-map-link\" data-payload=\"{&quot;from&quot;:&quot;src/A.php&quot;,&quot;to&quot;:&quot;src/B.php&quot;}\"><title>A uses B · calls 2, imports 1 · select to see what makes up this link</title>"
+        ));
+        // calls + instantiates collapse into 1 canonical kind -> not multi
+        assert!(html.contains("<title>B uses C · 2 links · calls 1, instantiates 1</title>"));
+        assert_eq!(html.matches("data-edge-multi=\"true\"").count(), 1);
+
+        for kind in [
+            "imports",
+            "extends",
+            "implements",
+            "writes",
+            "reads",
+            "uses",
+        ] {
+            assert!(html.contains(&format!("data-edge-kind=\"{kind}\"")));
+            assert!(html.contains(&format!("marker-end=\"url(#session-graph-arrow-{kind})\"")));
+        }
+        // Violation keeps against arrowhead while reporting normalized semantic kind.
+        assert!(html.contains("graph-map-edge-against\" data-ends=\"7 1\""));
+        assert!(html.contains("marker-end=\"url(#session-graph-arrow-against)\""));
+    }
+
+    #[test]
+    fn link_canvas_with_renders_kind_markers_and_attributes() {
+        let view = json!({
+            "from": {"path": "src/A.php", "name": "A.php"},
+            "to": {"path": "src/B.php", "name": "B.php"},
+            "users": {"groups": [{
+                "path": "src/A.php",
+                "name": "A.php",
+                "names": [
+                    {"key": "src/A.php#L10:.fnA()", "name": "fnA", "kind": "method", "line": 10, "links": 3},
+                    {"key": "src/A.php#L2:A", "name": "A", "kind": "type", "line": 2, "links": 4}
+                ]
+            }]},
+            "used": {"groups": [{
+                "path": "src/B.php",
+                "name": "B.php",
+                "names": [
+                    {"key": "src/B.php#L1:helper()", "name": "helper", "kind": "function", "line": 1, "links": 2},
+                    {"key": "src/B.php#L5:Base", "name": "Base", "kind": "type", "line": 5, "links": 1},
+                    {"key": "src/B.php#L9:T", "name": "T", "kind": "type", "line": 9, "links": 1},
+                    {"key": "src/B.php#L12:$prop", "name": "prop", "kind": "property", "line": 12, "links": 1},
+                    {"key": "src/B.php#L14:CONST_X", "name": "CONST_X", "kind": "const", "line": 14, "links": 1},
+                    {"key": "src/B.php#L18:TypeRef", "name": "TypeRef", "kind": "type", "line": 18, "links": 1}
+                ]
+            }]},
+            "edges": [
+                {"from": "src/A.php#L10:.fnA()", "to": "src/B.php#L1:helper()", "kind": "calls", "guessed": false},
+                {"from": "src/A.php#L2:A", "to": "src/B.php#L1:helper()", "kind": "imports_from", "guessed": false},
+                {"from": "src/A.php#L2:A", "to": "src/B.php#L5:Base", "kind": "extends", "guessed": false},
+                {"from": "src/A.php#L2:A", "to": "src/B.php#L9:T", "kind": "uses_trait", "guessed": false},
+                {"from": "src/A.php#L10:.fnA()", "to": "src/B.php#L12:$prop", "kind": "writes", "guessed": false},
+                {"from": "src/A.php#L10:.fnA()", "to": "src/B.php#L14:CONST_X", "kind": "uses_const", "guessed": false},
+                {"from": "src/A.php#L2:A", "to": "src/B.php#L18:TypeRef", "kind": "references", "guessed": false}
+            ]
+        });
+
+        let html = link_canvas_with(&view, "", None);
+        assert_eq!(html.matches("<marker ").count(), 7);
+        assert!(!html.contains("graph-link-arrow-against"));
+        assert!(html.contains("data-edge-kind=\"calls\""));
+        assert!(html.contains("marker-end=\"url(#graph-link-arrow)\""));
+        for kind in [
+            "imports",
+            "extends",
+            "implements",
+            "writes",
+            "reads",
+            "uses",
+        ] {
+            assert!(html.contains(&format!("<marker id=\"graph-link-arrow-{kind}\"")));
+            assert!(html.contains(&format!("data-edge-kind=\"{kind}\"")));
+            assert!(html.contains(&format!("marker-end=\"url(#graph-link-arrow-{kind})\"")));
+        }
+        assert!(html.contains("<title>A uses helper · imports from</title>"));
+        assert!(html.contains("<title>fnA uses CONST_X · uses const</title>"));
+    }
+
+    #[test]
+    fn arrow_kinds_legend_html_and_existing_legend_endings_preserved() {
+        let html = arrow_kinds_legend_html();
+        assert_eq!(html.matches("class=\"graph-arrow-swatch\"").count(), 7);
+        assert_eq!(html.matches("aria-hidden=\"true\"").count(), 7);
+        assert!(!html.contains(" id=\""));
+        for (kind, label) in [
+            ("calls", "Calls"),
+            ("imports", "Imports"),
+            ("extends", "Extends"),
+            ("implements", "Implements"),
+            ("writes", "Writes"),
+            ("reads", "Reads"),
+            ("uses", "Uses"),
+        ] {
+            assert!(html.contains(&format!("data-edge-kind=\"{kind}\"")));
+            assert!(html.contains(&format!("<span>{label}</span>")));
+        }
+        assert!(html.contains("stroke-dasharray=\"8 4\""));
+        assert!(html.contains("stroke-dasharray=\"6 3 2 3\""));
+        assert!(html.contains("stroke-dasharray=\"2 3\""));
+
+        let view = json!({"scope": "src", "nodes": [], "edges": []});
+        assert!(legend(&view, false)
+            .ends_with("Dotted: against the main direction, closing a cycle (↻)."));
     }
 }

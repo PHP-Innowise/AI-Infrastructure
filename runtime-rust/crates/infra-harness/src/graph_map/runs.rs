@@ -196,6 +196,64 @@ impl Index {
             }
         }
     }
+
+    /// Attaches live `GraphFocus` metadata (`target_paths`, `target_folders`, `target_nodes`,
+    /// and `created_entities`) under `view["graph_focus"]` and `view["run"]["graph_focus"]`,
+    /// preserving `view["focus"]` for the user-selected inspection panel.
+    pub fn overlay_graph_focus(&self, view: &mut Value, focus: &crate::graph_live::GraphFocus) {
+        let focus_json = serde_json::to_value(focus).unwrap_or(Value::Null);
+        view["graph_focus"] = focus_json.clone();
+        view["run"]["graph_focus"] = focus_json;
+
+        let exact_targets: BTreeSet<&str> = focus
+            .target_paths
+            .iter()
+            .chain(focus.target_folders.iter())
+            .chain(focus.target_nodes.iter())
+            .map(String::as_str)
+            .collect();
+
+        let is_subtree_hit = |folder: &str, candidate: &str| {
+            candidate == folder
+                || candidate
+                    .strip_prefix(folder)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        };
+
+        for place in view
+            .pointer_mut("/nodes")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            let Some(path) = place["path"].as_str().map(str::to_owned) else {
+                continue;
+            };
+            let is_folder = place["folder"] == true;
+            let targeted = exact_targets.contains(path.as_str())
+                || (is_folder
+                    && focus
+                        .target_paths
+                        .iter()
+                        .chain(focus.target_folders.iter())
+                        .any(|cand| is_subtree_hit(&path, cand)))
+                || focus
+                    .created_entities
+                    .iter()
+                    .any(|e| e.path == path || (is_folder && is_subtree_hit(&path, &e.path)));
+            if targeted {
+                place["focus_target"] = json!(true);
+            }
+            let created_here = focus
+                .created_entities
+                .iter()
+                .filter(|e| e.path == path || (is_folder && is_subtree_hit(&path, &e.path)))
+                .count();
+            if created_here > 0 {
+                place["created_entities_count"] = json!(created_here);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
