@@ -48,6 +48,12 @@ edition's own files remain in that edition's changelog.
   task being launched, not from the only chat of the project that happens to
   be starting, so a system dispatch into that project no longer receives it.
 
+- Explain a node or a link of the Harness dependency map from its context
+  menu (right click, the Menu key or Shift+F10): a read-only session of the
+  chosen provider answers from the graph evidence and the source. The session
+  stops after five minutes, and closing the window or asking for another
+  explanation stops it.
+
 - Attribute literal, successful `sed -n` reads on the Harness run map and
   open the recorded shell event from the comparison.
 

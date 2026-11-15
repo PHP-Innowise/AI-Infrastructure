@@ -2112,6 +2112,13 @@ the links it has with the change.
   for this project. Select a place to include it and its listed incoming and
   outgoing neighbors. Where available, the file also includes test candidates
   for the selected file. The attachment is sent with the next message.
+- **Explain node** or **Explain link** is in the context menu of a box or a
+  link: right click it, or press the Menu key or Shift+F10 on it. A Plan
+  session of the provider chosen for the next session answers from the graph
+  evidence of that place and from the source, without the project's
+  accelerator context, and appears in the session list like any other. It stops
+  after five minutes; closing the window or asking for another explanation
+  stops it sooner.
 - **Commits and pull requests…** opens a picker with three lists, as an editor's
   history and pull request views have them. **Commits** is the history of the
   checked-out branch, of every branch or of one local branch: message, the branches

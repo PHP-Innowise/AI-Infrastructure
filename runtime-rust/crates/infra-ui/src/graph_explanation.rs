@@ -8,7 +8,12 @@ use web_sys::{Element, HtmlElement, KeyboardEvent, MouseEvent};
 const DIALOG: &str = "graph-explanation";
 const MENU: &str = "graph-explain-action";
 const SELECTION: &str = "graph-explanation-selection";
+/// The explanation session still writing what the window waits for.
+const RUNNING: &str = "graph-explanation-running";
 const LIMIT: usize = 8;
+/// An explanation reads a few files. One that runs on past this stops
+/// instead of spending on.
+const SECONDS: u64 = 300;
 
 pub fn map_context(view: &V, base: &V) {
     let mut view = view.clone();
@@ -117,7 +122,7 @@ pub fn context_menu(target: &Element, mouse: &MouseEvent) -> bool {
 
 pub fn key(key: &KeyboardEvent) -> bool {
     if key.key() == "Escape" && dialog_open() {
-        dom::dialog(DIALOG, false);
+        close();
         return true;
     }
     if key.key() == "Escape"
@@ -146,7 +151,7 @@ pub fn click(target: &Element) -> bool {
             true
         }
         "graph-explanation-close" => {
-            dom::dialog(DIALOG, false);
+            close();
             true
         }
         _ => {
@@ -158,6 +163,55 @@ pub fn click(target: &Element) -> bool {
 
 fn dialog_open() -> bool {
     dom::get(DIALOG).is_some_and(|dialog| dialog.has_attribute("open"))
+}
+
+/// Closes the window. An explanation nobody waits for any more is stopped:
+/// its session would otherwise run on to the end.
+fn close() {
+    dom::dialog(DIALOG, false);
+    stop();
+}
+
+/// Stops the explanation session that is still running, if there is one.
+fn stop() {
+    if let Some(sid) = m::take(RUNNING).as_str() {
+        cancel(sid.to_owned());
+    }
+}
+
+fn cancel(sid: String) {
+    spawn_local(async move {
+        let path = format!("/api/sessions/{}/cancel", dom::enc(&sid));
+        // A session that has just finished cannot be cancelled; that is fine.
+        if let Ok(value) = api::post(&path, json!({})).await {
+            if value["session"].is_object() {
+                m::upsert(value["session"].clone());
+                session::history();
+            }
+        }
+    });
+}
+
+/// Lets go of a session that ended, unless another one runs by now.
+fn finished(sid: &str) {
+    if m::data(RUNNING).as_str() == Some(sid) {
+        m::take(RUNNING);
+    }
+}
+
+/// The session that writes an explanation: read-only, without the project's
+/// accelerator context, and limited in time.
+fn session_request(project: &str, provider: &str, model: V, selection: &V) -> V {
+    json!({
+        "project_id": project,
+        "provider": provider,
+        "model": model,
+        "mode": "plan",
+        "workflow": "native",
+        "project_context": false,
+        "budgets": {"seconds": SECONDS},
+        "prompt": prompt(selection),
+    })
 }
 
 fn show_error(error: &str) {
@@ -304,6 +358,8 @@ async fn explain(mut selection: V) {
     if project.is_empty() || selection["context"]["project"] != project {
         return;
     }
+    // One explanation at a time: the window shows only the newest.
+    stop();
     let epoch = m::next(DIALOG);
     dom::text("graph-explanation-subject", &m::text(&selection, "subject"));
     dom::text("graph-explanation-answer", "");
@@ -320,22 +376,30 @@ async fn explain(mut selection: V) {
     }
     let response = api::post(
         "/api/sessions",
-        json!({
-            "project_id": project,
-            "provider": dom::value("provider"),
-            "model": session::selected_model(""),
-            "mode": "plan",
-            "workflow": "native",
-            "project_context": false,
-            "prompt": prompt(&selection),
-        }),
+        session_request(
+            &project,
+            &dom::value("provider"),
+            session::selected_model(""),
+            &selection,
+        ),
     )
     .await;
     match response {
         Ok(value) if value["session"]["id"].is_string() => {
+            let sid = m::text(&value["session"], "id");
             m::upsert(value["session"].clone());
             session::history();
-            poll(m::text(&value["session"], "id"), epoch, Reply::default()).await;
+            // Closed while the session was being made: nobody waits for it.
+            if !visible(epoch) {
+                cancel(sid);
+                return;
+            }
+            m::set(RUNNING, json!(sid));
+            dom::text(
+                "graph-explanation-status",
+                "Explaining… Closing this window stops the explanation.",
+            );
+            poll(sid, epoch, Reply::default()).await;
         }
         Err(error) if visible(epoch) => show_error(&error.message),
         Ok(_) if visible(epoch) => show_error("The runner did not return an explanation session."),
@@ -409,6 +473,7 @@ async fn poll(sid: String, epoch: u64, mut reply: Reply) {
         );
         return;
     }
+    finished(&sid);
     m::upsert(page["session"].clone());
     session::history();
     if !visible(epoch) {
@@ -464,5 +529,37 @@ mod tests {
         assert_eq!(evidence["omitted"], 5);
         assert_eq!(rows(&evidence, "items").len(), LIMIT);
         assert_eq!(evidence["items"][0]["guessed"], 1);
+    }
+
+    /// An explanation is a read-only session that stops on its own: a click
+    /// on a node must not start a run with no end.
+    #[test]
+    fn an_explanation_session_is_read_only_and_limited_in_time() {
+        let selection = json!({"kind":"node","subject":"src/Cart.php","data":"src/Cart.php"});
+        let request = session_request("p1", "codex", V::Null, &selection);
+        assert_eq!(request["mode"], "plan");
+        assert_eq!(request["project_context"], false);
+        assert_eq!(request["budgets"], json!({"seconds": 300}));
+        // Only options the session API accepts.
+        let mut keys = request.as_object().unwrap().keys().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "budgets",
+                "mode",
+                "model",
+                "project_context",
+                "project_id",
+                "prompt",
+                "provider",
+                "workflow"
+            ]
+        );
+        assert!(request["prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("Explain a dependency-map node."));
+        assert!(request["prompt"].as_str().unwrap().contains("src/Cart.php"));
     }
 }
