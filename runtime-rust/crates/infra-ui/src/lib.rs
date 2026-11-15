@@ -113,7 +113,9 @@ pub fn start() -> Result<(), JsValue> {
             ]
             .contains(&k.as_str())
             {
-                session::resize_event(&k, &event);
+                if !graph_map::pointer_event(&k, &event) {
+                    session::resize_event(&k, &event);
+                }
                 return;
             }
             if k == "submit" {
@@ -167,6 +169,7 @@ pub fn start() -> Result<(), JsValue> {
             .add_event_listener_with_callback(kind, callback.as_ref().unchecked_ref())?;
         callback.forget();
     }
+    graph_map::attach_wheel_listeners();
     let pop = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
         spawn_local(async {
             let view = dom::hash_view();

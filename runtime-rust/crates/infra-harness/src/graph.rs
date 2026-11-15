@@ -257,9 +257,96 @@ fn version(program: &Path) -> Option<String> {
     )
     .and_then(|text| release(&text))
 }
-/// Identity of the project's files: the commit plus every uncommitted path with
-/// its size and modification time. `None` outside Git, where nothing cheap
-/// says that files changed.
+const WORKSPACE_PRINT_ENTRIES: usize = 20_000;
+const WORKSPACE_PRINT_DEPTH: usize = 32;
+const WORKSPACE_PRINT_IGNORED: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    "graphify-out",
+    "node_modules",
+    "vendor",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".cache",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".idea",
+    ".vscode",
+];
+
+fn workspace_print(root: &Path) -> Option<Print> {
+    if !root.is_dir() {
+        return None;
+    }
+    let mut stack = vec![(root.to_path_buf(), String::new(), 0usize)];
+    let mut files: Vec<(String, u64, u128)> = Vec::new();
+    let mut seen = 0usize;
+    while let Some((dir, prefix, depth)) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) if depth == 0 => return None,
+            Err(_) => continue,
+        };
+        let mut children = entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy().into_owned();
+                if WORKSPACE_PRINT_IGNORED.contains(&name_str.as_str()) {
+                    return None;
+                }
+                Some((name_str, entry.path()))
+            })
+            .collect::<Vec<_>>();
+        children.sort_by(|left, right| left.0.cmp(&right.0));
+        for (name, path) in children.into_iter().rev() {
+            if seen >= WORKSPACE_PRINT_ENTRIES {
+                break;
+            }
+            seen += 1;
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            let rel = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if meta.is_dir() {
+                if depth < WORKSPACE_PRINT_DEPTH {
+                    stack.push((path, rel, depth + 1));
+                }
+            } else if meta.is_file() {
+                let changed = meta
+                    .modified()
+                    .ok()
+                    .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |at| at.as_nanos());
+                files.push((rel, meta.len(), changed));
+            }
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut identity = b"workspace\0".to_vec();
+    for (rel, len, changed) in files {
+        identity.extend_from_slice(rel.as_bytes());
+        identity.extend_from_slice(format!("\0{len}:{changed}\n").as_bytes());
+    }
+    Some(Print {
+        hash: store::sha(&identity),
+        commit: None,
+    })
+}
+
+/// Identity of the project's files: in Git, the commit plus every uncommitted
+/// path with its size and modification time; outside Git, a bounded sorted
+/// fingerprint of non-ignored workspace file paths, sizes, and modification times.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Print {
     pub hash: String,
@@ -273,8 +360,8 @@ pub fn print(root: &Path) -> Option<Print> {
             .collect::<Vec<_>>();
         projects::git(root, &arguments, 20).ok()
     };
-    if git(&["rev-parse", "--is-inside-work-tree"])?.code != 0 {
-        return None;
+    if !git(&["rev-parse", "--is-inside-work-tree"]).is_some_and(|out| out.code == 0) {
+        return workspace_print(root);
     }
     let head = git(&["rev-parse", "--verify", "HEAD"])?;
     let commit = (head.code == 0)
@@ -725,24 +812,35 @@ impl Job {
         let elapsed = self.started().elapsed().as_secs_f64();
         let stage = self.stage.load(Ordering::Acquire);
         if stage != 0 {
+            let (phase, floor, message) = if stage == WAITING {
+                (
+                    "wait",
+                    5u64,
+                    "Preparing workspace snapshot to build code graph… 5%",
+                )
+            } else {
+                (
+                    "export",
+                    12u64,
+                    "Exporting commit files to build code graph… 12%",
+                )
+            };
             return json!({
-                "phase": if stage == WAITING { "wait" } else { "export" },
+                "phase": phase,
                 "done": null,
                 "total": null,
-                "percent": null,
+                "percent": floor,
                 "remaining_seconds": null,
                 "rough": history.is_none(),
                 "elapsed_seconds": elapsed.floor() as u64,
                 "overdue": false,
+                "message": message,
             });
         }
         let Ok(mut seen) = self.seen.lock() else {
             return Value::Null;
         };
-        let (percent, left, overdue) = progress(elapsed, &seen.observed, history, seen.peak);
-        if let Some(percent) = percent {
-            seen.peak = percent;
-        }
+        let (raw_percent, left, overdue) = progress(elapsed, &seen.observed, history, seen.peak);
         let phase = if seen.observed.read.is_some() {
             "assemble"
         } else if seen.observed.first.is_some() {
@@ -750,16 +848,41 @@ impl Job {
         } else {
             "scan"
         };
+        let done = seen.observed.last.map(|(_, done)| done);
+        let total = (seen.observed.total > 0).then_some(seen.observed.total);
+        let fallback = match phase {
+            "scan" => (15 + (elapsed.floor() as u64).min(13)).min(28),
+            "read" => match (done, total) {
+                (Some(done), Some(total)) if total > 0 => {
+                    (28 + (done.saturating_mul(50) / total)).clamp(30, 80)
+                }
+                _ => 30,
+            },
+            _ => 85,
+        };
+        let percent = raw_percent.unwrap_or(fallback).max(seen.peak).clamp(1, 99);
+        seen.peak = percent;
+        let message = match phase {
+            "scan" => format!("Building code graph: scanning project files… {percent}%"),
+            "read" => match (done, total) {
+                (Some(done), Some(total)) if total > 0 => {
+                    format!("Building code graph: analyzing files ({done}/{total})… {percent}%")
+                }
+                _ => format!("Building code graph: analyzing project files… {percent}%"),
+            },
+            _ => format!("Computing code graph and dependency map… {percent}%"),
+        };
         json!({
             "phase": phase,
-            "done": seen.observed.last.map(|(_, done)| done),
-            "total": (seen.observed.total > 0).then_some(seen.observed.total),
+            "done": done,
+            "total": total,
             "percent": percent,
             "remaining_seconds": left,
             // Without a previous build the silent part is a guess from one ratio.
             "rough": history.is_none(),
             "elapsed_seconds": elapsed.floor() as u64,
             "overdue": overdue,
+            "message": message,
         })
     }
 }
@@ -929,6 +1052,58 @@ fn end(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
+fn status_message(state: &str, build: Option<&Value>, failure: Option<&str>) -> String {
+    match state {
+        "building" => build
+            .and_then(|value| value["message"].as_str())
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| "Building code graph…".to_owned()),
+        "ready" => "Code graph & dependency map ready.".to_owned(),
+        "stale" => "Code graph is outdated; changes detected in project.".to_owned(),
+        "failed" => match failure.filter(|text| !text.is_empty()) {
+            Some(reason) => format!("Code graph build failed: {reason}"),
+            None => "Code graph build failed.".to_owned(),
+        },
+        "missing" => "Graphify is not installed. Install it to build the code graph.".to_owned(),
+        "empty" => "Code graph has not been built yet.".to_owned(),
+        _ => "Code graph is turned off.".to_owned(),
+    }
+}
+
+fn revision_message(state: &str, build: &Value, failure: Option<&str>) -> String {
+    match state {
+        "missing" => "Code graph for this revision is not built yet.".to_owned(),
+        _ => status_message(state, Some(build), failure),
+    }
+}
+
+fn apply_graph_focus(
+    store: &SessionStore,
+    project: &str,
+    focus_session: Option<&str>,
+    index: Option<&crate::graph_map::Index>,
+    view: &mut Value,
+    keep_run: bool,
+) -> Result<()> {
+    let graph_focus = crate::graph_live::project_focus_value(store, project, focus_session)?;
+    if let (Some(index), Ok(focus)) = (
+        index,
+        serde_json::from_value::<crate::graph_live::GraphFocus>(graph_focus.clone()),
+    ) {
+        index.overlay_graph_focus(view, &focus);
+        if !keep_run && let Some(obj) = view.as_object_mut() {
+            obj.remove("run");
+        }
+    } else {
+        view["graph_focus"] = graph_focus.clone();
+        if keep_run && view["run"].is_object() {
+            view["run"]["graph_focus"] = graph_focus;
+        }
+    }
+    Ok(())
+}
+
 /// What of a graph a request for the map asks to see.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Shown<'a> {
@@ -936,6 +1111,8 @@ pub struct Shown<'a> {
     pub scope: &'a str,
     /// The place whose two sides are listed.
     pub focus: Option<&'a str>,
+    /// Optional session ID whose live prompt target & entities are overlaid.
+    pub focus_session: Option<&'a str>,
     /// Only the links the tool read from the code.
     pub certain: bool,
     /// Only the names that hold this.
@@ -970,6 +1147,16 @@ pub struct Shown<'a> {
     /// One found pattern to draw, instead of a folder: its pattern and the
     /// type it is named after.
     pub pattern: Option<&'a str>,
+    /// Unfold all folders to render the entire project graph at once.
+    pub whole: bool,
+}
+struct ImpactContext {
+    root: PathBuf,
+    index: Option<Arc<crate::graph_map::Index>>,
+    resolved: Option<Arc<Resolved>>,
+    run_edited: Vec<(String, char)>,
+    live_focus: Option<crate::graph_live::GraphFocus>,
+    target_label: String,
 }
 /// How many places a request may name in one list, and in how many bytes.
 const UNFOLDED: usize = 256;
@@ -1039,6 +1226,7 @@ pub struct Graphs {
     finished: Mutex<BTreeMap<String, Instant>>,
     writing: Mutex<()>,
     stopping: AtomicBool,
+    autostarting: AtomicBool,
     maps: crate::graph_map::Maps,
     history: Mutex<BTreeMap<String, HistoryEntry>>,
     /// Open pull requests of each project as last listed, or why not.
@@ -1079,6 +1267,7 @@ impl Graphs {
             finished: Mutex::new(BTreeMap::new()),
             writing: Mutex::new(()),
             stopping: AtomicBool::new(false),
+            autostarting: AtomicBool::new(false),
             maps: crate::graph_map::Maps::default(),
             history: Mutex::new(BTreeMap::new()),
             pulls: Mutex::new(BTreeMap::new()),
@@ -1087,6 +1276,108 @@ impl Graphs {
             revisions: Mutex::new(BTreeMap::new()),
             refused: Mutex::new(BTreeMap::new()),
         })
+    }
+    pub fn live_index(&self, project: &str) -> Option<Arc<crate::graph_map::Index>> {
+        let graph = live(&self.store.state, project);
+        if !graph.is_file() {
+            return None;
+        }
+        let root = self.root(project).ok()?;
+        self.maps.index(project, &graph, &root).ok()
+    }
+    pub fn auto_start(&self, project: &str) -> Result<()> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let root = self.root(project)?;
+        if !root.is_dir() {
+            return Ok(());
+        }
+        let setting = self.setting(project)?;
+        if setting["disabled_by_user"] == true {
+            return Ok(());
+        }
+        if setting["enabled"] != true {
+            let _ = self.tool(true);
+            self.edit(project, |setting| {
+                setting["enabled"] = json!(true);
+                if let Some(fields) = setting.as_object_mut() {
+                    fields.remove("disabled_by_user");
+                }
+            })?;
+            return self.refresh(project, Trigger::Enabled);
+        }
+        let published = setting["built"].is_object() && live(&self.store.state, project).is_file();
+        if !published {
+            return self.refresh(project, Trigger::Enabled);
+        }
+        let _ = self.print(project, &root, true);
+        self.refresh(project, Trigger::Visit)
+    }
+    fn auto_start_order(&self) -> Vec<String> {
+        let Ok(projects) = self.store.projects() else {
+            return Vec::new();
+        };
+        let mut ordered = Vec::new();
+        let mut seen = BTreeSet::new();
+        if let Ok(summaries) = self.store.summaries() {
+            for session in summaries {
+                if let Some(id) = session["project_id"].as_str().filter(|id| !id.is_empty())
+                    && seen.insert(id.to_owned())
+                {
+                    ordered.push(id.to_owned());
+                }
+            }
+        }
+        for project in projects {
+            if let Some(id) = project["id"].as_str()
+                && seen.insert(id.to_owned())
+            {
+                ordered.push(id.to_owned());
+            }
+        }
+        ordered
+    }
+    pub fn auto_start_projects(self: &Arc<Self>) {
+        if self.stopping.load(Ordering::Acquire) {
+            return;
+        }
+        if self
+            .autostarting
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let me = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("harness-graph-autostart".into())
+            .spawn(move || {
+                struct Guard<'a>(&'a AtomicBool);
+                impl Drop for Guard<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(false, Ordering::Release);
+                    }
+                }
+                let _guard = Guard(&me.autostarting);
+                for id in me.auto_start_order() {
+                    if me.stopping.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let _ = me.auto_start(&id);
+                }
+            });
+        match spawned {
+            Ok(handle) => {
+                if let Ok(mut workers) = self.workers.lock() {
+                    workers.retain(|worker| !worker.is_finished());
+                    workers.push(handle);
+                }
+            }
+            Err(_) => {
+                self.autostarting.store(false, Ordering::Release);
+            }
+        }
     }
     /// One folder of the published graph's dependency map, or, with a
     /// target, the map of what that target changed. With a place followed,
@@ -1103,6 +1394,7 @@ impl Graphs {
         let Shown {
             scope,
             focus,
+            focus_session,
             certain,
             filter,
             followed,
@@ -1121,6 +1413,7 @@ impl Graphs {
             launch,
             compare_launch,
             pattern,
+            whole,
         } = *shown;
         if base.is_some()
             && (!matches!(target, Some(Target::Pull(_)))
@@ -1293,13 +1586,23 @@ impl Graphs {
             } else {
                 Ok(None)
             };
-            let mut view = follow(&index, &[], &|_| None, &rules)
-                .unwrap_or_else(|| index.view_with(name, scope, spread, focus, certain, filter));
+            let mut view = follow(&index, &[], &|_| None, &rules).unwrap_or_else(|| {
+                index.view_with_whole(name, scope, spread, focus, certain, filter, whole)
+            });
             marked(&index, &mut view, &rules);
             mark_history(&index, &mut view, None);
             mark_incoming(&index, &mut view);
             view["project_id"] = json!(project);
             view["built"] = json!({"commit": built["commit"], "at": built["at"]});
+            view["message"] = json!("Code graph & dependency map ready.");
+            apply_graph_focus(
+                &self.store,
+                project,
+                focus_session,
+                Some(&index),
+                &mut view,
+                false,
+            )?;
             told(&mut view);
             return Ok(view);
         };
@@ -1381,7 +1684,7 @@ impl Graphs {
             let now = self.print(project, &root, false);
             stale = now.is_some_and(|now| built["print"].as_str() != Some(now.hash.as_str()));
         }
-        let mut view = match &found.graph {
+        let (mut view, active_index) = match &found.graph {
             Some((kept, graph, base)) => {
                 let raw = self.maps.index(kept, graph, base)?;
                 let index = asked(raw.clone());
@@ -1486,7 +1789,7 @@ impl Graphs {
                             .map(|(run, edited)| ((&run.opened, &run.shell_reads), edited)),
                     );
                 }
-                view
+                (view, Some(index))
             }
             // Until the commit's own graph is there, the project's graph
             // gives a first picture: the files changed are the commit's, the
@@ -1512,16 +1815,34 @@ impl Graphs {
                         json!({"state": "waiting_head"})
                     };
                 }
-                view
+                (view, Some(index))
             }
-            None => json!({"mode": "changes"}),
+            None => (json!({"mode": "changes"}), None),
         };
+        let keep_run = view["run"].is_object();
         view["project_id"] = json!(project);
         view["target"] = json!(target.text());
         view["chosen"] = chosen(&resolved);
         view["state"] = json!(found.state);
         view["build"] = found.build;
         view["failure"] = json!(found.failure);
+        view["message"] = json!(revision_message(
+            found.state,
+            &view["build"],
+            found.failure.as_deref(),
+        ));
+        let focus_sid = match target {
+            Target::Run(session) => Some(session.as_str()),
+            _ => focus_session,
+        };
+        apply_graph_focus(
+            &self.store,
+            project,
+            focus_sid,
+            active_index.as_deref(),
+            &mut view,
+            keep_run,
+        )?;
         if own {
             view["stale"] = json!(stale);
             view["rebuilding"] = json!(lock(&self.jobs)?.contains_key(project));
@@ -1604,6 +1925,253 @@ impl Graphs {
         found["project_id"] = json!(project);
         found["notests"] = json!(notests);
         Ok(found)
+    }
+
+    fn load_project_focus(
+        &self,
+        project: &str,
+        focus_session: Option<&str>,
+    ) -> Result<Option<crate::graph_live::GraphFocus>> {
+        let value = crate::graph_live::project_focus_value(&self.store, project, focus_session)?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        Ok(serde_json::from_value(value).ok())
+    }
+
+    fn recent_session_for_project(&self, project: &str) -> Result<Option<String>> {
+        let sessions = self.store.summaries()?;
+        let active_statuses = ["running", "starting", "queued", "active"];
+        for pass_active in [true, false] {
+            for session in &sessions {
+                if session["project_id"].as_str() != Some(project) {
+                    continue;
+                }
+                let status = session["status"].as_str().unwrap_or("");
+                if pass_active && !active_statuses.contains(&status) {
+                    continue;
+                }
+                if let Some(sid) = session["id"].as_str() {
+                    return Ok(Some(sid.to_owned()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn impact_context(
+        &self,
+        project: &str,
+        target: Option<&Target>,
+        focus_session: Option<&str>,
+    ) -> Result<ImpactContext> {
+        let focus_session = match focus_session.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(sid) if sid.len() <= 1024 && !sid.chars().any(char::is_control) => Some(sid),
+            Some(_) => return Err(HarnessError::invalid("Invalid code graph session.")),
+            None => None,
+        };
+        let root = self.root(project)?;
+        let published = live(&self.store.state, project);
+        let live_index = || {
+            published
+                .is_file()
+                .then(|| self.maps.index(project, &published, &root).ok())
+                .flatten()
+        };
+        match target {
+            Some(Target::Run(session)) => {
+                let ran = self.ran(project, &root, session)?;
+                let run_edited = ran
+                    .resolved
+                    .files
+                    .iter()
+                    .map(|change| (change.path.clone(), change.status))
+                    .collect();
+                let live_focus = self.load_project_focus(project, Some(session.as_str()))?;
+                let index = live_index();
+                Ok(ImpactContext {
+                    root,
+                    index,
+                    resolved: Some(ran.resolved),
+                    run_edited,
+                    live_focus,
+                    target_label: Target::Run(session.clone()).text(),
+                })
+            }
+            Some(t @ (Target::Named(_) | Target::Commit(_) | Target::Pull(_))) => {
+                let existing = lock(&self.chosen)?
+                    .get(&(project.to_owned(), t.text()))
+                    .cloned();
+                let resolved = match existing {
+                    Some(res) => res,
+                    None => Arc::new(graph_changes::resolve(
+                        &root,
+                        t,
+                        &self.listed(project, &root),
+                    )?),
+                };
+                let index = match self.graph_of(project, &root, &resolved) {
+                    Ok(Found {
+                        graph: Some((kept, graph, base)),
+                        ..
+                    }) => self
+                        .maps
+                        .index(&kept, &graph, &base)
+                        .ok()
+                        .or_else(live_index),
+                    _ => live_index(),
+                };
+                Ok(ImpactContext {
+                    root,
+                    index,
+                    resolved: Some(resolved),
+                    run_edited: Vec::new(),
+                    live_focus: None,
+                    target_label: t.text(),
+                })
+            }
+            None | Some(Target::Work | Target::Uncommitted) => {
+                let is_git = graph_changes::place(&root)
+                    .ok()
+                    .is_some_and(|place| place["git"] == true);
+                let resolved_git = if is_git {
+                    let effective = target.unwrap_or(&Target::Work);
+                    Some(Arc::new(graph_changes::resolve(
+                        &root,
+                        effective,
+                        &self.listed(project, &root),
+                    )?))
+                } else {
+                    None
+                };
+                let session_for_edits = if !matches!(target, Some(Target::Uncommitted)) {
+                    if let Some(sid) = focus_session {
+                        Some(sid.to_owned())
+                    } else if !is_git {
+                        self.recent_session_for_project(project)?
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let run_edited = session_for_edits
+                    .as_deref()
+                    .and_then(|sid| self.ran(project, &root, sid).ok())
+                    .map(|ran| {
+                        ran.resolved
+                            .files
+                            .iter()
+                            .map(|change| (change.path.clone(), change.status))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let resolved = match (resolved_git, run_edited.is_empty()) {
+                    (res, true) => res,
+                    (Some(res), false) => {
+                        let mut combined = (*res).clone();
+                        let known: BTreeSet<String> = combined
+                            .files
+                            .iter()
+                            .map(|file| file.path.clone())
+                            .collect();
+                        for (path, status) in &run_edited {
+                            if !known.contains(path) {
+                                combined.files.push(graph_changes::Change {
+                                    path: path.clone(),
+                                    status: *status,
+                                    from: None,
+                                });
+                            }
+                        }
+                        Some(Arc::new(combined))
+                    }
+                    (None, false) => Some(Arc::new(Resolved {
+                        target: Target::Run(session_for_edits.unwrap_or_default()),
+                        kind: "run",
+                        name: String::new(),
+                        title: None,
+                        pull: None,
+                        head: None,
+                        base: None,
+                        revision: None,
+                        prefix: String::new(),
+                        files: run_edited
+                            .iter()
+                            .map(|(path, status)| graph_changes::Change {
+                                path: path.clone(),
+                                status: *status,
+                                from: None,
+                            })
+                            .collect(),
+                        notes: Vec::new(),
+                    })),
+                };
+                let live_focus = self.load_project_focus(project, focus_session)?;
+                let target_label = match target {
+                    Some(t) => t.text(),
+                    None if is_git => "work".to_owned(),
+                    None => "workspace".to_owned(),
+                };
+                let index = live_index();
+                Ok(ImpactContext {
+                    root,
+                    index,
+                    resolved,
+                    run_edited,
+                    live_focus,
+                    target_label,
+                })
+            }
+        }
+    }
+
+    /// Untruncated catalog of changed files and changed entities for a project target.
+    pub fn changes_catalog(
+        &self,
+        project: &str,
+        target: Option<&Target>,
+        focus_session: Option<&str>,
+        notests: bool,
+    ) -> Result<Value> {
+        let ctx = self.impact_context(project, target, focus_session)?;
+        let mut catalog = crate::graph_impact::changed_catalog(
+            &ctx.root,
+            ctx.index.as_deref(),
+            ctx.resolved.as_deref(),
+            ctx.live_focus.as_ref(),
+            &ctx.run_edited,
+            &ctx.target_label,
+            notests,
+        );
+        catalog["project_id"] = json!(project);
+        catalog["notests"] = json!(notests);
+        Ok(catalog)
+    }
+
+    /// Detailed dependency and reverse-dependent change-impact report for one file.
+    pub fn file_impact(
+        &self,
+        project: &str,
+        path: &str,
+        target: Option<&Target>,
+        focus_session: Option<&str>,
+        certain: bool,
+    ) -> Result<Value> {
+        if path.trim().is_empty() || path.len() > 1024 || path.chars().any(char::is_control) {
+            return Err(HarnessError::invalid("Invalid code graph file path."));
+        }
+        let ctx = self.impact_context(project, target, focus_session)?;
+        let mut report = crate::graph_impact::file_impact(
+            &ctx.root,
+            ctx.index.as_deref(),
+            ctx.resolved.as_deref(),
+            ctx.live_focus.as_ref(),
+            path,
+            certain,
+        )?;
+        report["project_id"] = json!(project);
+        Ok(report)
     }
     fn setting(&self, project: &str) -> Result<Value> {
         Ok(self
@@ -1690,20 +2258,20 @@ impl Graphs {
         let print = self.print(project, &root, trigger != Trigger::Visit);
         if trigger != Trigger::Manual {
             let now = print.as_ref().map(|print| print.hash.as_str());
-            if setting["built"].is_object() {
-                // Outside Git nothing says that files changed; rebuild on request.
-                if now.is_none() || setting["built"]["print"].as_str() == now {
-                    return Ok(());
-                }
+            let published =
+                setting["built"].is_object() && live(&self.store.state, project).is_file();
+            if published && (now.is_none() || setting["built"]["print"].as_str() == now) {
+                return Ok(());
             }
             if setting["failure"].is_object() && setting["failure"]["print"].as_str() == now {
                 return Ok(());
             }
         }
         if !asked {
-            if lock(&self.finished)?
-                .get(project)
-                .is_some_and(|at| at.elapsed() < self.gap)
+            if trigger != Trigger::Finish
+                && lock(&self.finished)?
+                    .get(project)
+                    .is_some_and(|at| at.elapsed() < self.gap)
             {
                 return Ok(());
             }
@@ -1714,6 +2282,9 @@ impl Graphs {
         self.begin(project, root, tool, print)
     }
     fn begin(&self, project: &str, root: PathBuf, tool: Tool, print: Option<Print>) -> Result<()> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let Some(me) = self.me.upgrade() else {
             return Ok(());
         };
@@ -1907,7 +2478,7 @@ impl Graphs {
         let hash = print.as_ref().map(|print| print.hash.clone());
         let _ = self.edit(project, |setting| {
             if purge {
-                *setting = json!({"enabled": false});
+                *setting = json!({"enabled": false, "disabled_by_user": true});
                 return;
             }
             match outcome {
@@ -2449,11 +3020,13 @@ impl Graphs {
             )?;
         }
         let found = self.graph_of(project, &root, &resolved)?;
+        let message = revision_message(found.state, &found.build, found.failure.as_deref());
         Ok(json!({
             "project_id": project,
             "target": target.text(),
             "chosen": chosen(&resolved),
             "state": found.state,
+            "message": message,
             "build": found.build,
             "failure": found.failure,
         }))
@@ -2749,12 +3322,24 @@ impl Graphs {
         } else {
             "ready"
         };
+        let build = job.map(|job| job.view(history));
+        let failure = if setting["failure"].is_object() {
+            Some(json!({"message": setting["failure"]["message"], "at": setting["failure"]["at"]}))
+        } else {
+            None
+        };
+        let message = status_message(
+            state,
+            build.as_ref(),
+            failure.as_ref().and_then(|value| value["message"].as_str()),
+        );
         Ok(json!({
             "project_id": project,
             "enabled": enabled,
             // Whether launches are told about the graph: a choice of its own.
             "agents": setting["agents"] == true,
             "state": state,
+            "message": message,
             "tool": {
                 "available": tool.is_some(),
                 "version": tool.as_ref().and_then(|tool| tool.version.clone()),
@@ -2773,23 +3358,27 @@ impl Graphs {
             } else {
                 Value::Null
             },
-            "build": job.map(|job| job.view(history)),
-            "failure": if setting["failure"].is_object() {
-                json!({"message": setting["failure"]["message"], "at": setting["failure"]["at"]})
-            } else {
-                Value::Null
-            },
+            "build": build,
+            "failure": failure,
         }))
     }
     pub fn act(&self, project: &str, action: &str) -> Result<Value> {
         self.root(project)?;
         match action {
             "enable" => {
-                self.edit(project, |setting| setting["enabled"] = json!(true))?;
+                self.edit(project, |setting| {
+                    setting["enabled"] = json!(true);
+                    if let Some(fields) = setting.as_object_mut() {
+                        fields.remove("disabled_by_user");
+                    }
+                })?;
                 self.refresh(project, Trigger::Enabled)?;
             }
             "disable" => {
-                self.edit(project, |setting| setting["enabled"] = json!(false))?;
+                self.edit(project, |setting| {
+                    setting["enabled"] = json!(false);
+                    setting["disabled_by_user"] = json!(true);
+                })?;
                 if let Some(job) = lock(&self.jobs)?.get(project) {
                     job.cancel.store(true, Ordering::Release);
                 }
@@ -2826,7 +3415,9 @@ impl Graphs {
                 self.refresh(project, Trigger::Manual)?;
             }
             "delete" => {
-                self.edit(project, |setting| *setting = json!({"enabled": false}))?;
+                self.edit(project, |setting| {
+                    *setting = json!({"enabled": false, "disabled_by_user": true});
+                })?;
                 // A commit's graph that is still being built writes into
                 // the folder. It is told to end first, and removes the
                 // folder when it has ended: it is told while it is known to
@@ -2894,6 +3485,25 @@ impl Domain for Graphs {
                         Some(_) => return Err(HarnessError::invalid("Invalid graph check.")),
                     };
                     self.status(project, visit)?
+                }
+                "graph.auto_start" => {
+                    if !project.is_empty()
+                        && let Some(me) = self.me.upgrade()
+                    {
+                        let project = project.to_owned();
+                        tokio::task::spawn_blocking(move || me.auto_start(&project))
+                            .await
+                            .map_err(|_| {
+                                HarnessError::unavailable("The code graph could not start.")
+                            })??;
+                    }
+                    json!({"ok": true})
+                }
+                "graph.auto_start_all" => {
+                    if let Some(me) = self.me.upgrade() {
+                        me.auto_start_projects();
+                    }
+                    json!({"ok": true})
                 }
                 "graph.act" => {
                     let body = &request["body"];
@@ -2968,6 +3578,10 @@ impl Domain for Graphs {
                             .ok_or_else(|| HarnessError::invalid("Invalid code graph place."))
                     };
                     let (scope, focus, filter) = (text("scope")?, text("focus")?, text("filter")?);
+                    let focus_session = text("focus_session")?;
+                    if focus_session.chars().any(char::is_control) {
+                        return Err(HarnessError::invalid("Invalid code graph session."));
+                    }
                     let flag = |name: &str| match query[name].as_str() {
                         None | Some("0") => Ok(false),
                         Some("1") => Ok(true),
@@ -2978,6 +3592,7 @@ impl Domain for Graphs {
                     let history = flag("history")?;
                     let modules = flag("modules")?;
                     let no_incoming = flag("no_incoming")?;
+                    let whole = flag("whole")?;
                     let origin = text("scenario")?;
                     let launch = text("launch")?;
                     let compare_launch = text("compare_launch")?;
@@ -3095,6 +3710,8 @@ impl Domain for Graphs {
                             &Shown {
                                 scope: &scope,
                                 focus: (!focus.is_empty()).then_some(focus.as_str()),
+                                focus_session: (!focus_session.is_empty())
+                                    .then_some(focus_session.as_str()),
                                 certain,
                                 filter: &filter,
                                 followed: followed.as_ref(),
@@ -3125,6 +3742,7 @@ impl Domain for Graphs {
                                     .then_some(compare_launch.as_str()),
                                 scenario: (!origin.is_empty()).then_some((origin.as_str(), skip)),
                                 pattern: (!pattern.is_empty()).then_some(pattern.as_str()),
+                                whole,
                             },
                         )
                     })
@@ -3160,6 +3778,68 @@ impl Domain for Graphs {
                     .await
                     .map_err(|_| {
                         HarnessError::unavailable("The code graph could not be searched.")
+                    })??
+                }
+                "graph.changes" | "graph.file_impact" => {
+                    let query = &request["query"];
+                    let flag = |name: &str| match query[name].as_str() {
+                        None | Some("0") => Ok(false),
+                        Some("1") => Ok(true),
+                        Some(_) => Err(HarnessError::invalid("Invalid graph filter.")),
+                    };
+                    let target = match query["target"].as_str() {
+                        None | Some("") => None,
+                        Some(text) => Some(Target::parse(text)?),
+                    };
+                    let focus_session = query["focus_session"].as_str().unwrap_or("");
+                    if focus_session.len() > 1024 || focus_session.chars().any(char::is_control) {
+                        return Err(HarnessError::invalid("Invalid code graph session."));
+                    }
+                    let focus_session =
+                        (!focus_session.trim().is_empty()).then(|| focus_session.trim().to_owned());
+                    let is_impact = operation == "graph.file_impact";
+                    let path = if is_impact {
+                        let value = query["path"].as_str().unwrap_or("");
+                        if value.trim().is_empty()
+                            || value.len() > 1024
+                            || value.chars().any(char::is_control)
+                        {
+                            return Err(HarnessError::invalid("Invalid code graph file path."));
+                        }
+                        value.to_owned()
+                    } else {
+                        String::new()
+                    };
+                    let toggle = if is_impact {
+                        flag("certain")?
+                    } else {
+                        flag("notests")?
+                    };
+                    let me = self.me.upgrade().ok_or_else(|| {
+                        HarnessError::unavailable("The code graph is shutting down.")
+                    })?;
+                    let project = project.to_owned();
+                    tokio::task::spawn_blocking(move || {
+                        if is_impact {
+                            me.file_impact(
+                                &project,
+                                &path,
+                                target.as_ref(),
+                                focus_session.as_deref(),
+                                toggle,
+                            )
+                        } else {
+                            me.changes_catalog(
+                                &project,
+                                target.as_ref(),
+                                focus_session.as_deref(),
+                                toggle,
+                            )
+                        }
+                    })
+                    .await
+                    .map_err(|_| {
+                        HarnessError::unavailable("The code graph could not be inspected.")
                     })??
                 }
                 _ => return Err(HarnessError::missing("Unknown code graph operation.")),
@@ -3238,6 +3918,8 @@ mod tests {
             "launch",
             "compare_launch",
             "scenario",
+            "focus_session",
+            "whole",
         ] {
             assert!(route.query.contains(&part), "{part}");
         }
@@ -3252,6 +3934,46 @@ mod tests {
                 "GET",
                 "/api/projects/{project_id}/graph/find",
                 &["query", "target", "notests"][..]
+            )
+        );
+        let changes_route = crate::http::ROUTES
+            .iter()
+            .find(|route| route.operation == "graph.changes")
+            .unwrap();
+        assert_eq!(
+            (
+                changes_route.method,
+                changes_route.pattern,
+                changes_route.status,
+                changes_route.token,
+                changes_route.query
+            ),
+            (
+                "GET",
+                "/api/projects/{project_id}/graph/changes",
+                200,
+                false,
+                &["target", "focus_session", "notests"][..]
+            )
+        );
+        let impact_route = crate::http::ROUTES
+            .iter()
+            .find(|route| route.operation == "graph.file_impact")
+            .unwrap();
+        assert_eq!(
+            (
+                impact_route.method,
+                impact_route.pattern,
+                impact_route.status,
+                impact_route.token,
+                impact_route.query
+            ),
+            (
+                "GET",
+                "/api/projects/{project_id}/graph/file-impact",
+                200,
+                false,
+                &["path", "target", "focus_session", "certain"][..]
             )
         );
         // The folders spread out in a picture come as the same kind of list.
@@ -5783,6 +6505,648 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 false
             );
             silent();
+        }
+        #[test]
+        fn auto_start_enables_unset_project_and_respects_user_disable() {
+            let fixture = Fixture::new();
+            assert_eq!(
+                fixture.graphs.status(&fixture.project, true).unwrap()["state"],
+                "off"
+            );
+            assert_eq!(
+                fixture.graphs.status(&fixture.project, false).unwrap()["message"],
+                "Code graph is turned off."
+            );
+
+            fixture.graphs.auto_start(&fixture.project).unwrap();
+            let ready = fixture.settled();
+            assert_eq!(ready["state"], "ready", "{ready}");
+            assert_eq!(ready["message"], "Code graph & dependency map ready.");
+            assert!(live(&fixture.store.state, &fixture.project).is_file());
+            assert!(fixture.graphs.live_index(&fixture.project).is_some());
+            assert_eq!(fixture.runs(), 1);
+
+            let disabled = fixture.graphs.act(&fixture.project, "disable").unwrap();
+            assert_eq!(disabled["state"], "off");
+            fixture.graphs.auto_start(&fixture.project).unwrap();
+            assert_eq!(
+                fixture.graphs.status(&fixture.project, false).unwrap()["state"],
+                "off"
+            );
+            assert_eq!(fixture.runs(), 1);
+
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            let ready = fixture.settled();
+            assert_eq!(ready["state"], "ready");
+            assert_eq!(fixture.runs(), 1);
+
+            fixture.graphs.act(&fixture.project, "delete").unwrap();
+            let deleted = fixture.settled();
+            assert_eq!(deleted["state"], "off");
+            fixture.graphs.auto_start(&fixture.project).unwrap();
+            assert_eq!(
+                fixture.graphs.status(&fixture.project, false).unwrap()["state"],
+                "off"
+            );
+            assert_eq!(fixture.runs(), 1);
+
+            // auto_start_projects asynchronously starts unset projects when enabled.
+            let root2 = tempfile::tempdir().unwrap();
+            let store2 = SessionStore::open(&root2.path().join("state")).unwrap();
+            let folder2 = root2.path().join("project");
+            std::fs::create_dir_all(&folder2).unwrap();
+            let p2 = store2.register(&folder2).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let missing = Graphs::with(
+                store2,
+                Some(PathBuf::from("/nonexistent/graphify-missing")),
+                Duration::ZERO,
+            );
+            missing.auto_start_projects();
+            let deadline = Instant::now();
+            let state2 = loop {
+                let st = missing.status(&p2, false).unwrap();
+                if st["state"] != "off" || deadline.elapsed() > Duration::from_secs(5) {
+                    break st;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert_eq!(state2["state"], "missing", "{state2}");
+            assert!(
+                state2["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Graphify is not installed"),
+                "{state2}"
+            );
+            missing.close();
+        }
+        #[test]
+        fn map_exposes_graph_focus_and_english_message_without_overwriting_focus() {
+            let fixture = Fixture::new();
+            fixture.graphs.auto_start(&fixture.project).unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+
+            let view = fixture
+                .graphs
+                .map(&fixture.project, None, &Shown::default())
+                .unwrap();
+            assert_eq!(view["message"], "Code graph & dependency map ready.");
+            assert_eq!(view["graph_focus"], Value::Null);
+        }
+        #[tokio::test]
+        async fn domain_execute_auto_start_and_map_focus_session() {
+            let fixture = Fixture::new();
+            std::fs::write(
+                fixture.folder.join("graph.fixture"),
+                json!({
+                    "nodes": [
+                        {"id": "n1", "label": "App", "source_file": "src/app.php"},
+                        {"id": "n2", "label": "Auth", "source_file": "src/auth/guard.php"}
+                    ],
+                    "links": [
+                        {"source": "n1", "target": "n2", "relation": "calls", "confidence": "EXTRACTED"}
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+            let Payload::Json(auto) = fixture
+                .graphs
+                .execute(
+                    "graph.auto_start",
+                    json!({
+                        "params": {"project_id": fixture.project},
+                        "body": {},
+                        "query": {},
+                    }),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected json auto_start payload");
+            };
+            assert_eq!(auto, json!({"ok": true}));
+            assert_eq!(fixture.settled()["state"], "ready");
+
+            let created = fixture
+                .store
+                .create(
+                    &json!({
+                        "project_id": fixture.project,
+                        "project_path": fixture.folder,
+                        "provider": "codex",
+                    }),
+                    "Focus overlay test",
+                    &[],
+                )
+                .unwrap();
+            let sid = created["id"].as_str().unwrap().to_owned();
+            let focus = crate::graph_live::GraphFocus {
+                phase: "active".into(),
+                summary: "Live: editing src/auth/guard.php".into(),
+                target_folders: vec!["src/auth".into()],
+                target_paths: vec!["src/auth/guard.php".into()],
+                target_nodes: vec!["src/auth".into()],
+                created_entities: crate::graph_live::diff_new_entities(
+                    "src/auth/guard.php",
+                    Some(""),
+                    "<?php\nclass Guard {\n}\n",
+                    false,
+                ),
+            };
+            crate::graph_live::save_session_focus(&fixture.store, &sid, &focus).unwrap();
+
+            let Payload::Json(map) = fixture
+                .graphs
+                .execute(
+                    "graph.map",
+                    json!({
+                        "params": {"project_id": fixture.project},
+                        "body": {},
+                        "query": {"scope": "src", "focus": "src/app.php", "focus_session": sid},
+                    }),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected json map payload");
+            };
+            assert_eq!(map["message"], "Code graph & dependency map ready.");
+            assert_eq!(map["focus"]["path"], "src/app.php", "{map}");
+            assert_eq!(map["graph_focus"]["phase"], "active", "{map}");
+            assert!(map.get("run").is_none(), "{map}");
+            let auth_node = map["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|node| node["path"] == "src/auth")
+                .expect("src/auth node present");
+            assert_eq!(auth_node["focus_target"], true, "{auth_node}");
+            assert_eq!(auth_node["created_entities_count"], 1, "{auth_node}");
+        }
+        #[test]
+        fn auto_start_projects_prioritizes_most_recent_session_project_first() {
+            let root = tempfile::tempdir().unwrap();
+            let store = SessionStore::open(&root.path().join("state")).unwrap();
+            let folder1 = root.path().join("project_first");
+            let folder2 = root.path().join("project_second");
+            std::fs::create_dir_all(&folder1).unwrap();
+            std::fs::create_dir_all(&folder2).unwrap();
+            let p1 = store.register(&folder1).unwrap();
+            let p1_id = p1["id"].as_str().unwrap().to_owned();
+            let p2 = store.register(&folder2).unwrap();
+            let p2_id = p2["id"].as_str().unwrap().to_owned();
+            // Associate a session with p2 so summaries() ranks p2 ahead of p1.
+            store
+                .create(
+                    &json!({
+                        "project_id": p2_id,
+                        "project_path": folder2,
+                        "provider": "codex",
+                    }),
+                    "Recent project",
+                    &[],
+                )
+                .unwrap();
+
+            let tool_dir = root.path().join("tool");
+            std::fs::create_dir_all(&tool_dir).unwrap();
+            let tool = tool_dir.join("graphify");
+            let text = tool.with_extension("text");
+            std::fs::write(&text, TOOL).unwrap();
+            let copied = Command::new("cp")
+                .arg("--")
+                .arg(&text)
+                .arg(&tool)
+                .status()
+                .unwrap();
+            assert!(copied.success());
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let graphs = Graphs::with(store, Some(tool), Duration::ZERO);
+            assert_eq!(
+                graphs.auto_start_order(),
+                vec![p2_id.clone(), p1_id.clone()],
+                "most-recently-active session's project must run first"
+            );
+
+            graphs.auto_start_projects();
+            let started = Instant::now();
+            loop {
+                let s1 = graphs.status(&p1_id, false).unwrap();
+                let s2 = graphs.status(&p2_id, false).unwrap();
+                if s1["state"] == "ready" && s2["state"] == "ready" {
+                    break;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "p1={s1} p2={s2}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            graphs.close();
+        }
+        #[test]
+        fn auto_start_rebuilds_when_live_graph_is_missing() {
+            let fixture = Fixture::new();
+            fixture.graphs.auto_start(&fixture.project).unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+            assert_eq!(fixture.runs(), 1);
+
+            let graph = live(&fixture.store.state, &fixture.project);
+            std::fs::remove_file(&graph).unwrap();
+            assert!(!graph.is_file());
+
+            fixture.graphs.auto_start(&fixture.project).unwrap();
+            let rebuilt = fixture.settled();
+            assert_eq!(rebuilt["state"], "ready", "{rebuilt}");
+            assert!(graph.is_file());
+            assert_eq!(fixture.runs(), 2);
+        }
+        #[test]
+        fn non_git_workspace_edit_recomputes_on_finish_despite_automatic_gap() {
+            let fixture = Fixture::new();
+            std::fs::write(fixture.folder.join("service.php"), "<?php // v1\n").unwrap();
+            let graphs = Graphs::with(
+                fixture.store.clone(),
+                Some(fixture.tool.clone()),
+                Duration::from_secs(30),
+            );
+            graphs.auto_start(&fixture.project).unwrap();
+            let settle = || {
+                let started = Instant::now();
+                loop {
+                    let current = graphs.status(&fixture.project, false).unwrap();
+                    if current["state"] != "building" {
+                        return current;
+                    }
+                    assert!(started.elapsed() < Duration::from_secs(10));
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            };
+            assert_eq!(settle()["state"], "ready");
+            assert_eq!(fixture.runs(), 1);
+
+            // Unchanged non-Git workspace must not re-run.
+            graphs.refresh(&fixture.project, Trigger::Finish).unwrap();
+            assert_eq!(settle()["state"], "ready");
+            assert_eq!(fixture.runs(), 1);
+
+            // Ignored cache directories must not count as workspace source changes.
+            std::fs::create_dir_all(fixture.folder.join("graphify-out")).unwrap();
+            std::fs::write(fixture.folder.join("graphify-out/noise.txt"), "x").unwrap();
+            graphs.refresh(&fixture.project, Trigger::Finish).unwrap();
+            assert_eq!(settle()["state"], "ready");
+            assert_eq!(fixture.runs(), 1);
+
+            // An actual non-Git file edit triggers immediate Finish recompute even within the 30s gap.
+            std::fs::write(
+                fixture.folder.join("service.php"),
+                "<?php // v2 with extra code\n",
+            )
+            .unwrap();
+            graphs.refresh(&fixture.project, Trigger::Finish).unwrap();
+            assert_eq!(settle()["state"], "ready");
+            assert_eq!(fixture.runs(), 2);
+            graphs.close();
+        }
+        #[test]
+        fn job_view_always_reports_monotonic_percentage_and_english_message() {
+            let job = Job::new();
+
+            job.stage.store(WAITING, Ordering::Release);
+            let wait = job.view(None);
+            assert_eq!(wait["phase"], "wait");
+            assert_eq!(wait["percent"], 5);
+            assert!(wait["message"].as_str().unwrap().contains("5%"), "{wait}");
+
+            job.stage.store(EXPORTING, Ordering::Release);
+            let export = job.view(None);
+            assert_eq!(export["phase"], "export");
+            assert_eq!(export["percent"], 12);
+            assert!(
+                export["message"].as_str().unwrap().contains("12%"),
+                "{export}"
+            );
+
+            job.stage.store(0, Ordering::Release);
+            let scan = job.view(None);
+            let scan_pct = scan["percent"].as_u64().expect("non-null scan percent");
+            assert!((15..=28).contains(&scan_pct), "{scan}");
+            assert!(
+                scan["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("{scan_pct}%")),
+                "{scan}"
+            );
+
+            job.observe(
+                "  AST extraction: 1/4 uncached files (25%) [2 workers]",
+                false,
+            );
+            let read = job.view(None);
+            let read_pct = read["percent"].as_u64().expect("non-null read percent");
+            assert!(
+                read_pct >= scan_pct && (1..=99).contains(&read_pct),
+                "{read}"
+            );
+            let read_msg = read["message"].as_str().unwrap();
+            assert!(read_msg.contains("(1/4)"), "{read}");
+            assert!(read_msg.contains(&format!("{read_pct}%")), "{read}");
+
+            job.observe(
+                "  AST extraction: 4/4 uncached files (100%) [2 workers]",
+                false,
+            );
+            let assemble = job.view(None);
+            let assemble_pct = assemble["percent"]
+                .as_u64()
+                .expect("non-null assemble percent");
+            assert!(
+                assemble_pct >= read_pct && (1..=99).contains(&assemble_pct),
+                "{assemble}"
+            );
+            let assemble_msg = assemble["message"].as_str().unwrap();
+            assert!(assemble_msg.contains("Computing"), "{assemble}");
+            assert!(
+                assemble_msg.contains(&format!("{assemble_pct}%")),
+                "{assemble}"
+            );
+        }
+        #[tokio::test]
+        async fn domain_execute_graph_map_whole_validates_and_marks_unscoped_overview() {
+            let fixture = Fixture::new();
+            std::fs::write(
+                fixture.folder.join("graph.fixture"),
+                json!({
+                    "nodes": [
+                        {"id": "n1", "label": "App", "source_file": "src/app.php"},
+                        {"id": "n2", "label": "Guard", "source_file": "src/auth/guard.php"}
+                    ],
+                    "links": [
+                        {"source": "n1", "target": "n2", "relation": "calls", "confidence": "EXTRACTED"}
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            fixture.graphs.auto_start(&fixture.project).unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+
+            let Payload::Json(overview) = fixture
+                .graphs
+                .execute(
+                    "graph.map",
+                    json!({
+                        "params": {"project_id": fixture.project},
+                        "body": {},
+                        "query": {},
+                    }),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected json map payload");
+            };
+            assert_eq!(overview["whole"], json!(false), "{overview}");
+
+            let Payload::Json(whole) = fixture
+                .graphs
+                .execute(
+                    "graph.map",
+                    json!({
+                        "params": {"project_id": fixture.project},
+                        "body": {},
+                        "query": {"whole": "1"},
+                    }),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected json whole map payload");
+            };
+            assert_eq!(whole["whole"], json!(true), "{whole}");
+
+            let invalid = fixture
+                .graphs
+                .execute(
+                    "graph.map",
+                    json!({
+                        "params": {"project_id": fixture.project},
+                        "body": {},
+                        "query": {"whole": "2"},
+                    }),
+                )
+                .await;
+            assert!(invalid.is_err(), "expected invalid whole flag error");
+        }
+        #[tokio::test]
+        async fn domain_execute_changes_and_file_impact_cover_non_git_and_git_projects() {
+            // Non-Git project with NO Graphify build must still answer without error.
+            let non_git = Fixture::new();
+            std::fs::create_dir_all(non_git.folder.join("src/auth")).unwrap();
+            std::fs::write(
+                non_git.folder.join("src/auth/guard.php"),
+                "<?php\nclass Guard {\n}\n",
+            )
+            .unwrap();
+
+            let Payload::Json(empty_catalog) = non_git
+                .graphs
+                .execute(
+                    "graph.changes",
+                    json!({
+                        "params": {"project_id": non_git.project},
+                        "body": {},
+                        "query": {"notests": "1"},
+                    }),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected json changes payload");
+            };
+            assert_eq!(empty_catalog["project_id"], non_git.project);
+            assert_eq!(empty_catalog["target"], "workspace");
+            assert_eq!(empty_catalog["notests"], true);
+            assert_eq!(empty_catalog["total_files"], 0, "{empty_catalog}");
+
+            let created = non_git
+                .store
+                .create(
+                    &json!({
+                        "project_id": non_git.project,
+                        "project_path": non_git.folder,
+                        "provider": "codex",
+                    }),
+                    "Non-Git focus catalog test",
+                    &[],
+                )
+                .unwrap();
+            let sid = created["id"].as_str().unwrap().to_owned();
+            let focus = crate::graph_live::GraphFocus {
+                phase: "active".into(),
+                summary: "Live: editing src/auth/guard.php".into(),
+                target_folders: vec!["src/auth".into()],
+                target_paths: vec!["src/auth/guard.php".into()],
+                target_nodes: vec!["src/auth".into()],
+                created_entities: crate::graph_live::diff_new_entities(
+                    "src/auth/guard.php",
+                    Some(""),
+                    "<?php\nclass Guard {\n}\n",
+                    false,
+                ),
+            };
+            crate::graph_live::save_session_focus(&non_git.store, &sid, &focus).unwrap();
+
+            let Payload::Json(focused_catalog) = non_git
+                .graphs
+                .execute(
+                    "graph.changes",
+                    json!({
+                        "params": {"project_id": non_git.project},
+                        "body": {},
+                        "query": {"focus_session": sid},
+                    }),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected json focused changes payload");
+            };
+            assert_eq!(focused_catalog["total_files"], 1, "{focused_catalog}");
+            assert_eq!(
+                focused_catalog["files"][0]["path"], "src/auth/guard.php",
+                "{focused_catalog}"
+            );
+
+            let Payload::Json(non_git_impact) = non_git
+                .graphs
+                .execute(
+                    "graph.file_impact",
+                    json!({
+                        "params": {"project_id": non_git.project},
+                        "body": {},
+                        "query": {"path": "src/auth/guard.php", "focus_session": sid},
+                    }),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected json non-git file impact payload");
+            };
+            assert_eq!(non_git_impact["project_id"], non_git.project);
+            assert_eq!(non_git_impact["path"], "src/auth/guard.php");
+            assert_eq!(non_git_impact["in_graph"], false);
+
+            let bad_path = non_git
+                .graphs
+                .execute(
+                    "graph.file_impact",
+                    json!({
+                        "params": {"project_id": non_git.project},
+                        "body": {},
+                        "query": {"path": "   "},
+                    }),
+                )
+                .await;
+            assert!(bad_path.is_err(), "expected empty path rejection");
+
+            // Git repo without Graphify build still computes diff, dependencies, and callers.
+            let git_fix = Fixture::new();
+            git_fix.git(&["init", "-b", "main"]);
+            std::fs::create_dir_all(git_fix.folder.join("src")).unwrap();
+            git_fix.write("src/helper.rs", "pub fn helper() -> i32 {\n    1\n}\n");
+            git_fix.write(
+                "src/service.rs",
+                "use crate::helper::helper;\npub fn run() -> i32 {\n    helper()\n}\n",
+            );
+            git_fix.write(
+                "src/caller.rs",
+                "use crate::service::run;\npub fn entry() -> i32 {\n    run()\n}\n",
+            );
+            git_fix.commit("initial");
+
+            git_fix.write("src/extra.rs", "pub fn extra() -> i32 {\n    2\n}\n");
+            git_fix.write(
+                "src/service.rs",
+                "use crate::extra::extra;\npub fn run_v2() -> i32 {\n    extra()\n}\n",
+            );
+
+            let Payload::Json(git_catalog) = git_fix
+                .graphs
+                .execute(
+                    "graph.changes",
+                    json!({
+                        "params": {"project_id": git_fix.project},
+                        "body": {},
+                        "query": {"target": "work"},
+                    }),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected json git catalog payload");
+            };
+            assert_eq!(git_catalog["target"], "work");
+            assert_eq!(git_catalog["total_files"], 2, "{git_catalog}");
+            assert_eq!(git_catalog["created_files"], 1, "{git_catalog}");
+            assert_eq!(git_catalog["modified_files"], 1, "{git_catalog}");
+
+            let Payload::Json(service_impact) = git_fix
+                .graphs
+                .execute(
+                    "graph.file_impact",
+                    json!({
+                        "params": {"project_id": git_fix.project},
+                        "body": {},
+                        "query": {"path": "src/service.rs", "target": "work", "certain": "1"},
+                    }),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected json service file impact payload");
+            };
+            assert_eq!(service_impact["path"], "src/service.rs");
+            assert_eq!(service_impact["status"], "modified", "{service_impact}");
+            assert_eq!(
+                service_impact["summary"]["uses_added"], 2,
+                "{service_impact}"
+            );
+            assert_eq!(
+                service_impact["summary"]["uses_removed"], 2,
+                "{service_impact}"
+            );
+            assert!(
+                service_impact["uses"]["added"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|dep| dep["target"] == "src/extra.rs"),
+                "{service_impact}"
+            );
+            assert!(
+                service_impact["uses"]["removed"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|dep| dep["target"] == "src/helper.rs"),
+                "{service_impact}"
+            );
+            assert!(
+                service_impact["used_by"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|caller| caller["path"] == "src/caller.rs"),
+                "{service_impact}"
+            );
         }
     }
 }

@@ -263,6 +263,7 @@ impl ServicesFactory for NativeFactory {
             });
             let closing = sessions.clone();
             let update_close = updates.clone();
+            let startup_graphs = graphs.clone();
             let closer = Arc::new(move || {
                 let closing = closing.clone();
                 let updates = update_close.clone();
@@ -299,6 +300,7 @@ impl ServicesFactory for NativeFactory {
             let reports = accelerators.keep_all_current()?;
             store.set_setting("accelerator-startup-sync", &json!(reports))?;
             updates.start();
+            startup_graphs.auto_start_projects();
             Ok(services as Arc<dyn Services>)
         })
     }

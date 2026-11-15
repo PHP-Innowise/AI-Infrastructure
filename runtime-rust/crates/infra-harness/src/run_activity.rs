@@ -1,8 +1,10 @@
 //! Display enrichment and activity counts never retain tool output or file contents.
+use crate::graph_live::{CreatedEntity, GraphFocus, LiveFocusTracker};
 use fancy_regex::Regex;
 use serde_json::{Value, json as object};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    path::PathBuf,
     sync::OnceLock,
 };
 const ENRICH_BYTES: usize = 1024 * 1024;
@@ -405,6 +407,8 @@ pub struct RunLedger {
     watched: BTreeSet<String>,
     reads: u64,
     outside_reads: u64,
+    focus_tracker: LiveFocusTracker,
+    focus_events: VecDeque<Value>,
 }
 impl RunLedger {
     pub fn new(provider: &str, watch: Option<BTreeMap<String, String>>, outside: bool) -> Self {
@@ -434,7 +438,33 @@ impl RunLedger {
             watched: BTreeSet::new(),
             reads: 0,
             outside_reads: 0,
+            focus_tracker: LiveFocusTracker::new(PathBuf::new()),
+            focus_events: VecDeque::new(),
         }
+    }
+    pub fn set_focus_root(&mut self, root: PathBuf) {
+        self.focus_tracker.set_root(root);
+    }
+    pub fn seed_graph_focus(&mut self, focus: GraphFocus) {
+        self.focus_tracker.seed_focus(focus);
+    }
+    pub fn graph_focus(&self) -> &GraphFocus {
+        self.focus_tracker.focus()
+    }
+    pub fn created_entities(&self) -> &[CreatedEntity] {
+        &self.focus_tracker.focus().created_entities
+    }
+    pub fn target_paths(&self) -> &[String] {
+        &self.focus_tracker.focus().target_paths
+    }
+    pub fn target_folders(&self) -> &[String] {
+        &self.focus_tracker.focus().target_folders
+    }
+    pub fn take_focus_event(&mut self) -> Option<Value> {
+        self.focus_events.pop_front()
+    }
+    pub fn take_focus_events(&mut self) -> Vec<Value> {
+        self.focus_events.drain(..).collect()
     }
     fn changes(fields: &Value, private: &Private) -> Vec<(String, Option<String>, String)> {
         let changes = fields["changes"]
@@ -492,6 +522,9 @@ impl RunLedger {
             }
             self.reads += 1;
             self.outside_reads += u64::from(outside);
+            if let Some(rel) = path.as_deref() {
+                self.focus_tracker.record_read(rel);
+            }
             entry.read = path;
         } else if kind == "skill"
             && fields["detail"]
@@ -500,9 +533,12 @@ impl RunLedger {
         {
             self.reads += 1;
             entry.read = Some(format!("skill:{}", fields["detail"].as_str().unwrap_or("")));
-        } else if (edit(&kind) || delete(&kind))
+        } else if (edit(&kind) || kind == "file_change" || delete(&kind))
             && fields["path"].as_str().is_some_and(|path| !path.is_empty())
         {
+            if let Some(rel) = path.as_deref() {
+                self.focus_tracker.record_mutation_start(rel);
+            }
             let created = kind == "write"
                 && private.existed.map(|value| !value).unwrap_or_else(|| {
                     !self.opened.iter().any(|(old, _)| old == &key)
@@ -548,6 +584,11 @@ impl RunLedger {
         {
             self.helpers += 1;
         }
+        for (_, maybe_rel, _) in &entry.changes {
+            if let Some(rel) = maybe_rel.as_deref() {
+                self.focus_tracker.record_mutation_start(rel);
+            }
+        }
         entry
     }
     fn finish(&mut self, entry: Entry, fields: &Value, private: &Private) {
@@ -582,6 +623,10 @@ impl RunLedger {
             entry.changes
         };
         for (key, path, kind) in entry.keys.into_iter().chain(changes) {
+            if let Some(rel) = path.as_deref() {
+                self.focus_tracker
+                    .record_mutation_complete(rel, Some(kind.as_str()));
+            }
             if !self.edited.iter().any(|(old, _)| old == &key) {
                 self.edited.push((key.clone(), path));
             }
@@ -590,6 +635,9 @@ impl RunLedger {
             } else if kind == "delete" {
                 self.deleted.insert(key);
             }
+        }
+        if let Some(delta) = self.focus_tracker.take_delta_event() {
+            self.focus_events.push_back(delta);
         }
     }
     fn observe_private(&mut self, label: &Value, fields: Option<&Value>, private: &Private) {
@@ -629,6 +677,9 @@ impl RunLedger {
                 self.steps += 1;
                 let entry = self.start(fields, private);
                 if state == "started" {
+                    if let Some(delta) = self.focus_tracker.take_delta_event() {
+                        self.focus_events.push_back(delta);
+                    }
                     if let Some(call) = call {
                         self.calls.insert(call.into(), entry);
                     } else if !kind.is_empty() {
@@ -681,6 +732,9 @@ impl RunLedger {
         let mut receipt = object!({"steps":self.steps,"opened":self.opened.len(),"opened_paths":listed(&self.opened),"edited":self.edited.len(),"edited_paths":listed(&self.edited),"created":self.created.len(),"deleted":self.deleted.len(),"searched":self.searched,"patterns":self.patterns.iter().take(12).collect::<Vec<_>>(),"commands":self.commands,"graph":self.graph,"failed":self.failed,"not_run":self.not_run,"failed_steps":self.failed_steps,"last_commands":self.last_commands.iter().map(|(_,value)|value.clone()).collect::<Vec<_>>(),"plan":self.plan,"helpers":self.helpers,"limited":self.limited});
         if let Some(memory) = self.memory() {
             receipt["memory"] = memory;
+        }
+        if !self.focus_tracker.focus().created_entities.is_empty() {
+            receipt["created_entities"] = object!(self.focus_tracker.focus().created_entities);
         }
         receipt
     }
@@ -761,6 +815,10 @@ impl Enricher {
         watch: Option<BTreeMap<String, String>>,
         outside: bool,
     ) -> Self {
+        let mut ledger = RunLedger::new(provider, watch, outside);
+        if !root.is_empty() {
+            ledger.set_focus_root(PathBuf::from(root));
+        }
         Self {
             _provider: provider.into(),
             root: root.into(),
@@ -783,8 +841,14 @@ impl Enricher {
             last_plan: None,
             plan_items: None,
             plan_total: 0,
-            ledger: RunLedger::new(provider, watch, outside),
+            ledger,
         }
+    }
+    pub fn take_focus_event(&mut self) -> Option<Value> {
+        self.ledger.take_focus_event()
+    }
+    pub fn take_focus_events(&mut self) -> Vec<Value> {
+        self.ledger.take_focus_events()
     }
     pub fn text(&self, value: &str, limit: usize) -> Option<String> {
         clean(
@@ -1042,4 +1106,118 @@ pub fn user_home() -> Option<String> {
     std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .ok()
         .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn enricher_tracks_pre_edit_baseline_and_emits_live_focus_deltas() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src/Auth")).expect("auth dir");
+        let target_file = root.join("src/Auth/TokenService.php");
+        fs::write(
+            &target_file,
+            "<?php\nclass TokenService {\n    public function verify(): bool { return true; }\n}\n",
+        )
+        .expect("initial php");
+
+        let mut enricher = Enricher::new(
+            "claude",
+            root.to_str().expect("utf8"),
+            None,
+            &[],
+            None,
+            None,
+            false,
+        );
+
+        // Started Edit captures pre-edit baseline before file is modified on disk.
+        let mut start_edit = object!({
+            "kind": "tool",
+            "targets": {
+                "state": "started",
+                "tool": "Edit",
+                "call": "c1",
+                "path": target_file.to_str().expect("path"),
+            }
+        });
+        assert!(enricher.take(&mut start_edit, 0, 0).is_some());
+        let start_deltas = enricher.take_focus_events();
+        assert_eq!(start_deltas.len(), 1);
+        assert_eq!(start_deltas[0]["kind"], "graph_focus");
+        assert_eq!(start_deltas[0]["phase"], "active");
+        assert_eq!(
+            start_deltas[0]["target_paths"],
+            object!(["src/Auth/TokenService.php"])
+        );
+        assert!(
+            start_deltas[0]["created_entities"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        );
+
+        // Simulate tool writing new method on disk before completed event.
+        fs::write(
+            &target_file,
+            "<?php\nclass TokenService {\n    public function verify(): bool { return true; }\n    public function rotateKey(): string { return 'secret-body'; }\n}\n",
+        )
+        .expect("updated php");
+
+        let mut done_edit = object!({
+            "kind": "tool",
+            "targets": {
+                "state": "completed",
+                "ok": true,
+                "tool": "Edit",
+                "call": "c1",
+                "path": target_file.to_str().expect("path"),
+            }
+        });
+        assert!(enricher.take(&mut done_edit, 1, 100).is_some());
+        let complete_deltas = enricher.take_focus_events();
+        assert_eq!(complete_deltas.len(), 1);
+        let delta = &complete_deltas[0];
+        assert_eq!(delta["kind"], "graph_focus");
+        assert_eq!(delta["phase"], "active");
+        assert!(!delta.to_string().contains("secret-body"));
+        assert_eq!(delta["created_entities"].as_array().map(Vec::len), Some(1));
+        assert_eq!(delta["created_entities"][0]["kind"], "method");
+        assert_eq!(delta["created_entities"][0]["name"], "rotateKey");
+        assert_eq!(delta["created_entities"][0]["parent"], "TokenService");
+
+        // Codex file_change adding a brand-new Rust file emits file + struct + impl method.
+        fs::create_dir_all(root.join("src/Http")).expect("http dir");
+        let guard_file = root.join("src/Http/guard.rs");
+        fs::write(
+            &guard_file,
+            "pub struct RouteGuard;\nimpl RouteGuard {\n    pub fn allow(&self) -> bool { true }\n}\n",
+        )
+        .expect("write rust");
+        let mut codex_change = object!({
+            "kind": "tool",
+            "targets": {
+                "state": "completed",
+                "ok": true,
+                "tool": "file_change",
+                "changes": [{"path": "src/Http/guard.rs", "kind": "add"}]
+            }
+        });
+        assert!(enricher.take(&mut codex_change, 2, 200).is_some());
+        let deltas = enricher.take_focus_events();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(enricher.ledger.created_entities().len(), 4);
+        assert_eq!(enricher.ledger.target_paths().len(), 2);
+        assert_eq!(enricher.ledger.target_folders().len(), 2);
+        let receipt = enricher.ledger.receipt();
+        assert_eq!(
+            receipt["created_entities"].as_array().map(Vec::len),
+            Some(4)
+        );
+        assert!(!receipt.to_string().contains("secret-body"));
+    }
 }

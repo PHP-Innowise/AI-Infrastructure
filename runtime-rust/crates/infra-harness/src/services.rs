@@ -29,6 +29,18 @@ pub struct NativeServices {
     pub closer: Arc<dyn Fn() -> CloseFuture<'static> + Send + Sync>,
 }
 impl NativeServices {
+    async fn auto_start_graph(&self, project_id: &str) {
+        if !project_id.is_empty()
+            && let Some(graph) = self.domains.get("graph")
+        {
+            let _ = graph
+                .execute(
+                    "graph.auto_start",
+                    json!({"params":{"project_id":project_id},"body":{},"query":{}}),
+                )
+                .await;
+        }
+    }
     pub fn new(
         store: SessionStore,
         domains: BTreeMap<String, Arc<dyn Domain>>,
@@ -84,15 +96,42 @@ impl Services for NativeServices {
             let body = &request["body"];
             let sid = params["session_id"].as_str().unwrap_or("");
             match operation {
-                "bootstrap" => Ok(Payload::Json((self.bootstrap)()?)),
-                "sessions.list" => Ok(Payload::Json(json!({"sessions":self.store.summaries()?}))),
+                "bootstrap" => {
+                    let data = (self.bootstrap)()?;
+                    if let Some(graph) = self.domains.get("graph") {
+                        let _ = graph
+                            .execute(
+                                "graph.auto_start_all",
+                                json!({"params":{},"body":{},"query":{}}),
+                            )
+                            .await;
+                    }
+                    Ok(Payload::Json(data))
+                }
+                "sessions.list" => {
+                    if let Some(project_id) = query["project_id"]
+                        .as_str()
+                        .or_else(|| params["project_id"].as_str())
+                        .filter(|id| !id.is_empty())
+                    {
+                        self.auto_start_graph(project_id).await;
+                    }
+                    Ok(Payload::Json(json!({"sessions":self.store.summaries()?})))
+                }
                 "sessions.get" => {
                     let after = query["after"]
                         .as_str()
                         .unwrap_or("0")
                         .parse::<i64>()
                         .map_err(|_| HarnessError::invalid("Invalid event cursor."))?;
-                    let (session, events) = self.store.session_events(sid, after)?;
+                    let (mut session, events) = self.store.session_events(sid, after)?;
+                    session["graph_focus"] =
+                        crate::graph_live::session_focus_value(&self.store, sid)?;
+                    if after == 0
+                        && let Some(project_id) = session["project_id"].as_str()
+                    {
+                        self.auto_start_graph(project_id).await;
+                    }
                     Ok(Payload::Json(json!({"session":session,"events":events})))
                 }
                 "sessions.merge_archive" => Ok(Payload::Json(self.store.merge_archive(sid)?)),
@@ -161,9 +200,33 @@ impl Services for NativeServices {
                             json!({"params":{"project_id":project["id"]},"body":{},"query":{}}),
                         )
                         .await?;
+                    self.auto_start_graph(project["id"].as_str().unwrap_or(""))
+                        .await;
                     Ok(Payload::Json(
                         json!({"project":project,"projects":(self.bootstrap)()?["projects"]}),
                     ))
+                }
+                "projects.select" => {
+                    let project_id = params["project_id"]
+                        .as_str()
+                        .or_else(|| body["project_id"].as_str())
+                        .ok_or_else(|| HarnessError::invalid("Invalid project selection."))?;
+                    let project = self.store.project(project_id)?;
+                    self.auto_start_graph(project_id).await;
+                    Ok(Payload::Json(json!({"project":project})))
+                }
+                "graph.status" => {
+                    if query["check"].as_str() == Some("1") {
+                        self.auto_start_graph(params["project_id"].as_str().unwrap_or(""))
+                            .await;
+                    }
+                    self.domains
+                        .get("graph")
+                        .ok_or_else(|| {
+                            HarnessError::unavailable("Required native service is unavailable.")
+                        })?
+                        .execute(operation, request)
+                        .await
                 }
                 "sdd.artifacts" => {
                     let session = self.store.get(sid)?;
@@ -188,5 +251,124 @@ impl Services for NativeServices {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    struct StubDomain;
+    impl Domain for StubDomain {
+        fn execute<'a>(&'a self, _operation: &'a str, _request: Value) -> Reply<'a> {
+            Box::pin(async { Ok(Payload::Json(json!({}))) })
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_status_visit_and_projects_select_auto_start_unset_project() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&root.path().join("state")).unwrap();
+        let folder = root.path().join("project");
+        std::fs::create_dir_all(&folder).unwrap();
+        let project = store.register(&folder).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let graphs = crate::graph::Graphs::with(
+            store.clone(),
+            Some(root.path().join("no-such-graphify")),
+            Duration::ZERO,
+        );
+
+        let stub: Arc<dyn Domain> = Arc::new(StubDomain);
+        let mut domains: BTreeMap<String, Arc<dyn Domain>> = [
+            "sessions",
+            "setup",
+            "accelerators",
+            "systems",
+            "discovery",
+            "creator",
+            "skills",
+            "results",
+            "delivery",
+            "brain",
+            "context",
+            "projects",
+            "commands",
+            "files",
+            "memory",
+            "updates",
+            "providers",
+            "knowledge",
+        ]
+        .into_iter()
+        .map(|name| (name.to_owned(), Arc::clone(&stub)))
+        .collect();
+        domains.insert("graph".to_owned(), graphs.clone());
+
+        let close_graphs = graphs.clone();
+        let services = NativeServices::new(
+            store,
+            domains,
+            Arc::new(|| Ok(json!({}))),
+            BTreeMap::new(),
+            Arc::new(move || {
+                let g = close_graphs.clone();
+                Box::pin(async move {
+                    g.close();
+                    Ok(())
+                })
+            }),
+        )
+        .unwrap();
+
+        // Direct Graphs::status stays "off" on untouched fixtures.
+        assert_eq!(graphs.status(&project, true).unwrap()["state"], "off");
+
+        // HTTP/service visit (check=1) auto-starts unset projects before returning status.
+        let Payload::Json(status) = services
+            .request(
+                "graph.status",
+                json!({
+                    "params": {"project_id": project},
+                    "query": {"check": "1"},
+                    "body": {},
+                }),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected json status payload");
+        };
+        assert_eq!(status["enabled"], true, "{status}");
+        assert_eq!(status["state"], "missing", "{status}");
+
+        // Explicit disable blocks subsequent check=1 / projects.select auto-start.
+        graphs.act(&project, "disable").unwrap();
+        let Payload::Json(selected) = services
+            .request(
+                "projects.select",
+                json!({
+                    "params": {"project_id": project},
+                    "query": {},
+                    "body": {},
+                }),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected json select payload");
+        };
+        assert_eq!(selected["project"]["id"], project);
+        assert_eq!(graphs.status(&project, true).unwrap()["state"], "off");
+        assert!(crate::http::ROUTES.iter().any(|route| {
+            route.method == "POST"
+                && route.pattern == "/api/projects/{project_id}/select"
+                && route.operation == "projects.select"
+        }));
+
+        services.close().await.unwrap();
     }
 }

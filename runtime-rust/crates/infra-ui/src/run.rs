@@ -16,6 +16,7 @@ pub fn reset() {
     dom::clear("run-tree");
     dom::clear("run-pane-plan");
     dom::clear("run-pane-commands");
+    render();
 }
 fn initial() -> V {
     json!({"launch":"","calls":{},"open":[],"files":{},"commands":[],"plan":[],"searches":[],"steps":0,"messages":0,"finished":false,"outcome":null,"memory":null,"kinds":[],"started":null})
@@ -291,16 +292,38 @@ fn update_clock() {
         dom::cancel_timer("run-clock");
     }
 }
+fn set_inert(id: &str, v: bool) {
+    if let Some(e) = dom::get(id) {
+        if v {
+            let _ = e.set_attribute("inert", "");
+        } else {
+            let _ = e.remove_attribute("inert");
+        }
+    }
+}
+fn run_has_activity(run: &V) -> bool {
+    run["steps"].as_u64().unwrap_or(0) > 0
+        || run["messages"].as_u64().unwrap_or(0) > 0
+        || run["files"].as_object().is_some_and(|f| !f.is_empty())
+        || !m::array(&run["plan"]).is_empty()
+        || !m::array(&run["commands"]).is_empty()
+        || !m::array(&run["searches"]).is_empty()
+}
+pub fn run_view_open(run: &V, session: &V) -> bool {
+    m::active(session) || (run.is_object() && native_run(run) && run_has_activity(run))
+}
 pub fn render() {
     let run = m::data("run");
+    let session = m::read(|s| s.selected.clone());
+    let open = run_view_open(&run, &session);
+    dom::hidden("run-view", !open);
+    dom::attr("run-view", "data-open", if open { "true" } else { "false" });
+    set_inert("run-view", !open);
     if !run.is_object() {
         dom::cancel_timer("run-clock");
-        dom::hidden("run-view", true);
         return;
     }
-    let session = m::read(|s| s.selected.clone());
     let native = native_run(&run);
-    dom::hidden("run-view", !native);
     if !native {
         dom::cancel_timer("run-clock");
         return;
@@ -500,6 +523,12 @@ pub fn render() {
     }
     let detailed = m::data("run-detailed").as_bool().unwrap_or(false);
     dom::hidden("run-panel", !detailed);
+    set_inert("run-panel", !detailed);
+    dom::attr(
+        "run-card",
+        "data-detailed",
+        if detailed { "true" } else { "false" },
+    );
     dom::attr(
         "run-view",
         "data-detailed",
@@ -822,5 +851,21 @@ mod clock_tests {
         ] {
             assert!(clock_state(&json!({"kinds":["tool",kind]}), &active).is_none());
         }
+    }
+
+    #[test]
+    fn run_view_opens_for_active_sessions_or_nonempty_native_runs() {
+        assert!(!run_view_open(&V::Null, &json!({"status": "completed"})));
+        assert!(run_view_open(&V::Null, &json!({"status": "running"})));
+        let empty = initial();
+        assert!(!run_view_open(&empty, &json!({"status": "completed"})));
+        assert!(run_view_open(&empty, &json!({"status": "running"})));
+        let mut with_step = empty.clone();
+        with_step["steps"] = json!(1);
+        with_step["kinds"] = json!(["tool"]);
+        assert!(run_view_open(&with_step, &json!({"status": "completed"})));
+        let mut managed = with_step;
+        managed["kinds"] = json!(["fleet_stage"]);
+        assert!(!run_view_open(&managed, &json!({"status": "completed"})));
     }
 }

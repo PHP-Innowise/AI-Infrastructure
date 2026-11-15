@@ -198,6 +198,7 @@ fn preview_controls(scope: &str) {
         },
         !ready,
     );
+    crate::session::sync_working_indicator();
 }
 fn file_list(id: &str, files: &[V]) {
     dom::clear(id);
@@ -1029,12 +1030,14 @@ fn creator_mutation_controls(locked: bool) {
             let _ = action.set_attribute("disabled", "");
         }
     }
+    crate::session::sync_working_indicator();
 }
 fn creator_reset_detail() {
     m::take("creator-detail");
     dom::hidden("creator-detail", true);
     dom::clear("creator-actions");
     dom::options("creator-runs", &[], m::summary, None);
+    crate::session::sync_working_indicator();
 }
 pub fn reset_creator_project() {
     m::next("creator-list");

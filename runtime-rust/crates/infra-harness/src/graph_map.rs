@@ -13,7 +13,17 @@
 //! project. Where the build says otherwise the build is believed: a link
 //! from one Rust crate into a crate it is not built with is left out, as
 //! `graph_crates` tells.
-use crate::{HarnessError, Result, graph_crates::Crates};
+use crate::{
+    HarnessError, Result,
+    graph_crates::Crates,
+    graph_deps::{
+        DeclaredMember, DepMemberRef, extract_declared_members, find_matching_member_references,
+    },
+    graph_impact::{
+        VisibilityWarning, caller_extends_target, enrich_member_ref, find_matching_declared_member,
+        norm_member_name,
+    },
+};
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::{Value, json};
 use std::{
@@ -66,6 +76,11 @@ pub const HELD: usize = 20;
 /// left to what the open folder itself holds, however much is spread out.
 const SPREAD: usize = 100;
 const OWN: usize = 20;
+const WHOLE_SHOWN: usize = 160;
+const WHOLE_SPREAD: usize = 200;
+const WHOLE_HELD: usize = 24;
+const WHOLE_DRAWN: usize = 320;
+const WHOLE_FOLDERS: usize = 128;
 /// Names each end of a link shows when the link is looked into, the most
 /// linked first, and the links drawn between the two ends.
 pub const LINKED: usize = 150;
@@ -221,7 +236,7 @@ struct Node {
 }
 /// What a symbol is, as far as the graph tells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     /// The node that stands for the file itself: its imports and the code
     /// outside any function.
     File,
@@ -239,7 +254,7 @@ enum Kind {
     Note,
 }
 impl Kind {
-    fn word(self) -> &'static str {
+    pub(crate) fn word(self) -> &'static str {
         match self {
             Kind::File => "file",
             Kind::Type => "type",
@@ -254,20 +269,20 @@ impl Kind {
 }
 /// A node of the graph that lies in a file. Its name is a run of `names`.
 #[derive(Clone, Copy, Debug)]
-struct Symbol {
-    file: u32,
-    community: Option<u32>,
+pub(crate) struct Symbol {
+    pub(crate) file: u32,
+    pub(crate) community: Option<u32>,
     /// The symbol that holds it, or `NONE` at the top of the file.
-    parent: u32,
+    pub(crate) parent: u32,
     /// Where it starts, or 0 when the graph does not say.
-    line: u32,
-    at: u32,
-    len: u16,
-    kind: Kind,
+    pub(crate) line: u32,
+    pub(crate) at: u32,
+    pub(crate) len: u16,
+    pub(crate) kind: Kind,
 }
 /// A link between two symbols: the one that uses, the one that is used, the
 /// relation, and whether the tool only inferred it.
-type Use = (u32, u32, u16, bool);
+pub(crate) type Use = (u32, u32, u16, bool);
 /// One run of lines a change left different in a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hunk {
@@ -387,19 +402,27 @@ struct Link {
     context: Option<Text>,
 }
 #[derive(Clone, Debug, Default, PartialEq)]
-struct Pair {
+pub(crate) struct Pair {
     /// Links the tool read from the code.
-    read: u64,
+    pub(crate) read: u64,
     /// Links it inferred, usually by matching a name.
-    guessed: u64,
-    kinds: Vec<(u16, u64)>,
+    pub(crate) guessed: u64,
+    pub(crate) kinds: Vec<(u16, u64)>,
+    pub(crate) read_kinds: Vec<(u16, u64)>,
 }
 impl Pair {
-    fn weight(&self, certain: bool) -> u64 {
+    pub(crate) fn weight(&self, certain: bool) -> u64 {
         if certain {
             self.read
         } else {
             self.read + self.guessed
+        }
+    }
+    pub(crate) fn kinds_for(&self, certain: bool) -> &[(u16, u64)] {
+        if certain {
+            &self.read_kinds
+        } else {
+            &self.kinds
         }
     }
 }
@@ -786,9 +809,43 @@ struct Tally {
     into: u64,
 }
 #[derive(Clone, Copy, Default)]
-struct Flow {
+pub(super) struct Flow {
     links: u64,
     guessed: u64,
+}
+/// Link tally and aggregated per-relation counts for one rendered map edge.
+#[derive(Clone, Default)]
+pub(super) struct EdgeFlow {
+    pub(super) flow: Flow,
+    pub(super) kinds: BTreeMap<u16, u64>,
+}
+impl EdgeFlow {
+    pub(super) fn add_link(&mut self, kind: u16, guessed: bool) {
+        self.flow.links += 1;
+        self.flow.guessed += u64::from(guessed);
+        *self.kinds.entry(kind).or_default() += 1;
+    }
+    pub(super) fn add_pair(&mut self, pair: &Pair, certain: bool) {
+        let weight = pair.weight(certain);
+        if weight == 0 {
+            return;
+        }
+        self.flow.links += weight;
+        self.flow.guessed += if certain { 0 } else { pair.guessed };
+        add_kind_counts(&mut self.kinds, pair.kinds_for(certain));
+    }
+    pub(super) fn merge(&mut self, other: &Self) {
+        self.flow.links += other.flow.links;
+        self.flow.guessed += other.flow.guessed;
+        for (&kind, &count) in &other.kinds {
+            *self.kinds.entry(kind).or_default() += count;
+        }
+    }
+}
+pub(super) fn add_kind_counts(dest: &mut BTreeMap<u16, u64>, counts: &[(u16, u64)]) {
+    for &(kind, count) in counts {
+        *dest.entry(kind).or_default() += count;
+    }
 }
 /// Two places asked what they share, and which part of that to draw.
 #[derive(Clone, Copy, Debug)]
@@ -1012,6 +1069,138 @@ impl Index {
         }
         crumbs
     }
+}
+
+#[derive(Clone, Copy)]
+struct ViewLimits {
+    shown: usize,
+    spread: usize,
+    held: usize,
+    own: usize,
+    drawn: usize,
+}
+
+const NORMAL_LIMITS: ViewLimits = ViewLimits {
+    shown: SHOWN,
+    spread: SPREAD,
+    held: HELD,
+    own: OWN,
+    drawn: DRAWN,
+};
+
+const WHOLE_LIMITS: ViewLimits = ViewLimits {
+    shown: WHOLE_SHOWN,
+    spread: WHOLE_SPREAD,
+    held: WHOLE_HELD,
+    own: OWN,
+    drawn: WHOLE_DRAWN,
+};
+
+pub(crate) fn is_test_path(path: &str) -> bool {
+    is_test(path)
+}
+
+pub(crate) fn check_layer_rule(
+    rules: &layer_rules::Rules,
+    from_path: &str,
+    to_path: &str,
+) -> Option<(String, String, String, String)> {
+    if is_test(from_path) || is_test(to_path) {
+        return None;
+    }
+    let from_layer = rules.layer(from_path)?;
+    let to_layer = rules.layer(to_path)?;
+    if !rules.forbidden(from_layer, to_layer) {
+        return None;
+    }
+    let from = &rules.layers[from_layer];
+    let to = &rules.layers[to_layer];
+    Some((
+        from.id.clone(),
+        from.name.clone(),
+        to.id.clone(),
+        to.name.clone(),
+    ))
+}
+
+impl Index {
+    pub(crate) fn files(&self) -> &[String] {
+        &self.files
+    }
+
+    pub(crate) fn pairs(&self) -> &[(u32, u32, Pair)] {
+        &self.pairs
+    }
+
+    pub(crate) fn symbol_entries(&self) -> &[Symbol] {
+        &self.symbols
+    }
+
+    pub(crate) fn uses(&self) -> &[Use] {
+        &self.uses
+    }
+
+    pub(crate) fn kind_name(&self, id: u16) -> &str {
+        self.kinds
+            .get(id as usize)
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    /// Sort aggregated link kind counts by descending count, then ascending relation name.
+    pub(super) fn kinds_json(&self, kinds: &BTreeMap<u16, u64>) -> Vec<Value> {
+        let mut sorted = kinds
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .map(|(&kind, &count)| (self.kinds[kind as usize].as_str(), count))
+            .collect::<Vec<_>>();
+        sorted.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
+        sorted
+            .into_iter()
+            .map(|(kind, count)| json!({"kind": kind, "links": count}))
+            .collect()
+    }
+
+    /// Serialize one drawn graph map edge with aggregated dependency kinds.
+    pub(super) fn edge_json(&self, from: &str, to: &str, edge: &EdgeFlow) -> Value {
+        json!({
+            "from": from,
+            "to": to,
+            "links": edge.flow.links,
+            "guessed": edge.flow.guessed,
+            "kinds": self.kinds_json(&edge.kinds),
+        })
+    }
+
+    pub(super) fn collect_symbol_kinds(
+        &self,
+        from: u32,
+        certain: bool,
+        kinds: &mut BTreeMap<u16, u64>,
+        matches: impl Fn(u32) -> bool,
+    ) {
+        for (_, other, kind, _) in self.wired(from, true, certain) {
+            if matches(*other) {
+                *kinds.entry(*kind).or_default() += 1;
+            }
+        }
+    }
+
+    pub(crate) fn file_id(&self, path: &str) -> Option<u32> {
+        self.files
+            .iter()
+            .position(|file| file == path)
+            .map(|at| at as u32)
+    }
+
+    pub(crate) fn symbol_label(&self, at: u32) -> &str {
+        self.label(at)
+    }
+
+    pub(crate) fn file_range(&self, file: u32) -> std::ops::Range<u32> {
+        self.range(file)
+    }
+
     /// One folder of the map, or, where the scope names a file, that file.
     /// `certain` leaves out what the tool inferred, `filter` keeps the
     /// children whose name contains it, and `focus` adds what one child, or
@@ -1028,6 +1217,88 @@ impl Index {
     ) -> Value {
         self.view_with(project, scope, &[], focus, certain, filter)
     }
+
+    /// Whole-project map view with optional breadth-first unfolding (`whole == true`)
+    /// so all modules, files and cross-file edges display in one view.
+    #[allow(clippy::too_many_arguments)]
+    pub fn view_with_whole(
+        &self,
+        project: &str,
+        scope: &str,
+        spread: &[String],
+        focus: Option<&str>,
+        certain: bool,
+        filter: &str,
+        whole: bool,
+    ) -> Value {
+        if whole && scope.trim_matches('/').is_empty() && self.opened(scope).is_none() {
+            let expanded = self.whole_spread(WHOLE_FOLDERS);
+            let mut view = self.view_with_limits(
+                project,
+                scope,
+                &expanded,
+                focus,
+                certain,
+                filter,
+                WHOLE_LIMITS,
+            );
+            view["whole"] = json!(true);
+            return view;
+        }
+        let mut view = self.view_with(project, scope, spread, focus, certain, filter);
+        view["whole"] = json!(whole);
+        view
+    }
+
+    fn whole_spread(&self, limit: usize) -> Vec<String> {
+        let mut file_weights = vec![0u64; self.files.len()];
+        for (from, to, pair) in &self.pairs {
+            let w = pair.weight(false);
+            if let Some(slot) = file_weights.get_mut(*from as usize) {
+                *slot += w;
+            }
+            if let Some(slot) = file_weights.get_mut(*to as usize) {
+                *slot += w;
+            }
+        }
+        let mut folder_stats: HashMap<&str, (u64, usize)> = HashMap::new();
+        for (idx, file) in self.files.iter().enumerate() {
+            let w = file_weights[idx];
+            for (at, ch) in file.char_indices() {
+                if ch == '/' {
+                    let entry = folder_stats.entry(&file[..at]).or_default();
+                    entry.0 += w;
+                    entry.1 += 1;
+                }
+            }
+        }
+        let mut children_of: HashMap<&str, Vec<&str>> = HashMap::new();
+        for &folder in folder_stats.keys() {
+            children_of.entry(holder(folder)).or_default().push(folder);
+        }
+        for kids in children_of.values_mut() {
+            kids.sort_by(|a, b| {
+                let sa = folder_stats.get(a).copied().unwrap_or_default();
+                let sb = folder_stats.get(b).copied().unwrap_or_default();
+                sb.0.cmp(&sa.0).then(sb.1.cmp(&sa.1)).then(a.cmp(b))
+            });
+        }
+        let mut result = Vec::new();
+        let mut queue = std::collections::VecDeque::from([""]);
+        while let Some(parent) = queue.pop_front() {
+            if let Some(kids) = children_of.get(parent) {
+                for &kid in kids {
+                    if result.len() >= limit {
+                        return result;
+                    }
+                    result.push(kid.to_owned());
+                    queue.push_back(kid);
+                }
+            }
+        }
+        result
+    }
+
     /// One folder of the map with some of the folders in it spread out:
     /// such a folder is not drawn as one place but as the places it holds,
     /// among the others, so what is around it stays in the picture. A
@@ -1041,6 +1312,28 @@ impl Index {
         focus: Option<&str>,
         certain: bool,
         filter: &str,
+    ) -> Value {
+        self.view_with_limits(
+            project,
+            scope,
+            spread,
+            focus,
+            certain,
+            filter,
+            NORMAL_LIMITS,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn view_with_limits(
+        &self,
+        project: &str,
+        scope: &str,
+        spread: &[String],
+        focus: Option<&str>,
+        certain: bool,
+        filter: &str,
+        limits: ViewLimits,
     ) -> Value {
         if let Some(file) = self.opened(scope) {
             return self.file(project, file, &HashMap::new(), None, focus, certain, filter);
@@ -1060,7 +1353,7 @@ impl Index {
             tally.folder |= key.len() < file.len();
             tally.symbols += self.holds(id as u32);
         }
-        let mut flows: HashMap<(&str, &str), Flow> = HashMap::new();
+        let mut flows: HashMap<(&str, &str), EdgeFlow> = HashMap::new();
         let mut kinds: BTreeMap<u16, u64> = BTreeMap::new();
         for (from, to, pair) in &self.pairs {
             let weight = pair.weight(certain);
@@ -1081,13 +1374,12 @@ impl Index {
             if let Some(tally) = tallies.get_mut(target) {
                 tally.into += weight;
             }
-            let flow = flows.entry((source, target)).or_default();
-            flow.links += weight;
-            flow.guessed += if certain { 0 } else { pair.guessed };
+            flows
+                .entry((source, target))
+                .or_default()
+                .add_pair(pair, certain);
             if focus == Some(source) {
-                for (kind, count) in &pair.kinds {
-                    *kinds.entry(*kind).or_default() += count;
-                }
+                add_kind_counts(&mut kinds, pair.kinds_for(certain));
             }
         }
         let needle = filter.trim().to_lowercase();
@@ -1112,14 +1404,18 @@ impl Index {
         let mut shown = HashSet::new();
         let mut drawn: HashMap<&str, usize> = HashMap::new();
         for framed in [true, false] {
-            let full = if framed { SPREAD - OWN } else { SPREAD };
+            let full = if framed {
+                limits.spread.saturating_sub(limits.own)
+            } else {
+                limits.spread
+            };
             for (key, _) in &children {
                 let folder = holder(key);
                 if (folder != scope) != framed || shown.len() >= full {
                     continue;
                 }
                 let count = drawn.entry(folder).or_default();
-                if *count < if framed { HELD } else { SHOWN } {
+                if *count < if framed { limits.held } else { limits.shown } {
                     *count += 1;
                     shown.insert(**key);
                 }
@@ -1163,7 +1459,11 @@ impl Index {
             .collect::<Vec<_>>();
         let between = edges.len();
         edges.sort_by(|((a, b), left), ((c, d), right)| {
-            right.links.cmp(&left.links).then((a, b).cmp(&(c, d)))
+            right
+                .flow
+                .links
+                .cmp(&left.flow.links)
+                .then((a, b).cmp(&(c, d)))
         });
         // Where nearly everything is linked to everything, all links drawn at
         // once say nothing. Each child then keeps its strongest uses; the
@@ -1177,20 +1477,20 @@ impl Index {
                 *count <= STRONGEST
             });
         }
-        edges.truncate(DRAWN);
+        edges.truncate(limits.drawn);
         let side = |outgoing: bool| {
             let Some(focus) = focus else {
                 return (Vec::new(), 0);
             };
             let mut rows = flows
                 .iter()
-                .filter_map(|((source, target), flow)| {
+                .filter_map(|((source, target), edge)| {
                     let other = if outgoing {
                         (*source == focus).then_some(*target)
                     } else {
                         (*target == focus).then_some(*source)
                     }?;
-                    Some((other, *flow))
+                    Some((other, edge.flow))
                 })
                 .collect::<Vec<_>>();
             rows.sort_by(|(a, left), (b, right)| right.links.cmp(&left.links).then(a.cmp(b)));
@@ -1216,11 +1516,6 @@ impl Index {
         let focus = focused.map(|(path, tally)| {
             let (uses, uses_more) = side(true);
             let (used_by, used_by_more) = side(false);
-            let mut kinds = kinds
-                .iter()
-                .map(|(kind, count)| (self.kinds[*kind as usize].as_str(), *count))
-                .collect::<Vec<_>>();
-            kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
             json!({
                 "path": path,
                 "name": name(path),
@@ -1235,7 +1530,7 @@ impl Index {
                 "uses_more": uses_more,
                 "used_by": used_by,
                 "used_by_more": used_by_more,
-                "kinds": kinds.into_iter().map(|(kind, count)| json!({"kind": kind, "links": count})).collect::<Vec<_>>(),
+                "kinds": self.kinds_json(&kinds),
             })
         });
         json!({
@@ -1266,12 +1561,9 @@ impl Index {
             })).collect::<Vec<_>>(),
             "between": between,
             "backbone": backbone,
-            "edges": edges.iter().map(|((source, target), flow)| json!({
-                "from": source,
-                "to": target,
-                "links": flow.links,
-                "guessed": flow.guessed,
-            })).collect::<Vec<_>>(),
+            "edges": edges.iter().map(|((source, target), edge)| {
+                self.edge_json(source, target, edge)
+            }).collect::<Vec<_>>(),
             "focus": focus,
         })
     }
@@ -1384,6 +1676,105 @@ impl Index {
             .iter()
             .map(|at| self.files[home(*at) as usize].as_str())
             .collect::<Vec<_>>();
+        // Lazily inspect source only for files appearing on either side of this link.
+        let mut member_cache = FileMemberCache::new(self);
+        let mut user_file_ids: BTreeSet<u32> = users.iter().map(|(at, _)| home(*at)).collect();
+        let mut used_file_ids: BTreeSet<u32> = useds.iter().map(|(at, _)| home(*at)).collect();
+        match user {
+            Reach::File(f) => {
+                user_file_ids.insert(f);
+            }
+            Reach::Symbol(s) => {
+                user_file_ids.insert(home(s));
+            }
+            Reach::Folder(_) => {}
+        }
+        match used {
+            Reach::File(f) => {
+                used_file_ids.insert(f);
+            }
+            Reach::Symbol(s) => {
+                used_file_ids.insert(home(s));
+            }
+            Reach::Folder(_) => {}
+        }
+
+        let target_sym_filter: Option<(String, Option<String>)> = match used {
+            Reach::Symbol(s)
+                if !matches!(
+                    self.symbols[s as usize].kind,
+                    Kind::Type | Kind::File | Kind::Note
+                ) =>
+            {
+                let lbl = self.label(s).to_owned();
+                let own = self
+                    .owner(s)
+                    .and_then(|o| o.rsplit('.').next().map(str::to_owned));
+                Some((lbl, own))
+            }
+            _ => None,
+        };
+
+        let mut pair_analyses: HashMap<(u32, u32), (Vec<DepMemberRef>, Vec<VisibilityWarning>)> =
+            HashMap::new();
+        let mut link_member_refs: Vec<DepMemberRef> = Vec::new();
+        let mut link_warnings: Vec<VisibilityWarning> = Vec::new();
+        let mut user_group_refs: HashMap<u32, Vec<DepMemberRef>> = HashMap::new();
+        let mut user_group_warnings: HashMap<u32, Vec<VisibilityWarning>> = HashMap::new();
+        let mut used_group_refs: HashMap<u32, Vec<DepMemberRef>> = HashMap::new();
+        let mut used_group_warnings: HashMap<u32, Vec<VisibilityWarning>> = HashMap::new();
+
+        for &u_fid in &user_file_ids {
+            let u_path = self.files[u_fid as usize].as_str();
+            for &t_fid in &used_file_ids {
+                if u_fid == t_fid {
+                    continue;
+                }
+                let t_path = self.files[t_fid as usize].as_str();
+                let (mut refs, mut warns) = member_cache.link_analysis(u_path, t_path);
+                if let Some((ref f_name, ref f_owner)) = target_sym_filter {
+                    let f_norm = norm_member_name(f_name);
+                    let filtered_refs: Vec<DepMemberRef> = refs
+                        .iter()
+                        .filter(|r| {
+                            norm_member_name(&r.name) == f_norm
+                                && f_owner
+                                    .as_ref()
+                                    .is_none_or(|o| r.parent.as_deref().is_none_or(|p| p == o))
+                        })
+                        .cloned()
+                        .collect();
+                    if !filtered_refs.is_empty() {
+                        refs = filtered_refs;
+                        warns.retain(|w| norm_member_name(&w.member) == f_norm);
+                    }
+                }
+                for r in &refs {
+                    push_unique_link_member_ref(
+                        user_group_refs.entry(u_fid).or_default(),
+                        r.clone(),
+                    );
+                    push_unique_link_member_ref(
+                        used_group_refs.entry(t_fid).or_default(),
+                        r.clone(),
+                    );
+                    push_unique_link_member_ref(&mut link_member_refs, r.clone());
+                }
+                for w in &warns {
+                    push_unique_link_warning(
+                        user_group_warnings.entry(u_fid).or_default(),
+                        w.clone(),
+                    );
+                    push_unique_link_warning(
+                        used_group_warnings.entry(t_fid).or_default(),
+                        w.clone(),
+                    );
+                    push_unique_link_warning(&mut link_warnings, w.clone());
+                }
+                pair_analyses.insert((u_fid, t_fid), (refs, warns));
+            }
+        }
+
         // A name is told as the picture of its file tells it.
         let mut keyed: HashMap<u32, Vec<String>> = HashMap::new();
         let mut key = |at: u32| {
@@ -1393,7 +1784,11 @@ impl Index {
         };
         // One end as it is drawn: its files, the most linked first, each
         // with its names in the order of their lines.
-        let mut side = |names: &[(u32, u64)], counts: &HashMap<u32, u64>| {
+        let mut side = |names: &[(u32, u64)],
+                        counts: &HashMap<u32, u64>,
+                        group_refs: &HashMap<u32, Vec<DepMemberRef>>,
+                        group_warnings: &HashMap<u32, Vec<VisibilityWarning>>,
+                        is_used_side: bool| {
             let mut groups: BTreeMap<u32, Vec<(u32, u64)>> = BTreeMap::new();
             for (at, links) in names {
                 groups.entry(home(*at)).or_default().push((*at, *links));
@@ -1412,36 +1807,96 @@ impl Index {
                 "groups": groups.into_iter().map(|(file, mut names)| {
                     names.sort_by_key(|(at, _)| (self.symbols[*at as usize].line, *at));
                     let path = self.files[file as usize].as_str();
+                    let decls = member_cache.declared(path).to_vec();
+                    let grefs = group_refs.get(&file).cloned().unwrap_or_default();
+                    let gwarns = group_warnings.get(&file).cloned().unwrap_or_default();
+                    let name_vals = names.into_iter().map(|(at, links)| {
+                        let symbol = &self.symbols[at as usize];
+                        let matched_tm = member_cache.symbol_match(at);
+                        let lbl_norm = norm_member_name(self.label(at));
+                        let risk = if is_used_side {
+                            grefs.iter().find_map(|r| {
+                                (norm_member_name(&r.name) == lbl_norm)
+                                    .then_some(r.access_risk.as_deref())
+                                    .flatten()
+                            })
+                        } else {
+                            None
+                        };
+                        let mut obj = serde_json::Map::new();
+                        obj.insert("key".to_owned(), json!(key(at)));
+                        obj.insert("name".to_owned(), json!(self.shown(at)));
+                        obj.insert("kind".to_owned(), json!(symbol.kind.word()));
+                        obj.insert("line".to_owned(), json!(symbol.line));
+                        obj.insert("owner".to_owned(), json!(self.owner(at)));
+                        obj.insert("links".to_owned(), json!(links));
+                        insert_symbol_overlay(&mut obj, matched_tm.as_ref(), risk);
+                        Value::Object(obj)
+                    }).collect::<Vec<_>>();
                     json!({
                         "path": path,
                         "name": label(path, &paths),
-                        "names": names.into_iter().map(|(at, links)| {
-                            let symbol = &self.symbols[at as usize];
-                            json!({
-                                "key": key(at),
-                                "name": self.shown(at),
-                                "kind": symbol.kind.word(),
-                                "line": symbol.line,
-                                "owner": self.owner(at),
-                                "links": links,
-                            })
-                        }).collect::<Vec<_>>(),
+                        "declared_members": decls,
+                        "referenced_members": grefs,
+                        "visibility_warnings": gwarns,
+                        "names": name_vals,
                     })
                 }).collect::<Vec<_>>(),
             })
         };
-        let (users, useds) = (side(&users, &out), side(&useds, &into));
+        let (users, useds) = (
+            side(&users, &out, &user_group_refs, &user_group_warnings, false),
+            side(&useds, &into, &used_group_refs, &used_group_warnings, true),
+        );
         let mut edges = links
             .iter()
             .filter(|(from, to, ..)| shown.contains(from) && shown.contains(to))
             .collect::<Vec<_>>();
         edges.sort_by_key(|(from, to, ..)| (*from, *to));
         edges.truncate(WIRED);
-        let mut kinds = kinds
+        let edge_vals = edges
             .iter()
-            .map(|(kind, count)| (self.kinds[*kind as usize].as_str(), *count))
+            .map(|(from_sym, to_sym, kind, inferred)| {
+                let u_fid = home(*from_sym);
+                let t_fid = home(*to_sym);
+                let to_lbl_norm = norm_member_name(self.label(*to_sym));
+                let mut access_risk = pair_analyses.get(&(u_fid, t_fid)).and_then(|(refs, _)| {
+                    refs.iter().find_map(|r| {
+                        (norm_member_name(&r.name) == to_lbl_norm)
+                            .then_some(r.access_risk.clone())
+                            .flatten()
+                    })
+                });
+                if access_risk.is_none()
+                    && u_fid != t_fid
+                    && let Some(tm) = member_cache.symbol_match(*to_sym)
+                {
+                    let u_path = self.files[u_fid as usize].as_str();
+                    let t_path = self.files[t_fid as usize].as_str();
+                    let t_decls = member_cache.declared(t_path).to_vec();
+                    let caller_ext =
+                        caller_extends_target(member_cache.source(u_path), t_path, &t_decls);
+                    access_risk = crate::graph_impact::assess_member_access(
+                        &tm,
+                        u_path,
+                        t_path,
+                        caller_ext,
+                        "reference",
+                        Some(self.symbols[*from_sym as usize].line),
+                    )
+                    .access_risk;
+                }
+                let mut obj = serde_json::Map::new();
+                obj.insert("from".to_owned(), json!(key(*from_sym)));
+                obj.insert("to".to_owned(), json!(key(*to_sym)));
+                obj.insert("kind".to_owned(), json!(self.kinds[*kind as usize]));
+                obj.insert("guessed".to_owned(), json!(inferred));
+                if let Some(risk) = access_risk {
+                    obj.insert("access_risk".to_owned(), json!(risk));
+                }
+                Value::Object(obj)
+            })
             .collect::<Vec<_>>();
-        kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
         json!({
             "mode": "link",
             "certain": certain,
@@ -1451,14 +1906,154 @@ impl Index {
             "guessed": guessed,
             "users": users,
             "used": useds,
-            "edges": edges.iter().map(|(from, to, kind, inferred)| json!({
-                "from": key(*from),
-                "to": key(*to),
-                "kind": self.kinds[*kind as usize],
-                "guessed": inferred,
-            })).collect::<Vec<_>>(),
-            "kinds": kinds.into_iter().map(|(kind, count)| json!({"kind": kind, "links": count})).collect::<Vec<_>>(),
+            "edges": edge_vals,
+            "kinds": self.kinds_json(&kinds),
+            "member_refs": link_member_refs,
+            "visibility_warnings": link_warnings,
         })
+    }
+}
+
+struct FileMemberCache<'a> {
+    index: &'a Index,
+    known_files: BTreeSet<String>,
+    sources: HashMap<String, Option<String>>,
+    members: HashMap<String, Vec<DeclaredMember>>,
+    links: HashMap<(String, String), (Vec<DepMemberRef>, Vec<VisibilityWarning>)>,
+}
+
+impl<'a> FileMemberCache<'a> {
+    fn new(index: &'a Index) -> Self {
+        Self {
+            index,
+            known_files: index.files.iter().cloned().collect(),
+            sources: HashMap::new(),
+            members: HashMap::new(),
+            links: HashMap::new(),
+        }
+    }
+
+    fn source(&mut self, path: &str) -> Option<&str> {
+        if !self.sources.contains_key(path) {
+            let loaded = text_at(&self.index.root, path);
+            self.sources.insert(path.to_owned(), loaded);
+        }
+        self.sources.get(path).and_then(|s| s.as_deref())
+    }
+
+    fn declared(&mut self, path: &str) -> &[DeclaredMember] {
+        if !self.members.contains_key(path) {
+            let list = self
+                .source(path)
+                .map(|src| extract_declared_members(path, src))
+                .unwrap_or_default();
+            self.members.insert(path.to_owned(), list);
+        }
+        self.members.get(path).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    fn symbol_match(&mut self, at: u32) -> Option<DeclaredMember> {
+        let symbol = &self.index.symbols[at as usize];
+        if matches!(symbol.kind, Kind::File | Kind::Note | Kind::Heading) {
+            return None;
+        }
+        let file_path = self.index.files[symbol.file as usize].as_str();
+        let label = self.index.label(at);
+        let owner_raw = self.index.owner(at);
+        let owner = owner_raw
+            .as_deref()
+            .and_then(|o| o.rsplit('.').next())
+            .or(owner_raw.as_deref());
+        let hint = match symbol.kind {
+            Kind::Method => Some("method"),
+            Kind::Function => Some("function"),
+            _ => None,
+        };
+        let decls = self.declared(file_path);
+        find_matching_declared_member(decls, label, hint, owner).cloned()
+    }
+
+    fn link_analysis(
+        &mut self,
+        caller_path: &str,
+        target_path: &str,
+    ) -> (Vec<DepMemberRef>, Vec<VisibilityWarning>) {
+        let key = (caller_path.to_owned(), target_path.to_owned());
+        if let Some(cached) = self.links.get(&key) {
+            return cached.clone();
+        }
+        let target_members = self.declared(target_path).to_vec();
+        let Some(caller_src) = self.source(caller_path).map(str::to_owned) else {
+            let empty = (Vec::new(), Vec::new());
+            self.links.insert(key, empty.clone());
+            return empty;
+        };
+        let mut refs = find_matching_member_references(
+            caller_path,
+            &caller_src,
+            target_path,
+            &target_members,
+            &self.known_files,
+        );
+        let caller_extends = caller_extends_target(Some(&caller_src), target_path, &target_members);
+        let mut warnings = Vec::new();
+        for mref in &mut refs {
+            let assess = enrich_member_ref(
+                mref,
+                &target_members,
+                caller_path,
+                target_path,
+                caller_extends,
+            );
+            if let Some(w) = assess.warning {
+                push_unique_link_warning(&mut warnings, w);
+            }
+        }
+        let result = (refs, warnings);
+        self.links.insert(key, result.clone());
+        result
+    }
+}
+
+fn push_unique_link_member_ref(out: &mut Vec<DepMemberRef>, candidate: DepMemberRef) {
+    let c_norm = norm_member_name(&candidate.name);
+    if !out.iter().any(|existing| {
+        norm_member_name(&existing.name) == c_norm
+            && existing.kind == candidate.kind
+            && existing.parent == candidate.parent
+            && existing.access == candidate.access
+    }) {
+        out.push(candidate);
+    }
+}
+
+fn push_unique_link_warning(out: &mut Vec<VisibilityWarning>, warning: VisibilityWarning) {
+    let w_norm = norm_member_name(&warning.member);
+    if !out.iter().any(|existing| {
+        norm_member_name(&existing.member) == w_norm
+            && existing.kind == warning.kind
+            && existing.parent == warning.parent
+            && existing.line == warning.line
+            && existing.reason == warning.reason
+    }) {
+        out.push(warning);
+    }
+}
+
+fn insert_symbol_overlay(
+    obj: &mut serde_json::Map<String, Value>,
+    member: Option<&DeclaredMember>,
+    access_risk: Option<&str>,
+) {
+    if let Some(tm) = member {
+        obj.insert("member_kind".to_owned(), json!(tm.kind));
+        obj.insert("modifiers".to_owned(), json!(tm.modifiers));
+        if let Some(vis) = &tm.visibility {
+            obj.insert("visibility".to_owned(), json!(vis));
+        }
+    }
+    if let Some(risk) = access_risk {
+        obj.insert("access_risk".to_owned(), json!(risk));
     }
 }
 /// The text of a file of the graph's tree: one that lies inside the tree
@@ -1484,15 +2079,18 @@ fn pairs_of(symbols: &[Symbol], uses: &[Use]) -> Vec<(u32, u32, Pair)> {
             continue;
         }
         let pair = pairs.entry((from, to)).or_default();
+        let bump =
+            |kinds: &mut Vec<(u16, u64)>| match kinds.iter_mut().find(|(known, _)| known == kind) {
+                Some((_, count)) => *count += 1,
+                None => kinds.push((*kind, 1)),
+            };
         if *guessed {
             pair.guessed += 1;
         } else {
             pair.read += 1;
+            bump(&mut pair.read_kinds);
         }
-        match pair.kinds.iter_mut().find(|(known, _)| known == kind) {
-            Some((_, count)) => *count += 1,
-            None => pair.kinds.push((*kind, 1)),
-        }
+        bump(&mut pair.kinds);
     }
     let mut pairs = pairs
         .into_iter()
@@ -2100,7 +2698,7 @@ impl Index {
             // A folder shows how many changed, even when it is one.
             spot.status = (!spot.folder && spot.changed == 1).then_some(*kind);
         }
-        let mut flows: HashMap<(&str, &str), Flow> = HashMap::new();
+        let mut flows: HashMap<(&str, &str), EdgeFlow> = HashMap::new();
         // Each linked file: how strongly, and on which side of the change.
         let mut near: HashMap<u32, (u64, bool, bool)> = HashMap::new();
         for (from, to, pair) in &self.pairs {
@@ -2132,16 +2730,17 @@ impl Index {
                 entry.0 += weight;
                 entry.2 = true;
             }
-            let flow = flows.entry((source, target)).or_default();
-            flow.links += weight;
-            flow.guessed += if certain { 0 } else { pair.guessed };
+            flows
+                .entry((source, target))
+                .or_default()
+                .add_pair(pair, certain);
         }
-        for ((source, target), flow) in &flows {
+        for ((source, target), edge) in &flows {
             if let Some(spot) = spots.get_mut(source) {
-                spot.out += flow.links;
+                spot.out += edge.flow.links;
             }
             if let Some(spot) = spots.get_mut(target) {
-                spot.into += flow.links;
+                spot.into += edge.flow.links;
             }
         }
         // A change too wide to draw keeps its busiest places.
@@ -2183,16 +2782,16 @@ impl Index {
                 },
             );
         }
-        for ((source, target), flow) in &flows {
+        for ((source, target), edge) in &flows {
             if let Some(spot) = spots.get_mut(source)
                 && spot.changed == 0
             {
-                spot.out += flow.links;
+                spot.out += edge.flow.links;
             }
             if let Some(spot) = spots.get_mut(target)
                 && spot.changed == 0
             {
-                spot.into += flow.links;
+                spot.into += edge.flow.links;
             }
         }
         let mut edges = flows
@@ -2203,7 +2802,11 @@ impl Index {
             .collect::<Vec<_>>();
         let between = edges.len();
         edges.sort_by(|((a, b), left), ((c, d), right)| {
-            right.links.cmp(&left.links).then((a, b).cmp(&(c, d)))
+            right
+                .flow
+                .links
+                .cmp(&left.flow.links)
+                .then((a, b).cmp(&(c, d)))
         });
         edges.truncate(DRAWN);
         let drawn = spots.keys().copied().collect::<Vec<_>>();
@@ -2254,9 +2857,7 @@ impl Index {
                 flow.links += weight;
                 flow.guessed += if certain { 0 } else { pair.guessed };
                 if own(from) {
-                    for (kind, count) in &pair.kinds {
-                        *kinds.entry(*kind).or_default() += count;
-                    }
+                    add_kind_counts(&mut kinds, pair.kinds_for(certain));
                 }
             }
             let side = |rows: HashMap<u32, Flow>| {
@@ -2285,11 +2886,6 @@ impl Index {
             };
             let (uses, uses_more) = side(uses);
             let (used_by, used_by_more) = side(used);
-            let mut kinds = kinds
-                .iter()
-                .map(|(kind, count)| (self.kinds[*kind as usize].as_str(), *count))
-                .collect::<Vec<_>>();
-            kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
             json!({
                 "path": place,
                 "name": named(place, spot),
@@ -2308,7 +2904,7 @@ impl Index {
                 "uses_more": uses_more,
                 "used_by": used_by,
                 "used_by_more": used_by_more,
-                "kinds": kinds.into_iter().map(|(kind, count)| json!({"kind": kind, "links": count})).collect::<Vec<_>>(),
+                "kinds": self.kinds_json(&kinds),
             })
         });
         json!({
@@ -2346,12 +2942,9 @@ impl Index {
             })).collect::<Vec<_>>(),
             "between": between,
             "backbone": false,
-            "edges": edges.iter().map(|((source, target), flow)| json!({
-                "from": source,
-                "to": target,
-                "links": flow.links,
-                "guessed": flow.guessed,
-            })).collect::<Vec<_>>(),
+            "edges": edges.iter().map(|((source, target), edge)| {
+                self.edge_json(source, target, edge)
+            }).collect::<Vec<_>>(),
             "focus": focus,
         })
     }
@@ -2445,7 +3038,7 @@ impl Index {
                 stop.status = Some(*kind);
             }
         }
-        let mut flows: HashMap<(&str, &str), Flow> = HashMap::new();
+        let mut flows: HashMap<(&str, &str), EdgeFlow> = HashMap::new();
         let mut kinds: BTreeMap<u16, u64> = BTreeMap::new();
         for (from, to, pair) in &self.pairs {
             let weight = pair.weight(certain);
@@ -2463,21 +3056,20 @@ impl Index {
             if let Some(stop) = stops.get_mut(target) {
                 stop.into += weight;
             }
-            let flow = flows.entry((source, target)).or_default();
-            flow.links += weight;
-            flow.guessed += if certain { 0 } else { pair.guessed };
+            flows
+                .entry((source, target))
+                .or_default()
+                .add_pair(pair, certain);
             if focus == Some(source) {
-                for (kind, count) in &pair.kinds {
-                    *kinds.entry(*kind).or_default() += count;
-                }
+                add_kind_counts(&mut kinds, pair.kinds_for(certain));
             }
         }
         // Both sides of every place, strongest first.
         let mut uses: HashMap<&str, Vec<(&str, Flow)>> = HashMap::new();
         let mut users: HashMap<&str, Vec<(&str, Flow)>> = HashMap::new();
-        for ((source, target), flow) in &flows {
-            uses.entry(*source).or_default().push((*target, *flow));
-            users.entry(*target).or_default().push((*source, *flow));
+        for ((source, target), edge) in &flows {
+            uses.entry(*source).or_default().push((*target, edge.flow));
+            users.entry(*target).or_default().push((*source, edge.flow));
         }
         for rows in uses.values_mut().chain(users.values_mut()) {
             rows.sort_by(|(a, left), (b, right)| right.links.cmp(&left.links).then(a.cmp(b)));
@@ -2530,7 +3122,11 @@ impl Index {
             .collect::<Vec<_>>();
         let between = edges.len();
         edges.sort_by(|((a, b), left), ((c, d), right)| {
-            right.links.cmp(&left.links).then((a, b).cmp(&(c, d)))
+            right
+                .flow
+                .links
+                .cmp(&left.flow.links)
+                .then((a, b).cmp(&(c, d)))
         });
         edges.truncate(DRAWN);
         let count = |side: &HashMap<&str, Vec<(&str, Flow)>>, place: &str| {
@@ -2607,11 +3203,6 @@ impl Index {
             };
             let (using, using_more) = side(uses.get(path));
             let (used_by, used_by_more) = side(users.get(path));
-            let mut kinds = kinds
-                .iter()
-                .map(|(kind, count)| (self.kinds[*kind as usize].as_str(), *count))
-                .collect::<Vec<_>>();
-            kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
             let mut focus = node(path);
             focus["name"] = json!(name(path));
             focus["inside"] = json!(true);
@@ -2619,10 +3210,7 @@ impl Index {
             focus["uses_more"] = json!(using_more);
             focus["used_by"] = json!(used_by);
             focus["used_by_more"] = json!(used_by_more);
-            focus["kinds"] = kinds
-                .into_iter()
-                .map(|(kind, count)| json!({"kind": kind, "links": count}))
-                .collect();
+            focus["kinds"] = json!(self.kinds_json(&kinds));
             focus
         });
         Some(json!({
@@ -2648,12 +3236,9 @@ impl Index {
             "nodes": shown.iter().map(|place| node(place)).collect::<Vec<_>>(),
             "between": between,
             "backbone": false,
-            "edges": edges.iter().map(|((source, target), flow)| json!({
-                "from": source,
-                "to": target,
-                "links": flow.links,
-                "guessed": flow.guessed,
-            })).collect::<Vec<_>>(),
+            "edges": edges.iter().map(|((source, target), edge)| {
+                self.edge_json(source, target, edge)
+            }).collect::<Vec<_>>(),
             "focus": focus,
         }))
     }
@@ -3009,24 +3594,14 @@ impl Index {
                 let (uses, uses_more) = rows(true);
                 let (used_by, used_by_more) = rows(false);
                 let mut kinds: BTreeMap<u16, u64> = BTreeMap::new();
-                for (_, _, kind, _) in self.wired(at, true, certain) {
-                    *kinds.entry(*kind).or_default() += 1;
-                }
-                let mut kinds = kinds
-                    .iter()
-                    .map(|(kind, count)| (self.kinds[*kind as usize].as_str(), *count))
-                    .collect::<Vec<_>>();
-                kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
+                self.collect_symbol_kinds(at, certain, &mut kinds, |_| true);
                 let mut focus = node(index);
                 focus["inside"] = json!(true);
                 focus["uses"] = json!(uses);
                 focus["uses_more"] = json!(uses_more);
                 focus["used_by"] = json!(used_by);
                 focus["used_by_more"] = json!(used_by_more);
-                focus["kinds"] = kinds
-                    .into_iter()
-                    .map(|(kind, count)| json!({"kind": kind, "links": count}))
-                    .collect();
+                focus["kinds"] = json!(self.kinds_json(&kinds));
                 focus
             });
         let symbol = &self.symbols[at as usize];
@@ -3061,12 +3636,17 @@ impl Index {
             "nodes": (0..shown.len()).map(node).collect::<Vec<_>>(),
             "between": between,
             "backbone": false,
-            "edges": edges.iter().map(|(source, target, flow)| json!({
-                "from": keys[*source],
-                "to": keys[*target],
-                "links": flow.links,
-                "guessed": flow.guessed,
-            })).collect::<Vec<_>>(),
+            "edges": edges.iter().map(|(source, target, flow)| {
+                let mut kinds = BTreeMap::new();
+                self.collect_symbol_kinds(shown[*source], certain, &mut kinds, |other| {
+                    other == shown[*target]
+                });
+                self.edge_json(
+                    &keys[*source],
+                    &keys[*target],
+                    &EdgeFlow { flow: *flow, kinds },
+                )
+            }).collect::<Vec<_>>(),
             "focus": focus,
         })
     }
@@ -3369,38 +3949,58 @@ impl<'a> Net<'a> {
             })
         }
     }
-    /// How the places `users` use the places `used`: each kind of link with
-    /// how many there are of it, the most first.
-    fn kinds(&self, users: &[u32], used: &HashSet<u32>) -> Value {
+    pub(super) fn edge_kinds(&self, users: &[u32], used: &HashSet<u32>) -> BTreeMap<u16, u64> {
         let index = self.index;
         let mut kinds: BTreeMap<u16, u64> = BTreeMap::new();
         if self.symbols {
             for user in users {
-                for (_, other, kind, _) in index.wired(*user, true, self.certain) {
-                    if used.contains(other) {
-                        *kinds.entry(*kind).or_default() += 1;
-                    }
+                index.collect_symbol_kinds(*user, self.certain, &mut kinds, |other| {
+                    used.contains(&other)
+                });
+            }
+        } else if used.len() == 1 {
+            let target = *used.iter().next().unwrap();
+            for &user in users {
+                if let Ok(pos) = index
+                    .pairs
+                    .binary_search_by_key(&(user, target), |(from, to, _)| (*from, *to))
+                {
+                    add_kind_counts(&mut kinds, index.pairs[pos].2.kinds_for(self.certain));
                 }
             }
-        } else {
-            let users = users.iter().copied().collect::<HashSet<_>>();
-            for (user, other, pair) in &index.pairs {
-                if users.contains(user) && used.contains(other) {
-                    for (kind, count) in &pair.kinds {
-                        *kinds.entry(*kind).or_default() += count;
+        } else if !used.is_empty() {
+            for &user in users {
+                let start = index.pairs.partition_point(|(from, ..)| *from < user);
+                for (from, other, pair) in &index.pairs[start..] {
+                    if *from != user {
+                        break;
+                    }
+                    if used.contains(other) {
+                        add_kind_counts(&mut kinds, pair.kinds_for(self.certain));
                     }
                 }
             }
         }
-        let mut kinds = kinds
-            .iter()
-            .map(|(kind, count)| (index.kinds[*kind as usize].as_str(), *count))
-            .collect::<Vec<_>>();
-        kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
         kinds
-            .into_iter()
-            .map(|(kind, count)| json!({"kind": kind, "links": count}))
-            .collect()
+    }
+    /// How the places `users` use the places `used`: each kind of link with
+    /// how many there are of it, the most first.
+    fn kinds(&self, users: &[u32], used: &HashSet<u32>) -> Value {
+        json!(self.index.kinds_json(&self.edge_kinds(users, used)))
+    }
+    /// Serialize one edge between `from_places` and `to_places` with kind breakdown.
+    pub(super) fn edge_json(
+        &self,
+        from_places: &[u32],
+        to_places: &[u32],
+        from_key: &str,
+        to_key: &str,
+        flow: Flow,
+    ) -> Value {
+        let used = to_places.iter().copied().collect::<HashSet<_>>();
+        let kinds = self.edge_kinds(from_places, &used);
+        self.index
+            .edge_json(from_key, to_key, &EdgeFlow { flow, kinds })
     }
 }
 /// The links a picture of ways draws, the strongest first, each from the
@@ -3560,11 +4160,19 @@ impl Index {
         view["edges"] = route
             .iter()
             .enumerate()
-            .map(|(at, (_, _, flow))| {
-                json!({
-                    "from": keys[at], "to": keys[(at + 1) % len],
-                    "links": flow.links, "guessed": flow.guessed,
-                })
+            .map(|(at, (from, to, flow))| {
+                let next = (at + 1) % len;
+                let from_places = if at == 0 && folder {
+                    members.as_slice()
+                } else {
+                    std::slice::from_ref(from)
+                };
+                let to_places = if next == 0 && folder {
+                    members.as_slice()
+                } else {
+                    std::slice::from_ref(to)
+                };
+                net.edge_json(from_places, to_places, &keys[at], &keys[next], *flow)
             })
             .collect();
         if let Some(at) = focus.and_then(|selected| keys.iter().position(|key| key == selected)) {
@@ -4029,12 +4637,13 @@ impl Index {
         view["edges"] = edges
             .iter()
             .map(|(source, target, flow)| {
-                json!({
-                    "from": keys[*source],
-                    "to": keys[*target],
-                    "links": flow.links,
-                    "guessed": flow.guessed,
-                })
+                net.edge_json(
+                    &[shown[*source].0],
+                    &[shown[*target].0],
+                    &keys[*source],
+                    &keys[*target],
+                    *flow,
+                )
             })
             .collect();
         view["focus"] = json!(focus);
@@ -4451,12 +5060,15 @@ impl Index {
         view["edges"] = edges
             .iter()
             .map(|(source, target, flow)| {
-                json!({
-                    "from": keys[*source],
-                    "to": keys[*target],
-                    "links": flow.links,
-                    "guessed": flow.guessed,
-                })
+                let from_places = members(*source);
+                let to_places = members(*target);
+                net.edge_json(
+                    &from_places,
+                    &to_places,
+                    &keys[*source],
+                    &keys[*target],
+                    *flow,
+                )
             })
             .collect();
         view["focus"] = json!(focus);
@@ -4931,30 +5543,28 @@ impl Index {
             drawn[slot(*at)] = true;
         }
         // The files around are those the drawn symbols are linked with.
-        let mut flows: HashMap<(End, End), Flow> = HashMap::new();
+        let mut flows: HashMap<(End, End), EdgeFlow> = HashMap::new();
         let mut near: HashMap<u32, Near> = HashMap::new();
-        let mut flow = |from: End, to: End, guessed: bool| {
-            let flow = flows.entry((from, to)).or_default();
-            flow.links += 1;
-            flow.guessed += u64::from(guessed);
+        let mut flow = |from: End, to: End, kind: u16, guessed: bool| {
+            flows.entry((from, to)).or_default().add_link(kind, guessed);
         };
-        for (from, to, _, guessed) in &inner {
+        for (from, to, kind, guessed) in &inner {
             if drawn[slot(*from)] && drawn[slot(*to)] {
-                flow(End::Symbol(*from), End::Symbol(*to), *guessed);
+                flow(End::Symbol(*from), End::Symbol(*to), *kind, *guessed);
             }
         }
-        for (from, to, _, guessed) in &leaving {
+        for (from, to, kind, guessed) in &leaving {
             if drawn[slot(*from)] {
                 let other = self.symbols[*to as usize].file;
                 near.entry(other).or_default().used += 1;
-                flow(End::Symbol(*from), End::File(other), *guessed);
+                flow(End::Symbol(*from), End::File(other), *kind, *guessed);
             }
         }
-        for (from, to, _, guessed) in &entering {
+        for (from, to, kind, guessed) in &entering {
             if drawn[slot(*to)] {
                 let other = self.symbols[*from as usize].file;
                 near.entry(other).or_default().uses += 1;
-                flow(End::File(other), End::Symbol(*to), *guessed);
+                flow(End::File(other), End::Symbol(*to), *kind, *guessed);
             }
         }
         let linked = near.len();
@@ -4981,37 +5591,68 @@ impl Index {
                     End::File(id) => beside.contains(id),
                 })
             })
-            .map(|((from, to), flow)| (place(from), place(to), *flow))
+            .map(|((from, to), edge)| (place(from), place(to), edge))
             .collect::<Vec<_>>();
         let between = edges.len();
-        edges.sort_by(|a, b| b.2.links.cmp(&a.2.links).then((a.0, a.1).cmp(&(b.0, b.1))));
+        edges.sort_by(|a, b| {
+            b.2.flow
+                .links
+                .cmp(&a.2.flow.links)
+                .then((a.0, a.1).cmp(&(b.0, b.1)))
+        });
         edges.truncate(DRAWN);
+        let mut member_cache = FileMemberCache::new(self);
+        let file_declared_members = member_cache.declared(path).to_vec();
+
         let mut paths = around.iter().map(|(path, ..)| *path).collect::<Vec<_>>();
         paths.push(path);
         let mut nodes = listed
             .iter()
             .map(|at| {
                 let symbol = &self.symbols[*at as usize];
-                json!({
-                    "path": keys[slot(*at)],
-                    "name": self.shown(*at),
-                    "kind": symbol.kind.word(),
-                    "line": symbol.line,
-                    "owner": self.owner(*at),
-                    "members": members[slot(*at)],
-                    "symbol": true,
-                    "folder": false,
-                    "files": 1,
-                    "within": 0,
-                    "out": out[slot(*at)],
-                    "in": into[slot(*at)],
-                    "changed": u64::from(touched(*at)),
-                    "status": status(*at).map(String::from),
-                    "touched": inside(*at),
-                })
+                let tm = member_cache.symbol_match(*at);
+                let mut obj = serde_json::Map::new();
+                obj.insert("path".to_owned(), json!(keys[slot(*at)]));
+                obj.insert("name".to_owned(), json!(self.shown(*at)));
+                obj.insert("kind".to_owned(), json!(symbol.kind.word()));
+                obj.insert("line".to_owned(), json!(symbol.line));
+                obj.insert("owner".to_owned(), json!(self.owner(*at)));
+                obj.insert("members".to_owned(), json!(members[slot(*at)]));
+                obj.insert("symbol".to_owned(), json!(true));
+                obj.insert("folder".to_owned(), json!(false));
+                obj.insert("files".to_owned(), json!(1));
+                obj.insert("within".to_owned(), json!(0));
+                obj.insert("out".to_owned(), json!(out[slot(*at)]));
+                obj.insert("in".to_owned(), json!(into[slot(*at)]));
+                obj.insert("changed".to_owned(), json!(u64::from(touched(*at))));
+                obj.insert("status".to_owned(), json!(status(*at).map(String::from)));
+                obj.insert("touched".to_owned(), json!(inside(*at)));
+                insert_symbol_overlay(&mut obj, tm.as_ref(), None);
+                Value::Object(obj)
             })
             .collect::<Vec<_>>();
         nodes.extend(around.iter().map(|(other, id, near)| {
+            let decls = member_cache.declared(other).to_vec();
+            let mut nrefs = Vec::new();
+            let mut nwarns = Vec::new();
+            if near.used > 0 {
+                let (r, w) = member_cache.link_analysis(path, other);
+                for item in r {
+                    push_unique_link_member_ref(&mut nrefs, item);
+                }
+                for item in w {
+                    push_unique_link_warning(&mut nwarns, item);
+                }
+            }
+            if near.uses > 0 {
+                let (r, w) = member_cache.link_analysis(other, path);
+                for item in r {
+                    push_unique_link_member_ref(&mut nrefs, item);
+                }
+                for item in w {
+                    push_unique_link_warning(&mut nwarns, item);
+                }
+            }
             json!({
                 "path": other,
                 "name": label(other, &paths),
@@ -5026,6 +5667,9 @@ impl Index {
                 "role": near.role(),
                 "changed": u64::from(changed.contains_key(other)),
                 "status": changed.get(other).map(|kind| kind.to_string()),
+                "declared_members": decls,
+                "referenced_members": nrefs,
+                "visibility_warnings": nwarns,
             })
         }));
         // The rows of the side panel name symbols of other files too, by the
@@ -5035,17 +5679,9 @@ impl Index {
             for (_, _, kind, _) in links {
                 *kinds.entry(*kind).or_default() += 1;
             }
-            let mut kinds = kinds
-                .iter()
-                .map(|(kind, count)| (self.kinds[*kind as usize].as_str(), *count))
-                .collect::<Vec<_>>();
-            kinds.sort_by(|(a, left), (b, right)| right.cmp(left).then(a.cmp(b)));
-            kinds
-                .into_iter()
-                .map(|(kind, count)| json!({"kind": kind, "links": count}))
-                .collect::<Vec<_>>()
+            self.kinds_json(&kinds)
         };
-        let rows = |mut told: Vec<Told>| {
+        let mut rows = |mut told: Vec<Told>, is_used_by: bool| {
             let more = told.len().saturating_sub(TOLD);
             told.truncate(TOLD);
             let mut foreign: HashMap<u32, Vec<String>> = HashMap::new();
@@ -5061,24 +5697,51 @@ impl Index {
                         keys[(told.symbol - self.first[home as usize]) as usize].clone()
                     };
                     let elsewhere = (home != file).then(|| self.files[home as usize].as_str());
-                    json!({
-                        "path": key,
-                        "name": self.shown(told.symbol),
-                        "kind": symbol.kind.word(),
-                        "line": symbol.line,
-                        "owner": self.owner(told.symbol),
-                        "file": elsewhere,
-                        "symbol": true,
-                        "folder": false,
-                        "inside": home == file,
-                        "relation": told.relation.map(|kind| self.kinds[kind as usize].as_str()),
-                        "links": told.links,
-                        "guessed": told.guessed,
-                        "changed": match elsewhere {
+                    let sym_tm = member_cache.symbol_match(told.symbol);
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("path".to_owned(), json!(key));
+                    obj.insert("name".to_owned(), json!(self.shown(told.symbol)));
+                    obj.insert("kind".to_owned(), json!(symbol.kind.word()));
+                    obj.insert("line".to_owned(), json!(symbol.line));
+                    obj.insert("owner".to_owned(), json!(self.owner(told.symbol)));
+                    obj.insert("file".to_owned(), json!(elsewhere));
+                    obj.insert("symbol".to_owned(), json!(true));
+                    obj.insert("folder".to_owned(), json!(false));
+                    obj.insert("inside".to_owned(), json!(home == file));
+                    obj.insert(
+                        "relation".to_owned(),
+                        json!(told.relation.map(|kind| self.kinds[kind as usize].as_str())),
+                    );
+                    obj.insert("links".to_owned(), json!(told.links));
+                    obj.insert("guessed".to_owned(), json!(told.guessed));
+                    obj.insert(
+                        "changed".to_owned(),
+                        json!(match elsewhere {
                             Some(other) => changed.contains_key(other),
                             None => touched(told.symbol),
-                        },
-                    })
+                        }),
+                    );
+                    let mut sym_risk: Option<String> = None;
+                    if let Some(other) = elsewhere {
+                        let (r, w, decls) = if is_used_by {
+                            let (r, w) = member_cache.link_analysis(other, path);
+                            (r, w, file_declared_members.clone())
+                        } else {
+                            let (r, w) = member_cache.link_analysis(path, other);
+                            let lbl_norm = norm_member_name(self.label(told.symbol));
+                            sym_risk = r.iter().find_map(|item| {
+                                (norm_member_name(&item.name) == lbl_norm)
+                                    .then_some(item.access_risk.clone())
+                                    .flatten()
+                            });
+                            (r, w, member_cache.declared(other).to_vec())
+                        };
+                        obj.insert("declared_members".to_owned(), json!(decls));
+                        obj.insert("referenced_members".to_owned(), json!(r));
+                        obj.insert("visibility_warnings".to_owned(), json!(w));
+                    }
+                    insert_symbol_overlay(&mut obj, sym_tm.as_ref(), sym_risk.as_deref());
+                    Value::Object(obj)
                 })
                 .collect::<Vec<_>>();
             (rows, more)
@@ -5154,12 +5817,14 @@ impl Index {
                     .filter(|link| link.1 == at)
                     .collect::<Vec<_>>();
                 let kinds = relations(&uses);
-                let (uses, uses_more) = rows(single(
-                    uses.into_iter().map(|link| (link.1, link)).collect(),
-                ));
-                let (used_by, used_by_more) = rows(single(
-                    used.into_iter().map(|link| (link.0, link)).collect(),
-                ));
+                let (uses, uses_more) = rows(
+                    single(uses.into_iter().map(|link| (link.1, link)).collect()),
+                    false,
+                );
+                let (used_by, used_by_more) = rows(
+                    single(used.into_iter().map(|link| (link.0, link)).collect()),
+                    true,
+                );
                 let mut held = range
                     .clone()
                     .filter(|other| {
@@ -5170,83 +5835,190 @@ impl Index {
                 held.sort_by_key(|other| (self.symbols[*other as usize].line, *other));
                 let held_more = held.len().saturating_sub(TOLD);
                 held.truncate(TOLD);
-                Some(json!({
-                    "path": keys[slot(at)],
-                    "name": self.shown(at),
-                    "kind": symbol.kind.word(),
-                    "line": symbol.line,
-                    "owner": self.owner(at),
-                    "file": path,
-                    "symbol": true,
-                    "folder": false,
-                    "inside": true,
-                    "out": out[slot(at)],
-                    "in": into[slot(at)],
-                    "changed": u64::from(touched(at)),
-                    "status": status(at).map(String::from),
-                    "touched": inside(at),
-                    "members": held.iter().map(|other| json!({
-                        "path": keys[slot(*other)],
-                        "name": self.label(*other),
-                        "kind": self.symbols[*other as usize].kind.word(),
-                        "line": self.symbols[*other as usize].line,
-                        "symbol": true,
-                        "folder": false,
-                        "inside": true,
-                        "changed": touched(*other),
-                    })).collect::<Vec<_>>(),
-                    "members_more": held_more,
-                    "uses": uses,
-                    "uses_more": uses_more,
-                    "used_by": used_by,
-                    "used_by_more": used_by_more,
-                    "kinds": kinds,
-                }))
+
+                let sym_tm = member_cache.symbol_match(at);
+                let focus_lbl = self.label(at);
+                let focus_decls: Vec<DeclaredMember> = if !held.is_empty()
+                    || sym_tm.as_ref().is_some_and(|m| {
+                        matches!(
+                            m.kind.as_str(),
+                            "class" | "abstract_class" | "trait" | "interface" | "struct" | "enum"
+                        )
+                    }) {
+                    let f_norm = norm_member_name(focus_lbl);
+                    file_declared_members
+                        .iter()
+                        .filter(|m| {
+                            m.parent
+                                .as_deref()
+                                .is_some_and(|p| norm_member_name(p) == f_norm)
+                        })
+                        .cloned()
+                        .collect()
+                } else {
+                    sym_tm.clone().into_iter().collect()
+                };
+                let member_vals = held
+                    .iter()
+                    .map(|other| {
+                        let m_tm = member_cache.symbol_match(*other);
+                        let mut m_obj = serde_json::Map::new();
+                        m_obj.insert("path".to_owned(), json!(keys[slot(*other)]));
+                        m_obj.insert("name".to_owned(), json!(self.label(*other)));
+                        m_obj.insert(
+                            "kind".to_owned(),
+                            json!(self.symbols[*other as usize].kind.word()),
+                        );
+                        m_obj.insert("line".to_owned(), json!(self.symbols[*other as usize].line));
+                        m_obj.insert("symbol".to_owned(), json!(true));
+                        m_obj.insert("folder".to_owned(), json!(false));
+                        m_obj.insert("inside".to_owned(), json!(true));
+                        m_obj.insert("changed".to_owned(), json!(touched(*other)));
+                        insert_symbol_overlay(&mut m_obj, m_tm.as_ref(), None);
+                        Value::Object(m_obj)
+                    })
+                    .collect::<Vec<_>>();
+                let mut sym_refs: Vec<DepMemberRef> = Vec::new();
+                let mut sym_warns: Vec<VisibilityWarning> = Vec::new();
+                let target_sym_norm = norm_member_name(focus_lbl);
+                let is_container = !held.is_empty()
+                    || sym_tm.as_ref().is_some_and(|m| {
+                        matches!(
+                            m.kind.as_str(),
+                            "class" | "abstract_class" | "trait" | "interface" | "struct" | "enum"
+                        )
+                    });
+                for item in uses.iter().chain(used_by.iter()) {
+                    for r in item
+                        .get("referenced_members")
+                        .and_then(|v| serde_json::from_value::<Vec<DepMemberRef>>(v.clone()).ok())
+                        .unwrap_or_default()
+                    {
+                        let matches_focus = norm_member_name(&r.name) == target_sym_norm
+                            || (is_container
+                                && r.parent
+                                    .as_deref()
+                                    .is_some_and(|p| norm_member_name(p) == target_sym_norm));
+                        if matches_focus {
+                            push_unique_link_member_ref(&mut sym_refs, r);
+                        }
+                    }
+                    for w in item
+                        .get("visibility_warnings")
+                        .and_then(|v| {
+                            serde_json::from_value::<Vec<VisibilityWarning>>(v.clone()).ok()
+                        })
+                        .unwrap_or_default()
+                    {
+                        let matches_focus = norm_member_name(&w.member) == target_sym_norm
+                            || (is_container
+                                && w.parent
+                                    .as_deref()
+                                    .is_some_and(|p| norm_member_name(p) == target_sym_norm));
+                        if matches_focus {
+                            push_unique_link_warning(&mut sym_warns, w);
+                        }
+                    }
+                }
+                let mut f_obj = serde_json::Map::new();
+                f_obj.insert("path".to_owned(), json!(keys[slot(at)]));
+                f_obj.insert("name".to_owned(), json!(self.shown(at)));
+                f_obj.insert("kind".to_owned(), json!(symbol.kind.word()));
+                f_obj.insert("line".to_owned(), json!(symbol.line));
+                f_obj.insert("owner".to_owned(), json!(self.owner(at)));
+                f_obj.insert("file".to_owned(), json!(path));
+                f_obj.insert("symbol".to_owned(), json!(true));
+                f_obj.insert("folder".to_owned(), json!(false));
+                f_obj.insert("inside".to_owned(), json!(true));
+                f_obj.insert("out".to_owned(), json!(out[slot(at)]));
+                f_obj.insert("in".to_owned(), json!(into[slot(at)]));
+                f_obj.insert("changed".to_owned(), json!(u64::from(touched(at))));
+                f_obj.insert("status".to_owned(), json!(status(at).map(String::from)));
+                f_obj.insert("touched".to_owned(), json!(inside(at)));
+                f_obj.insert("members".to_owned(), json!(member_vals));
+                f_obj.insert("members_more".to_owned(), json!(held_more));
+                f_obj.insert("declared_members".to_owned(), json!(focus_decls));
+                f_obj.insert("referenced_members".to_owned(), json!(sym_refs));
+                f_obj.insert("visibility_warnings".to_owned(), json!(sym_warns));
+                f_obj.insert("uses".to_owned(), json!(uses));
+                f_obj.insert("uses_more".to_owned(), json!(uses_more));
+                f_obj.insert("used_by".to_owned(), json!(used_by));
+                f_obj.insert("used_by_more".to_owned(), json!(used_by_more));
+                f_obj.insert("kinds".to_owned(), json!(kinds));
+                insert_symbol_overlay(&mut f_obj, sym_tm.as_ref(), None);
+                Some(Value::Object(f_obj))
             }
             (None, Some(other)) => {
-                around
-                    .iter()
-                    .find(|(place, ..)| *place == other)
-                    .map(|(other, id, near)| {
-                        let theirs = |at: u32| self.symbols[at as usize].file == *id;
-                        // Its symbols that use this file, and its symbols that
-                        // this file uses.
-                        let users = entering
-                            .iter()
-                            .filter(|link| theirs(link.0))
-                            .collect::<Vec<_>>();
-                        let kinds = relations(&users);
-                        let (uses, uses_more) = rows(grouped(
-                            users.into_iter().map(|link| (link.0, link.3)).collect(),
-                        ));
-                        let (used_by, used_by_more) = rows(grouped(
+                if let Some((other, id, near)) = around.iter().find(|(place, ..)| *place == other) {
+                    let theirs = |at: u32| self.symbols[at as usize].file == *id;
+                    // Its symbols that use this file, and its symbols that
+                    // this file uses.
+                    let users = entering
+                        .iter()
+                        .filter(|link| theirs(link.0))
+                        .collect::<Vec<_>>();
+                    let kinds = relations(&users);
+                    let (uses, uses_more) = rows(
+                        grouped(users.into_iter().map(|link| (link.0, link.3)).collect()),
+                        true,
+                    );
+                    let (used_by, used_by_more) = rows(
+                        grouped(
                             leaving
                                 .iter()
                                 .filter(|link| theirs(link.1))
                                 .map(|link| (link.1, link.3))
                                 .collect(),
-                        ));
-                        json!({
-                            "path": other,
-                            "name": label(other, &paths),
-                            "kind": "file",
-                            "symbol": false,
-                            "folder": false,
-                            "inside": true,
-                            "files": 1,
-                            "symbols": self.holds(*id),
-                            "out": near.uses,
-                            "in": near.used,
-                            "role": near.role(),
-                            "changed": u64::from(changed.contains_key(other)),
-                            "status": changed.get(other).map(|kind| kind.to_string()),
-                            "uses": uses,
-                            "uses_more": uses_more,
-                            "used_by": used_by,
-                            "used_by_more": used_by_more,
-                            "kinds": kinds,
-                        })
-                    })
+                        ),
+                        false,
+                    );
+                    let other_decls = member_cache.declared(other).to_vec();
+                    let mut frefs = Vec::new();
+                    let mut fwarns = Vec::new();
+                    if near.used > 0 {
+                        let (r, w) = member_cache.link_analysis(path, other);
+                        for item in r {
+                            push_unique_link_member_ref(&mut frefs, item);
+                        }
+                        for item in w {
+                            push_unique_link_warning(&mut fwarns, item);
+                        }
+                    }
+                    if near.uses > 0 {
+                        let (r, w) = member_cache.link_analysis(other, path);
+                        for item in r {
+                            push_unique_link_member_ref(&mut frefs, item);
+                        }
+                        for item in w {
+                            push_unique_link_warning(&mut fwarns, item);
+                        }
+                    }
+                    Some(json!({
+                        "path": other,
+                        "name": label(other, &paths),
+                        "kind": "file",
+                        "symbol": false,
+                        "folder": false,
+                        "inside": true,
+                        "files": 1,
+                        "symbols": self.holds(*id),
+                        "out": near.uses,
+                        "in": near.used,
+                        "role": near.role(),
+                        "changed": u64::from(changed.contains_key(other)),
+                        "status": changed.get(other).map(|kind| kind.to_string()),
+                        "declared_members": other_decls,
+                        "referenced_members": frefs,
+                        "visibility_warnings": fwarns,
+                        "uses": uses,
+                        "uses_more": uses_more,
+                        "used_by": used_by,
+                        "used_by_more": used_by_more,
+                        "kinds": kinds,
+                    }))
+                } else {
+                    None
+                }
             }
             _ => None,
         };
@@ -5310,12 +6082,8 @@ impl Index {
             "nodes": nodes,
             "between": between,
             "backbone": false,
-            "edges": edges.iter().map(|(from, to, flow)| json!({
-                "from": from,
-                "to": to,
-                "links": flow.links,
-                "guessed": flow.guessed,
-            })).collect::<Vec<_>>(),
+            "edges": edges.iter().map(|(from, to, edge)| self.edge_json(from, to, edge)).collect::<Vec<_>>(),
+            "declared_members": file_declared_members,
             "focus": focus,
         })
     }
@@ -5745,6 +6513,11 @@ impl Index {
             "rows": rows,
         })
     }
+
+    /// Relative paths of all files indexed by this graph.
+    pub fn indexed_files(&self) -> &[String] {
+        &self.files
+    }
 }
 type Kept = (String, u64, Option<SystemTime>, Arc<Index>);
 /// Indexes of the graphs looked at most recently, each tied to the size and
@@ -5838,8 +6611,20 @@ mod tests {
         assert_eq!(
             guessed["edges"],
             json!([
-                {"from": "src/a.php", "to": "src/b.php", "links": 1, "guessed": 0},
-                {"from": "src/b.php", "to": "src/a.php", "links": 1, "guessed": 1}
+                {
+                    "from": "src/a.php",
+                    "to": "src/b.php",
+                    "links": 1,
+                    "guessed": 0,
+                    "kinds": [{"kind": "calls", "links": 1}]
+                },
+                {
+                    "from": "src/b.php",
+                    "to": "src/a.php",
+                    "links": 1,
+                    "guessed": 1,
+                    "kinds": [{"kind": "calls", "links": 1}]
+                }
             ])
         );
         assert_eq!(guessed["focus"]["uses"][0]["path"], "src/b.php");
@@ -11844,6 +12629,474 @@ where
         assert_eq!(
             rows(&outside, "nodes"),
             rows(&shop.view("shop", "src", None, false, ""), "nodes")
+        );
+    }
+
+    #[test]
+    fn view_with_whole_unfolds_breadth_first_with_raised_caps_and_flags() {
+        let mut nodes = Vec::new();
+        let mut links = Vec::new();
+        for folder in 0..45 {
+            let dir = if folder % 2 == 0 {
+                format!("m{folder:02}")
+            } else {
+                format!("m{folder:02}/sub")
+            };
+            for file in 0..2 {
+                let id = format!("sym_{folder}_{file}");
+                let path = format!("{dir}/f{file}.rs");
+                nodes.push(json!({"id": id, "label": format!("fn_{folder}_{file}()"), "source_file": path}));
+            }
+            if folder > 0 {
+                links.push(json!({
+                    "source": format!("sym_{folder}_0"),
+                    "target": format!("sym_{}_0", folder - 1),
+                    "relation": "calls",
+                    "confidence": "EXTRACTED",
+                    "source_file": format!("{dir}/f0.rs"),
+                }));
+            }
+        }
+        let wide = index(json!({"nodes": nodes, "links": links}));
+        assert_eq!(wide.files().len(), 90);
+        assert!(wide.file_id("m00/f0.rs").is_some());
+        assert_eq!(wide.file_id("missing.rs"), None);
+        assert!(!wide.pairs().is_empty());
+        assert!(!wide.symbol_entries().is_empty());
+        assert!(!wide.uses().is_empty());
+
+        let collapsed = wide.view_with_whole("wide", "", &[], None, false, "", false);
+        assert_eq!(collapsed["whole"], false);
+        assert_eq!(collapsed["nodes"].as_array().unwrap().len(), SHOWN);
+        assert!(collapsed["frames"].as_array().unwrap().is_empty());
+
+        let unfolded = wide.view_with_whole("wide", "", &[], None, false, "", true);
+        assert_eq!(unfolded["whole"], true);
+        let drawn_nodes = unfolded["nodes"].as_array().unwrap();
+        assert_eq!(drawn_nodes.len(), 90);
+        assert!(drawn_nodes.iter().all(|node| node["folder"] == false));
+        let frames = unfolded["frames"].as_array().unwrap();
+        assert!(frames.len() >= 45);
+        assert!(
+            unfolded["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| edge["from"] == "m01/sub/f0.rs" && edge["to"] == "m00/f0.rs")
+        );
+
+        let scoped = wide.view_with_whole("wide", "m00", &[], None, false, "", true);
+        assert_eq!(scoped["whole"], true);
+        assert_eq!(scoped["scope"], "m00");
+        assert_eq!(scoped["nodes"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn file_and_link_views_include_declared_referenced_members_and_visibility_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/Invoice.php"),
+            "<?php\nclass Invoice {\n    public const PRECISION = 2;\n    private int $total = 100;\n    public function subtotal(): int { return $this->total; }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/Checkout.php"),
+            "<?php\nrequire_once __DIR__ . '/Invoice.php';\nclass Checkout {\n    public function apply(Invoice $inv): int {\n        return $inv->subtotal() + $inv->total + Invoice::PRECISION;\n    }\n}\n",
+        )
+        .unwrap();
+
+        let graph = json!({
+            "nodes": [
+                {"id": "inv_cls", "label": "Invoice", "file_type": "code", "_callable_class": "true", "source_file": "src/Invoice.php", "source_location": "L2"},
+                {"id": "inv_prec", "label": "PRECISION", "file_type": "code", "source_file": "src/Invoice.php", "source_location": "L3"},
+                {"id": "inv_total", "label": "total", "file_type": "code", "source_file": "src/Invoice.php", "source_location": "L4"},
+                {"id": "inv_sub", "label": "subtotal()", "file_type": "code", "source_file": "src/Invoice.php", "source_location": "L5"},
+                {"id": "chk_cls", "label": "Checkout", "file_type": "code", "_callable_class": "true", "source_file": "src/Checkout.php", "source_location": "L3"},
+                {"id": "chk_apply", "label": "apply()", "file_type": "code", "source_file": "src/Checkout.php", "source_location": "L4"}
+            ],
+            "links": [
+                {"source": "inv_cls", "target": "inv_prec", "relation": "contains", "confidence": "EXTRACTED", "source_file": "src/Invoice.php"},
+                {"source": "inv_cls", "target": "inv_total", "relation": "contains", "confidence": "EXTRACTED", "source_file": "src/Invoice.php"},
+                {"source": "inv_cls", "target": "inv_sub", "relation": "method", "confidence": "EXTRACTED", "source_file": "src/Invoice.php"},
+                {"source": "chk_cls", "target": "chk_apply", "relation": "method", "confidence": "EXTRACTED", "source_file": "src/Checkout.php"},
+                {"source": "chk_apply", "target": "inv_sub", "relation": "calls", "confidence": "EXTRACTED", "source_file": "src/Checkout.php"},
+                {"source": "chk_apply", "target": "inv_total", "relation": "calls", "confidence": "EXTRACTED", "source_file": "src/Checkout.php"},
+                {"source": "chk_apply", "target": "inv_prec", "relation": "calls", "confidence": "EXTRACTED", "source_file": "src/Checkout.php"}
+            ]
+        });
+        let index = Index::read(graph.to_string().as_bytes(), dir.path()).unwrap();
+
+        // File view without focus keeps existing invariants intact and emits declared_members & neighbor refs
+        let overview = index.view("shop", "src/Invoice.php", None, false, "");
+        assert_eq!(overview["file"]["path"], "src/Invoice.php");
+        assert_eq!(overview["file"]["symbols"], 4);
+        assert_eq!(overview["file"]["types"], 1);
+        assert_eq!(overview["file"]["methods"], 1);
+        assert_eq!(overview["file"]["used_by"], 1);
+
+        let declared = overview["declared_members"].as_array().unwrap();
+        assert!(declared.iter().any(|m| {
+            m["name"] == "$total" && m["kind"] == "property" && m["visibility"] == "private"
+        }));
+        assert!(declared.iter().any(|m| {
+            m["name"] == "PRECISION" && m["kind"] == "const" && m["visibility"] == "public"
+        }));
+
+        let nodes = overview["nodes"].as_array().unwrap();
+        let inv_node = nodes
+            .iter()
+            .find(|n| n["name"] == "Invoice")
+            .expect("Invoice class node");
+        assert_eq!(inv_node["kind"], "type");
+        assert!(inv_node["members"].as_u64().is_some());
+
+        let total_node = nodes
+            .iter()
+            .find(|n| n["name"] == "total")
+            .expect("total symbol node");
+        assert_eq!(total_node["kind"], "name");
+        assert_eq!(total_node["member_kind"], "property");
+        assert_eq!(total_node["visibility"], "private");
+
+        let inv_key = inv_node["path"].as_str().unwrap().to_owned();
+        let class_focus = index.view("shop", "src/Invoice.php", Some(&inv_key), false, "");
+        assert_eq!(class_focus["focus"]["kind"], "type");
+        assert_eq!(class_focus["focus"]["member_kind"], "class");
+        assert!(
+            class_focus["focus"]["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| {
+                    m["name"] == "total"
+                        && m["kind"] == "name"
+                        && m["member_kind"] == "property"
+                        && m["visibility"] == "private"
+                })
+        );
+
+        let checkout_node = nodes
+            .iter()
+            .find(|n| n["path"] == "src/Checkout.php" && n["kind"] == "file")
+            .expect("Checkout neighbor file node");
+        assert!(
+            !checkout_node["declared_members"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            checkout_node["referenced_members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["name"] == "$total" && r["access_risk"] == "inaccessible")
+        );
+
+        // Neighbor file focus adds referenced_members and visibility_warnings cleanly
+        let neighbor_focus = index.view(
+            "shop",
+            "src/Invoice.php",
+            Some("src/Checkout.php"),
+            false,
+            "",
+        );
+        assert!(
+            neighbor_focus["focus"]["referenced_members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["name"] == "$total" && r["access_risk"] == "inaccessible")
+        );
+        assert!(
+            !neighbor_focus["focus"]["visibility_warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        // Symbol focus on Invoice class overlays visibility/members without breaking symbol fields
+        let total_key = total_node["path"].as_str().unwrap().to_owned();
+        let sym_focus = index.view("shop", "src/Invoice.php", Some(&total_key), false, "");
+        assert_eq!(sym_focus["focus"]["kind"], "name");
+        assert_eq!(sym_focus["focus"]["member_kind"], "property");
+        assert_eq!(sym_focus["focus"]["visibility"], "private");
+        assert!(
+            !sym_focus["focus"]["used_by"][0]["visibility_warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        // Link view preserves from/to intact, enriches groups/names/edges, and reports inaccessible member warning
+        let link = index.link("src/Checkout.php", "src/Invoice.php", false);
+        assert_eq!(
+            link["from"],
+            json!({"path": "src/Checkout.php", "name": "Checkout.php", "what": "file"})
+        );
+        assert_eq!(
+            link["to"],
+            json!({"path": "src/Invoice.php", "name": "Invoice.php", "what": "file"})
+        );
+        assert!(link["member_refs"].as_array().unwrap().iter().any(|r| {
+            r["name"] == "$total"
+                && r["visibility"] == "private"
+                && r["access_risk"] == "inaccessible"
+        }));
+        assert!(
+            link["visibility_warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["member"] == "$total" && w["visibility"] == "private")
+        );
+        assert!(
+            !link["users"]["groups"][0]["referenced_members"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let used_group = &link["used"]["groups"][0];
+        assert!(
+            !used_group["declared_members"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(used_group["names"].as_array().unwrap().iter().any(|n| {
+            n["name"] == "total"
+                && n["kind"] == "name"
+                && n["member_kind"] == "property"
+                && n["visibility"] == "private"
+                && n["access_risk"] == "inaccessible"
+        }));
+        assert!(link["edges"].as_array().unwrap().iter().any(|e| {
+            e["to"].as_str().is_some_and(|s| s.contains("total"))
+                && e["access_risk"] == "inaccessible"
+        }));
+    }
+
+    #[test]
+    fn edges_expose_aggregated_dependency_kinds_across_map_modes() {
+        let sym = |id: &str, label: &str, file: &str, line: &str| json!({"id": id, "label": label, "source_file": file, "source_location": line});
+        let link = |from: &str, to: &str, relation: &str, confidence: &str| json!({"source": from, "target": to, "relation": relation, "confidence": confidence});
+        let ctrl_file = "src/ctrl/OrderController.php";
+        let svc_file = "src/svc/OrderService.php";
+        let audit_file = "src/shared/AuditLog.php";
+        let helper_file = "src/extra/Helper.php";
+        let index = index(json!({
+            "nodes": [
+                sym("ctrl", "OrderController", ctrl_file, "L3"),
+                sym("ctrl_handle", "handle()", ctrl_file, "L7"),
+                sym("svc", "OrderService", svc_file, "L3"),
+                sym("svc_run", "run()", svc_file, "L8"),
+                sym("audit", "AuditLog", audit_file, "L3"),
+                sym("audit_rec", "record()", audit_file, "L6"),
+                sym("helper", "Helper", helper_file, "L3"),
+            ],
+            "links": [
+                link("ctrl_handle", "svc_run", "calls", "EXTRACTED"),
+                link("ctrl_handle", "svc_run", "calls", "EXTRACTED"),
+                link("ctrl_handle", "svc_run", "calls", "INFERRED"),
+                link("ctrl_handle", "svc_run", "reads", "EXTRACTED"),
+                link("ctrl_handle", "svc_run", "reads", "EXTRACTED"),
+                link("ctrl_handle", "svc_run", "writes", "EXTRACTED"),
+                link("ctrl_handle", "svc_run", "uses_const", "EXTRACTED"),
+                link("ctrl", "svc", "imports", "EXTRACTED"),
+                link("ctrl", "svc", "extends", "EXTRACTED"),
+                link("ctrl", "svc", "implements", "EXTRACTED"),
+                link("svc_run", "audit_rec", "calls", "EXTRACTED"),
+                link("svc_run", "audit_rec", "imports", "EXTRACTED"),
+                link("audit_rec", "ctrl_handle", "writes", "EXTRACTED"),
+                link("helper", "svc_run", "calls", "EXTRACTED"),
+                link("helper", "svc_run", "reads", "EXTRACTED"),
+            ],
+        }));
+
+        let edge = |view: &Value, from: &str, to: &str| -> Value {
+            view["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|edge| edge["from"] == from && edge["to"] == to)
+                .unwrap_or_else(|| panic!("missing edge {from} -> {to} in {view}"))
+                .clone()
+        };
+
+        let expected_file_all = json!([
+            {"kind": "calls", "links": 3},
+            {"kind": "reads", "links": 2},
+            {"kind": "extends", "links": 1},
+            {"kind": "implements", "links": 1},
+            {"kind": "imports", "links": 1},
+            {"kind": "uses_const", "links": 1},
+            {"kind": "writes", "links": 1},
+        ]);
+        let expected_file_certain = json!([
+            {"kind": "calls", "links": 2},
+            {"kind": "reads", "links": 2},
+            {"kind": "extends", "links": 1},
+            {"kind": "implements", "links": 1},
+            {"kind": "imports", "links": 1},
+            {"kind": "uses_const", "links": 1},
+            {"kind": "writes", "links": 1},
+        ]);
+        let expected_sym_all = json!([
+            {"kind": "calls", "links": 3},
+            {"kind": "reads", "links": 2},
+            {"kind": "uses_const", "links": 1},
+            {"kind": "writes", "links": 1},
+        ]);
+
+        // Scope ("src" folder view & spread view with focus)
+        let root_view = index.view("shop", "src", Some("src/ctrl"), false, "");
+        assert_eq!(
+            edge(&root_view, "src/ctrl", "src/svc")["kinds"],
+            expected_file_all
+        );
+        assert_eq!(
+            edge(
+                &index.view("shop", "src", None, true, ""),
+                "src/ctrl",
+                "src/svc"
+            )["kinds"],
+            expected_file_certain
+        );
+
+        let nested = index.view_with(
+            "shop",
+            "src",
+            &[String::from("src/ctrl"), String::from("src/svc")],
+            Some(ctrl_file),
+            false,
+            "",
+        );
+        assert_eq!(
+            edge(&nested, ctrl_file, svc_file)["kinds"],
+            expected_file_all
+        );
+        assert_eq!(
+            nested["focus"]["kinds"],
+            json!([
+                {"kind": "calls", "links": 3},
+                {"kind": "reads", "links": 2},
+                {"kind": "extends", "links": 1},
+                {"kind": "implements", "links": 1},
+                {"kind": "imports", "links": 1},
+                {"kind": "uses_const", "links": 1},
+                {"kind": "writes", "links": 1},
+            ])
+        );
+
+        // Changes
+        let changed_view =
+            index.changes("shop", &[(ctrl_file.to_owned(), 'M')], "", None, false, "");
+        assert_eq!(
+            edge(&changed_view, ctrl_file, svc_file)["kinds"],
+            expected_file_all
+        );
+
+        // Follow (file & symbol)
+        let follow_files = index
+            .follow(
+                "shop",
+                ctrl_file,
+                &[ctrl_file.to_owned()],
+                &[],
+                &[],
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            edge(&follow_files, ctrl_file, svc_file)["kinds"],
+            expected_file_all
+        );
+
+        let handle_key = format!("{ctrl_file}#L7:handle()");
+        let run_key = format!("{svc_file}#L8:run()");
+        let follow_syms = index
+            .follow(
+                "shop",
+                &handle_key,
+                std::slice::from_ref(&handle_key),
+                &[],
+                &[],
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            edge(&follow_syms, &handle_key, &run_key)["kinds"],
+            expected_sym_all
+        );
+
+        // File symbol view
+        let file_view = index
+            .symbols("shop", ctrl_file, &[], None, None, false, "")
+            .unwrap();
+        assert_eq!(
+            edge(&file_view, &handle_key, svc_file)["kinds"],
+            expected_sym_all
+        );
+
+        // Cycle (folder and file)
+        let folder_cycle = index.cycle("shop", "src/ctrl", &[], &|_| None, None, false);
+        assert_eq!(
+            edge(&folder_cycle, "src/ctrl", svc_file)["kinds"],
+            expected_file_all
+        );
+        let file_cycle = index.cycle("shop", ctrl_file, &[], &|_| None, None, false);
+        assert_eq!(
+            edge(&file_cycle, ctrl_file, svc_file)["kinds"],
+            expected_file_all
+        );
+
+        // Path
+        let path_view = index
+            .path("shop", ctrl_file, audit_file, &[], &|_| None, None, false)
+            .unwrap();
+        assert_eq!(
+            edge(&path_view, ctrl_file, svc_file)["kinds"],
+            expected_file_all
+        );
+        assert_eq!(
+            edge(&path_view, svc_file, audit_file)["kinds"],
+            json!([{"kind": "calls", "links": 1}, {"kind": "imports", "links": 1}])
+        );
+
+        // Shared
+        let shared_view = index
+            .shared(
+                "shop",
+                Sharing {
+                    from: ctrl_file,
+                    to: helper_file,
+                    users: Some(false),
+                    skip: 0,
+                },
+                &[],
+                &|_| None,
+                None,
+                false,
+                "",
+            )
+            .unwrap();
+        assert_eq!(
+            edge(&shared_view, ctrl_file, svc_file)["kinds"],
+            expected_file_all
+        );
+        assert_eq!(
+            edge(&shared_view, helper_file, svc_file)["kinds"],
+            json!([{"kind": "calls", "links": 1}, {"kind": "reads", "links": 1}])
+        );
+
+        // Scenario
+        let scenario_view = index.scenario("shop", ctrl_file, false, "", 0);
+        assert_eq!(
+            edge(&scenario_view, ctrl_file, svc_file)["kinds"],
+            expected_file_all
         );
     }
 }

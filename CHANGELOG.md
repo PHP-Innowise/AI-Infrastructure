@@ -24,6 +24,60 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Add distinct dependency-kind arrow markers, stroke/dash styles, dark/light/forced-colors CSS tokens (`--map-edge-*`), edge `<title>` kind breakdowns, and an accessible visual arrow legend (`arrow_kinds_legend_html`) across the Dependency Map modal, Link Detail modal, and Sessions Code Graph.
+- Add mouse-wheel cursor-anchored zoom in/out (`wheel` with `{ passive: false }`), `+`/`-`/`100%` zoom controls, and `scaled()` > 100% magnification support across the Dependency Map modal (`#graph-map-canvas`), Link Detail modal (`#graph-link-canvas`), and Sessions Code Graph (`#session-graph-canvas`).
+- Extract class/struct properties, fields, and constants with visibility (`public`, `protected`, `private`, `internal`) and modifiers across PHP, Rust, TypeScript/JavaScript, and Python (`graph_live`, `graph_deps`, `graph_map`).
+- Track member-level dependency references, declared/referenced member usage, visibility narrowing, and caller access-risk warnings (`visibility_warnings`) across `/graph/changes`, `/graph/file-impact`, `/graph/file`, and `/graph/link`.
+- Add Code Graph UI visibility pills (`--vis-*`), member-kind tags, filterable member disclosures (`<details>`), and accessible `<summary>` markup without embedded headings.
+- Add whole-graph and `Unfold all` exploration across the Sessions Code Graph
+  (`#session-graph-mode-whole`, `#session-graph-unfold`, `#session-graph-open-full`)
+  and full Dependency Map (`#graph-map-whole`, `GET
+  /api/projects/{project_id}/graph/map?whole=1`), including breadth-first
+  folder unfolding (`view_with_whole`), embedded name filter and `Without tests`
+  controls, and dynamic breadcrumb/note visibility.
+- Add an untruncated changed-files and entities catalog (`GET
+  /api/projects/{project_id}/graph/changes`) spanning Git worktrees, active runs,
+  and non-Git workspaces, with live `NEW`/`MOD`/`DEL` entity badges, a filterable
+  `Changes (N)` side tab, canvas node change markers, and `Inspect in graph`
+  jumps from session file results.
+- Add file dependency change-impact inspection (`GET
+  /api/projects/{project_id}/graph/file-impact`) with `+`/`-`/`=` dependency
+  diffs combining static PHP/Rust/TS-JS/Python imports and Graphify links,
+  reverse-dependent impact and risk classification (`broken_risk`, `impacted`,
+  `added_caller`, `unchanged`), in-memory cycle and layer-rule overlays, canvas
+  diff edges, and surface-aware `graph-link` diff badges.
+
+- Make the Code Graph & Dependency Map central across the Harness UI and embedded
+  alongside Sessions, with automatic startup, project-switch, and file-change
+  recompute (including bounded non-Git workspace fingerprinting), monotonic
+  `1..=99%` build progress with English status messages, prompt-start target
+  region prediction with smooth camera zoom/focus, and live created-entity
+  (`class`, `method`, `function`, `file`) detection rendered blinking on the
+  graph area.
+
+- Refresh the Harness web interface with layered light and dark elevation tokens,
+  translucent header surfaces, tactile hover/press feedback, smooth view/dialog/message
+  entrances, and an animated carrot-chewing rabbit companion beside the prompt
+  composer while sessions or background operations are running (all honoring
+  `prefers-reduced-motion`).
+- Enhance the Dependency Map's visualization of design patterns (`Strategy`,
+  `Decorator`, `Factory`, etc.), architectural patterns (`Repository`, `Events`,
+  `Commands`, `Layers`), and architecture rule checks with family-coded blueprints
+  and badges, tier bands and order pills in the Layers diagram, glowing violation
+  halos, non-overlapping edge relationship labels, interactive layer/participant
+  canvas highlighting, and grouped family pattern cards with direct pattern briefs.
+
+- Fix vertical text alignment inside custom-styled `<select>` controls and compact
+  buttons/badges across the Harness web UI (`harness/web/app.css`) and Open Source
+  Kit catalog (`install/open-source-kit/web/index.html`) so labels no longer hug the
+  top border.
+- Fix `Knowledge -> Memory use` stage summary cards (`Project Brain`, `Promotion`,
+  `Memory bank`, `Selected by retrieval`) rendering oversized 20px display-font
+  metric lines inside narrow 4-column strips: replace `.memory-lead` stat lists
+  with a semantic `<dl class="memory-metrics">` table in `--text-ui` with
+  tabular numerals and a responsive `auto-fit` / CSS Subgrid layout in
+  `harness/web/app.css`.
+
 - Fix Harness file uploads, which Linux and macOS refused with "Mode
   destination changed" since the move to the native runtime: making the staged
   private copy read-only took Harness's own permission change for a different

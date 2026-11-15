@@ -36,14 +36,14 @@ impl Index {
         let selected = focus
             .and_then(|path| path.strip_prefix("module:")?.parse::<u32>().ok())
             .filter(|id| modules.contains_key(id));
-        let mut edges: BTreeMap<(u32, u32), Flow> = BTreeMap::new();
+        let mut edges: BTreeMap<(u32, u32), EdgeFlow> = BTreeMap::new();
         let mut inside: BTreeMap<(u32, u32), Flow> = BTreeMap::new();
         let mut outside = 0;
         let add = |flow: &mut Flow, guessed: bool| {
             flow.links += 1;
             flow.guessed += u64::from(guessed);
         };
-        for &(from, to, _, guessed) in &self.uses {
+        for &(from, to, kind, guessed) in &self.uses {
             let (source, target) = (&self.symbols[from as usize], &self.symbols[to as usize]);
             if (certain && guessed) || source.kind == Kind::Note || target.kind == Kind::Note {
                 continue;
@@ -56,7 +56,10 @@ impl Index {
                     }
                 }
                 (Some(source_id), Some(target_id)) => {
-                    add(edges.entry((source_id, target_id)).or_default(), guessed);
+                    edges
+                        .entry((source_id, target_id))
+                        .or_default()
+                        .add_link(kind, guessed);
                     add(&mut modules.get_mut(&source_id).unwrap().out, guessed);
                     add(&mut modules.get_mut(&target_id).unwrap().into, guessed);
                 }
@@ -103,7 +106,7 @@ impl Index {
             .iter()
             .filter(|((from, to), _)| shown.contains(from) && shown.contains(to))
             .collect();
-        drawn.sort_by_key(|(pair, flow)| (std::cmp::Reverse(flow.links), **pair));
+        drawn.sort_by_key(|(pair, edge)| (std::cmp::Reverse(edge.flow.links), **pair));
         let focus = selected.map(|id| {
             let module = &modules[&id];
             let mut focused = node(id, module);
@@ -122,9 +125,9 @@ impl Index {
                 json!({"from": endpoint(from), "to": endpoint(to), "links": flow.links, "guessed": flow.guessed})
             }).collect::<Vec<_>>());
             for (outgoing, field) in [(true, "uses"), (false, "used_by")] {
-                let mut peers: Vec<_> = edges.iter().filter_map(|(&(from, to), flow)| {
-                    if outgoing { (from == id).then_some((to, flow)) }
-                    else { (to == id).then_some((from, flow)) }
+                let mut peers: Vec<_> = edges.iter().filter_map(|(&(from, to), edge)| {
+                    if outgoing { (from == id).then_some((to, edge.flow)) }
+                    else { (to == id).then_some((from, edge.flow)) }
                 }).collect();
                 peers.sort_by_key(|(peer, flow)| (std::cmp::Reverse(flow.links), *peer));
                 focused[format!("{field}_total")] = json!(peers.len());
@@ -139,8 +142,8 @@ impl Index {
             "children": modules.len(), "matching": matching.len(), "between": edges.len(),
             "module_info":{"unassigned":unassigned, "outside":outside},
             "nodes":matching.into_iter().take(SHOWN).map(|(id, module)| node(*id, module)).collect::<Vec<_>>(),
-            "edges":drawn.into_iter().take(DRAWN).map(|(&(from,to), flow)| {
-                json!({"from":key(from), "to":key(to), "links":flow.links, "guessed":flow.guessed})
+            "edges":drawn.into_iter().take(DRAWN).map(|(&(from, to), edge)| {
+                self.edge_json(&key(from), &key(to), edge)
             }).collect::<Vec<_>>(),
             "focus":focus,
         })
@@ -190,5 +193,64 @@ mod tests {
         assert_eq!(plain["focus"]["within"], 0);
         let empty = index.modules("shop", None, false, "missing");
         assert_eq!(empty["matching"], 0);
+    }
+
+    #[test]
+    fn module_edges_include_aggregated_dependency_kinds() {
+        let input = json!({
+            "nodes": [
+                {"id": "a", "label": "Ctrl", "source_file": "src/a.php", "community": 0, "community_name": "Ctrl"},
+                {"id": "b", "label": "Svc", "source_file": "src/b.php", "community": 5, "community_name": "Svc"},
+            ],
+            "links": [
+                {"source": "a", "target": "b", "relation": "calls", "confidence": "EXTRACTED"},
+                {"source": "a", "target": "b", "relation": "calls", "confidence": "INFERRED"},
+                {"source": "a", "target": "b", "relation": "imports", "confidence": "EXTRACTED"},
+                {"source": "a", "target": "b", "relation": "extends", "confidence": "EXTRACTED"},
+                {"source": "a", "target": "b", "relation": "implements", "confidence": "EXTRACTED"},
+                {"source": "a", "target": "b", "relation": "reads", "confidence": "EXTRACTED"},
+                {"source": "a", "target": "b", "relation": "writes", "confidence": "EXTRACTED"},
+                {"source": "a", "target": "b", "relation": "uses_const", "confidence": "EXTRACTED"},
+            ],
+        });
+        let index = Index::read(input.to_string().as_bytes(), Path::new("/work/shop")).unwrap();
+        let all = index.modules("shop", None, false, "");
+        assert_eq!(
+            all["edges"],
+            json!([{
+                "from": "module:0",
+                "to": "module:5",
+                "links": 8,
+                "guessed": 1,
+                "kinds": [
+                    {"kind": "calls", "links": 2},
+                    {"kind": "extends", "links": 1},
+                    {"kind": "implements", "links": 1},
+                    {"kind": "imports", "links": 1},
+                    {"kind": "reads", "links": 1},
+                    {"kind": "uses_const", "links": 1},
+                    {"kind": "writes", "links": 1},
+                ],
+            }])
+        );
+        let certain = index.modules("shop", None, true, "");
+        assert_eq!(
+            certain["edges"],
+            json!([{
+                "from": "module:0",
+                "to": "module:5",
+                "links": 7,
+                "guessed": 0,
+                "kinds": [
+                    {"kind": "calls", "links": 1},
+                    {"kind": "extends", "links": 1},
+                    {"kind": "implements", "links": 1},
+                    {"kind": "imports", "links": 1},
+                    {"kind": "reads", "links": 1},
+                    {"kind": "uses_const", "links": 1},
+                    {"kind": "writes", "links": 1},
+                ],
+            }])
+        );
     }
 }

@@ -537,6 +537,7 @@ fn controls() {
         !m::yes(&m::data("discovery-active")),
     );
     layout();
+    crate::session::sync_working_indicator();
 }
 /// The empty state stands in for the map and the editor, so it hides while either shows.
 fn layout() {
