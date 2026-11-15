@@ -3,9 +3,9 @@
 //! points gather on the left edge and foundations on the right. A file opens
 //! in turn to its classes, methods and functions and the files around them.
 use crate::{api, dom, model as m};
-use serde_json::{Value as V, json};
+use serde_json::{json, Value as V};
 use std::collections::{BTreeMap, BTreeSet};
-use wasm_bindgen::{JsCast, closure::Closure};
+use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::spawn_local;
 const BOX_WIDTH: f64 = 164.0;
 const BOX_HEIGHT: f64 = 30.0;
@@ -298,7 +298,11 @@ pub fn plan_beside(
         for node in pair {
             let held = wired.iter().any(
                 |(near, far, ..)| {
-                    if last { *near == node } else { *far == node }
+                    if last {
+                        *near == node
+                    } else {
+                        *far == node
+                    }
                 },
             );
             if node < count && linked[node] && !held {
@@ -664,10 +668,10 @@ pub fn plan_beside(
                 stop.1 = index > 0 && straight[straight.len() - index];
             }
         }
-        let mut path = format!("M{:.1} {:.1}", stops[0].0.0, stops[0].0.1);
+        let mut path = format!("M{:.1} {:.1}", stops[0].0 .0, stops[0].0 .1);
         for pair in stops.windows(2) {
             if pair[1].1 {
-                path.push_str(&format!(" L{:.1} {:.1}", pair[1].0.0, pair[1].0.1));
+                path.push_str(&format!(" L{:.1} {:.1}", pair[1].0 .0, pair[1].0 .1));
             } else {
                 curve(&mut path, pair[0].0, pair[1].0);
             }
@@ -730,7 +734,11 @@ pub fn plan_row(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
             .iter()
             .filter(
                 |(_, from, to)| {
-                    if back { from > to } else { *to > from + 1 }
+                    if back {
+                        from > to
+                    } else {
+                        *to > from + 1
+                    }
                 },
             )
             .map(|(_, from, to)| (from.abs_diff(*to), *from.min(to), (*from, *to)))
@@ -5332,7 +5340,11 @@ pub fn choosing(state: &V) -> String {
 }
 fn state() -> V {
     let state = m::data("graph-map");
-    if state.is_object() { state } else { fresh("") }
+    if state.is_object() {
+        state
+    } else {
+        fresh("")
+    }
 }
 /// The link the window shows: its two ends, the name chosen in it, and
 /// what the server said of it.
@@ -7946,16 +7958,12 @@ mod tests {
         assert_eq!(plan.wires.len(), 1);
         let apart = plan.apart.unwrap();
         let loose = plan.nodes[2..].iter().collect::<Vec<_>>();
-        assert!(
-            loose
-                .iter()
-                .all(|node| node.layer.is_none() && node.y >= apart + CAPTION)
-        );
-        assert!(
-            plan.nodes[..2]
-                .iter()
-                .all(|node| node.y + BOX_HEIGHT < apart)
-        );
+        assert!(loose
+            .iter()
+            .all(|node| node.layer.is_none() && node.y >= apart + CAPTION));
+        assert!(plan.nodes[..2]
+            .iter()
+            .all(|node| node.y + BOX_HEIGHT < apart));
         for (index, a) in plan.nodes.iter().enumerate() {
             assert!(a.x + BOX_WIDTH <= plan.width && a.y + BOX_HEIGHT <= plan.height);
             for b in &plan.nodes[index + 1..] {
@@ -8019,9 +8027,6 @@ mod tests {
                 "head": {"name": "fix/rounding", "commit": "1a2b3c4d5e6f"}, "base": {"name": "main", "commit": "9f8e7d6c5b4a"}, "notes": [], "files": 3}
         })
     }
-    /// The change of the fixture as what a run did: the run opened the cart
-    /// it changed and the order, and of four files that use its change left
-    /// three unopened.
     #[test]
     fn modules_render_as_graph_nodes_with_links_and_file_actions() {
         let view = json!({
@@ -8088,6 +8093,9 @@ mod tests {
         assert!(map_attachment(&json!({"mode":"changes"})).is_none());
     }
 
+    /// The change of the fixture as what a run did: the run opened the cart
+    /// it changed and the order, and of four files that use its change left
+    /// three unopened.
     fn run_view() -> V {
         let mut view = change();
         view["chosen"] = json!({
@@ -8185,11 +8193,8 @@ mod tests {
         folders["nodes"][1]["folder"] = json!(true);
         folders["nodes"][1]["opened"] = json!(1200);
         let html = canvas(&folders);
-        assert!(
-            html.contains(
-                "<span class=\"graph-map-node-opened\" aria-hidden=\"true\">◉1,200</span>"
-            )
-        );
+        assert!(html
+            .contains("<span class=\"graph-map-node-opened\" aria-hidden=\"true\">◉1,200</span>"));
         assert!(
             html.contains(", the run opened 1,200 files in it"),
             "{html}"
@@ -8219,11 +8224,8 @@ mod tests {
         many["run"]["reach"]["unopened"] = json!(1203);
         many["run"]["reach"]["more"] = json!(1200);
         let html = side(&many);
-        assert!(
-            html.contains(
-                "not opened by the run <span class=\"graph-map-total\">1,203</span></h4>"
-            )
-        );
+        assert!(html
+            .contains("not opened by the run <span class=\"graph-map-total\">1,203</span></h4>"));
         assert!(html.ends_with("</ul><p class=\"knowledge-note\">and 1,200 more</p>"));
         assert!(summary(&many).ends_with("· 1,203 of those that use them not opened by the run"));
         // A run that opened all that uses its change says so; where nothing
@@ -8334,10 +8336,8 @@ mod tests {
         // The Show list names a run that is shown, and the map is opened
         // on what its button asks for.
         let place = json!({"git": true, "branch": "main", "base": "origin/main"});
-        assert!(
-            targets(&place, "run:0b0e7f3a")
-                .ends_with("<option value=\"run:0b0e7f3a\" selected>A run of an agent</option>")
-        );
+        assert!(targets(&place, "run:0b0e7f3a")
+            .ends_with("<option value=\"run:0b0e7f3a\" selected>A run of an agent</option>"));
         // With a session on the screen the list offers its run; where
         // that run is the one shown it is called by what it is here, and
         // another session's run stays a run of an agent.
@@ -8354,11 +8354,8 @@ mod tests {
             targets(&place, "work")
         );
         let shown = with_run(targets(&place, "run:0b0e7f3a"), "run:0b0e7f3a", "0b0e7f3a");
-        assert!(
-            shown.ends_with(
-                "<option value=\"run:0b0e7f3a\" selected>The run of this session</option>"
-            )
-        );
+        assert!(shown
+            .ends_with("<option value=\"run:0b0e7f3a\" selected>The run of this session</option>"));
         assert_eq!(shown.matches("run:0b0e7f3a").count(), 1);
         let other = with_run(targets(&place, "run:ffff0000"), "run:ffff0000", "0b0e7f3a");
         assert!(other.ends_with(
@@ -8384,23 +8381,17 @@ mod tests {
         assert!(
             targets(&place, "pr:9").ends_with("<option value=\"pr:9\" selected>#9 Wip</option>")
         );
-        assert!(
-            targets(&place, "pr:77")
-                .ends_with("<option value=\"pr:77\" selected>Pull request #77</option>")
-        );
+        assert!(targets(&place, "pr:77")
+            .ends_with("<option value=\"pr:77\" selected>Pull request #77</option>"));
         assert!(targets(&place, "commit:1a2b3c4d5e6f7a8b9c0d").ends_with(
             "<option value=\"commit:1a2b3c4d5e6f7a8b9c0d\" selected>Commit 1a2b3c4d</option>"
         ));
-        assert!(
-            targets(&place, "ref:feature/x")
-                .ends_with("<option value=\"ref:feature/x\" selected>feature/x</option>")
-        );
+        assert!(targets(&place, "ref:feature/x")
+            .ends_with("<option value=\"ref:feature/x\" selected>feature/x</option>"));
         // Without an open request the default branch is the base.
         let alone = json!({"git": true, "branch": "main", "base": "origin/main", "pull": null, "against": null, "pulls": []});
-        assert!(
-            targets(&alone, "")
-                .contains("<option value=\"work\">Current work: main against origin/main</option>")
-        );
+        assert!(targets(&alone, "")
+            .contains("<option value=\"work\">Current work: main against origin/main</option>"));
         // Outside Git there is only the project.
         assert_eq!(
             targets(&json!({"git": false}), ""),
@@ -9048,11 +9039,8 @@ mod tests {
         // What the manifests of Rust crates rule out is said after it.
         let mut ruled = view();
         ruled["totals"]["ruled_out"] = json!(1157);
-        assert!(
-            summary(&ruled).ends_with(
-                "270 skipped, their file is unclear · 1,157 ruled out by Cargo manifests"
-            )
-        );
+        assert!(summary(&ruled)
+            .ends_with("270 skipped, their file is unclear · 1,157 ruled out by Cargo manifests"));
         ruled["totals"]["ruled_out"] = json!(0);
         assert_eq!(summary(&ruled), summary(&view()));
         let mut capped = view();
@@ -9090,10 +9078,8 @@ mod tests {
         let mut kept = view();
         kept["matching"] = json!(0);
         kept["beyond"] = json!(true);
-        assert!(
-            note(&kept)
-                .starts_with("No name here matches the filter. The selected one is drawn as well.")
-        );
+        assert!(note(&kept)
+            .starts_with("No name here matches the filter. The selected one is drawn as well."));
         kept["matching"] = json!(2);
         assert!(note(&kept).starts_with("The selected one is drawn as well."));
     }
@@ -9443,11 +9429,8 @@ mod tests {
         assert!(html.contains("<h4>Uses <span class=\"graph-map-total\">1</span></h4>"));
         assert!(html.contains("<h4>Used by <span class=\"graph-map-total\">5</span></h4>"));
         assert!(html.contains("and 4 more"));
-        assert!(
-            html.contains(
-                "Cart/</span><span class=\"graph-map-row-links\">3 links, 1 guessed</span>"
-            )
-        );
+        assert!(html
+            .contains("Cart/</span><span class=\"graph-map-row-links\">3 links, 1 guessed</span>"));
         assert!(html.contains("Uses by kind: calls 4 · imports from 1"));
         assert!(html.contains("&quot;inside&quot;:false"));
         assert!(side(&json!({"focus": null})).contains("Select a folder or a file"));
@@ -9527,11 +9510,9 @@ mod tests {
         assert!(plan.width >= frame.x + frame.width + MARGIN);
         assert_eq!(plan.height, plan.nodes[5].y + BOX_HEIGHT + ROW_GAP);
         // Without frames the picture is as it was.
-        assert!(
-            plan_with(4, &[(0, 1, 1)], &Frames::default())
-                .frames
-                .is_empty()
-        );
+        assert!(plan_with(4, &[(0, 1, 1)], &Frames::default())
+            .frames
+            .is_empty());
         assert_eq!(
             plan_with(4, &[(0, 1, 1), (2, 1, 1)], &Frames::default()),
             super::plan(4, &[(0, 1, 1), (2, 1, 1)])
@@ -9708,9 +9689,7 @@ mod tests {
         view["focus"]["inside"] = json!(false);
         assert!(!side(&view).contains("Open here"));
         assert!(!side(&super::tests::view()).contains("Open here"));
-        assert!(
-            side(&json!({"focus": null})).contains("+ at the corner of a folder opens it here")
-        );
+        assert!(side(&json!({"focus": null})).contains("+ at the corner of a folder opens it here"));
         // The state: a folder is named once, the newest last.
         let state = spread(fresh(""), "src/Cart", false);
         let state = spread(state, "src", false);
@@ -10389,10 +10368,8 @@ mod tests {
             "No chain of links leads from main.php to db<1>.php, nor back. The two may still share something that both use, or that uses both: What they share, beside the path above the picture, shows it."
         );
         none["certain"] = json!(true);
-        assert!(
-            note(&none)
-                .ends_with("Links guessed by name are left out; with them there may be a way.")
-        );
+        assert!(note(&none)
+            .ends_with("Links guessed by name are left out; with them there may be a way."));
         // Where there is no path there is no other way to ask for, but
         // what the two share can be asked all the same.
         assert!(crumbs(&none).ends_with(
@@ -10508,11 +10485,8 @@ mod tests {
         // be followed like any other.
         view["focus"]["start"] = json!(true);
         let html = side(&view);
-        assert!(
-            html.contains(
-                "<p class=\"knowledge-note\">File · 2 symbols · the path starts here</p>"
-            )
-        );
+        assert!(html
+            .contains("<p class=\"knowledge-note\">File · 2 symbols · the path starts here</p>"));
         assert!(html.contains("data-action=\"graph-map-follow\""));
         view["focus"]["start"] = json!(false);
         view["focus"]["end"] = json!(true);
@@ -10916,10 +10890,8 @@ mod tests {
             )
         );
         none["certain"] = json!(true);
-        assert!(
-            note(&none)
-                .ends_with("Links guessed by name are left out; with them there may be something.")
-        );
+        assert!(note(&none)
+            .ends_with("Links guessed by name are left out; with them there may be something."));
         assert!(crumbs(&none).ends_with(&format!(": what uses both</span>{ASK_PATH}")));
         // One of the two in the other: they are not apart, and there is
         // nothing more to ask of them.
@@ -11690,9 +11662,7 @@ mod tests {
         assert_eq!(
             kept(
                 &name,
-                &[
-                    "target", "scope", "focus", "filter", "follow", "out", "into", "certain"
-                ]
+                &["target", "scope", "focus", "filter", "follow", "out", "into", "certain"]
             ),
             [
                 json!("pr:7"),
@@ -11721,9 +11691,7 @@ mod tests {
         assert_eq!(
             kept(
                 &there,
-                &[
-                    "target", "scope", "focus", "filter", "follow", "out", "into", "certain"
-                ]
+                &["target", "scope", "focus", "filter", "follow", "out", "into", "certain"]
             ),
             [
                 json!(""),
@@ -11924,10 +11892,8 @@ mod tests {
         assert_eq!(html.matches("graph-map-node-pattern").count(), 2);
         assert!(html.contains("Pay, folder, 9 files, uses others through 0 links, is used through 0 links, holds parts of 1,200 found patterns"));
         assert!(html.contains("Kernel.php, file, uses others through 0 links, is used through 0 links, holds parts of 1 found pattern"));
-        assert!(
-            legend(&view, false)
-                .ends_with("◆: a part of a found pattern, or a place that holds one.")
-        );
+        assert!(legend(&view, false)
+            .ends_with("◆: a part of a found pattern, or a place that holds one."));
         // A picture that was not asked for patterns says nothing of them.
         let mut plain = view.clone();
         plain.as_object_mut().unwrap().remove("patterns");
@@ -11974,9 +11940,7 @@ mod tests {
         let own = found_patterns(&selected, &[]);
         assert!(own.starts_with("<h4>Patterns <span class=\"graph-map-total\">2</span></h4><ul class=\"graph-map-rows\">"), "{own}");
         assert!(own.contains("<span class=\"graph-map-row-name\">Strategy: Gateway<span"));
-        assert!(
-            own.contains("<span class=\"graph-map-row-name\">Repository: Orders&lt;T&gt;<span")
-        );
+        assert!(own.contains("<span class=\"graph-map-row-name\">Repository: Orders&lt;T&gt;<span"));
         assert!(!own.contains("graph-map-family"));
         selected["focus"]["patterns"] = json!([]);
         assert_eq!(
@@ -12299,11 +12263,8 @@ mod tests {
         let mut more = view.clone();
         more["pattern"]["against"]["more"] = json!(1200);
         let html = side(&more);
-        assert!(
-            html.contains(
-                "<h4>Against the order <span class=\"graph-map-total\">1,202</span></h4>"
-            )
-        );
+        assert!(html
+            .contains("<h4>Against the order <span class=\"graph-map-total\">1,202</span></h4>"));
         assert!(html.ends_with("<p class=\"knowledge-note\">and 1,200 more</p>"));
         // A folder in order says so.
         let mut clean = view.clone();
@@ -12438,17 +12399,11 @@ mod tests {
         many["pattern"]["change"]["added"]["more"] = json!(40);
         many["pattern"]["change"]["removed"]["more"] = json!(1200);
         let html = side(&many);
-        assert!(
-            html.contains(
-                "<h4>Added by this change <span class=\"graph-map-total\">41</span></h4>"
-            )
-        );
+        assert!(html
+            .contains("<h4>Added by this change <span class=\"graph-map-total\">41</span></h4>"));
         assert!(html.contains("</ul><p class=\"knowledge-note\">and 40 more</p><h4>Gone with this change <span class=\"graph-map-total\">1,202</span></h4>"), "{html}");
-        assert!(
-            html.contains(
-                "</ul><p class=\"knowledge-note\">and 1,200 more</p><h4>Against the order "
-            )
-        );
+        assert!(html
+            .contains("</ul><p class=\"knowledge-note\">and 1,200 more</p><h4>Against the order "));
         // A change that did nothing to the order says so, and one that
         // only took away or only added says that.
         let mut none = plain.clone();
@@ -12801,14 +12756,12 @@ mod tests {
         );
         // A pair of files of the layers is looked into, and so is every
         // link of any other picture.
-        assert!(
-            between(
-                shown.clone(),
-                "app/Models/Order.php",
-                "app/Services/Pay.php"
-            )
-            .is_none()
-        );
+        assert!(between(
+            shown.clone(),
+            "app/Models/Order.php",
+            "app/Services/Pay.php"
+        )
+        .is_none());
         assert!(between(shown.clone(), "layer:model", "app/Services/Pay.php").is_none());
         assert!(between(shown.clone(), "app/Models/Order.php", "layer:services").is_none());
         assert!(between(map.clone(), "layer:services", "layer:model").is_none());

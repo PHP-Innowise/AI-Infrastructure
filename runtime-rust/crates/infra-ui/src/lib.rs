@@ -1,6 +1,6 @@
 use serde_json::Value as V;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 mod activity;
 mod api;

@@ -4219,8 +4219,6 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 ("ready".to_owned(), head[..12].to_owned(), 2, 0)
             );
         }
-        /// A session of the project with the steps a run recorded, as the
-        /// store keeps them: each step started and completed under one call.
         #[test]
         fn map_git_history_finds_indirect_peers_and_ranks_hotspots() {
             let fixture = Fixture::new();
@@ -4352,6 +4350,8 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             );
         }
 
+        /// A session of the project with the steps a run recorded, as the
+        /// store keeps them: each step started and completed under one call.
         fn recorded(fixture: &Fixture, folder: &str, steps: &[Value]) -> String {
             let session = store::id();
             fixture

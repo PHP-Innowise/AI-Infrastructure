@@ -1,6 +1,6 @@
 //! Context actions on the dependency map.
 use crate::{api, dom, graph_map, model as m, session};
-use serde_json::{Value as V, json};
+use serde_json::{json, Value as V};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{Element, HtmlElement, KeyboardEvent, MouseEvent};
