@@ -8,13 +8,19 @@ use super::{
         OmnigraphClient, QueryRequest, StoredQueryRequest,
     },
     schema::{
-        self, GQ_LINK_CONSUMED_BY, GQ_LINK_DERIVED_FROM, GQ_LINK_PUBLISHED_BY, GQ_LINK_RELATES_TO,
-        GQ_LINK_TOUCHES_FILE, GQ_LIST_ATOM_RELATIONS, GQ_LIST_CONSUMED_EDGES, GQ_LIST_FILE_EDGES,
-        GQ_LIST_FILES, GQ_LIST_PUBLISHED_EDGES, GQ_LIST_SESSIONS, GQ_UPSERT_ATOM, GQ_UPSERT_FILE,
-        GQ_UPSERT_SESSION, GQ_UPSERT_TURN_SNAPSHOT, HARNESS_GRAPH_ID, OMNIGRAPH_DOCKER_IMAGE,
-        OMNIGRAPH_RELEASE_URL_LINUX_X86_64, OMNIGRAPH_VERSION,
+        self, GQ_CLEAR_BRANCH_CONTEXT, GQ_LINK_CONSUMED_BY, GQ_LINK_DERIVED_FROM,
+        GQ_LINK_PUBLISHED_BY, GQ_LINK_RELATES_TO, GQ_LINK_SESSION_FOLLOWS, GQ_LINK_TOUCHES_FILE,
+        GQ_LIST_ATOM_RELATIONS, GQ_LIST_CONSUMED_EDGES, GQ_LIST_FILE_EDGES, GQ_LIST_FILES,
+        GQ_LIST_PUBLISHED_EDGES, GQ_LIST_SESSION_FOLLOWS, GQ_LIST_SESSIONS, GQ_UPSERT_ATOM,
+        GQ_UPSERT_FILE, GQ_UPSERT_SESSION, GQ_UPSERT_TURN_SNAPSHOT, HARNESS_GRAPH_ID,
+        OMNIGRAPH_DOCKER_IMAGE, OMNIGRAPH_RELEASE_URL_LINUX_X86_64, OMNIGRAPH_VERSION,
     },
     session_branch_name,
+    transfer::{
+        self, BUNDLE_FORMAT_V1, filter_graph_for_export, filter_ndjson_excluding_atoms,
+        parse_bool_param, parse_import_body, parse_ndjson_records, prepare_import_ndjson,
+        serialize_graph_ndjson, slugify_segment, validate_branch_token,
+    },
 };
 use crate::{
     HarnessError, Result,
@@ -1103,6 +1109,15 @@ impl OmnigraphManager {
             snapshot_commit.as_deref(),
         )
         .await;
+        let follow_edges = query_edges_safe(
+            &client,
+            GQ_LIST_SESSION_FOLLOWS,
+            "list_session_follows",
+            &params,
+            target_branch.as_deref(),
+            snapshot_commit.as_deref(),
+        )
+        .await;
 
         let mut files_by_atom: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for edge in &file_edges {
@@ -1167,7 +1182,24 @@ impl OmnigraphManager {
         let sessions: Vec<Value> = sessions_res
             .rows
             .iter()
-            .map(normalize_session_row)
+            .map(|row| {
+                let mut obj = normalize_session_row(row);
+                if let Some(store) = &self.store
+                    && let Some(sid) = str_field(&obj, "session_id")
+                    && let Ok(sess) = store.get(&sid)
+                {
+                    if let Some(space) = sess["omnigraph"]["shared_space"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                    {
+                        obj["shared_space"] = json!(space);
+                    }
+                    if sess["omnigraph"]["linked_session_ids"].is_array() {
+                        obj["linked_session_ids"] = sess["omnigraph"]["linked_session_ids"].clone();
+                    }
+                }
+                obj
+            })
             .collect();
         let files: Vec<Value> = files_res.rows.iter().map(normalize_file_row).collect();
 
@@ -1240,6 +1272,24 @@ impl OmnigraphManager {
                     "label": rel,
                     "note": e.get("note").cloned().unwrap_or(Value::Null),
                     "confidence": e.get("confidence").cloned().unwrap_or(Value::Null),
+                }));
+            }
+        }
+        for e in &follow_edges {
+            if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
+                && sid_filter.is_none_or(|sid| src == sid || dst == sid)
+            {
+                let rel = e["relation"].as_str().unwrap_or("shared_branch");
+                edges.push(json!({
+                    "id": format!("follow:{src}->{dst}"),
+                    "kind": "session_follows",
+                    "relation": rel,
+                    "source": src,
+                    "target": dst,
+                    "from": src,
+                    "to": dst,
+                    "label": rel,
+                    "created_at": e.get("created_at").cloned().unwrap_or(Value::Null),
                 }));
             }
         }
@@ -1959,16 +2009,7 @@ impl OmnigraphManager {
             for pull in pull_branches.iter().filter_map(Value::as_str) {
                 let pull = pull.trim();
                 if !pull.is_empty() && pull != branch {
-                    let _ = client
-                        .merge_branches(&BranchMergeRequest {
-                            source: pull.to_string(),
-                            target: Some(branch.clone()),
-                            delete_branch: false,
-                            as_commit: false,
-                            dry_run: false,
-                            settings: None,
-                        })
-                        .await;
+                    let _ = merge_or_sync_branch(&client, pull, &branch, project_id).await;
                 }
             }
         }
@@ -2005,6 +2046,30 @@ impl OmnigraphManager {
                 settings: None,
             })
             .await?;
+
+        if let Some(peers) = omni_opts["linked_session_ids"].as_array()
+            && !peers.is_empty()
+        {
+            let rel = clean_opt(omni_opts["shared_space"].as_str()).unwrap_or("linked");
+            for peer_id in peers.iter().filter_map(Value::as_str) {
+                let peer_id = peer_id.trim();
+                if peer_id.is_empty() || peer_id == sid {
+                    continue;
+                }
+                let peer_meta = self.store.as_ref().and_then(|s| s.get(peer_id).ok());
+                let _ = upsert_session_node(
+                    &client,
+                    peer_meta.as_ref(),
+                    peer_id,
+                    project_id,
+                    &branch,
+                    &ts,
+                )
+                .await;
+                let _ = link_session_follows(&client, sid, peer_id, rel, &branch, &ts).await;
+                let _ = link_session_follows(&client, peer_id, sid, rel, &branch, &ts).await;
+            }
+        }
 
         let mut ranked_atoms: Vec<(Value, f64)> = Vec::new();
         let mut seen_ids = BTreeSet::new();
@@ -2462,6 +2527,824 @@ impl OmnigraphManager {
             Err(err) => Err(err.into()),
         }
     }
+
+    /// Export a scoped task/branch/graph Omnigraph context bundle + raw NDJSON (`GET|POST /api/omnigraph/export`).
+    pub async fn export_context_json(&self, params: &Value) -> Result<Value> {
+        let cfg = self.config().await;
+        let client = self.client().await?;
+        let project_id = clean_opt(params["project_id"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let explicit_branch = clean_opt(params["branch"].as_str())
+            .filter(|b| *b != "auto")
+            .map(str::to_string);
+        let session_id = clean_opt(params["session_id"].as_str()).map(str::to_string);
+
+        let format = clean_opt(params["format"].as_str())
+            .unwrap_or("bundle")
+            .to_ascii_lowercase();
+        if !matches!(format.as_str(), "bundle" | "ndjson") {
+            return Err(HarnessError::invalid(format!(
+                "Unsupported export format '{format}'; expected `bundle` or `ndjson`."
+            )));
+        }
+
+        let default_scope = if session_id.is_some() {
+            "task"
+        } else if explicit_branch.is_some() {
+            "branch"
+        } else {
+            "all"
+        };
+        let scope = clean_opt(params["scope"].as_str())
+            .unwrap_or(default_scope)
+            .to_ascii_lowercase();
+        if !matches!(scope.as_str(), "task" | "branch" | "all") {
+            return Err(HarnessError::invalid(format!(
+                "Unsupported export scope '{scope}'; expected `task`, `branch`, or `all`."
+            )));
+        }
+
+        let include_inherited =
+            parse_bool_param(&params["include_inherited"]).unwrap_or(scope != "task");
+
+        let mut source_branch = if scope == "all" && explicit_branch.is_none() {
+            "main".to_string()
+        } else if let Some(ref b) = explicit_branch {
+            validate_branch_token(b)?
+        } else if let Some(ref sid) = session_id {
+            self.resolve_session_branch(sid)
+        } else {
+            "main".to_string()
+        };
+
+        let raw_ndjson = match client.export_branch(Some(&source_branch), &[], None).await {
+            Ok(text) => text,
+            Err(err)
+                if err.is_not_found() && explicit_branch.is_none() && source_branch != "main" =>
+            {
+                source_branch = "main".to_string();
+                client.export_branch(Some("main"), &[], None).await?
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        let parsed = parse_ndjson_records(&raw_ndjson)?;
+        let filtered = filter_graph_for_export(
+            &parsed,
+            &project_id,
+            &scope,
+            session_id.as_deref(),
+            &source_branch,
+            include_inherited,
+        );
+
+        let mut files_by_atom: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for edge in &filtered.edges {
+            if edge.edge_type == "TouchesFile" {
+                files_by_atom
+                    .entry(edge.from.clone())
+                    .or_default()
+                    .push(edge.to.clone());
+            }
+        }
+
+        let atoms: Vec<Value> = filtered
+            .atoms
+            .values()
+            .map(|row| {
+                let mut atom = normalize_atom_row(row);
+                let aid = str_field(&atom, "atom_id").unwrap_or_default();
+                let atom_files = files_by_atom.get(&aid).cloned().unwrap_or_default();
+                atom["files"] = json!(atom_files);
+                atom
+            })
+            .collect();
+        let files: Vec<Value> = filtered.files.values().map(normalize_file_row).collect();
+        let symbols: Vec<Value> = filtered
+            .symbols
+            .values()
+            .map(normalize_symbol_row)
+            .collect();
+        let sessions: Vec<Value> = filtered
+            .sessions
+            .values()
+            .map(normalize_session_row)
+            .collect();
+        let turns: Vec<Value> = filtered.turns.values().map(normalize_turn_row).collect();
+        let edges: Vec<Value> = filtered
+            .edges
+            .iter()
+            .map(transfer::EdgeRecord::to_bundle_json)
+            .collect();
+        let ndjson = serialize_graph_ndjson(&filtered);
+
+        let exported_at = now_utc_iso_ms();
+        let label_slug = session_id
+            .as_deref()
+            .map(slugify_segment)
+            .unwrap_or_else(|| slugify_segment(&source_branch));
+        let stamp = exported_at
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(15)
+            .collect::<String>();
+        let ext = if format == "ndjson" { "ndjson" } else { "json" };
+        let filename = format!("omnigraph-{label_slug}-{stamp}.{ext}");
+
+        let bundle = json!({
+            "format": BUNDLE_FORMAT_V1,
+            "graph_id": cfg.graph_id,
+            "project_id": project_id,
+            "source_branch": source_branch,
+            "source_session_id": session_id,
+            "scope": scope,
+            "include_inherited": include_inherited,
+            "exported_at": exported_at,
+            "atoms": atoms,
+            "files": files,
+            "symbols": symbols,
+            "sessions": sessions,
+            "turns": turns,
+            "edges": edges,
+            "ndjson": ndjson,
+        });
+
+        let counts = json!({
+            "atoms": bundle["atoms"].as_array().map(Vec::len).unwrap_or(0),
+            "files": bundle["files"].as_array().map(Vec::len).unwrap_or(0),
+            "symbols": bundle["symbols"].as_array().map(Vec::len).unwrap_or(0),
+            "sessions": bundle["sessions"].as_array().map(Vec::len).unwrap_or(0),
+            "turns": bundle["turns"].as_array().map(Vec::len).unwrap_or(0),
+            "edges": bundle["edges"].as_array().map(Vec::len).unwrap_or(0),
+        });
+
+        Ok(json!({
+            "ok": true,
+            "format": if format == "ndjson" { "ndjson" } else { BUNDLE_FORMAT_V1 },
+            "requested_format": format,
+            "filename": filename,
+            "graph_id": cfg.graph_id,
+            "project_id": project_id,
+            "source_branch": source_branch,
+            "source_session_id": session_id,
+            "exported_at": exported_at,
+            "counts": counts,
+            "bundle": bundle,
+            "ndjson": ndjson,
+        }))
+    }
+
+    /// Export context as JSON metadata or downloadable attachment bytes (`download=1`).
+    pub async fn export_context_payload(&self, query: &Value, body: &Value) -> Result<Payload> {
+        let mut merged = Map::new();
+        if let Some(qm) = query.as_object() {
+            for (k, v) in qm {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some(bm) = body.as_object() {
+            for (k, v) in bm {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        let params = Value::Object(merged);
+        let download = parse_bool_param(&params["download"]).unwrap_or(false);
+        let out = self.export_context_json(&params).await?;
+        if !download {
+            return Ok(Payload::Json(out));
+        }
+
+        let filename = out["filename"]
+            .as_str()
+            .unwrap_or("omnigraph-context.json")
+            .to_string();
+        if out["requested_format"] == "ndjson" {
+            let text = out["ndjson"].as_str().unwrap_or("").to_string();
+            Ok(Payload::Bytes {
+                bytes: text.into_bytes(),
+                content_type: "application/x-ndjson; charset=utf-8".into(),
+                filename: Some(filename),
+                etag: None,
+                cache: Some("no-store".into()),
+            })
+        } else {
+            let bytes = serde_json::to_vec_pretty(&out["bundle"])?;
+            Ok(Payload::Bytes {
+                bytes,
+                content_type: "application/json; charset=utf-8".into(),
+                filename: Some(filename),
+                etag: None,
+                cache: Some("no-store".into()),
+            })
+        }
+    }
+
+    /// Import an exported `harness.omnigraph.bundle.v1` JSON bundle or raw NDJSON onto an Omnigraph branch.
+    pub async fn import_context_json(&self, body: &Value) -> Result<Value> {
+        let client = self.client().await?;
+        let project_id = clean_opt(body["project_id"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let mode = clean_opt(body["mode"].as_str())
+            .unwrap_or("merge")
+            .to_ascii_lowercase();
+        if !matches!(mode.as_str(), "merge" | "replace" | "append") {
+            return Err(HarnessError::invalid(format!(
+                "Unsupported import mode '{mode}'; expected `merge` or `replace`."
+            )));
+        }
+
+        let session_id = clean_opt(body["session_id"].as_str()).map(str::to_string);
+        let target_branch =
+            if let Some(b) = clean_opt(body["target_branch"].as_str()).filter(|b| *b != "auto") {
+                validate_branch_token(b)?
+            } else if let Some(ref sid) = session_id {
+                self.resolve_session_branch(sid)
+            } else {
+                "main".to_string()
+            };
+
+        let explicit_from = clean_opt(body["from_branch"].as_str())
+            .map(validate_branch_token)
+            .transpose()?;
+        let from_branch = explicit_from.clone().unwrap_or_else(|| "main".to_string());
+        let create_branch_flag = body.get("create_branch").and_then(Value::as_bool);
+
+        let parsed = parse_import_body(body)?;
+
+        if target_branch != "main" && (create_branch_flag != Some(false) || explicit_from.is_some())
+        {
+            ensure_branch_exists(&client, &target_branch, Some(&from_branch)).await?;
+        }
+
+        let existing_on_branch = if mode != "replace" {
+            client
+                .export_branch(Some(&target_branch), &[], None)
+                .await
+                .ok()
+                .and_then(|txt| parse_ndjson_records(&txt).ok())
+        } else {
+            None
+        };
+
+        let ts = now_utc_iso_ms();
+        let (normalized, ndjson_payload) = prepare_import_ndjson(
+            &parsed,
+            &project_id,
+            &target_branch,
+            existing_on_branch.as_ref(),
+            &ts,
+        );
+
+        let mut commit_id: Option<String> = None;
+        if mode == "replace" {
+            let clear_res = client
+                .mutate(&ChangeRequest {
+                    query: GQ_CLEAR_BRANCH_CONTEXT.into(),
+                    name: Some("clear_branch_context".into()),
+                    params: None,
+                    branch: Some(target_branch.clone()),
+                    settings: None,
+                })
+                .await?;
+            if let Some(c) = clear_res.commit {
+                commit_id = Some(c.graph_commit_id);
+            }
+            if !ndjson_payload.trim().is_empty() {
+                let load_res = client
+                    .load_ndjson(&target_branch, None, "overwrite", &ndjson_payload, None)
+                    .await?;
+                if let Some(cid) = load_res["commit"]["graph_commit_id"].as_str() {
+                    commit_id = Some(cid.to_string());
+                }
+            }
+        } else if !ndjson_payload.trim().is_empty() {
+            let load_mode = if mode == "append" { "append" } else { "merge" };
+            let load_res = client
+                .load_ndjson(&target_branch, None, load_mode, &ndjson_payload, None)
+                .await?;
+            if let Some(cid) = load_res["commit"]["graph_commit_id"].as_str() {
+                commit_id = Some(cid.to_string());
+            }
+        }
+
+        let mut target_sids: Vec<String> = Vec::new();
+        let explicit_targets = body["target_session_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let inject_flag = body.get("inject_into_sessions").and_then(Value::as_bool);
+        let should_inject = match inject_flag {
+            Some(true) => true,
+            Some(false) => false,
+            None => !explicit_targets.is_empty(),
+        };
+        if should_inject {
+            for sid in explicit_targets {
+                if !target_sids.contains(&sid) {
+                    target_sids.push(sid);
+                }
+            }
+            if let Some(ref sid) = session_id
+                && !target_sids.contains(sid)
+            {
+                target_sids.push(sid.clone());
+            }
+        }
+
+        let atom_ids: Vec<String> = normalized.atoms.keys().cloned().collect();
+        let mut shared_session_ids = Vec::new();
+        for sid in &target_sids {
+            let sess_meta = self.store.as_ref().and_then(|s| s.get(sid).ok());
+            let sess_proj = sess_meta
+                .as_ref()
+                .and_then(|s| s["project_id"].as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&project_id);
+            let sess_branch = self.resolve_session_branch(sid);
+            upsert_session_node(
+                &client,
+                sess_meta.as_ref(),
+                sid,
+                sess_proj,
+                &target_branch,
+                &ts,
+            )
+            .await?;
+
+            for aid in &atom_ids {
+                if let Ok(r) = client
+                    .mutate(&ChangeRequest {
+                        query: GQ_LINK_CONSUMED_BY.into(),
+                        name: Some("link_consumed_by".into()),
+                        params: Some(json!({
+                            "atom_id": aid,
+                            "session_id": sid,
+                            "consumed_at": ts,
+                            "injection_mode": "import",
+                            "relevance": 1.0,
+                        })),
+                        branch: Some(target_branch.clone()),
+                        settings: None,
+                    })
+                    .await
+                    && let Some(c) = r.commit
+                {
+                    commit_id = Some(c.graph_commit_id);
+                }
+            }
+
+            if sess_branch != target_branch {
+                ensure_branch_exists(&client, &sess_branch, Some(&target_branch)).await?;
+                if !ndjson_payload.trim().is_empty() {
+                    let _ = client
+                        .load_ndjson(&sess_branch, None, "merge", &ndjson_payload, None)
+                        .await;
+                }
+                let _ = upsert_session_node(
+                    &client,
+                    sess_meta.as_ref(),
+                    sid,
+                    sess_proj,
+                    &sess_branch,
+                    &ts,
+                )
+                .await;
+                for aid in &atom_ids {
+                    let _ = client
+                        .mutate(&ChangeRequest {
+                            query: GQ_LINK_CONSUMED_BY.into(),
+                            name: Some("link_consumed_by".into()),
+                            params: Some(json!({
+                                "atom_id": aid,
+                                "session_id": sid,
+                                "consumed_at": ts,
+                                "injection_mode": "import",
+                                "relevance": 1.0,
+                            })),
+                            branch: Some(sess_branch.clone()),
+                            settings: None,
+                        })
+                        .await;
+                }
+            }
+            shared_session_ids.push(sid.clone());
+        }
+
+        let atoms_out: Vec<Value> = normalized.atoms.values().map(normalize_atom_row).collect();
+        Ok(json!({
+            "ok": true,
+            "target_branch": target_branch,
+            "mode": mode,
+            "commit_id": commit_id,
+            "imported_atoms": normalized.atoms.len(),
+            "imported_files": normalized.files.len(),
+            "imported_symbols": normalized.symbols.len(),
+            "imported_sessions": normalized.sessions.len(),
+            "imported_turns": normalized.turns.len(),
+            "imported_edges": normalized.edges.len(),
+            "atom_ids": atom_ids,
+            "atoms": atoms_out,
+            "shared_session_ids": shared_session_ids,
+        }))
+    }
+
+    /// Link multiple Harness sessions in Omnigraph via mutual `shared_branch` or `broadcast` mode.
+    pub async fn link_sessions_json(&self, body: &Value, store: &SessionStore) -> Result<Value> {
+        let client = self.client().await?;
+        let mode = clean_opt(body["mode"].as_str())
+            .unwrap_or("shared_branch")
+            .to_ascii_lowercase();
+        if !matches!(mode.as_str(), "shared_branch" | "broadcast") {
+            return Err(HarnessError::invalid(format!(
+                "Unsupported session link mode '{mode}'; expected `shared_branch` or `broadcast`."
+            )));
+        }
+
+        let requested_project_id = clean_opt(body["project_id"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let source_session_id = clean_opt(body["source_session_id"].as_str()).map(str::to_string);
+
+        let mut selected_ids: Vec<String> = Vec::new();
+        if let Some(arr) = body["session_ids"].as_array() {
+            for item in arr {
+                if let Some(s) = item.as_str().map(str::trim).filter(|s| !s.is_empty())
+                    && !selected_ids.contains(&s.to_string())
+                {
+                    selected_ids.push(s.to_string());
+                }
+            }
+        }
+
+        let mut all_sids = Vec::new();
+        if mode == "broadcast" {
+            let mut target_ids = Vec::new();
+            let src = source_session_id.clone().ok_or_else(|| {
+                HarnessError::invalid("`source_session_id` is required in `broadcast` mode.")
+            })?;
+            all_sids.push(src.clone());
+            for sid in selected_ids {
+                if sid != src {
+                    target_ids.push(sid.clone());
+                    all_sids.push(sid);
+                }
+            }
+            if target_ids.is_empty() {
+                return Err(HarnessError::invalid(
+                    "Select at least one target session distinct from `source_session_id`.",
+                ));
+            }
+        } else {
+            if let Some(ref src) = source_session_id {
+                all_sids.push(src.clone());
+            }
+            for sid in selected_ids {
+                if !all_sids.contains(&sid) {
+                    all_sids.push(sid);
+                }
+            }
+            if all_sids.len() < 2 {
+                return Err(HarnessError::invalid(
+                    "Select at least 2 sessions to share context.",
+                ));
+            }
+        }
+
+        let mut session_rows: Vec<(String, Value, String)> = Vec::with_capacity(all_sids.len());
+        let mut resolved_project_id = requested_project_id.clone();
+        for sid in &all_sids {
+            let sess = store.get(sid)?;
+            let sess_proj = sess["project_id"].as_str().unwrap_or("").to_string();
+            if resolved_project_id.is_empty() {
+                resolved_project_id = sess_proj.clone();
+            } else if sess_proj != resolved_project_id {
+                return Err(HarnessError::invalid(format!(
+                    "Session `{sid}` does not belong to project `{resolved_project_id}`."
+                )));
+            }
+            let sess_branch = clean_opt(sess["omnigraph"]["branch"].as_str())
+                .filter(|b| *b != "auto")
+                .map(str::to_string)
+                .unwrap_or_else(|| session_branch_name(sid));
+            session_rows.push((sid.clone(), sess, sess_branch));
+        }
+
+        let space_name_opt = clean_opt(body["space_name"].as_str()).map(str::to_string);
+        let target_branch_opt = body["target_branch"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(validate_branch_token)
+            .transpose()?;
+
+        let (shared_branch, shared_space) = if mode == "broadcast" {
+            let source_branch = session_rows[0].2.clone();
+            let sb = target_branch_opt.unwrap_or(source_branch);
+            let sp = space_name_opt.unwrap_or_else(|| sb.clone());
+            (sb, sp)
+        } else {
+            let sb = if let Some(tb) = target_branch_opt {
+                tb
+            } else if let Some(ref sp) = space_name_opt {
+                if sp.starts_with("shared/") || *sp == "main" {
+                    validate_branch_token(sp)?
+                } else {
+                    format!("shared/{}", slugify_segment(sp))
+                }
+            } else {
+                let mut sorted = all_sids.clone();
+                sorted.sort();
+                let digest = store::sha(sorted.join(",").as_bytes());
+                format!("shared/{}", &digest[..10])
+            };
+            let sp = space_name_opt.unwrap_or_else(|| sb.clone());
+            (sb, sp)
+        };
+
+        let ts = now_utc_iso_ms();
+        for (sid, sess, sess_branch) in &session_rows {
+            ensure_branch_exists(&client, sess_branch, Some("main")).await?;
+            upsert_session_node(
+                &client,
+                Some(sess),
+                sid,
+                &resolved_project_id,
+                sess_branch,
+                &ts,
+            )
+            .await?;
+        }
+        ensure_branch_exists(&client, &shared_branch, Some("main")).await?;
+        for (sid, sess, _) in &session_rows {
+            upsert_session_node(
+                &client,
+                Some(sess),
+                sid,
+                &resolved_project_id,
+                &shared_branch,
+                &ts,
+            )
+            .await?;
+        }
+
+        let mut last_commit: Option<String> = None;
+        let mut conflicts: Vec<Value> = Vec::new();
+
+        if mode == "shared_branch" {
+            for (_, _, sess_branch) in &session_rows {
+                if sess_branch != &shared_branch {
+                    let (commit, mut cfl) = merge_or_sync_branch(
+                        &client,
+                        sess_branch,
+                        &shared_branch,
+                        &resolved_project_id,
+                    )
+                    .await?;
+                    if let Some(c) = commit {
+                        last_commit = Some(c.graph_commit_id);
+                    }
+                    conflicts.append(&mut cfl);
+                }
+            }
+
+            let shared_atoms =
+                fetch_branch_atoms(&client, &resolved_project_id, &shared_branch).await?;
+            for i in 0..all_sids.len() {
+                for j in 0..all_sids.len() {
+                    if i != j
+                        && let Ok(r) = link_session_follows(
+                            &client,
+                            &all_sids[i],
+                            &all_sids[j],
+                            "shared_branch",
+                            &shared_branch,
+                            &ts,
+                        )
+                        .await
+                        && let Some(c) = r.commit
+                    {
+                        last_commit = Some(c.graph_commit_id);
+                    }
+                }
+            }
+            for atom in &shared_atoms {
+                if let Some(aid) = str_field(atom, "atom_id") {
+                    for sid in &all_sids {
+                        if let Ok(r) = link_consumed_by(
+                            &client,
+                            &aid,
+                            sid,
+                            "shared_branch",
+                            &shared_branch,
+                            &ts,
+                        )
+                        .await
+                            && let Some(c) = r.commit
+                        {
+                            last_commit = Some(c.graph_commit_id);
+                        }
+                    }
+                }
+            }
+
+            for (_, _, sess_branch) in &session_rows {
+                if sess_branch != &shared_branch {
+                    let (commit, mut cfl) = merge_or_sync_branch(
+                        &client,
+                        &shared_branch,
+                        sess_branch,
+                        &resolved_project_id,
+                    )
+                    .await?;
+                    if let Some(c) = commit {
+                        last_commit = Some(c.graph_commit_id);
+                    }
+                    conflicts.append(&mut cfl);
+                }
+            }
+
+            let atom_ids: Vec<String> = shared_atoms
+                .iter()
+                .filter_map(|a| str_field(a, "atom_id"))
+                .collect();
+            return Ok(json!({
+                "ok": true,
+                "mode": mode,
+                "shared_branch": shared_branch,
+                "shared_space": shared_space,
+                "source_session_id": Value::Null,
+                "commit_id": last_commit,
+                "synced_atoms": shared_atoms.len(),
+                "atom_ids": atom_ids,
+                "atoms": shared_atoms,
+                "linked_session_ids": all_sids,
+                "conflicts": conflicts,
+            }));
+        }
+
+        // Broadcast mode: push `source_session_id`'s branch/atoms into all target sessions
+        let (source_sid, _, source_branch) = &session_rows[0];
+        if &shared_branch != source_branch {
+            let (commit, mut cfl) =
+                merge_or_sync_branch(&client, source_branch, &shared_branch, &resolved_project_id)
+                    .await?;
+            if let Some(c) = commit {
+                last_commit = Some(c.graph_commit_id);
+            }
+            conflicts.append(&mut cfl);
+        }
+        let source_atoms = fetch_branch_atoms(&client, &resolved_project_id, source_branch).await?;
+        for (target_sid, _, target_branch) in session_rows.iter().skip(1) {
+            let (commit, mut cfl) =
+                merge_or_sync_branch(&client, source_branch, target_branch, &resolved_project_id)
+                    .await?;
+            if let Some(c) = commit {
+                last_commit = Some(c.graph_commit_id);
+            }
+            conflicts.append(&mut cfl);
+
+            for b in [target_branch.as_str(), shared_branch.as_str()] {
+                let _ = link_session_follows(&client, target_sid, source_sid, "broadcast", b, &ts)
+                    .await;
+            }
+            for atom in &source_atoms {
+                if let Some(aid) = str_field(atom, "atom_id")
+                    && let Ok(r) =
+                        link_consumed_by(&client, &aid, target_sid, "broadcast", target_branch, &ts)
+                            .await
+                    && let Some(c) = r.commit
+                {
+                    last_commit = Some(c.graph_commit_id);
+                }
+            }
+        }
+
+        let atom_ids: Vec<String> = source_atoms
+            .iter()
+            .filter_map(|a| str_field(a, "atom_id"))
+            .collect();
+        Ok(json!({
+            "ok": true,
+            "mode": mode,
+            "shared_branch": shared_branch,
+            "shared_space": shared_space,
+            "source_session_id": source_sid,
+            "commit_id": last_commit,
+            "synced_atoms": source_atoms.len(),
+            "atom_ids": atom_ids,
+            "atoms": source_atoms,
+            "linked_session_ids": all_sids,
+            "conflicts": conflicts,
+        }))
+    }
+
+    /// Best-effort helper to create `Session` nodes and `SessionFollows` edges when a new session is
+    /// created with `omnigraph.linked_session_ids`.
+    pub async fn sync_new_session_links(
+        &self,
+        store: &SessionStore,
+        session: &Value,
+    ) -> Result<()> {
+        let cfg = self.config().await;
+        if cfg.mode == OmnigraphMode::Off {
+            return Ok(());
+        }
+        let peers = session["omnigraph"]["linked_session_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if peers.is_empty() {
+            return Ok(());
+        }
+        let Ok(client) = self.client().await else {
+            return Ok(());
+        };
+        let sid = session["id"].as_str().unwrap_or("");
+        if sid.is_empty() {
+            return Ok(());
+        }
+        let project_id = session["project_id"].as_str().unwrap_or("");
+        let branch = self.resolve_session_branch(sid);
+        let ts = now_utc_iso_ms();
+        ensure_branch_exists(&client, &branch, Some("main")).await?;
+        upsert_session_node(&client, Some(session), sid, project_id, &branch, &ts).await?;
+        let rel = clean_opt(session["omnigraph"]["shared_space"].as_str()).unwrap_or("linked");
+        for peer_id in &peers {
+            if peer_id == sid {
+                continue;
+            }
+            let peer_meta = store.get(peer_id).ok();
+            let _ = upsert_session_node(
+                &client,
+                peer_meta.as_ref(),
+                peer_id,
+                project_id,
+                &branch,
+                &ts,
+            )
+            .await;
+            let _ = link_session_follows(&client, sid, peer_id, rel, &branch, &ts).await;
+            let _ = link_session_follows(&client, peer_id, sid, rel, &branch, &ts).await;
+            if let Some(ref pm) = peer_meta {
+                let peer_branch = clean_opt(pm["omnigraph"]["branch"].as_str())
+                    .filter(|b| *b != "auto")
+                    .map(str::to_string)
+                    .unwrap_or_else(|| session_branch_name(peer_id));
+                if ensure_branch_exists(&client, &peer_branch, Some("main"))
+                    .await
+                    .is_ok()
+                {
+                    let _ = upsert_session_node(
+                        &client,
+                        Some(session),
+                        sid,
+                        project_id,
+                        &peer_branch,
+                        &ts,
+                    )
+                    .await;
+                    let _ = upsert_session_node(
+                        &client,
+                        Some(pm),
+                        peer_id,
+                        project_id,
+                        &peer_branch,
+                        &ts,
+                    )
+                    .await;
+                    let _ =
+                        link_session_follows(&client, sid, peer_id, rel, &peer_branch, &ts).await;
+                    let _ =
+                        link_session_follows(&client, peer_id, sid, rel, &peer_branch, &ts).await;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_session_branch(&self, sid: &str) -> String {
+        self.store
+            .as_ref()
+            .and_then(|s| s.get(sid).ok())
+            .and_then(|sess| {
+                clean_opt(sess["omnigraph"]["branch"].as_str())
+                    .filter(|b| *b != "auto")
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| session_branch_name(sid))
+    }
 }
 
 /// Discovered local `omnigraph` CLI and `omnigraph-server` binary locations.
@@ -2498,6 +3381,18 @@ impl Domain for OmnigraphDomain {
             let result = match operation {
                 "omnigraph.status" => self.manager.status_json(project_id).await?,
                 "omnigraph.setup" => self.manager.setup_json(body).await?,
+                "omnigraph.export" => {
+                    return self.manager.export_context_payload(query, body).await;
+                }
+                "omnigraph.import" => self.manager.import_context_json(body).await?,
+                "omnigraph.link_sessions" => {
+                    let store = self.manager.store.as_ref().ok_or_else(|| {
+                        HarnessError::unavailable(
+                            "Session store is required for omnigraph.link_sessions.",
+                        )
+                    })?;
+                    self.manager.link_sessions_json(body, store).await?
+                }
                 "omnigraph.graph" => {
                     self.manager
                         .graph_view_json(
@@ -2665,12 +3560,22 @@ async fn compute_stats(client: &OmnigraphClient, project_id: &str) -> Result<Val
     )
     .await
     .len();
+    let follow_cnt = query_edges_safe(
+        client,
+        GQ_LIST_SESSION_FOLLOWS,
+        "list_session_follows",
+        &params,
+        Some("main"),
+        None,
+    )
+    .await
+    .len();
 
     Ok(json!({
         "branches": branches_count,
         "atoms": atoms_count,
         "sessions": sessions_count,
-        "edges": pub_cnt + con_cnt + file_cnt + rel_cnt,
+        "edges": pub_cnt + con_cnt + file_cnt + rel_cnt + follow_cnt,
         "commits": commits_count,
         "unmerged_branches": unmerged_branches,
     }))
@@ -2732,6 +3637,188 @@ async fn query_edges_safe(
         .await
         .map(|r| r.rows)
         .unwrap_or_default()
+}
+
+async fn upsert_session_node(
+    client: &OmnigraphClient,
+    session_meta: Option<&Value>,
+    sid: &str,
+    project_id: &str,
+    branch: &str,
+    ts: &str,
+) -> Result<super::client::ChangeResponse> {
+    let sess_project_id = session_meta
+        .and_then(|s| s["project_id"].as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(project_id);
+    let sess_title = session_meta
+        .and_then(|s| s["title"].as_str())
+        .unwrap_or("Harness Session");
+    let sess_provider = session_meta
+        .and_then(|s| s["provider"].as_str())
+        .unwrap_or("codex");
+    let sess_workflow = session_meta
+        .and_then(|s| s["workflow"].as_str())
+        .unwrap_or("native");
+    let sess_status = session_meta
+        .and_then(|s| s["status"].as_str())
+        .unwrap_or("running");
+    let sess_branch = session_meta
+        .and_then(|s| clean_opt(s["omnigraph"]["branch"].as_str()))
+        .filter(|b| *b != "auto")
+        .map(str::to_string)
+        .unwrap_or_else(|| session_branch_name(sid));
+    let goal = session_meta
+        .and_then(|s| {
+            clean_opt(s["omnigraph"]["query"].as_str()).or_else(|| clean_opt(s["goal"].as_str()))
+        })
+        .map(str::to_string);
+    client
+        .mutate(&ChangeRequest {
+            query: GQ_UPSERT_SESSION.into(),
+            name: Some("upsert_session".into()),
+            params: Some(json!({
+                "session_id": sid,
+                "project_id": sess_project_id,
+                "title": sess_title,
+                "branch": sess_branch,
+                "provider": sess_provider,
+                "workflow": sess_workflow,
+                "status": sess_status,
+                "goal": goal,
+                "created_at": ts,
+                "updated_at": ts,
+            })),
+            branch: Some(branch.to_string()),
+            settings: None,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+async fn link_session_follows(
+    client: &OmnigraphClient,
+    from_sid: &str,
+    to_sid: &str,
+    relation: &str,
+    branch: &str,
+    ts: &str,
+) -> Result<super::client::ChangeResponse> {
+    client
+        .mutate(&ChangeRequest {
+            query: GQ_LINK_SESSION_FOLLOWS.into(),
+            name: Some("link_session_follows".into()),
+            params: Some(json!({
+                "from_session_id": from_sid,
+                "to_session_id": to_sid,
+                "relation": relation,
+                "created_at": ts,
+            })),
+            branch: Some(branch.to_string()),
+            settings: None,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+async fn link_consumed_by(
+    client: &OmnigraphClient,
+    atom_id: &str,
+    session_id: &str,
+    injection_mode: &str,
+    branch: &str,
+    ts: &str,
+) -> Result<super::client::ChangeResponse> {
+    client
+        .mutate(&ChangeRequest {
+            query: GQ_LINK_CONSUMED_BY.into(),
+            name: Some("link_consumed_by".into()),
+            params: Some(json!({
+                "atom_id": atom_id,
+                "session_id": session_id,
+                "consumed_at": ts,
+                "injection_mode": injection_mode,
+                "relevance": 1.0,
+            })),
+            branch: Some(branch.to_string()),
+            settings: None,
+        })
+        .await
+        .map_err(Into::into)
+}
+
+async fn fetch_branch_atoms(
+    client: &OmnigraphClient,
+    project_id: &str,
+    branch: &str,
+) -> Result<Vec<Value>> {
+    let resp = run_stored_or_inline(
+        client,
+        "recent_atoms",
+        schema::QUERY_RECENT_ATOMS,
+        json!({ "project_id": project_id }),
+        Some(branch.to_string()),
+        None,
+    )
+    .await?;
+    Ok(resp.rows.iter().map(normalize_atom_row).collect())
+}
+
+async fn merge_or_sync_branch(
+    client: &OmnigraphClient,
+    source_branch: &str,
+    target_branch: &str,
+    project_id: &str,
+) -> Result<(Option<CommitOutput>, Vec<Value>)> {
+    if source_branch == target_branch {
+        return Ok((None, Vec::new()));
+    }
+    match client
+        .merge_branches(&BranchMergeRequest {
+            source: source_branch.to_string(),
+            target: Some(target_branch.to_string()),
+            delete_branch: false,
+            as_commit: false,
+            dry_run: false,
+            settings: None,
+        })
+        .await
+    {
+        Ok(resp) => Ok((resp.commit, Vec::new())),
+        Err(err) if err.is_not_found() => Ok((None, Vec::new())),
+        Err(err) if err.is_merge_conflict() => {
+            let mut conflicts = Vec::new();
+            let mut excluded_atoms = BTreeSet::new();
+            for mc in &err.merge_conflicts {
+                if mc.type_name == "ContextAtom" {
+                    if let Some(eid) = mc.entity_id.as_ref().filter(|s| !s.is_empty()) {
+                        excluded_atoms.insert(eid.clone());
+                    }
+                    if let Ok(v) = serde_json::to_value(mc) {
+                        conflicts.push(v);
+                    }
+                }
+            }
+            let exported = client
+                .export_branch(Some(source_branch), &[], None)
+                .await
+                .unwrap_or_default();
+            let filtered_ndjson =
+                filter_ndjson_excluding_atoms(&exported, project_id, &excluded_atoms);
+            let mut commit_out = None;
+            if !filtered_ndjson.trim().is_empty()
+                && let Ok(load_res) = client
+                    .load_ndjson(target_branch, None, "merge", &filtered_ndjson, None)
+                    .await
+                && let Ok(parsed_commit) =
+                    serde_json::from_value::<CommitOutput>(load_res["commit"].clone())
+            {
+                commit_out = Some(parsed_commit);
+            }
+            Ok((commit_out, conflicts))
+        }
+        Err(err) => Err(err.into()),
+    }
 }
 
 async fn ensure_branch_exists(
@@ -2814,6 +3901,32 @@ fn normalize_file_row(row: &Value) -> Value {
     Value::Object(obj)
 }
 
+fn normalize_symbol_row(row: &Value) -> Value {
+    let mut obj = match row.as_object() {
+        Some(m) => m.clone(),
+        None => Map::new(),
+    };
+    if let Some(fqn) = obj.get("fqn").and_then(Value::as_str).map(str::to_string) {
+        obj.entry("id").or_insert_with(|| Value::String(fqn));
+    }
+    Value::Object(obj)
+}
+
+fn normalize_turn_row(row: &Value) -> Value {
+    let mut obj = match row.as_object() {
+        Some(m) => m.clone(),
+        None => Map::new(),
+    };
+    if let Some(snap_id) = obj
+        .get("snapshot_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
+        obj.entry("id").or_insert_with(|| Value::String(snap_id));
+    }
+    Value::Object(obj)
+}
+
 fn change_to_atom_entry(ch: &super::client::EntityChange) -> Value {
     let props = ch
         .after
@@ -2881,7 +3994,7 @@ fn diff_edge_relation(entity_type: &str, props: &Value) -> String {
     }
 }
 
-fn pascal_to_snake(raw: &str) -> String {
+pub(super) fn pascal_to_snake(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len() + 4);
     for (idx, ch) in raw.chars().enumerate() {
         if ch.is_uppercase() {
@@ -2933,7 +4046,7 @@ fn enrich_commit_change(ch: &super::client::EntityChange) -> Value {
     Value::Object(obj)
 }
 
-fn normalize_relation_name(raw: &str) -> Option<String> {
+pub(super) fn normalize_relation_name(raw: &str) -> Option<String> {
     let normalized = match raw.trim().to_ascii_lowercase().as_str() {
         "relates_to" | "related" => "supports".to_string(),
         other => other.to_string(),
@@ -3230,7 +4343,7 @@ fn format_omnigraph_ts(ts: i64) -> Option<String> {
     Some(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
-fn detect_language(path: &str) -> Option<&'static str> {
+pub(super) fn detect_language(path: &str) -> Option<&'static str> {
     let ext = Path::new(path).extension().and_then(|e| e.to_str())?;
     match ext {
         "rs" => Some("rust"),

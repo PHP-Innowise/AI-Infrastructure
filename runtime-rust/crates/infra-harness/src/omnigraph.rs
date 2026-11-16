@@ -7,6 +7,7 @@
 pub mod client;
 pub mod schema;
 pub mod sidecar;
+mod transfer;
 
 #[cfg(test)]
 mod tests;
@@ -17,10 +18,10 @@ pub use client::{
     ChangeBaselineRequest, ChangeBaselineResponse, ChangeBlock, ChangeCause, ChangeFeedQuery,
     ChangeFeedResponse, ChangeImage, ChangeOp, ChangeRequest, ChangeResponse,
     CommitChangesResponse, CommitListQuery, CommitListResponse, CommitOutput, DiffOutput,
-    DiffQuery, EntityChange, EntityKind, GraphSummary, GraphsListResponse, HealthResponse,
-    MergeConflict, MergeConflictKind, OmnigraphClient, OmnigraphError, PreconditionFailure,
-    QueryRequest, QueryResponse, RankingOutput, ReadinessResponse, SchemaResponse,
-    StoredQueryRequest,
+    DiffQuery, EntityChange, EntityKind, ExportRequest, GraphSummary, GraphsListResponse,
+    HealthResponse, IngestRequest, MergeConflict, MergeConflictKind, OmnigraphClient,
+    OmnigraphError, PreconditionFailure, QueryRequest, QueryResponse, RankingOutput,
+    ReadinessResponse, SchemaResponse, StoredQueryRequest,
 };
 pub use schema::{
     CLUSTER_YAML_TEMPLATE, GRAPH_POLICY_YAML, HARNESS_CONTEXT_PG, HARNESS_GRAPH_ID,

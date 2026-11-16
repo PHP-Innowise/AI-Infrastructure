@@ -2623,7 +2623,7 @@ Operating modes persisted at `<state>/omnigraph.json` (plus auto-generated clust
 
 ### Session lifecycle
 
-- `POST /api/sessions` (and `send` follow-ups) accepts optional `omnigraph` settings (`enabled`, `branch`, `pull_branches`, `query`, `auto_publish`, `auto_merge`), persisted on the SQLite `sessions.omnigraph` column.
+- `POST /api/sessions` (and `send` follow-ups) accepts optional `omnigraph` settings (`enabled`, `branch`, `pull_branches`, `query`, `auto_publish`, `auto_merge`, `shared_space`, `linked_session_ids`), persisted on the SQLite `sessions.omnigraph` column. Passing `linked_session_ids` automatically adds peer branches to `pull_branches`, updates reciprocal `linked_session_ids`, and records `SessionFollows` edges in Omnigraph.
 - Before a run launches, when `omnigraph.enabled` is `true`, Harness ensures the session branch (`session/<sid12>` or configured branch) exists, pulls any configured `pull_branches` (defaulting to `["main"]`), queries shared context atoms, and stores `injected_atoms` and a bounded capsule on the session. Unreachable Omnigraph servers record a session warning/event without blocking the Harness turn.
 - `prompt::build` inserts the bounded `Shared Omnigraph Context` section (6,000-character cap) and records it under the `"omnigraph"` bucket in `PromptLedger`.
 - After a turn completes (including manual `/api/sessions/{id}/memory` saves, Clash, and Fleet runs), when `auto_publish` is not `false`, Harness collects `memory-draft` learnings, Clash/Fleet findings, touched files, and the turn outcome summary, publishes `ContextAtom` nodes and provenance edges (`PublishedBy`, `TouchesFile`, `DerivedFrom`), optionally merges into `main` when `auto_merge` is `true`, and records a session `omnigraph` event.
@@ -2640,6 +2640,9 @@ All `GET` and CSRF-protected (`X-Harness-Token`) `POST` routes are registered in
 - `POST /api/omnigraph/branches` — `create`, `merge` (returning conflict workbench payloads on 3-way conflicts), or `delete` branches.
 - `POST /api/omnigraph/atoms` — publish a `ContextAtom` with linked files, session provenance, and `relates_to` links.
 - `POST /api/omnigraph/share` — inject/share selected `atom_ids` into a target session (`inject`, `reference`, `inject_and_link`, or `copy`), updating `session["omnigraph"]` and emitting a session event.
+- `GET|POST /api/omnigraph/export` — export scoped task, branch, or main Omnigraph context (`bundle` `harness.omnigraph.bundle.v1` JSON or raw `ndjson`, with optional `download=1` attachment download).
+- `POST /api/omnigraph/import` — import an exported JSON bundle or raw Omnigraph NDJSON onto a branch (creating from `from_branch` if requested, in `merge` or `replace` mode) and optionally inject `ConsumedBy` context into target sessions.
+- `POST /api/omnigraph/sessions/link` — link multiple Harness sessions in `shared_branch` (mutual) or `broadcast` mode, syncing branches/atoms, creating `SessionFollows` and `ConsumedBy` edges, updating `session["omnigraph"]`, and best-effort queuing live native `session_inbox` context notices.
 - `GET /api/omnigraph/changes?project_id=...&cursor=...&branch=...` — incremental commit/entity pulse feed.
 - `GET /api/omnigraph/commits/{commit_id}?project_id=...` — inspect commit metadata, `changes`, and affected `atoms`.
 

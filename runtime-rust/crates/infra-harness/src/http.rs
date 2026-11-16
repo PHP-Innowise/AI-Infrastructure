@@ -1332,6 +1332,46 @@ pub const ROUTES: &[Route] = &[
     },
     Route {
         method: "GET",
+        pattern: "/api/omnigraph/export",
+        operation: "omnigraph.export",
+        status: 200,
+        token: false,
+        query: &[
+            "project_id",
+            "branch",
+            "session_id",
+            "format",
+            "scope",
+            "include_inherited",
+            "download",
+        ],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/export",
+        operation: "omnigraph.export",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/import",
+        operation: "omnigraph.import",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/sessions/link",
+        operation: "omnigraph.link_sessions",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "GET",
         pattern: "/api/omnigraph/changes",
         operation: "omnigraph.changes",
         status: 200,
@@ -1596,6 +1636,8 @@ async fn serve(app: &App, request: Request<Body>, head: bool) -> Result<Response
             crate::attachments::MAX_JSON_BYTES
         } else if route.operation == "skills.create_preview" {
             131072
+        } else if route.operation == "omnigraph.import" {
+            4 * 1024 * 1024
         } else if ["omnigraph.publish", "omnigraph.share"].contains(&route.operation) {
             512 * 1024
         } else if ["systems.preview", "discovery.start"].contains(&route.operation) {
