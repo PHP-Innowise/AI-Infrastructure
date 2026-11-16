@@ -461,6 +461,20 @@ pub(crate) const GQ_LIST_ATOM_RELATIONS: &str = r#"query list_atom_relations($pr
     limit 500
 }"#;
 
+pub(crate) const GQ_LIST_SESSION_FOLLOWS: &str = r#"query list_session_follows($project_id: String) {
+    match {
+        $s1: Session { project_id: $project_id }
+        $s1 $e:sessionFollows $s2
+    }
+    return {
+        $s1.session_id as source_id,
+        $s2.session_id as target_id,
+        $e.relation as relation,
+        $e.created_at as created_at
+    }
+    limit 500
+}"#;
+
 pub(crate) const GQ_UPSERT_SESSION: &str = r#"query upsert_session(
     $session_id: String,
     $project_id: String,
@@ -625,6 +639,35 @@ pub(crate) const GQ_LINK_DERIVED_FROM: &str = r#"query link_derived_from(
         to: $snapshot_id,
         recorded_at: $recorded_at
     }
+}"#;
+
+pub(crate) const GQ_LINK_SESSION_FOLLOWS: &str = r#"query link_session_follows(
+    $from_session_id: String,
+    $to_session_id: String,
+    $relation: String,
+    $created_at: DateTime
+) {
+    insert SessionFollows {
+        from: $from_session_id,
+        to: $to_session_id,
+        relation: $relation,
+        created_at: $created_at
+    }
+}"#;
+
+pub(crate) const GQ_CLEAR_BRANCH_CONTEXT: &str = r#"query clear_branch_context() {
+    delete PublishedBy where @src != ""
+    delete ConsumedBy where @src != ""
+    delete TouchesFile where @src != ""
+    delete MentionsSymbol where @src != ""
+    delete RelatesTo where @src != ""
+    delete DerivedFrom where @src != ""
+    delete SessionFollows where @src != ""
+    delete ContextAtom where atom_id != ""
+    delete FileRef where path != ""
+    delete SymbolRef where fqn != ""
+    delete TurnSnapshot where snapshot_id != ""
+    delete Session where session_id != ""
 }"#;
 
 /// Default `cluster.yaml` template using `{{GRAPH_ID}}` placeholder.

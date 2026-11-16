@@ -24,6 +24,7 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Extend Omnigraph Harness backend (`infra-harness`) with scoped task/branch/graph context export and import (`GET|POST /api/omnigraph/export`, `POST /api/omnigraph/import` supporting `harness.omnigraph.bundle.v1` and raw Omnigraph NDJSON via `/export` + `/load/ndjson`) and multi-task session context linking (`POST /api/omnigraph/sessions/link` in `shared_branch` and `broadcast` modes, `omnigraph.shared_space` / `omnigraph.linked_session_ids` on `POST /api/sessions`, `SessionFollows` graph edges, and best-effort live native `session_inbox` updates).
 - Wire Omnigraph (`v0.15.0` CLI/server HTTP API `0.14`) cross-session context sharing into `infra-harness`, `infra-ui`, and `harness/web`: add `OmnigraphManager` lifecycle management (`off`, managed `local_sidecar`, `docker`, and `external`), `/api/omnigraph/*` HTTP endpoints (`status`, `setup`, `graph`, `search`, `branches/diff`, `branches`, `atoms`, `share`, `changes`, `commits/{commit_id}`), SQLite `session["omnigraph"]` persistence/migration, pre-run branch preparation and bounded `Shared Omnigraph Context` prompt injection with `PromptLedger` accounting, post-turn learnings/Clash/Fleet/file publication and optional `auto_merge`, and the Context Graph Studio UI.
 - Tell in the side panel of a selected place of the Harness dependency map what
   a change to it reaches within four links (`graph_map/blast.rs`): the files

@@ -632,6 +632,25 @@ pub struct ChangeBaselineResponse {
     pub records: Vec<Value>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ExportRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub type_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct IngestRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    pub data: String,
+}
+
 /// Async client bound to a single Omnigraph endpoint + graph id.
 #[derive(Clone, Debug)]
 pub struct OmnigraphClient {
@@ -723,23 +742,54 @@ impl OmnigraphClient {
         if_commit: Option<&str>,
         json_body: Option<Vec<u8>>,
     ) -> Result<Response, OmnigraphError> {
+        self.send_raw_with(
+            method,
+            url,
+            contract_headers,
+            if_commit,
+            None,
+            json_body.as_ref().map(|_| "application/json"),
+            json_body,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Shared low-level transport helper for JSON and NDJSON endpoints."
+    )]
+    async fn send_raw_with(
+        &self,
+        method: Method,
+        url: Url,
+        contract_headers: bool,
+        if_commit: Option<&str>,
+        actor_override: Option<&str>,
+        content_type: Option<&str>,
+        body: Option<Vec<u8>>,
+    ) -> Result<Response, OmnigraphError> {
         let mut req = self.http.request(method, url);
         if contract_headers {
             req = req.header(HTTP_API_CONTRACT_HEADER, HTTP_API_CONTRACT_VERSION);
             if let Some(token) = &self.token {
                 req = req.bearer_auth(token);
             }
-            if let Some(actor) = &self.expected_actor {
+            let actor = actor_override
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or(self.expected_actor.as_deref());
+            if let Some(actor) = actor {
                 req = req.header(IF_ACTOR_HEADER, actor);
             }
         }
         if let Some(commit) = if_commit {
             req = req.header(IF_GRAPH_COMMIT_HEADER, commit);
         }
-        if let Some(bytes) = json_body {
-            req = req
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(bytes);
+        if let Some(bytes) = body {
+            if let Some(ct) = content_type {
+                req = req.header(reqwest::header::CONTENT_TYPE, ct);
+            }
+            req = req.body(bytes);
         }
         req.send()
             .await
@@ -1055,6 +1105,136 @@ impl OmnigraphClient {
         terminal.ok_or_else(|| {
             OmnigraphError::transport("Baseline stream ended without terminal baseline record.")
         })
+    }
+
+    /// Stream the contents of a branch as NDJSON (`POST /graphs/{graph_id}/export`).
+    pub async fn export_branch(
+        &self,
+        branch: Option<&str>,
+        type_names: &[&str],
+        actor: Option<&str>,
+    ) -> Result<String, OmnigraphError> {
+        let url = self.graph_url("/export")?;
+        let req = ExportRequest {
+            branch: branch
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            type_names: type_names
+                .iter()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+        };
+        let payload = serde_json::to_vec(&req).map_err(|err| {
+            OmnigraphError::invalid(format!("Failed serializing export body: {err}"))
+        })?;
+        let resp = self
+            .send_raw_with(
+                Method::POST,
+                url,
+                true,
+                None,
+                actor,
+                Some("application/json"),
+                Some(payload),
+            )
+            .await?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(|err| {
+            OmnigraphError::transport(format!("Failed reading export stream: {err}"))
+        })?;
+        if !status.is_success() {
+            return Err(parse_error(status, &bytes));
+        }
+        String::from_utf8(bytes.to_vec()).map_err(|err| {
+            OmnigraphError::transport(format!("Omnigraph export was not valid UTF-8: {err}"))
+        })
+    }
+
+    /// Bulk-load an NDJSON graph batch onto `branch` (`POST /graphs/{graph_id}/load/ndjson`).
+    pub async fn load_ndjson(
+        &self,
+        branch: &str,
+        from: Option<&str>,
+        mode: &str,
+        ndjson: &str,
+        actor: Option<&str>,
+    ) -> Result<Value, OmnigraphError> {
+        let normalized_mode = normalize_load_mode(mode)?;
+        let mut url = self.graph_url("/load/ndjson")?;
+        {
+            let mut qp = url.query_pairs_mut();
+            let trimmed_branch = branch.trim();
+            if !trimmed_branch.is_empty() {
+                qp.append_pair("branch", trimmed_branch);
+            }
+            if let Some(base) = from.map(str::trim).filter(|s| !s.is_empty()) {
+                qp.append_pair("from", base);
+            }
+            qp.append_pair("mode", normalized_mode);
+        }
+        let resp = self
+            .send_raw_with(
+                Method::POST,
+                url,
+                true,
+                None,
+                actor,
+                Some("application/x-ndjson"),
+                Some(ndjson.as_bytes().to_vec()),
+            )
+            .await?;
+        Self::decode_json(resp).await
+    }
+
+    /// Compatibility-load NDJSON data via JSON envelope (`POST /graphs/{graph_id}/load`).
+    pub async fn load_json(
+        &self,
+        branch: &str,
+        from: Option<&str>,
+        mode: &str,
+        ndjson: &str,
+        actor: Option<&str>,
+    ) -> Result<Value, OmnigraphError> {
+        let normalized_mode = normalize_load_mode(mode)?;
+        let url = self.graph_url("/load")?;
+        let req = IngestRequest {
+            branch: (!branch.trim().is_empty()).then(|| branch.trim().to_string()),
+            from: from
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            mode: Some(normalized_mode.to_string()),
+            data: ndjson.to_string(),
+        };
+        let payload = serde_json::to_vec(&req).map_err(|err| {
+            OmnigraphError::invalid(format!("Failed serializing load body: {err}"))
+        })?;
+        let resp = self
+            .send_raw_with(
+                Method::POST,
+                url,
+                true,
+                None,
+                actor,
+                Some("application/json"),
+                Some(payload),
+            )
+            .await?;
+        Self::decode_json(resp).await
+    }
+}
+
+fn normalize_load_mode(mode: &str) -> Result<&'static str, OmnigraphError> {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "" | "merge" => Ok("merge"),
+        "append" => Ok("append"),
+        "overwrite" => Ok("overwrite"),
+        other => Err(OmnigraphError::invalid(format!(
+            "Unsupported Omnigraph load mode '{other}'; expected merge, append, or overwrite."
+        ))),
     }
 }
 

@@ -33,12 +33,15 @@ struct MockSnapshot {
     sessions: BTreeMap<String, Value>,
     atoms: BTreeMap<String, Value>,
     files: BTreeMap<String, Value>,
+    symbols: BTreeMap<String, Value>,
     turn_snapshots: BTreeMap<String, Value>,
     published_by: BTreeMap<String, Value>,
     consumed_by: BTreeMap<String, Value>,
     touches_file: BTreeMap<String, Value>,
+    mentions_symbol: BTreeMap<String, Value>,
     relates_to: BTreeMap<String, Value>,
     derived_from: BTreeMap<String, Value>,
+    session_follows: BTreeMap<String, Value>,
 }
 
 #[derive(Clone)]
@@ -635,6 +638,18 @@ fn three_way_merge(
     for (id, v) in &source.files {
         merged.files.entry(id.clone()).or_insert_with(|| v.clone());
     }
+    for (id, v) in &source.symbols {
+        merged
+            .symbols
+            .entry(id.clone())
+            .or_insert_with(|| v.clone());
+    }
+    for (id, v) in &source.turn_snapshots {
+        merged
+            .turn_snapshots
+            .entry(id.clone())
+            .or_insert_with(|| v.clone());
+    }
     for (id, v) in &source.published_by {
         merged.published_by.insert(id.clone(), v.clone());
     }
@@ -644,8 +659,17 @@ fn three_way_merge(
     for (id, v) in &source.touches_file {
         merged.touches_file.insert(id.clone(), v.clone());
     }
+    for (id, v) in &source.mentions_symbol {
+        merged.mentions_symbol.insert(id.clone(), v.clone());
+    }
     for (id, v) in &source.relates_to {
         merged.relates_to.insert(id.clone(), v.clone());
+    }
+    for (id, v) in &source.derived_from {
+        merged.derived_from.insert(id.clone(), v.clone());
+    }
+    for (id, v) in &source.session_follows {
+        merged.session_follows.insert(id.clone(), v.clone());
     }
     Ok(merged)
 }
@@ -861,7 +885,18 @@ async fn mock_mutate(
     let mut affected_edges = 0usize;
     let query_name = body["name"].as_str().unwrap_or("mutate").to_string();
 
-    if query_text.contains("insert Session") || query_name == "upsert_session" {
+    if query_text.contains("insert SessionFollows") || query_name == "link_session_follows" {
+        let src = params["from_session_id"].as_str().unwrap_or("");
+        let dst = params["to_session_id"].as_str().unwrap_or("");
+        let mut props = params.clone();
+        props["source_id"] = json!(src);
+        props["target_id"] = json!(dst);
+        snap.session_follows.insert(format!("{src}->{dst}"), props);
+        affected_edges += 1;
+    } else if query_text.contains("insert Session ")
+        || query_text.contains("insert Session{")
+        || query_name == "upsert_session"
+    {
         let sid = params["session_id"].as_str().unwrap_or("s1").to_string();
         snap.sessions.insert(sid.clone(), params.clone());
         affected_nodes += 1;
@@ -972,9 +1007,37 @@ async fn mock_mutate(
     } else if query_text.contains("insert DerivedFrom") {
         let src = params["atom_id"].as_str().unwrap_or("");
         let dst = params["snapshot_id"].as_str().unwrap_or("");
-        snap.derived_from
-            .insert(format!("{src}->{dst}"), params.clone());
+        let mut props = params.clone();
+        props["source_id"] = json!(src);
+        props["target_id"] = json!(dst);
+        snap.derived_from.insert(format!("{src}->{dst}"), props);
         affected_edges += 1;
+    } else if query_text.contains("insert SymbolRef") {
+        let fqn = params["fqn"].as_str().unwrap_or("sym").to_string();
+        snap.symbols.insert(fqn, params.clone());
+        affected_nodes += 1;
+    } else if query_text.contains("insert MentionsSymbol") {
+        let src = params["atom_id"].as_str().unwrap_or("");
+        let dst = params["fqn"].as_str().unwrap_or("");
+        let mut props = params.clone();
+        props["source_id"] = json!(src);
+        props["target_id"] = json!(dst);
+        snap.mentions_symbol.insert(format!("{src}->{dst}"), props);
+        affected_edges += 1;
+    } else if query_name == "clear_branch_context" {
+        affected_nodes = snap.atoms.len()
+            + snap.files.len()
+            + snap.symbols.len()
+            + snap.sessions.len()
+            + snap.turn_snapshots.len();
+        affected_edges = snap.published_by.len()
+            + snap.consumed_by.len()
+            + snap.touches_file.len()
+            + snap.mentions_symbol.len()
+            + snap.relates_to.len()
+            + snap.derived_from.len()
+            + snap.session_follows.len();
+        snap = MockSnapshot::default();
     }
 
     let cid = st.alloc_commit_id();
@@ -1093,6 +1156,9 @@ fn evaluate_mock_query(
     }
     if query_name == "list_atom_relations" || query_text.contains("list_atom_relations") {
         return (snap.relates_to.values().cloned().collect(), None);
+    }
+    if query_name == "list_session_follows" || query_text.contains("list_session_follows") {
+        return (snap.session_follows.values().cloned().collect(), None);
     }
     if query_name == "contradictions" || query_text.contains("contradictions") {
         let rows: Vec<Value> = snap
@@ -1444,6 +1510,562 @@ async fn mock_changes_baseline(
     (StatusCode::OK, lines).into_response()
 }
 
+fn export_mock_snapshot_ndjson(snap: &MockSnapshot, type_names: &[String]) -> String {
+    let want = |name: &str| type_names.is_empty() || type_names.iter().any(|t| t == name);
+    let mut lines = Vec::new();
+    let strip_alias = |v: &Value| -> Value {
+        let mut obj = v.as_object().cloned().unwrap_or_default();
+        obj.remove("source_id");
+        obj.remove("target_id");
+        Value::Object(obj)
+    };
+    if want("ConsumedBy") {
+        for v in snap.consumed_by.values() {
+            lines.push(
+                json!({
+                    "edge": "ConsumedBy",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("DerivedFrom") {
+        for v in snap.derived_from.values() {
+            lines.push(
+                json!({
+                    "edge": "DerivedFrom",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("MentionsSymbol") {
+        for v in snap.mentions_symbol.values() {
+            lines.push(
+                json!({
+                    "edge": "MentionsSymbol",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("PublishedBy") {
+        for v in snap.published_by.values() {
+            lines.push(
+                json!({
+                    "edge": "PublishedBy",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("RelatesTo") {
+        for v in snap.relates_to.values() {
+            lines.push(
+                json!({
+                    "edge": "RelatesTo",
+                    "id": format!("[\"{}\",\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or(""), v["relation"].as_str().unwrap_or("supports")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("SessionFollows") {
+        for v in snap.session_follows.values() {
+            lines.push(
+                json!({
+                    "edge": "SessionFollows",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("TouchesFile") {
+        for v in snap.touches_file.values() {
+            lines.push(
+                json!({
+                    "edge": "TouchesFile",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("ContextAtom") {
+        for (id, v) in &snap.atoms {
+            lines.push(json!({ "type": "ContextAtom", "id": id, "data": v }).to_string());
+        }
+    }
+    if want("FileRef") {
+        for (id, v) in &snap.files {
+            lines.push(json!({ "type": "FileRef", "id": id, "data": v }).to_string());
+        }
+    }
+    if want("Session") {
+        for (id, v) in &snap.sessions {
+            lines.push(json!({ "type": "Session", "id": id, "data": v }).to_string());
+        }
+    }
+    if want("SymbolRef") {
+        for (id, v) in &snap.symbols {
+            lines.push(json!({ "type": "SymbolRef", "id": id, "data": v }).to_string());
+        }
+    }
+    if want("TurnSnapshot") {
+        for (id, v) in &snap.turn_snapshots {
+            lines.push(json!({ "type": "TurnSnapshot", "id": id, "data": v }).to_string());
+        }
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
+async fn mock_export(
+    State(srv): State<MockServer>,
+    AxumPath(graph_id): AxumPath<String>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let st = srv.state.lock().unwrap();
+    if let Err(resp) = check_auth_and_contract(&headers, &st) {
+        return *resp;
+    }
+    if graph_id != st.graph_id {
+        return json_err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.", None);
+    }
+    let bname = body["branch"].as_str().unwrap_or("main");
+    let Some(branch) = st.branches.get(bname) else {
+        return json_err(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Branch not found.",
+            None,
+        );
+    };
+    let type_names: Vec<String> = body["type_names"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    let snap = &st.commits[&branch.head_commit].snapshot;
+    let body_text = export_mock_snapshot_ndjson(snap, &type_names);
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+        body_text,
+    )
+        .into_response()
+}
+
+fn apply_mock_ndjson_load(
+    st: &mut MockGraphState,
+    actor: String,
+    branch_name: &str,
+    from: Option<&str>,
+    mode: &str,
+    ndjson: &str,
+    include_uri: bool,
+) -> Response {
+    let mut branch_created = false;
+    if !st.branches.contains_key(branch_name) {
+        let Some(base_name) = from.filter(|s| !s.is_empty()) else {
+            return json_err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Target branch not found.",
+                None,
+            );
+        };
+        let Some(base_branch) = st.branches.get(base_name).cloned() else {
+            return json_err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Base branch not found.",
+                None,
+            );
+        };
+        let ts = 1_700_000_000_000_000 + (st.next_seq as i64) * 1000;
+        st.branches.insert(
+            branch_name.to_string(),
+            MockBranch {
+                name: branch_name.to_string(),
+                head_commit: base_branch.head_commit.clone(),
+                from: Some(base_name.to_string()),
+                from_commit_id: Some(base_branch.head_commit),
+                created_at: ts,
+                updated_at: ts,
+            },
+        );
+        branch_created = true;
+    }
+
+    let branch = st.branches[branch_name].clone();
+    let mut snap = st.commits[&branch.head_commit].snapshot.clone();
+    let mut node_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut edge_counts: BTreeMap<String, usize> = BTreeMap::new();
+
+    let mut parsed_records = Vec::new();
+    for line in ndjson.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return json_err(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "Invalid NDJSON line.",
+                None,
+            );
+        };
+        parsed_records.push(v);
+    }
+
+    if mode == "overwrite" {
+        let mut present_types = BTreeSet::new();
+        for rec in &parsed_records {
+            if let Some(t) = rec.get("type").and_then(Value::as_str) {
+                present_types.insert(t.to_string());
+            } else if let Some(e) = rec.get("edge").and_then(Value::as_str) {
+                present_types.insert(e.to_string());
+            }
+        }
+        if present_types.contains("ContextAtom") {
+            snap.atoms.clear();
+        }
+        if present_types.contains("FileRef") {
+            snap.files.clear();
+        }
+        if present_types.contains("SymbolRef") {
+            snap.symbols.clear();
+        }
+        if present_types.contains("Session") {
+            snap.sessions.clear();
+        }
+        if present_types.contains("TurnSnapshot") {
+            snap.turn_snapshots.clear();
+        }
+        if present_types.contains("PublishedBy") {
+            snap.published_by.clear();
+        }
+        if present_types.contains("ConsumedBy") {
+            snap.consumed_by.clear();
+        }
+        if present_types.contains("TouchesFile") {
+            snap.touches_file.clear();
+        }
+        if present_types.contains("MentionsSymbol") {
+            snap.mentions_symbol.clear();
+        }
+        if present_types.contains("RelatesTo") {
+            snap.relates_to.clear();
+        }
+        if present_types.contains("DerivedFrom") {
+            snap.derived_from.clear();
+        }
+        if present_types.contains("SessionFollows") {
+            snap.session_follows.clear();
+        }
+    }
+
+    let mut changes = Vec::new();
+    for rec in &parsed_records {
+        if let Some(t) = rec.get("type").and_then(Value::as_str) {
+            let data = rec["data"].clone();
+            match t {
+                "ContextAtom" => {
+                    let id = data["atom_id"]
+                        .as_str()
+                        .or_else(|| rec["id"].as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if mode == "append" && snap.atoms.contains_key(&id) {
+                        return json_err(
+                            StatusCode::CONFLICT,
+                            "conflict",
+                            "Entity already exists.",
+                            None,
+                        );
+                    }
+                    let prev = snap.atoms.insert(id.clone(), data.clone());
+                    changes.push(json!({
+                        "kind": "node",
+                        "type": { "id": "t-atom", "name": "ContextAtom" },
+                        "id": id,
+                        "op": if prev.is_some() { "update" } else { "insert" },
+                        "after": { "properties": data }
+                    }));
+                }
+                "FileRef" => {
+                    let id = data["path"]
+                        .as_str()
+                        .or_else(|| rec["id"].as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    snap.files.insert(id, data);
+                }
+                "SymbolRef" => {
+                    let id = data["fqn"]
+                        .as_str()
+                        .or_else(|| rec["id"].as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    snap.symbols.insert(id, data);
+                }
+                "Session" => {
+                    let id = data["session_id"]
+                        .as_str()
+                        .or_else(|| rec["id"].as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    snap.sessions.insert(id, data);
+                }
+                "TurnSnapshot" => {
+                    let id = data["snapshot_id"]
+                        .as_str()
+                        .or_else(|| rec["id"].as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    snap.turn_snapshots.insert(id, data);
+                }
+                _ => {
+                    return json_err(
+                        StatusCode::BAD_REQUEST,
+                        "bad_request",
+                        "Unknown node type.",
+                        None,
+                    );
+                }
+            }
+            *node_counts.entry(t.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    for rec in &parsed_records {
+        if let Some(e) = rec.get("edge").and_then(Value::as_str) {
+            let from = rec["from"].as_str().unwrap_or("");
+            let to = rec["to"].as_str().unwrap_or("");
+            let mut props = rec["data"].as_object().cloned().unwrap_or_default();
+            props.insert("source_id".into(), json!(from));
+            props.insert("target_id".into(), json!(to));
+            let val = Value::Object(props);
+            match e {
+                "PublishedBy" => {
+                    if !snap.atoms.contains_key(from) || !snap.sessions.contains_key(to) {
+                        return json_err(
+                            StatusCode::BAD_REQUEST,
+                            "bad_request",
+                            "Dangling PublishedBy.",
+                            None,
+                        );
+                    }
+                    snap.published_by.insert(format!("{from}->{to}"), val);
+                }
+                "ConsumedBy" => {
+                    if !snap.atoms.contains_key(from) || !snap.sessions.contains_key(to) {
+                        return json_err(
+                            StatusCode::BAD_REQUEST,
+                            "bad_request",
+                            "Dangling ConsumedBy.",
+                            None,
+                        );
+                    }
+                    snap.consumed_by.insert(format!("{from}->{to}"), val);
+                }
+                "TouchesFile" => {
+                    if !snap.atoms.contains_key(from) || !snap.files.contains_key(to) {
+                        return json_err(
+                            StatusCode::BAD_REQUEST,
+                            "bad_request",
+                            "Dangling TouchesFile.",
+                            None,
+                        );
+                    }
+                    snap.touches_file.insert(format!("{from}->{to}"), val);
+                }
+                "MentionsSymbol" => {
+                    if !snap.atoms.contains_key(from) || !snap.symbols.contains_key(to) {
+                        return json_err(
+                            StatusCode::BAD_REQUEST,
+                            "bad_request",
+                            "Dangling MentionsSymbol.",
+                            None,
+                        );
+                    }
+                    snap.mentions_symbol.insert(format!("{from}->{to}"), val);
+                }
+                "RelatesTo" => {
+                    if !snap.atoms.contains_key(from) || !snap.atoms.contains_key(to) {
+                        return json_err(
+                            StatusCode::BAD_REQUEST,
+                            "bad_request",
+                            "Dangling RelatesTo.",
+                            None,
+                        );
+                    }
+                    let rel = val["relation"].as_str().unwrap_or("supports");
+                    snap.relates_to.insert(format!("{from}:{rel}:{to}"), val);
+                }
+                "DerivedFrom" => {
+                    if !snap.atoms.contains_key(from) || !snap.turn_snapshots.contains_key(to) {
+                        return json_err(
+                            StatusCode::BAD_REQUEST,
+                            "bad_request",
+                            "Dangling DerivedFrom.",
+                            None,
+                        );
+                    }
+                    snap.derived_from.insert(format!("{from}->{to}"), val);
+                }
+                "SessionFollows" => {
+                    if !snap.sessions.contains_key(from) || !snap.sessions.contains_key(to) {
+                        return json_err(
+                            StatusCode::BAD_REQUEST,
+                            "bad_request",
+                            "Dangling SessionFollows.",
+                            None,
+                        );
+                    }
+                    snap.session_follows.insert(format!("{from}->{to}"), val);
+                }
+                _ => {
+                    return json_err(
+                        StatusCode::BAD_REQUEST,
+                        "bad_request",
+                        "Unknown edge type.",
+                        None,
+                    );
+                }
+            }
+            *edge_counts.entry(e.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    let cid = st.alloc_commit_id();
+    let ts = 1_700_000_000_000_000 + (st.next_seq as i64) * 1000;
+    let commit = MockCommit {
+        id: cid.clone(),
+        branch: branch_name.to_string(),
+        parent: Some(branch.head_commit),
+        merged_parent: None,
+        actor_id: Some(actor.clone()),
+        created_at: ts,
+        snapshot: snap,
+        changes,
+    };
+    let commit_json = json!({
+        "graph_commit_id": commit.id,
+        "graph_branch": commit.branch,
+        "graph_manifest_version": 1,
+        "parent_commit_id": commit.parent,
+        "merged_parent_commit_id": Value::Null,
+        "actor_id": commit.actor_id,
+        "created_at": commit.created_at,
+        "published": true,
+        "kind": "published"
+    });
+    st.commits.insert(cid.clone(), commit);
+    st.commit_order.push(cid.clone());
+    if let Some(b) = st.branches.get_mut(branch_name) {
+        b.head_commit = cid;
+        b.updated_at = ts;
+    }
+
+    let nodes: Vec<Value> = node_counts
+        .into_iter()
+        .map(|(name, entities_loaded)| json!({ "name": name, "entities_loaded": entities_loaded }))
+        .collect();
+    let edges: Vec<Value> = edge_counts
+        .into_iter()
+        .map(|(name, entities_loaded)| json!({ "name": name, "entities_loaded": entities_loaded }))
+        .collect();
+    let mut resp = json!({
+        "branch": branch_name,
+        "base_branch": from,
+        "branch_created": branch_created,
+        "mode": mode,
+        "nodes": nodes,
+        "edges": edges,
+        "total_entities": parsed_records.len(),
+        "embedding_generation": Value::Null,
+        "actor_id": actor,
+        "commit": commit_json,
+    });
+    if include_uri {
+        resp["uri"] = json!(format!("mock://{}/graphs/{}", st.graph_id, st.graph_id));
+    }
+    axum::Json(resp).into_response()
+}
+
+async fn mock_load_ndjson(
+    State(srv): State<MockServer>,
+    AxumPath(graph_id): AxumPath<String>,
+    AxumQuery(q): AxumQuery<BTreeMap<String, String>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let mut st = srv.state.lock().unwrap();
+    let actor = match check_auth_and_contract(&headers, &st) {
+        Ok(a) => a,
+        Err(r) => return *r,
+    };
+    if graph_id != st.graph_id {
+        return json_err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.", None);
+    }
+    let branch = q.get("branch").map(String::as_str).unwrap_or("main");
+    let from = q.get("from").map(String::as_str);
+    let mode = q.get("mode").map(String::as_str).unwrap_or("merge");
+    apply_mock_ndjson_load(&mut st, actor, branch, from, mode, &body, false)
+}
+
+async fn mock_load_json(
+    State(srv): State<MockServer>,
+    AxumPath(graph_id): AxumPath<String>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let mut st = srv.state.lock().unwrap();
+    let actor = match check_auth_and_contract(&headers, &st) {
+        Ok(a) => a,
+        Err(r) => return *r,
+    };
+    if graph_id != st.graph_id {
+        return json_err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.", None);
+    }
+    let branch = body["branch"].as_str().unwrap_or("main");
+    let from = body["from"].as_str();
+    let mode = body["mode"].as_str().unwrap_or("merge");
+    let data = body["data"].as_str().unwrap_or("");
+    apply_mock_ndjson_load(&mut st, actor, branch, from, mode, data, true)
+}
+
 async fn spawn_mock_omnigraph() -> (String, tokio::task::JoinHandle<()>) {
     let srv = MockServer {
         state: Arc::new(Mutex::new(MockGraphState::new(schema::HARNESS_GRAPH_ID))),
@@ -1484,6 +2106,9 @@ async fn spawn_mock_omnigraph() -> (String, tokio::task::JoinHandle<()>) {
             "/graphs/{graph_id}/changes/baseline",
             post(mock_changes_baseline),
         )
+        .route("/graphs/{graph_id}/export", post(mock_export))
+        .route("/graphs/{graph_id}/load", post(mock_load_json))
+        .route("/graphs/{graph_id}/load/ndjson", post(mock_load_ndjson))
         .with_state(srv);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2758,4 +3383,703 @@ async fn sidecar_payload_contracts_cover_deleted_edges_and_share_modes() {
     assert_eq!(ch_reset["cursor"], "cur-feat-1");
     assert_eq!(ch_reset["events"].as_array().unwrap().len(), 1);
     assert_eq!(ch_reset["events"][0]["atom_id"], "a2");
+}
+
+#[tokio::test]
+async fn client_export_branch_and_load_round_trip() {
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let client = OmnigraphClient::new(
+        &base_url,
+        Some("tok-harness".into()),
+        schema::HARNESS_GRAPH_ID,
+    )
+    .unwrap();
+
+    let seed_ndjson = [
+        r#"{"type":"Session","id":"s-seed","data":{"session_id":"s-seed","project_id":"proj-1","branch":"main","title":"Seed","status":"running","updated_at":"2026-11-16T10:00:00.000Z"}}"#,
+        r#"{"type":"FileRef","id":"src/auth.rs","data":{"path":"src/auth.rs","project_id":"proj-1","language":"rust","last_touched_at":"2026-11-16T10:00:00.000Z"}}"#,
+        r#"{"type":"SymbolRef","id":"sym::login","data":{"fqn":"sym::login","path":"src/auth.rs","name":"login","kind":"function","project_id":"proj-1"}}"#,
+        r#"{"type":"ContextAtom","id":"atom-seed-1","data":{"atom_id":"atom-seed-1","project_id":"proj-1","branch":"main","origin_session_id":"s-seed","kind":"decision","title":"Use JWT RS256","summary":"Verify asymmetrically","importance":0.9,"stale":false,"created_at":"2026-11-16T10:00:00.000Z","updated_at":"2026-11-16T10:00:00.000Z"}}"#,
+        r#"{"edge":"PublishedBy","id":"pub-1","from":"atom-seed-1","to":"s-seed","data":{"published_at":"2026-11-16T10:00:00.000Z","role":"author"}}"#,
+        r#"{"edge":"TouchesFile","id":"tf-1","from":"atom-seed-1","to":"src/auth.rs","data":{"access":"modified"}}"#,
+        r#"{"edge":"MentionsSymbol","id":"ms-1","from":"atom-seed-1","to":"sym::login","data":{"role":"defines"}}"#,
+    ]
+    .join("\n");
+    client
+        .load_ndjson("main", None, "merge", &seed_ndjson, Some("harness"))
+        .await
+        .unwrap();
+
+    let full_ndjson = client
+        .export_branch(Some("main"), &[], Some("harness"))
+        .await
+        .unwrap();
+    assert!(full_ndjson.contains("\"ContextAtom\""));
+    assert!(full_ndjson.contains("\"PublishedBy\""));
+    assert!(full_ndjson.contains("\"TouchesFile\""));
+    assert!(full_ndjson.contains("\"MentionsSymbol\""));
+
+    let atoms_only = client
+        .export_branch(Some("main"), &["ContextAtom"], Some("harness"))
+        .await
+        .unwrap();
+    assert!(atoms_only.contains("\"ContextAtom\""));
+    assert!(!atoms_only.contains("\"FileRef\""));
+    assert!(!atoms_only.contains("\"PublishedBy\""));
+
+    let loaded_ndjson = client
+        .load_ndjson(
+            "imported/ndjson",
+            Some("main"),
+            "merge",
+            &full_ndjson,
+            Some("harness"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded_ndjson["branch"], "imported/ndjson");
+    assert_eq!(loaded_ndjson["branch_created"], true);
+    assert!(loaded_ndjson["commit"]["graph_commit_id"].is_string());
+
+    let loaded_json = client
+        .load_json(
+            "imported/json",
+            Some("main"),
+            "merge",
+            &full_ndjson,
+            Some("harness"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded_json["branch"], "imported/json");
+    assert_eq!(loaded_json["branch_created"], true);
+    assert!(loaded_json["uri"].is_string());
+
+    // `append` mode rejects duplicate atom IDs already present on `main`.
+    let append_err = client
+        .load_ndjson("main", None, "append", &atoms_only, Some("harness"))
+        .await
+        .unwrap_err();
+    assert_eq!(append_err.status, 409);
+}
+
+#[tokio::test]
+async fn sidecar_export_import_round_trip_and_scopes() {
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let state_dir = tempfile::tempdir().unwrap();
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.connect_external(&base_url, Some("tok-harness"), None)
+        .await
+        .unwrap();
+
+    let s1 = "session-export-alpha";
+    let b1 = crate::omnigraph::session_branch_name(s1);
+    let sess1 = json!({
+        "id": s1,
+        "project_id": "proj-1",
+        "title": "Export Alpha",
+        "provider": "claude",
+        "workflow": "native",
+        "omnigraph": { "enabled": true, "mode": "session_branch" }
+    });
+    mgr.prepare_session_context(&sess1, state_dir.path())
+        .await
+        .unwrap();
+    mgr.publish_atom_json(&json!({
+        "project_id": "proj-1",
+        "branch": &b1,
+        "session_id": s1,
+        "atom_id": "atom-alpha-1",
+        "kind": "decision",
+        "title": "Alpha task auth choice",
+        "summary": "Use middleware guard",
+        "files": ["src/middleware.rs"]
+    }))
+    .await
+    .unwrap();
+
+    // Publish an inherited atom on `main` and merge `main` into `b1` so `b1` holds it without `s1` consuming it.
+    mgr.publish_atom_json(&json!({
+        "project_id": "proj-1",
+        "branch": "main",
+        "session_id": "s-main-seed",
+        "atom_id": "atom-inherited",
+        "kind": "contract",
+        "title": "Shared baseline invariant",
+        "summary": "All tokens expire after 1h",
+        "files": ["src/config.rs"]
+    }))
+    .await
+    .unwrap();
+    mgr.branch_action_json(&json!({
+        "action": "merge",
+        "source": "main",
+        "target": &b1,
+        "dry_run": false
+    }))
+    .await
+    .unwrap();
+
+    // 1. `scope: "task"` with `include_inherited: false` excludes `main` baseline `atom-inherited`.
+    let task_only = mgr
+        .export_context_json(&json!({
+            "project_id": "proj-1",
+            "session_id": s1,
+            "scope": "task",
+            "include_inherited": false,
+            "format": "bundle"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(task_only["ok"], true);
+    assert_eq!(task_only["format"], "harness.omnigraph.bundle.v1");
+    assert_eq!(task_only["source_branch"], b1);
+    assert_eq!(task_only["source_session_id"], s1);
+    let task_atom_ids: Vec<&str> = task_only["bundle"]["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["id"].as_str())
+        .collect();
+    assert_eq!(task_atom_ids, vec!["atom-alpha-1"]);
+    assert!(
+        task_only["ndjson"]
+            .as_str()
+            .unwrap()
+            .contains("atom-alpha-1")
+    );
+
+    // 2. `scope: "task"` with `include_inherited: true` includes consumed `atom-inherited`.
+    let with_inherited = mgr
+        .export_context_json(&json!({
+            "project_id": "proj-1",
+            "session_id": s1,
+            "scope": "task",
+            "include_inherited": true,
+            "format": "bundle"
+        }))
+        .await
+        .unwrap();
+    let inherited_ids: Vec<&str> = with_inherited["bundle"]["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["id"].as_str())
+        .collect();
+    assert!(inherited_ids.contains(&"atom-alpha-1"));
+    assert!(inherited_ids.contains(&"atom-inherited"));
+
+    // 3. `export_context_payload` with `download=1` returns downloadable bytes + filename.
+    let download_bundle = mgr
+        .export_context_payload(
+            &json!({
+                "project_id": "proj-1",
+                "session_id": s1,
+                "scope": "task",
+                "format": "bundle",
+                "download": "1"
+            }),
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    match download_bundle {
+        crate::services::Payload::Bytes {
+            content_type,
+            filename,
+            bytes,
+            ..
+        } => {
+            assert_eq!(content_type, "application/json; charset=utf-8");
+            let fname = filename.unwrap();
+            assert!(fname.starts_with("omnigraph-") && fname.ends_with(".json"));
+            let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(parsed["format"], "harness.omnigraph.bundle.v1");
+        }
+        crate::services::Payload::Json(_) => panic!("expected Payload::Bytes for download=1"),
+    }
+
+    let download_ndjson = mgr
+        .export_context_payload(
+            &json!({
+                "project_id": "proj-1",
+                "branch": b1,
+                "scope": "branch",
+                "format": "ndjson",
+                "download": "1"
+            }),
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    match download_ndjson {
+        crate::services::Payload::Bytes {
+            content_type,
+            filename,
+            bytes,
+            ..
+        } => {
+            assert_eq!(content_type, "application/x-ndjson; charset=utf-8");
+            let fname = filename.unwrap();
+            assert!(fname.starts_with("omnigraph-") && fname.ends_with(".ndjson"));
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("\"ContextAtom\""));
+        }
+        crate::services::Payload::Json(_) => panic!("expected Payload::Bytes for ndjson download"),
+    }
+
+    // 4. Import the exported bundle onto a fresh branch and inject into target session `s-recv`.
+    let s_recv = "session-import-recv";
+    let imported = mgr
+        .import_context_json(&json!({
+            "project_id": "proj-1",
+            "target_branch": "imported/task-bundle",
+            "from_branch": "main",
+            "create_branch": true,
+            "mode": "merge",
+            "bundle": with_inherited["bundle"],
+            "inject_into_sessions": true,
+            "target_session_ids": [s_recv]
+        }))
+        .await
+        .unwrap();
+    assert_eq!(imported["ok"], true);
+    assert_eq!(imported["target_branch"], "imported/task-bundle");
+    assert!(imported["commit_id"].is_string());
+    assert!(imported["imported_atoms"].as_u64().unwrap() >= 2);
+    assert!(imported["imported_files"].as_u64().unwrap() >= 1);
+    assert_eq!(imported["shared_session_ids"], json!([s_recv]));
+
+    // 5. Re-import via raw NDJSON with `mode: "replace"` wipes old atoms on the target branch.
+    let replace_ndjson = concat!(
+        r#"{"type":"ContextAtom","id":"atom-replaced-only","data":{"project_id":"proj-1","branch":"imported/task-bundle","origin_session_id":"s-ext","kind":"insight","title":"Clean replacement atom","summary":"Only this remains","importance":0.8,"stale":false,"created_at":"2026-11-16T11:00:00.000Z","updated_at":"2026-11-16T11:00:00.000Z"}}"#,
+        "\n",
+        r#"{"type":"FileRef","id":"src/replaced.rs","data":{"path":"src/replaced.rs","project_id":"proj-1","language":"rust","last_touched_at":"2026-11-16T11:00:00.000Z"}}"#,
+        "\n",
+        r#"{"edge":"TouchesFile","id":"edge-tf-rep","from":"atom-replaced-only","to":"src/replaced.rs","data":{"access":"modified"}}"#
+    );
+    let replaced = mgr
+        .import_context_json(&json!({
+            "project_id": "proj-1",
+            "target_branch": "imported/task-bundle",
+            "mode": "replace",
+            "raw_text": replace_ndjson
+        }))
+        .await
+        .unwrap();
+    assert_eq!(replaced["ok"], true);
+    assert_eq!(replaced["imported_atoms"], 1);
+    assert_eq!(replaced["imported_edges"], 1);
+
+    let after_replace = mgr
+        .export_context_json(&json!({
+            "project_id": "proj-1",
+            "branch": "imported/task-bundle",
+            "scope": "branch",
+            "format": "bundle"
+        }))
+        .await
+        .unwrap();
+    let after_ids: Vec<&str> = after_replace["bundle"]["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["id"].as_str())
+        .collect();
+    assert_eq!(after_ids, vec!["atom-replaced-only"]);
+
+    // 6. Malformed/empty import fails cleanly.
+    let empty_err = mgr
+        .import_context_json(&json!({
+            "project_id": "proj-1",
+            "target_branch": "imported/task-bundle",
+            "raw_text": "   "
+        }))
+        .await;
+    assert!(empty_err.is_err());
+
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn sidecar_link_sessions_shared_branch_and_broadcast_via_mock() {
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let state_dir = tempfile::tempdir().unwrap();
+    let store = crate::store::SessionStore::open(state_dir.path()).unwrap();
+    let proj_dir = state_dir.path().join("project");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    let project = store.register(&proj_dir).unwrap();
+    let project_id = project["id"].as_str().unwrap().to_string();
+
+    let sess_a = store
+        .create(
+            &json!({
+                "project_id": project_id,
+                "provider": "claude",
+                "workflow": "native",
+                "mode": "plan",
+                "agents_enabled": false,
+                "title": "Backend auth task",
+                "omnigraph": { "enabled": true, "mode": "session_branch" }
+            }),
+            "design auth",
+            &[],
+        )
+        .unwrap();
+    let sess_b = store
+        .create(
+            &json!({
+                "project_id": project_id,
+                "provider": "codex",
+                "workflow": "native",
+                "mode": "plan",
+                "agents_enabled": false,
+                "title": "Frontend login task",
+                "omnigraph": { "enabled": true, "mode": "session_branch" }
+            }),
+            "build login form",
+            &[],
+        )
+        .unwrap();
+    let sess_c = store
+        .create(
+            &json!({
+                "project_id": project_id,
+                "provider": "claude",
+                "workflow": "native",
+                "mode": "plan",
+                "agents_enabled": false,
+                "title": "E2E suite",
+                "omnigraph": { "enabled": true, "mode": "session_branch" }
+            }),
+            "write tests",
+            &[],
+        )
+        .unwrap();
+
+    let sid_a = sess_a["id"].as_str().unwrap().to_string();
+    let sid_b = sess_b["id"].as_str().unwrap().to_string();
+    let sid_c = sess_c["id"].as_str().unwrap().to_string();
+
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    mgr.connect_external(&base_url, Some("tok-harness"), None)
+        .await
+        .unwrap();
+
+    // Publish one distinct atom per session branch (`sid_a` and `sid_b`).
+    let br_a = crate::omnigraph::session_branch_name(&sid_a);
+    let br_b = crate::omnigraph::session_branch_name(&sid_b);
+    mgr.prepare_session_context(&sess_a, &proj_dir)
+        .await
+        .unwrap();
+    mgr.prepare_session_context(&sess_b, &proj_dir)
+        .await
+        .unwrap();
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": br_a,
+        "session_id": sid_a,
+        "atom_id": "atom-sess-a",
+        "kind": "decision",
+        "title": "Session A endpoint schema",
+        "summary": "POST /api/login returns token"
+    }))
+    .await
+    .unwrap();
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": br_b,
+        "session_id": sid_b,
+        "atom_id": "atom-sess-b",
+        "kind": "insight",
+        "title": "Session B form validation",
+        "summary": "Require non-empty password"
+    }))
+    .await
+    .unwrap();
+
+    // Validation check: fewer than 2 sessions rejected.
+    let too_few = mgr
+        .link_sessions_json(
+            &json!({
+                "project_id": project_id,
+                "session_ids": [sid_a],
+                "mode": "shared_branch"
+            }),
+            &store,
+        )
+        .await;
+    assert!(too_few.is_err());
+
+    // Mutual `shared_branch` sharing between sid_a and sid_b.
+    let link_req = json!({
+        "project_id": project_id,
+        "session_ids": [sid_a, sid_b],
+        "mode": "shared_branch",
+        "space_name": "Team Auth",
+        "inject_live": true
+    });
+    let shared = mgr.link_sessions_json(&link_req, &store).await.unwrap();
+    assert_eq!(shared["ok"], true);
+    assert_eq!(shared["mode"], "shared_branch");
+    assert_eq!(shared["shared_branch"], "shared/team-auth");
+    assert_eq!(shared["shared_space"], "Team Auth");
+    assert!(shared["synced_atoms"].as_u64().unwrap() >= 2);
+    assert_eq!(shared["conflicts"], json!([]));
+    assert_eq!(
+        shared["linked_session_ids"],
+        json!([sid_a.clone(), sid_b.clone()])
+    );
+
+    let synced_rows =
+        crate::sessions::sync_omnigraph_link_to_sessions(&store, None, &link_req, &shared).await;
+    assert_eq!(synced_rows.len(), 2);
+
+    // Graph view and status reflect `SessionFollows` and `shared_space`.
+    let gv = mgr
+        .graph_view_json(
+            &project_id,
+            Some("shared/team-auth"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let edges = gv["edges"].as_array().unwrap();
+    let follow_count = edges
+        .iter()
+        .filter(|e| e["kind"] == "session_follows")
+        .count();
+    assert!(
+        follow_count >= 2,
+        "expected >=2 session_follows edges in graph view: {edges:?}"
+    );
+    let sessions = gv["sessions"].as_array().unwrap();
+    assert!(
+        sessions
+            .iter()
+            .any(|s| s["shared_space"] == json!("Team Auth")),
+        "expected shared_space on session in graph view: {sessions:?}"
+    );
+    let status = mgr.status_json(&project_id).await.unwrap();
+    assert!(status["stats"]["branches"].as_u64().unwrap_or(0) >= 3);
+
+    // Broadcast from sid_a to sid_c links SessionFollows and syncs sid_a's branch.
+    let broadcast = mgr
+        .link_sessions_json(
+            &json!({
+                "project_id": project_id,
+                "mode": "broadcast",
+                "source_session_id": sid_a,
+                "session_ids": [sid_c],
+                "inject_live": true
+            }),
+            &store,
+        )
+        .await
+        .unwrap();
+    assert_eq!(broadcast["ok"], true);
+    assert_eq!(broadcast["mode"], "broadcast");
+    assert_eq!(broadcast["shared_branch"], json!(br_a));
+    assert_eq!(
+        broadcast["linked_session_ids"],
+        json!([sid_a.clone(), sid_c.clone()])
+    );
+
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn real_omnigraph_binary_export_import_and_share_round_trip() {
+    let bin_cli = std::path::Path::new("/tmp/omnigraph-v0.15.0/omnigraph");
+    let bin_srv = std::path::Path::new("/tmp/omnigraph-v0.15.0/omnigraph-server");
+    if !bin_cli.is_file() || !bin_srv.is_file() {
+        eprintln!(
+            "skipping real_omnigraph_binary_export_import_and_share_round_trip: /tmp/omnigraph-v0.15.0 not present"
+        );
+        return;
+    }
+
+    let state_dir = tempfile::tempdir().unwrap();
+    let store = crate::store::SessionStore::open(state_dir.path()).unwrap();
+    let proj_dir = state_dir.path().join("project");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    let project = store.register(&proj_dir).unwrap();
+    let project_id = project["id"].as_str().unwrap().to_string();
+
+    let sess_a = store
+        .create(
+            &json!({
+                "project_id": project_id,
+                "provider": "claude",
+                "workflow": "native",
+                "mode": "plan",
+                "agents_enabled": false,
+                "title": "Real OG Session A",
+                "omnigraph": { "enabled": true, "mode": "session_branch" }
+            }),
+            "task A",
+            &[],
+        )
+        .unwrap();
+    let sess_b = store
+        .create(
+            &json!({
+                "project_id": project_id,
+                "provider": "codex",
+                "workflow": "native",
+                "mode": "plan",
+                "agents_enabled": false,
+                "title": "Real OG Session B",
+                "omnigraph": { "enabled": true, "mode": "session_branch" }
+            }),
+            "task B",
+            &[],
+        )
+        .unwrap();
+    let sid_a = sess_a["id"].as_str().unwrap().to_string();
+    let sid_b = sess_b["id"].as_str().unwrap().to_string();
+
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    std::fs::create_dir_all(mgr.tools_dir()).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(bin_cli, mgr.tools_dir().join("omnigraph")).unwrap();
+        std::os::unix::fs::symlink(bin_srv, mgr.tools_dir().join("omnigraph-server")).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(bin_cli, mgr.tools_dir().join("omnigraph")).unwrap();
+        std::fs::copy(bin_srv, mgr.tools_dir().join("omnigraph-server")).unwrap();
+    }
+
+    let started = mgr.start_local(None).await.unwrap();
+    assert_eq!(started["connected"], true);
+
+    let br_a = crate::omnigraph::session_branch_name(&sid_a);
+    mgr.prepare_session_context(&sess_a, &proj_dir)
+        .await
+        .unwrap();
+    mgr.prepare_session_context(&sess_b, &proj_dir)
+        .await
+        .unwrap();
+    mgr.publish_atom_json(&json!({
+        "project_id": project_id,
+        "branch": br_a,
+        "session_id": sid_a,
+        "atom_id": "atom-real-1",
+        "kind": "decision",
+        "title": "Real Omnigraph decision",
+        "summary": "Persisted into real RocksDB graph",
+        "files": ["src/real.rs"]
+    }))
+    .await
+    .unwrap();
+
+    // 1. Real export from session branch
+    let exported = mgr
+        .export_context_json(&json!({
+            "project_id": project_id,
+            "session_id": sid_a,
+            "scope": "task",
+            "include_inherited": false,
+            "format": "bundle"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(exported["ok"], true);
+    assert!(exported["counts"]["atoms"].as_u64().unwrap() >= 1);
+    assert!(exported["counts"]["edges"].as_u64().unwrap() >= 1);
+    assert!(exported["ndjson"].as_str().unwrap().contains("atom-real-1"));
+
+    // 2. Real import (`create_branch: true`, `mode: "merge"`, then `"replace"`)
+    let imported = mgr
+        .import_context_json(&json!({
+            "project_id": project_id,
+            "target_branch": "imported/real-bundle",
+            "from_branch": "main",
+            "create_branch": true,
+            "mode": "merge",
+            "bundle": exported["bundle"],
+            "inject_into_sessions": true,
+            "target_session_ids": [sid_b]
+        }))
+        .await
+        .unwrap();
+    assert_eq!(imported["ok"], true);
+    assert!(imported["imported_atoms"].as_u64().unwrap() >= 1);
+    assert!(imported["imported_edges"].as_u64().unwrap() >= 1);
+    assert_eq!(imported["shared_session_ids"], json!([sid_b]));
+
+    let replace_raw = r#"{"type":"ContextAtom","id":"atom-real-replaced","data":{"project_id":"__PROJ__","branch":"imported/real-bundle","origin_session_id":"s-ext","kind":"insight","title":"Replaced atom on real graph","summary":"Previous edges cleared before load","importance":0.7,"stale":false,"created_at":"2026-11-16T12:00:00.000Z","updated_at":"2026-11-16T12:00:00.000Z"}}"#
+        .replace("__PROJ__", &project_id);
+    let replaced = mgr
+        .import_context_json(&json!({
+            "project_id": project_id,
+            "target_branch": "imported/real-bundle",
+            "mode": "replace",
+            "raw_text": replace_raw
+        }))
+        .await
+        .unwrap();
+    assert_eq!(replaced["ok"], true);
+    assert_eq!(replaced["imported_atoms"], 1);
+
+    let re_export = mgr
+        .export_context_json(&json!({
+            "project_id": project_id,
+            "branch": "imported/real-bundle",
+            "scope": "branch",
+            "format": "bundle"
+        }))
+        .await
+        .unwrap();
+    let real_ids: Vec<&str> = re_export["bundle"]["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["id"].as_str())
+        .collect();
+    assert_eq!(real_ids, vec!["atom-real-replaced"]);
+
+    // 3. Real multi-session sharing (`shared_branch`) + graph view verification
+    let linked = mgr
+        .link_sessions_json(
+            &json!({
+                "project_id": project_id,
+                "session_ids": [sid_a, sid_b],
+                "mode": "shared_branch",
+                "space_name": "Real Workspace",
+                "inject_live": true
+            }),
+            &store,
+        )
+        .await
+        .unwrap();
+    assert_eq!(linked["ok"], true);
+    assert_eq!(linked["shared_branch"], "shared/real-workspace");
+    assert!(linked["synced_atoms"].as_u64().unwrap() >= 1);
+
+    let gv = mgr
+        .graph_view_json(
+            &project_id,
+            Some("shared/real-workspace"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        gv["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "session_follows")
+    );
+
+    mgr.close().await.unwrap();
 }

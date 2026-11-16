@@ -711,6 +711,13 @@ impl Sessions {
         value["prompt"] = prompt.into();
         let sid = store::id();
         value["omnigraph"] = validate_omnigraph_options(&data["omnigraph"], &sid)?;
+        if value["omnigraph"].is_object() {
+            enrich_linked_pull_branches(
+                &self.store,
+                project["id"].as_str().unwrap_or(""),
+                &mut value["omnigraph"],
+            )?;
+        }
         let (root, branch, common) = projects::workspace(&self.store, &project, &value, &sid)?;
         value["_session_id"] = sid.into();
         value["_workspace_path"] = root.to_string_lossy().into_owned().into();
@@ -741,6 +748,7 @@ impl Sessions {
             options["prompt"].as_str().unwrap_or(""),
             &uploads,
         )?;
+        sync_reciprocal_session_links(&self.store, &session);
         let job = Job {
             sid: sid.into(),
             prompt: options["prompt"].as_str().unwrap_or("").into(),
@@ -2110,7 +2118,19 @@ impl Domain for Sessions {
                     let _admission = lock(&self.admission)?;
                     return Ok(Payload::Json(self.store.inbox_cancel(sid, id)?));
                 }
-                "sessions.create" => self.create_ready(self.create_options(body)?)?,
+                "sessions.create" => {
+                    let created = self.create_ready(self.create_options(body)?)?;
+                    if created["omnigraph"]["linked_session_ids"]
+                        .as_array()
+                        .is_some_and(|a| !a.is_empty())
+                        && let Some(omnigraph) = self.omnigraph()
+                    {
+                        let _ = omnigraph
+                            .sync_new_session_links(&self.store, &created)
+                            .await;
+                    }
+                    created
+                }
                 "sessions.send" => {
                     let prompt = body["prompt"]
                         .as_str()
@@ -2372,6 +2392,8 @@ fn validate_omnigraph_fields(raw: &Value, sid: &str, base: Option<&Value>) -> Re
         "query",
         "auto_publish",
         "auto_merge",
+        "shared_space",
+        "linked_session_ids",
     ];
     if obj.keys().any(|k| !allowed.contains(&k.as_str())) {
         return Err(HarnessError::invalid("Unknown Omnigraph session setting."));
@@ -2386,6 +2408,8 @@ fn validate_omnigraph_fields(raw: &Value, sid: &str, base: Option<&Value>) -> Re
             "query": Value::Null,
             "auto_publish": true,
             "auto_merge": false,
+            "shared_space": Value::Null,
+            "linked_session_ids": [],
             "capsule_text": "",
             "injected_atoms": [],
             "published_atoms": [],
@@ -2393,6 +2417,12 @@ fn validate_omnigraph_fields(raw: &Value, sid: &str, base: Option<&Value>) -> Re
             "last_error": Value::Null,
         }),
     };
+    if out.get("shared_space").is_none() {
+        out["shared_space"] = Value::Null;
+    }
+    if !out["linked_session_ids"].is_array() {
+        out["linked_session_ids"] = json!([]);
+    }
 
     if let Some(v) = obj.get("enabled") {
         let b = v
@@ -2461,6 +2491,55 @@ fn validate_omnigraph_fields(raw: &Value, sid: &str, base: Option<&Value>) -> Re
             })?;
             out[flag] = json!(b);
         }
+    }
+    if let Some(v) = obj.get("shared_space") {
+        if v.is_null() {
+            out["shared_space"] = Value::Null;
+        } else {
+            let s = v
+                .as_str()
+                .ok_or_else(|| HarnessError::invalid("Omnigraph `shared_space` must be text."))?;
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                out["shared_space"] = Value::Null;
+            } else if trimmed.chars().count() > 128
+                || trimmed.chars().any(char::is_control)
+                || trimmed.contains("..")
+                || trimmed.starts_with('/')
+                || trimmed.ends_with('/')
+            {
+                return Err(HarnessError::invalid("Invalid Omnigraph `shared_space`."));
+            } else {
+                out["shared_space"] = json!(trimmed);
+            }
+        }
+    }
+    if let Some(v) = obj.get("linked_session_ids") {
+        let arr = v.as_array().ok_or_else(|| {
+            HarnessError::invalid("Omnigraph `linked_session_ids` must be an array.")
+        })?;
+        if arr.len() > 32 {
+            return Err(HarnessError::invalid(
+                "Omnigraph `linked_session_ids` allows at most 32 sessions.",
+            ));
+        }
+        let mut parsed = Vec::with_capacity(arr.len());
+        let mut seen = std::collections::BTreeSet::new();
+        for item in arr {
+            let s = item.as_str().ok_or_else(|| {
+                HarnessError::invalid("Omnigraph `linked_session_ids` items must be text.")
+            })?;
+            let trimmed = s.trim();
+            if trimmed.is_empty() || trimmed.len() > 128 || trimmed.chars().any(char::is_control) {
+                return Err(HarnessError::invalid(
+                    "Invalid session id in Omnigraph `linked_session_ids`.",
+                ));
+            }
+            if trimmed != sid && seen.insert(trimmed.to_string()) {
+                parsed.push(Value::String(trimmed.to_string()));
+            }
+        }
+        out["linked_session_ids"] = Value::Array(parsed);
     }
     Ok(out)
 }
@@ -2532,6 +2611,8 @@ pub(crate) fn merge_omnigraph_context(
             "query": Value::Null,
             "auto_publish": true,
             "auto_merge": false,
+            "shared_space": Value::Null,
+            "linked_session_ids": [],
             "capsule_text": "",
             "injected_atoms": [],
             "published_atoms": [],
@@ -2541,6 +2622,12 @@ pub(crate) fn merge_omnigraph_context(
     };
     if omni["enabled"].is_null() {
         omni["enabled"] = json!(true);
+    }
+    if omni.get("shared_space").is_none() {
+        omni["shared_space"] = Value::Null;
+    }
+    if !omni["linked_session_ids"].is_array() {
+        omni["linked_session_ids"] = json!([]);
     }
 
     let mut merged = Vec::new();
@@ -2786,6 +2873,449 @@ pub(crate) fn sync_omnigraph_merge_to_session(
         }),
     );
     Some(patched)
+}
+
+fn append_unique_str_list(array_val: &mut Value, additions: &[&str], limit: usize) {
+    let mut items: Vec<String> = array_val
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    for add in additions {
+        let trimmed = add.trim();
+        if !trimmed.is_empty() && !items.iter().any(|existing| existing == trimmed) {
+            if items.len() >= limit {
+                break;
+            }
+            items.push(trimmed.to_string());
+        }
+    }
+    *array_val = Value::Array(items.into_iter().map(Value::String).collect());
+}
+
+fn default_omnigraph_object(branch: &str) -> Value {
+    json!({
+        "enabled": true,
+        "branch": branch,
+        "pull_branches": ["main"],
+        "query": Value::Null,
+        "auto_publish": true,
+        "auto_merge": false,
+        "shared_space": Value::Null,
+        "linked_session_ids": [],
+        "capsule_text": "",
+        "injected_atoms": [],
+        "published_atoms": [],
+        "merge_status": Value::Null,
+        "last_error": Value::Null,
+    })
+}
+
+fn enrich_linked_pull_branches(
+    store: &SessionStore,
+    project_id: &str,
+    omni: &mut Value,
+) -> Result<()> {
+    let linked: Vec<String> = omni["linked_session_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if linked.is_empty() {
+        return Ok(());
+    }
+    let mut extra_branches = Vec::new();
+    for peer_id in &linked {
+        let peer = store.get(peer_id)?;
+        if peer["project_id"].as_str().unwrap_or("") != project_id {
+            return Err(HarnessError::invalid(format!(
+                "Linked session `{peer_id}` belongs to a different project."
+            )));
+        }
+        let peer_branch = peer["omnigraph"]["branch"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "auto")
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::omnigraph::session_branch_name(peer_id));
+        extra_branches.push(peer_branch);
+        if let Some(space) = peer["omnigraph"]["shared_space"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| s.starts_with("shared/"))
+        {
+            extra_branches.push(space.to_string());
+        }
+    }
+    if let Some(space) = omni["shared_space"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| s.starts_with("shared/"))
+    {
+        extra_branches.push(space.to_string());
+    }
+    let refs: Vec<&str> = extra_branches.iter().map(String::as_str).collect();
+    append_unique_str_list(&mut omni["pull_branches"], &refs, 32);
+    Ok(())
+}
+
+fn sync_reciprocal_session_links(store: &SessionStore, session: &Value) {
+    let Some(sid) = session["id"].as_str().filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let linked: Vec<String> = session["omnigraph"]["linked_session_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != sid)
+        .map(str::to_string)
+        .collect();
+    if linked.is_empty() {
+        return;
+    }
+    let new_branch = session["omnigraph"]["branch"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "auto")
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::omnigraph::session_branch_name(sid));
+    let shared_space = session["omnigraph"]["shared_space"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    for peer_id in &linked {
+        let Ok(peer) = store.get(peer_id) else {
+            continue;
+        };
+        let peer_branch = peer["omnigraph"]["branch"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "auto")
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::omnigraph::session_branch_name(peer_id));
+        let mut peer_omni = if peer["omnigraph"].is_object() {
+            peer["omnigraph"].clone()
+        } else {
+            default_omnigraph_object(&peer_branch)
+        };
+        peer_omni["enabled"] = json!(true);
+        append_unique_str_list(&mut peer_omni["linked_session_ids"], &[sid], 32);
+        let mut pulls = vec![new_branch.as_str()];
+        if let Some(sp) = shared_space.filter(|s| s.starts_with("shared/")) {
+            pulls.push(sp);
+        }
+        append_unique_str_list(&mut peer_omni["pull_branches"], &pulls, 32);
+        if peer_omni["shared_space"].is_null()
+            && let Some(sp) = shared_space
+        {
+            peer_omni["shared_space"] = json!(sp);
+        }
+        if store
+            .patch(peer_id, &json!({ "omnigraph": peer_omni }))
+            .is_ok()
+        {
+            let _ = store.event(
+                peer_id,
+                &json!({
+                    "kind": "omnigraph",
+                    "phase": "link",
+                    "ok": true,
+                    "mode": "linked_create",
+                    "linked_session_ids": [sid],
+                    "branch": new_branch,
+                    "shared_space": shared_space,
+                    "text": format!("Linked Omnigraph context with new session `{sid}` (`{new_branch}`)."),
+                }),
+            );
+        }
+    }
+}
+
+async fn notify_live_native_session_inbox(
+    sessions_domain: Option<&dyn Domain>,
+    session: &Value,
+    request_prefix: &str,
+    prompt: &str,
+) {
+    let Some(domain) = sessions_domain else {
+        return;
+    };
+    if session["status"] != "running" || session["workflow"] != "native" {
+        return;
+    }
+    let Some(sid) = session["id"].as_str().filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let req_id = format!("{request_prefix}-{}", &store::hexid()[..12]);
+    let _ = domain
+        .execute(
+            "sessions.inbox_accept",
+            json!({
+                "params": { "session_id": sid },
+                "query": {},
+                "body": {
+                    "request_id": req_id,
+                    "prompt": prompt,
+                },
+            }),
+        )
+        .await;
+}
+
+/// Update `session["omnigraph"]`, emit events, and notify active native sessions after `omnigraph.import`.
+pub(crate) async fn sync_omnigraph_import_to_sessions(
+    store: &SessionStore,
+    sessions_domain: Option<&dyn Domain>,
+    body: &Value,
+    import_result: &Value,
+) -> Vec<Value> {
+    if import_result["ok"] != true {
+        return Vec::new();
+    }
+    let shared_sids: Vec<String> = import_result["shared_session_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if shared_sids.is_empty() {
+        return Vec::new();
+    }
+    let target_branch = import_result["target_branch"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("main");
+    let atoms = import_result["atoms"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let atom_ids = import_result["atom_ids"].clone();
+    let inject_live = body.get("inject_live").and_then(Value::as_bool) != Some(false);
+
+    let mut updated = Vec::new();
+    for sid in &shared_sids {
+        let Ok(session) = store.get(sid) else {
+            continue;
+        };
+        let sess_branch = session["omnigraph"]["branch"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "auto")
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::omnigraph::session_branch_name(sid));
+        let mut updated_omni = merge_omnigraph_context(
+            &session["omnigraph"],
+            &atoms,
+            &sess_branch,
+            None,
+            Some(target_branch),
+        );
+        if target_branch != sess_branch {
+            append_unique_str_list(&mut updated_omni["pull_branches"], &[target_branch], 32);
+        }
+        let Ok(patched) = store.patch(sid, &json!({ "omnigraph": updated_omni })) else {
+            continue;
+        };
+        let status = session["status"].as_str().unwrap_or("");
+        let _ = store.event(
+            sid,
+            &json!({
+                "kind": "omnigraph",
+                "phase": "import",
+                "ok": true,
+                "target_branch": target_branch,
+                "atom_ids": atom_ids,
+                "imported_atoms": atoms.len(),
+                "session_status": status,
+                "text": format!(
+                    "Imported {} Omnigraph context atom(s) onto `{target_branch}` into session `{sid}`.",
+                    atoms.len()
+                ),
+            }),
+        );
+        if inject_live {
+            let notice = format!(
+                "Omnigraph context update: {} imported atom(s) added on branch `{target_branch}` and injected into this session.",
+                atoms.len()
+            );
+            notify_live_native_session_inbox(sessions_domain, &session, "omni-import", &notice)
+                .await;
+        }
+        updated.push(patched);
+    }
+    updated
+}
+
+/// Update `session["omnigraph"]` (`shared_space`, `linked_session_ids`, `pull_branches`, `injected_atoms`,
+/// `capsule_text`), emit events, and notify active native sessions after `omnigraph.link_sessions`.
+pub(crate) async fn sync_omnigraph_link_to_sessions(
+    store: &SessionStore,
+    sessions_domain: Option<&dyn Domain>,
+    body: &Value,
+    link_result: &Value,
+) -> Vec<Value> {
+    if link_result["ok"] != true {
+        return Vec::new();
+    }
+    let linked_sids: Vec<String> = link_result["linked_session_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if linked_sids.is_empty() {
+        return Vec::new();
+    }
+    let mode = link_result["mode"]
+        .as_str()
+        .or_else(|| body["mode"].as_str())
+        .unwrap_or("shared_branch");
+    let shared_branch = link_result["shared_branch"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("main");
+    let shared_space = link_result["shared_space"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(shared_branch);
+    let source_sid = link_result["source_session_id"]
+        .as_str()
+        .or_else(|| body["source_session_id"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let atoms = link_result["atoms"].as_array().cloned().unwrap_or_default();
+    let synced_count = link_result["synced_atoms"]
+        .as_u64()
+        .unwrap_or(atoms.len() as u64);
+    let inject_live = body.get("inject_live").and_then(Value::as_bool) != Some(false);
+
+    let mut session_branches = std::collections::BTreeMap::new();
+    for sid in &linked_sids {
+        if let Ok(sess) = store.get(sid) {
+            let br = sess["omnigraph"]["branch"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "auto")
+                .map(str::to_owned)
+                .unwrap_or_else(|| crate::omnigraph::session_branch_name(sid));
+            session_branches.insert(sid.clone(), br);
+        }
+    }
+
+    let mut updated = Vec::new();
+    for sid in &linked_sids {
+        let Ok(session) = store.get(sid) else {
+            continue;
+        };
+        let sess_branch = session_branches
+            .get(sid)
+            .cloned()
+            .unwrap_or_else(|| crate::omnigraph::session_branch_name(sid));
+        let peer_ids: Vec<String> = linked_sids
+            .iter()
+            .filter(|id| id.as_str() != sid.as_str())
+            .cloned()
+            .collect();
+        let peer_refs: Vec<&str> = peer_ids.iter().map(String::as_str).collect();
+
+        let is_broadcast_source = mode == "broadcast" && source_sid == Some(sid.as_str());
+        let mut updated_omni = if is_broadcast_source {
+            if session["omnigraph"].is_object() {
+                session["omnigraph"].clone()
+            } else {
+                default_omnigraph_object(&sess_branch)
+            }
+        } else {
+            merge_omnigraph_context(
+                &session["omnigraph"],
+                &atoms,
+                &sess_branch,
+                None,
+                Some(shared_branch),
+            )
+        };
+        updated_omni["enabled"] = json!(true);
+        updated_omni["shared_space"] = json!(shared_space);
+        updated_omni["last_error"] = Value::Null;
+        if !updated_omni["linked_session_ids"].is_array() {
+            updated_omni["linked_session_ids"] = json!([]);
+        }
+        append_unique_str_list(&mut updated_omni["linked_session_ids"], &peer_refs, 32);
+
+        if !is_broadcast_source {
+            let mut pull_adds: Vec<String> = Vec::new();
+            if shared_branch != sess_branch {
+                pull_adds.push(shared_branch.to_string());
+            }
+            if mode == "shared_branch" {
+                for pid in &peer_ids {
+                    if let Some(pbr) = session_branches.get(pid)
+                        && pbr != &sess_branch
+                    {
+                        pull_adds.push(pbr.clone());
+                    }
+                }
+            } else if let Some(src_id) = source_sid
+                && let Some(sbr) = session_branches.get(src_id)
+                && sbr != &sess_branch
+            {
+                pull_adds.push(sbr.clone());
+            }
+            let pull_refs: Vec<&str> = pull_adds.iter().map(String::as_str).collect();
+            append_unique_str_list(&mut updated_omni["pull_branches"], &pull_refs, 32);
+        }
+
+        let Ok(patched) = store.patch(sid, &json!({ "omnigraph": updated_omni })) else {
+            continue;
+        };
+        let status = session["status"].as_str().unwrap_or("");
+        let _ = store.event(
+            sid,
+            &json!({
+                "kind": "omnigraph",
+                "phase": "link",
+                "ok": true,
+                "mode": mode,
+                "shared_branch": shared_branch,
+                "shared_space": shared_space,
+                "linked_session_ids": peer_ids,
+                "synced_atoms": synced_count,
+                "session_status": status,
+                "text": format!(
+                    "Linked {} session(s) via `{mode}` on `{shared_branch}` ({synced_count} context atom(s)).",
+                    linked_sids.len()
+                ),
+            }),
+        );
+        if inject_live && !is_broadcast_source {
+            let notice = format!(
+                "Shared Omnigraph context update ({mode}): {synced_count} atom(s) synced on `{shared_branch}` across linked tasks."
+            );
+            notify_live_native_session_inbox(sessions_domain, &session, "omni-link", &notice).await;
+        }
+        updated.push(patched);
+    }
+    updated
 }
 
 struct CancelRelay(tokio::task::JoinHandle<()>);

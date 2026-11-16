@@ -47,12 +47,15 @@ struct MockSnapshot {
     sessions: BTreeMap<String, Value>,
     atoms: BTreeMap<String, Value>,
     files: BTreeMap<String, Value>,
+    symbols: BTreeMap<String, Value>,
     turn_snapshots: BTreeMap<String, Value>,
     published_by: BTreeMap<String, Value>,
     consumed_by: BTreeMap<String, Value>,
     touches_file: BTreeMap<String, Value>,
+    mentions_symbol: BTreeMap<String, Value>,
     relates_to: BTreeMap<String, Value>,
     derived_from: BTreeMap<String, Value>,
+    session_follows: BTreeMap<String, Value>,
 }
 
 #[derive(Clone)]
@@ -495,6 +498,18 @@ async fn mock_branches_merge(
     for (id, v) in &src_snap.files {
         merged.files.entry(id.clone()).or_insert_with(|| v.clone());
     }
+    for (id, v) in &src_snap.symbols {
+        merged
+            .symbols
+            .entry(id.clone())
+            .or_insert_with(|| v.clone());
+    }
+    for (id, v) in &src_snap.turn_snapshots {
+        merged
+            .turn_snapshots
+            .entry(id.clone())
+            .or_insert_with(|| v.clone());
+    }
     for (id, v) in &src_snap.published_by {
         merged.published_by.insert(id.clone(), v.clone());
     }
@@ -504,8 +519,17 @@ async fn mock_branches_merge(
     for (id, v) in &src_snap.touches_file {
         merged.touches_file.insert(id.clone(), v.clone());
     }
+    for (id, v) in &src_snap.mentions_symbol {
+        merged.mentions_symbol.insert(id.clone(), v.clone());
+    }
     for (id, v) in &src_snap.relates_to {
         merged.relates_to.insert(id.clone(), v.clone());
+    }
+    for (id, v) in &src_snap.derived_from {
+        merged.derived_from.insert(id.clone(), v.clone());
+    }
+    for (id, v) in &src_snap.session_follows {
+        merged.session_follows.insert(id.clone(), v.clone());
     }
 
     let outcome = if base_id == tgt.head_commit {
@@ -597,7 +621,18 @@ async fn mock_mutate(
     let mut nodes = 0usize;
     let mut edges = 0usize;
 
-    if qtext.contains("insert Session") || qname == "upsert_session" {
+    if qtext.contains("insert SessionFollows") || qname == "link_session_follows" {
+        let src = params["from_session_id"].as_str().unwrap_or("");
+        let dst = params["to_session_id"].as_str().unwrap_or("");
+        let mut props = params.clone();
+        props["source_id"] = json!(src);
+        props["target_id"] = json!(dst);
+        snap.session_follows.insert(format!("{src}->{dst}"), props);
+        edges += 1;
+    } else if qtext.contains("insert Session ")
+        || qtext.contains("insert Session{")
+        || qname == "upsert_session"
+    {
         let sid = params["session_id"].as_str().unwrap_or("s1").to_string();
         snap.sessions.insert(sid.clone(), params.clone());
         nodes += 1;
@@ -665,6 +700,32 @@ async fn mock_mutate(
         snap.derived_from
             .insert(format!("{src}->{dst}"), params.clone());
         edges += 1;
+    } else if qtext.contains("insert SymbolRef") {
+        let fqn = params["fqn"].as_str().unwrap_or("sym").to_string();
+        snap.symbols.insert(fqn, params.clone());
+        nodes += 1;
+    } else if qtext.contains("insert MentionsSymbol") {
+        let src = params["atom_id"].as_str().unwrap_or("");
+        let dst = params["fqn"].as_str().unwrap_or("");
+        let mut props = params.clone();
+        props["source_id"] = json!(src);
+        props["target_id"] = json!(dst);
+        snap.mentions_symbol.insert(format!("{src}->{dst}"), props);
+        edges += 1;
+    } else if qname == "clear_branch_context" {
+        nodes = snap.atoms.len()
+            + snap.files.len()
+            + snap.symbols.len()
+            + snap.sessions.len()
+            + snap.turn_snapshots.len();
+        edges = snap.published_by.len()
+            + snap.consumed_by.len()
+            + snap.touches_file.len()
+            + snap.mentions_symbol.len()
+            + snap.relates_to.len()
+            + snap.derived_from.len()
+            + snap.session_follows.len();
+        snap = MockSnapshot::default();
     }
 
     let cid = st.alloc_commit_id();
@@ -753,6 +814,7 @@ fn eval_query(snap: &MockSnapshot, qname: &str, params: &Value) -> Vec<Value> {
         "list_consumed_edges" => snap.consumed_by.values().cloned().collect(),
         "list_file_edges" => snap.touches_file.values().cloned().collect(),
         "list_atom_relations" => snap.relates_to.values().cloned().collect(),
+        "list_session_follows" => snap.session_follows.values().cloned().collect(),
         _ => Vec::new(),
     }
 }
@@ -969,6 +1031,453 @@ async fn mock_changes(
     .into_response()
 }
 
+fn export_mock_snapshot_ndjson(snap: &MockSnapshot, type_names: &[String]) -> String {
+    let want = |name: &str| type_names.is_empty() || type_names.iter().any(|t| t == name);
+    let mut lines = Vec::new();
+    let strip_alias = |v: &Value| -> Value {
+        let mut obj = v.as_object().cloned().unwrap_or_default();
+        obj.remove("source_id");
+        obj.remove("target_id");
+        Value::Object(obj)
+    };
+    if want("ConsumedBy") {
+        for v in snap.consumed_by.values() {
+            lines.push(
+                json!({
+                    "edge": "ConsumedBy",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("DerivedFrom") {
+        for v in snap.derived_from.values() {
+            lines.push(
+                json!({
+                    "edge": "DerivedFrom",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("MentionsSymbol") {
+        for v in snap.mentions_symbol.values() {
+            lines.push(
+                json!({
+                    "edge": "MentionsSymbol",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("PublishedBy") {
+        for v in snap.published_by.values() {
+            lines.push(
+                json!({
+                    "edge": "PublishedBy",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("RelatesTo") {
+        for v in snap.relates_to.values() {
+            lines.push(
+                json!({
+                    "edge": "RelatesTo",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("SessionFollows") {
+        for v in snap.session_follows.values() {
+            lines.push(
+                json!({
+                    "edge": "SessionFollows",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("TouchesFile") {
+        for v in snap.touches_file.values() {
+            lines.push(
+                json!({
+                    "edge": "TouchesFile",
+                    "id": format!("[\"{}\",\"{}\"]", v["source_id"].as_str().unwrap_or(""), v["target_id"].as_str().unwrap_or("")),
+                    "from": v["source_id"],
+                    "to": v["target_id"],
+                    "data": strip_alias(v),
+                })
+                .to_string(),
+            );
+        }
+    }
+    if want("ContextAtom") {
+        for (id, v) in &snap.atoms {
+            lines.push(json!({ "type": "ContextAtom", "id": id, "data": v }).to_string());
+        }
+    }
+    if want("FileRef") {
+        for (id, v) in &snap.files {
+            lines.push(json!({ "type": "FileRef", "id": id, "data": v }).to_string());
+        }
+    }
+    if want("Session") {
+        for (id, v) in &snap.sessions {
+            lines.push(json!({ "type": "Session", "id": id, "data": v }).to_string());
+        }
+    }
+    if want("SymbolRef") {
+        for (id, v) in &snap.symbols {
+            lines.push(json!({ "type": "SymbolRef", "id": id, "data": v }).to_string());
+        }
+    }
+    if want("TurnSnapshot") {
+        for (id, v) in &snap.turn_snapshots {
+            lines.push(json!({ "type": "TurnSnapshot", "id": id, "data": v }).to_string());
+        }
+    }
+    lines.join("\n")
+}
+
+async fn mock_export(
+    State(srv): State<MockServer>,
+    AxumPath(gid): AxumPath<String>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let st = srv.state.lock().unwrap();
+    if let Err(resp) = check_contract(&headers, &st) {
+        return *resp;
+    }
+    if gid != st.graph_id {
+        return mock_err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.", None);
+    }
+    let bname = body["branch"].as_str().unwrap_or("main");
+    let Some(branch) = st.branches.get(bname) else {
+        return mock_err(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Branch not found.",
+            None,
+        );
+    };
+    let type_names: Vec<String> = body["type_names"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    let snap = &st.commits[&branch.head_commit].snapshot;
+    let ndjson = export_mock_snapshot_ndjson(snap, &type_names);
+    (
+        StatusCode::OK,
+        [("content-type", "application/x-ndjson")],
+        if ndjson.is_empty() {
+            ndjson
+        } else {
+            format!("{ndjson}\n")
+        },
+    )
+        .into_response()
+}
+
+fn apply_mock_ndjson_load(
+    st: &mut MockGraphState,
+    actor: String,
+    branch_name: &str,
+    from: Option<&str>,
+    mode: &str,
+    ndjson: &str,
+    include_uri: bool,
+) -> Response {
+    if !matches!(mode, "append" | "overwrite" | "merge") {
+        return mock_err(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "Invalid load mode.",
+            None,
+        );
+    }
+    let mut parsed_records: Vec<Value> = Vec::new();
+    for line in ndjson.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(trimmed) {
+            Ok(v) => parsed_records.push(v),
+            Err(err) => {
+                return mock_err(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    &format!("Invalid NDJSON: {err}"),
+                    None,
+                );
+            }
+        }
+    }
+
+    let mut branch_created = false;
+    if !st.branches.contains_key(branch_name) {
+        let base_name = from.filter(|s| !s.trim().is_empty()).unwrap_or("main");
+        let Some(base_branch) = st.branches.get(base_name).cloned() else {
+            return mock_err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Base branch not found.",
+                None,
+            );
+        };
+        let ts = 1_700_000_000_000_000 + (st.next_seq as i64) * 1000;
+        st.branches.insert(
+            branch_name.to_string(),
+            MockBranch {
+                name: branch_name.to_string(),
+                head_commit: base_branch.head_commit.clone(),
+                from: Some(base_name.to_string()),
+                from_commit_id: Some(base_branch.head_commit),
+                created_at: ts,
+                updated_at: ts,
+            },
+        );
+        branch_created = true;
+    }
+
+    let branch = st.branches[branch_name].clone();
+    let mut snap = st.commits[&branch.head_commit].snapshot.clone();
+    let mut node_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut edge_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut changes = Vec::new();
+
+    for rec in &parsed_records {
+        if let Some(t) = rec.get("type").and_then(Value::as_str) {
+            let id = rec.get("id").and_then(Value::as_str).unwrap_or("");
+            let data = rec.get("data").cloned().unwrap_or_else(|| json!({}));
+            if mode == "append" {
+                let exists = match t {
+                    "ContextAtom" => snap.atoms.contains_key(id),
+                    "FileRef" => snap.files.contains_key(id),
+                    "Session" => snap.sessions.contains_key(id),
+                    "SymbolRef" => snap.symbols.contains_key(id),
+                    "TurnSnapshot" => snap.turn_snapshots.contains_key(id),
+                    _ => false,
+                };
+                if exists {
+                    return mock_err(
+                        StatusCode::CONFLICT,
+                        "conflict",
+                        &format!("Duplicate {t} '{id}'."),
+                        None,
+                    );
+                }
+            }
+            match t {
+                "ContextAtom" => {
+                    snap.atoms.insert(id.to_string(), data.clone());
+                    changes.push(json!({
+                        "kind": "node",
+                        "type": { "id": "t-atom", "name": "ContextAtom" },
+                        "id": id,
+                        "op": "insert",
+                        "after": { "properties": data }
+                    }));
+                }
+                "FileRef" => {
+                    snap.files.insert(id.to_string(), data);
+                }
+                "Session" => {
+                    snap.sessions.insert(id.to_string(), data);
+                }
+                "SymbolRef" => {
+                    snap.symbols.insert(id.to_string(), data);
+                }
+                "TurnSnapshot" => {
+                    snap.turn_snapshots.insert(id.to_string(), data);
+                }
+                _ => {
+                    return mock_err(
+                        StatusCode::BAD_REQUEST,
+                        "bad_request",
+                        "Unknown node type.",
+                        None,
+                    );
+                }
+            }
+            *node_counts.entry(t.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    for rec in &parsed_records {
+        if let Some(e) = rec.get("edge").and_then(Value::as_str) {
+            let from_id = rec.get("from").and_then(Value::as_str).unwrap_or("");
+            let to_id = rec.get("to").and_then(Value::as_str).unwrap_or("");
+            let mut val = rec.get("data").cloned().unwrap_or_else(|| json!({}));
+            val["source_id"] = json!(from_id);
+            val["target_id"] = json!(to_id);
+            match e {
+                "PublishedBy" => {
+                    snap.published_by.insert(format!("{from_id}->{to_id}"), val);
+                }
+                "ConsumedBy" => {
+                    snap.consumed_by.insert(format!("{from_id}->{to_id}"), val);
+                }
+                "TouchesFile" => {
+                    snap.touches_file.insert(format!("{from_id}->{to_id}"), val);
+                }
+                "MentionsSymbol" => {
+                    snap.mentions_symbol
+                        .insert(format!("{from_id}->{to_id}"), val);
+                }
+                "RelatesTo" => {
+                    let rel = val["relation"].as_str().unwrap_or("supports");
+                    snap.relates_to
+                        .insert(format!("{from_id}:{rel}:{to_id}"), val);
+                }
+                "DerivedFrom" => {
+                    snap.derived_from.insert(format!("{from_id}->{to_id}"), val);
+                }
+                "SessionFollows" => {
+                    snap.session_follows
+                        .insert(format!("{from_id}->{to_id}"), val);
+                }
+                _ => {
+                    return mock_err(
+                        StatusCode::BAD_REQUEST,
+                        "bad_request",
+                        "Unknown edge type.",
+                        None,
+                    );
+                }
+            }
+            *edge_counts.entry(e.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    let cid = st.alloc_commit_id();
+    let ts = 1_700_000_000_000_000 + (st.next_seq as i64) * 1000;
+    let commit = MockCommit {
+        id: cid.clone(),
+        branch: branch_name.to_string(),
+        parent: Some(branch.head_commit),
+        merged_parent: None,
+        actor_id: Some(actor.clone()),
+        created_at: ts,
+        snapshot: snap,
+        changes,
+    };
+    let commit_json = json!({
+        "graph_commit_id": commit.id,
+        "graph_branch": commit.branch,
+        "graph_manifest_version": 1,
+        "parent_commit_id": commit.parent,
+        "merged_parent_commit_id": Value::Null,
+        "actor_id": commit.actor_id,
+        "created_at": commit.created_at,
+        "published": true,
+        "kind": "published"
+    });
+    st.commits.insert(cid.clone(), commit);
+    st.commit_order.push(cid.clone());
+    if let Some(b) = st.branches.get_mut(branch_name) {
+        b.head_commit = cid;
+        b.updated_at = ts;
+    }
+
+    let nodes: Vec<Value> = node_counts
+        .into_iter()
+        .map(|(name, entities_loaded)| json!({ "name": name, "entities_loaded": entities_loaded }))
+        .collect();
+    let edges: Vec<Value> = edge_counts
+        .into_iter()
+        .map(|(name, entities_loaded)| json!({ "name": name, "entities_loaded": entities_loaded }))
+        .collect();
+    let mut resp = json!({
+        "branch": branch_name,
+        "base_branch": from,
+        "branch_created": branch_created,
+        "mode": mode,
+        "nodes": nodes,
+        "edges": edges,
+        "total_entities": parsed_records.len(),
+        "actor_id": actor,
+        "commit": commit_json,
+    });
+    if include_uri {
+        resp["uri"] = json!(format!("mock://{}/graphs/{}", st.graph_id, st.graph_id));
+    }
+    axum::Json(resp).into_response()
+}
+
+async fn mock_load_ndjson(
+    State(srv): State<MockServer>,
+    AxumPath(gid): AxumPath<String>,
+    AxumQuery(q): AxumQuery<BTreeMap<String, String>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let mut st = srv.state.lock().unwrap();
+    let actor = match check_contract(&headers, &st) {
+        Ok(a) => a,
+        Err(r) => return *r,
+    };
+    if gid != st.graph_id {
+        return mock_err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.", None);
+    }
+    let branch = q.get("branch").map(String::as_str).unwrap_or("main");
+    let from = q.get("from").map(String::as_str);
+    let mode = q.get("mode").map(String::as_str).unwrap_or("merge");
+    apply_mock_ndjson_load(&mut st, actor, branch, from, mode, &body, false)
+}
+
+async fn mock_load_json(
+    State(srv): State<MockServer>,
+    AxumPath(gid): AxumPath<String>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let mut st = srv.state.lock().unwrap();
+    let actor = match check_contract(&headers, &st) {
+        Ok(a) => a,
+        Err(r) => return *r,
+    };
+    if gid != st.graph_id {
+        return mock_err(StatusCode::NOT_FOUND, "not_found", "Unknown graph.", None);
+    }
+    let branch = body["branch"].as_str().unwrap_or("main");
+    let from = body["from"].as_str();
+    let mode = body["mode"].as_str().unwrap_or("merge");
+    let data = body["data"].as_str().unwrap_or("");
+    apply_mock_ndjson_load(&mut st, actor, branch, from, mode, data, true)
+}
+
 async fn spawn_mock_omnigraph(token: &str) -> (String, tokio::task::JoinHandle<()>) {
     let srv = MockServer {
         state: Arc::new(Mutex::new(MockGraphState::new(
@@ -1003,6 +1512,9 @@ async fn spawn_mock_omnigraph(token: &str) -> (String, tokio::task::JoinHandle<(
             get(mock_commit_changes),
         )
         .route("/graphs/{graph_id}/changes", get(mock_changes))
+        .route("/graphs/{graph_id}/export", post(mock_export))
+        .route("/graphs/{graph_id}/load", post(mock_load_json))
+        .route("/graphs/{graph_id}/load/ndjson", post(mock_load_ndjson))
         .with_state(srv);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1091,9 +1603,15 @@ impl HarnessFixture {
                 },
             )]))),
         });
-        infra_host::model_catalog::model_options("claude", None, None)
-            .await
-            .unwrap();
+        static CLAUDE_CATALOG_WARMUP: tokio::sync::OnceCell<()> =
+            tokio::sync::OnceCell::const_new();
+        CLAUDE_CATALOG_WARMUP
+            .get_or_init(|| async {
+                infra_host::model_catalog::model_options("claude", None, None)
+                    .await
+                    .unwrap();
+            })
+            .await;
 
         let knowledge = Arc::new(KnowledgeDomain::new(store.clone(), source.clone()));
         let special = ["creator", "system_run", "system_discovery"]
@@ -2239,6 +2757,539 @@ async fn end_to_end_http_session_create_executes_prepares_prompt_and_publishes_t
             && prompt_b_text.contains("Tenant header must match JWT claim"),
         "Session B prompt did not receive Session A's shared Omnigraph context:\n{prompt_b_text}"
     );
+
+    fx.shutdown().await;
+    mock_task.abort();
+}
+
+async fn post_session_http(fx: &HarnessFixture, body: Value) -> (u16, Value) {
+    for _ in 0..20 {
+        let (status, resp) = fx
+            .http(Method::POST, "/api/sessions", Some(body.clone()), true)
+            .await;
+        if status == 503
+            && resp["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("native model catalog"))
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            continue;
+        }
+        return (status, resp);
+    }
+    fx.http(Method::POST, "/api/sessions", Some(body), true)
+        .await
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_omnigraph_export_import_bundle_and_ndjson_round_trip() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (mock_url, mock_task) = spawn_mock_omnigraph("tok-xfer").await;
+    let bin_dir = tempfile::tempdir().unwrap();
+    let fake_claude = bin_dir.path().join("claude");
+    let result_line = json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "session_id": "native-xfer-1",
+        "result": "Done."
+    })
+    .to_string();
+    fs::write(
+        &fake_claude,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\ncat <<'EOF'\n{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native-xfer-1\"}}\n{result_line}\nEOF\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+    let fx = HarnessFixture::new(Some(fake_claude)).await;
+
+    let (status, setup) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/setup",
+            Some(json!({ "action": "connect", "endpoint": mock_url, "token": "tok-xfer" })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{setup}");
+
+    let (status, sess_a_resp) = post_session_http(
+        &fx,
+        json!({
+            "project_id": fx.project_id,
+            "provider": "claude",
+            "workflow": "native",
+            "mode": "plan",
+            "project_context": false,
+            "prompt": "Capture architecture",
+            "omnigraph": { "enabled": true, "branch": "auto" }
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{sess_a_resp}");
+    let sid_a = sess_a_resp["session"]["id"].as_str().unwrap().to_string();
+    let br_a = format!("session/{}", &sid_a[..12.min(sid_a.len())]);
+
+    let (status, sess_b_resp) = post_session_http(
+        &fx,
+        json!({
+            "project_id": fx.project_id,
+            "provider": "claude",
+            "workflow": "native",
+            "mode": "plan",
+            "project_context": false,
+            "prompt": "Receive imported context",
+            "omnigraph": { "enabled": true, "branch": "auto" }
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{sess_b_resp}");
+    let sid_b = sess_b_resp["session"]["id"].as_str().unwrap().to_string();
+
+    // Ensure session A's branch exists and publish an atom on it.
+    let _ = fx
+        .omnigraph
+        .prepare_session_context(&fx.store.get(&sid_a).unwrap(), &fx.project_path)
+        .await
+        .unwrap();
+    let (status, pub_res) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/atoms",
+            Some(json!({
+                "project_id": fx.project_id,
+                "branch": &br_a,
+                "session_id": &sid_a,
+                "atom_id": "atom-xfer-1",
+                "kind": "decision",
+                "title": "Use Ed25519 JWT signing",
+                "summary": "Fast stateless verification across services",
+                "files": ["src/auth/jwt.rs"]
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{pub_res}");
+
+    // 1. POST /api/omnigraph/export returns structured bundle + ndjson.
+    let (status, exported) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/export",
+            Some(json!({
+                "project_id": fx.project_id,
+                "session_id": &sid_a,
+                "scope": "task",
+                "include_inherited": false,
+                "format": "bundle"
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{exported}");
+    assert_eq!(exported["ok"], true);
+    assert_eq!(exported["format"], "harness.omnigraph.bundle.v1");
+    assert_eq!(exported["source_session_id"], sid_a);
+    assert!(exported["counts"]["atoms"].as_u64().unwrap() >= 1);
+    assert!(exported["ndjson"].as_str().unwrap().contains("atom-xfer-1"));
+
+    // 2. GET /api/omnigraph/export?download=1 serves attachment bytes for both JSON bundle and NDJSON.
+    let dl_json_resp = fx
+        .client
+        .get(format!(
+            "http://127.0.0.1:{}/api/omnigraph/export?project_id={}&session_id={}&scope=task&format=bundle&download=1",
+            fx.port, fx.project_id, sid_a
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dl_json_resp.status().as_u16(), 200);
+    let disp_json = dl_json_resp
+        .headers()
+        .get("content-disposition")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(disp_json.contains("attachment"), "{disp_json}");
+    let dl_json_bytes = dl_json_resp.bytes().await.unwrap();
+    let dl_json_val: Value = serde_json::from_slice(&dl_json_bytes).unwrap();
+    assert_eq!(dl_json_val["format"], "harness.omnigraph.bundle.v1");
+
+    let dl_ndjson_resp = fx
+        .client
+        .get(format!(
+            "http://127.0.0.1:{}/api/omnigraph/export?project_id={}&branch={}&scope=branch&format=ndjson&download=1",
+            fx.port, fx.project_id, br_a
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dl_ndjson_resp.status().as_u16(), 200);
+    let disp_nd = dl_ndjson_resp
+        .headers()
+        .get("content-disposition")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        disp_nd.contains("attachment") && disp_nd.contains(".ndjson"),
+        "{disp_nd}"
+    );
+    let dl_nd_text = dl_ndjson_resp.text().await.unwrap();
+    assert!(dl_nd_text.contains("\"ContextAtom\""));
+
+    // 3. POST /api/omnigraph/import accepts >64 KiB bundle, creates branch, injects into sid_b, and updates SessionStore.
+    let mut big_bundle = exported["bundle"].clone();
+    let padded_body = "x".repeat(72 * 1024);
+    big_bundle["atoms"].as_array_mut().unwrap().push(json!({
+        "atom_id": "atom-xfer-large",
+        "project_id": fx.project_id,
+        "kind": "insight",
+        "title": "Large payload atom",
+        "summary": "Exercises >64KiB body limit",
+        "body": padded_body,
+        "importance": 0.75,
+        "stale": false
+    }));
+    let (status, imported) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/import",
+            Some(json!({
+                "project_id": fx.project_id,
+                "target_branch": "imported/large-ctx",
+                "from_branch": "main",
+                "create_branch": true,
+                "mode": "merge",
+                "bundle": big_bundle,
+                "inject_into_sessions": true,
+                "target_session_ids": [&sid_b]
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{imported}");
+    assert_eq!(imported["ok"], true);
+    assert_eq!(imported["target_branch"], "imported/large-ctx");
+    assert!(imported["imported_atoms"].as_u64().unwrap() >= 2);
+    assert_eq!(imported["shared_session_ids"], json!([sid_b]));
+    assert!(imported["session"]["id"] == sid_b);
+    assert_eq!(imported["sessions"].as_array().unwrap().len(), 1);
+
+    let updated_b = fx.store.get(&sid_b).unwrap();
+    assert!(
+        updated_b["omnigraph"]["pull_branches"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("imported/large-ctx"))
+    );
+    let events_b = fx.store.events(&sid_b, 0).unwrap();
+    assert!(events_b.iter().any(|e| e["kind"] == "omnigraph"));
+
+    // 4. POST /api/omnigraph/import with raw NDJSON & `mode: "replace"` replaces target branch cleanly.
+    let replace_ndjson = json!({
+        "type": "ContextAtom",
+        "id": "atom-ndjson-only",
+        "data": {
+            "project_id": fx.project_id,
+            "branch": "imported/large-ctx",
+            "origin_session_id": sid_a,
+            "kind": "contract",
+            "title": "Replaced via NDJSON",
+            "summary": "Old large atoms wiped",
+            "importance": 0.9,
+            "stale": false,
+            "created_at": "2026-11-16T12:00:00.000Z",
+            "updated_at": "2026-11-16T12:00:00.000Z"
+        }
+    })
+    .to_string();
+    let (status, replaced) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/import",
+            Some(json!({
+                "project_id": fx.project_id,
+                "target_branch": "imported/large-ctx",
+                "mode": "replace",
+                "raw_text": replace_ndjson
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{replaced}");
+    assert_eq!(replaced["imported_atoms"], 1);
+
+    let (status, after_rep) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/export",
+            Some(json!({
+                "project_id": fx.project_id,
+                "branch": "imported/large-ctx",
+                "scope": "branch",
+                "format": "bundle"
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200);
+    let ids: Vec<&str> = after_rep["bundle"]["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["atom-ndjson-only"]);
+
+    fx.shutdown().await;
+    mock_task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_omnigraph_sessions_link_and_create_with_linked_peers() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (mock_url, mock_task) = spawn_mock_omnigraph("tok-link").await;
+    let bin_dir = tempfile::tempdir().unwrap();
+    let fake_claude = bin_dir.path().join("claude");
+    let result_line = json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "session_id": "native-link-1",
+        "result": "Done."
+    })
+    .to_string();
+    fs::write(
+        &fake_claude,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\ncat <<'EOF'\n{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native-link-1\"}}\n{result_line}\nEOF\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+    let fx = HarnessFixture::new(Some(fake_claude)).await;
+
+    let (status, setup) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/setup",
+            Some(json!({ "action": "connect", "endpoint": mock_url, "token": "tok-link" })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{setup}");
+
+    // Create 2 sessions and seed an atom on each session's branch.
+    let (status, r1) = post_session_http(
+        &fx,
+        json!({
+            "project_id": fx.project_id,
+            "provider": "claude",
+            "workflow": "native",
+            "mode": "plan",
+            "project_context": false,
+            "prompt": "Implement JWT middleware",
+            "omnigraph": { "enabled": true, "branch": "auto" }
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{r1}");
+    let sid1 = r1["session"]["id"].as_str().unwrap().to_string();
+    let br1 = format!("session/{}", &sid1[..12.min(sid1.len())]);
+
+    let (status, r2) = post_session_http(
+        &fx,
+        json!({
+            "project_id": fx.project_id,
+            "provider": "claude",
+            "workflow": "native",
+            "mode": "plan",
+            "project_context": false,
+            "prompt": "Build login dialog",
+            "omnigraph": { "enabled": true, "branch": "auto" }
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{r2}");
+    let sid2 = r2["session"]["id"].as_str().unwrap().to_string();
+    let br2 = format!("session/{}", &sid2[..12.min(sid2.len())]);
+
+    for (sid, br, aid, title) in [
+        (&sid1, &br1, "atom-s1", "Backend returns 401 on expired JWT"),
+        (&sid2, &br2, "atom-s2", "UI redirects to /login on 401"),
+    ] {
+        let _ = fx
+            .omnigraph
+            .prepare_session_context(&fx.store.get(sid).unwrap(), &fx.project_path)
+            .await
+            .unwrap();
+        let (st, pb) = fx
+            .http(
+                Method::POST,
+                "/api/omnigraph/atoms",
+                Some(json!({
+                    "project_id": fx.project_id,
+                    "branch": br,
+                    "session_id": sid,
+                    "atom_id": aid,
+                    "kind": "contract",
+                    "title": title,
+                    "summary": title
+                })),
+                true,
+            )
+            .await;
+        assert_eq!(st, 200, "{pb}");
+    }
+
+    // 1. POST /api/omnigraph/sessions/link in `shared_branch` mutual mode.
+    let (status, linked) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/sessions/link",
+            Some(json!({
+                "project_id": fx.project_id,
+                "session_ids": [&sid1, &sid2],
+                "mode": "shared_branch",
+                "space_name": "Auth Sync",
+                "inject_live": true
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{linked}");
+    assert_eq!(linked["ok"], true);
+    assert_eq!(linked["mode"], "shared_branch");
+    assert_eq!(linked["shared_branch"], "shared/auth-sync");
+    assert_eq!(linked["shared_space"], "Auth Sync");
+    assert!(linked["synced_atoms"].as_u64().unwrap() >= 2);
+    assert_eq!(linked["sessions"].as_array().unwrap().len(), 2);
+
+    let s1_after = fx.store.get(&sid1).unwrap();
+    let s2_after = fx.store.get(&sid2).unwrap();
+    assert_eq!(s1_after["omnigraph"]["shared_space"], json!("Auth Sync"));
+    assert_eq!(s2_after["omnigraph"]["shared_space"], json!("Auth Sync"));
+    assert!(
+        s1_after["omnigraph"]["linked_session_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(sid2))
+    );
+    assert!(
+        s2_after["omnigraph"]["pull_branches"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("shared/auth-sync"))
+    );
+    assert!(
+        fx.store
+            .events(&sid1, 0)
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "omnigraph")
+    );
+    assert!(
+        fx.store
+            .events(&sid2, 0)
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "omnigraph")
+    );
+
+    // Verify GET /api/omnigraph/graph returns `session_follows` edges & `shared_space` on sessions.
+    let (status, gv) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/omnigraph/graph?project_id={}&branch=shared/auth-sync",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{gv}");
+    assert!(
+        gv["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "session_follows")
+    );
+    assert!(
+        gv["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["shared_space"] == json!("Auth Sync"))
+    );
+
+    // 2. POST /api/sessions with `omnigraph.linked_session_ids` auto-wires pull_branches + reciprocal links.
+    let (status, r3) = post_session_http(
+        &fx,
+        json!({
+            "project_id": fx.project_id,
+            "provider": "claude",
+            "workflow": "native",
+            "mode": "plan",
+            "project_context": false,
+            "prompt": "Verify auth end-to-end",
+            "omnigraph": {
+                "enabled": true,
+                "branch": "auto",
+                "shared_space": "Auth Sync",
+                "linked_session_ids": [&sid1]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{r3}");
+    let sid3 = r3["session"]["id"].as_str().unwrap().to_string();
+    let s3 = fx.store.get(&sid3).unwrap();
+    assert_eq!(s3["omnigraph"]["shared_space"], json!("Auth Sync"));
+    assert!(
+        s3["omnigraph"]["pull_branches"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(br1))
+    );
+    let s1_recip = fx.store.get(&sid1).unwrap();
+    assert!(
+        s1_recip["omnigraph"]["linked_session_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(sid3))
+    );
+
+    // 3. POST /api/omnigraph/sessions/link in `broadcast` mode from sid1 -> sid3.
+    let (status, bc) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/sessions/link",
+            Some(json!({
+                "project_id": fx.project_id,
+                "mode": "broadcast",
+                "source_session_id": &sid1,
+                "session_ids": [&sid3],
+                "inject_live": true
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{bc}");
+    assert_eq!(bc["ok"], true);
+    assert_eq!(bc["mode"], "broadcast");
+    assert_eq!(bc["shared_branch"], br1);
+    assert!(bc["sessions"].as_array().unwrap().len() >= 2);
 
     fx.shutdown().await;
     mock_task.abort();

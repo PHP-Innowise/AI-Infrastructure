@@ -285,6 +285,48 @@ impl Services for NativeServices {
                     }
                     Ok(payload)
                 }
+                "omnigraph.import" => {
+                    let domain = self.domains.get("omnigraph").ok_or_else(|| {
+                        HarnessError::unavailable("Required native service is unavailable.")
+                    })?;
+                    let mut payload = domain.execute(operation, request.clone()).await?;
+                    if let Payload::Json(ref mut val) = payload {
+                        let sessions_domain = self.domains.get("sessions").map(Arc::as_ref);
+                        let updated_sessions = crate::sessions::sync_omnigraph_import_to_sessions(
+                            &self.store,
+                            sessions_domain,
+                            &request["body"],
+                            val,
+                        )
+                        .await;
+                        if !updated_sessions.is_empty() {
+                            val["session"] = updated_sessions[0].clone();
+                            val["sessions"] = Value::Array(updated_sessions);
+                        }
+                    }
+                    Ok(payload)
+                }
+                "omnigraph.link_sessions" => {
+                    let domain = self.domains.get("omnigraph").ok_or_else(|| {
+                        HarnessError::unavailable("Required native service is unavailable.")
+                    })?;
+                    let mut payload = domain.execute(operation, request.clone()).await?;
+                    if let Payload::Json(ref mut val) = payload {
+                        let sessions_domain = self.domains.get("sessions").map(Arc::as_ref);
+                        let updated_sessions = crate::sessions::sync_omnigraph_link_to_sessions(
+                            &self.store,
+                            sessions_domain,
+                            &request["body"],
+                            val,
+                        )
+                        .await;
+                        if let Some(first) = updated_sessions.first() {
+                            val["session"] = first.clone();
+                        }
+                        val["sessions"] = Value::Array(updated_sessions);
+                    }
+                    Ok(payload)
+                }
                 _ => {
                     let (group, _) = operation.split_once('.').ok_or_else(|| {
                         HarnessError::missing("Unknown native service operation.")
