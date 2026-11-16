@@ -20,6 +20,7 @@
       <nav class="navigation" aria-label="Main navigation">
         <button class="nav-item" type="button" data-nav="sessions" aria-current="page"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v12H9l-5 4Z"/></svg>Sessions</button>
         <button class="nav-item" type="button" data-nav="systems"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 4.5h6v5h-6Z M14.5 4.5h6v5h-6Z M9 14.5h6v5H9Z M9.5 7h5 M6.5 9.5v7.5H9 M17.5 9.5v7.5H15"/></svg>System Orchestration</button>
+        <button class="nav-item" type="button" data-nav="omnigraph"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><circle cx="6" cy="7" r="2.2"/><circle cx="18" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><circle cx="18" cy="16" r="1.8"/><path d="M8.1 6.7 15.8 6.2 M7.1 8.9 10.9 16 M16.9 8 13.1 16 M13.9 17.3 16.3 16.5"/></svg>Context Graph</button>
         <button class="nav-item" type="button" data-nav="knowledge"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h6a4 4 0 0 1 4 4v13a5 5 0 0 0-4-2H4Z M14 8a4 4 0 0 1 4-4h3v15h-3a5 5 0 0 0-4 2"/></svg>Knowledge</button>
         <button class="nav-item" type="button" data-nav="skills"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m8 5-6 7 6 7 M16 5l6 7-6 7 M14 3l-4 18"/></svg>Skills</button>
         <button class="nav-item" type="button" data-nav="accelerators"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m13 2-9 12h7l-1 8 10-12h-8Z"/></svg>Accelerators</button>
@@ -28,6 +29,7 @@
       <div class="history" id="history"><p class="history-empty">Connecting to the local runner…</p></div>
       <div class="sidebar-footer"><strong id="runtime-label">Local runner</strong><span id="runtime-detail" hidden></span>
         <button type="button" class="sidebar-graph-pill" id="sidebar-graph-pill" data-state="idle" title="Open live code graph in Sessions"><span class="sidebar-graph-dot" id="sidebar-graph-dot" aria-hidden="true"></span><span class="sidebar-graph-label" id="sidebar-graph-label">Graph: idle</span></button>
+        <button type="button" class="sidebar-graph-pill sidebar-omnigraph-pill" id="sidebar-omnigraph-pill" data-state="off" title="Open Context Graph studio"><span class="sidebar-graph-dot" id="sidebar-omnigraph-dot" aria-hidden="true"></span><span class="omni-pill-shape" id="sidebar-omnigraph-shape" aria-hidden="true">○</span><span class="sidebar-graph-label" id="sidebar-omnigraph-label">Omnigraph: off</span></button>
         <div class="theme-control"><span id="theme-label">Theme</span><div class="theme-switch" role="radiogroup" aria-labelledby="theme-label"><label title="Match the system theme"><input id="theme-system" type="radio" name="theme" value="system"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h18v12H3Z M8 20h8 M12 16v4"/></svg><span class="sr-only">System</span></label><label title="Light theme"><input id="theme-light" type="radio" name="theme" value="light"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2.5 M12 19.5V22 M2 12h2.5 M19.5 12H22 M4.9 4.9l1.8 1.8 M17.3 17.3l1.8 1.8 M4.9 19.1l1.8-1.8 M17.3 6.7l1.8-1.8"/></svg><span class="sr-only">Light</span></label><label title="Dark theme"><input id="theme-dark" type="radio" name="theme" value="dark"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg><span class="sr-only">Dark</span></label></div></div></div>
     </aside>
     <main class="main" id="main" tabindex="-1">
@@ -70,6 +72,7 @@
             <button class="chip" type="button" id="option-clash" aria-expanded="false" aria-controls="panel-clash">Clash<span class="chip-value" id="option-clash-value"></span><span class="chip-caret" aria-hidden="true"></span></button>
             <button class="chip" type="button" id="option-workspace" aria-expanded="false" aria-controls="panel-workspace">Run in<span class="chip-value" id="option-workspace-value"></span><span class="chip-caret" aria-hidden="true"></span></button>
             <button class="chip" type="button" id="option-brain" aria-expanded="false" aria-controls="panel-brain">Memory<span class="chip-value" id="brain-link-summary"></span><span class="chip-caret" aria-hidden="true"></span></button>
+            <button class="chip" type="button" id="option-omnigraph" aria-expanded="false" aria-controls="panel-omnigraph">Omnigraph<span class="chip-value" id="option-omnigraph-value">Off</span><span class="chip-caret" aria-hidden="true"></span></button>
             <button class="chip" type="button" id="option-graph" aria-expanded="false" aria-controls="panel-graph">Graph<span class="chip-value" id="option-graph-value"></span><span class="chip-caret" aria-hidden="true"></span></button>
             <button class="chip" type="button" id="option-budgets" aria-expanded="false" aria-controls="panel-budgets">Budgets<span class="chip-value" id="option-budgets-value"></span><span class="chip-caret" aria-hidden="true"></span></button>
             <button class="chip" type="button" id="option-models" aria-expanded="false" aria-controls="panel-models">Models<span class="chip-value" id="model-routing-summary"></span><span class="chip-caret" aria-hidden="true"></span></button>
@@ -104,6 +107,25 @@
             <div id="brain-link-fields"><div class="knowledge-form-grid"><label class="field">Knowledge root<select id="brain-link-bank" disabled></select></label><label class="field">Brain task<select id="brain-link-kind"><option value="auto">New task from the first message</option><option value="existing">Existing task</option><option value="create">New task with an ID</option></select></label><label class="field wide" id="brain-link-existing-field" hidden>Existing task<select id="brain-link-task" disabled></select></label><label class="field" id="brain-link-id-field" hidden>New task ID<input id="brain-link-task-id" type="text" maxlength="200" placeholder="TASK-123"></label><label class="field wide" id="brain-link-goal-field" hidden>Task goal<textarea id="brain-link-goal" maxlength="12000" rows="2" placeholder="What should this task achieve?"></textarea></label></div><label class="checkbox brain-link-review"><input id="brain-link-review" type="checkbox">Review context by hand</label><div class="knowledge-form-grid" id="brain-link-query-field" hidden><label class="field wide">Context query<textarea id="brain-link-query" maxlength="4000" rows="2" placeholder="A concise topic, files, or question for retrieval"></textarea></label></div><button class="button" id="brain-link-refresh" type="button">Refresh tasks</button><p class="knowledge-note" id="brain-link-availability" role="status"></p></div><p class="error-text" id="brain-link-error" role="alert" hidden></p>
           </div>
           </div>
+          <div class="option-panel" id="panel-omnigraph" role="region" aria-labelledby="option-omnigraph" hidden>
+          <div class="option-panel-body" id="omnigraph-session-config">
+            <div class="omni-panel-head">
+              <label class="checkbox" for="omnigraph-enabled"><input id="omnigraph-enabled" form="session-form" type="checkbox" aria-describedby="omnigraph-session-note">Share context via Omnigraph</label>
+              <button class="button compact" id="omnigraph-open-studio" type="button">Open Context Graph ↗</button>
+            </div>
+            <p class="knowledge-note" id="omnigraph-session-note" role="status">Sessions can read and publish live learnings across isolated Omnigraph branches.</p>
+            <div class="knowledge-form-grid" id="omnigraph-session-fields" hidden>
+              <div class="field"><label for="omnigraph-branch-mode">Branch mode</label><select id="omnigraph-branch-mode" form="session-form" aria-describedby="omnigraph-session-note"><option value="auto">Automatic session branch (session/…)</option><option value="main">Shared main branch</option><option value="existing">Existing branch</option></select></div>
+              <div class="field" id="omnigraph-existing-branch-field" hidden><label for="omnigraph-existing-branch">Target branch</label><select id="omnigraph-existing-branch" form="session-form" disabled><option value="main">main</option></select></div>
+              <div class="field wide"><label for="omnigraph-pull-branches">Pull context from branches</label><input id="omnigraph-pull-branches" form="session-form" type="text" maxlength="500" placeholder="main, session/auth-fix" autocomplete="off" spellcheck="false" aria-describedby="omnigraph-pull-hint"><span class="workspace-helper" id="omnigraph-pull-hint">Comma-separated branches to pull from on startup. Leave blank for main.</span></div>
+              <div class="field wide"><label for="omnigraph-session-query">Focus query</label><textarea id="omnigraph-session-query" form="session-form" maxlength="2000" rows="2" placeholder="Topic, files, contracts, or decisions to prioritize"></textarea></div>
+            </div>
+            <div class="omni-panel-checks" id="omnigraph-session-checks" hidden>
+              <label class="checkbox" for="omnigraph-auto-publish"><input id="omnigraph-auto-publish" form="session-form" type="checkbox" checked>Auto-publish learnings to branch</label>
+              <label class="checkbox" for="omnigraph-auto-merge"><input id="omnigraph-auto-merge" form="session-form" type="checkbox">Auto-merge branch into main when finished</label>
+            </div>
+          </div>
+          </div>
           <div class="option-panel" id="panel-graph" role="region" aria-labelledby="option-graph" hidden>
           <div class="option-panel-body">
             <label class="checkbox"><input id="graph-enabled" type="checkbox" aria-describedby="graph-note" disabled>Use a code graph for this project</label>
@@ -134,6 +156,21 @@
         <div class="conversation" id="conversation"><div class="conversation-inner">
           <div class="welcome" id="welcome"><img class="welcome-mark" src="/icons/ai-accelerator.svg" alt="" width="48" height="48"><h2>What are we working on?</h2><div class="welcome-links"><button class="button primary" type="button" id="welcome-choose-folder">Choose a project folder</button><button class="button" type="button" data-view="context">Explore project context</button><button class="button" type="button" data-view="accelerators">Choose an accelerator</button></div></div>
           <section class="linked-context" id="linked-context" aria-label="Linked task and retrieved context" hidden><div class="linked-toolbar"><h2 id="linked-context-title">Linked Brain task</h2><span id="linked-context-state" class="knowledge-note" role="status"></span></div><p class="linked-task-meta" id="linked-context-target"></p><p class="knowledge-note" id="linked-context-note"></p><div class="capsule-meter" id="capsule-meter" hidden><div class="capsule-bar" id="capsule-bar" role="img"><span class="capsule-part" data-kind="brain"></span><span class="capsule-part" data-kind="bank"></span><span class="capsule-part" data-kind="rules"></span></div><p class="capsule-facts" id="capsule-facts"></p><p class="capsule-repeats" id="capsule-repeats-line"><span id="capsule-repeats"></span><button class="explain" type="button" aria-controls="capsule-repeats-help" aria-expanded="false" aria-label="About repeated characters">?</button></p><p class="knowledge-note" id="capsule-repeats-help" hidden>The capsule lists each retrieved item in its layer, again among the selected items and again under its category. The 8,000-character cap counts every copy.</p><p class="capsule-legend" id="capsule-legend"></p></div><details id="linked-capsule-details"><summary>Retrieved context capsule</summary><pre class="knowledge-result" id="linked-capsule" tabindex="0"></pre></details><form id="linked-context-form"><div class="knowledge-form-grid"><label class="field wide">Context query<textarea id="linked-context-query" maxlength="4000" rows="2" required></textarea></label></div><div class="knowledge-actions"><button class="button" id="linked-context-refresh" type="submit">Refresh context</button><button class="button primary" id="linked-context-run" type="button" aria-describedby="linked-context-cost" hidden>Run with this context</button><span class="knowledge-note capsule-cost" id="linked-context-cost" hidden></span></div></form><p class="error-text" id="linked-context-error" role="alert" hidden></p></section>
+          <section class="omni-session-bar" id="session-omnigraph-bar" aria-label="Shared Omnigraph session context" hidden>
+            <div class="omni-session-bar-head">
+              <div class="omni-session-bar-title">
+                <span class="omni-badge" data-kind="branch"><svg class="omni-icon-xs" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="4" r="2"/><path d="M4 6v6 M12 6v4 M4 10c0-2 8-1 8-4"/></svg><span id="session-omnigraph-branch">main</span></span>
+                <strong>Omnigraph Shared Context</strong>
+                <span class="knowledge-note" id="session-omnigraph-meta" role="status"></span>
+              </div>
+              <div class="omni-session-bar-actions">
+                <button class="button compact" id="session-omnigraph-open" type="button">Explore in Graph ↗</button>
+                <button class="button compact primary" id="session-omnigraph-merge" type="button" hidden>Merge branch → main</button>
+              </div>
+            </div>
+            <div class="omni-session-atoms" id="session-omnigraph-atoms"></div>
+            <p class="error-text" id="session-omnigraph-error" role="alert" hidden></p>
+          </section>
           <section class="fleet-progress" id="fleet-progress" aria-label="Fleet review progress" hidden><div class="fleet-progress-header"><h2>Fleet review</h2><span class="fleet-stage" id="fleet-stage" role="status"></span></div><p class="fleet-note" id="fleet-run-detail"></p><p class="fleet-note" id="fleet-brain-note" hidden></p><div class="fleet-reviewers" id="fleet-reviewers" aria-label="Reviewer progress"></div><div class="fleet-actions" id="fleet-resume-actions" hidden><button class="button" id="fleet-resume" type="button">Resume review</button><span class="fleet-note">Continue from the saved checkpoint. Save budget changes first; earlier spending still counts.</span></div><p class="fleet-error" id="fleet-action-error" role="alert" hidden></p></section>
           <div id="events" role="log" aria-label="Session messages" aria-live="polite" aria-relevant="additions"></div>
           <section class="fleet-outcome" id="clash-outcome" aria-label="Clash ledger and outcome" hidden><h3 id="clash-outcome-title">Clash ledger</h3><p class="fleet-note" id="clash-outcome-summary" role="status"></p><p class="fleet-note" id="clash-verdict-note" hidden></p><div class="fleet-findings" id="clash-items"></div><details class="fleet-report" id="clash-turns"><summary>Turns</summary><div id="clash-turn-list"></div></details><details class="fleet-report" id="clash-report" hidden><summary>Ledger report</summary><pre class="fleet-report-text" id="clash-report-text" tabindex="0"></pre></details></section>
@@ -618,6 +655,270 @@
         <section class="skills-result" id="create-skill-result" aria-label="Created skill result" hidden><h3>Skill saved</h3><p class="skills-preview-context" id="create-skill-result-context"></p><p id="create-skill-result-summary"></p><div class="skills-file-list" id="create-skill-result-files"></div><p class="skills-note">Start a new agent session to load your skill.</p><button class="button" id="create-skill-view-installed" type="button">View installed skills</button></section>
       </div></div></section>
       <section class="view" id="accelerators-view" aria-label="Accelerators" hidden><div class="page-scroll"><div class="page-content"><div class="page-toolbar" data-project-field><label class="field">Target project<select id="accelerator-project"></select></label></div><div id="accelerators"></div></div></div></section>
+      <section class="view omni-view" id="omnigraph-view" aria-label="Context Graph Studio" data-pulse-paused="false" hidden>
+        <div class="omni-shell">
+          <header class="omni-header">
+            <div class="omni-header-main">
+              <div class="omni-header-badges">
+                <span class="omni-state-badge" id="omnigraph-state-badge" data-state="off"><span class="omni-state-icon" id="omnigraph-state-icon" aria-hidden="true">○</span><span id="omnigraph-state-text">Disconnected</span></span>
+                <span class="omni-meta-pill" id="omnigraph-mode-badge">Mode: local</span>
+                <span class="omni-meta-pill omni-mono" id="omnigraph-graph-id" hidden></span>
+                <span class="omni-meta-pill omni-mono" id="omnigraph-endpoint-badge" hidden></span>
+              </div>
+              <div class="omni-stats-row" id="omnigraph-stats" aria-label="Context graph statistics">
+                <span class="omni-stat-pill"><strong id="omnigraph-stat-branches">0</strong><span>Branches</span></span>
+                <span class="omni-stat-pill"><strong id="omnigraph-stat-atoms">0</strong><span>Atoms</span></span>
+                <span class="omni-stat-pill"><strong id="omnigraph-stat-sessions">0</strong><span>Sessions</span></span>
+                <span class="omni-stat-pill" id="omnigraph-stat-unmerged-pill" data-warn="false"><strong id="omnigraph-stat-unmerged">0</strong><span>Unmerged</span></span>
+              </div>
+            </div>
+            <div class="omni-header-actions">
+              <label class="field" data-project-field>Project<select id="omnigraph-project"></select></label>
+              <button class="button compact" id="omnigraph-mcp-copy" type="button" hidden>Copy MCP URL</button>
+              <button class="button compact" id="omnigraph-apply-schema" type="button" hidden>Apply Schema</button>
+              <button class="button compact" id="omnigraph-open-settings" type="button">Connection…</button>
+              <button class="button compact danger" id="omnigraph-stop" type="button" hidden>Stop</button>
+              <button class="button compact" id="omnigraph-refresh-header" type="button">Refresh</button>
+            </div>
+          </header>
+          <p class="knowledge-note omni-banner-note" id="omnigraph-status-message" role="status" hidden></p>
+          <p class="error-text omni-banner-error" id="omnigraph-error" role="alert" hidden></p>
+          <section class="omni-onboarding" id="omnigraph-onboarding" aria-labelledby="omnigraph-onboarding-title">
+            <div class="omni-onboarding-hero">
+              <div class="omni-onboarding-mark" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="7" r="2.2"/><circle cx="18" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><circle cx="18" cy="16" r="1.8"/><path d="M8.1 6.7 15.8 6.2 M7.1 8.9 10.9 16 M16.9 8 13.1 16 M13.9 17.3 16.3 16.5"/></svg>
+              </div>
+              <div>
+                <h2 id="omnigraph-onboarding-title">Shared Session Context Graph</h2>
+                <p class="knowledge-note" id="omnigraph-onboarding-copy">Connect Omnigraph v0.15.0 so parallel agent sessions can share live findings, decisions, warnings, and contracts across isolated branches with 3-way merge and time-travel history.</p>
+              </div>
+            </div>
+            <div class="omni-onboarding-grid">
+              <article class="omni-onboard-card">
+                <h3>Local Omnigraph Sidecar</h3>
+                <p class="knowledge-note" id="omnigraph-local-detail">Downloads or launches the local v0.15.0 binary managed by Harness with automatic schema setup and bearer auth.</p>
+                <div class="omni-card-actions">
+                  <button class="button primary" id="omnigraph-install-start" type="button">Install &amp; Start Local Omnigraph v0.15.0</button>
+                  <button class="button" id="omnigraph-start-local" type="button" hidden>Start Local Sidecar</button>
+                </div>
+              </article>
+              <article class="omni-onboard-card">
+                <h3>Docker Container</h3>
+                <p class="knowledge-note" id="omnigraph-docker-detail">Runs <code>ghcr.io/modernrelay/omnigraph-server:v0.15.0</code> bound to localhost with persistent Harness state storage.</p>
+                <div class="omni-card-actions">
+                  <button class="button" id="omnigraph-start-docker" type="button">Start via Docker</button>
+                </div>
+              </article>
+              <article class="omni-onboard-card omni-onboard-connect">
+                <h3>Connect External Server</h3>
+                <form id="omnigraph-connect-form" class="omni-connect-form">
+                  <div class="field">
+                    <label for="omnigraph-ext-endpoint">Server endpoint URL</label>
+                    <input id="omnigraph-ext-endpoint" type="text" maxlength="500" placeholder="http://127.0.0.1:8080" required autocomplete="off" spellcheck="false" aria-describedby="omnigraph-ext-endpoint-hint omnigraph-error">
+                    <span class="workspace-helper" id="omnigraph-ext-endpoint-hint">Must speak Omnigraph HTTP API 0.14.</span>
+                  </div>
+                  <div class="field">
+                    <label for="omnigraph-ext-token">Bearer token (optional)</label>
+                    <input id="omnigraph-ext-token" type="password" maxlength="500" placeholder="Bearer token for actor attribution" autocomplete="off" aria-describedby="omnigraph-ext-token-hint">
+                    <span class="workspace-helper" id="omnigraph-ext-token-hint">Required when connecting with MCP or Cedar policies.</span>
+                  </div>
+                  <div class="field">
+                    <label for="omnigraph-ext-graph">Graph ID (optional)</label>
+                    <input id="omnigraph-ext-graph" type="text" maxlength="120" placeholder="harness-context" autocomplete="off" spellcheck="false">
+                  </div>
+                  <button class="button" id="omnigraph-ext-submit" type="submit">Connect External Server</button>
+                </form>
+              </article>
+            </div>
+          </section>
+          <section class="omni-studio" id="omnigraph-studio" aria-label="Interactive context studio" hidden>
+            <div class="omni-filter-bar">
+              <div class="omni-search-field">
+                <label class="sr-only" for="omnigraph-search">Search context atoms and sessions</label>
+                <input id="omnigraph-search" type="search" maxlength="200" autocomplete="off" spellcheck="false" placeholder="Search findings, decisions, files, or queries (press /)…">
+                <button class="button compact" id="omnigraph-search-clear" type="button" hidden>Clear</button>
+              </div>
+              <div class="omni-kind-chips" id="omnigraph-kind-chips" role="group" aria-label="Filter by atom kind">
+                <button type="button" class="omni-kind-chip" data-action="omnigraph-filter-kind" data-kind="" aria-pressed="true"><span class="omni-chip-glyph" aria-hidden="true">◈</span>All</button>
+                <button type="button" class="omni-kind-chip" data-action="omnigraph-filter-kind" data-kind="finding" aria-pressed="false"><span class="omni-chip-glyph" aria-hidden="true">✦</span>Findings</button>
+                <button type="button" class="omni-kind-chip" data-action="omnigraph-filter-kind" data-kind="decision" aria-pressed="false"><span class="omni-chip-glyph" aria-hidden="true">◆</span>Decisions</button>
+                <button type="button" class="omni-kind-chip" data-action="omnigraph-filter-kind" data-kind="warning" aria-pressed="false"><span class="omni-chip-glyph" aria-hidden="true">▲</span>Warnings</button>
+                <button type="button" class="omni-kind-chip" data-action="omnigraph-filter-kind" data-kind="contract" aria-pressed="false"><span class="omni-chip-glyph" aria-hidden="true">⬡</span>Contracts</button>
+                <button type="button" class="omni-kind-chip" data-action="omnigraph-filter-kind" data-kind="insight" aria-pressed="false"><span class="omni-chip-glyph" aria-hidden="true">◉</span>Insights</button>
+              </div>
+              <div class="omni-filter-controls">
+                <div class="omni-inline-field">
+                  <label for="omnigraph-branch">Branch</label>
+                  <select id="omnigraph-branch"><option value="main">main</option></select>
+                </div>
+                <label class="checkbox omni-check" for="omnigraph-show-sessions"><input id="omnigraph-show-sessions" type="checkbox" checked>Sessions</label>
+                <label class="checkbox omni-check" for="omnigraph-show-files"><input id="omnigraph-show-files" type="checkbox" checked>Files</label>
+              </div>
+            </div>
+            <div class="omni-timetravel-banner" id="omnigraph-timetravel-banner" role="status" hidden>
+              <span class="omni-timetravel-badge"><span aria-hidden="true">⏱</span> Time-travel snapshot</span>
+              <span id="omnigraph-timetravel-text"></span>
+              <button class="button compact primary" id="omnigraph-return-live" type="button">Return to live head</button>
+            </div>
+            <div class="omni-studio-grid">
+              <div class="omni-stage">
+                <div class="omni-stage-header">
+                  <div class="omni-tabs" id="omni-stage-tabs" role="tablist" aria-label="Context Graph views" focusgroup="tablist nomemory">
+                    <button type="button" class="omni-tab" role="tab" id="omni-tab-constellation" data-action="omnigraph-stage-tab" data-tab="constellation" aria-controls="omni-pane-constellation" aria-selected="true">Constellation</button>
+                    <button type="button" class="omni-tab" role="tab" id="omni-tab-dag" data-action="omnigraph-stage-tab" data-tab="dag" aria-controls="omni-pane-dag" aria-selected="false">Branch &amp; Time-Travel DAG</button>
+                    <button type="button" class="omni-tab" role="tab" id="omni-tab-merge" data-action="omnigraph-stage-tab" data-tab="merge" aria-controls="omni-pane-merge" aria-selected="false">3-Way Merge &amp; Diff</button>
+                  </div>
+                  <div class="omni-stage-tools" id="omni-canvas-tools" role="toolbar" aria-label="Constellation canvas controls">
+                    <div class="session-graph-zoom-group" role="group" aria-label="Zoom">
+                      <button type="button" class="button compact session-graph-btn" id="omni-zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
+                      <button type="button" class="button compact session-graph-btn session-graph-zoom-level" id="omni-zoom-level" title="Reset zoom to 100%" aria-label="Reset zoom level">100%</button>
+                      <button type="button" class="button compact session-graph-btn" id="omni-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+                    </div>
+                    <button type="button" class="button compact session-graph-btn" id="omni-fit" title="Fit constellation to view">Fit</button>
+                    <button type="button" class="button compact session-graph-btn" id="omni-toggle-pulse" title="Pause or resume ambient node pulse animation">Pause pulse</button>
+                    <button type="button" class="button compact session-graph-btn" id="omni-refresh" title="Reload graph from Omnigraph">Sync</button>
+                  </div>
+                </div>
+                <section class="omni-stage-pane" role="tabpanel" id="omni-pane-constellation" aria-labelledby="omni-tab-constellation">
+                  <div class="omni-canvas-wrap" id="omnigraph-canvas-wrap">
+                    <div class="graph-map-canvas session-graph-canvas omni-canvas" id="omnigraph-canvas" data-panning="false" data-wheeling="false" tabindex="0" role="region" aria-label="Interactive Omnigraph context constellation"></div>
+                    <div class="omni-radar-slot" id="omnigraph-canvas-radar" hidden></div>
+                  </div>
+                  <p class="omni-legend" aria-label="Constellation legend">
+                    <span class="omni-legend-item"><span class="omni-chip-glyph" aria-hidden="true">✦</span>Finding</span>
+                    <span class="omni-legend-item"><span class="omni-chip-glyph" aria-hidden="true">◆</span>Decision</span>
+                    <span class="omni-legend-item"><span class="omni-chip-glyph" aria-hidden="true">▲</span>Warning</span>
+                    <span class="omni-legend-item"><span class="omni-chip-glyph" aria-hidden="true">⬡</span>Contract</span>
+                    <span class="omni-legend-item"><span class="omni-chip-glyph" aria-hidden="true">◉</span>Insight</span>
+                    <span class="omni-legend-item"><span class="omni-legend-line" data-edge="published_by" aria-hidden="true"></span>Published</span>
+                    <span class="omni-legend-item"><span class="omni-legend-line" data-edge="consumed_by" aria-hidden="true"></span>Consumed</span>
+                    <span class="omni-legend-item"><span class="omni-legend-line" data-edge="relates_to" aria-hidden="true"></span>Relates</span>
+                  </p>
+                </section>
+                <section class="omni-stage-pane" role="tabpanel" id="omni-pane-dag" aria-labelledby="omni-tab-dag" hidden>
+                  <form class="omni-dag-bar" id="omni-create-branch-form">
+                    <div class="omni-inline-field">
+                      <label for="omni-new-branch-name">New branch</label>
+                      <input id="omni-new-branch-name" type="text" maxlength="120" placeholder="session/experiment" required autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="omni-inline-field">
+                      <label for="omni-new-branch-from">From</label>
+                      <select id="omni-new-branch-from"><option value="main">main</option></select>
+                    </div>
+                    <button class="button compact primary" id="omni-create-branch-submit" type="submit">Create branch</button>
+                    <button class="button compact danger" id="omni-delete-branch" type="button" hidden>Delete active branch</button>
+                  </form>
+                  <div class="omni-dag-host" id="omnigraph-dag-container"></div>
+                </section>
+                <section class="omni-stage-pane" role="tabpanel" id="omni-pane-merge" aria-labelledby="omni-tab-merge" hidden>
+                  <div class="omni-merge-bar">
+                    <div class="omni-inline-field">
+                      <label for="omni-merge-source">Source branch</label>
+                      <select id="omni-merge-source"><option value="">Choose branch…</option></select>
+                    </div>
+                    <span class="omni-merge-arrow" aria-hidden="true">→</span>
+                    <div class="omni-inline-field">
+                      <label for="omni-merge-target">Target branch</label>
+                      <select id="omni-merge-target"><option value="main">main</option></select>
+                    </div>
+                    <button class="button compact" id="omni-merge-preview" type="button">Preview Merge</button>
+                    <button class="button compact primary" id="omni-merge-exec" type="button">Merge into main</button>
+                    <button class="button compact" id="omni-merge-delete" type="button">Merge &amp; Delete Branch</button>
+                  </div>
+                  <div class="omni-merge-host" id="omnigraph-merge-container"></div>
+                </section>
+              </div>
+              <aside class="omni-drawer" aria-label="Context Inspector, Live Pulse, and Publishing">
+                <div class="omni-tabs omni-drawer-tabs" id="omni-drawer-tabs" role="tablist" aria-label="Studio drawer panels" focusgroup="tablist nomemory">
+                  <button type="button" class="omni-tab" role="tab" id="omni-drawer-tab-inspector" data-action="omnigraph-drawer-tab" data-tab="inspector" aria-controls="omni-drawer-inspector" aria-selected="true">Inspector</button>
+                  <button type="button" class="omni-tab" role="tab" id="omni-drawer-tab-pulse" data-action="omnigraph-drawer-tab" data-tab="pulse" aria-controls="omni-drawer-pulse" aria-selected="false">Live Pulse <span class="omni-tab-badge" id="omni-pulse-count">0</span></button>
+                  <button type="button" class="omni-tab" role="tab" id="omni-drawer-tab-publish" data-action="omnigraph-drawer-tab" data-tab="publish" aria-controls="omni-drawer-publish" aria-selected="false">Publish Atom</button>
+                </div>
+                <section class="omni-drawer-pane" role="tabpanel" id="omni-drawer-inspector" aria-labelledby="omni-drawer-tab-inspector">
+                  <div class="omni-search-hits" id="omnigraph-search-hits" hidden></div>
+                  <div class="omni-inspector-body" id="omnigraph-inspector-body">
+                    <p class="empty-note">Select a node, commit, or search hit to inspect its provenance, files, relations, and share controls.</p>
+                  </div>
+                </section>
+                <section class="omni-drawer-pane" role="tabpanel" id="omni-drawer-pulse" aria-labelledby="omni-drawer-tab-pulse" hidden>
+                  <div class="omni-pulse-head">
+                    <span class="omni-pulse-status" id="omni-pulse-status"><span class="omni-pulse-dot" data-live="true" aria-hidden="true"></span>Watching branch changes</span>
+                    <button class="button compact" id="omni-pulse-poll" type="button">Poll now</button>
+                  </div>
+                  <div class="omni-pulse-list" id="omnigraph-pulse-list">
+                    <p class="empty-note">No cross-session context events recorded yet.</p>
+                  </div>
+                </section>
+                <section class="omni-drawer-pane" role="tabpanel" id="omni-drawer-publish" aria-labelledby="omni-drawer-tab-publish" hidden>
+                  <form class="omni-publish-form" id="omni-publish-form">
+                    <div class="omni-form-row">
+                      <div class="field">
+                        <label for="omni-pub-kind">Kind</label>
+                        <select id="omni-pub-kind">
+                          <option value="finding">Finding</option>
+                          <option value="decision">Decision</option>
+                          <option value="warning">Warning</option>
+                          <option value="contract">Contract</option>
+                          <option value="insight">Insight</option>
+                          <option value="artifact">Artifact</option>
+                          <option value="question">Question</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label for="omni-pub-branch">Branch</label>
+                        <select id="omni-pub-branch"><option value="main">main</option></select>
+                      </div>
+                    </div>
+                    <div class="field">
+                      <label for="omni-pub-session">Source session (optional)</label>
+                      <select id="omni-pub-session"><option value="">No specific session</option></select>
+                    </div>
+                    <div class="field">
+                      <label for="omni-pub-title">Title</label>
+                      <input id="omni-pub-title" type="text" maxlength="200" required placeholder="Short, scannable finding or decision title" autocomplete="off">
+                    </div>
+                    <div class="field">
+                      <label for="omni-pub-summary">Summary</label>
+                      <textarea id="omni-pub-summary" rows="2" maxlength="600" required placeholder="1–2 sentence distilled takeaway for other sessions"></textarea>
+                    </div>
+                    <div class="field">
+                      <label for="omni-pub-body">Details (optional)</label>
+                      <textarea id="omni-pub-body" rows="4" maxlength="16000" placeholder="Evidence, rationale, constraints, or verification commands"></textarea>
+                    </div>
+                    <div class="omni-form-row">
+                      <div class="field">
+                        <label for="omni-pub-tags">Tags (comma-separated)</label>
+                        <input id="omni-pub-tags" type="text" maxlength="300" placeholder="auth, migration, api" autocomplete="off">
+                      </div>
+                      <div class="field">
+                        <label for="omni-pub-files">Files (comma-separated)</label>
+                        <input id="omni-pub-files" type="text" maxlength="500" placeholder="src/auth.rs, src/routes.rs" autocomplete="off" spellcheck="false">
+                      </div>
+                    </div>
+                    <div class="field">
+                      <label for="omni-pub-relates">Relates to atom IDs (optional)</label>
+                      <input id="omni-pub-relates" type="text" maxlength="300" placeholder="atom_id_1, atom_id_2" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="omni-form-row">
+                      <div class="field">
+                        <label for="omni-pub-confidence">Confidence (0–1)</label>
+                        <input id="omni-pub-confidence" type="number" min="0" max="1" step="0.05" value="0.9">
+                      </div>
+                      <div class="field">
+                        <label for="omni-pub-pin">Pin priority (0–100)</label>
+                        <input id="omni-pub-pin" type="number" min="0" max="100" step="1" value="50">
+                      </div>
+                    </div>
+                    <button class="button primary" id="omni-pub-submit" type="submit">Publish Context Atom</button>
+                    <p class="knowledge-note" id="omni-pub-status" role="status" hidden></p>
+                    <p class="error-text" id="omni-pub-error" role="alert" hidden></p>
+                  </form>
+                </section>
+              </aside>
+            </div>
+          </section>
+        </div>
+      </section>
       <section class="view" id="kit3-view" aria-label="Open Source Kit" hidden><iframe id="kit3-frame" class="catalog-frame" title="Open Source Kit resource catalog"></iframe></section>
       <noscript><p class="connection-loading">This local Harness interface needs JavaScript to connect to the runner.</p></noscript>
     </main>
@@ -686,6 +987,35 @@
     <p class="knowledge-note" id="graph-explanation-status" role="status"></p>
     <p class="error-text" id="graph-explanation-error" role="alert" hidden></p>
     <div class="knowledge-result graph-explanation-answer" id="graph-explanation-answer" tabindex="0" hidden></div>
+  </dialog>
+  <dialog class="folder-picker omni-settings-dialog" id="omni-settings-dialog" aria-labelledby="omni-settings-title" aria-describedby="omni-settings-description">
+    <div class="folder-picker-head"><h2 id="omni-settings-title">Omnigraph Connection</h2><button class="button" id="omni-settings-close" type="button">Close</button></div>
+    <p class="knowledge-note" id="omni-settings-description">Switch runtime mode, apply the Harness context schema, or connect to an external Omnigraph server.</p>
+    <div class="omni-settings-actions">
+      <button class="button" id="omni-dlg-install" type="button">Install Local v0.15.0</button>
+      <button class="button" id="omni-dlg-start-local" type="button">Start Local Sidecar</button>
+      <button class="button" id="omni-dlg-start-docker" type="button">Start Docker</button>
+      <button class="button" id="omni-dlg-apply-schema" type="button">Apply Schema</button>
+      <button class="button danger" id="omni-dlg-stop" type="button">Stop Sidecar</button>
+    </div>
+    <form id="omni-dlg-connect-form" class="omni-connect-form">
+      <div class="field">
+        <label for="omni-dlg-endpoint">External server endpoint</label>
+        <input id="omni-dlg-endpoint" type="text" maxlength="500" placeholder="http://127.0.0.1:8080" required autocomplete="off" spellcheck="false" aria-describedby="omni-dlg-endpoint-hint omni-dlg-error">
+        <span class="workspace-helper" id="omni-dlg-endpoint-hint">Requires Omnigraph HTTP API 0.14.</span>
+      </div>
+      <div class="field">
+        <label for="omni-dlg-token">Bearer token (optional)</label>
+        <input id="omni-dlg-token" type="password" maxlength="500" placeholder="Bearer token" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="omni-dlg-graph">Graph ID (optional)</label>
+        <input id="omni-dlg-graph" type="text" maxlength="120" placeholder="harness-context" autocomplete="off" spellcheck="false">
+      </div>
+      <button class="button primary" id="omni-dlg-connect-submit" type="submit">Connect External Server</button>
+    </form>
+    <p class="knowledge-note" id="omni-dlg-status" role="status" hidden></p>
+    <p class="error-text" id="omni-dlg-error" role="alert" hidden></p>
   </dialog>
   <script type="module" src="/boot.js"></script>
 </body>

@@ -16,6 +16,7 @@ mod inbox;
 mod knowledge;
 mod management;
 mod model;
+mod omnigraph;
 pub(crate) mod omnigraph_canvas;
 mod run;
 mod session;
@@ -107,6 +108,7 @@ pub fn start() -> Result<(), JsValue> {
                     || knowledge::key_event(key)
                     || graph_map::key(key)
                     || system_map::key(key)
+                    || omnigraph::key(key)
                 {
                     event.prevent_default();
                     return;
@@ -121,6 +123,7 @@ pub fn start() -> Result<(), JsValue> {
                     dom::attr("menu-toggle", "aria-expanded", "false");
                     dom::dialog("folder-picker", false);
                     dom::dialog("merge-picker", false);
+                    dom::dialog("omni-settings-dialog", false);
                 }
                 session::resize_key(key);
                 return;
@@ -138,7 +141,10 @@ pub fn start() -> Result<(), JsValue> {
                     run::pointer_down(&target);
                     activity::pointer_down(&target);
                 }
-                if !graph_map::pointer_event(&k, &event) && !system_map::pointer_event(&k, &event) {
+                if !graph_map::pointer_event(&k, &event)
+                    && !system_map::pointer_event(&k, &event)
+                    && !omnigraph::pointer_event(&k, &event)
+                {
                     session::resize_event(&k, &event);
                 }
                 return;
@@ -171,6 +177,24 @@ pub fn start() -> Result<(), JsValue> {
                 let path = element.get_attribute("data-path").unwrap_or_default();
                 if !svc.is_empty() || !path.is_empty() {
                     payload = serde_json::json!({ "service": svc, "path": path });
+                }
+            }
+            if payload.is_null() && action.starts_with("omnigraph-") {
+                let mut map = serde_json::Map::new();
+                for (key, attr) in [
+                    ("node_id", "data-node-id"),
+                    ("commit_id", "data-commit-id"),
+                    ("branch", "data-branch"),
+                    ("atom_id", "data-atom-id"),
+                    ("kind", "data-kind"),
+                    ("tab", "data-tab"),
+                ] {
+                    if let Some(val) = element.get_attribute(attr) {
+                        map.insert(key.into(), V::String(val));
+                    }
+                }
+                if !map.is_empty() {
+                    payload = V::Object(map);
                 }
             }
             if let Some(view) = element.get_attribute("data-view").or_else(|| {
@@ -206,6 +230,7 @@ pub fn start() -> Result<(), JsValue> {
     }
     graph_map::attach_wheel_listeners();
     system_map::attach_wheel_listeners();
+    omnigraph::attach_wheel_listeners();
     let pop = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
         spawn_local(async {
             let view = dom::hash_view();
@@ -231,6 +256,7 @@ pub fn start() -> Result<(), JsValue> {
     let visibility = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
         run::visibility();
         knowledge::visibility();
+        omnigraph::visibility();
         if !dom::document().hidden() {
             spawn_local(async {
                 session::sign_in(true).await;
@@ -245,6 +271,7 @@ pub fn start() -> Result<(), JsValue> {
     session::initialize();
     knowledge::initialize();
     management::initialize();
+    omnigraph::initialize();
     spawn_local(async {
         session::bootstrap().await;
     });
@@ -286,6 +313,9 @@ async fn dispatch(
         return;
     }
     if session::event(kind, id, action, &payload, &value, checked).await {
+        return;
+    }
+    if omnigraph::event(kind, id, action, &payload, &value, checked).await {
         return;
     }
     if commands::event(kind, id, action, &payload, &value).await {
