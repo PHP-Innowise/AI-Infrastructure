@@ -1439,12 +1439,33 @@ fn extract_canvas_edge(edge: &Value) -> Option<CanvasEdge> {
     if from.is_empty() || to.is_empty() {
         return None;
     }
-    let top_rel = str_field(edge, &["relation", "kind", "type", "@type"]);
+    let edge_kind = str_field(edge, &["kind", "type", "@type"]);
+    let top_rel = str_field(edge, &["relation"]);
     let prop_rel = props
         .map(|p| str_field(p, &["relation", "rel_kind", "relation_kind", "kind"]))
         .unwrap_or_default();
-    let raw_rel = if !top_rel.is_empty() {
-        top_rel
+    let kind_snake = to_snake_token(&edge_kind);
+    let is_structural_kind = matches!(
+        kind_snake.as_str(),
+        "session_follows"
+            | "follows"
+            | "published_by"
+            | "published"
+            | "consumed_by"
+            | "consumed"
+            | "touches_file"
+            | "touches"
+            | "mentions_symbol"
+            | "mentions"
+            | "derived_from"
+            | "derived"
+    );
+    let raw_rel = if is_structural_kind {
+        edge_kind
+    } else if !top_rel.is_empty() {
+        top_rel.clone()
+    } else if !edge_kind.is_empty() {
+        edge_kind
     } else if !prop_rel.is_empty() {
         prop_rel.clone()
     } else {
@@ -1456,7 +1477,12 @@ fn extract_canvas_edge(edge: &Value) -> Option<CanvasEdge> {
                 .map(|p| str_field(p, &["subkind", "rel_kind", "relation_kind", "label"]))
                 .unwrap_or_default()
         });
-    if subkind.is_empty() && !prop_rel.is_empty() && prop_rel != raw_rel {
+    if subkind.is_empty()
+        && !top_rel.is_empty()
+        && to_snake_token(&top_rel) != to_snake_token(&raw_rel)
+    {
+        subkind = top_rel;
+    } else if subkind.is_empty() && !prop_rel.is_empty() && prop_rel != raw_rel {
         subkind = prop_rel;
     }
     let (relation, subkind, arrow_key, label) = normalize_edge_relation(&raw_rel, &subkind);
@@ -3706,7 +3732,8 @@ mod tests {
             "atoms": [],
             "files": [],
             "edges": [
-                { "from": "s-beta", "to": "s-alpha", "relation": "SessionFollows" }
+                { "from": "s-beta", "to": "s-alpha", "kind": "session_follows", "relation": "shared_branch" },
+                { "from": "s-alpha", "to": "s-beta", "type": "SessionFollows", "relation": "broadcast" }
             ]
         });
         let res = render_constellation(
@@ -3720,11 +3747,12 @@ mod tests {
             &CanvasViewport::default(),
         );
         assert_eq!(res.node_count, 2);
-        assert_eq!(res.edge_count, 1);
+        assert_eq!(res.edge_count, 2);
         assert!(res.html.contains("omni-space-pill"));
         assert!(res.html.contains("shared/sprint-auth"));
         assert!(res.html.contains("omni-edge-session_follows"));
         assert!(res.html.contains("url(#omni-arrow-session_follows)"));
+        assert!(!res.html.contains("omni-edge-relates_to"));
         assert!(res.html.contains(">follows<"));
         assert_no_inline_hex_colors(&res.html);
     }
