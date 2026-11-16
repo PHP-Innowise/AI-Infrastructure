@@ -1701,6 +1701,53 @@ async fn http_omnigraph_routes_end_to_end_and_share_via_app_router() {
         active_after["events"]
     );
 
+    // 11. Merging a session's Omnigraph branch persists merge_status and returns updated `session`
+    let active_branch = active_after["session"]["omnigraph"]["branch"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, pub_active) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/atoms",
+            Some(json!({
+                "project_id": fx.project_id,
+                "branch": active_branch,
+                "atom_id": "atom-active-merge-1",
+                "kind": "finding",
+                "title": "Persist merge_status onto session",
+                "summary": "Manual branch merge updates session omnigraph metadata."
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{pub_active}");
+    let (status, merge_res) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/branches",
+            Some(json!({
+                "action": "merge",
+                "project_id": fx.project_id,
+                "source": active_branch,
+                "target": "main",
+                "dry_run": false,
+                "delete_branch": false
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{merge_res}");
+    assert_eq!(merge_res["ok"], true);
+    assert_eq!(
+        merge_res["session"]["omnigraph"]["merge_status"],
+        merge_res["outcome"]
+    );
+    assert_eq!(
+        fx.store.get(&active_sid).unwrap()["omnigraph"]["merge_status"],
+        merge_res["outcome"]
+    );
+
     fx.shutdown().await;
     mock_task.abort();
 }

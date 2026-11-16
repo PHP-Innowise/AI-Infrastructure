@@ -2282,14 +2282,38 @@ impl OmnigraphManager {
     ) -> Result<Value> {
         let client = self.client().await?;
         let target_branch = clean_opt(branch).unwrap_or("main").to_string();
-        let query = ChangeFeedQuery {
+        let fresh_query = ChangeFeedQuery {
             branch: Some(target_branch.clone()),
-            cursor: clean_opt(cursor).map(str::to_string),
-            start: clean_opt(cursor).is_none().then(|| "beginning".to_string()),
+            cursor: None,
+            start: Some("beginning".to_string()),
             page_token: None,
             limit: Some(100),
         };
-        let feed = match client.changes(&query).await {
+        let mut cursor_reset = false;
+        let feed_res = if let Some(cur) = clean_opt(cursor) {
+            let query = ChangeFeedQuery {
+                branch: Some(target_branch.clone()),
+                cursor: Some(cur.to_string()),
+                start: None,
+                page_token: None,
+                limit: Some(100),
+            };
+            match client.changes(&query).await {
+                Ok(feed) => Ok(feed),
+                Err(err)
+                    if err.is_change_feed_gap()
+                        || err.status == 400
+                        || err.code.as_deref() == Some("change_cursor_rejected") =>
+                {
+                    cursor_reset = true;
+                    client.changes(&fresh_query).await
+                }
+                Err(err) => Err(err),
+            }
+        } else {
+            client.changes(&fresh_query).await
+        };
+        let feed = match feed_res {
             Ok(feed) => feed,
             Err(err) if err.is_change_feed_gap() => {
                 let baseline = client
@@ -2388,6 +2412,7 @@ impl OmnigraphManager {
         Ok(json!({
             "cursor": feed.cursor,
             "caught_up": feed.caught_up.unwrap_or(true),
+            "reset": cursor_reset,
             "events": events,
         }))
     }
@@ -2835,11 +2860,7 @@ fn diff_edge_entry(ch: &super::client::EntityChange) -> Value {
         .or_else(|| str_field(&props, "to"))
         .or_else(|| str_field(&props, "target_id"))
         .unwrap_or_default();
-    let relation = str_field(&props, "relation")
-        .or_else(|| str_field(&props, "role"))
-        .or_else(|| str_field(&props, "injection_mode"))
-        .or_else(|| str_field(&props, "access"))
-        .unwrap_or_else(|| ch.entity_type.name.clone());
+    let relation = diff_edge_relation(&ch.entity_type.name, &props);
     json!({
         "id": ch.id,
         "type": ch.entity_type.name,
@@ -2850,6 +2871,31 @@ fn diff_edge_entry(ch: &super::client::EntityChange) -> Value {
         "endpoints": endpoints,
         "properties": props,
     })
+}
+
+fn diff_edge_relation(entity_type: &str, props: &Value) -> String {
+    if entity_type == "RelatesTo" {
+        str_field(props, "relation").unwrap_or_else(|| "relates_to".to_string())
+    } else {
+        pascal_to_snake(entity_type)
+    }
+}
+
+fn pascal_to_snake(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 4);
+    for (idx, ch) in raw.chars().enumerate() {
+        if ch.is_uppercase() {
+            if idx > 0 {
+                out.push('_');
+            }
+            for lower in ch.to_lowercase() {
+                out.push(lower);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn enrich_commit_change(ch: &super::client::EntityChange) -> Value {
@@ -2887,24 +2933,33 @@ fn enrich_commit_change(ch: &super::client::EntityChange) -> Value {
     Value::Object(obj)
 }
 
+fn normalize_relation_name(raw: &str) -> Option<String> {
+    let normalized = match raw.trim().to_ascii_lowercase().as_str() {
+        "relates_to" | "related" => "supports".to_string(),
+        other => other.to_string(),
+    };
+    VALID_RELATIONS
+        .contains(&normalized.as_str())
+        .then_some(normalized)
+}
+
 fn parse_relation_entry(rel: &Value) -> Option<(String, String, Option<String>, Option<f64>)> {
     if let Some(raw) = rel.as_str().map(str::trim).filter(|s| !s.is_empty()) {
         if let Some((prefix, rest)) = raw.split_once(':') {
-            let p = prefix.trim().to_ascii_lowercase();
             let target = rest.trim();
-            if VALID_RELATIONS.contains(&p.as_str()) && !target.is_empty() {
-                return Some((target.to_string(), p, None, None));
+            if !target.is_empty()
+                && let Some(relation) = normalize_relation_name(prefix)
+            {
+                return Some((target.to_string(), relation, None, None));
             }
         }
         return Some((raw.to_string(), "supports".to_string(), None, None));
     }
     let target_id = clean_opt(rel["target_id"].as_str().or_else(|| rel["id"].as_str()))?;
-    let relation = clean_opt(rel["relation"].as_str())
-        .unwrap_or("supports")
-        .to_ascii_lowercase();
-    if !VALID_RELATIONS.contains(&relation.as_str()) {
-        return None;
-    }
+    let relation = match clean_opt(rel["relation"].as_str()) {
+        Some(raw) => normalize_relation_name(raw)?,
+        None => "supports".to_string(),
+    };
     Some((
         target_id.to_string(),
         relation,

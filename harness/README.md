@@ -2618,7 +2618,7 @@ Operating modes persisted at `<state>/omnigraph.json` (plus auto-generated clust
 
 - **Off** (`off`): disabled; existing Brain and Memory Bank workflows behave identically.
 - **Local sidecar** (`local_sidecar`): installs or runs `omnigraph` / `omnigraph-server` (`<state>/tools/omnigraph/v0.15.0/`) locally on loopback.
-- **Docker** (`docker`): runs the managed container (`ghcr.io/modernrelay/omnigraph:v0.15.0`).
+- **Docker** (`docker`): runs the managed container (`ghcr.io/modernrelay/omnigraph-server:v0.15.0`).
 - **External** (`external`): connects with bearer token auth to an existing Omnigraph endpoint.
 
 ### Session lifecycle
