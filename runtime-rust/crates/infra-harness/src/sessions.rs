@@ -2721,6 +2721,73 @@ pub(crate) async fn sync_omnigraph_share_to_session(
     Some(patched)
 }
 
+/// Update `session["omnigraph"]["merge_status"]` and emit a session event when
+/// `omnigraph.branch_act` (`action == "merge"`) successfully merges a session branch.
+pub(crate) fn sync_omnigraph_merge_to_session(
+    store: &SessionStore,
+    body: &Value,
+    merge_result: &Value,
+) -> Option<Value> {
+    if merge_result["ok"] != true
+        || merge_result["action"] != "merge"
+        || merge_result["dry_run"] == true
+    {
+        return None;
+    }
+    let outcome = merge_result["outcome"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "conflict")?;
+    let source = merge_result["source"]
+        .as_str()
+        .or_else(|| body["source"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let explicit_sid = body["session_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let session = if let Some(sid) = explicit_sid {
+        store.get(sid).ok()?
+    } else {
+        let src = source?;
+        let matched = store.summaries().ok()?.into_iter().find(|s| {
+            s["omnigraph"]["branch"].as_str() == Some(src)
+                || s["id"]
+                    .as_str()
+                    .is_some_and(|id| crate::omnigraph::session_branch_name(id) == src)
+        })?;
+        let sid = matched["id"].as_str()?;
+        store.get(sid).ok()?
+    };
+
+    let sid = session["id"].as_str()?.to_owned();
+    let mut omni = if session["omnigraph"].is_object() {
+        session["omnigraph"].clone()
+    } else {
+        json!({ "enabled": true })
+    };
+    omni["merge_status"] = json!(outcome);
+    omni["last_error"] = Value::Null;
+    let patched = store.patch(&sid, &json!({ "omnigraph": omni })).ok()?;
+    let branch = source.unwrap_or("main");
+    let target = merge_result["target"].as_str().unwrap_or("main");
+    let _ = store.event(
+        &sid,
+        &json!({
+            "kind": "omnigraph",
+            "phase": "merge",
+            "ok": true,
+            "branch": branch,
+            "target": target,
+            "merge_status": outcome,
+            "text": format!("Merged Omnigraph branch `{branch}` into `{target}` ({outcome})."),
+        }),
+    );
+    Some(patched)
+}
+
 struct CancelRelay(tokio::task::JoinHandle<()>);
 impl Drop for CancelRelay {
     fn drop(&mut self) {

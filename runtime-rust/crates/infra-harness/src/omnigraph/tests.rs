@@ -2009,6 +2009,7 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
                     "relates_to": [
                         published_atom_id,
                         format!("refines:{published_atom_id}"),
+                        { "target_id": "atom-relates-fallback", "relation": "relates_to" },
                         { "target_id": published_atom_id, "relation": "depends_on" }
                     ]
                 }
@@ -2055,7 +2056,14 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
             .iter()
             .filter(|e| e["kind"] == "relates_to")
             .count()
-            >= 3
+            >= 4
+    );
+    assert!(
+        graph_json["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["to"] == "atom-relates-fallback" && e["relation"] == "supports")
     );
     assert!(!graph_json["branches"].as_array().unwrap().is_empty());
     assert_eq!(

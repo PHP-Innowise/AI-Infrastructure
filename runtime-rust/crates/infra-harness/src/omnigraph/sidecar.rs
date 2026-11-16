@@ -2887,24 +2887,33 @@ fn enrich_commit_change(ch: &super::client::EntityChange) -> Value {
     Value::Object(obj)
 }
 
+fn normalize_relation_name(raw: &str) -> Option<String> {
+    let normalized = match raw.trim().to_ascii_lowercase().as_str() {
+        "relates_to" | "related" => "supports".to_string(),
+        other => other.to_string(),
+    };
+    VALID_RELATIONS
+        .contains(&normalized.as_str())
+        .then_some(normalized)
+}
+
 fn parse_relation_entry(rel: &Value) -> Option<(String, String, Option<String>, Option<f64>)> {
     if let Some(raw) = rel.as_str().map(str::trim).filter(|s| !s.is_empty()) {
         if let Some((prefix, rest)) = raw.split_once(':') {
-            let p = prefix.trim().to_ascii_lowercase();
             let target = rest.trim();
-            if VALID_RELATIONS.contains(&p.as_str()) && !target.is_empty() {
-                return Some((target.to_string(), p, None, None));
+            if !target.is_empty()
+                && let Some(relation) = normalize_relation_name(prefix)
+            {
+                return Some((target.to_string(), relation, None, None));
             }
         }
         return Some((raw.to_string(), "supports".to_string(), None, None));
     }
     let target_id = clean_opt(rel["target_id"].as_str().or_else(|| rel["id"].as_str()))?;
-    let relation = clean_opt(rel["relation"].as_str())
-        .unwrap_or("supports")
-        .to_ascii_lowercase();
-    if !VALID_RELATIONS.contains(&relation.as_str()) {
-        return None;
-    }
+    let relation = match clean_opt(rel["relation"].as_str()) {
+        Some(raw) => normalize_relation_name(raw)?,
+        None => "supports".to_string(),
+    };
     Some((
         target_id.to_string(),
         relation,

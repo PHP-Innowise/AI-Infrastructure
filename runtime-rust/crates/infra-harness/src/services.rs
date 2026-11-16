@@ -249,6 +249,23 @@ impl Services for NativeServices {
                         json!({"session_id":sid,"sdd":session["sdd"],"files":crate::sdd::artifacts(std::path::Path::new(session["project_path"].as_str().unwrap_or("")),&session["sdd"])?}),
                     ))
                 }
+                "omnigraph.branch_act" => {
+                    let domain = self.domains.get("omnigraph").ok_or_else(|| {
+                        HarnessError::unavailable("Required native service is unavailable.")
+                    })?;
+                    let mut payload = domain.execute(operation, request.clone()).await?;
+                    if let Payload::Json(ref mut val) = payload
+                        && let Some(updated_session) =
+                            crate::sessions::sync_omnigraph_merge_to_session(
+                                &self.store,
+                                &request["body"],
+                                val,
+                            )
+                    {
+                        val["session"] = updated_session;
+                    }
+                    Ok(payload)
+                }
                 "omnigraph.share" => {
                     let domain = self.domains.get("omnigraph").ok_or_else(|| {
                         HarnessError::unavailable("Required native service is unavailable.")
