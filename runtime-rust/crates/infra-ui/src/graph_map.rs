@@ -5542,6 +5542,7 @@ pub fn canvas_with_overlays(
             "<span class=\"graph-map-caption\" style=\"top:{apart:.0}px\">Not linked to anything here</span>"
         ));
     }
+    let blast = blast_marks(view, &nodes);
     for (index, node) in nodes.iter().enumerate() {
         let placed = &plan.nodes[index];
         let folder = m::yes(&node["folder"]);
@@ -5600,6 +5601,29 @@ pub fn canvas_with_overlays(
             (true, true) => " data-circle=\"through\"",
             (true, false) => " data-circle=\"inside\"",
             _ => "",
+        };
+        // Where it stands among the changes the failing tests reach.
+        let suspect = node["suspect"]["rank"].as_u64();
+        if let Some(rank) = suspect {
+            label.push_str(&match node["suspect"]["files"].as_u64() {
+                Some(files) => format!(
+                    ", holds {} the failing tests reach, the first ranked {rank}",
+                    plural(files, "changed file", "changed files")
+                ),
+                None => format!(", ranked {rank} among the changes by the failing tests"),
+            });
+        }
+        // What a change to the selected place leaves here.
+        let blast_attr = match blast[index] {
+            Some((hop, left)) => {
+                label.push_str(&format!(
+                    ", a change to the selected place reaches it in {}, {} % of it",
+                    plural(hop, "link", "links"),
+                    (left * 100.0).round() as u64
+                ));
+                format!(" data-blast=\"{hop}\"")
+            }
+            None => String::new(),
         };
         // Of a path, a box that lies on a longer way only.
         let detour_attr = if m::yes(&node["detour"]) {
@@ -5820,6 +5844,12 @@ pub fn canvas_with_overlays(
         } else {
             architecture
         };
+        let position = match blast[index] {
+            Some((_, left)) => {
+                position.replacen(" style=\"", &format!(" style=\"--blast:{left:.2};"), 1)
+            }
+            None => position,
+        };
         let mut pattern_node_attrs = String::new();
         if patterns > 0 {
             pattern_node_attrs.push_str(" data-has-patterns=\"true\"");
@@ -5867,7 +5897,7 @@ pub fn canvas_with_overlays(
             ""
         };
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark}{focus_target_attr}{circle_attr}{detour_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{position} title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>{node_vis_pill}",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark}{focus_target_attr}{circle_attr}{detour_attr}{blast_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{position} title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>{node_vis_pill}",
             payload(&node_payload),
             escape(kind),
             opened && !symbol,
@@ -5985,6 +6015,14 @@ pub fn canvas_with_overlays(
             html.push_str(&format!(
                 "<span class=\"graph-map-node-detail\" aria-hidden=\"true\">{}</span>",
                 escape(&detail)
+            ));
+        }
+        if !blast_attr.is_empty() {
+            html.push_str("<span class=\"graph-map-node-blast\" aria-hidden=\"true\"></span>");
+        }
+        if let Some(rank) = suspect {
+            html.push_str(&format!(
+                "<span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#{rank}</span>"
             ));
         }
         html.push_str("</button>");
@@ -6254,6 +6292,137 @@ fn circle_told(circle: &V, folder: bool) -> Option<String> {
 /// The circles of files that touch what is open, the largest first. Each
 /// is shown as the shortest cycle through the file that has most to do
 /// with the others.
+fn blast_side(view: &V) -> String {
+    let blast = &view["focus"]["blast"];
+    if !blast.is_object() {
+        return String::new();
+    }
+    let number = |key: &str| blast[key].as_u64().unwrap_or(0);
+    let (files, hops) = (number("files"), number("hops"));
+    let mut html = format!(
+        "<h4>A change here reaches <span class=\"graph-map-total\">{}</span></h4>",
+        count(files)
+    );
+    if files == 0 {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">Nothing else uses it within {}.</p>",
+            plural(hops, "link", "links")
+        ));
+        return html;
+    }
+    // How many files each link further first reaches.
+    let steps = m::array(&blast["by_hop"])
+        .iter()
+        .filter(|row| row["files"].as_u64().unwrap_or(0) > 0)
+        .map(|row| {
+            format!(
+                "{} at {}",
+                count(row["files"].as_u64().unwrap_or(0)),
+                plural(row["hop"].as_u64().unwrap_or(0), "link", "links")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tests = number("tests");
+    html.push_str(&format!(
+        "<p class=\"knowledge-note\">Files that use it, and what uses those, up to {} away: {steps}.{} Each link passes on less of a change than it receives: a type built on it and a call most, an import little, a guessed link less; past an interface the type implements, less again. The bar under a box says how much is left there.{}</p>",
+        plural(hops, "link", "links"),
+        match tests {
+            0 => String::new(),
+            1 => " 1 of them is a test.".to_owned(),
+            tests => format!(" {} of them are tests.", count(tests)),
+        },
+        if m::yes(&blast["cut"]) {
+            " The walk stopped before the end: there is more."
+        } else {
+            ""
+        },
+    ));
+    html.push_str("<ul class=\"graph-map-rows\">");
+    for row in m::array(&blast["listed"]) {
+        let path = m::text(&row, "path");
+        let folder = parent(&path);
+        let hop = row["hop"].as_u64().unwrap_or(0);
+        let left = (row["left"].as_f64().unwrap_or(0.0) * 100.0).round() as u64;
+        let through = m::yes(&row["through"]);
+        html.push_str(&format!(
+            "<li><button type=\"button\" class=\"graph-map-row\" data-blast-hop=\"{hop}\" data-action=\"graph-map-open\" data-payload=\"{}\" title=\"{} · reached at {} by {}{} · select to open it\"><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{}{} · {left} %{}{}</span></button></li>",
+            payload(&row["path"]),
+            escape(&path),
+            escape(&m::text(&row, "name")),
+            escape(&m::text(&row, "via")),
+            if through { " through an interface" } else { "" },
+            escape(base(&path)),
+            if folder.is_empty() {
+                String::new()
+            } else {
+                format!("{} · ", escape(folder))
+            },
+            plural(hop, "link", "links"),
+            if through { " · past an interface" } else { "" },
+            if m::yes(&row["test"]) { " · test" } else { "" },
+        ));
+    }
+    html.push_str("</ul>");
+    let more = number("more");
+    if more > 0 {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">and {} more</p>",
+            count(more)
+        ));
+    }
+    html
+}
+/// What a change to the selected place reaches of each box of a picture:
+/// the fewest links to it and the most of the change left there. A file is
+/// told by itself, a name by its file, a folder by the most reached file in
+/// it. The selected box is told nothing.
+fn blast_marks(view: &V, nodes: &[V]) -> Vec<Option<(u64, f64)>> {
+    let marked = m::array(&view["focus"]["blast"]["marked"])
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row[0].as_str()?.to_owned(),
+                row[1].as_u64()?,
+                row[2].as_f64()?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if marked.is_empty() {
+        return vec![None; nodes.len()];
+    }
+    let focus = m::text(&view["focus"], "path");
+    nodes
+        .iter()
+        .map(|node| {
+            let path = m::text(node, "path");
+            if path == focus {
+                return None;
+            }
+            let folder = m::yes(&node["folder"]);
+            let file = node["file"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| strip_symbol_suffix(&path).to_owned());
+            marked
+                .iter()
+                .filter(|(reached, ..)| {
+                    if folder {
+                        reached
+                            .strip_prefix(path.as_str())
+                            .is_some_and(|rest| rest.starts_with('/'))
+                    } else {
+                        *reached == file
+                    }
+                })
+                .fold(None, |best: Option<(u64, f64)>, (_, hop, left)| {
+                    Some(best.map_or((*hop, *left), |(near, most)| {
+                        (near.min(*hop), most.max(*left))
+                    }))
+                })
+        })
+        .collect()
+}
 fn circles_side(view: &V) -> String {
     let circles = &view["circles"];
     let listed = m::array(&circles["listed"]);
@@ -11260,6 +11429,145 @@ pub fn key(e: &web_sys::KeyboardEvent) -> bool {
         _ => false,
     }
 }
+/// How many failing tests a picture of a change may be told of, and how
+/// long a name of one may be.
+const FAILING: usize = 64;
+const FAILING_NAME: usize = 300;
+/// The failing tests a person pasted: a test, a path or a line of the
+/// output of a test run on each line, each once, as many as are taken.
+pub fn failing_lines(text: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || lines.iter().any(|known| known == line) {
+            continue;
+        }
+        lines.push(line.chars().take(FAILING_NAME).collect());
+        if lines.len() == FAILING {
+            break;
+        }
+    }
+    lines
+}
+/// The changed files ranked by the tests that fail: a field to paste the
+/// failing tests into, and what the server made of them.
+fn suspects_side(view: &V, state: &V, surface: MapSurface) -> String {
+    if !changes(view) {
+        return String::new();
+    }
+    let named = m::array(&state["failing"])
+        .into_iter()
+        .filter_map(|told| told.as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let suspects = &view["suspects"];
+    let mut html = String::from("<h4>Failing tests</h4>");
+    if suspects.is_object() {
+        let failing = m::array(&suspects["failing"]);
+        let rows = m::array(&suspects["rows"]);
+        if failing.is_empty() {
+            html.push_str("<p class=\"knowledge-note\">None of the names is a test file of this graph. A test is found by its path, or by the name of its file standing as a word of its own.</p>");
+        } else if rows.is_empty() {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">No changed file is reached by {}.</p>",
+                match failing.len() {
+                    1 => "the failing test".to_owned(),
+                    many => format!("the {} failing tests", count(many as u64)),
+                }
+            ));
+        } else {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">The changed files that {} reach{}, first those that the failing tests reach and the passing ones do not. The graph stands in for what a test runs: this says where to look first, not what broke.</p><ol class=\"graph-map-rows graph-suspects\">",
+                plural(failing.len() as u64, "failing test file", "failing test files"),
+                if failing.len() == 1 { "es" } else { "" },
+            ));
+            for row in &rows {
+                let path = m::text(row, "path");
+                let folder = parent(&path);
+                let (fail, pass, nearest) = (
+                    row["failing"].as_u64().unwrap_or(0),
+                    row["passing"].as_u64().unwrap_or(0),
+                    row["nearest"].as_u64().unwrap_or(0),
+                );
+                let rank = row["rank"].as_u64().unwrap_or(0);
+                html.push_str(&format!(
+                    "<li><button type=\"button\" class=\"graph-map-row\" data-suspect-rank=\"{rank}\" data-action=\"graph-map-node\" data-payload=\"{}\" title=\"{} · select it in the picture\"><span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#{rank}</span><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{}{} of {} failing, {} passing · {} from a failing test</span></button></li>",
+                    payload(&row["path"]),
+                    escape(&path),
+                    escape(base(&path)),
+                    if folder.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} · ", escape(folder))
+                    },
+                    count(fail),
+                    count(failing.len() as u64),
+                    count(pass),
+                    plural(nearest, "link", "links"),
+                ));
+            }
+            html.push_str("</ol>");
+            let more = suspects["more"].as_u64().unwrap_or(0);
+            if more > 0 {
+                html.push_str(&format!(
+                    "<p class=\"knowledge-note\">and {} more</p>",
+                    count(more)
+                ));
+            }
+        }
+        let clear = suspects["clear"].as_u64().unwrap_or(0);
+        if clear > 0 && !failing.is_empty() {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">No failing test reaches {}.</p>",
+                plural(clear, "other changed file", "other changed files")
+            ));
+        }
+        let unmatched = m::array(&suspects["unmatched"])
+            .iter()
+            .filter_map(|told| told.as_str().map(escape))
+            .collect::<Vec<_>>();
+        if !unmatched.is_empty() {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">No test file found for: {}.</p>",
+                unmatched.join(", ")
+            ));
+        }
+        if !m::yes(&suspects["complete"]) {
+            html.push_str("<p class=\"knowledge-note\">The search stopped before the end: some tests may be missing.</p>");
+        }
+    } else if named.is_empty() {
+        html.push_str("<p class=\"knowledge-note\">Paste the tests that fail to rank the changed files by how likely each is behind them.</p>");
+    }
+    let asked = |clear: bool| {
+        // Keys in the order of their names: a payload reads the same whether
+        // or not the map keeps the order keys are put in.
+        payload(&if clear {
+            json!({"clear": true, "surface": surface.name})
+        } else {
+            json!({"surface": surface.name})
+        })
+    };
+    html.push_str(&format!(
+        "<details class=\"graph-suspects-ask\"{}><summary>{}</summary><textarea id=\"{}-failing\" class=\"graph-suspects-field\" rows=\"4\" spellcheck=\"false\" aria-label=\"Failing tests, one on each line\" placeholder=\"One on each line: a test, its file, or a line of the output of a test run\">{}</textarea><div class=\"graph-suspects-actions\"><button type=\"button\" class=\"button compact\" data-action=\"graph-map-failing\" data-payload=\"{}\">Rank the changes</button>{}</div></details>",
+        if named.is_empty() { " open" } else { "" },
+        if named.is_empty() {
+            "Name the failing tests"
+        } else {
+            "Change the failing tests"
+        },
+        surface.id_prefix,
+        escape(&named.join("\n")),
+        asked(false),
+        if named.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-failing\" data-payload=\"{}\">Clear</button>",
+                asked(true)
+            )
+        },
+    ));
+    html
+}
 fn test_paths(view: &V) -> String {
     let rows = m::array(&view["test_reach"]);
     if rows.is_empty() {
@@ -13832,6 +14140,14 @@ pub fn build_scoped_map_path(scope: &GraphTargetScope, state: &V, embedded: bool
             query.push((key, json!(places).to_string()));
         }
     }
+    let failing = m::array(&state["failing"])
+        .iter()
+        .filter_map(|told| told.as_str().map(str::to_owned))
+        .take(FAILING)
+        .collect::<Vec<_>>();
+    if !target.is_empty() && !failing.is_empty() {
+        query.push(("failing", json!(failing).to_string()));
+    }
     if let Some(origin) = state["scenario"].as_str() {
         query.push(("scenario", origin.to_owned()));
         query.push((
@@ -13960,7 +14276,7 @@ fn map_side_html(
     }
     let details_body = if let Some(impact) = impact_doc.as_ref() {
         format!(
-            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}{}",
+            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}{}{}{}",
             choosing(state),
             paging(view),
             run_comparison(view),
@@ -13971,7 +14287,9 @@ fn map_side_html(
                 surface.name,
                 &m::text(state, "member_filter")
             ),
+            blast_side(view),
             without_incoming_side(view),
+            suspects_side(view, state, surface),
             test_paths(view),
             history_side(view),
             circles_side(view),
@@ -13981,13 +14299,15 @@ fn map_side_html(
     } else if let Some(focused_path) = active_focus.as_deref() {
         if view["focus"].is_object() {
             format!(
-                "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}<p class=\"knowledge-note\">Reading dependency impact…</p>{}{}{}{}{}",
+                "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}<p class=\"knowledge-note\">Reading dependency impact…</p>{}{}{}{}{}{}{}",
                 choosing(state),
                 paging(view),
                 run_comparison(view),
                 shell_reads(view),
                 side(view),
+                blast_side(view),
                 without_incoming_side(view),
+                suspects_side(view, state, surface),
                 test_paths(view),
                 history_side(view),
                 circles_side(view),
@@ -14014,13 +14334,15 @@ fn map_side_html(
         "<p class=\"knowledge-note\">Select a file or folder on the map to inspect its dependencies and change impact.</p>".to_owned()
     } else {
         format!(
-            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}{}",
+            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}{}{}{}",
             choosing(state),
             paging(view),
             run_comparison(view),
             shell_reads(view),
             side(view),
+            blast_side(view),
             without_incoming_side(view),
+            suspects_side(view, state, surface),
             test_paths(view),
             history_side(view),
             circles_side(view),
@@ -15032,6 +15354,19 @@ pub async fn event(
         )
     {
         switch_kinds(action, payload);
+        return true;
+    }
+    // The failing tests of a change are read from their field when they
+    // are asked to rank it, or dropped.
+    if kind == "click" && action == "graph-map-failing" && payload["surface"] == "modal" {
+        let mut asked = state();
+        asked["failing"] = if m::yes(&payload["clear"]) {
+            json!([])
+        } else {
+            json!(failing_lines(&dom::value("graph-map-failing")))
+        };
+        m::set("graph-map", asked);
+        load(false).await;
         return true;
     }
     if id.starts_with("session-graph-")
@@ -17059,6 +17394,19 @@ fn handle_surface_click(surface: MapSurface, id: &str, action: &str, payload: &V
         let owned = payload.clone();
         spawn_local(async move {
             show_shell_event(&owned).await;
+        });
+        return true;
+    }
+    if action == "graph-map-failing" {
+        let mut state = surface_state(surface);
+        state["failing"] = if m::yes(&payload["clear"]) {
+            json!([])
+        } else {
+            json!(failing_lines(&dom::value(&format!("{prefix}-failing"))))
+        };
+        save_surface_state(surface, &state);
+        spawn_local(async move {
+            load_embedded_surface(surface, false).await;
         });
         return true;
     }
@@ -26229,5 +26577,192 @@ mod tests {
             ),
             old
         );
+    }
+
+    #[test]
+    fn a_selected_place_tells_what_a_change_to_it_reaches_and_marks_the_boxes() {
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/price.php", "name": "price.php", "folder": false},
+                {"path": "src/cart.php", "name": "cart.php", "folder": false},
+                {"path": "src/web", "name": "web", "folder": true, "files": 3},
+                {"path": "src/alone.php", "name": "alone.php", "folder": false}
+            ],
+            "edges": [
+                {"from": "src/cart.php", "to": "src/price.php", "links": 2, "guessed": 0},
+                {"from": "src/web", "to": "src/cart.php", "links": 1, "guessed": 0}
+            ],
+            "focus": {"path": "src/price.php", "blast": {
+                "place": "src/price.php", "hops": 4, "files": 4, "names": 6, "tests": 1, "cut": false,
+                "by_hop": [
+                    {"hop": 1, "files": 2, "names": 3}, {"hop": 2, "files": 2, "names": 3},
+                    {"hop": 3, "files": 0, "names": 0}, {"hop": 4, "files": 0, "names": 0}
+                ],
+                "listed": [
+                    {"path": "src/cart.php", "hop": 1, "left": 0.85, "name": "Cart.total()", "via": "calls", "through": false, "names": 2, "test": false},
+                    {"path": "tests/PriceTest.php", "hop": 1, "left": 0.85, "name": "PriceTest.testTotal()", "via": "calls", "through": false, "names": 1, "test": true},
+                    {"path": "src/web/Checkout.php", "hop": 2, "left": 0.72, "name": "Checkout.pay()", "via": "calls", "through": false, "names": 2, "test": false},
+                    {"path": "src/web/Gate.php", "hop": 2, "left": 0.34, "name": "Gate", "via": "calls", "through": true, "names": 1, "test": false}
+                ],
+                "more": 0,
+                "marked": [
+                    ["src/cart.php", 1, 0.85], ["tests/PriceTest.php", 1, 0.85],
+                    ["src/web/Checkout.php", 2, 0.72], ["src/web/Gate.php", 2, 0.34]
+                ]
+            }}
+        });
+        let side = blast_side(&view);
+        assert!(
+            side.starts_with("<h4>A change here reaches <span class=\"graph-map-total\">4</span></h4><p class=\"knowledge-note\">Files that use it, and what uses those, up to 4 links away: 2 at 1 link, 2 at 2 links. 1 of them is a test. Each link passes on less"),
+            "{side}"
+        );
+        assert!(side.contains(
+            "<li><button type=\"button\" class=\"graph-map-row\" data-blast-hop=\"1\" data-action=\"graph-map-open\" data-payload=\"&quot;src/cart.php&quot;\" title=\"src/cart.php · reached at Cart.total() by calls · select to open it\"><span class=\"graph-map-row-name\">cart.php</span><span class=\"graph-map-row-links\">src · 1 link · 85 %</span></button></li>"
+        ), "{side}");
+        assert!(side
+            .contains("<span class=\"graph-map-row-links\">tests · 1 link · 85 % · test</span>"));
+        assert!(side.contains("title=\"src/web/Gate.php · reached at Gate by calls through an interface · select to open it\""));
+        assert!(side.contains("<span class=\"graph-map-row-links\">src/web · 2 links · 34 % · past an interface</span>"));
+        assert!(side.ends_with("</ul>"));
+        // The boxes it reaches carry a bar as long as what is left there,
+        // a folder that of the most reached file in it; the selected box
+        // and what is not reached carry none.
+        let html = canvas(&view);
+        assert_eq!(
+            html.matches("<span class=\"graph-map-node-blast\" aria-hidden=\"true\"></span>")
+                .count(),
+            2
+        );
+        assert!(html.contains(" data-blast=\"1\""));
+        assert!(html.contains(" data-blast=\"2\""));
+        assert!(html.contains(" style=\"--blast:0.85;left:"), "{html}");
+        assert!(html.contains(" style=\"--blast:0.72;left:"));
+        assert!(html.contains("a change to the selected place reaches it in 1 link, 85 % of it\""));
+        assert!(html.contains("a change to the selected place reaches it in 2 links, 72 % of it\""));
+        // Nothing reached, more than is listed, a walk cut short.
+        let mut none = view.clone();
+        none["focus"]["blast"]["files"] = json!(0);
+        assert_eq!(
+            blast_side(&none),
+            "<h4>A change here reaches <span class=\"graph-map-total\">0</span></h4><p class=\"knowledge-note\">Nothing else uses it within 4 links.</p>"
+        );
+        let mut more = view.clone();
+        more["focus"]["blast"]["more"] = json!(17);
+        more["focus"]["blast"]["cut"] = json!(true);
+        more["focus"]["blast"]["tests"] = json!(3);
+        let side = blast_side(&more);
+        assert!(side.contains(" 3 of them are tests. "));
+        assert!(side.contains("there is more.</p>"));
+        assert!(side.ends_with("<p class=\"knowledge-note\">and 17 more</p>"));
+        // Without a selected place there is nothing to tell or to mark.
+        let mut plain = view.clone();
+        plain["focus"] = V::Null;
+        assert_eq!(blast_side(&plain), "");
+        assert!(!canvas(&plain).contains("graph-map-node-blast"));
+    }
+
+    #[test]
+    fn a_change_is_ranked_by_the_tests_that_fail() {
+        // What a person pastes: each test once, blanks and repeats left out.
+        assert_eq!(
+            failing_lines("  CartTest \n\nFAILED tests/a.py::t\nCartTest\r\n"),
+            ["CartTest", "FAILED tests/a.py::t"]
+        );
+        assert_eq!(failing_lines(&"x\n".repeat(3)).len(), 1);
+        let many = (0..100)
+            .map(|at| format!("T{at}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(failing_lines(&many).len(), FAILING);
+        assert_eq!(failing_lines(&"y".repeat(500))[0].len(), FAILING_NAME);
+        let view = json!({
+            "mode": "changes",
+            "scope": "",
+            "nodes": [
+                {"path": "src/cart.php", "name": "cart.php", "folder": false, "changed": 1, "status": "M",
+                 "suspect": {"rank": 1, "score": 1.0}},
+                {"path": "src/price.php", "name": "price.php", "folder": false, "changed": 1, "status": "M",
+                 "suspect": {"rank": 2, "score": 0.71}},
+                {"path": "src/mail.php", "name": "mail.php", "folder": false, "changed": 1, "status": "M"}
+            ],
+            "edges": [{"from": "src/cart.php", "to": "src/price.php", "links": 1, "guessed": 0}],
+            "suspects": {
+                "failing": ["tests/CartTest.php"], "unmatched": ["Cart"], "tests": 3,
+                "rows": [
+                    {"path": "src/cart.php", "status": "M", "rank": 1, "score": 1.0, "failing": 1, "passing": 0, "nearest": 1},
+                    {"path": "src/price.php", "status": "M", "rank": 2, "score": 0.71, "failing": 1, "passing": 1, "nearest": 2}
+                ],
+                "more": 0, "clear": 1, "complete": true
+            }
+        });
+        let state = json!({"failing": ["1) Tests\\Unit\\CartTest::testTotal", "Cart"]});
+        let side = suspects_side(&view, &state, SESSION_SURFACE);
+        assert!(side.starts_with("<h4>Failing tests</h4><p class=\"knowledge-note\">The changed files that 1 failing test file reaches, first those"), "{side}");
+        assert!(side.contains(
+            "<li><button type=\"button\" class=\"graph-map-row\" data-suspect-rank=\"1\" data-action=\"graph-map-node\" data-payload=\"&quot;src/cart.php&quot;\" title=\"src/cart.php · select it in the picture\"><span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#1</span><span class=\"graph-map-row-name\">cart.php</span><span class=\"graph-map-row-links\">src · 1 of 1 failing, 0 passing · 1 link from a failing test</span></button></li>"
+        ), "{side}");
+        assert!(side.contains("src · 1 of 1 failing, 1 passing · 2 links from a failing test"));
+        assert!(side.contains(
+            "<p class=\"knowledge-note\">No failing test reaches 1 other changed file.</p>"
+        ));
+        assert!(side.contains("<p class=\"knowledge-note\">No test file found for: Cart.</p>"));
+        // The field keeps what was pasted, and the tests can be changed or
+        // dropped; the buttons say which picture they rank.
+        assert!(side.contains("<details class=\"graph-suspects-ask\"><summary>Change the failing tests</summary><textarea id=\"session-graph-failing\""), "{side}");
+        assert!(side.contains(">1) Tests\\Unit\\CartTest::testTotal\nCart</textarea>"));
+        assert!(side.contains("data-action=\"graph-map-failing\" data-payload=\"{&quot;surface&quot;:&quot;session&quot;}\">Rank the changes</button>"));
+        assert!(side.contains("data-payload=\"{&quot;clear&quot;:true,&quot;surface&quot;:&quot;session&quot;}\">Clear</button>"));
+        // The boxes the failing tests reach carry their rank.
+        let html = canvas(&view);
+        assert!(
+            html.contains("<span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#1</span>")
+        );
+        assert!(
+            html.contains("<span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#2</span>")
+        );
+        assert_eq!(html.matches("graph-map-node-suspect").count(), 2);
+        assert!(html.contains(", ranked 1 among the changes by the failing tests,"));
+        // A folder that holds ranked files carries the best rank of them.
+        let mut folders = view.clone();
+        folders["nodes"] = json!([
+            {"path": "src", "name": "src", "folder": true, "files": 3, "changed": 3,
+             "suspect": {"rank": 1, "score": 1.0, "files": 2}}
+        ]);
+        folders["edges"] = json!([]);
+        let html = canvas(&folders);
+        assert!(
+            html.contains("<span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#1</span>")
+        );
+        assert!(
+            html.contains(", holds 2 changed files the failing tests reach, the first ranked 1")
+        );
+        // Nothing asked yet: an open field and a word on what it does.
+        let mut plain = view.clone();
+        plain["suspects"] = V::Null;
+        let side = suspects_side(&plain, &json!({}), MODAL_SURFACE);
+        assert!(side.contains("Paste the tests that fail to rank the changed files"));
+        assert!(side.contains("<details class=\"graph-suspects-ask\" open><summary>Name the failing tests</summary><textarea id=\"graph-map-failing\""));
+        assert!(!side.contains(">Clear</button>"));
+        // No test named matched, or nothing changed is reached.
+        let mut none = view.clone();
+        none["suspects"]["failing"] = json!([]);
+        none["suspects"]["rows"] = json!([]);
+        assert!(suspects_side(&none, &state, MODAL_SURFACE)
+            .contains("None of the names is a test file of this graph."));
+        let mut apart = view.clone();
+        apart["suspects"]["rows"] = json!([]);
+        assert!(suspects_side(&apart, &state, MODAL_SURFACE)
+            .contains("No changed file is reached by the failing test."));
+        // Only a picture of a change is ranked.
+        let mut folder = view.clone();
+        folder["mode"] = json!("folder");
+        assert_eq!(suspects_side(&folder, &state, MODAL_SURFACE), "");
+        // The request names the failing tests only for a change.
+        let mut asked = fresh("work");
+        asked["failing"] = json!(["CartTest"]);
+        assert!(build_map_path("p", &asked, false).contains("failing="));
+        asked["target"] = json!("");
+        assert!(!build_map_path("p", &asked, false).contains("failing="));
     }
 }

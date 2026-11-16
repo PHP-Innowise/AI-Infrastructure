@@ -24,6 +24,39 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Tell in the side panel of a selected place of the Harness dependency map what
+  a change to it reaches within four links (`graph_map/blast.rs`): the files
+  that use it, and what uses those, each with the fewest links to it, how much
+  of the change is left there, and the kind of link that led there. A call or
+  a type built on it passes on most, an import little, a guessed link less;
+  past an interface a type implements the change reaches the users of the
+  interface, with less left. A bar along the foot of each reached box is as
+  long as what is left there. A walk looks at 400,000 links at most; on a
+  synthetic graph of 30,000 names and 150,000 links it took 12–17 ms for a
+  file and 79 ms for a folder in a debug build.
+- Rank the changed files of a change by the tests that fail (`failing` on the
+  three map routes, **Failing tests** in the side panel of a change): a test is
+  named by its file, its path or a line of a test runner's output; the changed
+  files that the failing tests reach and the passing ones do not come first
+  (Ochiai over the reach of the graph), and a box and the folder that holds it
+  carry the rank. The graph stands in for what a test runs: it says where to
+  look first, not what broke.
+- Add `GET /api/systems/graph/bridge` and **Code on both sides** in the panel of
+  a link of the system map: the files of the consumer that name the contract,
+  the files of the provider its passport says the contract is made in and those
+  that name it, and how many files of its own service a change of each reaches.
+- Add **Waves** under the map of a system change: the change as far as one wave,
+  what a later wave reaches left faint, and **▶ Play** to step through them.
+- List in the evidence of a system run, and under its receipts, the files more
+  than one step edited (`overlaps`). A run dispatches its workers one after
+  another and the Harness starts no two writers on one repository at once, so
+  no two workers write a file at the same moment, and the view of a run, polled
+  every 1.1 seconds, is not streamed.
+- Refuse on the system routes the parameters no handler reads: `phase`,
+  `attempt`, `compare_run_id`, `compare_phase`, `compare_attempt`, and on the
+  routes that never used them `launch`, `compare_launch`, `focus_session`,
+  `contracts`, `seed_services`, `depth` and the parameters of a project map on
+  `/api/systems/graph/map`, where a request named them and looked answered.
 - Lead the links of the Harness dependency map so that fewer cross and fewer
   lines run side by side. The links of one box leave it, and arrive at it, side
   by side in the order of where they lead; links of one box that pass the same

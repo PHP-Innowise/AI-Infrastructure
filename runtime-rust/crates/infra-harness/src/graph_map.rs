@@ -36,6 +36,7 @@ use std::{
     time::SystemTime,
 };
 mod access;
+mod blast;
 mod circles;
 mod history;
 mod incoming;
@@ -55,6 +56,8 @@ const LISTED: usize = 12;
 /// shortest and still be drawn, how many such ways a picture draws, and how
 /// many links the search for them tries before it gives up.
 pub(crate) const LONGER: usize = 3;
+/// How many failing tests a picture of a change may be told of.
+pub(crate) const FAILING: usize = 64;
 const DETOURS: usize = 12;
 const DETOUR_WALK: usize = 60_000;
 /// More links than this per child and the folder is drawn as a backbone:

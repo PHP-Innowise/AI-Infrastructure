@@ -2016,6 +2016,22 @@ ways as long those along the stronger links, and says where there are more. The
 summary still counts the places and links of the shortest ways; the ways round are
 counted beside them.
 
+**A change here reaches**, in the side panel of a selected place, lists what a
+change to it reaches within four links: the names that use it, those that use
+them, and so on, gathered by file, with how many files each link further first
+reaches and how many of them are tests. Each link passes on less of a change than
+it receives: a type that extends or implements it and a call most, a write and a
+read less, an import little, a link the tool only guessed less again. Where a type implements an interface or extends a
+base, the names that use the interface never name the type, yet they run its code:
+they are reached through the interface, with less left. A file is listed with the
+fewest links to it, how much of the change is left there in per cent, and the
+kind of the link that led there; the 12 with the most left come first, and a bar
+along the foot of each box that is reached is as long as what is left there, a
+folder's that of its most reached file. A walk looks at 400,000 links at most and
+says when it stopped early. On a synthetic graph of 30,000 names and 150,000 links,
+denser than a project, it took 12–17 ms for a file, 2 ms for a name and 79 ms for a
+folder in a debug build.
+
 **What they share**, beside the path above a picture of two places, asks what ties
 the two together apart from the way between them: what both use, and what uses both.
 It is there whether or not a path was found. Both use a place where a chain of links
@@ -2223,6 +2239,22 @@ the links it has with the change.
   reachable in the graph. Execution coverage requires running the tests.
   The section is available on a current change graph with **Without tests**
   turned off.
+- **Failing tests** ranks the changed files by how likely each is behind the
+  tests that fail. Paste the failing tests under **Name the failing tests**, one
+  on each line: a test, its file, or a line of the output of a test run as a
+  runner prints it (`FAILED tests/test_cart.py::test_total`,
+  `1) Tests\Unit\CartTest::testTotal`). A test file is found by its path, or by
+  the name of its file standing as a word of its own; a fixture is no test, and
+  what names no test file is listed. **Rank the changes** puts first the changed
+  files that the failing tests reach along the links and the passing tests do
+  not: the share of the failing tests that reach a file, times the share of
+  failing among the tests that reach it, under a root, and of files as likely
+  the one nearer to a failing test. A ranked file carries `#1`, `#2` on its box,
+  and a folder of a change drawn by folder the best rank inside it. The graph
+  stands in for what a test runs, so this says where to look first, not what
+  broke. Up to 64 tests are taken, the tests are looked for in the whole graph
+  also where **Without tests** leaves them out of the picture, and **Clear**
+  drops them.
 - **Attach map context** puts `dependency-map.txt` in the current session draft
   for this project. Select a place to include it and its listed incoming and
   outgoing neighbors. Where available, the file also includes test candidates

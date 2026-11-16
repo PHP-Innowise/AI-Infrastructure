@@ -2031,6 +2031,54 @@ fn render_run() {
         dom::append("system-receipts", &card);
     }
 
+    // The files more than one step of the run edited, after the receipts.
+    let overlaps = overlap_rows(&v["evidence"]);
+    if !overlaps.is_empty() {
+        let card = dom::el(
+            "article",
+            "system-card system-receipt-card system-overlaps",
+            "",
+        );
+        dom::add(
+            &card,
+            &dom::el(
+                "h5",
+                "",
+                &format!("Edited by more than one step: {}", overlaps.len()),
+            ),
+        );
+        dom::add(
+            &card,
+            &dom::el(
+                "p",
+                "system-note",
+                "The steps of a run go one after another, so no two wrote a file at once; a later step may still have changed what an earlier one made.",
+            ),
+        );
+        let list = dom::el("div", "system-receipt-files", "");
+        for (path, steps, open) in &overlaps {
+            let row = dom::el("div", "system-receipt-file-row", "");
+            dom::add(&row, &dom::el("code", "system-receipt-file-path", path));
+            dom::add(&row, &dom::el("span", "system-note", steps));
+            if let Some((service, file)) = open {
+                let map_btn = dom::button(
+                    "Map",
+                    "inspect-system-file-graph",
+                    json!({ "service": service, "path": file }),
+                );
+                map_btn.set_class_name("button compact");
+                let _ = map_btn.set_attribute(
+                    "aria-label",
+                    &format!("Show {path} on {service} dependency map"),
+                );
+                dom::add(&row, &map_btn);
+            }
+            dom::add(&list, &row);
+        }
+        dom::add(&card, &list);
+        dom::append("system-receipts", &card);
+    }
+
     dom::pretty("system-native-tasks", &v["execution"]["tasks"]);
     dom::hidden(
         "system-native-details",
@@ -3726,6 +3774,31 @@ pub async fn event(
     true
 }
 
+/// A file more than one step of a run edited: the file, the steps in the
+/// order they ran, and, for a file of a member service, that service and
+/// the path it opens at on its code map.
+pub type OverlapRow = (String, String, Option<(String, String)>);
+/// The files more than one step of a run edited.
+pub fn overlap_rows(evidence: &V) -> Vec<OverlapRow> {
+    m::array(&evidence["overlaps"])
+        .iter()
+        .map(|row| {
+            let steps = m::array(&row["steps"])
+                .iter()
+                .filter_map(|step| step.as_str())
+                .collect::<Vec<_>>()
+                .join(" → ");
+            let open = match (row["service"].as_str(), row["file"].as_str()) {
+                (Some(service), Some(file)) if service != "__system__" => {
+                    Some((service.to_owned(), file.to_owned()))
+                }
+                _ => None,
+            };
+            (m::text(row, "path"), steps, open)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod editor_value_tests {
     use super::*;
@@ -4395,5 +4468,39 @@ mod display_tests {
             "evidence": { "dispatches": [] }
         });
         assert!(run_has_agent_activity(&session_run));
+    }
+
+    #[test]
+    fn the_files_several_steps_edited_are_listed_in_the_order_the_steps_ran() {
+        let evidence = json!({"overlaps": [
+            {"path": "orders/src/Order.php", "service": "orders", "file": "src/Order.php",
+             "steps": ["service-orders", "verify"], "services": ["orders", "__system__"]},
+            {"path": "packages/money/Money.php", "service": null, "file": null,
+             "steps": ["service-orders", "service-billing"], "services": ["orders", "billing"]},
+            {"path": "__system__/docs/a.md", "service": "__system__", "file": "docs/a.md",
+             "steps": ["contracts", "verify"], "services": ["__system__", "__system__"]}
+        ]});
+        assert_eq!(
+            overlap_rows(&evidence),
+            [
+                (
+                    "orders/src/Order.php".to_owned(),
+                    "service-orders → verify".to_owned(),
+                    Some(("orders".to_owned(), "src/Order.php".to_owned()))
+                ),
+                (
+                    "packages/money/Money.php".to_owned(),
+                    "service-orders → service-billing".to_owned(),
+                    None
+                ),
+                // The folder of the system has no code map of its own.
+                (
+                    "__system__/docs/a.md".to_owned(),
+                    "contracts → verify".to_owned(),
+                    None
+                ),
+            ]
+        );
+        assert!(overlap_rows(&json!({})).is_empty());
     }
 }

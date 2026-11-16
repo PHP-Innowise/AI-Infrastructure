@@ -2390,6 +2390,7 @@ impl HarnessCodeGraphBridge {
                     link: None,
                     path: None,
                     longer: 0,
+                    failing: &[],
                     cycle: None,
                     base: None,
                     shared: None,
@@ -2688,29 +2689,7 @@ impl SystemGraphDomain {
                     .map(move |prov| {
                         let cid = prov["id"].as_str().unwrap_or("").to_owned();
                         let ckind = prov["kind"].as_str().unwrap_or("other").to_owned();
-                        let mut probes = Vec::new();
-                        if cid.len() >= 4 {
-                            probes.push(cid.clone());
-                        }
-                        for key in ["path", "route", "endpoint", "topic", "event", "queue"] {
-                            if let Some(v) = prov[key].as_str().filter(|s| s.len() >= 4) {
-                                probes.push(v.to_owned());
-                            }
-                        }
-                        if let Some(summary) = prov["summary"].as_str() {
-                            for token in summary.split_whitespace() {
-                                if (token.starts_with('/') && token.len() >= 5)
-                                    || (token.contains('.') && token.len() >= 6)
-                                {
-                                    probes.push(
-                                        token
-                                            .trim_matches(|c: char| c == ',' || c == ';')
-                                            .to_owned(),
-                                    );
-                                }
-                            }
-                        }
-                        (sid.clone(), cid, ckind, probes)
+                        (sid.clone(), cid, ckind, contract_probes(prov))
                     })
             })
             .collect();
@@ -3194,8 +3173,6 @@ impl SystemGraphDomain {
             qobj.remove("project_id");
             qobj.remove("config_path");
             qobj.remove("service");
-            qobj.remove("phase");
-            qobj.remove("attempt");
             let raw_target = qobj
                 .get("target")
                 .and_then(Value::as_str)
@@ -3591,6 +3568,43 @@ impl SystemGraphDomain {
                     out["intra_service"] = intra;
                 }
                 Ok(out)
+            }
+            "system_graph.bridge" => {
+                let project_id = query["project_id"].as_str().unwrap_or("");
+                let config_path = query["config_path"].as_str();
+                let certain = Self::parse_bool_flag(query, "certain")?;
+                let named = |key: &str| -> Result<String> {
+                    let value = query[key].as_str().map(str::trim).unwrap_or("");
+                    if value.len() > 256 || value.chars().any(char::is_control) {
+                        return Err(HarnessError::invalid("Invalid service link."));
+                    }
+                    Ok(value.to_owned())
+                };
+                let (from, to, contract) = (named("from")?, named("to")?, named("contract")?);
+                if from.is_empty() || to.is_empty() || from == to {
+                    return Err(HarnessError::invalid("Invalid service link."));
+                }
+                let (system, cfg_rel, targets) = resolve_all_targets(
+                    &self.store,
+                    Some(&self.graphs),
+                    self.manager.as_deref(),
+                    project_id,
+                    config_path,
+                )?;
+                let sys_graph =
+                    self.build_enriched_system_graph(&system, &targets, None, None, None)?;
+                let link = sys_graph.link(&from, &to, certain);
+                let mut view = bridge_view(
+                    &self.graphs,
+                    &system,
+                    &targets,
+                    &link,
+                    (!contract.is_empty()).then_some(contract.as_str()),
+                    certain,
+                );
+                view["project_id"] = json!(project_id);
+                view["config_path"] = json!(cfg_rel);
+                Ok(view)
             }
             _ => Err(HarnessError::missing(
                 "Unknown system code graph operation.",
@@ -4007,6 +4021,250 @@ fn parse_system_map_query(query: &Value) -> Result<SystemMapQuery> {
         seed_services: parse_csv_or_json_list(query["seed_services"].as_str(), 64)?,
         contracts: parse_csv_or_json_list(query["contracts"].as_str(), 32)?,
         depth,
+    })
+}
+
+/// What code that uses a contract would hold of it: its id, the path,
+/// route, endpoint, topic, event or queue it is reached by, and the paths
+/// and dotted names its summary gives.
+fn contract_probes(prov: &Value) -> Vec<String> {
+    let mut probes = Vec::new();
+    if let Some(cid) = prov["id"].as_str().filter(|cid| cid.len() >= 4) {
+        probes.push(cid.to_owned());
+    }
+    for key in ["path", "route", "endpoint", "topic", "event", "queue"] {
+        if let Some(v) = prov[key].as_str().filter(|s| s.len() >= 4) {
+            probes.push(v.to_owned());
+        }
+    }
+    if let Some(summary) = prov["summary"].as_str() {
+        for token in summary.split_whitespace() {
+            if (token.starts_with('/') && token.len() >= 5)
+                || (token.contains('.') && token.len() >= 6)
+            {
+                probes.push(
+                    token
+                        .trim_matches(|c: char| c == ',' || c == ';')
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    probes
+}
+
+/// How many files of a provider are read for what names a contract, how
+/// many bytes in all, and how many files of each side are listed.
+const BRIDGE_FILES: usize = 400;
+const BRIDGE_BYTES: u64 = 8 * 1024 * 1024;
+const BRIDGE_LISTED: usize = 24;
+
+/// The code on the two sides of a link between two services. Of the
+/// consumer, the files that name what it uses of the provider, as the code
+/// references of the system graph found them. Of the provider, the files
+/// its passport says a contract is made in, and the files that name the
+/// contract. Each file is told how many files of its own service a change
+/// of it reaches, where the service has a code graph: that is how far the
+/// contract goes into each side.
+fn bridge_view(
+    graphs: &Graphs,
+    system: &System,
+    targets: &[ResolvedServiceTarget],
+    link: &Value,
+    contract: Option<&str>,
+    certain: bool,
+) -> Value {
+    let (from, to) = (
+        link["from"].as_str().unwrap_or(""),
+        link["to"].as_str().unwrap_or(""),
+    );
+    let ids = match contract {
+        Some(contract) => vec![contract.to_owned()],
+        None => link["contracts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c["id"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>(),
+    };
+    let index_of = |service: &str| {
+        targets
+            .iter()
+            .find(|target| target.service_id == service)
+            .and_then(|target| graphs.live_index(&target.graph_id))
+    };
+    let reach = |index: &Option<Arc<Index>>, path: &str| match index {
+        Some(index) => index
+            .blast(path, certain)
+            .map(|blast| json!({"files": blast["files"], "tests": blast["tests"]}))
+            .unwrap_or(Value::Null),
+        None => Value::Null,
+    };
+    // What the passport names first, then code, then the documents that
+    // name the contract as well.
+    let document = |path: &str| {
+        let path = path.to_ascii_lowercase();
+        [".md", ".markdown", ".rst", ".txt", ".adoc"]
+            .iter()
+            .any(|end| path.ends_with(end))
+    };
+    let listed = |sites: BTreeMap<String, (BTreeSet<String>, Value)>,
+                  index: &Option<Arc<Index>>| {
+        let more = sites.len().saturating_sub(BRIDGE_LISTED);
+        let mut sites = sites.into_iter().collect::<Vec<_>>();
+        sites.sort_by_key(|(path, (_, row))| {
+            (row["declared"] != true, document(path), path.clone())
+        });
+        let rows = sites
+            .into_iter()
+            .take(BRIDGE_LISTED)
+            .map(|(path, (contracts, mut row))| {
+                row["document"] = json!(document(&path));
+                row["path"] = json!(path);
+                row["contracts"] = json!(contracts);
+                row["in_graph"] = json!(
+                    index
+                        .as_ref()
+                        .is_some_and(|index| index.file_id(&path).is_some())
+                );
+                row["reach"] = reach(index, &path);
+                row
+            })
+            .collect::<Vec<_>>();
+        (rows, more)
+    };
+    // The consumer: what its code was found to name of the provider.
+    let consumer_index = index_of(from);
+    let mut consumer: BTreeMap<String, (BTreeSet<String>, Value)> = BTreeMap::new();
+    for found in link["code_refs"].as_array().into_iter().flatten() {
+        let named = found["contract"].as_str();
+        if let (Some(asked), Some(named)) = (contract, named)
+            && asked != named
+        {
+            continue;
+        }
+        let Some(path) = found["from_path"].as_str() else {
+            continue;
+        };
+        let entry = consumer.entry(path.to_owned()).or_insert_with(|| {
+            (
+                BTreeSet::new(),
+                json!({"detail": found["detail"], "certainty": found["certainty"]}),
+            )
+        });
+        if let Some(named) = named {
+            entry.0.insert(named.to_owned());
+        }
+    }
+    // The provider: where its passport says each contract is made, and
+    // what of its code names the contract.
+    let provider_index = index_of(to);
+    let provides = system
+        .services
+        .get(to)
+        .and_then(|service| service.manifest.as_ref())
+        .and_then(|manifest| manifest["provides"].as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|prov| {
+            prov["id"]
+                .as_str()
+                .is_some_and(|id| ids.iter().any(|asked| asked == id))
+        })
+        .collect::<Vec<_>>();
+    let mut provider: BTreeMap<String, (BTreeSet<String>, Value)> = BTreeMap::new();
+    for prov in &provides {
+        let id = prov["id"].as_str().unwrap_or("");
+        for source in prov["sources"].as_array().into_iter().flatten() {
+            if let Some(path) = source.as_str().filter(|path| !path.is_empty()) {
+                let entry = provider.entry(path.to_owned()).or_insert_with(|| {
+                    (BTreeSet::new(), json!({"declared": true, "found": false}))
+                });
+                entry.0.insert(id.to_owned());
+                entry.1["declared"] = json!(true);
+            }
+        }
+    }
+    let probes = provides
+        .iter()
+        .map(|prov| {
+            (
+                prov["id"].as_str().unwrap_or("").to_owned(),
+                contract_probes(prov),
+            )
+        })
+        .filter(|(_, probes)| !probes.is_empty())
+        .collect::<Vec<_>>();
+    let (mut scanned, mut cut) = (0usize, false);
+    if let Some(target) = targets.iter().find(|target| target.service_id == to)
+        && !probes.is_empty()
+    {
+        let files = match &provider_index {
+            Some(index) => index
+                .files()
+                .iter()
+                .filter(|path| !graph_map::is_test_path(path))
+                .cloned()
+                .collect::<Vec<_>>(),
+            None => collect_service_code_files(&target.root, BRIDGE_FILES),
+        };
+        let mut read = 0u64;
+        for rel_path in files {
+            if rel_path == "ai-service.json" || rel_path.ends_with(".lock") {
+                continue;
+            }
+            if scanned == BRIDGE_FILES || read > BRIDGE_BYTES {
+                cut = true;
+                break;
+            }
+            let full_path = target.root.join(&rel_path);
+            let Ok(meta) = fs::symlink_metadata(&full_path) else {
+                continue;
+            };
+            if !meta.is_file() || meta.len() > MAX_UNDECLARED_SCAN_BYTES {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&full_path) else {
+                continue;
+            };
+            scanned += 1;
+            read += meta.len();
+            for (id, probes) in &probes {
+                if probes.iter().any(|probe| content.contains(probe.as_str())) {
+                    let entry = provider.entry(rel_path.clone()).or_insert_with(|| {
+                        (BTreeSet::new(), json!({"declared": false, "found": true}))
+                    });
+                    entry.0.insert(id.clone());
+                    entry.1["found"] = json!(true);
+                }
+            }
+        }
+    }
+    let (consumer_sites, consumer_more) = listed(consumer, &consumer_index);
+    let (provider_sites, provider_more) = listed(provider, &provider_index);
+    json!({
+        "kind": "system_bridge",
+        "from": from,
+        "to": to,
+        "direction": link["direction"],
+        "contracts": ids,
+        "contract": contract,
+        "certain": certain,
+        "consumer": {
+            "service": from,
+            "graph": consumer_index.is_some(),
+            "sites": consumer_sites,
+            "more": consumer_more,
+        },
+        "provider": {
+            "service": to,
+            "graph": provider_index.is_some(),
+            "sites": provider_sites,
+            "more": provider_more,
+            "scanned": scanned,
+            "cut": cut,
+        },
     })
 }
 

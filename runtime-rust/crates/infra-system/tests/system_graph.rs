@@ -1386,3 +1386,91 @@ fn synthetic_graph_ids_runtime_records_and_run_scoped_summaries() {
     assert_eq!(enriched["orders"].nodes, 2);
     assert_eq!(enriched["billing"].state, "unindexed");
 }
+
+#[test]
+fn a_run_tells_which_files_more_than_one_of_its_steps_edited() {
+    let change = |path: &str| infra_system::EvidenceFileChange {
+        path: path.into(),
+        status: "modified".into(),
+        from: None,
+    };
+    let step = |phase: &str, attempt: u64, service: &str, root: &str| DispatchEvidence {
+        phase: phase.into(),
+        attempt,
+        service: service.into(),
+        root: root.into(),
+        ..Default::default()
+    };
+    let state = json!({
+        "status": "completed",
+        "roots": {"orders": "/work/core/services/orders", "billing": "/work/core/services/billing"}
+    });
+    // orders edits its own Order.php and a shared package; billing, after
+    // it, edits the shared package as well, through a path that names it
+    // from billing's root; a second attempt of billing edits its own file
+    // twice over.
+    let mut orders = step("service-orders", 1, "orders", "/work/core/services/orders");
+    orders.ledger_edited = vec![
+        change("src/Order.php"),
+        change("../../packages/money/Money.php"),
+    ];
+    let mut billing = step(
+        "service-billing",
+        1,
+        "billing",
+        "/work/core/services/billing",
+    );
+    billing.git_changed = vec![
+        change("../../packages/money/Money.php"),
+        change("src/Invoice.php"),
+    ];
+    let mut again = step(
+        "service-billing",
+        2,
+        "billing",
+        "/work/core/services/billing",
+    );
+    again.ledger_edited = vec![change("src/Invoice.php")];
+    // A step that could write into every service names the service first.
+    let mut verify = step("verify", 1, "__system__", "/work/core");
+    verify.ledger_edited = vec![change("orders/src/Order.php")];
+    let summary = summarize_run_evidence(None, &state, &[orders, billing, again, verify]);
+    // A file of a service is shown with its service, to be opened on its
+    // code map; one outside every service from the folder of the run.
+    assert_eq!(
+        summary["overlaps"],
+        json!([
+            {
+                "path": "orders/src/Order.php",
+                "service": "orders",
+                "file": "src/Order.php",
+                "steps": ["service-orders", "verify"],
+                "services": ["orders", "__system__"]
+            },
+            {
+                "path": "packages/money/Money.php",
+                "service": null,
+                "file": null,
+                "steps": ["service-orders", "service-billing"],
+                "services": ["orders", "billing"]
+            }
+        ])
+    );
+    // One step, however many times it ran, is no overlap.
+    let mut once = step(
+        "service-billing",
+        1,
+        "billing",
+        "/work/core/services/billing",
+    );
+    once.ledger_edited = vec![change("src/Invoice.php")];
+    let mut twice = step(
+        "service-billing",
+        2,
+        "billing",
+        "/work/core/services/billing",
+    );
+    twice.git_changed = vec![change("src/Invoice.php")];
+    let summary = summarize_run_evidence(None, &state, &[once, twice]);
+    assert_eq!(summary["overlaps"], json!([]));
+}
