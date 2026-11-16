@@ -124,6 +124,8 @@ pub fn start() -> Result<(), JsValue> {
                     dom::dialog("folder-picker", false);
                     dom::dialog("merge-picker", false);
                     dom::dialog("omni-settings-dialog", false);
+                    dom::dialog("omnigraph-transfer-dialog", false);
+                    dom::dialog("omnigraph-share-dialog", false);
                 }
                 session::resize_key(key);
                 return;
@@ -186,6 +188,7 @@ pub fn start() -> Result<(), JsValue> {
                     ("commit_id", "data-commit-id"),
                     ("branch", "data-branch"),
                     ("atom_id", "data-atom-id"),
+                    ("session_id", "data-session-id"),
                     ("kind", "data-kind"),
                     ("tab", "data-tab"),
                 ] {

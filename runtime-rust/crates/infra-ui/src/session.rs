@@ -273,6 +273,7 @@ const PREF_FIELDS: &[&str] = &[
     "omnigraph-existing-branch",
     "omnigraph-pull-branches",
     "omnigraph-session-query",
+    "omnigraph-shared-space",
     "omnigraph-auto-publish",
     "omnigraph-auto-merge",
 ];
@@ -1555,6 +1556,7 @@ pub fn new_session(project: Option<&str>) {
     m::take("merge-draft");
     crate::graph_map::apply_focus(&V::Null);
     crate::graph::run_state(false);
+    omnigraph::clear_draft_peers();
     omnigraph::render_session_bar(&V::Null);
     clear_files();
     dom::clear("events");
@@ -1844,6 +1846,7 @@ pub fn apply_settings(v: &V) {
     dom::text("workspace-session-branch", &m::text(v, "branch"));
     dom::text("workspace-session-path", &m::text(v, "project_path"));
     knowledge::render_linked(v);
+    omnigraph::apply_session_settings(v);
     omnigraph::render_session_bar(v);
     run::outcomes(v);
 }
@@ -2193,6 +2196,10 @@ pub async fn send() {
                     poll(e).await;
                 } else {
                     m::take("merge-draft");
+                    omnigraph::clear_draft_peers();
+                    if session["omnigraph"]["linked_session_ids"].is_array() {
+                        refresh().await;
+                    }
                     select(&m::text(session, "id")).await;
                 }
             }
@@ -3140,6 +3147,11 @@ pub async fn event(
         dom::disabled("merge-picker-continue", !(2..=8).contains(&n));
         return true;
     }
+    if kind == "change" && action == "omnigraph-peer-choice" {
+        omnigraph::sync_peer_draft_from_dom();
+        controls();
+        return true;
+    }
     if kind == "change" {
         if ["project", "project-switcher"].contains(&id) {
             if value == "__choose-folder__" {
@@ -3216,6 +3228,7 @@ pub async fn event(
             "omnigraph-enabled",
             "omnigraph-branch-mode",
             "omnigraph-existing-branch",
+            "omnigraph-shared-space",
             "omnigraph-auto-publish",
             "omnigraph-auto-merge",
         ]
@@ -3232,7 +3245,8 @@ pub async fn event(
             || id == "agent-count"
             || id == "sdd-feature"
             || id == "omnigraph-pull-branches"
-            || id == "omnigraph-session-query")
+            || id == "omnigraph-session-query"
+            || id == "omnigraph-shared-space")
     {
         if id.starts_with("omnigraph-") {
             save_preferences();
@@ -3354,7 +3368,31 @@ pub async fn event(
             new_session(None);
             open_view("sessions", true).await;
         }
-        "refresh-sessions" => refresh().await,
+        "refresh-sessions" => {
+            refresh().await;
+            omnigraph::session_controls();
+        }
+        "share-sessions-context" => {
+            dom::class("sidebar", "open", false);
+            dom::class("scrim", "open", false);
+            dom::attr("menu-toggle", "aria-expanded", "false");
+            omnigraph::open_share_dialog(None).await;
+        }
+        "omnigraph-open-session" => {
+            let target_id = payload["session_id"]
+                .as_str()
+                .or_else(|| payload.as_str())
+                .unwrap_or("")
+                .to_owned();
+            if !target_id.is_empty() {
+                if m::read(|s| s.sid != target_id) {
+                    crate::graph_map::apply_focus(&V::Null);
+                    crate::graph::run_state(false);
+                }
+                select(&target_id).await;
+                open_view("sessions", true).await;
+            }
+        }
         "session-open" => {
             let target_id = payload.as_str().unwrap_or("");
             if m::read(|s| s.sid != target_id) {
@@ -3653,7 +3691,11 @@ pub async fn event(
                     management::load_attachment().await;
                 }
                 if panel == "omnigraph" {
+                    if m::read(|s| s.sessions.is_empty()) {
+                        refresh().await;
+                    }
                     omnigraph::load_session_branches().await;
+                    omnigraph::session_controls();
                 }
                 if panel == "graph" {
                     crate::graph::load(true).await;

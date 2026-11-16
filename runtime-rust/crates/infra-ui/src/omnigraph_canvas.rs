@@ -252,6 +252,7 @@ struct CanvasNode {
     title: String,
     subtitle: String,
     branch: String,
+    shared_space: String,
     session_id: String,
     status: String,
     provider: String,
@@ -1498,12 +1499,18 @@ fn extract_graph_items(
             let title = str_field(item, &["title", "name", "label"]).if_empty(&id);
             let branch =
                 str_field(item, &["branch", "source_branch", "graph_branch"]).if_empty("main");
+            let shared_space =
+                str_field(item, &["shared_space", "space_name"]).if_empty_from(|| {
+                    item.get("omnigraph")
+                        .map(|o| str_field(o, &["shared_space", "space_name"]))
+                        .unwrap_or_default()
+                });
             let status = str_field(item, &["status", "state"]).if_empty("idle");
             let provider = str_field(item, &["provider"]);
             let actor = str_field(item, &["actor", "actor_id"]);
             let tags = string_list(item, &["tags"]);
             let blob = format!(
-                "{id} {title} {branch} {status} {provider} {actor} {}",
+                "{id} {title} {branch} {shared_space} {status} {provider} {actor} {}",
                 tags.join(" ")
             )
             .to_ascii_lowercase();
@@ -1515,6 +1522,7 @@ fn extract_graph_items(
                 title,
                 subtitle: actor,
                 branch,
+                shared_space,
                 session_id: id,
                 status,
                 provider,
@@ -1578,6 +1586,7 @@ fn extract_graph_items(
                 title,
                 subtitle: summary,
                 branch,
+                shared_space: String::new(),
                 session_id,
                 status: String::new(),
                 provider: String::new(),
@@ -1626,6 +1635,7 @@ fn extract_graph_items(
                 title: base_name,
                 subtitle: dir_hint,
                 branch,
+                shared_space: String::new(),
                 session_id: String::new(),
                 status: String::new(),
                 provider: lang,
@@ -2251,6 +2261,13 @@ fn render_constellation_node(
         foot.push_str(&format!(
             "<span class=\"omni-tag-more\">+{}</span>",
             node.tags.len() - 2
+        ));
+    }
+    if node.group == NodeKindGroup::Session && !node.shared_space.is_empty() {
+        foot.push_str(&format!(
+            "<span class=\"omni-space-pill\" title=\"Shared space: {}\"><span aria-hidden=\"true\">⇄</span> {}</span>",
+            esc(&node.shared_space),
+            esc(&node.shared_space),
         ));
     }
     if !node.branch.is_empty() {
@@ -3662,5 +3679,53 @@ mod tests {
             res.width,
             file_right
         );
+    }
+
+    #[test]
+    fn session_nodes_render_shared_space_pill_and_session_follows_edges() {
+        let graph = json!({
+            "active_branch": "shared/sprint-auth",
+            "sessions": [
+                {
+                    "id": "s-alpha",
+                    "title": "Auth API",
+                    "branch": "shared/sprint-auth",
+                    "shared_space": "shared/sprint-auth",
+                    "provider": "claude",
+                    "status": "running"
+                },
+                {
+                    "id": "s-beta",
+                    "title": "Auth UI",
+                    "omnigraph": { "shared_space": "shared/sprint-auth" },
+                    "branch": "shared/sprint-auth",
+                    "provider": "codex",
+                    "status": "completed"
+                }
+            ],
+            "atoms": [],
+            "files": [],
+            "edges": [
+                { "from": "s-beta", "to": "s-alpha", "relation": "SessionFollows" }
+            ]
+        });
+        let res = render_constellation(
+            &graph,
+            &ConstellationFilter {
+                branch: "shared/sprint-auth".into(),
+                show_files: true,
+                show_sessions: true,
+                ..ConstellationFilter::default()
+            },
+            &CanvasViewport::default(),
+        );
+        assert_eq!(res.node_count, 2);
+        assert_eq!(res.edge_count, 1);
+        assert!(res.html.contains("omni-space-pill"));
+        assert!(res.html.contains("shared/sprint-auth"));
+        assert!(res.html.contains("omni-edge-session_follows"));
+        assert!(res.html.contains("url(#omni-arrow-session_follows)"));
+        assert!(res.html.contains(">follows<"));
+        assert_no_inline_hex_colors(&res.html);
     }
 }

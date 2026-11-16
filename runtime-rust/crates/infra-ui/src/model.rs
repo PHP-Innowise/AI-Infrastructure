@@ -266,7 +266,11 @@ pub fn project_for_reentry(
 
 pub fn omnigraph_enabled(session: &V) -> bool {
     let omni = &session["omnigraph"];
-    omni.is_object() && (yes(&omni["enabled"]) || omni["branch"].is_string())
+    omni.is_object()
+        && (yes(&omni["enabled"])
+            || omni["branch"].is_string()
+            || !text(omni, "shared_space").is_empty()
+            || !array(&omni["linked_session_ids"]).is_empty())
 }
 
 pub fn omnigraph_branch(session: &V) -> String {
@@ -275,6 +279,29 @@ pub fn omnigraph_branch(session: &V) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("main")
         .to_owned()
+}
+
+pub fn omnigraph_shared_space(session: &V) -> String {
+    text(&session["omnigraph"], "shared_space")
+}
+
+pub fn omnigraph_linked_session_ids(session: &V) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for item in array(&session["omnigraph"]["linked_session_ids"]) {
+        if let Some(id) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            if seen.insert(id.to_owned()) {
+                out.push(id.to_owned());
+            }
+        }
+    }
+    out
+}
+
+pub fn upsert_sessions(sessions: &[V]) {
+    for session in sessions {
+        upsert(session.clone());
+    }
 }
 #[cfg(test)]
 mod sdd_contract_tests {
@@ -559,5 +586,49 @@ mod omnigraph_model_tests {
             omnigraph_branch(&serde_json::json!({"omnigraph": {"enabled": true}})),
             "main"
         );
+
+        let shared = serde_json::json!({
+            "id": "s3",
+            "omnigraph": {
+                "shared_space": "shared/sprint-auth",
+                "linked_session_ids": ["s1", " s2 ", "s1", ""]
+            }
+        });
+        assert!(omnigraph_enabled(&shared));
+        assert_eq!(omnigraph_shared_space(&shared), "shared/sprint-auth");
+        assert_eq!(omnigraph_linked_session_ids(&shared), vec!["s1", "s2"]);
+    }
+
+    #[test]
+    fn state_default_and_upsert_sessions_keep_selected_in_sync() {
+        let state = State::default();
+        assert_eq!(state.view, "sessions");
+        assert!(state.sessions.is_empty());
+        assert!(state.selected.is_null());
+
+        write(|s| {
+            s.sid = "sess-2".into();
+            s.selected = serde_json::json!({"id": "sess-2", "title": "Old"});
+            s.sessions = vec![
+                serde_json::json!({"id": "sess-1", "title": "One"}),
+                serde_json::json!({"id": "sess-2", "title": "Old"}),
+            ];
+        });
+        upsert_sessions(&[
+            serde_json::json!({"id": "sess-2", "title": "Updated", "omnigraph": {"shared_space": "shared/alpha"}}),
+            serde_json::json!({"id": "sess-3", "title": "Three"}),
+        ]);
+        read(|s| {
+            assert_eq!(s.selected["title"], "Updated");
+            assert_eq!(s.selected["omnigraph"]["shared_space"], "shared/alpha");
+            assert!(s.sessions.iter().any(|item| item["id"] == "sess-3"));
+            assert_eq!(
+                s.sessions
+                    .iter()
+                    .find(|item| item["id"] == "sess-2")
+                    .unwrap()["title"],
+                "Updated"
+            );
+        });
     }
 }

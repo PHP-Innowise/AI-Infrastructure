@@ -25,7 +25,7 @@
         <button class="nav-item" type="button" data-nav="skills"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m8 5-6 7 6 7 M16 5l6 7-6 7 M14 3l-4 18"/></svg>Skills</button>
         <button class="nav-item" type="button" data-nav="accelerators"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="m13 2-9 12h7l-1 8 10-12h-8Z"/></svg>Accelerators</button>
       </nav>
-      <div class="history-header"><span>Recent sessions</span><div class="history-actions"><button class="history-action" id="merge-chats" type="button" aria-haspopup="dialog" aria-label="Merge chats into a new task" title="Merge chats: start a new task from 2–8 finished chats of this project">Merge</button><button class="icon-button" id="refresh-sessions" type="button" aria-label="Refresh sessions"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2 6 M20 4v7h-7"/></svg></button></div></div>
+      <div class="history-header"><span>Recent sessions</span><div class="history-actions"><button class="history-action history-action-share" id="share-sessions-context" type="button" aria-haspopup="dialog" aria-label="Share context across tasks via Omnigraph" title="Share live Omnigraph context across multiple tasks">Share</button><button class="history-action" id="merge-chats" type="button" aria-haspopup="dialog" aria-label="Merge chats into a new task" title="Merge chats: start a new task from 2–8 finished chats of this project">Merge</button><button class="icon-button" id="refresh-sessions" type="button" aria-label="Refresh sessions"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2 6 M20 4v7h-7"/></svg></button></div></div>
       <div class="history" id="history"><p class="history-empty">Connecting to the local runner…</p></div>
       <div class="sidebar-footer"><strong id="runtime-label">Local runner</strong><span id="runtime-detail" hidden></span>
         <button type="button" class="sidebar-graph-pill" id="sidebar-graph-pill" data-state="idle" title="Open live code graph in Sessions"><span class="sidebar-graph-dot" id="sidebar-graph-dot" aria-hidden="true"></span><span class="sidebar-graph-label" id="sidebar-graph-label">Graph: idle</span></button>
@@ -117,12 +117,20 @@
             <div class="knowledge-form-grid" id="omnigraph-session-fields" hidden>
               <div class="field"><label for="omnigraph-branch-mode">Branch mode</label><select id="omnigraph-branch-mode" form="session-form" aria-describedby="omnigraph-session-note"><option value="auto">Automatic session branch (session/…)</option><option value="main">Shared main branch</option><option value="existing">Existing branch</option></select></div>
               <div class="field" id="omnigraph-existing-branch-field" hidden><label for="omnigraph-existing-branch">Target branch</label><select id="omnigraph-existing-branch" form="session-form" disabled><option value="main">main</option></select></div>
+              <div class="field"><label for="omnigraph-shared-space">Shared space (optional)</label><input id="omnigraph-shared-space" form="session-form" type="text" maxlength="100" placeholder="sprint-auth" autocomplete="off" spellcheck="false" aria-describedby="omnigraph-space-hint"><span class="workspace-helper" id="omnigraph-space-hint">Creates or joins <code>shared/&lt;slug&gt;</code> with linked peer tasks.</span></div>
               <div class="field wide"><label for="omnigraph-pull-branches">Pull context from branches</label><input id="omnigraph-pull-branches" form="session-form" type="text" maxlength="500" placeholder="main, session/auth-fix" autocomplete="off" spellcheck="false" aria-describedby="omnigraph-pull-hint"><span class="workspace-helper" id="omnigraph-pull-hint">Comma-separated branches to pull from on startup. Leave blank for main.</span></div>
               <div class="field wide"><label for="omnigraph-session-query">Focus query</label><textarea id="omnigraph-session-query" form="session-form" maxlength="2000" rows="2" placeholder="Topic, files, contracts, or decisions to prioritize"></textarea></div>
             </div>
             <div class="omni-panel-checks" id="omnigraph-session-checks" hidden>
               <label class="checkbox" for="omnigraph-auto-publish"><input id="omnigraph-auto-publish" form="session-form" type="checkbox" checked>Auto-publish learnings to branch</label>
               <label class="checkbox" for="omnigraph-auto-merge"><input id="omnigraph-auto-merge" form="session-form" type="checkbox">Auto-merge branch into main when finished</label>
+            </div>
+            <div class="omni-peer-config" id="omnigraph-peer-sessions-wrap" hidden>
+              <div class="omni-peer-config-head">
+                <span class="field-label" id="omnigraph-peer-sessions-label">Link context with existing tasks</span>
+                <span class="omni-meta-pill" id="omnigraph-peer-count">0 linked</span>
+              </div>
+              <div class="omni-peer-sessions" id="omnigraph-peer-sessions" role="group" aria-labelledby="omnigraph-peer-sessions-label"></div>
             </div>
           </div>
           </div>
@@ -164,10 +172,14 @@
                 <span class="knowledge-note" id="session-omnigraph-meta" role="status"></span>
               </div>
               <div class="omni-session-bar-actions">
+                <button class="button compact" id="session-omnigraph-share-tasks" type="button">Share with tasks…</button>
+                <button class="button compact" id="session-omnigraph-export" type="button">Export</button>
+                <button class="button compact" id="session-omnigraph-import" type="button">Import</button>
                 <button class="button compact" id="session-omnigraph-open" type="button">Explore in Graph ↗</button>
                 <button class="button compact primary" id="session-omnigraph-merge" type="button" hidden>Merge branch → main</button>
               </div>
             </div>
+            <div class="omni-session-peers" id="session-omnigraph-peers" aria-label="Linked peer tasks" hidden></div>
             <div class="omni-session-atoms" id="session-omnigraph-atoms"></div>
             <p class="error-text" id="session-omnigraph-error" role="alert" hidden></p>
           </section>
@@ -674,6 +686,8 @@
             </div>
             <div class="omni-header-actions">
               <label class="field" data-project-field for="omnigraph-project">Project<select id="omnigraph-project"></select></label>
+              <button class="button compact" id="omnigraph-export-open" type="button">Export…</button>
+              <button class="button compact" id="omnigraph-import-open" type="button">Import…</button>
               <button class="button compact" id="omnigraph-mcp-copy" type="button" hidden>Copy MCP URL</button>
               <button class="button compact" id="omnigraph-apply-schema" type="button" hidden>Apply Schema</button>
               <button class="button compact" id="omnigraph-open-settings" type="button">Connection…</button>
@@ -1018,6 +1032,175 @@
     </form>
     <p class="knowledge-note" id="omni-dlg-status" role="status" hidden></p>
     <p class="error-text" id="omni-dlg-error" role="alert" hidden></p>
+  </dialog>
+  <dialog class="folder-picker omni-transfer-dialog" id="omnigraph-transfer-dialog" aria-labelledby="omni-transfer-title" aria-describedby="omni-transfer-description">
+    <div class="folder-picker-head"><h2 id="omni-transfer-title">Export &amp; Import Omnigraph Context</h2><button class="button" id="omni-transfer-close" type="button">Close</button></div>
+    <p class="knowledge-note" id="omni-transfer-description">Export a portable context bundle or NDJSON stream, or import context back into any Omnigraph branch and task.</p>
+    <div class="omni-tabs omni-transfer-tabs" id="omni-transfer-tabs" role="tablist" aria-label="Context transfer mode" focusgroup="tablist nomemory">
+      <button type="button" class="omni-tab" role="tab" id="omni-transfer-tab-export" data-action="omnigraph-transfer-tab" data-tab="export" aria-controls="omni-transfer-pane-export" aria-selected="true">Export</button>
+      <button type="button" class="omni-tab" role="tab" id="omni-transfer-tab-import" data-action="omnigraph-transfer-tab" data-tab="import" aria-controls="omni-transfer-pane-import" aria-selected="false">Import</button>
+    </div>
+    <section class="omni-transfer-pane" role="tabpanel" id="omni-transfer-pane-export" aria-labelledby="omni-transfer-tab-export">
+      <div class="omni-form-row">
+        <div class="field">
+          <label for="omni-export-scope">Scope</label>
+          <select id="omni-export-scope">
+            <option value="task">Current task / session</option>
+            <option value="branch">Active branch</option>
+            <option value="all">Main graph</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="omni-export-format">Format</label>
+          <select id="omni-export-format">
+            <option value="bundle">Omnigraph Context Bundle (.json)</option>
+            <option value="ndjson">Raw Omnigraph NDJSON (.ndjson)</option>
+          </select>
+        </div>
+      </div>
+      <div class="omni-form-row">
+        <div class="field" id="omni-export-session-field">
+          <label for="omni-export-session">Task / session</label>
+          <select id="omni-export-session"><option value="">No session selected</option></select>
+        </div>
+        <div class="field" id="omni-export-branch-field" hidden>
+          <label for="omni-export-branch">Branch</label>
+          <select id="omni-export-branch"><option value="main">main</option></select>
+        </div>
+      </div>
+      <label class="checkbox" for="omni-export-include-inherited"><input id="omni-export-include-inherited" type="checkbox">Include inherited branch context</label>
+      <div class="omni-transfer-summary" id="omni-export-summary-bar">
+        <span class="omni-meta-pill" id="omni-export-summary">0 atoms · 0 files · 0 edges</span>
+        <span class="omni-meta-pill omni-mono" id="omni-export-filename" hidden></span>
+        <span class="omni-badge" data-kind="branch" id="omni-export-source-branch" hidden>main</span>
+      </div>
+      <div class="omni-transfer-actions">
+        <button class="button" id="omni-export-preview-btn" type="button">Generate Preview</button>
+        <button class="button primary" id="omni-export-download" type="button">Download File</button>
+        <button class="button" id="omni-export-copy" type="button">Copy to Clipboard</button>
+      </div>
+      <details class="omni-transfer-preview-details" id="omni-export-preview-details">
+        <summary>Payload preview (<span id="omni-export-preview-meta">ready to generate</span>)</summary>
+        <pre class="knowledge-result omni-transfer-preview-code" id="omni-export-preview-code" tabindex="0"></pre>
+      </details>
+      <p class="knowledge-note" id="omni-export-status" role="status" hidden></p>
+      <p class="error-text" id="omni-export-error" role="alert" hidden></p>
+    </section>
+    <section class="omni-transfer-pane" role="tabpanel" id="omni-transfer-pane-import" aria-labelledby="omni-transfer-tab-import" hidden>
+      <form class="omni-transfer-form" id="omni-import-form" novalidate>
+        <div class="omni-dropzone" id="omni-import-dropzone" data-dragover="false">
+          <svg class="omni-dropzone-icon" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4 M7 9l5-5 5 5 M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+          <div class="omni-dropzone-copy">
+            <strong>Drop a <code>.json</code> bundle or <code>.ndjson</code> export here</strong>
+            <span class="omni-dropzone-file" id="omni-import-file-name">No file selected</span>
+          </div>
+          <button class="button compact" id="omni-import-browse" type="button">Choose file…</button>
+          <label class="sr-only" for="omni-import-file">Import Omnigraph file</label>
+          <input id="omni-import-file" type="file" accept=".json,.ndjson,application/json" hidden>
+        </div>
+        <div class="field">
+          <label for="omni-import-text">Bundle JSON or Raw NDJSON</label>
+          <textarea id="omni-import-text" rows="5" spellcheck="false" placeholder='{"format":"harness.omnigraph.bundle.v1","atoms":[...]} or {"type":"ContextAtom",...}'></textarea>
+        </div>
+        <div class="omni-import-preview" id="omni-import-preview" data-state="empty" role="status">
+          <span class="omni-meta-pill" id="omni-import-format-pill">Waiting for payload</span>
+          <span class="knowledge-note" id="omni-import-preview-text">Drop a file or paste Omnigraph JSON / NDJSON to inspect its contents before importing.</span>
+        </div>
+        <div class="omni-form-row">
+          <div class="field">
+            <label for="omni-import-target-branch">Target branch</label>
+            <input id="omni-import-target-branch" type="text" maxlength="120" list="omni-import-branch-list" placeholder="main or session/imported" autocomplete="off" spellcheck="false">
+            <datalist id="omni-import-branch-list"></datalist>
+          </div>
+          <div class="field">
+            <label for="omni-import-mode">Mode</label>
+            <select id="omni-import-mode">
+              <option value="merge">Merge (upsert into branch)</option>
+              <option value="replace">Replace (overwrite branch)</option>
+            </select>
+          </div>
+        </div>
+        <label class="checkbox" for="omni-import-inject"><input id="omni-import-inject" type="checkbox">Inject imported context into active session</label>
+        <div class="field" id="omni-import-session-field" hidden>
+          <label for="omni-import-session">Target session</label>
+          <select id="omni-import-session"><option value="">No target session</option></select>
+        </div>
+        <p class="knowledge-note" id="omni-import-status" role="status" hidden></p>
+        <p class="error-text" id="omni-import-error" role="alert" hidden></p>
+        <div class="folder-picker-actions">
+          <button class="button" id="omni-import-clear" type="button">Clear</button>
+          <button class="button primary" id="omni-import-submit" type="submit" disabled>Import into Omnigraph</button>
+        </div>
+      </form>
+    </section>
+  </dialog>
+  <dialog class="folder-picker omni-share-dialog" id="omnigraph-share-dialog" aria-labelledby="omni-share-dialog-title" aria-describedby="omni-share-dialog-description">
+    <div class="folder-picker-head"><h2 id="omni-share-dialog-title">Share Context Across Tasks</h2><button class="button" id="omni-share-dialog-close" type="button">Close</button></div>
+    <p class="knowledge-note" id="omni-share-dialog-description">Link tasks in Sessions through Omnigraph so findings, decisions, files, and warnings stay live-synchronized.</p>
+    <p class="omni-share-offline" id="omni-share-offline-note" role="status" hidden><span>Omnigraph is currently offline. Connect it in Context Graph to sync tasks live.</span><button class="button compact" id="omni-share-open-setup" type="button">Open Context Graph ↗</button></p>
+    <form class="omni-share-form" id="omni-share-form" novalidate>
+      <fieldset class="omni-share-modes" id="omni-share-mode-group">
+        <legend class="field-label">Sharing topology</legend>
+        <div class="omni-share-mode-grid">
+          <label class="omni-mode-card" for="omni-share-mode-shared">
+            <input id="omni-share-mode-shared" type="radio" name="omni-share-link-mode" value="shared_branch" checked>
+            <span class="omni-mode-card-head"><svg class="omni-icon-xs" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><circle cx="3" cy="3.5" r="1.5"/><circle cx="13" cy="3.5" r="1.5"/><circle cx="3" cy="12.5" r="1.5"/><circle cx="13" cy="12.5" r="1.5"/><path d="M4.2 4.6 L6.3 6.5 M11.8 4.6 L9.7 6.5 M4.2 11.4 L6.3 9.5 M11.8 11.4 L9.7 9.5"/></svg><strong>Mutual Shared Space</strong></span>
+            <span class="omni-mode-card-copy">Syncs a shared Omnigraph branch across all checked tasks for mutual two-way collaboration.</span>
+          </label>
+          <label class="omni-mode-card" for="omni-share-mode-broadcast">
+            <input id="omni-share-mode-broadcast" type="radio" name="omni-share-link-mode" value="broadcast">
+            <span class="omni-mode-card-head"><svg class="omni-icon-xs" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="3" cy="8" r="2"/><circle cx="13" cy="3.5" r="1.6"/><circle cx="13" cy="8" r="1.6"/><circle cx="13" cy="12.5" r="1.6"/><path d="M5 7.4 L11.3 4 M5 8 H11.3 M5 8.6 L11.3 12"/></svg><strong>Broadcast from one task</strong></span>
+            <span class="omni-mode-card-copy">Pushes one source task’s context branch and atoms into every checked target task.</span>
+          </label>
+        </div>
+      </fieldset>
+      <div class="omni-form-row">
+        <div class="field" id="omni-share-space-field">
+          <label for="omni-share-space">Shared space slug (optional)</label>
+          <input id="omni-share-space" type="text" maxlength="100" placeholder="shared/sprint-auth" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field" id="omni-share-source-field" hidden>
+          <label for="omni-share-source">Source task</label>
+          <select id="omni-share-source"><option value="">Choose source task…</option></select>
+        </div>
+      </div>
+      <section class="omni-share-topology" id="omnigraph-share-topology" aria-label="Live sharing topology preview"></section>
+      <fieldset class="omni-share-tasks" id="omni-share-tasks">
+        <div class="omni-share-tasks-head">
+          <legend class="field-label">Project tasks (<span id="omni-share-selected-count">0</span> selected)</legend>
+          <div class="omni-share-tasks-controls">
+            <label class="sr-only" for="omni-share-filter">Filter tasks</label>
+            <input id="omni-share-filter" type="search" maxlength="100" placeholder="Filter tasks…" autocomplete="off">
+            <button class="button compact" id="omni-share-select-all" type="button">Select All</button>
+            <button class="button compact" id="omni-share-clear" type="button">Clear</button>
+          </div>
+        </div>
+        <div class="omni-share-task-list" id="omnigraph-share-task-list"></div>
+      </fieldset>
+      <p class="knowledge-note omni-share-summary" id="omni-share-summary" role="status"></p>
+      <ol class="stepper omni-share-stepper" id="omni-share-progress" aria-label="Sharing progress" hidden>
+        <li class="step" id="omni-share-step-1" data-state="pending"><span class="step-mark" aria-hidden="true">1</span><span>Preparing task branches</span></li>
+        <li class="step" id="omni-share-step-2" data-state="pending"><span class="step-mark" aria-hidden="true">2</span><span>Syncing Omnigraph links</span></li>
+        <li class="step" id="omni-share-step-3" data-state="pending"><span class="step-mark" aria-hidden="true">3</span><span>Updating live sessions</span></li>
+      </ol>
+      <section class="omni-share-result" id="omni-share-result" role="status" hidden>
+        <div class="omni-share-result-head">
+          <span class="omni-badge" data-kind="success"><span aria-hidden="true">✓</span> Context Linked</span>
+          <span class="omni-badge" data-kind="branch" id="omni-share-result-branch">main</span>
+          <span class="omni-meta-pill" id="omni-share-result-atoms">0 synced atoms</span>
+        </div>
+        <p class="knowledge-note" id="omni-share-result-copy"></p>
+        <div class="omni-share-result-actions">
+          <button class="button compact primary" id="omni-share-open-graph" type="button">View in Context Graph ↗</button>
+          <button class="button compact" id="omni-share-done" type="button">Done</button>
+        </div>
+      </section>
+      <p class="error-text" id="omni-share-dlg-error" role="alert" hidden></p>
+      <div class="folder-picker-actions">
+        <button class="button" id="omni-share-cancel" type="button">Cancel</button>
+        <button class="button primary" id="omni-share-submit" type="submit" disabled>Share Context via Omnigraph</button>
+      </div>
+    </form>
   </dialog>
   <script type="module" src="/boot.js"></script>
 </body>
