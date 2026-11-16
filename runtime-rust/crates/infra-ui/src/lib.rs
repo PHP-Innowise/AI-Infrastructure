@@ -16,6 +16,7 @@ mod inbox;
 mod knowledge;
 mod management;
 mod model;
+pub(crate) mod omnigraph_canvas;
 mod run;
 mod session;
 mod system_map;
