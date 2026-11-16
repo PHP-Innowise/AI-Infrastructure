@@ -263,6 +263,19 @@ pub fn project_for_reentry(
     }
     project_scope_transition(scope, current, sidebar, held).then(|| sidebar.to_owned())
 }
+
+pub fn omnigraph_enabled(session: &V) -> bool {
+    let omni = &session["omnigraph"];
+    omni.is_object() && (yes(&omni["enabled"]) || omni["branch"].is_string())
+}
+
+pub fn omnigraph_branch(session: &V) -> String {
+    session["omnigraph"]["branch"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("main")
+        .to_owned()
+}
 #[cfg(test)]
 mod sdd_contract_tests {
     use super::*;
@@ -527,5 +540,24 @@ mod project_reentry_tests {
                 .is_none()
         );
         assert!(scope_current("reentry-contract", adopted, "b", ""));
+    }
+}
+
+#[cfg(test)]
+mod omnigraph_model_tests {
+    use super::*;
+    #[test]
+    fn omnigraph_session_helpers_detect_enabled_and_branch() {
+        assert!(!omnigraph_enabled(&serde_json::json!({"id": "s1"})));
+        assert!(!omnigraph_enabled(
+            &serde_json::json!({"omnigraph": {"enabled": false}})
+        ));
+        let active = serde_json::json!({"omnigraph": {"enabled": true, "branch": "session/s2"}});
+        assert!(omnigraph_enabled(&active));
+        assert_eq!(omnigraph_branch(&active), "session/s2");
+        assert_eq!(
+            omnigraph_branch(&serde_json::json!({"omnigraph": {"enabled": true}})),
+            "main"
+        );
     }
 }
