@@ -1171,7 +1171,7 @@ pub fn reset() {
 }
 
 fn initial() -> V {
-    json!({"launch":"","calls":{},"open":[],"files":{},"commands":[],"plan":[],"searches":[],"steps":0,"messages":0,"finished":false,"outcome":null,"memory":null,"kinds":[],"started":null})
+    json!({"launch":"","calls":{},"open":[],"files":{},"commands":[],"plan":[],"searches":[],"steps":0,"messages":0,"finished":false,"outcome":null,"memory":null,"omnigraph":null,"kinds":[],"started":null})
 }
 
 fn tool_name(v: &V) -> String {
@@ -1312,6 +1312,7 @@ fn advance(mut run: V, event: &V) -> (V, Option<V>) {
         "text" => run["messages"] = json!(run["messages"].as_u64().unwrap_or(0) + 1),
         "usage" => run["usage"] = event.clone(),
         "memory" => run["memory"] = event.clone(),
+        "omnigraph" => run["omnigraph"] = event.clone(),
         "delegation" => run["delegation"] = event.clone(),
         "status" => {
             if check_status(&m::text(event, "text")) {
@@ -1480,6 +1481,7 @@ fn conversation(v: &V) {
         "status",
         "error",
         "memory",
+        "omnigraph",
         "delegation",
         "clash_turn",
         "clash_state",
