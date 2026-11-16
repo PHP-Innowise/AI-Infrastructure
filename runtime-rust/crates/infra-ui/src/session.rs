@@ -367,6 +367,7 @@ pub async fn bootstrap() {
                 && boot["providers"].is_array() =>
         {
             m::set("app-update", boot["update"].clone());
+            let boot_omnigraph = boot["omnigraph"].clone();
             m::write(|s| {
                 s.sessions = m::array(&boot["sessions"]);
                 s.boot = boot;
@@ -380,6 +381,9 @@ pub async fn bootstrap() {
             populate();
             history();
             restore_preferences();
+            if boot_omnigraph.is_object() {
+                omnigraph::hydrate_status(&boot_omnigraph);
+            }
             spawn_local(async {
                 omnigraph::refresh_pill().await;
             });
@@ -429,6 +433,7 @@ pub fn populate() {
         "creator-project",
         "accelerator-project",
         "system-project",
+        "omnigraph-project",
     ] {
         dom::options(id, &projects, m::summary, None);
     }

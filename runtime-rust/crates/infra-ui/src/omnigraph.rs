@@ -99,6 +99,41 @@ pub fn parse_csv_list(raw: &str) -> Vec<String> {
     out
 }
 
+pub fn parse_relates_to(raw: &str) -> Vec<V> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for item in raw.split([',', '\n']) {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (relation, target_id) = if let Some((rel, target)) = trimmed.split_once(':') {
+            let rel_trimmed = rel.trim();
+            let target_trimmed = target.trim();
+            if target_trimmed.is_empty() {
+                continue;
+            }
+            (
+                if rel_trimmed.is_empty() {
+                    "relates_to"
+                } else {
+                    rel_trimmed
+                },
+                target_trimmed,
+            )
+        } else {
+            ("relates_to", trimmed)
+        };
+        if seen.insert((relation.to_owned(), target_id.to_owned())) {
+            out.push(json!({
+                "target_id": target_id,
+                "relation": relation,
+            }));
+        }
+    }
+    out
+}
+
 pub fn session_payload_from_fields(
     enabled: bool,
     branch_mode: &str,
@@ -124,14 +159,17 @@ pub fn session_payload_from_fields(
         _ => "auto",
     };
     let pull_branches = parse_csv_list(pull_raw);
-    Some(json!({
+    let mut payload = json!({
         "enabled": true,
         "branch": branch,
-        "pull_branches": pull_branches,
         "query": query.trim(),
         "auto_publish": auto_publish,
         "auto_merge": auto_merge,
-    }))
+    });
+    if !pull_branches.is_empty() {
+        payload["pull_branches"] = json!(pull_branches);
+    }
+    Some(payload)
 }
 
 pub fn pill_presentation(status: &V) -> (&'static str, &'static str, String, String) {
@@ -226,6 +264,76 @@ fn atom_id(atom: &V) -> String {
         .to_owned()
 }
 
+fn atom_branch<'a>(atom: &'a V, fallback: &'a str) -> &'a str {
+    atom["source_branch"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| atom["branch"].as_str().filter(|s| !s.is_empty()))
+        .unwrap_or(fallback)
+}
+
+fn atom_session_id(atom: &V) -> &str {
+    atom["source_session_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| atom["session_id"].as_str().filter(|s| !s.is_empty()))
+        .or_else(|| atom["author_session_id"].as_str().filter(|s| !s.is_empty()))
+        .unwrap_or("")
+}
+
+pub fn format_timestamp_val(v: &V) -> String {
+    if let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        return s.to_owned();
+    }
+    let Some(raw) = v
+        .as_i64()
+        .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
+        .or_else(|| v.as_f64().map(|f| f as i64))
+    else {
+        return String::new();
+    };
+    if raw <= 0 {
+        return String::new();
+    }
+    let secs = if raw >= 1_000_000_000_000_000_000 {
+        raw / 1_000_000_000
+    } else if raw >= 1_000_000_000_000_000 {
+        raw / 1_000_000
+    } else if raw >= 1_000_000_000_000 {
+        raw / 1_000
+    } else {
+        raw
+    };
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let hour = rem / 3_600;
+    let minute = (rem % 3_600) / 60;
+    let second = rem % 60;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+    format!("{y:04}-{m:02}-{d:02} {hour:02}:{minute:02}:{second:02} UTC")
+}
+
+fn first_timestamp_val(vals: &[&V]) -> String {
+    for val in vals {
+        let formatted = format_timestamp_val(val);
+        if !formatted.is_empty() {
+            return formatted;
+        }
+    }
+    String::new()
+}
+
 fn session_node_id(session: &V) -> String {
     session["id"]
         .as_str()
@@ -292,7 +400,7 @@ fn branch_names_from_graph(graph: &V) -> Vec<String> {
 pub fn format_context_snippet(atom: &V) -> String {
     let kind = kind_title(atom["kind"].as_str().unwrap_or("finding"));
     let title = atom["title"].as_str().unwrap_or("Context Atom");
-    let branch = atom["branch"].as_str().unwrap_or("main");
+    let branch = atom_branch(atom, "main");
     let summary = atom["summary"].as_str().unwrap_or("");
     let body = atom["body"].as_str().unwrap_or("");
     let files = m::array(&atom["files"])
@@ -410,19 +518,20 @@ fn render_atom_inspector_html(graph: &V, atom: &V, sessions: &[V], active_branch
         .unwrap_or(&id);
     let summary = atom["summary"].as_str().unwrap_or("");
     let body = atom["body"].as_str().unwrap_or("");
-    let branch = atom["branch"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(active_branch);
+    let branch = atom_branch(atom, active_branch);
     let confidence = atom["confidence"].as_f64().unwrap_or(0.85).clamp(0.0, 1.0);
     let pin = atom["pin_priority"].as_i64().unwrap_or(0);
     let actor = atom["actor_id"]
         .as_str()
         .or_else(|| atom["author"].as_str())
         .unwrap_or("");
-    let session_id = atom["session_id"].as_str().unwrap_or("");
+    let session_id = atom_session_id(atom);
     let commit_id = atom["commit_id"].as_str().unwrap_or("");
-    let created_at = atom["created_at"].as_str().unwrap_or("");
+    let created_at = first_timestamp_val(&[
+        &atom["created_at"],
+        &atom["authored_at"],
+        &atom["timestamp"],
+    ]);
 
     let mut html = format!(
         "<article class=\"omni-inspector-card\"><div class=\"omni-node-head\"><span class=\"omni-badge\" data-kind=\"{}\"><span aria-hidden=\"true\">{}</span> {}</span><span class=\"omni-badge\" data-kind=\"branch\">{}</span></div><h3 class=\"omni-inspector-title\">{}</h3>",
@@ -492,7 +601,7 @@ fn render_atom_inspector_html(graph: &V, atom: &V, sessions: &[V], active_branch
         provenance_parts.push(format!("Actor: <code>{}</code>", esc(actor)));
     }
     if !created_at.is_empty() {
-        provenance_parts.push(format!("Created: {}", esc(created_at)));
+        provenance_parts.push(format!("Created: {}", esc(&created_at)));
     }
     if !provenance_parts.is_empty() || !session_id.is_empty() || !commit_id.is_empty() {
         html.push_str("<div class=\"omni-inspector-group\"><h4>Provenance</h4>");
@@ -580,7 +689,7 @@ fn render_atom_inspector_html(graph: &V, atom: &V, sessions: &[V], active_branch
             ));
         }
     }
-    html.push_str("</select></div><div class=\"field\"><label for=\"omni-share-mode\">Mode</label><select id=\"omni-share-mode\"><option value=\"inject\">Inject</option><option value=\"reference\">Reference</option></select></div></div>");
+    html.push_str("</select></div><div class=\"field\"><label for=\"omni-share-mode\">Mode</label><select id=\"omni-share-mode\"><option value=\"inject\">Inject</option><option value=\"reference\">Reference</option><option value=\"inject_and_link\">Inject &amp; Link</option><option value=\"copy\">Copy to Branch</option></select></div></div>");
     html.push_str(&format!(
         "<div class=\"omni-chip-list\"><button type=\"button\" class=\"button compact primary\" data-action=\"omnigraph-share-atom\" data-atom-id=\"{}\" data-branch=\"{}\"{}>Share to Session</button><button type=\"button\" class=\"button compact\" data-action=\"omnigraph-copy-snippet\" data-atom-id=\"{}\">Copy context snippet</button><button type=\"button\" class=\"button compact\" data-action=\"omnigraph-open-branch\" data-branch=\"{}\">Open in Branch</button><button type=\"button\" class=\"button compact\" data-action=\"omnigraph-cite-atom\" data-atom-id=\"{}\">Cite in new atom</button></div><p class=\"knowledge-note\" id=\"omni-share-status\" role=\"status\" hidden></p><p class=\"error-text\" id=\"omni-share-error\" role=\"alert\" hidden></p></div></article>",
         esc(&id),
@@ -694,13 +803,23 @@ pub fn render_commit_inspector_html(detail: &V) -> String {
     let cid = commit["id"]
         .as_str()
         .or_else(|| commit["graph_commit_id"].as_str())
+        .or_else(|| commit["commit_id"].as_str())
         .unwrap_or("commit");
     let branch = commit["branch"]
         .as_str()
         .or_else(|| commit["graph_branch"].as_str())
+        .or_else(|| commit["source_branch"].as_str())
         .unwrap_or("main");
-    let actor = commit["actor_id"].as_str().unwrap_or("harness");
-    let created = commit["created_at"].as_str().unwrap_or("");
+    let actor = commit["actor_id"]
+        .as_str()
+        .or_else(|| commit["actor"].as_str())
+        .or_else(|| commit["author"].as_str())
+        .unwrap_or("harness");
+    let created = first_timestamp_val(&[
+        &commit["created_at"],
+        &commit["authored_at"],
+        &commit["timestamp"],
+    ]);
     let changes = m::array(&detail["changes"]);
     let atoms = m::array(&detail["atoms"]);
     let mut html = format!(
@@ -711,7 +830,7 @@ pub fn render_commit_inspector_html(detail: &V) -> String {
         if created.is_empty() {
             String::new()
         } else {
-            format!(" · {}", esc(created))
+            format!(" · {}", esc(&created))
         }
     );
     if !changes.is_empty() {
@@ -724,14 +843,42 @@ pub fn render_commit_inspector_html(detail: &V) -> String {
                 .as_str()
                 .or_else(|| ch["kind"].as_str())
                 .unwrap_or("change");
+            let type_name = ch["type"]["name"]
+                .as_str()
+                .or_else(|| ch["type_name"].as_str())
+                .or_else(|| ch["entity_kind"].as_str())
+                .unwrap_or("");
             let label = ch["title"]
                 .as_str()
-                .or_else(|| ch["entity_id"].as_str())
-                .or_else(|| ch["id"].as_str())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    ch["after"]["properties"]["title"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                })
+                .or_else(|| {
+                    ch["after"]["properties"]["summary"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                })
+                .or_else(|| ch["after"]["title"].as_str().filter(|s| !s.is_empty()))
+                .or_else(|| ch["after"]["summary"].as_str().filter(|s| !s.is_empty()))
+                .or_else(|| {
+                    ch["before"]["properties"]["title"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                })
+                .or_else(|| ch["entity_id"].as_str().filter(|s| !s.is_empty()))
+                .or_else(|| ch["id"].as_str().filter(|s| !s.is_empty()))
                 .unwrap_or("item");
+            let tag = if !type_name.is_empty() && type_name != op {
+                format!("{op} {type_name}")
+            } else {
+                op.to_owned()
+            };
             html.push_str(&format!(
                 "<span class=\"omni-meta-pill\">{} · {}</span>",
-                esc(op),
+                esc(&tag),
                 esc(label)
             ));
         }
@@ -768,37 +915,67 @@ pub fn render_pulse_list_html(events: &[V]) -> String {
     for ev in events.iter().take(MAX_PULSE_EVENTS) {
         let kind = ev["kind"]
             .as_str()
-            .or_else(|| ev["event"].as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                ev["after"]["properties"]["kind"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| ev["type_name"].as_str().filter(|s| !s.is_empty()))
+            .or_else(|| ev["entity_kind"].as_str().filter(|s| !s.is_empty()))
+            .or_else(|| ev["op"].as_str().filter(|s| !s.is_empty()))
+            .or_else(|| ev["event"].as_str().filter(|s| !s.is_empty()))
             .unwrap_or("change");
         let branch = ev["branch"]
             .as_str()
-            .or_else(|| ev["graph_branch"].as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| ev["source_branch"].as_str().filter(|s| !s.is_empty()))
+            .or_else(|| ev["graph_branch"].as_str().filter(|s| !s.is_empty()))
             .unwrap_or("main");
         let node_id = ev["atom_id"]
             .as_str()
-            .or_else(|| ev["node_id"].as_str())
-            .or_else(|| ev["session_id"].as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| ev["node_id"].as_str().filter(|s| !s.is_empty()))
+            .or_else(|| ev["entity_id"].as_str().filter(|s| !s.is_empty()))
+            .or_else(|| ev["session_id"].as_str().filter(|s| !s.is_empty()))
             .unwrap_or("");
+        let op = ev["op"].as_str().unwrap_or("");
+        let fallback_title = if !op.is_empty() && !node_id.is_empty() {
+            format!("{op} · {node_id}")
+        } else if !node_id.is_empty() {
+            node_id.to_owned()
+        } else {
+            kind.to_owned()
+        };
         let title = ev["title"]
             .as_str()
-            .or_else(|| ev["summary"].as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or(kind);
+            .or_else(|| ev["summary"].as_str().filter(|s| !s.is_empty()))
+            .or_else(|| {
+                ev["after"]["properties"]["title"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| {
+                ev["after"]["properties"]["summary"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or(&fallback_title);
         let actor = ev["actor_id"]
             .as_str()
-            .or_else(|| ev["session_id"].as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| ev["source_session_id"].as_str().filter(|s| !s.is_empty()))
+            .or_else(|| ev["session_id"].as_str().filter(|s| !s.is_empty()))
             .unwrap_or("system");
-        let when = ev["created_at"]
-            .as_str()
-            .or_else(|| ev["timestamp"].as_str())
-            .unwrap_or("");
+        let when = first_timestamp_val(&[&ev["created_at"], &ev["authored_at"], &ev["timestamp"]]);
         html.push_str(&format!(
             "<button type=\"button\" class=\"omni-pulse-item\" data-action=\"omnigraph-pulse-focus\" data-node-id=\"{}\" data-branch=\"{}\"><div class=\"omni-pulse-item-head\"><span class=\"omni-badge\" data-kind=\"{}\">{}</span><span>{}</span></div><strong>{}</strong><span class=\"knowledge-note\">{} · {}</span></button>",
             esc(node_id),
             esc(branch),
             esc(kind),
             esc(kind),
-            esc(when),
+            esc(&when),
             esc(title),
             esc(branch),
             esc(actor)
@@ -807,13 +984,17 @@ pub fn render_pulse_list_html(events: &[V]) -> String {
     html
 }
 
+pub fn session_bar_error(session: &V) -> String {
+    m::text(&session["omnigraph"], "last_error")
+}
+
 pub fn session_bar_summary(session: &V) -> (bool, String, String, Vec<V>, bool) {
     if !m::omnigraph_enabled(session) {
         return (false, String::new(), String::new(), Vec::new(), false);
     }
     let omni = &session["omnigraph"];
     let branch = m::omnigraph_branch(session);
-    let atoms = {
+    let shared_atoms = {
         let injected = m::array(&omni["injected_atoms"]);
         if !injected.is_empty() {
             injected
@@ -826,16 +1007,50 @@ pub fn session_bar_summary(session: &V) -> (bool, String, String, Vec<V>, bool) 
             }
         }
     };
-    let count = omni["atom_count"].as_u64().unwrap_or(atoms.len() as u64);
+    let published = m::array(&omni["published_atoms"]);
+    let count = omni["atom_count"]
+        .as_u64()
+        .unwrap_or(shared_atoms.len() as u64);
+    let pub_count = omni["published_count"]
+        .as_u64()
+        .unwrap_or(published.len() as u64);
+    let mut combined = Vec::new();
+    let mut seen = BTreeSet::new();
+    for item in shared_atoms.into_iter().chain(published) {
+        let normalized = if let Some(id_str) = item.as_str().filter(|s| !s.is_empty()) {
+            json!({ "id": id_str, "title": id_str, "kind": "finding" })
+        } else {
+            item
+        };
+        let aid = atom_id(&normalized);
+        if aid.is_empty() || seen.insert(aid) {
+            combined.push(normalized);
+        }
+    }
     let mut parts = vec![format!("{count} shared atoms")];
+    if pub_count > 0 {
+        parts.push(format!("{pub_count} published"));
+    }
     if m::yes(&omni["auto_publish"]) {
         parts.push("auto-publish".into());
     }
     if m::yes(&omni["auto_merge"]) {
         parts.push("auto-merge".into());
     }
-    let can_merge = branch != "main" && branch != "auto";
-    (true, branch, parts.join(" · "), atoms, can_merge)
+    let merge_status = m::text(omni, "merge_status");
+    if !merge_status.is_empty() {
+        parts.push(format!("merge: {merge_status}"));
+    }
+    let last_error = m::text(omni, "last_error");
+    if !last_error.is_empty() {
+        parts.push(format!("error: {last_error}"));
+    }
+    let is_merged = matches!(
+        merge_status.to_ascii_lowercase().as_str(),
+        "merged" | "fast_forward"
+    );
+    let can_merge = !is_merged && branch != "main" && branch != "auto";
+    (true, branch, parts.join(" · "), combined, can_merge)
 }
 
 fn current_project_id() -> String {
@@ -1058,6 +1273,14 @@ pub fn focus_branch(branch: &str) {
     }
 }
 
+pub fn hydrate_status(status: &V) {
+    if !status.is_object() {
+        return;
+    }
+    m::set("omnigraph-status", status.clone());
+    apply_status_to_chrome(status);
+}
+
 pub async fn refresh_pill() {
     let project = current_project_id();
     let path = format!(
@@ -1065,8 +1288,7 @@ pub async fn refresh_pill() {
         dom::query(&[("project_id", project)])
     );
     if let Ok(status) = api::get(&path).await {
-        m::set("omnigraph-status", status.clone());
-        apply_status_to_chrome(&status);
+        hydrate_status(&status);
     }
 }
 
@@ -1430,11 +1652,43 @@ async fn preview_merge(source: &str, target: &str) {
     }
 }
 
+pub fn branch_merge_outcome(res: &V) -> Result<(), String> {
+    let outcome = res["outcome"].as_str().unwrap_or("");
+    let ok = res["ok"].as_bool();
+    if outcome == "conflict" || ok == Some(false) {
+        let conflicts = m::array(&res["conflicts"]);
+        let msg = res["error"]
+            .as_str()
+            .or_else(|| res["message"].as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                if !conflicts.is_empty() {
+                    format!(
+                        "Merge conflict across {} item(s); review the diff below.",
+                        conflicts.len()
+                    )
+                } else if outcome == "conflict" {
+                    "Merge conflict detected; resolve conflicts before merging.".to_owned()
+                } else {
+                    "Branch operation failed.".to_owned()
+                }
+            });
+        Err(msg)
+    } else {
+        Ok(())
+    }
+}
+
 async fn execute_branch_action(body: V, status_msg: &str) -> Result<V, api::Error> {
     dom::error("omnigraph-error", "");
     let res = api::post("/api/omnigraph/branches", body).await?;
-    dom::text("omnigraph-status-message", status_msg);
-    dom::hidden("omnigraph-status-message", false);
+    if branch_merge_outcome(&res).is_ok() {
+        dom::text("omnigraph-status-message", status_msg);
+        dom::hidden("omnigraph-status-message", false);
+    } else {
+        dom::hidden("omnigraph-status-message", true);
+    }
     refresh_pill().await;
     refresh_graph().await;
     Ok(res)
@@ -1837,10 +2091,12 @@ pub fn render_session_bar(session: &V) {
     let (visible, branch, meta, atoms, can_merge) = session_bar_summary(session);
     dom::hidden("session-omnigraph-bar", !visible);
     if !visible {
+        dom::error("session-omnigraph-error", "");
         return;
     }
     dom::text("session-omnigraph-branch", &branch);
     dom::text("session-omnigraph-meta", &meta);
+    dom::error("session-omnigraph-error", &session_bar_error(session));
     dom::hidden("session-omnigraph-merge", !can_merge);
     dom::disabled("session-omnigraph-merge", m::active(session));
     if let Some(host) = dom::get("session-omnigraph-atoms") {
@@ -2296,7 +2552,7 @@ pub async fn event(
                     "body": dom::value("omni-pub-body").trim(),
                     "tags": parse_csv_list(&dom::value("omni-pub-tags")),
                     "files": parse_csv_list(&dom::value("omni-pub-files")),
-                    "relates_to": parse_csv_list(&dom::value("omni-pub-relates")),
+                    "relates_to": parse_relates_to(&dom::value("omni-pub-relates")),
                     "confidence": confidence,
                     "pin_priority": pin_priority,
                 });
@@ -2305,9 +2561,19 @@ pub async fn event(
                 }
                 match api::post("/api/omnigraph/atoms", body).await {
                     Ok(res) => {
-                        let new_id = res["id"]
+                        if res["ok"].as_bool() == Some(false) {
+                            let msg = res["error"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("Failed to publish context atom.");
+                            dom::error("omni-pub-error", msg);
+                            return true;
+                        }
+                        let new_id = res["atom"]["atom_id"]
                             .as_str()
                             .or_else(|| res["atom"]["id"].as_str())
+                            .or_else(|| res["atom_id"].as_str())
+                            .or_else(|| res["id"].as_str())
                             .unwrap_or("")
                             .to_owned();
                         dom::set_value("omni-pub-title", "");
@@ -2683,13 +2949,29 @@ pub async fn event(
             )
             .await
             {
-                Ok(res) => {
-                    m::set("omnigraph-diff", res);
-                    if delete_branch && m::text(&ui_state(), "branch") == src {
-                        set_ui_state(|s| s["branch"] = json!(dst));
+                Ok(mut res) => {
+                    if let Err(msg) = branch_merge_outcome(&res) {
+                        dom::error("omnigraph-error", &msg);
+                        if !m::array(&res["conflicts"]).is_empty() || res["outcome"] == "conflict" {
+                            if res["source"].is_null() {
+                                res["source"] = json!(src);
+                            }
+                            if res["target"].is_null() {
+                                res["target"] = json!(dst);
+                            }
+                            m::set("omnigraph-diff", res);
+                            render_merge();
+                        } else {
+                            preview_merge(&src, &dst).await;
+                        }
+                    } else {
+                        m::set("omnigraph-diff", res);
+                        if delete_branch && m::text(&ui_state(), "branch") == src {
+                            set_ui_state(|s| s["branch"] = json!(dst));
+                        }
+                        render_merge();
+                        refresh_graph().await;
                     }
-                    render_merge();
-                    refresh_graph().await;
                 }
                 Err(e) => {
                     dom::error("omnigraph-error", &e.message);
@@ -2724,7 +3006,16 @@ pub async fn event(
             )
             .await
             {
-                Ok(_) => {
+                Ok(res) => {
+                    if res["session"].is_object() {
+                        m::upsert(res["session"].clone());
+                        let updated_id = m::text(&res["session"], "id");
+                        if !updated_id.is_empty()
+                            && m::read(|s| m::text(&s.selected, "id")) == updated_id
+                        {
+                            render_session_bar(&res["session"]);
+                        }
+                    }
                     dom::text("omni-share-status", "Shared atom into session.");
                     dom::hidden("omni-share-status", false);
                     poll_changes(true).await;
@@ -2752,7 +3043,11 @@ pub async fn event(
             if !aid.is_empty() {
                 let cur = dom::value("omni-pub-relates");
                 let mut list = parse_csv_list(&cur);
-                if !list.iter().any(|x| x == aid) {
+                if !list.iter().any(|x| {
+                    x == aid
+                        || x.split_once(':')
+                            .is_some_and(|(_, target)| target.trim() == aid)
+                }) {
                     list.push(aid.to_owned());
                 }
                 dom::set_value("omni-pub-relates", &list.join(", "));
@@ -2802,9 +3097,23 @@ pub async fn event(
             )
             .await
             {
-                Ok(_) => {
-                    dom::text("session-omnigraph-meta", &format!("Merged {branch} → main"));
-                    refresh_pill().await;
+                Ok(res) => {
+                    if let Err(msg) = branch_merge_outcome(&res) {
+                        dom::error("session-omnigraph-error", &msg);
+                    } else {
+                        if res["session"].is_object() {
+                            m::upsert(res["session"].clone());
+                            let updated_id = m::text(&res["session"], "id");
+                            if !updated_id.is_empty()
+                                && m::read(|s| m::text(&s.selected, "id")) == updated_id
+                            {
+                                render_session_bar(&res["session"]);
+                            }
+                        }
+                        dom::text("session-omnigraph-meta", &format!("Merged {branch} → main"));
+                        dom::hidden("session-omnigraph-merge", true);
+                        refresh_pill().await;
+                    }
                 }
                 Err(e) => dom::error("session-omnigraph-error", &e.message),
             }
@@ -2879,7 +3188,7 @@ mod tests {
             session_payload_from_fields(true, "existing", "session/wave-2", "", "", false, false)
                 .unwrap();
         assert_eq!(existing["branch"], "session/wave-2");
-        assert_eq!(existing["pull_branches"], json!([]));
+        assert!(existing.get("pull_branches").is_none());
     }
 
     #[test]
@@ -3086,5 +3395,98 @@ mod tests {
         assert_eq!(scale, 1.0);
         assert_eq!(px, (400.0 - pos.0).round());
         assert_eq!(py, (300.0 - pos.1).round());
+    }
+
+    #[test]
+    fn backend_contract_alignment_relates_to_conflicts_raw_changes_and_session_bar() {
+        assert_eq!(
+            parse_relates_to("atom-1, supports: atom-2, atom-1, contradicts:atom-3, :atom-4"),
+            vec![
+                json!({ "target_id": "atom-1", "relation": "relates_to" }),
+                json!({ "target_id": "atom-2", "relation": "supports" }),
+                json!({ "target_id": "atom-3", "relation": "contradicts" }),
+                json!({ "target_id": "atom-4", "relation": "relates_to" }),
+            ]
+        );
+
+        let conflict_res = json!({
+            "ok": false,
+            "outcome": "conflict",
+            "conflicts": [{ "entity_id": "atom-1" }],
+            "error": "Conflict on atom-1 title"
+        });
+        assert_eq!(
+            branch_merge_outcome(&conflict_res).unwrap_err(),
+            "Conflict on atom-1 title"
+        );
+        assert!(branch_merge_outcome(&json!({ "ok": true, "outcome": "merged" })).is_ok());
+
+        let graph = json!({
+            "atoms": [{
+                "atom_id": "atom-9",
+                "kind": "contract",
+                "title": "Source fields contract",
+                "summary": "Backend emits source_branch and source_session_id",
+                "source_branch": "session/s9",
+                "source_session_id": "sess-9",
+                "authored_at": 1_763_316_000_i64
+            }],
+            "sessions": [{ "id": "sess-9", "title": "Session 9" }],
+            "edges": []
+        });
+        let inspector = render_node_inspector_html(&graph, "atom-9", &[], "main");
+        assert!(inspector.contains("session/s9"));
+        assert!(inspector.contains("Session: sess-9"));
+        assert!(inspector.contains("UTC"));
+        assert!(format_context_snippet(&graph["atoms"][0]).contains("(branch: session/s9)"));
+
+        let pulse = vec![json!({
+            "entity_id": "atom-42",
+            "entity_kind": "atom",
+            "type_name": "ContextAtom",
+            "op": "insert",
+            "authored_at": 1_763_316_000_i64,
+            "source_branch": "session/s4"
+        })];
+        let pulse_html = render_pulse_list_html(&pulse);
+        assert!(pulse_html.contains("data-node-id=\"atom-42\""));
+        assert!(pulse_html.contains("ContextAtom"));
+        assert!(pulse_html.contains("insert · atom-42"));
+        assert!(pulse_html.contains("UTC"));
+
+        let commit_detail = json!({
+            "commit": { "id": "c-raw", "branch": "session/s4", "actor_id": "harness", "authored_at": 1_763_316_000_i64 },
+            "changes": [{
+                "op": "upsert",
+                "entity_id": "atom-42",
+                "type": { "name": "ContextAtom" },
+                "after": { "properties": { "title": "Auth boundary" } }
+            }],
+            "atoms": []
+        });
+        let commit_html = render_commit_inspector_html(&commit_detail);
+        assert!(commit_html.contains("upsert ContextAtom · Auth boundary"));
+        assert!(commit_html.contains("UTC"));
+
+        let merged_session = json!({
+            "id": "s-merged",
+            "omnigraph": {
+                "enabled": true,
+                "branch": "session/s-merged",
+                "merge_status": "merged",
+                "last_error": "post-merge warning",
+                "injected_atoms": [{ "id": "a1", "kind": "finding", "title": "Injected" }],
+                "published_atoms": ["atom-pub-1"]
+            }
+        });
+        let (visible, branch, meta, atoms, can_merge) = session_bar_summary(&merged_session);
+        assert!(visible);
+        assert_eq!(branch, "session/s-merged");
+        assert!(meta.contains("1 published"));
+        assert!(meta.contains("merge: merged"));
+        assert!(meta.contains("error: post-merge warning"));
+        assert_eq!(atoms.len(), 2);
+        assert!(!can_merge);
+        assert_eq!(session_bar_error(&merged_session), "post-merge warning");
     }
 }

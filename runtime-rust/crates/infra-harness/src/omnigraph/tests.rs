@@ -501,6 +501,23 @@ fn diff_snapshots(base: &MockSnapshot, head: &MockSnapshot) -> Vec<Value> {
                 }));
             }
         }
+        for (eid, old) in base_map {
+            if !head_map.contains_key(eid) {
+                changes.push(json!({
+                    "kind": "edge",
+                    "type": { "id": format!("t-{edge_type}"), "name": edge_type },
+                    "id": eid,
+                    "op": "delete",
+                    "before": {
+                        "properties": old,
+                        "endpoints": {
+                            "from": old["source_id"],
+                            "to": old["target_id"]
+                        }
+                    }
+                }));
+            }
+        }
     }
     changes
 }
@@ -1883,6 +1900,23 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
     };
     assert_eq!(pub_json["ok"], true);
     let published_atom_id = pub_json["atom"]["atom_id"].as_str().unwrap().to_string();
+    assert_eq!(pub_json["id"], published_atom_id);
+    assert_eq!(pub_json["atom_id"], published_atom_id);
+    assert_eq!(pub_json["atom"]["id"], published_atom_id);
+    assert_eq!(pub_json["atom"]["branch"], "main");
+    assert_eq!(pub_json["atom"]["source_branch"], "main");
+    assert!(
+        pub_json["atom"]
+            .as_object()
+            .unwrap()
+            .contains_key("session_id")
+    );
+    assert!(
+        pub_json["atom"]
+            .as_object()
+            .unwrap()
+            .contains_key("source_session_id")
+    );
 
     // 4. `prepare_session_context` creates `session/<sid12>`, upserts Session, returns capsule
     let session = json!({
@@ -1958,6 +1992,36 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
     assert_eq!(share_json["shared_count"], 1);
     assert_eq!(share_json["target_branch"], "session/target-sessi");
 
+    // 6b. Publish with session provenance and mixed `relates_to` formats (string ID, `rel:id`, and object)
+    let pub_rel = domain
+        .execute(
+            "omnigraph.publish",
+            json!({
+                "params": {},
+                "query": {},
+                "body": {
+                    "project_id": "proj-1",
+                    "branch": "main",
+                    "session_id": "sess-author-01",
+                    "kind": "finding",
+                    "title": "Validate relation shorthands",
+                    "summary": "Supports plain string, relation:id, and object entries.",
+                    "relates_to": [
+                        published_atom_id,
+                        format!("refines:{published_atom_id}"),
+                        { "target_id": published_atom_id, "relation": "depends_on" }
+                    ]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    let crate::services::Payload::Json(pub_rel_json) = pub_rel else {
+        panic!("expected json");
+    };
+    assert_eq!(pub_rel_json["atom"]["session_id"], "sess-author-01");
+    assert_eq!(pub_rel_json["atom"]["source_session_id"], "sess-author-01");
+
     let graph_res = domain
         .execute(
             "omnigraph.graph",
@@ -1973,10 +2037,53 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
         panic!("expected json");
     };
     assert!(graph_json["atoms"].as_array().unwrap().len() >= 2);
+    let first_atom = &graph_json["atoms"][0];
+    assert_eq!(first_atom["id"], first_atom["atom_id"]);
+    assert_eq!(first_atom["branch"], first_atom["source_branch"]);
+    assert!(first_atom.as_object().unwrap().contains_key("session_id"));
+    assert!(
+        first_atom
+            .as_object()
+            .unwrap()
+            .contains_key("source_session_id")
+    );
     assert!(!graph_json["files"].as_array().unwrap().is_empty());
-    assert!(!graph_json["edges"].as_array().unwrap().is_empty());
+    assert!(
+        graph_json["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "relates_to")
+            .count()
+            >= 3
+    );
     assert!(!graph_json["branches"].as_array().unwrap().is_empty());
+    assert_eq!(
+        graph_json["branches"][0]["head_commit"],
+        graph_json["branches"][0]["head_commit_id"]
+    );
     assert!(!graph_json["commits"].as_array().unwrap().is_empty());
+    let first_commit = &graph_json["commits"][0];
+    assert!(first_commit["authored_at"].as_i64().is_some());
+    assert!(
+        first_commit["created_at"]
+            .as_str()
+            .is_some_and(|s| s.ends_with('Z'))
+    );
+    assert!(first_commit["added_count"].as_u64().is_some());
+    assert!(first_commit["updated_count"].as_u64().is_some());
+    assert!(first_commit["deleted_count"].as_u64().is_some());
+    assert!(
+        first_commit["summary"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty() && !s.starts_with("Commit "))
+    );
+    assert!(graph_json["commits"].as_array().unwrap().iter().any(|c| {
+        c["added_count"].as_u64().unwrap_or(0) > 0
+            && c["summary"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("Published: ") || s.starts_with("Merged "))
+    }));
 
     let search_res = domain
         .execute(
@@ -2008,7 +2115,25 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
     let crate::services::Payload::Json(ch_json) = ch_res else {
         panic!("expected json");
     };
-    assert!(!ch_json["events"].as_array().unwrap().is_empty());
+    let ch_events = ch_json["events"].as_array().unwrap();
+    assert!(!ch_events.is_empty());
+    let sample_ev = &ch_events[0];
+    assert!(sample_ev["kind"].is_string());
+    assert!(sample_ev["title"].is_string());
+    assert!(sample_ev["summary"].is_string());
+    assert!(sample_ev["branch"].is_string());
+    assert!(sample_ev["authored_at"].as_i64().is_some());
+    assert!(sample_ev["timestamp"].as_i64().is_some());
+    assert!(
+        sample_ev["created_at"]
+            .as_str()
+            .is_some_and(|s| s.ends_with('Z'))
+    );
+    let node_ev = ch_events
+        .iter()
+        .find(|ev| ev["entity_kind"] == "node")
+        .expect("node event");
+    assert_eq!(node_ev["node_id"], node_ev["entity_id"]);
 
     let commit_id = graph_json["commits"][0]["commit_id"].as_str().unwrap();
     let detail_res = domain
@@ -2026,6 +2151,21 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
         panic!("expected json");
     };
     assert_eq!(detail_json["commit"]["graph_commit_id"], commit_id);
+    assert_eq!(detail_json["commit"]["commit_id"], commit_id);
+    assert!(detail_json["commit"]["authored_at"].as_i64().is_some());
+    assert!(
+        detail_json["commit"]["created_at"]
+            .as_str()
+            .is_some_and(|s| s.ends_with('Z'))
+    );
+    if let Some(first_ch) = detail_json["changes"].as_array().and_then(|a| a.first()) {
+        assert!(first_ch["title"].is_string());
+        assert!(first_ch["kind"].is_string());
+        assert!(first_ch["type_name"].is_string());
+        assert!(first_ch["entity_id"].is_string());
+        assert!(first_ch["op"].is_string());
+        assert!(first_ch["summary"].is_string());
+    }
 
     // Branch create + diff + 409 conflict surfacing in `branch_diff_json` & `branch_action_json`
     domain
@@ -2091,6 +2231,13 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
     };
     assert_eq!(diff_json["outcome"], "conflict");
     assert!(!diff_json["conflicts"].as_array().unwrap().is_empty());
+    assert!(diff_json["deleted_edges"].is_array());
+    for edge in diff_json["added_edges"].as_array().unwrap() {
+        assert!(edge["from"].is_string());
+        assert!(edge["to"].is_string());
+        assert!(edge["relation"].is_string());
+        assert!(edge["endpoints"].is_object());
+    }
 
     let merge_conflict = domain
         .execute(
@@ -2108,6 +2255,11 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
     };
     assert_eq!(mc_json["ok"], false);
     assert_eq!(mc_json["outcome"], "conflict");
+    assert_eq!(mc_json["added_atoms"], json!([]));
+    assert_eq!(mc_json["updated_atoms"], json!([]));
+    assert_eq!(mc_json["deleted_atoms"], json!([]));
+    assert_eq!(mc_json["added_edges"], json!([]));
+    assert_eq!(mc_json["deleted_edges"], json!([]));
 
     // Unknown operation -> 404
     let err = domain
@@ -2282,4 +2434,233 @@ http.server.HTTPServer((host, int(port)), H).serve_forever()
         .await;
     assert!(res.is_err());
     assert!(res.unwrap_err().message.contains("Unsafe path traversal"));
+}
+
+#[tokio::test]
+async fn sidecar_payload_contracts_cover_deleted_edges_and_share_modes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let change_hits = Arc::new(AtomicUsize::new(0));
+    let hit_counter = change_hits.clone();
+    let app = Router::new()
+        .route("/healthz", get(mock_healthz))
+        .route(
+            "/readyz",
+            get(|| async { axum::Json(json!({ "ready": true, "status": "serving" })) }),
+        )
+        .route(
+            "/graphs",
+            get(|| async {
+                axum::Json(json!({ "graphs": [{ "id": schema::HARNESS_GRAPH_ID }] }))
+            }),
+        )
+        .route(
+            &format!("/graphs/{}/branches", schema::HARNESS_GRAPH_ID),
+            get(|| async {
+                axum::Json(json!({
+                    "branches": ["main", "feature/del-edge"],
+                    "details": [
+                        {
+                            "name": "main",
+                            "head": {
+                                "graph_commit_id": "c-main-1",
+                                "graph_branch": "main",
+                                "created_at": 1_700_000_000_000_000i64,
+                                "published": true
+                            },
+                            "created_at": 1_700_000_000_000_000i64,
+                            "updated_at": 1_700_000_000_000_000i64
+                        },
+                        {
+                            "name": "feature/del-edge",
+                            "head": {
+                                "graph_commit_id": "c-feat-2",
+                                "graph_branch": "feature/del-edge",
+                                "created_at": 1_700_000_100_000_000i64,
+                                "published": true
+                            },
+                            "from": "main",
+                            "from_commit_id": "c-main-1",
+                            "created_at": 1_700_000_050_000_000i64,
+                            "updated_at": 1_700_000_100_000_000i64
+                        }
+                    ]
+                }))
+            })
+            .post(|| async {
+                axum::Json(json!({
+                    "uri": "/graphs/harness-context/branches/session",
+                    "from": "main",
+                    "name": "session/session-share",
+                    "from_commit_id": "c-main-1"
+                }))
+            }),
+        )
+        .route(
+            &format!("/graphs/{}/commits", schema::HARNESS_GRAPH_ID),
+            get(|| async {
+                axum::Json(json!({
+                    "commits": [{
+                        "graph_commit_id": "c-main-1",
+                        "graph_branch": "main",
+                        "created_at": 1_700_000_000_000_000i64,
+                        "published": true
+                    }]
+                }))
+            }),
+        )
+        .route(
+            &format!(
+                "/graphs/{}/commits/c-main-1/changes",
+                schema::HARNESS_GRAPH_ID
+            ),
+            get(move || {
+                let hits = hit_counter.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::Relaxed);
+                    axum::Json(json!({
+                        "cause": {
+                            "graph_commit_id": "c-main-1",
+                            "authored_branch": "main",
+                            "authored_at": 1_700_000_000_000_000i64
+                        },
+                        "changes": [{
+                            "kind": "node",
+                            "type": { "id": "t-atom", "name": "ContextAtom" },
+                            "id": "a0",
+                            "op": "insert",
+                            "after": { "properties": { "title": "Cached atom title" } }
+                        }]
+                    }))
+                }
+            }),
+        )
+        .route(
+            &format!("/graphs/{}/branches/diff", schema::HARNESS_GRAPH_ID),
+            get(|| async {
+                axum::Json(json!({
+                    "from_commit_id": "c-main-1",
+                    "to_commit_id": "c-feat-2",
+                    "base_commit_id": "c-main-1",
+                    "changes": [
+                        {
+                            "kind": "edge",
+                            "type": { "id": "t-rel", "name": "RelatesTo" },
+                            "id": "e-add-1",
+                            "op": "insert",
+                            "after": {
+                                "properties": { "relation": "refines", "source_id": "a2", "target_id": "a1" },
+                                "endpoints": { "from": "a2", "to": "a1" }
+                            }
+                        },
+                        {
+                            "kind": "edge",
+                            "type": { "id": "t-rel", "name": "RelatesTo" },
+                            "id": "e-del-1",
+                            "op": "delete",
+                            "before": {
+                                "properties": { "relation": "supports", "source_id": "a1", "target_id": "a0" },
+                                "endpoints": { "from": "a1", "to": "a0" }
+                            }
+                        }
+                    ]
+                }))
+            }),
+        )
+        .route(
+            &format!("/graphs/{}/branches/merge", schema::HARNESS_GRAPH_ID),
+            post(|| async {
+                axum::Json(json!({
+                    "source": "feature/del-edge",
+                    "target": "main",
+                    "outcome": "fast_forward",
+                    "dry_run": true
+                }))
+            }),
+        )
+        .route(
+            &format!("/graphs/{}/query", schema::HARNESS_GRAPH_ID),
+            post(|| async { axum::Json(json!({ "rows": [] })) }),
+        )
+        .route(
+            &format!("/graphs/{}/queries/{{name}}", schema::HARNESS_GRAPH_ID),
+            post(|| async { axum::Json(json!({ "rows": [] })) }),
+        )
+        .route(
+            &format!("/graphs/{}/mutate", schema::HARNESS_GRAPH_ID),
+            post(|| async {
+                axum::Json(json!({
+                    "branch": "session/s1",
+                    "query_name": "mutate",
+                    "affected_nodes": 1,
+                    "affected_edges": 1
+                }))
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _srv = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let state_dir = tempfile::tempdir().unwrap();
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.connect_external(&format!("http://{addr}"), Some("tok"), None)
+        .await
+        .unwrap();
+
+    let diff = mgr
+        .branch_diff_json("proj-1", "feature/del-edge", Some("main"))
+        .await
+        .unwrap();
+    assert_eq!(diff["added_edges"].as_array().unwrap().len(), 1);
+    assert_eq!(diff["added_edges"][0]["from"], "a2");
+    assert_eq!(diff["added_edges"][0]["to"], "a1");
+    assert_eq!(diff["added_edges"][0]["relation"], "refines");
+    assert_eq!(diff["deleted_edges"].as_array().unwrap().len(), 1);
+    assert_eq!(diff["deleted_edges"][0]["from"], "a1");
+    assert_eq!(diff["deleted_edges"][0]["to"], "a0");
+    assert_eq!(diff["deleted_edges"][0]["relation"], "supports");
+    assert_eq!(diff["deleted_edges"][0]["endpoints"]["from"], "a1");
+    assert_eq!(diff["deleted_edges"][0]["endpoints"]["to"], "a0");
+
+    for mode in ["inject", "reference", "inject_and_link", "copy"] {
+        let out = mgr
+            .share_into_session_json(&json!({
+                "project_id": "proj-1",
+                "target_session_id": "session-share-check",
+                "atom_ids": ["a2"],
+                "source_branch": "main",
+                "mode": mode,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["mode"], mode);
+        assert_eq!(out["source_branch"], "main");
+    }
+
+    let invalid = mgr
+        .share_into_session_json(&json!({
+            "project_id": "proj-1",
+            "target_session_id": "session-share-check",
+            "atom_ids": ["a2"],
+            "mode": "unknown-mode",
+        }))
+        .await;
+    assert!(invalid.is_err());
+
+    let gv1 = mgr
+        .graph_view_json("proj-1", Some("main"), None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(gv1["commits"][0]["added_count"], 1);
+    assert_eq!(gv1["commits"][0]["summary"], "Published: Cached atom title");
+    assert_eq!(change_hits.load(Ordering::Relaxed), 1);
+
+    let gv2 = mgr
+        .graph_view_json("proj-1", Some("main"), None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(gv2["commits"][0]["summary"], "Published: Cached atom title");
+    assert_eq!(change_hits.load(Ordering::Relaxed), 1);
 }

@@ -169,7 +169,7 @@ struct EdgeVisualSpec {
     marker_body: &'static str,
 }
 
-const EDGE_SPECS: [EdgeVisualSpec; 11] = [
+const EDGE_SPECS: [EdgeVisualSpec; 12] = [
     EdgeVisualSpec {
         key: "published_by",
         label: "published by",
@@ -211,6 +211,12 @@ const EDGE_SPECS: [EdgeVisualSpec; 11] = [
         label: "depends on",
         dash_array: Some("2 3"),
         marker_body: "<path d=\"M1 1 L7.4 4 L1 7\"/>",
+    },
+    EdgeVisualSpec {
+        key: "refines",
+        label: "refines",
+        dash_array: Some("8 2 2 2"),
+        marker_body: "<path d=\"M0.8 4 L4 1.2 L7.4 4 L4 6.8 Z M4 2.7 V5.3\"/>",
     },
     EdgeVisualSpec {
         key: "relates_to",
@@ -299,7 +305,9 @@ pub fn render_constellation(
         }
     }
 
-    let (kept_nodes, kept_edges) = apply_constellation_filter(nodes, resolved_edges, filter);
+    let active_branch = str_field(graph, &["active_branch"]);
+    let (kept_nodes, kept_edges) =
+        apply_constellation_filter(nodes, resolved_edges, filter, &active_branch);
     if kept_nodes.is_empty() {
         let html = render_constellation_empty(filter, &vp);
         return RenderedCanvas {
@@ -1318,19 +1326,25 @@ fn partition_entity_changes(
 }
 
 fn render_diff_atom_card(item: &Value, change: &str, marker: &str, sr_label: &str) -> String {
-    let primary = item
+    let primary_raw = item
         .get("after")
         .or_else(|| item.get("source"))
         .or_else(|| item.get("atom"))
         .filter(|v| v.is_object())
         .unwrap_or(item);
-    let previous = item
+    let primary = primary_raw
+        .get("properties")
+        .filter(|v| v.is_object())
+        .unwrap_or(primary_raw);
+    let previous_raw = item
         .get("before")
         .or_else(|| item.get("target"))
         .or_else(|| item.get("base"))
         .filter(|v| v.is_object());
+    let previous = previous_raw.map(|p| p.get("properties").filter(|v| v.is_object()).unwrap_or(p));
 
     let id = str_field(primary, &["id", "atom_id", "@id"])
+        .if_empty_from(|| str_field(primary_raw, &["id", "atom_id", "@id"]))
         .if_empty_from(|| str_field(item, &["id", "atom_id", "entity_id"]));
     let raw_kind = str_field(primary, &["kind"])
         .if_empty_from(|| str_field(item, &["kind"]))
@@ -1340,7 +1354,8 @@ fn render_diff_atom_card(item: &Value, change: &str, marker: &str, sr_label: &st
         .if_empty_from(|| str_field(item, &["title", "name"]))
         .if_empty(&id);
     let summary = str_field(primary, &["summary", "body", "content"]);
-    let branch = str_field(primary, &["branch", "graph_branch"]);
+    let branch = str_field(primary, &["branch", "source_branch", "graph_branch"])
+        .if_empty_from(|| str_field(item, &["branch", "source_branch", "graph_branch"]));
 
     let mut html = format!(
         "<article class=\"omni-diff-card\" data-change=\"{change}\" data-kind=\"{}\" data-node-id=\"{}\">",
@@ -1407,19 +1422,63 @@ fn render_diff_atom_card(item: &Value, change: &str, marker: &str, sr_label: &st
     html
 }
 
-fn render_diff_edge_card(edge: &Value, change: &str, marker: &str, sr_label: &str) -> String {
-    let from = str_field(edge, &["from", "src", "source", "@src"]);
-    let to = str_field(edge, &["to", "dst", "target", "@dst"]);
-    let raw_rel = str_field(edge, &["relation", "kind", "type", "@type"]).if_empty("relates_to");
-    let subkind = str_field(edge, &["subkind", "rel_kind", "relation_kind", "label"]);
-    let (_, _, arrow_key, rel_label) = normalize_edge_relation(&raw_rel, &subkind);
+fn extract_canvas_edge(edge: &Value) -> Option<CanvasEdge> {
+    let endpoints = edge.get("endpoints");
+    let props = edge.get("properties");
+    let from = str_field(edge, &["from", "src", "source", "@src"]).if_empty_from(|| {
+        endpoints
+            .map(|ep| str_field(ep, &["from", "src", "source", "@src"]))
+            .unwrap_or_default()
+    });
+    let to = str_field(edge, &["to", "dst", "target", "@dst"]).if_empty_from(|| {
+        endpoints
+            .map(|ep| str_field(ep, &["to", "dst", "target", "@dst"]))
+            .unwrap_or_default()
+    });
+    if from.is_empty() || to.is_empty() {
+        return None;
+    }
+    let top_rel = str_field(edge, &["relation", "kind", "type", "@type"]);
+    let prop_rel = props
+        .map(|p| str_field(p, &["relation", "rel_kind", "relation_kind", "kind"]))
+        .unwrap_or_default();
+    let raw_rel = if !top_rel.is_empty() {
+        top_rel
+    } else if !prop_rel.is_empty() {
+        prop_rel.clone()
+    } else {
+        "relates_to".to_owned()
+    };
+    let mut subkind = str_field(edge, &["subkind", "rel_kind", "relation_kind", "label"])
+        .if_empty_from(|| {
+            props
+                .map(|p| str_field(p, &["subkind", "rel_kind", "relation_kind", "label"]))
+                .unwrap_or_default()
+        });
+    if subkind.is_empty() && !prop_rel.is_empty() && prop_rel != raw_rel {
+        subkind = prop_rel;
+    }
+    let (relation, subkind, arrow_key, label) = normalize_edge_relation(&raw_rel, &subkind);
+    Some(CanvasEdge {
+        from,
+        to,
+        relation,
+        subkind,
+        arrow_key,
+        label,
+    })
+}
 
+fn render_diff_edge_card(edge: &Value, change: &str, marker: &str, sr_label: &str) -> String {
+    let Some(parsed) = extract_canvas_edge(edge) else {
+        return String::new();
+    };
     format!(
         "<div class=\"omni-diff-edge-card\" data-change=\"{change}\" data-rel=\"{}\"><span class=\"omni-diff-mark\" data-change=\"{change}\" aria-hidden=\"true\">{marker}</span><span class=\"sr-only\">{sr_label}</span><span class=\"omni-diff-edge-rel\">{}</span><code class=\"omni-diff-edge-end\">{}</code><span class=\"omni-diff-arrow\" aria-label=\"to\">→</span><code class=\"omni-diff-edge-end\">{}</code></div>",
-        escape_attr_token(&arrow_key),
-        esc(&rel_label),
-        esc(&from),
-        esc(&to),
+        escape_attr_token(&parsed.arrow_key),
+        esc(&parsed.label),
+        esc(&parsed.from),
+        esc(&parsed.to),
     )
 }
 
@@ -1437,7 +1496,8 @@ fn extract_graph_items(
                 continue;
             }
             let title = str_field(item, &["title", "name", "label"]).if_empty(&id);
-            let branch = str_field(item, &["branch", "graph_branch"]).if_empty("main");
+            let branch =
+                str_field(item, &["branch", "source_branch", "graph_branch"]).if_empty("main");
             let status = str_field(item, &["status", "state"]).if_empty("idle");
             let provider = str_field(item, &["provider"]);
             let actor = str_field(item, &["actor", "actor_id"]);
@@ -1482,8 +1542,17 @@ fn extract_graph_items(
             let kind = atom_kind_spec(&raw_kind).key.to_owned();
             let title = str_field(item, &["title", "name", "label"]).if_empty(&id);
             let summary = str_field(item, &["summary", "body", "content"]);
-            let branch = str_field(item, &["branch", "graph_branch"]).if_empty("main");
-            let session_id = str_field(item, &["session_id", "author_session_id", "published_by"]);
+            let branch =
+                str_field(item, &["branch", "source_branch", "graph_branch"]).if_empty("main");
+            let session_id = str_field(
+                item,
+                &[
+                    "session_id",
+                    "source_session_id",
+                    "author_session_id",
+                    "published_by",
+                ],
+            );
             let actor = str_field(item, &["actor", "actor_id"]);
             let tags = string_list(item, &["tags"]);
             let confidence = f64_field(item, &["confidence"]).map(|c| {
@@ -1542,7 +1611,7 @@ fn extract_graph_items(
             if path != id && !path.is_empty() {
                 aliases.entry(path.clone()).or_insert_with(|| id.clone());
             }
-            let branch = str_field(item, &["branch", "graph_branch"]);
+            let branch = str_field(item, &["branch", "source_branch", "graph_branch"]);
             let lang = str_field(item, &["language", "kind"]);
             let touch_count = i64_field(item, &["touch_count", "atom_count"])
                 .unwrap_or(0)
@@ -1578,27 +1647,18 @@ fn extract_graph_items(
     let mut seen_edges: BTreeSet<(String, String, String, String)> = BTreeSet::new();
     if let Some(arr) = graph.get("edges").and_then(Value::as_array) {
         for item in arr {
-            let from = str_field(item, &["from", "src", "source", "@src"]);
-            let to = str_field(item, &["to", "dst", "target", "@dst"]);
-            if from.is_empty() || to.is_empty() {
+            let Some(edge) = extract_canvas_edge(item) else {
+                continue;
+            };
+            if !seen_edges.insert((
+                edge.from.clone(),
+                edge.to.clone(),
+                edge.relation.clone(),
+                edge.subkind.clone(),
+            )) {
                 continue;
             }
-            let raw_rel =
-                str_field(item, &["relation", "kind", "type", "@type"]).if_empty("relates_to");
-            let subkind = str_field(item, &["subkind", "rel_kind", "relation_kind", "label"]);
-            let (rel_norm, sub_norm, arrow_key, label) =
-                normalize_edge_relation(&raw_rel, &subkind);
-            if !seen_edges.insert((from.clone(), to.clone(), rel_norm.clone(), sub_norm.clone())) {
-                continue;
-            }
-            edges.push(CanvasEdge {
-                from,
-                to,
-                relation: rel_norm,
-                subkind: sub_norm,
-                arrow_key,
-                label,
-            });
+            edges.push(edge);
         }
     }
 
@@ -1609,18 +1669,26 @@ fn apply_constellation_filter(
     nodes: Vec<CanvasNode>,
     edges: Vec<CanvasEdge>,
     filter: &ConstellationFilter,
+    active_branch: &str,
 ) -> (Vec<CanvasNode>, Vec<CanvasEdge>) {
     let query = filter.query.trim().to_ascii_lowercase();
     let kind_filter = filter.kind.trim().to_ascii_lowercase();
     let branch_filter = filter.branch.trim();
     let branch_active = !branch_filter.is_empty() && branch_filter != "*" && branch_filter != "all";
+    // `/api/omnigraph/graph?branch=X` already returns the materialized snapshot for `X`
+    // (including inherited `main` atoms on `session/*` branches), so never hide them.
+    let snapshot_matches_branch =
+        !active_branch.is_empty() && active_branch.trim().eq_ignore_ascii_case(branch_filter);
     let kind_active = !kind_filter.is_empty() && kind_filter != "*" && kind_filter != "all";
 
     let mut atom_ids_kept: BTreeSet<String> = BTreeSet::new();
     let mut direct_match_ids: BTreeSet<String> = BTreeSet::new();
 
     for node in &nodes {
-        let branch_ok = !branch_active || node.branch.is_empty() || node.branch == branch_filter;
+        let branch_ok = !branch_active
+            || snapshot_matches_branch
+            || node.branch.is_empty()
+            || node.branch == branch_filter;
         let query_ok = query.is_empty() || node.search_blob.contains(&query);
         match node.group {
             NodeKindGroup::Atom => {
@@ -1658,26 +1726,22 @@ fn apply_constellation_filter(
     let mut kept_nodes = Vec::new();
     let mut kept_ids: BTreeSet<String> = BTreeSet::new();
     for node in nodes {
+        let branch_ok = !branch_active
+            || snapshot_matches_branch
+            || node.branch.is_empty()
+            || node.branch == branch_filter;
         let include = match node.group {
             NodeKindGroup::Atom => atom_ids_kept.contains(&node.id),
             NodeKindGroup::Session => {
                 if !filter.show_sessions {
                     false
                 } else if kind_active {
-                    connected_to_kept_atom.contains(&node.id)
-                        && (!branch_active
-                            || node.branch.is_empty()
-                            || node.branch == branch_filter)
+                    connected_to_kept_atom.contains(&node.id) && branch_ok
                 } else if !query.is_empty() {
                     direct_match_ids.contains(&node.id)
-                        || (connected_to_kept_atom.contains(&node.id)
-                            && (!branch_active
-                                || node.branch.is_empty()
-                                || node.branch == branch_filter))
+                        || (connected_to_kept_atom.contains(&node.id) && branch_ok)
                 } else {
-                    !branch_active
-                        || node.branch == branch_filter
-                        || connected_to_kept_atom.contains(&node.id)
+                    branch_ok || connected_to_kept_atom.contains(&node.id)
                 }
             }
             NodeKindGroup::File => {
@@ -1686,10 +1750,7 @@ fn apply_constellation_filter(
                 } else if kind_active || !query.is_empty() {
                     direct_match_ids.contains(&node.id) || connected_to_kept_atom.contains(&node.id)
                 } else {
-                    !branch_active
-                        || node.branch.is_empty()
-                        || node.branch == branch_filter
-                        || connected_to_kept_atom.contains(&node.id)
+                    branch_ok || connected_to_kept_atom.contains(&node.id)
                 }
             }
         };
@@ -1935,7 +1996,8 @@ fn layout_constellation(
 
     let max_x = nodes.iter().map(|n| n.x + n.w).fold(0.0, f64::max);
     let max_y = nodes.iter().map(|n| n.y + n.h).fold(0.0, f64::max);
-    let width = (max_x + MARGIN_X).max(MIN_PLANE_W);
+    let right_pad = MARGIN_X + if file_indices.is_empty() { 0.0 } else { 44.0 };
+    let width = (max_x + right_pad).max(MIN_PLANE_W);
     let height = (max_y + MARGIN_Y).max(MIN_PLANE_H);
     (nodes, width, height)
 }
@@ -2354,12 +2416,15 @@ fn extract_dag_data(graph: &Value, active_branch: &str) -> (Vec<DagBranch>, Vec<
                 )
             } else {
                 let name = str_field(item, &["name", "branch", "id"]);
-                let head =
-                    str_field(item, &["head_commit", "head", "commit_id"]).if_empty_from(|| {
-                        item.get("head")
-                            .map(|h| str_field(h, &["graph_commit_id", "id", "commit_id"]))
-                            .unwrap_or_default()
-                    });
+                let head = str_field(
+                    item,
+                    &["head_commit", "head_commit_id", "head", "commit_id"],
+                )
+                .if_empty_from(|| {
+                    item.get("head")
+                        .map(|h| str_field(h, &["graph_commit_id", "id", "commit_id"]))
+                        .unwrap_or_default()
+                });
                 let parent = str_field(
                     item,
                     &["parent_branch", "from", "base_branch", "forked_from"],
@@ -2413,7 +2478,8 @@ fn extract_dag_data(graph: &Value, active_branch: &str) -> (Vec<DagBranch>, Vec<
             if id.is_empty() {
                 continue;
             }
-            let branch = str_field(item, &["branch", "graph_branch"]).if_empty("main");
+            let branch =
+                str_field(item, &["branch", "source_branch", "graph_branch"]).if_empty("main");
             let mut parents = string_list(item, &["parents", "parent_ids"]);
             if parents.is_empty() {
                 let single = str_field(item, &["parent_commit_id", "parent", "parent_id"]);
@@ -2429,7 +2495,12 @@ fn extract_dag_data(graph: &Value, active_branch: &str) -> (Vec<DagBranch>, Vec<
             let actor = str_field(item, &["actor", "actor_id"]).if_empty("harness");
             let summary = str_field(item, &["summary", "message", "title", "kind"])
                 .if_empty("Context checkpoint");
-            let created_at = str_field(item, &["created_at", "timestamp"]);
+            let created_at = str_field(item, &["created_at", "authored_at", "timestamp"])
+                .if_empty_from(|| {
+                    i64_field(item, &["created_at", "authored_at", "timestamp"])
+                        .map(format_timestamp_i64)
+                        .unwrap_or_default()
+                });
             let atom_delta = i64_field(
                 item,
                 &[
@@ -2481,7 +2552,43 @@ fn edge_spec(key: &str) -> &'static EdgeVisualSpec {
     EDGE_SPECS
         .iter()
         .find(|spec| spec.key == key)
-        .unwrap_or(&EDGE_SPECS[7]) // relates_to fallback
+        .unwrap_or(&EDGE_SPECS[8]) // relates_to fallback
+}
+
+fn format_timestamp_i64(raw: i64) -> String {
+    if raw <= 0 {
+        return String::new();
+    }
+    let secs = if raw >= 100_000_000_000_000 {
+        raw / 1_000_000
+    } else if raw >= 100_000_000_000 {
+        raw / 1_000
+    } else {
+        raw
+    };
+    if secs < 86_400 {
+        return format!("{secs}s");
+    }
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let hour = rem / 3_600;
+    let minute = (rem % 3_600) / 60;
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    (year, m as u32, d as u32)
 }
 
 fn normalize_edge_relation(raw_rel: &str, raw_subkind: &str) -> (String, String, String, String) {
@@ -2495,7 +2602,7 @@ fn normalize_edge_relation(raw_rel: &str, raw_subkind: &str) -> (String, String,
         "mentions" | "mentions_symbol" => "mentions_symbol",
         "derived" | "derived_from" => "derived_from",
         "follows" | "session_follows" => "session_follows",
-        "supports" | "contradicts" | "supersedes" | "depends_on" => "relates_to",
+        "supports" | "contradicts" | "supersedes" | "depends_on" | "refines" => "relates_to",
         _ => "relates_to",
     };
 
@@ -2503,7 +2610,7 @@ fn normalize_edge_relation(raw_rel: &str, raw_subkind: &str) -> (String, String,
         sub_norm
     } else if matches!(
         rel_norm.as_str(),
-        "supports" | "contradicts" | "supersedes" | "depends_on"
+        "supports" | "contradicts" | "supersedes" | "depends_on" | "refines"
     ) {
         rel_norm.clone()
     } else {
@@ -2513,7 +2620,7 @@ fn normalize_edge_relation(raw_rel: &str, raw_subkind: &str) -> (String, String,
     let arrow_key = if canonical_rel == "relates_to"
         && matches!(
             effective_sub.as_str(),
-            "supports" | "contradicts" | "supersedes" | "depends_on"
+            "supports" | "contradicts" | "supersedes" | "depends_on" | "refines"
         ) {
         effective_sub.clone()
     } else {
@@ -2702,10 +2809,20 @@ fn string_list(v: &Value, keys: &[&str]) -> Vec<String> {
 
 fn short_hash(id: &str) -> String {
     let trimmed = id.trim();
-    if trimmed.chars().count() <= 10 {
-        trimmed.to_owned()
+    let core = trimmed.strip_prefix("hb1.").unwrap_or(trimmed);
+    let len = core.chars().count();
+    if len <= 10 {
+        core.to_owned()
     } else {
-        trimmed.chars().take(8).collect()
+        let tail: String = core
+            .chars()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("…{tail}")
     }
 }
 
@@ -3382,5 +3499,168 @@ mod tests {
         assert!(diff_html.contains("touches"));
         assert!(!diff_html.contains("class=\"omni-conflict-compare\""));
         assert_no_inline_hex_colors(&diff_html);
+    }
+
+    #[test]
+    fn preserves_inherited_main_atoms_on_active_branch_and_handles_backend_diff_dag_fields() {
+        // 1. BLOCKER #4 & MINOR #7: `source_branch`, `source_session_id`, and active_branch == filter.branch
+        let backend_graph = json!({
+            "active_branch": "session/s9",
+            "branches": [
+                {"name": "main", "head_commit_id": "cm-main-1"},
+                {"name": "session/s9", "head_commit_id": "cm-s9-1", "parent_branch": "main"}
+            ],
+            "commits": [
+                {
+                    "graph_commit_id": "cm-s9-1",
+                    "graph_branch": "session/s9",
+                    "parent_commit_id": "cm-main-1",
+                    "actor_id": "codex",
+                    "summary": "Session finding",
+                    "created_at": 1_714_000_000_000_000_i64
+                },
+                {
+                    "graph_commit_id": "cm-main-1",
+                    "graph_branch": "main",
+                    "actor_id": "harness",
+                    "summary": "Baseline",
+                    "authored_at": 1_713_990_000_i64
+                }
+            ],
+            "sessions": [
+                {"id": "s9", "title": "Session Nine", "source_branch": "session/s9", "status": "running"}
+            ],
+            "atoms": [
+                {
+                    "atom_id": "a-inherited",
+                    "kind": "decision",
+                    "title": "Inherited main decision",
+                    "source_branch": "main",
+                    "source_session_id": "s0"
+                },
+                {
+                    "atom_id": "a-local",
+                    "kind": "finding",
+                    "title": "Local branch finding",
+                    "source_branch": "session/s9",
+                    "source_session_id": "s9"
+                }
+            ],
+            "edges": [
+                {"from": "a-local", "to": "a-inherited", "relation": "relates_to", "subkind": "refines"},
+                {"from": "a-local", "to": "s9", "relation": "published_by"}
+            ]
+        });
+
+        let branch_filter = ConstellationFilter {
+            branch: "session/s9".to_owned(),
+            show_sessions: true,
+            show_files: true,
+            ..ConstellationFilter::default()
+        };
+        let res = render_constellation(&backend_graph, &branch_filter, &CanvasViewport::default());
+        assert_eq!(
+            res.node_count, 3,
+            "inherited main atom must stay visible when active_branch matches filter.branch"
+        );
+        assert_eq!(res.edge_count, 2);
+        assert!(res.html.contains("data-node-id=\"a-inherited\""));
+        assert!(res.html.contains("data-node-id=\"a-local\""));
+        assert!(res.html.contains("omni-arrow-refines"));
+        assert!(res.html.contains("refines"));
+
+        // Ensure `source_session_id` clusters `a-local` with `s9` and `head_commit_id` + i64 timestamps render in DAG
+        let dag_html = render_branch_dag(&backend_graph, "session/s9", None);
+        assert!(dag_html.contains("cm-s9-1"));
+        assert!(dag_html.contains("2024-04-24 23:06 UTC"));
+        assert!(dag_html.contains("2024-04-24 20:20 UTC"));
+        assert!(dag_html.contains("class=\"omni-head-badge\">HEAD</span>"));
+
+        // 2. BLOCKER #5: nested `endpoints` + `properties.relation`, `deleted_edges`, and `source_branch` in diff
+        let backend_diff = json!({
+            "source": "session/s9",
+            "target": "main",
+            "outcome": "merged",
+            "added_atoms": [
+                {"id": "a-local", "kind": "finding", "title": "Local branch finding", "source_branch": "session/s9"}
+            ],
+            "added_edges": [
+                {"endpoints": {"from": "a-local", "to": "a-inherited"}, "properties": {"relation": "refines"}}
+            ],
+            "deleted_edges": [
+                {"endpoints": {"from": "a-old", "to": "s0"}, "properties": {"relation": "published_by"}}
+            ]
+        });
+        let diff_html = render_merge_diff(&backend_diff);
+        assert!(diff_html.contains("session/s9"));
+        assert!(diff_html.contains("<span class=\"omni-diff-edge-rel\">refines</span><code class=\"omni-diff-edge-end\">a-local</code>"));
+        assert!(diff_html.contains("<code class=\"omni-diff-edge-end\">a-inherited</code>"));
+        assert!(diff_html.contains("<span class=\"omni-diff-edge-rel\">published by</span><code class=\"omni-diff-edge-end\">a-old</code>"));
+        assert!(diff_html.contains("<code class=\"omni-diff-edge-end\">s0</code>"));
+        assert!(diff_html.contains("data-change=\"deleted\" data-rel=\"published_by\""));
+        assert_no_inline_hex_colors(&diff_html);
+    }
+
+    #[test]
+    fn short_hash_uses_distinguishing_tail_and_file_track_has_extra_right_padding() {
+        let hb_dag = render_branch_dag(
+            &json!({
+                "branches": [{"name": "main", "head_commit_id": "hb1.01M7JWJ7AAAAAAAAAA93XWDY"}],
+                "commits": [
+                    {
+                        "graph_commit_id": "hb1.01M7JWJ7AAAAAAAAAA93XWDY",
+                        "graph_branch": "main",
+                        "summary": "First"
+                    },
+                    {
+                        "graph_commit_id": "hb1.01M7JWJ7BBBBBBBBBB71KLPQ",
+                        "graph_branch": "main",
+                        "summary": "Second"
+                    }
+                ]
+            }),
+            "main",
+            None,
+        );
+        assert!(hb_dag.contains("…AA93XWDY"));
+        assert!(hb_dag.contains("…BB71KLPQ"));
+        assert!(!hb_dag.contains(">hb1.01M7<"));
+
+        // File anchors get >= 40px extra right-side canvas padding beyond MARGIN_X
+        let wide_graph = json!({
+            "sessions": [
+                {"id": "s1", "title": "S1", "branch": "main"}
+            ],
+            "atoms": [
+                {"id": "a1", "kind": "finding", "title": "A1", "branch": "main"},
+                {"id": "a2", "kind": "decision", "title": "A2", "branch": "main"},
+                {"id": "a3", "kind": "contract", "title": "A3", "branch": "main"},
+                {"id": "a4", "kind": "insight", "title": "A4", "branch": "main"},
+                {"id": "a5", "kind": "warning", "title": "A5", "branch": "main"},
+                {"id": "a6", "kind": "artifact", "title": "A6", "branch": "main"}
+            ],
+            "files": [
+                {"id": "f1", "path": "src/main.rs"}
+            ],
+            "edges": [
+                {"from": "a1", "to": "f1", "relation": "touches_file"}
+            ]
+        });
+        let res = render_constellation(
+            &wide_graph,
+            &ConstellationFilter {
+                show_files: true,
+                show_sessions: true,
+                ..ConstellationFilter::default()
+            },
+            &CanvasViewport::default(),
+        );
+        let file_right = res.positions["f1"].0 + FILE_W * 0.5;
+        assert!(
+            res.width >= file_right + MARGIN_X + 40.0,
+            "width {} should leave extra right padding past file_right {}",
+            res.width,
+            file_right
+        );
     }
 }

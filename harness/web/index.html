@@ -673,7 +673,7 @@
               </div>
             </div>
             <div class="omni-header-actions">
-              <label class="field" data-project-field>Project<select id="omnigraph-project"></select></label>
+              <label class="field" data-project-field for="omnigraph-project">Project<select id="omnigraph-project"></select></label>
               <button class="button compact" id="omnigraph-mcp-copy" type="button" hidden>Copy MCP URL</button>
               <button class="button compact" id="omnigraph-apply-schema" type="button" hidden>Apply Schema</button>
               <button class="button compact" id="omnigraph-open-settings" type="button">Connection…</button>
@@ -745,6 +745,8 @@
                 <button type="button" class="omni-kind-chip" data-action="omnigraph-filter-kind" data-kind="warning" aria-pressed="false"><span class="omni-chip-glyph" aria-hidden="true">▲</span>Warnings</button>
                 <button type="button" class="omni-kind-chip" data-action="omnigraph-filter-kind" data-kind="contract" aria-pressed="false"><span class="omni-chip-glyph" aria-hidden="true">⬡</span>Contracts</button>
                 <button type="button" class="omni-kind-chip" data-action="omnigraph-filter-kind" data-kind="insight" aria-pressed="false"><span class="omni-chip-glyph" aria-hidden="true">◉</span>Insights</button>
+                <button type="button" class="omni-kind-chip" data-action="omnigraph-filter-kind" data-kind="artifact" aria-pressed="false"><span class="omni-chip-glyph" aria-hidden="true">▣</span>Artifacts</button>
+                <button type="button" class="omni-kind-chip" data-action="omnigraph-filter-kind" data-kind="question" aria-pressed="false"><span class="omni-chip-glyph" aria-hidden="true">?</span>Questions</button>
               </div>
               <div class="omni-filter-controls">
                 <div class="omni-inline-field">
@@ -897,7 +899,7 @@
                     </div>
                     <div class="field">
                       <label for="omni-pub-relates">Relates to atom IDs (optional)</label>
-                      <input id="omni-pub-relates" type="text" maxlength="300" placeholder="atom_id_1, atom_id_2" autocomplete="off" spellcheck="false">
+                      <input id="omni-pub-relates" type="text" maxlength="300" placeholder="atom_1, supports:atom_2" autocomplete="off" spellcheck="false">
                     </div>
                     <div class="omni-form-row">
                       <div class="field">

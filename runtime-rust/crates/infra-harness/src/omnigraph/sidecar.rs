@@ -4,8 +4,8 @@
 use super::{
     client::{
         BranchCreateRequest, BranchDiffQuery, BranchMergeRequest, ChangeBaselineRequest,
-        ChangeFeedQuery, ChangeOp, ChangeRequest, CommitListQuery, EntityKind, OmnigraphClient,
-        QueryRequest, StoredQueryRequest,
+        ChangeFeedQuery, ChangeOp, ChangeRequest, CommitListQuery, CommitOutput, EntityKind,
+        OmnigraphClient, QueryRequest, StoredQueryRequest,
     },
     schema::{
         self, GQ_LINK_CONSUMED_BY, GQ_LINK_DERIVED_FROM, GQ_LINK_PUBLISHED_BY, GQ_LINK_RELATES_TO,
@@ -149,12 +149,22 @@ struct RuntimeState {
     last_error: Option<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct CommitDigest {
+    added_count: usize,
+    updated_count: usize,
+    deleted_count: usize,
+    atom_delta: isize,
+    summary: String,
+}
+
 /// Manages Omnigraph lifecycle, config persistence, and high-level Harness context operations.
 pub struct OmnigraphManager {
     state_dir: PathBuf,
     store: Option<SessionStore>,
     runtime: Mutex<RuntimeState>,
     process: Arc<StdMutex<ProcessHandle>>,
+    commit_cache: StdMutex<BTreeMap<String, CommitDigest>>,
 }
 
 impl OmnigraphManager {
@@ -169,6 +179,7 @@ impl OmnigraphManager {
                 last_error: None,
             }),
             process: Arc::new(StdMutex::new(ProcessHandle::default())),
+            commit_cache: StdMutex::new(BTreeMap::new()),
         })
     }
 
@@ -947,6 +958,7 @@ impl OmnigraphManager {
                             .is_some_and(|mh| mh != d.head.graph_commit_id);
                     json!({
                         "name": d.name,
+                        "head_commit": d.head.graph_commit_id,
                         "head_commit_id": d.head.graph_commit_id,
                         "from": d.from,
                         "from_commit_id": d.from_commit_id,
@@ -980,25 +992,32 @@ impl OmnigraphManager {
             .await
             .unwrap_or_default();
 
-        let commits_json: Vec<Value> = commits_resp
-            .commits
-            .iter()
-            .map(|c| {
-                json!({
-                    "graph_commit_id": c.graph_commit_id,
-                    "commit_id": c.graph_commit_id,
-                    "branch": c.graph_branch.as_deref().unwrap_or(&active_branch),
-                    "graph_branch": c.graph_branch,
-                    "parent_commit_id": c.parent_commit_id,
-                    "merged_parent_commit_id": c.merged_parent_commit_id,
-                    "actor_id": c.actor_id,
-                    "created_at": c.created_at,
-                    "published": c.published,
-                    "summary": format!("Commit {}", &c.graph_commit_id.chars().take(12).collect::<String>()),
-                    "atom_delta": 0,
-                })
-            })
-            .collect();
+        let mut commits_json = Vec::with_capacity(commits_resp.commits.len());
+        for (idx, c) in commits_resp.commits.iter().enumerate() {
+            let digest = if idx < 16 {
+                summarize_commit_cached(&client, &self.commit_cache, c).await
+            } else {
+                fallback_commit_digest(c)
+            };
+            commits_json.push(json!({
+                "graph_commit_id": c.graph_commit_id,
+                "commit_id": c.graph_commit_id,
+                "branch": c.graph_branch.as_deref().unwrap_or(&active_branch),
+                "graph_branch": c.graph_branch,
+                "parent_commit_id": c.parent_commit_id,
+                "merged_parent_commit_id": c.merged_parent_commit_id,
+                "actor_id": c.actor_id,
+                "authored_at": c.created_at,
+                "created_at": format_omnigraph_ts(c.created_at)
+                    .unwrap_or_else(|| c.created_at.to_string()),
+                "published": c.published,
+                "added_count": digest.added_count,
+                "updated_count": digest.updated_count,
+                "deleted_count": digest.deleted_count,
+                "atom_delta": digest.atom_delta,
+                "summary": digest.summary,
+            }));
+        }
 
         let target_branch = if snapshot_commit.is_some() {
             None
@@ -1403,6 +1422,7 @@ impl OmnigraphManager {
         let mut updated_atoms = Vec::new();
         let mut deleted_atoms = Vec::new();
         let mut added_edges = Vec::new();
+        let mut deleted_edges = Vec::new();
 
         for ch in &diff.changes {
             match (ch.kind, ch.op) {
@@ -1422,15 +1442,11 @@ impl OmnigraphManager {
                     }
                 }
                 (EntityKind::Edge, ChangeOp::Insert | ChangeOp::Update) => {
-                    added_edges.push(json!({
-                        "id": ch.id,
-                        "type": ch.entity_type.name,
-                        "op": ch.op.as_str(),
-                        "endpoints": ch.after.as_ref().and_then(|a| a.endpoints.clone()),
-                        "properties": ch.after.as_ref().map(|a| a.properties.clone()).unwrap_or(Value::Null),
-                    }));
+                    added_edges.push(diff_edge_entry(ch));
                 }
-                (EntityKind::Edge, ChangeOp::Delete) => {}
+                (EntityKind::Edge, ChangeOp::Delete) => {
+                    deleted_edges.push(diff_edge_entry(ch));
+                }
             }
         }
 
@@ -1460,6 +1476,7 @@ impl OmnigraphManager {
             "updated_atoms": updated_atoms,
             "deleted_atoms": deleted_atoms,
             "added_edges": added_edges,
+            "deleted_edges": deleted_edges,
             "conflicts": conflicts,
         }))
     }
@@ -1532,6 +1549,11 @@ impl OmnigraphManager {
                         "target": target,
                         "outcome": "conflict",
                         "dry_run": dry_run,
+                        "added_atoms": [],
+                        "updated_atoms": [],
+                        "deleted_atoms": [],
+                        "added_edges": [],
+                        "deleted_edges": [],
                         "conflicts": err.merge_conflicts,
                         "error": err.message,
                     })),
@@ -1581,6 +1603,7 @@ impl OmnigraphManager {
             .map(str::to_string)
             .unwrap_or_else(|| summary.clone());
         let atom_id = clean_opt(body["atom_id"].as_str())
+            .or_else(|| clean_opt(body["id"].as_str()))
             .map(str::to_string)
             .unwrap_or_else(|| format!("atom-{}", &store::hexid()[..12]));
         let session_id = clean_opt(body["session_id"].as_str()).map(str::to_string);
@@ -1698,15 +1721,10 @@ impl OmnigraphManager {
 
         if let Some(relations) = body["relates_to"].as_array() {
             for rel in relations {
-                let Some(target_id) = clean_opt(rel["target_id"].as_str()) else {
+                let Some((target_id, relation, note, rel_confidence)) = parse_relation_entry(rel)
+                else {
                     continue;
                 };
-                let relation = clean_opt(rel["relation"].as_str())
-                    .unwrap_or("supports")
-                    .to_ascii_lowercase();
-                if !VALID_RELATIONS.contains(&relation.as_str()) {
-                    continue;
-                }
                 if let Ok(r) = client
                     .mutate(&ChangeRequest {
                         query: GQ_LINK_RELATES_TO.into(),
@@ -1715,8 +1733,8 @@ impl OmnigraphManager {
                             "source_id": atom_id,
                             "target_id": target_id,
                             "relation": relation,
-                            "note": clean_opt(rel["note"].as_str()),
-                            "confidence": rel["confidence"].as_f64(),
+                            "note": note,
+                            "confidence": rel_confidence,
                             "created_at": ts,
                         })),
                         branch: Some(branch.clone()),
@@ -1730,10 +1748,13 @@ impl OmnigraphManager {
             }
         }
 
+        let atom_resp = normalize_atom_row(&atom_params);
         Ok(json!({
             "ok": true,
+            "id": atom_id,
+            "atom_id": atom_id,
             "branch": branch,
-            "atom": atom_params,
+            "atom": atom_resp,
             "files": files,
             "commit": last_commit,
         }))
@@ -1761,7 +1782,15 @@ impl OmnigraphManager {
             .to_string();
         let mode = clean_opt(body["mode"].as_str())
             .unwrap_or("reference")
-            .to_string();
+            .to_ascii_lowercase();
+        if !matches!(
+            mode.as_str(),
+            "inject" | "reference" | "inject_and_link" | "copy"
+        ) {
+            return Err(HarnessError::invalid(format!(
+                "Unknown share mode '{mode}'."
+            )));
+        }
         let project_id = clean_opt(body["project_id"].as_str())
             .unwrap_or("")
             .to_string();
@@ -1889,6 +1918,7 @@ impl OmnigraphManager {
         Ok(json!({
             "ok": true,
             "target_session_id": target_session_id,
+            "source_branch": source_branch,
             "target_branch": target_branch,
             "mode": mode,
             "shared_count": shared.len(),
@@ -2283,6 +2313,9 @@ impl OmnigraphManager {
 
         let mut events = Vec::new();
         for block in &feed.blocks {
+            let authored_at = block.cause.authored_at;
+            let created_at =
+                format_omnigraph_ts(authored_at).unwrap_or_else(|| authored_at.to_string());
             for ch in &block.changes {
                 let props = ch
                     .after
@@ -2300,14 +2333,50 @@ impl OmnigraphManager {
                     .or_else(|| props["relation"].as_str())
                     .unwrap_or("")
                     .to_string();
+                let kind = if ch.kind == EntityKind::Node {
+                    props["kind"]
+                        .as_str()
+                        .unwrap_or(ch.entity_type.name.as_str())
+                        .to_string()
+                } else {
+                    "edge".to_string()
+                };
+                let node_id = if ch.kind == EntityKind::Node {
+                    Value::String(ch.id.clone())
+                } else {
+                    Value::Null
+                };
+                let atom_id = if ch.kind == EntityKind::Node && ch.entity_type.name == "ContextAtom"
+                {
+                    Value::String(ch.id.clone())
+                } else {
+                    Value::Null
+                };
+                let session_id = if ch.kind == EntityKind::Node && ch.entity_type.name == "Session"
+                {
+                    Value::String(ch.id.clone())
+                } else {
+                    props
+                        .get("source_session_id")
+                        .or_else(|| props.get("session_id"))
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                };
                 events.push(json!({
                     "graph_commit_id": block.cause.graph_commit_id,
+                    "commit_id": block.cause.graph_commit_id,
                     "branch": block.cause.authored_branch,
                     "actor_id": block.cause.actor_id,
-                    "authored_at": block.cause.authored_at,
+                    "authored_at": authored_at,
+                    "timestamp": authored_at,
+                    "created_at": created_at,
                     "entity_kind": ch.kind,
                     "type_name": ch.entity_type.name,
                     "entity_id": ch.id,
+                    "kind": kind,
+                    "node_id": node_id,
+                    "atom_id": atom_id,
+                    "session_id": session_id,
                     "op": ch.op.as_str(),
                     "title": title,
                     "summary": summary,
@@ -2333,27 +2402,33 @@ impl OmnigraphManager {
         match client.commit_changes(commit_id, Some(200), None).await {
             Ok(detail) => {
                 let mut atoms = Vec::new();
+                let mut changes = Vec::new();
                 for ch in &detail.changes {
                     if ch.kind == EntityKind::Node && ch.entity_type.name == "ContextAtom" {
                         atoms.push(change_to_atom_entry(ch));
                     }
+                    changes.push(enrich_commit_change(ch));
                 }
                 Ok(json!({
                     "commit": {
                         "graph_commit_id": detail.cause.graph_commit_id,
+                        "commit_id": detail.cause.graph_commit_id,
                         "parent_commit_id": detail.cause.parent_commit_id,
                         "merged_parent_commit_id": detail.cause.merged_parent_commit_id,
                         "branch": detail.cause.authored_branch,
                         "actor_id": detail.cause.actor_id,
                         "authored_at": detail.cause.authored_at,
+                        "created_at": format_omnigraph_ts(detail.cause.authored_at)
+                            .unwrap_or_else(|| detail.cause.authored_at.to_string()),
                     },
-                    "changes": detail.changes,
+                    "changes": changes,
                     "atoms": atoms,
                 }))
             }
             Err(err) if err.status == 409 => Ok(json!({
                 "commit": {
                     "graph_commit_id": commit_id,
+                    "commit_id": commit_id,
                     "parentless": true,
                 },
                 "changes": [],
@@ -2656,18 +2731,35 @@ async fn ensure_branch_exists(
     }
 }
 
+fn copy_alias(obj: &mut Map<String, Value>, a: &str, b: &str) {
+    let a_val = obj.get(a).filter(|v| !v.is_null()).cloned();
+    let b_val = obj.get(b).filter(|v| !v.is_null()).cloned();
+    match (a_val, b_val) {
+        (Some(v), None) => {
+            obj.insert(b.to_string(), v);
+        }
+        (None, Some(v)) => {
+            obj.insert(a.to_string(), v);
+        }
+        (None, None) => {
+            if obj.contains_key(a) && !obj.contains_key(b) {
+                obj.insert(b.to_string(), Value::Null);
+            } else if obj.contains_key(b) && !obj.contains_key(a) {
+                obj.insert(a.to_string(), Value::Null);
+            }
+        }
+        (Some(_), Some(_)) => {}
+    }
+}
+
 fn normalize_atom_row(row: &Value) -> Value {
     let mut obj = match row.as_object() {
         Some(m) => m.clone(),
         None => Map::new(),
     };
-    if let Some(id) = obj
-        .get("atom_id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-    {
-        obj.entry("id").or_insert_with(|| Value::String(id));
-    }
+    copy_alias(&mut obj, "atom_id", "id");
+    copy_alias(&mut obj, "source_branch", "branch");
+    copy_alias(&mut obj, "source_session_id", "session_id");
     Value::Object(obj)
 }
 
@@ -2705,10 +2797,15 @@ fn change_to_atom_entry(ch: &super::client::EntityChange) -> Value {
         .map(|img| img.properties.clone())
         .unwrap_or_else(|| json!({}));
     let mut out = normalize_atom_row(&props);
-    if out.get("atom_id").is_none() {
+    if out
+        .get("atom_id")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
         out["atom_id"] = json!(ch.id);
         out["id"] = json!(ch.id);
     }
+    out = normalize_atom_row(&out);
     out["op"] = json!(ch.op.as_str());
     if let Some(before) = &ch.before {
         out["before"] = before.properties.clone();
@@ -2717,6 +2814,103 @@ fn change_to_atom_entry(ch: &super::client::EntityChange) -> Value {
         out["after"] = after.properties.clone();
     }
     out
+}
+
+fn diff_edge_entry(ch: &super::client::EntityChange) -> Value {
+    let img = match ch.op {
+        ChangeOp::Delete => ch.before.as_ref().or(ch.after.as_ref()),
+        _ => ch.after.as_ref().or(ch.before.as_ref()),
+    };
+    let endpoints = img.and_then(|i| i.endpoints.clone());
+    let props = img.map(|i| i.properties.clone()).unwrap_or(Value::Null);
+    let from = endpoints
+        .as_ref()
+        .map(|e| e.from.clone())
+        .or_else(|| str_field(&props, "from"))
+        .or_else(|| str_field(&props, "source_id"))
+        .unwrap_or_default();
+    let to = endpoints
+        .as_ref()
+        .map(|e| e.to.clone())
+        .or_else(|| str_field(&props, "to"))
+        .or_else(|| str_field(&props, "target_id"))
+        .unwrap_or_default();
+    let relation = str_field(&props, "relation")
+        .or_else(|| str_field(&props, "role"))
+        .or_else(|| str_field(&props, "injection_mode"))
+        .or_else(|| str_field(&props, "access"))
+        .unwrap_or_else(|| ch.entity_type.name.clone());
+    json!({
+        "id": ch.id,
+        "type": ch.entity_type.name,
+        "op": ch.op.as_str(),
+        "from": from,
+        "to": to,
+        "relation": relation,
+        "endpoints": endpoints,
+        "properties": props,
+    })
+}
+
+fn enrich_commit_change(ch: &super::client::EntityChange) -> Value {
+    let props = ch
+        .after
+        .as_ref()
+        .or(ch.before.as_ref())
+        .map(|img| img.properties.clone())
+        .unwrap_or(Value::Null);
+    let title = props["title"]
+        .as_str()
+        .or_else(|| props["path"].as_str())
+        .unwrap_or(&ch.id)
+        .to_string();
+    let summary = props["summary"]
+        .as_str()
+        .or_else(|| props["relation"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut obj = serde_json::to_value(ch)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    obj.insert("entity_kind".into(), json!(ch.kind));
+    obj.insert("type_name".into(), json!(ch.entity_type.name));
+    obj.insert("entity_id".into(), json!(ch.id));
+    obj.insert("title".into(), json!(title));
+    obj.insert("summary".into(), json!(summary));
+    if ch.kind == EntityKind::Node {
+        obj.insert("node_id".into(), json!(ch.id));
+        if ch.entity_type.name == "ContextAtom" {
+            obj.insert("atom_id".into(), json!(ch.id));
+        }
+    }
+    Value::Object(obj)
+}
+
+fn parse_relation_entry(rel: &Value) -> Option<(String, String, Option<String>, Option<f64>)> {
+    if let Some(raw) = rel.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some((prefix, rest)) = raw.split_once(':') {
+            let p = prefix.trim().to_ascii_lowercase();
+            let target = rest.trim();
+            if VALID_RELATIONS.contains(&p.as_str()) && !target.is_empty() {
+                return Some((target.to_string(), p, None, None));
+            }
+        }
+        return Some((raw.to_string(), "supports".to_string(), None, None));
+    }
+    let target_id = clean_opt(rel["target_id"].as_str().or_else(|| rel["id"].as_str()))?;
+    let relation = clean_opt(rel["relation"].as_str())
+        .unwrap_or("supports")
+        .to_ascii_lowercase();
+    if !VALID_RELATIONS.contains(&relation.as_str()) {
+        return None;
+    }
+    Some((
+        target_id.to_string(),
+        relation,
+        clean_opt(rel["note"].as_str()).map(str::to_string),
+        rel["confidence"].as_f64(),
+    ))
 }
 
 fn atom_matches_query(atom: &Value, q_lower: &str) -> bool {
@@ -2804,6 +2998,181 @@ fn parse_limit(v: &Value) -> Option<usize> {
 
 fn now_utc_iso_ms() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn fallback_commit_digest(c: &CommitOutput) -> CommitDigest {
+    let short: String = c.graph_commit_id.chars().take(12).collect();
+    CommitDigest {
+        added_count: 0,
+        updated_count: 0,
+        deleted_count: 0,
+        atom_delta: 0,
+        summary: format!("Commit {short}"),
+    }
+}
+
+fn build_commit_digest(c: &CommitOutput, changes: &[super::client::EntityChange]) -> CommitDigest {
+    let mut added_count = 0usize;
+    let mut updated_count = 0usize;
+    let mut deleted_count = 0usize;
+    let mut node_changes = 0usize;
+    let mut edge_changes = 0usize;
+    let mut atom_delta = 0isize;
+    let mut atom_titles = Vec::new();
+    let mut session_label: Option<String> = None;
+    let mut snapshot_summary: Option<String> = None;
+
+    for ch in changes {
+        match ch.op {
+            ChangeOp::Insert => added_count += 1,
+            ChangeOp::Update => updated_count += 1,
+            ChangeOp::Delete => deleted_count += 1,
+        }
+        match ch.kind {
+            EntityKind::Node => node_changes += 1,
+            EntityKind::Edge => edge_changes += 1,
+        }
+        let props = ch
+            .after
+            .as_ref()
+            .or(ch.before.as_ref())
+            .map(|img| &img.properties);
+        if ch.kind == EntityKind::Node && ch.entity_type.name == "ContextAtom" {
+            match ch.op {
+                ChangeOp::Insert => atom_delta += 1,
+                ChangeOp::Delete => atom_delta -= 1,
+                ChangeOp::Update => {}
+            }
+            if let Some(title) = props
+                .and_then(|p| p["title"].as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                atom_titles.push(title.to_string());
+            }
+        } else if ch.kind == EntityKind::Node
+            && ch.entity_type.name == "Session"
+            && session_label.is_none()
+        {
+            session_label = props
+                .and_then(|p| p["title"].as_str().or_else(|| p["branch"].as_str()))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| Some(ch.id.clone()));
+        } else if ch.kind == EntityKind::Node
+            && ch.entity_type.name == "TurnSnapshot"
+            && snapshot_summary.is_none()
+        {
+            snapshot_summary = props
+                .and_then(|p| p["summary"].as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+        }
+    }
+
+    let summary = if c.merged_parent_commit_id.is_some() {
+        let branch = c.graph_branch.as_deref().unwrap_or("main");
+        if changes.is_empty() {
+            format!("Merged into {branch}")
+        } else {
+            format!("Merged into {branch} (+{node_changes} nodes · +{edge_changes} edges)")
+        }
+    } else if let Some(first_title) = atom_titles.first() {
+        let clipped: String = if first_title.chars().count() > 56 {
+            let prefix: String = first_title.chars().take(55).collect();
+            format!("{prefix}…")
+        } else {
+            first_title.clone()
+        };
+        let extra_atoms = atom_titles.len().saturating_sub(1);
+        match (extra_atoms, edge_changes) {
+            (0, 0) => format!("Published: {clipped}"),
+            (0, e) => format!(
+                "Published: {clipped} (+{e} edge{})",
+                if e == 1 { "" } else { "s" }
+            ),
+            (a, 0) => format!("Published: {clipped} (+{a} more)"),
+            (a, e) => format!("Published: {clipped} (+{a} atoms, +{e} edges)"),
+        }
+    } else if let Some(label) = session_label {
+        let clipped: String = if label.chars().count() > 52 {
+            let prefix: String = label.chars().take(51).collect();
+            format!("{prefix}…")
+        } else {
+            label
+        };
+        if edge_changes > 0 {
+            format!("Session: {clipped} (+{edge_changes} edges)")
+        } else {
+            format!("Session: {clipped}")
+        }
+    } else if snapshot_summary.is_some() {
+        if edge_changes > 0 {
+            format!("Turn snapshot (+{edge_changes} edges)")
+        } else {
+            "Turn snapshot".to_string()
+        }
+    } else if changes.is_empty() {
+        "Empty commit".to_string()
+    } else {
+        format!("+{node_changes} nodes · +{edge_changes} edges")
+    };
+
+    CommitDigest {
+        added_count,
+        updated_count,
+        deleted_count,
+        atom_delta,
+        summary,
+    }
+}
+
+async fn summarize_commit_cached(
+    client: &OmnigraphClient,
+    cache: &StdMutex<BTreeMap<String, CommitDigest>>,
+    c: &CommitOutput,
+) -> CommitDigest {
+    if let Ok(guard) = cache.lock()
+        && let Some(hit) = guard.get(&c.graph_commit_id)
+    {
+        return hit.clone();
+    }
+    let digest = match client
+        .commit_changes(&c.graph_commit_id, Some(200), None)
+        .await
+    {
+        Ok(detail) => build_commit_digest(c, &detail.changes),
+        Err(err) if err.status == 409 => CommitDigest {
+            added_count: 0,
+            updated_count: 0,
+            deleted_count: 0,
+            atom_delta: 0,
+            summary: "Initial root commit".to_string(),
+        },
+        Err(_) => return fallback_commit_digest(c),
+    };
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= 512 {
+            guard.clear();
+        }
+        guard.insert(c.graph_commit_id.clone(), digest.clone());
+    }
+    digest
+}
+
+fn format_omnigraph_ts(ts: i64) -> Option<String> {
+    let dt = if ts >= 1_000_000_000_000_000 {
+        chrono::DateTime::from_timestamp_micros(ts)
+    } else if ts >= 1_000_000_000_000 {
+        chrono::DateTime::from_timestamp_millis(ts)
+    } else if ts > 0 {
+        chrono::DateTime::from_timestamp(ts, 0)
+    } else {
+        None
+    }?;
+    Some(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 fn detect_language(path: &str) -> Option<&'static str> {
