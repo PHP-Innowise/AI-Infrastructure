@@ -24,6 +24,46 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Lead the links of the Harness dependency map so that fewer cross and fewer
+  lines run side by side. The links of one box leave it, and arrive at it, side
+  by side in the order of where they lead; links of one box that pass the same
+  layers share one slot in each; a link that passes four layers or more is led
+  through none of them and is drawn while a box at one of its ends, or the mark
+  that counts such links there, is rested on or selected. In the unfolded picture
+  of a sample monorepo of 141 files the slots of passing links fall from 225 to
+  50 and 40 of 200 links become such marks; the picture is about a twentieth
+  lower, not more, because its height is that of the folders drawn under each
+  other.
+- Add **Hide transitive** and **Reach** to the key of the links. The first leaves
+  out every link a longer way already joins (76 of the 200 links of that
+  picture) and keeps every box reaching what it reached; the second lights the
+  links of a selected box one, two or three links away on each side. Neither
+  asks the server.
+- Tell more or less by the scale a picture is drawn at: below half its size the
+  names are drawn larger and the small marks are left out, above 140 % a box
+  has a second line with the number of links it is used and uses others through
+  and where it lies. A picture larger than its window has itself in small in the
+  corner of the window, with a frame around what the window shows; a press on it
+  looks at what is pressed, and the window follows the pointer held down. The
+  Dependency Map, the Sessions code graph and both System code maps have it.
+- Find the files of a project that use each other in a circle once for a graph
+  (`graph_map/circles.rs`: the groups of files that all reach each other, by
+  every link and by the links read from the code) and mark them in every
+  picture, wherever the rest of a circle lies: a file with ↻, a folder with ↻
+  and the number of its files in such groups, fainter where every group stays
+  inside the folder. **Show cycle** is offered for each marked place a cycle
+  passes through, and the side panel lists the groups that touch what is open.
+  A picture marked only the cycles among the boxes and links it drew.
+- Add the ways longer than the shortest to a path between two places
+  (`longer=1..3` with `path` on the three map routes, **Longer ways** in the
+  key): each a chain that passes no place twice and neither end on its way,
+  drawn whole and lighter, 12 at most, the shorter and the stronger first, with
+  a note where there are more. `path.shown` still counts the places of the
+  shortest ways that are drawn; `path.aside` counts those only a longer way has.
+- Keep room in the Sessions code graph under a box that carries the cards of
+  what a session made in its file, so a card lies on no other box, and correct
+  the fixed text under the window of one link, which still called a guessed
+  link dashed.
 - Make the seven kinds of links of the Harness dependency map tell themselves
   apart at once, and let none of an arrow's marks hide another. The native
   source reader (`graph_deps`) now tells an assignment as `writes` and any other

@@ -1223,6 +1223,9 @@ pub struct Shown<'a> {
     /// Two places to find the shortest ways between, instead of a folder:
     /// the one they lead from and the one they lead to.
     pub path: Option<(&'a str, &'a str)>,
+    /// With a path, by how many links a way may be longer than the
+    /// shortest and still be drawn: the ways round, besides the shortest.
+    pub longer: usize,
     /// A place to find the shortest directed cycle through.
     pub cycle: Option<&'a str>,
     /// The selected PR's base identifier for a cycle or link inspection.
@@ -1550,6 +1553,7 @@ impl Graphs {
             spread,
             link,
             path,
+            longer,
             cycle,
             shared,
             base,
@@ -1639,7 +1643,8 @@ impl Graphs {
             // before a followed place; a place the graph does not know
             // leaves what else was asked.
             if let Some((from, to)) = path
-                && let Some(view) = index.path(name, from, to, changed, edited, focus, certain)
+                && let Some(view) =
+                    index.path_with(name, from, to, changed, edited, focus, certain, longer)
             {
                 return Some(view);
             }
@@ -1742,6 +1747,9 @@ impl Graphs {
             // The sources of the checkout say what the graph does not:
             // which state a file reads of another, and which it writes.
             index.mark_access(&mut view);
+            // Which of the places drawn are part of a circle of files,
+            // wherever the rest of the circle lies.
+            index.mark_circles(&mut view);
             mark_history(&index, &mut view, None);
             mark_incoming(&index, &mut view);
             view["project_id"] = json!(project);
@@ -1929,6 +1937,7 @@ impl Graphs {
                 if own && !stale {
                     index.mark_access(&mut view);
                 }
+                index.mark_circles(&mut view);
                 mark_history(&index, &mut view, resolved.revision.as_deref());
                 mark_incoming(&index, &mut view);
                 if !notests && !stale {
@@ -3892,6 +3901,19 @@ impl Domain for Graphs {
                     if !ends.is_empty() && ends.len() != 2 {
                         return Err(HarnessError::invalid("Invalid code graph path."));
                     }
+                    // A path may ask for the ways that are longer than its
+                    // shortest by a few links; nothing else may.
+                    let longer = match query["longer"].as_str() {
+                        None | Some("") => 0,
+                        Some(text) if !ends.is_empty() => text
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|longer| *longer <= crate::graph_map::LONGER)
+                            .ok_or_else(|| HarnessError::invalid("Invalid code graph path."))?,
+                        Some(_) => {
+                            return Err(HarnessError::invalid("Invalid code graph path."));
+                        }
+                    };
                     // And what two places share: a list of the two, asked
                     // for instead of the path between them.
                     let sharing = places(
@@ -3989,6 +4011,7 @@ impl Domain for Graphs {
                                     [from, to] => Some((from.as_str(), to.as_str())),
                                     _ => None,
                                 },
+                                longer,
                                 cycle: (!cycle.is_empty()).then_some(cycle.as_str()),
                                 base: (!base.is_empty()).then_some(base.as_str()),
                                 shared: match sharing.as_slice() {

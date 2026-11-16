@@ -62,6 +62,42 @@ pub struct Wire {
     pub path: String,
     /// Runs right to left: the weaker direction of a cycle.
     pub back: bool,
+    /// Passes so many layers that it is led through none of them: one
+    /// curve from end to end, drawn only while it is lit.
+    pub portal: bool,
+}
+/// How far apart two links leave, or reach, one side of a box, and how much
+/// of that side all of them take together.
+const PORT_GAP: f64 = 4.0;
+const PORT_SPREAD: f64 = 18.0;
+/// A link that passes this many layers or more is a portal.
+pub const PORTAL_SPAN: usize = 4;
+/// How the links of a picture are led between its boxes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Routing {
+    /// The links of a box leave it, and reach it, apart along its side, in
+    /// the order of where they lead, so that they do not cross at once.
+    pub ports: bool,
+    /// Links that pass layers together, away from one box or towards one,
+    /// share one slot in each of them and part at its end.
+    pub trunks: bool,
+    /// A link that passes at least this many layers takes no slot in them.
+    pub portals: Option<usize>,
+}
+impl Routing {
+    /// Every link by itself: from the middle of a box, through a slot of
+    /// its own in each layer it passes.
+    pub const PLAIN: Self = Self {
+        ports: false,
+        trunks: false,
+        portals: None,
+    };
+    /// As the pictures lead them.
+    pub const CLEAN: Self = Self {
+        ports: true,
+        trunks: true,
+        portals: Some(PORTAL_SPAN),
+    };
 }
 /// The folders spread out in a picture: each is drawn as a frame around the
 /// boxes of what it holds.
@@ -133,6 +169,16 @@ pub struct FocusOverlay {
     pub frames: BTreeSet<usize>,
     pub entities: Vec<PlacedEntity>,
     pub bbox: Option<(f64, f64, f64, f64)>,
+    /// How many cards hang under each box that has some.
+    pub under: BTreeMap<usize, usize>,
+}
+/// How much room the cards under a box take: they stand three to a column,
+/// so three rows at most.
+pub fn entity_room(cards: usize) -> f64 {
+    match cards.min(3) {
+        0 => 0.0,
+        rows => 6.0 + rows as f64 * (ENTITY_HEIGHT + 4.0),
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum EntityAnchor {
@@ -487,6 +533,13 @@ pub fn resolve_focus(view: &V, plan: &Plan, focus: &LiveFocus) -> FocusOverlay {
             entity: entity.clone(),
         });
     }
+    overlay.under = anchor_counts
+        .iter()
+        .filter_map(|(anchor, cards)| match anchor {
+            EntityAnchor::Node(node) => Some((*node, *cards)),
+            _ => None,
+        })
+        .collect();
     for &idx in &overlay.nodes {
         let p = &plan.nodes[idx];
         overlay.bbox = Some(union_bbox(
@@ -834,6 +887,117 @@ fn order(count: usize, linked: &[bool], links: &BTreeMap<(usize, usize), u64>) -
     first.extend(last);
     first
 }
+/// Which links of a picture say nothing new of what depends on what: a link
+/// from one box to another that a longer way through other boxes already
+/// joins. Leaving them out keeps every box reaching what it reached.
+///
+/// Boxes that all reach each other are one place for this: a link inside
+/// such a group is never left out, and a way may lead through the group.
+/// Of two boxes joined by a link and by no longer way, the link stays.
+pub fn transitive(count: usize, links: &[(usize, usize)]) -> Vec<bool> {
+    let mut out = vec![vec![]; count];
+    for (from, to) in links {
+        if from != to && *from < count && *to < count && !out[*from].contains(to) {
+            out[*from].push(*to);
+        }
+    }
+    // The groups come out with what is used before what uses it, so every
+    // link between two groups leads from a later one to an earlier one.
+    let group = groups(count, &out);
+    let many = group.iter().copied().max().map_or(0, |last| last + 1);
+    let mut next: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); many];
+    for (from, to) in links {
+        if *from < count && *to < count && group[*from] != group[*to] {
+            next[group[*from]].insert(group[*to]);
+        }
+    }
+    // What each group reaches, itself left out, as a set of bits.
+    let words = many.div_ceil(64).max(1);
+    let mut reach = vec![vec![0u64; words]; many];
+    for at in 0..many {
+        let mut held = vec![0u64; words];
+        for used in &next[at] {
+            held[used / 64] |= 1 << (used % 64);
+            if *used < at {
+                for (word, more) in held.iter_mut().zip(&reach[*used]) {
+                    *word |= more;
+                }
+            }
+        }
+        reach[at] = held;
+    }
+    links
+        .iter()
+        .map(|(from, to)| {
+            if *from >= count || *to >= count {
+                return false;
+            }
+            let (user, used) = (group[*from], group[*to]);
+            user != used
+                && next[user]
+                    .iter()
+                    .any(|by| *by != used && reach[*by][used / 64] & (1 << (used % 64)) != 0)
+        })
+        .collect()
+}
+/// How far each box of a picture lies from one of them along its links:
+/// what the box uses within `down` links is so many links after it, what
+/// uses it within `up` links so many before it, and the box itself at none.
+/// A box that lies both ways, as in a cycle, is told by the nearer way, and
+/// by what the box uses where both are as near.
+pub fn cone(
+    count: usize,
+    links: &[(usize, usize)],
+    from: usize,
+    up: usize,
+    down: usize,
+) -> Vec<Option<i32>> {
+    let mut depth = vec![None; count];
+    if from >= count {
+        return depth;
+    }
+    let walk = |outgoing: bool, limit: usize| {
+        let mut found = vec![None; count];
+        found[from] = Some(0usize);
+        let mut edge = vec![from];
+        for step in 1..=limit {
+            let mut further = vec![];
+            for (a, b) in links {
+                let (near, far) = if outgoing { (*a, *b) } else { (*b, *a) };
+                if near < count && far < count && edge.contains(&near) && found[far].is_none() {
+                    found[far] = Some(step);
+                    further.push(far);
+                }
+            }
+            if further.is_empty() {
+                break;
+            }
+            edge = further;
+        }
+        found
+    };
+    let (after, before) = (walk(true, down), walk(false, up));
+    for node in 0..count {
+        depth[node] = match (after[node], before[node]) {
+            (Some(after), Some(before)) if before < after => Some(-(before as i32)),
+            (Some(after), _) => Some(after as i32),
+            (None, Some(before)) => Some(-(before as i32)),
+            (None, None) => None,
+        };
+    }
+    depth
+}
+/// Whether a link lies in the cone of a box: it leads one step further
+/// from the box along the arrows, or one step nearer to it against them.
+pub fn in_cone(depth: &[Option<i32>], link: (usize, usize)) -> bool {
+    match (
+        depth.get(link.0).copied().flatten(),
+        depth.get(link.1).copied().flatten(),
+    ) {
+        (Some(from), Some(to)) => (from >= 0 && to == from + 1) || (to <= 0 && from == to - 1),
+        _ => false,
+    }
+}
 fn curve(path: &mut String, from: (f64, f64), to: (f64, f64)) {
     let reach = (to.0 - from.0) / 2.0;
     path.push_str(&format!(
@@ -879,6 +1043,48 @@ pub fn plan_beside(
     frames: &Frames,
     pair: Option<([usize; 2], bool)>,
 ) -> Plan {
+    plan_routed(count, edges, frames, pair, Routing::PLAIN)
+}
+/// The same picture with its links led as `routing` says. The boxes of a
+/// layer stand as their links put them either way; what changes is how
+/// much room the links that pass a layer take there, and so how tall the
+/// picture is.
+///
+/// With `ports` the links of a box leave its side one under another, in the
+/// order of where they lead next, and reach a box the same way. With
+/// `trunks` the links that leave one box and pass layers share one slot in
+/// each layer they pass together; so do the links that lead to one box. A
+/// link joins the larger of the two bundles it could. With `portals` a link
+/// that passes that many layers takes no slot at all.
+pub fn plan_routed(
+    count: usize,
+    edges: &[(usize, usize, u64)],
+    frames: &Frames,
+    pair: Option<([usize; 2], bool)>,
+    routing: Routing,
+) -> Plan {
+    plan_roomy(count, edges, frames, pair, routing, &[])
+}
+/// The same picture with room kept under some of its boxes: `room` says for
+/// each box how much. What hangs under a box, such as the cards of what a
+/// session made in a file, then lies on nothing else. A box no link touches
+/// stands in a grid, whose rows all stand as far apart as the most room
+/// asked for among such boxes.
+pub fn plan_roomy(
+    count: usize,
+    edges: &[(usize, usize, u64)],
+    frames: &Frames,
+    pair: Option<([usize; 2], bool)>,
+    routing: Routing,
+    room: &[f64],
+) -> Plan {
+    let under = |node: usize| {
+        room.get(node)
+            .copied()
+            .filter(|room| room.is_finite())
+            .unwrap_or(0.0)
+            .max(0.0)
+    };
     let mut links: BTreeMap<(usize, usize), u64> = BTreeMap::new();
     let mut out = vec![vec![]; count];
     let mut linked = vec![false; count];
@@ -1040,25 +1246,85 @@ pub fn plan_beside(
     }
     let mut chains: Vec<Vec<usize>> = vec![];
     let mut heights = vec![BOX_HEIGHT; count];
+    // The layer each item stands in: a box in its own, a slot in the layer
+    // its link passes there.
+    let mut column_of = layer.clone();
     let (mut above, mut below): (Vec<Vec<usize>>, Vec<Vec<usize>>) =
         (vec![vec![]; count], vec![vec![]; count]);
-    for (near, far, ..) in &wired {
+    // A link that passes many layers is a portal: it takes no slot in them,
+    // and is drawn from end to end only while it is lit. A link that runs
+    // back closes a cycle and is always drawn.
+    let passes = |near: usize, far: usize| layer[far].saturating_sub(layer[near]);
+    let portal = wired
+        .iter()
+        .map(|(near, far, back, _)| {
+            !*back
+                && routing
+                    .portals
+                    .is_some_and(|least| passes(*near, *far) >= least)
+        })
+        .collect::<Vec<_>>();
+    // Links that pass layers together share one slot in each: those that
+    // leave one box, or those that lead to one.
+    let (mut leaving, mut reaching) = (vec![0usize; count], vec![0usize; count]);
+    for ((near, far, back, _), portal) in wired.iter().zip(&portal) {
+        if routing.trunks && !*back && !*portal && passes(*near, *far) >= 2 {
+            leaving[*near] += 1;
+            reaching[*far] += 1;
+        }
+    }
+    // The slot of a bundle in a layer and a band: by whether it leaves a
+    // box or leads to one, and by that box.
+    let mut trunks: BTreeMap<(bool, usize, usize, usize), usize> = BTreeMap::new();
+    for ((near, far, back, _), portal) in wired.iter().zip(&portal) {
         let mut chain = vec![*near];
         // A link passes through the band that holds both of its ends.
         let through = meet(band[*near], band[*far]);
-        for column in columns.iter_mut().take(layer[*far]).skip(layer[*near] + 1) {
-            let bend = heights.len();
-            heights.push(BEND_HEIGHT);
-            band.push(through);
-            above.push(vec![]);
-            below.push(vec![]);
-            column.push(bend);
-            chain.push(bend);
+        // A link joins the larger bundle of the two it could.
+        let trunk = if !routing.trunks || *back || *portal {
+            None
+        } else if leaving[*near] >= 2 && leaving[*near] >= reaching[*far] {
+            Some((true, *near))
+        } else if reaching[*far] >= 2 {
+            Some((false, *far))
+        } else {
+            None
+        };
+        if !*portal {
+            // The number of a layer names its slots as well as its column.
+            #[allow(clippy::needless_range_loop)]
+            for at in layer[*near] + 1..layer[*far] {
+                let shared =
+                    trunk.and_then(|(out, of)| trunks.get(&(out, of, at, through)).copied());
+                let bend = match shared {
+                    Some(bend) => bend,
+                    None => {
+                        let bend = heights.len();
+                        heights.push(BEND_HEIGHT);
+                        band.push(through);
+                        column_of.push(at);
+                        above.push(vec![]);
+                        below.push(vec![]);
+                        columns[at].push(bend);
+                        if let Some((out, of)) = trunk {
+                            trunks.insert((out, of, at, through), bend);
+                        }
+                        bend
+                    }
+                };
+                chain.push(bend);
+            }
         }
         chain.push(*far);
-        for pair in chain.windows(2) {
-            below[pair[0]].push(pair[1]);
-            above[pair[1]].push(pair[0]);
+        // A portal pulls no box towards the other: it is not there to be
+        // kept short.
+        if !*portal {
+            for pair in chain.windows(2) {
+                if !below[pair[0]].contains(&pair[1]) {
+                    below[pair[0]].push(pair[1]);
+                    above[pair[1]].push(pair[0]);
+                }
+            }
         }
         chains.push(chain);
     }
@@ -1134,6 +1400,9 @@ pub fn plan_beside(
             }
             offset[*item] = y;
             y += heights[*item];
+            if *item < count {
+                y += under(*item);
+            }
         }
         if let Some(last) = column.last() {
             runs.insert((at, band[*last]), y);
@@ -1161,6 +1430,13 @@ pub fn plan_beside(
         widen(&mut span[band[node]], layer[node], layer[node]);
     }
     pass(&mut span);
+    // How far apart the rows of a grid stand.
+    let pitch = BOX_HEIGHT
+        + ROW_GAP
+        + (0..count)
+            .filter(|node| !linked[*node])
+            .map(under)
+            .fold(0.0, f64::max);
     // What a frame holds that no link here touches lies in a grid under the
     // rest of it, from the frame's first layer on.
     let apart_in = |frame: usize| {
@@ -1207,7 +1483,7 @@ pub fn plan_beside(
                     }
                     grid_in[frame] = y;
                     let rows = unlinked.div_ceil(across[frame]);
-                    y += rows as f64 * (BOX_HEIGHT + ROW_GAP) - ROW_GAP;
+                    y += rows as f64 * pitch - ROW_GAP;
                 }
             }
             Step::End(frame) => {
@@ -1259,7 +1535,7 @@ pub fn plan_beside(
                 .unwrap_or(0);
             Placed {
                 x: left(span[frame].map_or(0, |(first, _)| first) + at % across[frame]),
-                y: grid_in[frame] + (at / across[frame]) as f64 * (BOX_HEIGHT + ROW_GAP),
+                y: grid_in[frame] + (at / across[frame]) as f64 * pitch,
                 layer: None,
                 cycle: false,
             }
@@ -1267,7 +1543,7 @@ pub fn plan_beside(
             let at = loose.iter().position(|other| *other == node).unwrap_or(0);
             Placed {
                 x: MARGIN + inset + (at % per_row) as f64 * (BOX_WIDTH + ROW_GAP),
-                y: grid_top + (at / per_row) as f64 * (BOX_HEIGHT + ROW_GAP),
+                y: grid_top + (at / per_row) as f64 * pitch,
                 layer: None,
                 cycle: false,
             }
@@ -1287,20 +1563,73 @@ pub fn plan_beside(
             None => Framed::default(),
         })
         .collect::<Vec<_>>();
+    // Where each link leaves the box at its near end and reaches the box
+    // at its far end, as a distance from the middle of the side: the links
+    // of one side stand in the order of where they lead next, so the one
+    // that leads up leaves above the one that leads down.
+    let centre = |item: usize| top[item] + heights[item] / 2.0;
+    let mut port = vec![(0.0f64, 0.0f64); chains.len()];
+    if routing.ports {
+        // For each box the links at one of its sides: where each leads
+        // next, and which link it is.
+        type Side = Vec<Vec<(f64, usize)>>;
+        let (mut right, mut left_side): (Side, Side) = (vec![vec![]; count], vec![vec![]; count]);
+        for (index, chain) in chains.iter().enumerate() {
+            if portal[index] {
+                continue;
+            }
+            let last = chain.len() - 1;
+            right[chain[0]].push((centre(chain[1]), index));
+            left_side[chain[last]].push((centre(chain[last - 1]), index));
+        }
+        let apart = |side: &mut Vec<(f64, usize)>| {
+            side.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let many = side.len();
+            let room = PORT_SPREAD.min(PORT_GAP * many.saturating_sub(1) as f64);
+            side.iter()
+                .enumerate()
+                .map(|(place, (_, index))| {
+                    let part = if many < 2 {
+                        0.0
+                    } else {
+                        place as f64 / (many - 1) as f64 - 0.5
+                    };
+                    (*index, room * part)
+                })
+                .collect::<Vec<_>>()
+        };
+        for node in 0..count {
+            for (index, offset) in apart(&mut right[node]) {
+                port[index].0 = offset;
+            }
+            for (index, offset) in apart(&mut left_side[node]) {
+                port[index].1 = offset;
+            }
+        }
+    }
     let mut wires = vec![];
-    for (chain, (near, _, back, pair)) in chains.iter().zip(&wired) {
+    for (index, (chain, (_, _, back, pair))) in chains.iter().zip(&wired).enumerate() {
         let edge = edges
             .iter()
             .position(|(from, to, _)| (*from, *to) == *pair)
             .unwrap_or(0);
         // The stops of the link from left to right; a slot is crossed straight.
         let mut stops = vec![];
+        let last = chain.len() - 1;
         for (step, item) in chain.iter().enumerate() {
-            let (x, y) = (left(layer[*near] + step), top[*item] + heights[*item] / 2.0);
+            let x = left(column_of[*item]);
+            let y = centre(*item)
+                + if step == 0 {
+                    port[index].0
+                } else if step == last {
+                    port[index].1
+                } else {
+                    0.0
+                };
             if step > 0 {
                 stops.push(((x, y), false));
             }
-            if step + 1 < chain.len() {
+            if step < last {
                 stops.push(((x + BOX_WIDTH, y), step > 0));
             }
         }
@@ -1327,6 +1656,7 @@ pub fn plan_beside(
             edge,
             path,
             back: *back,
+            portal: portal[index],
         });
     }
     let rows = loose.len().div_ceil(per_row);
@@ -1346,7 +1676,7 @@ pub fn plan_beside(
         height: if loose.is_empty() {
             below_all + MARGIN
         } else {
-            grid_top + rows as f64 * (BOX_HEIGHT + ROW_GAP)
+            grid_top + rows as f64 * pitch
         }
         .max(BOX_HEIGHT + 2.0 * MARGIN),
         apart,
@@ -1456,6 +1786,7 @@ pub fn plan_row(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
                 ),
             },
             back: from > to,
+            portal: false,
         })
         .collect();
     Plan {
@@ -2384,6 +2715,18 @@ fn shown(view: &V) -> String {
         if number("shown") < number("places") {
             text.push_str(&format!(", {} drawn", count(number("shown"))));
         }
+        // The ways round that were asked for and found.
+        if number("detours") > 0 {
+            text.push_str(&format!(
+                " · {}{}",
+                if m::yes(&path["detours_more"]) {
+                    "at least "
+                } else {
+                    ""
+                },
+                plural(number("detours"), "longer way", "longer ways")
+            ));
+        }
         return text;
     }
     if shares(view) {
@@ -3099,6 +3442,23 @@ fn path_note(view: &V) -> String {
         "Each box uses the next: these are the ways that take the fewest links. Select a link to see what makes it up."
             .to_owned(),
     );
+    // With them the ways round that were asked for, as far as there are any.
+    let longer = number("longer");
+    if longer > 0 {
+        let by = plural(longer, "link", "links");
+        parts.push(match number("detours") {
+            0 => format!("No way that is longer by {by} at most leads there."),
+            found => format!(
+                "Drawn lighter with them: {} longer by {by} at most, each whole{}",
+                plural(found, "way", "ways"),
+                if m::yes(&path["detours_more"]) {
+                    "; there are more."
+                } else {
+                    "."
+                }
+            ),
+        });
+    }
     if number("shown") < number("places") {
         parts.push(format!(
             "{} places lie on such ways; each step shows its {} most linked.",
@@ -4333,6 +4693,156 @@ pub fn kinds_legend_html(view: &V, off: &KindsOff, surface: &str) -> String {
     html.push_str("</div>");
     html
 }
+/// What the key under a picture is set to: the kinds of links switched
+/// off, whether links that longer ways already join are left out, and how
+/// far the links of the selected box are lit (to what uses it, to what it
+/// uses).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct KeyState {
+    pub off: KindsOff,
+    pub hide_transitive: bool,
+    pub cone: (usize, usize),
+}
+/// How far from a selected box its links can be lit.
+pub const CONE_REACH: usize = 3;
+/// The key of a picture of the map: the kinds of its links, and beside
+/// them what else is chosen for the picture as a whole. **Hide transitive**
+/// leaves out the links that a longer way already joins and says how many
+/// that is. With a box selected, **Reach** says how many links from it are
+/// lit on each side: one, as always, or two or three.
+pub fn key_html(view: &V, key: &KeyState, surface: &str) -> String {
+    let mut html = kinds_legend_html(view, &key.off, surface);
+    let mut more = String::new();
+    // A path that was found can be asked for the ways round as well.
+    if paths(view) && m::yes(&view["path"]["found"]) {
+        more.push_str(&longer_ways(view, surface));
+    }
+    let plain = plain_map(view);
+    let said = transitive_links(view);
+    if plain && (said > 0 || key.hide_transitive) {
+        let told = if key.hide_transitive {
+            format!(
+                "{} left out: a longer way already joins their two ends. Select to draw them again",
+                plural(said as u64, "link is", "links are")
+            )
+        } else {
+            format!(
+                "Leave out {}: a longer way already joins their two ends, so every box still reaches what it reached",
+                plural(said as u64, "link", "links")
+            )
+        };
+        more.push_str(&format!(
+            "<button type=\"button\" class=\"graph-arrow-legend-preset graph-arrow-legend-switch\" data-action=\"graph-transitive-toggle\" data-payload=\"{}\" aria-pressed=\"{}\" title=\"{}\">Hide transitive <span class=\"graph-arrow-legend-count\">{}</span></button>",
+            payload(&json!({"surface": surface})),
+            key.hide_transitive,
+            escape(&told),
+            count(said as u64),
+        ));
+    }
+    let nodes = m::array(&view["nodes"]);
+    let selected = view["focus"]["path"]
+        .as_str()
+        .is_some_and(|path| nodes.iter().any(|node| node["path"] == path));
+    if plain && selected {
+        more.push_str("<span class=\"graph-arrow-legend-reach\" role=\"group\" aria-label=\"How many links from the selected box are lit\"><span class=\"graph-arrow-legend-title\">Reach:</span>");
+        for (side, word, told, now) in [
+            ("up", "used by", "what uses it", key.cone.0.max(1)),
+            ("down", "uses", "what it uses", key.cone.1.max(1)),
+        ] {
+            more.push_str(&format!(
+                "<span class=\"graph-arrow-legend-side\">{word}</span>"
+            ));
+            for hops in 1..=CONE_REACH {
+                more.push_str(&format!(
+                    "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"graph-cone\" data-payload=\"{}\" aria-pressed=\"{}\" title=\"Light {told} within {}\">{hops}</button>",
+                    payload(&json!({"hops": hops, "side": side, "surface": surface})),
+                    now == hops,
+                    plural(hops as u64, "link", "links"),
+                ));
+            }
+        }
+        more.push_str("</span>");
+    }
+    if !more.is_empty() {
+        // Before the note that ends the key.
+        let at = html
+            .rfind("<span class=\"graph-arrow-legend-note\">")
+            .unwrap_or(html.len());
+        html.insert_str(at, &more);
+    }
+    html
+}
+/// By how many links a way between two places may be longer than the
+/// shortest and still be asked for.
+const LONGER: u64 = 3;
+/// What the key of a path offers beside the kinds of its links: the
+/// shortest ways alone, or with them the ways that are longer by one, two
+/// or three links, each drawn whole as a way round. It says how many of
+/// those the picture draws, with a + where there are more.
+fn longer_ways(view: &V, surface: &str) -> String {
+    let path = &view["path"];
+    let now = path["longer"].as_u64().unwrap_or(0);
+    let mut html = String::from("<span class=\"graph-arrow-legend-reach\" role=\"group\" aria-label=\"Ways longer than the shortest\"><span class=\"graph-arrow-legend-title\">Longer ways:</span>");
+    for longer in 0..=LONGER {
+        let (word, told) = match longer {
+            0 => ("none".to_owned(), "The shortest ways alone".to_owned()),
+            longer => (
+                format!("+{longer}"),
+                format!(
+                    "Also the ways longer than the shortest by {}",
+                    plural(longer, "link", "links")
+                ),
+            ),
+        };
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"graph-map-longer\" data-payload=\"{}\" aria-pressed=\"{}\" title=\"{told}\">{word}</button>",
+            payload(&json!({"longer": longer, "surface": surface})),
+            now == longer,
+        ));
+    }
+    if now > 0 {
+        let found = path["detours"].as_u64().unwrap_or(0);
+        html.push_str(&format!(
+            "<span class=\"graph-arrow-legend-side\">{}</span>",
+            match found {
+                0 => "none found".to_owned(),
+                found => format!(
+                    "{}{} drawn, lighter",
+                    count(found),
+                    if m::yes(&path["detours_more"]) {
+                        "+"
+                    } else {
+                        ""
+                    }
+                ),
+            }
+        ));
+    }
+    html.push_str("</span>");
+    html
+}
+/// The state with the reach of a selected box set on one side, one to
+/// `CONE_REACH` links; the other side stays as it was.
+pub fn reaching(mut state: V, side: &str, hops: u64) -> V {
+    let hops = hops.clamp(1, CONE_REACH as u64);
+    let (up, down) = cone_of(&state);
+    state["cone"] = match side {
+        "up" => json!({"up": hops, "down": down}),
+        "down" => json!({"up": up, "down": hops}),
+        _ => return state,
+    };
+    state
+}
+/// The reach a state holds: to what uses the selected box, and to what it
+/// uses. One on each side where none was set.
+pub fn cone_of(state: &V) -> (usize, usize) {
+    let side = |key: &str| {
+        state["cone"][key]
+            .as_u64()
+            .map_or(1, |hops| hops.clamp(1, CONE_REACH as u64) as usize)
+    };
+    (side("up"), side("down"))
+}
 /// The key of the links where no picture is there to count them.
 #[cfg(test)]
 pub fn arrow_kinds_legend_html() -> String {
@@ -4347,6 +4857,51 @@ pub struct CanvasOverlayContext<'a> {
     pub impact: Option<&'a V>,
     /// The kinds of links the key of the picture has switched off.
     pub links_off: KindsOff,
+    /// Whether the links that a longer way already joins are left out.
+    pub hide_transitive: bool,
+    /// How many links from the selected box are lit: against the arrows,
+    /// to what uses it, and along them, to what it uses. None is one.
+    pub cone: (usize, usize),
+}
+/// Whether a picture is one of the map itself: a folder, a change, an
+/// opened file or followed links. In a picture of a way, of a cycle, of
+/// what two places share, of a pattern, of a scenario or of modules every
+/// link is what was asked for, and none of them is held back or left out.
+fn plain_map(view: &V) -> bool {
+    !(paths(view)
+        || cycles(view)
+        || shares(view)
+        || patterned(view)
+        || matches!(view["mode"].as_str(), Some("scenario" | "modules")))
+}
+/// The links a picture would leave out as said by longer ways: those whose
+/// ends are drawn, and that break no rule.
+fn said_twice(view: &V) -> Vec<bool> {
+    let nodes = m::array(&view["nodes"]);
+    let at = |path: &V| nodes.iter().position(|node| &node["path"] == path);
+    let edges = m::array(&view["edges"]);
+    let drawn = edges
+        .iter()
+        .map(|edge| at(&edge["from"]).zip(at(&edge["to"])))
+        .collect::<Vec<_>>();
+    let pairs = drawn.iter().flatten().copied().collect::<Vec<_>>();
+    let mut said = transitive(nodes.len(), &pairs).into_iter();
+    edges
+        .iter()
+        .zip(&drawn)
+        .map(|(edge, ends)| {
+            ends.is_some()
+                && said.next().unwrap_or(false)
+                && edge["architecture_violation"].as_u64().unwrap_or(0) == 0
+        })
+        .collect()
+}
+/// How many links of a picture a longer way already joins.
+pub fn transitive_links(view: &V) -> usize {
+    if !plain_map(view) {
+        return 0;
+    }
+    said_twice(view).into_iter().filter(|said| *said).count()
 }
 
 /// Canvas markup plus resolved plane size and live focus overlay coordinates.
@@ -4357,6 +4912,8 @@ pub struct RenderedCanvas {
     pub height: f64,
     pub focus: FocusOverlay,
     pub selected_bbox: Option<(f64, f64, f64, f64)>,
+    /// The picture in small, for the corner of its window.
+    pub radar: String,
 }
 /// Renders a dependency map view using the default `"graph-map"` SVG ID prefix.
 #[cfg(test)]
@@ -4371,9 +4928,7 @@ pub fn canvas_with(view: &V, id_prefix: &str, live_focus: Option<&LiveFocus>) ->
         id_prefix,
         CanvasOverlayContext {
             live_focus,
-            changes: None,
-            impact: None,
-            links_off: [false; 7],
+            ..Default::default()
         },
     )
 }
@@ -4391,10 +4946,21 @@ pub fn canvas_with_overlays(
         .and_then(|doc| ImpactLookup::from_value(doc, &nodes));
     let edges = m::array(&view["edges"]);
     let at = |path: &V| nodes.iter().position(|node| &node["path"] == path);
-    // A link whose end is not drawn is not drawn either.
+    // A link whose end is not drawn is not drawn either. Nor is, where
+    // that was asked for, a link that a longer way already joins: without
+    // those the picture holds fewer links that pass layers, and every box
+    // still reaches what it reached.
+    let plain = plain_map(view);
+    let left_out = if overlay.hide_transitive && plain {
+        said_twice(view)
+    } else {
+        vec![false; edges.len()]
+    };
     let edges = edges
         .iter()
-        .filter(|edge| at(&edge["from"]).is_some() && at(&edge["to"]).is_some())
+        .zip(&left_out)
+        .filter(|(edge, said)| !**said && at(&edge["from"]).is_some() && at(&edge["to"]).is_some())
+        .map(|(edge, _)| edge)
         .collect::<Vec<_>>();
     let pairs = edges
         .iter()
@@ -4422,10 +4988,38 @@ pub fn canvas_with_overlays(
     // Layers stand in a row in their own order, whatever their links say.
     let layered_view = layered(view);
     let declared = m::yes(&view["pattern"]["declared"]);
+    // In a picture of a way, of a cycle, of what two places share, of a
+    // pattern or of a scenario every link is what is asked for: there no
+    // link is held back until its box is rested on.
+    let routing = if plain {
+        Routing::CLEAN
+    } else {
+        Routing {
+            portals: None,
+            ..Routing::CLEAN
+        }
+    };
     let plan = if layered_view && !declared {
         plan_row(nodes.len(), &weighted)
     } else {
-        plan_beside(nodes.len(), &weighted, &framed, pair)
+        let plan = plan_routed(nodes.len(), &weighted, &framed, pair, routing);
+        // What a session made hangs under the box of its file as cards.
+        // Where there are some, the picture is laid out again with room
+        // for them, so that they lie on no other box.
+        let under = live_focus
+            .map(|focus| resolve_focus(view, &plan, focus).under)
+            .unwrap_or_default();
+        if under.is_empty() {
+            plan
+        } else {
+            let mut room = vec![0.0; nodes.len()];
+            for (node, cards) in under {
+                if let Some(room) = room.get_mut(node) {
+                    *room = entity_room(cards);
+                }
+            }
+            plan_roomy(nodes.len(), &weighted, &framed, pair, routing, &room)
+        }
     };
     // How much each box uses and is used through the links drawn here.
     let mut flow = vec![(0u64, 0u64); nodes.len()];
@@ -4495,11 +5089,21 @@ pub fn canvas_with_overlays(
         .flatten()
         .filter_map(|edge| Some((at(&edge[0])?, at(&edge[1])?)))
         .collect();
+    // The links of the selected box are lit, and, where more was asked
+    // for, those that lead on from them: so many links along the arrows
+    // to what it uses, and so many against them to what uses it.
+    let reach = (overlay.cone.0.max(1), overlay.cone.1.max(1));
+    let depth = chosen
+        .filter(|_| plain && shared_edges.is_empty() && reach != (1, 1))
+        .map(|chosen| cone(nodes.len(), &pairs, chosen, reach.0, reach.1));
     let lit = |pair: (usize, usize)| {
         cycle_view
             || chosen_link == Some(pair)
-            || match chosen {
-                Some(chosen) if shared_edges.is_empty() => pair.0 == chosen || pair.1 == chosen,
+            || match (&depth, chosen) {
+                (Some(depth), _) => in_cone(depth, pair),
+                (None, Some(chosen)) if shared_edges.is_empty() => {
+                    pair.0 == chosen || pair.1 == chosen
+                }
                 _ => shared_edges.contains(&pair),
             }
     };
@@ -4632,6 +5236,9 @@ pub fn canvas_with_overlays(
     let mut marks = String::new();
     let mut placed_ties = Vec::new();
     let mut hidden_wires = Vec::with_capacity(plan.wires.len());
+    // What each box is joined with by links that are led through no layer:
+    // the boxes it uses far away, and the boxes far away that use it.
+    let mut far: Vec<(Vec<usize>, Vec<usize>)> = vec![(vec![], vec![]); nodes.len()];
     for (wire, kinds) in plan.wires.iter().zip(&wire_kinds) {
         let edge = edges[wire.edge];
         let (links, guessed) = (
@@ -4650,6 +5257,12 @@ pub fn canvas_with_overlays(
             layered_view && wire.back
         };
         let grew = edge["added"].as_u64().filter(|_| against);
+        // Of a path, a link that only a longer way has.
+        let detour_attr = if m::yes(&edge["detour"]) {
+            " data-detour=\"true\""
+        } else {
+            ""
+        };
         let back = wire.back && cycles && !layered_view;
         let on_path = shared_edges.contains(&(from, to));
         let added = cycle_view && m::yes(&edge["added"]);
@@ -4729,11 +5342,17 @@ pub fn canvas_with_overlays(
             // A link that closes a cycle is a row of dots, kept thin.
             .min(if back { 1.8 } else { 3.5 })
             + if added { 1.5 } else { 0.0 };
+        // A link that passes many layers is led through none of them: it
+        // is drawn from end to end while its box is rested on or selected,
+        // and a mark at each of its ends says that it is there. One against
+        // the rules is always drawn.
+        let portal = wire.portal && !against;
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}{}{}\" data-ends=\"{from} {to}\"{edge_diff_attr}{}{}{hidden_attr} d=\"{}\" data-edge-kind=\"{arrow_kind}\" data-kinds=\"{}\"{multi_attr} stroke=\"url(#{id_prefix}-flow-{}{})\" stroke-width=\"{:.1}\" marker-start=\"url(#{id_prefix}-port{})\" marker-end=\"url(#{id_prefix}-arrow{marker_suffix})\"><title>{told}{}{}{}{breakdown_note}</title></path>",
+            "<path class=\"graph-map-edge{state}{}{}{}{}\" data-ends=\"{from} {to}\"{edge_diff_attr}{}{}{hidden_attr}{detour_attr} d=\"{}\" data-edge-kind=\"{arrow_kind}\" data-kinds=\"{}\"{multi_attr} stroke=\"url(#{id_prefix}-flow-{}{})\" stroke-width=\"{:.1}\" marker-start=\"url(#{id_prefix}-port{})\" marker-end=\"url(#{id_prefix}-arrow{marker_suffix})\"><title>{told}{}{}{}{breakdown_note}</title></path>",
             if guess { " graph-map-edge-guess" } else { "" },
             if back { " graph-map-edge-back" } else { "" },
             if against { " graph-map-edge-against" } else { "" },
+            if portal { " graph-map-edge-portal" } else { "" },
             if on_path { " data-shared-path=\"true\"" } else { "" },
             if added { " data-cycle-added=\"true\"" } else { "" },
             wire.path,
@@ -4742,7 +5361,13 @@ pub fn canvas_with_overlays(
             if arrow_kind == "calls" { String::new() } else { format!("-{arrow_kind}") },
             width + if guess { 2.0 } else { 0.0 },
             if multi_kind { "-multi" } else { "" },
-            if back { " · against the main direction, closes a cycle" } else { "" },
+            if !detour_attr.is_empty() {
+                " · on a longer way only"
+            } else if back {
+                " · against the main direction, closes a cycle"
+            } else {
+                ""
+            },
             match grew {
                 Some(links) => format!(
                     " · against the order of the layers · {} added by this change",
@@ -4757,10 +5382,16 @@ pub fn canvas_with_overlays(
         ));
         if guess {
             html.push_str(&format!(
-                "<path class=\"graph-map-edge-core{}\" data-ends=\"{from} {to}\"{hidden_attr} d=\"{}\" data-edge-kind=\"{arrow_kind}\" stroke-width=\"{width:.1}\"/>",
+                "<path class=\"graph-map-edge-core{}{}{}\" data-ends=\"{from} {to}\"{hidden_attr} d=\"{}\" data-edge-kind=\"{arrow_kind}\" stroke-width=\"{width:.1}\"/>",
                 if back { " graph-map-edge-back" } else { "" },
+                if portal { " graph-map-edge-portal" } else { "" },
+                if portal { state } else { "" },
                 wire.path,
             ));
+        }
+        if portal && !hidden {
+            far[from].0.push(to);
+            far[to].1.push(from);
         }
         // What stands at the middle of a link: a word of a pattern, what a
         // change did to it, or, on a link that passes layers and carries
@@ -4890,7 +5521,8 @@ pub fn canvas_with_overlays(
             .map(|text| format!(" · {}", escape(text)))
             .unwrap_or_default();
         html.push_str(&format!(
-            "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\"{} d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{}{breakdown_note} · select to see {}</title></path>",
+            "<path class=\"graph-map-hit{}\" data-ends=\"{from} {to}\"{} d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{}{breakdown_note} · select to see {}</title></path>",
+            if wire.portal && edge["architecture_violation"].as_u64().unwrap_or(0) == 0 { " graph-map-hit-portal" } else { "" },
             if *hidden { " data-kind-hidden=\"true\"" } else { "" },
             wire.path,
             payload(&json!({"from": nodes[from]["path"], "to": nodes[to]["path"]})),
@@ -4956,9 +5588,26 @@ pub fn canvas_with_overlays(
             plural(used, "link", "links")
         ));
         let cycle = placed.cycle && cycles;
-        if cycle {
+        // The whole project says more than the picture: a box is part of
+        // a circle of files also where the rest of the circle is not drawn.
+        let circle = &node["circle"];
+        if let Some(told) = circle_told(circle, folder) {
+            label.push_str(&told);
+        } else if cycle {
             label.push_str(", part of a cycle");
         }
+        let circle_attr = match (circle.is_object(), m::yes(&circle["leaves"])) {
+            (true, true) => " data-circle=\"through\"",
+            (true, false) => " data-circle=\"inside\"",
+            _ => "",
+        };
+        // Of a path, a box that lies on a longer way only.
+        let detour_attr = if m::yes(&node["detour"]) {
+            label.push_str(", on a longer way only");
+            " data-detour=\"true\""
+        } else {
+            ""
+        };
         let lit = near(index);
         let path_mark = if !shared_edges.is_empty() && lit {
             " data-shared-path=\"true\""
@@ -5218,7 +5867,7 @@ pub fn canvas_with_overlays(
             ""
         };
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark}{focus_target_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{position} title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>{node_vis_pill}",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark}{focus_target_attr}{circle_attr}{detour_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{position} title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>{node_vis_pill}",
             payload(&node_payload),
             escape(kind),
             opened && !symbol,
@@ -5245,11 +5894,49 @@ pub fn canvas_with_overlays(
                 escape(&m::text(node, "name"))
             },
         ));
+        // A second line for a picture drawn large: through how many links
+        // the box is used and uses others, and where it lies.
+        let place = if m::yes(&node["layer"]) || m::yes(&node["module"]) {
+            String::new()
+        } else if symbol {
+            let file = home.rsplit('/').next().unwrap_or(&home);
+            match line {
+                0 => file.to_owned(),
+                line => format!("{file}:{line}"),
+            }
+        } else if folder {
+            plural(node["files"].as_u64().unwrap_or(0), "file", "files")
+        } else {
+            m::text(node, "path")
+                .rsplit_once('/')
+                .map(|(folder, _)| folder.to_owned())
+                .unwrap_or_default()
+        };
+        let detail = [
+            if uses + used > 0 {
+                format!("{}→ →{}", count(used), count(uses))
+            } else {
+                String::new()
+            },
+            place,
+        ]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
         if pattern_view && !layered_view && start {
             html.push_str("<span class=\"graph-map-node-anchor\" aria-hidden=\"true\">★</span>");
         }
-        if cycle {
-            html.push_str("<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻</span>");
+        if cycle || circle.is_object() {
+            // A folder says how many of its files are part of circles.
+            let held = circle["files"]
+                .as_u64()
+                .filter(|_| folder)
+                .map(count)
+                .unwrap_or_default();
+            html.push_str(&format!(
+                "<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻{held}</span>"
+            ));
         }
         if patterns > 0 {
             html.push_str(&format!(
@@ -5292,6 +5979,14 @@ pub fn canvas_with_overlays(
                 count(node["files"].as_u64().unwrap_or(0))
             ));
         }
+        // The second line is the last of what a box holds: it is laid out
+        // under the rest, and only where the picture is drawn large.
+        if !detail.is_empty() {
+            html.push_str(&format!(
+                "<span class=\"graph-map-node-detail\" aria-hidden=\"true\">{}</span>",
+                escape(&detail)
+            ));
+        }
         html.push_str("</button>");
         if followed {
             html.push_str(&handles(
@@ -5300,6 +5995,41 @@ pub fn canvas_with_overlays(
                 placed.x,
                 placed.y,
                 chosen.is_some() && !near(index),
+            ));
+        }
+        // The links of this box that are led through no layer: a mark at
+        // the side they leave by, and one at the side they arrive at, each
+        // with how many there are. Resting on a mark draws them.
+        for (side, others, sign) in [("out", &far[index].0, "⇢"), ("in", &far[index].1, "⇠")] {
+            if others.is_empty() {
+                continue;
+            }
+            let names = others
+                .iter()
+                .take(6)
+                .map(|other| m::text(&nodes[*other], "name"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let told = format!(
+                "{} {} {}{} — drawn while this is rested on or the box is selected",
+                m::text(node, "name"),
+                if side == "out" {
+                    "uses, far from here:"
+                } else {
+                    "is used from far away by:"
+                },
+                names,
+                if others.len() > 6 { ", …" } else { "" },
+            );
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"graph-map-portal\" data-of=\"{index}\" data-side=\"{side}\" data-dim=\"{}\" data-action=\"{node_action}\" data-payload=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{sign}{}</button>",
+                chosen.is_some() && !near(index),
+                payload(&node_payload),
+                if side == "out" { placed.x + BOX_WIDTH } else { placed.x },
+                placed.y + BOX_HEIGHT,
+                escape(&told),
+                escape(&told),
+                count(others.len() as u64),
             ));
         }
         if folder && spreads(view) {
@@ -5468,16 +6198,118 @@ pub fn canvas_with_overlays(
         }
         (min_x, min_y, max_x, max_y)
     });
+    // In small a box tells one thing: that it is selected, else that it
+    // changed, else that it closes a cycle.
+    let boxes = nodes
+        .iter()
+        .zip(&plan.nodes)
+        .enumerate()
+        .map(|(index, (node, placed))| {
+            let state = if selected_idx == Some(index) {
+                "selected"
+            } else if node["changed"].as_u64().unwrap_or(0) > 0 || node["status"].is_string() {
+                "changed"
+            } else if placed.cycle && cycles {
+                "cycle"
+            } else {
+                ""
+            };
+            (placed.x, placed.y, state)
+        })
+        .collect::<Vec<_>>();
+    let radar = radar((plane_w, plane_h), &plan.frames, &boxes);
     RenderedCanvas {
         html,
         width: plane_w,
         height: plane_h,
         focus: focus_overlay,
         selected_bbox,
+        radar,
     }
 }
 /// How far past a corner the second handle of a side hangs.
 const HANDLE_GAP: f64 = 11.0;
+/// What the whole project says of a box and the circles of files: a file is
+/// part of one, a folder holds files of some, and of those some lead out of
+/// the folder and back.
+fn circle_told(circle: &V, folder: bool) -> Option<String> {
+    let files = circle["files"].as_u64().filter(|files| *files > 0)?;
+    Some(if !folder {
+        format!(
+            ", part of a cycle of {}",
+            plural(circle["largest"].as_u64().unwrap_or(0), "file", "files")
+        )
+    } else if m::yes(&circle["leaves"]) {
+        format!(
+            ", holds {} of cycles that lead out of it and back",
+            plural(files, "file", "files")
+        )
+    } else {
+        format!(
+            ", holds {} that use each other in cycles",
+            plural(files, "file", "files")
+        )
+    })
+}
+/// The circles of files that touch what is open, the largest first. Each
+/// is shown as the shortest cycle through the file that has most to do
+/// with the others.
+fn circles_side(view: &V) -> String {
+    let circles = &view["circles"];
+    let listed = m::array(&circles["listed"]);
+    if listed.is_empty() || cycles(view) {
+        return String::new();
+    }
+    let number = |key: &str| circles[key].as_u64().unwrap_or(0);
+    let (groups, here) = (number("groups"), number("here"));
+    let mut html = format!(
+        "<h4>Cycles of files <span class=\"graph-map-total\">{}</span></h4><p class=\"knowledge-note\">{}</p><ul class=\"graph-map-rows\">",
+        count(here),
+        if here == groups {
+            format!(
+                "{} of the project use each other in {}; the largest holds {}. A box marked ↻ is part of one, wherever the rest of it lies.",
+                plural(number("files"), "file", "files"),
+                plural(groups, "cycle", "cycles"),
+                count(number("largest")),
+            )
+        } else {
+            format!(
+                "{} of the {} of the project touch what is open. A box marked ↻ is part of one, wherever the rest of it lies.",
+                count(here),
+                plural(groups, "cycle", "cycles"),
+            )
+        }
+    );
+    for circle in &listed {
+        let start = m::text(circle, "start");
+        let more = circle["more"].as_u64().unwrap_or(0);
+        let names = m::array(&circle["names"])
+            .iter()
+            .filter_map(|name| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        html.push_str(&format!(
+            "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-cycle\" data-payload=\"{}\" title=\"Show the shortest cycle through {}\"><span class=\"graph-map-row-name\">{}{}</span><span class=\"graph-map-row-links\">{}</span></button></li>",
+            payload(&circle["start"]),
+            escape(&start),
+            escape(&names),
+            if more > 0 {
+                format!(", +{}", count(more))
+            } else {
+                String::new()
+            },
+            plural(circle["files"].as_u64().unwrap_or(0), "file", "files"),
+        ));
+    }
+    html.push_str("</ul>");
+    if here > listed.len() as u64 {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">and {} more</p>",
+            count(here - listed.len() as u64)
+        ));
+    }
+    html
+}
 /// The handles at the top corners of a box whose links are followed. The
 /// right corner is for what the box uses and the left one for what uses it,
 /// as the links leave on the right and arrive on the left. A side that is
@@ -8238,6 +9070,107 @@ pub fn scaled(size: (f64, f64), scale: f64) -> String {
         "{plain};transform:scale({scale:.4});transform-origin:0 0;margin:0 {dx:.0}px {dy:.0}px 0"
     )
 }
+/// Below this scale a picture is an overview: names are drawn larger and the
+/// small marks are left out.
+const LOD_FAR: f64 = 0.5;
+/// Above this scale a box has room for a second line.
+const LOD_NEAR: f64 = 1.4;
+/// How much a picture tells at a scale: `far` is an overview of names,
+/// `near` adds to each box where it lies and how many links it has, and
+/// `mid` is the picture as it is laid out.
+pub fn lod(scale: f64) -> &'static str {
+    if !scale.is_finite() || scale <= 0.0 {
+        "mid"
+    } else if scale < LOD_FAR {
+        "far"
+    } else if scale > LOD_NEAR {
+        "near"
+    } else {
+        "mid"
+    }
+}
+/// The room the small picture of a map may take, and its least side.
+const RADAR_ROOM: (f64, f64) = (176.0, 176.0);
+const RADAR_LEAST: f64 = 18.0;
+/// How large the small picture of a map is drawn: as large as its room
+/// lets a picture of that shape be.
+pub fn radar_size(picture: (f64, f64)) -> (f64, f64) {
+    if !(picture.0 > 0.0 && picture.1 > 0.0) {
+        return (0.0, 0.0);
+    }
+    let by = (RADAR_ROOM.0 / picture.0).min(RADAR_ROOM.1 / picture.1);
+    (
+        (picture.0 * by).round().max(RADAR_LEAST),
+        (picture.1 * by).round().max(RADAR_LEAST),
+    )
+}
+/// What of a picture a window onto it shows, in the measures of the
+/// picture: left, top, width and height. The window is `room` large, the
+/// picture is drawn at `scale`, and its corner lies `corner` from the corner
+/// of the window. `None` once the window shows all of the picture: there is
+/// nowhere else to look.
+pub fn in_window(
+    corner: (f64, f64),
+    scale: f64,
+    room: (f64, f64),
+    picture: (f64, f64),
+) -> Option<(f64, f64, f64, f64)> {
+    if !(scale.is_finite() && scale > 0.0 && picture.0 > 0.0 && picture.1 > 0.0) {
+        return None;
+    }
+    let side = |corner: f64, room: f64, picture: f64| {
+        let from = -corner / scale;
+        let to = from + room / scale;
+        // Half a point of the screen is no part of the picture left out.
+        let all = from <= 0.5 / scale && to >= picture - 0.5 / scale;
+        let (from, to) = (from.clamp(0.0, picture), to.clamp(0.0, picture));
+        (from, (to - from).max(0.0), all)
+    };
+    let (x, width, wide) = side(corner.0, room.0, picture.0);
+    let (y, height, tall) = side(corner.1, room.1, picture.1);
+    (!(wide && tall)).then_some((x, y, width, height))
+}
+/// Where the corner of a picture lies from the corner of its window once
+/// `point` of the picture is in the middle of the window.
+pub fn centred(point: (f64, f64), scale: f64, room: (f64, f64)) -> (f64, f64) {
+    (
+        room.0 / 2.0 - point.0 * scale,
+        room.1 / 2.0 - point.1 * scale,
+    )
+}
+/// The small picture of a map: its frames and its boxes, each box told by
+/// what it is to the picture, and a frame around what the window shows,
+/// which is set once the picture is measured.
+fn radar(picture: (f64, f64), frames: &[Framed], boxes: &[(f64, f64, &'static str)]) -> String {
+    let (width, height) = radar_size(picture);
+    if width <= 0.0 || boxes.is_empty() {
+        return String::new();
+    }
+    let mut svg = format!(
+        "<svg class=\"graph-radar-picture\" width=\"{width:.0}\" height=\"{height:.0}\" viewBox=\"0 0 {:.0} {:.0}\" preserveAspectRatio=\"none\" data-w=\"{:.0}\" data-h=\"{:.0}\" focusable=\"false\">",
+        picture.0, picture.1, picture.0, picture.1
+    );
+    for frame in frames.iter().filter(|frame| frame.width > 0.0) {
+        svg.push_str(&format!(
+            "<rect class=\"graph-radar-frame\" x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"{:.0}\"/>",
+            frame.x, frame.y, frame.width, frame.height
+        ));
+    }
+    for (x, y, state) in boxes {
+        svg.push_str(&format!(
+            "<rect class=\"graph-radar-box\" x=\"{x:.0}\" y=\"{y:.0}\" width=\"{BOX_WIDTH:.0}\" height=\"{BOX_HEIGHT:.0}\"{}/>",
+            if state.is_empty() {
+                String::new()
+            } else {
+                format!(" data-state=\"{state}\"")
+            }
+        ));
+    }
+    svg.push_str(
+        "<rect class=\"graph-radar-view\" x=\"0\" y=\"0\" width=\"0\" height=\"0\"/></svg>",
+    );
+    svg
+}
 /// Computes the multiplicative zoom factor for a single DOM `wheel` event.
 /// Returns `None` for zero or non-finite vertical deltas so pure horizontal
 /// trackpad swipes pass through unintercepted.
@@ -8303,13 +9236,250 @@ fn apply_scroll_canvas_scale(
     );
     let _ = plane.set_attribute("data-scale", &scale_text);
     let _ = canvas.set_attribute("data-scale", &scale_text);
+    let _ = canvas.set_attribute("data-lod", lod(scale_value));
     if let Some(label_id) = scroll_canvas_label_id(canvas_id) {
         dom::text(
             label_id,
             &format!("{}%", (scale_value * 100.0).round() as i64),
         );
     }
+    sync_scroll_radar(canvas_id);
     scale_value
+}
+/// How far the small picture of a map stands from the corner of its window.
+const RADAR_INSET: i32 = 10;
+/// Draws, in the small picture of a map, around what the window of the map
+/// shows, and puts the small picture in the corner of that window. A window
+/// that shows all of its picture has none: there is nowhere else to look.
+fn sync_radar(canvas_id: &str, seen: Option<(f64, f64, f64, f64)>) {
+    let Some(radar) = dom::get(&format!("{canvas_id}-radar")) else {
+        return;
+    };
+    let frame = radar.query_selector(".graph-radar-view").ok().flatten();
+    let (Some(seen), Some(frame)) = (seen, frame) else {
+        dom::hide(&radar, true);
+        return;
+    };
+    for (key, value) in [
+        ("x", seen.0),
+        ("y", seen.1),
+        ("width", seen.2),
+        ("height", seen.3),
+    ] {
+        let _ = frame.set_attribute(key, &format!("{value:.1}"));
+    }
+    dom::hide(&radar, false);
+    let (Some(canvas), Ok(radar)) = (
+        dom::get(canvas_id).and_then(|canvas| canvas.dyn_into::<web_sys::HtmlElement>().ok()),
+        radar.dyn_into::<web_sys::HtmlElement>(),
+    ) else {
+        return;
+    };
+    // The corner inside the scroll bars, measured from what both lie in.
+    let left = canvas.offset_left() + canvas.client_left() + canvas.client_width()
+        - radar.offset_width()
+        - RADAR_INSET;
+    let top = canvas.offset_top() + canvas.client_top() + canvas.client_height()
+        - radar.offset_height()
+        - RADAR_INSET;
+    let _ = radar.set_attribute("style", &format!("left:{left}px;top:{top}px"));
+}
+/// Where the corner of a scrolled picture lies from the corner of its
+/// window, the scale it is drawn at, the room of the window and the size
+/// of the picture.
+#[allow(clippy::type_complexity)]
+fn scroll_window(canvas_id: &str) -> Option<((f64, f64), f64, (f64, f64), (f64, f64))> {
+    let canvas = dom::get(canvas_id)?;
+    let plane = canvas
+        .query_selector(".graph-map-plane")
+        .ok()
+        .flatten()
+        .and_then(|plane| plane.dyn_into::<web_sys::HtmlElement>().ok())?;
+    let picture = (plane.offset_width() as f64, plane.offset_height() as f64);
+    let (window, drawn) = (
+        canvas.get_bounding_client_rect(),
+        plane.get_bounding_client_rect(),
+    );
+    Some((
+        (
+            drawn.left() - window.left() - canvas.client_left() as f64,
+            drawn.top() - window.top() - canvas.client_top() as f64,
+        ),
+        current_scroll_canvas_scale(&plane, canvas_id),
+        (canvas.client_width() as f64, canvas.client_height() as f64),
+        picture,
+    ))
+}
+/// The small picture of a map that is scrolled, drawn again for where the
+/// map is scrolled to.
+fn sync_scroll_radar(canvas_id: &str) {
+    if dom::get(&format!("{canvas_id}-radar")).is_none() {
+        return;
+    }
+    let seen = scroll_window(canvas_id)
+        .and_then(|(corner, scale, room, picture)| in_window(corner, scale, room, picture));
+    sync_radar(canvas_id, seen);
+}
+/// The small picture of an embedded map, drawn again for where its camera
+/// looks.
+fn sync_surface_radar(surface: MapSurface, cam: &Camera) {
+    let (width, height, measured) = viewport_size(surface.canvas);
+    let seen = (measured && cam.plane_w > 0.0 && cam.plane_h > 0.0)
+        .then(|| {
+            in_window(
+                (cam.pan_x, cam.pan_y),
+                cam.scale,
+                (width, height),
+                (cam.plane_w, cam.plane_h),
+            )
+        })
+        .flatten();
+    sync_radar(surface.canvas, seen);
+}
+/// The point of a picture under a point of its small picture.
+fn radar_point(radar: &web_sys::Element, client: (f64, f64)) -> Option<(f64, f64)> {
+    let picture = radar
+        .query_selector(".graph-radar-picture")
+        .ok()
+        .flatten()?;
+    let size = |key: &str| {
+        picture
+            .get_attribute(key)
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| *value > 0.0)
+    };
+    let (width, height) = (size("data-w")?, size("data-h")?);
+    let drawn = picture.get_bounding_client_rect();
+    if drawn.width() <= 0.0 || drawn.height() <= 0.0 {
+        return None;
+    }
+    Some((
+        ((client.0 - drawn.left()) / drawn.width()).clamp(0.0, 1.0) * width,
+        ((client.1 - drawn.top()) / drawn.height()).clamp(0.0, 1.0) * height,
+    ))
+}
+/// Brings a point of a picture to the middle of its window.
+fn look_at(canvas_id: &str, point: (f64, f64)) {
+    if let Some(surface) = embedded_surface_for_canvas(canvas_id) {
+        let mut cam = load_surface_camera(surface);
+        let (width, height, measured) = viewport_size(surface.canvas);
+        if !measured {
+            return;
+        }
+        let (x, y) = centred(point, cam.scale, (width, height));
+        cam.pan_x = x.round();
+        cam.pan_y = y.round();
+        cam.fit_mode = false;
+        cam.needs_measure = false;
+        save_surface_camera(surface, &cam);
+        apply_surface_camera(surface, &cam);
+        return;
+    }
+    let (Some(canvas), Some((corner, scale, room, _))) =
+        (dom::get(canvas_id), scroll_window(canvas_id))
+    else {
+        return;
+    };
+    let wanted = centred(point, scale, room);
+    canvas.set_scroll_left((canvas.scroll_left() as f64 + corner.0 - wanted.0).round() as i32);
+    canvas.set_scroll_top((canvas.scroll_top() as f64 + corner.1 - wanted.1).round() as i32);
+    sync_scroll_radar(canvas_id);
+}
+/// The small picture the pointer is held down on, by the window it is of.
+const RADAR_DRAG: &str = "graph-radar-drag";
+/// A press on the small picture of a map looks at what is pressed, and the
+/// window follows the pointer while it is held down.
+fn radar_pointer(kind: &str, event: &web_sys::Event, target: Option<&web_sys::Element>) -> bool {
+    let held = m::data(RADAR_DRAG);
+    let pointer = event.dyn_ref::<web_sys::PointerEvent>();
+    match kind {
+        "pointerdown" => {
+            let Some(radar) =
+                target.and_then(|target| target.closest(".graph-map-radar").ok().flatten())
+            else {
+                return false;
+            };
+            let Some(pointer) = pointer.filter(|pointer| pointer.button() == 0) else {
+                return true;
+            };
+            let id = radar.id();
+            let Some(canvas_id) = id.strip_suffix("-radar") else {
+                return true;
+            };
+            event.prevent_default();
+            let _ = radar.set_pointer_capture(pointer.pointer_id());
+            m::set(
+                RADAR_DRAG,
+                json!({"canvas": canvas_id, "pointer_id": pointer.pointer_id(), "moved": false}),
+            );
+            if let Some(point) = radar_point(
+                &radar,
+                (pointer.client_x() as f64, pointer.client_y() as f64),
+            ) {
+                look_at(canvas_id, point);
+            }
+            true
+        }
+        "pointermove" => {
+            let Some(canvas_id) = held["canvas"].as_str() else {
+                return false;
+            };
+            let Some(pointer) = pointer
+                .filter(|pointer| Some(pointer.pointer_id() as i64) == held["pointer_id"].as_i64())
+            else {
+                return true;
+            };
+            let Some(radar) = dom::get(&format!("{canvas_id}-radar")) else {
+                return true;
+            };
+            if !m::yes(&held["moved"]) {
+                // While the pointer leads, the picture follows it at once.
+                dom::attr(canvas_id, "data-panning", "true");
+                let mut held = held.clone();
+                held["moved"] = json!(true);
+                m::set(RADAR_DRAG, held);
+            }
+            if let Some(point) = radar_point(
+                &radar,
+                (pointer.client_x() as f64, pointer.client_y() as f64),
+            ) {
+                look_at(canvas_id, point);
+            }
+            true
+        }
+        "pointerup" | "pointercancel" => {
+            let Some(canvas_id) = held["canvas"].as_str() else {
+                return false;
+            };
+            if m::yes(&held["moved"]) {
+                dom::attr(canvas_id, "data-panning", "false");
+            }
+            if let (Some(radar), Some(pointer)) = (dom::get(&format!("{canvas_id}-radar")), pointer)
+            {
+                let _ = radar.release_pointer_capture(pointer.pointer_id());
+            }
+            m::take(RADAR_DRAG);
+            true
+        }
+        _ => false,
+    }
+}
+/// Draws the small picture of a scrolled map again as the map is scrolled.
+fn attach_canvas_scroll(canvas_id: &'static str) {
+    let Some(canvas) = dom::get(canvas_id) else {
+        return;
+    };
+    if canvas.get_attribute("data-scroll-bound").as_deref() == Some("true") {
+        return;
+    }
+    let _ = canvas.set_attribute("data-scroll-bound", "true");
+    let scrolled = Closure::<dyn FnMut()>::new(move || sync_scroll_radar(canvas_id));
+    if canvas
+        .add_event_listener_with_callback("scroll", scrolled.as_ref().unchecked_ref())
+        .is_ok()
+    {
+        scrolled.forget();
+    }
 }
 fn current_scroll_canvas_scale(plane: &web_sys::HtmlElement, canvas_id: &str) -> f64 {
     if let Some(scale_value) = plane
@@ -8671,9 +9841,19 @@ fn ensure_resize_watch() {
         if open() {
             fit();
         }
-        refit_surface_if_visible(SESSION_SURFACE);
-        refit_surface_if_visible(SYSTEM_EMBEDDED_SURFACE);
-        refit_surface_if_visible(SYSTEM_CHANGE_SURFACE);
+        for surface in [
+            SESSION_SURFACE,
+            SYSTEM_EMBEDDED_SURFACE,
+            SYSTEM_CHANGE_SURFACE,
+        ] {
+            refit_surface_if_visible(surface);
+            // A window of another size shows another part of its picture,
+            // also where the picture is left as it was.
+            let (_, _, measured) = viewport_size(surface.canvas);
+            if measured {
+                sync_surface_radar(surface, &load_surface_camera(surface));
+            }
+        }
     });
     let _ =
         dom::window().add_event_listener_with_callback("resize", resized.as_ref().unchecked_ref());
@@ -8808,6 +9988,7 @@ fn watch() {
     }
     m::set("graph-map-watched", json!(true));
     ensure_resize_watch();
+    attach_canvas_scroll("graph-map-canvas");
     attach_canvas_hover("graph-map-canvas");
     attach_canvas_hover("graph-link-canvas");
     attach_side_hover("graph-map-side", "graph-map-canvas");
@@ -8862,37 +10043,81 @@ const PATTERNS: &str = "graph-map-patterns";
 /// And the kinds of links its key has switched off, their names joined by
 /// commas. One choice holds for every picture of links.
 const LINKS_OFF: &str = "graph-map-links-off";
-/// The kinds of links switched off now: as the key left them, or, the
-/// first time they are asked for, as this browser kept them.
-fn links_off_now() -> KindsOff {
+/// And whether the links that longer ways already join are left out.
+const HIDE_TRANSITIVE: &str = "graph-map-hide-transitive";
+/// What the keys of the pictures hold in common, as they left it, or, the
+/// first time it is asked for, as this browser kept it.
+fn key_store() -> V {
     let held = m::data(LINKS_OFF);
     if held.is_object() {
-        return kinds_off(&held);
+        return held;
     }
     let kept = dom::storage(LINKS_OFF).unwrap_or_default();
-    let held =
-        json!({"links_off": kept.split(',').filter(|kind| !kind.is_empty()).collect::<Vec<_>>()});
+    let held = json!({
+        "links_off": kept.split(',').filter(|kind| !kind.is_empty()).collect::<Vec<_>>(),
+        "hide_transitive": dom::storage(HIDE_TRANSITIVE).as_deref() == Some("1"),
+    });
     m::set(LINKS_OFF, held.clone());
-    kinds_off(&held)
+    held
+}
+/// The kinds of links switched off now.
+fn links_off_now() -> KindsOff {
+    kinds_off(&key_store())
+}
+/// What the key of a picture is set to: what all pictures share, and the
+/// reach its own state holds.
+fn key_now(state: &V) -> KeyState {
+    let held = key_store();
+    KeyState {
+        off: kinds_off(&held),
+        hide_transitive: m::yes(&held["hide_transitive"]),
+        cone: cone_of(state),
+    }
 }
 /// A kind of link, or a preset of them, was selected in the key of a
 /// picture: the choice is kept, and the picture that key belongs to is
 /// drawn again from what it holds. The server is asked nothing.
 fn switch_kinds(action: &str, asked: &V) {
-    let held = json!({"links_off": names_off(&links_off_now())});
-    let next = if action == "graph-kind-preset" {
-        preset_kinds(held, &m::text(asked, "preset"))
-    } else {
-        switched_kind(
-            held,
-            &m::text(asked, "kind"),
-            m::yes(&m::data("pointer-mods")["alt"]),
-        )
-    };
-    let kept = names_off(&kinds_off(&next)).join(",");
-    dom::save(LINKS_OFF, (!kept.is_empty()).then_some(kept.as_str()));
-    m::set(LINKS_OFF, next);
+    let held = key_store();
     let surface = m::text(asked, "surface");
+    match action {
+        // How far the links of the selected box are lit is a choice of
+        // the one picture.
+        "graph-cone" => {
+            if surface == "link" {
+                return;
+            }
+            let surface = surface_by_name(&surface);
+            let next = reaching(
+                surface_state(surface),
+                &m::text(asked, "side"),
+                asked["hops"].as_u64().unwrap_or(1),
+            );
+            save_surface_state(surface, &next);
+        }
+        "graph-transitive-toggle" => {
+            let mut next = held;
+            let hide = !m::yes(&next["hide_transitive"]);
+            next["hide_transitive"] = json!(hide);
+            dom::save(HIDE_TRANSITIVE, hide.then_some("1"));
+            m::set(LINKS_OFF, next);
+        }
+        _ => {
+            let mut next = if action == "graph-kind-preset" {
+                preset_kinds(held.clone(), &m::text(asked, "preset"))
+            } else {
+                switched_kind(
+                    held.clone(),
+                    &m::text(asked, "kind"),
+                    m::yes(&m::data("pointer-mods")["alt"]),
+                )
+            };
+            next["hide_transitive"] = held["hide_transitive"].clone();
+            let kept = names_off(&kinds_off(&next)).join(",");
+            dom::save(LINKS_OFF, (!kept.is_empty()).then_some(kept.as_str()));
+            m::set(LINKS_OFF, next);
+        }
+    }
     let legend = if surface == "link" {
         draw_link();
         "graph-link-arrow-legend".to_owned()
@@ -12630,6 +13855,11 @@ pub fn build_scoped_map_path(scope: &GraphTargetScope, state: &V, embedded: bool
             "path"
         };
         query.push((asked, json!(ends).to_string()));
+        // With a path, the ways longer than its shortest by as many links.
+        let longer = state["longer"].as_u64().unwrap_or(0).min(LONGER);
+        if asked == "path" && longer > 0 {
+            query.push(("longer", longer.to_string()));
+        }
         if asked == "shared" && !m::text(state, "side").is_empty() {
             query.push(("side", m::text(state, "side")));
         }
@@ -12730,7 +13960,7 @@ fn map_side_html(
     }
     let details_body = if let Some(impact) = impact_doc.as_ref() {
         format!(
-            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}",
+            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}{}",
             choosing(state),
             paging(view),
             run_comparison(view),
@@ -12744,13 +13974,14 @@ fn map_side_html(
             without_incoming_side(view),
             test_paths(view),
             history_side(view),
+            circles_side(view),
             architecture_side(view),
             found_patterns(view, &unfolded(state, "kinds")),
         )
     } else if let Some(focused_path) = active_focus.as_deref() {
         if view["focus"].is_object() {
             format!(
-                "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}<p class=\"knowledge-note\">Reading dependency impact…</p>{}{}{}{}",
+                "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}<p class=\"knowledge-note\">Reading dependency impact…</p>{}{}{}{}{}",
                 choosing(state),
                 paging(view),
                 run_comparison(view),
@@ -12759,6 +13990,7 @@ fn map_side_html(
                 without_incoming_side(view),
                 test_paths(view),
                 history_side(view),
+                circles_side(view),
                 architecture_side(view),
                 found_patterns(view, &unfolded(state, "kinds")),
             )
@@ -12782,7 +14014,7 @@ fn map_side_html(
         "<p class=\"knowledge-note\">Select a file or folder on the map to inspect its dependencies and change impact.</p>".to_owned()
     } else {
         format!(
-            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}",
+            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}{}",
             choosing(state),
             paging(view),
             run_comparison(view),
@@ -12791,6 +14023,7 @@ fn map_side_html(
             without_incoming_side(view),
             test_paths(view),
             history_side(view),
+            circles_side(view),
             architecture_side(view),
             found_patterns(view, &unfolded(state, "kinds")),
         )
@@ -12921,6 +14154,7 @@ fn render(view: &V) {
     let modal_state = state();
     let modal_changes = surface_changes_doc(MODAL_SURFACE, &modal_state);
     let modal_impact = cached_impact_for_selection(MODAL_SURFACE, &modal_state, Some(view));
+    let modal_key = key_now(&modal_state);
     let rendered = canvas_with_overlays(
         view,
         MODAL_SURFACE.id_prefix,
@@ -12928,14 +14162,17 @@ fn render(view: &V) {
             live_focus: None,
             changes: modal_changes.as_ref(),
             impact: modal_impact.as_ref(),
-            links_off: links_off_now(),
+            links_off: modal_key.off,
+            hide_transitive: modal_key.hide_transitive,
+            cone: modal_key.cone,
         },
     );
     html("graph-map-canvas", &rendered.html);
+    html("graph-map-canvas-radar", &rendered.radar);
     fit();
     html(
         "graph-map-arrow-legend",
-        &kinds_legend_html(view, &links_off_now(), "modal"),
+        &key_html(view, &modal_key, "modal"),
     );
     let changes_tab = m::text(&modal_state, "side_tab") == "changes";
     if scenario_mode && !changes_tab {
@@ -13018,7 +14255,7 @@ fn render(view: &V) {
         && !state["pick"].is_object()
         && (pull_place
             || !dom::all(
-                "#graph-map-canvas .graph-map-node[data-selected=\"true\"][data-cycle=\"true\"]",
+                "#graph-map-canvas .graph-map-node[data-selected=\"true\"]:is([data-cycle=\"true\"],[data-circle=\"through\"])",
             )
             .is_empty());
     let action = if cycles(view) {
@@ -13477,6 +14714,13 @@ fn apply_click_action(
             state["path"] = json!(ends);
             state["focus"] = json!("");
         }
+        // How much longer than the shortest a way of the path may be.
+        "graph-map-longer" => {
+            if busy || unfolded(state, "path").len() != 2 {
+                return ClickOutcome::stay();
+            }
+            state["longer"] = json!(payload["longer"].as_u64().unwrap_or(0).min(LONGER));
+        }
         "graph-map-shared" => {
             match sharing(state.clone(), payload) {
                 Some(shown) => *state = shown,
@@ -13781,7 +15025,12 @@ pub async fn event(
     checked: bool,
 ) -> bool {
     // The key of the links is the same in every picture.
-    if kind == "click" && matches!(action, "graph-kind-toggle" | "graph-kind-preset") {
+    if kind == "click"
+        && matches!(
+            action,
+            "graph-kind-toggle" | "graph-kind-preset" | "graph-transitive-toggle" | "graph-cone"
+        )
+    {
         switch_kinds(action, payload);
         return true;
     }
@@ -14501,11 +15750,14 @@ fn apply_surface_plane_transform(surface: MapSurface, cam: &Camera) {
         return;
     };
     let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") else {
+        sync_radar(surface.canvas, None);
         return;
     };
+    sync_surface_radar(surface, cam);
     if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
         return;
     }
+    let _ = canvas.set_attribute("data-lod", lod(cam.scale));
     let style = format!(
         "width:{:.0}px;height:{:.0}px;--graph-scale:{:.4};--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;transform:translate({:.1}px,{:.1}px) scale({:.4});transform-origin:0 0",
         cam.plane_w, cam.plane_h, cam.scale, cam.pan_x, cam.pan_y, cam.pan_x, cam.pan_y, cam.scale
@@ -14840,6 +16092,7 @@ fn render_embedded_surface(
     dom::text(surface.note, &note_text);
     dom::hidden(surface.note, note_text.is_empty());
 
+    let surface_key = key_now(&state);
     let rendered = canvas_with_overlays(
         view,
         prefix,
@@ -14847,14 +16100,14 @@ fn render_embedded_surface(
             live_focus: live.as_ref(),
             changes: changes_doc.as_ref(),
             impact: impact_doc.as_ref(),
-            links_off: links_off_now(),
+            links_off: surface_key.off,
+            hide_transitive: surface_key.hide_transitive,
+            cone: surface_key.cone,
         },
     );
     html(surface.canvas, &rendered.html);
-    html(
-        &legend_id,
-        &kinds_legend_html(view, &links_off_now(), surface.name),
-    );
+    html(&format!("{}-radar", surface.canvas), &rendered.radar);
+    html(&legend_id, &key_html(view, &surface_key, surface.name));
     dom::hidden(&legend_id, false);
     let was_empty = dom::get(surface.side).is_none_or(|el| el.inner_html().is_empty());
     let attach_action = format!("{prefix}-attach");
@@ -16175,6 +17428,9 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
     let target_el = event
         .target()
         .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+    if radar_pointer(kind, event, target_el.as_ref()) {
+        return true;
+    }
     match kind {
         "pointerdown" => {
             let Some(surface) = target_embedded_surface(target_el.as_ref()) else {
@@ -16471,6 +17727,265 @@ mod tests {
         let plan = plan(4, &[(0, 3, 1), (1, 2, 1)]);
         assert!(plan.nodes[0].y < plan.nodes[1].y);
         assert!(plan.nodes[3].y < plan.nodes[2].y);
+    }
+    /// A picture led as `routing` says, without frames.
+    fn laid_out(count: usize, edges: &[(usize, usize, u64)], routing: Routing) -> Plan {
+        plan_routed(count, edges, &Frames::default(), None, routing)
+    }
+    /// Where a drawn link starts and where it ends.
+    fn ends_at(wire: &Wire) -> ((f64, f64), (f64, f64)) {
+        let numbers = wire
+            .path
+            .split(|c: char| c == ' ' || c.is_ascii_alphabetic())
+            .filter_map(|part| part.parse::<f64>().ok())
+            .collect::<Vec<_>>();
+        (
+            (numbers[0], numbers[1]),
+            (numbers[numbers.len() - 2], numbers[numbers.len() - 1]),
+        )
+    }
+    fn wire_of(plan: &Plan, edge: usize) -> &Wire {
+        plan.wires.iter().find(|wire| wire.edge == edge).unwrap()
+    }
+    #[test]
+    fn the_links_of_a_box_leave_it_apart_in_the_order_of_where_they_lead() {
+        // 0 uses 1, 2 and 3, which stand one under another.
+        let edges = [(0, 1, 1), (0, 2, 1), (0, 3, 1)];
+        let plain = laid_out(4, &edges, Routing::PLAIN);
+        let middle = plain.nodes[0].y + BOX_HEIGHT / 2.0;
+        assert!(plain.wires.iter().all(|wire| ends_at(wire).0 .1 == middle));
+        let plan = laid_out(4, &edges, Routing::CLEAN);
+        // The boxes stand where they stood.
+        assert_eq!(plan.nodes, plain.nodes);
+        let mut used = [1, 2, 3];
+        used.sort_by(|a, b| plan.nodes[*a].y.total_cmp(&plan.nodes[*b].y));
+        let leaves = used.map(|node| {
+            let edge = edges.iter().position(|(_, to, _)| *to == node).unwrap();
+            ends_at(wire_of(&plan, edge)).0 .1
+        });
+        // The link to the box above leaves above, four apart, about the
+        // middle of the side.
+        assert_eq!(
+            leaves,
+            [middle - PORT_GAP, middle, middle + PORT_GAP],
+            "{plan:?}"
+        );
+        // Each of them reaches the middle of its own box: one link there.
+        for (edge, (_, to, _)) in edges.iter().enumerate() {
+            assert_eq!(
+                ends_at(wire_of(&plan, edge)).1 .1,
+                plan.nodes[*to].y + BOX_HEIGHT / 2.0
+            );
+        }
+        // Many links share the side: they never take more of it than
+        // `PORT_SPREAD`, and none leaves outside the box.
+        let fan = (1..12).map(|to| (0, to, 1)).collect::<Vec<_>>();
+        let plan = laid_out(12, &fan, Routing::CLEAN);
+        let top = plan.nodes[0].y;
+        let ys = plan
+            .wires
+            .iter()
+            .map(|wire| ends_at(wire).0 .1)
+            .collect::<Vec<_>>();
+        let (least, most) = (
+            ys.iter().copied().fold(f64::INFINITY, f64::min),
+            ys.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        );
+        assert_eq!(most - least, PORT_SPREAD);
+        assert!(
+            least > top && most < top + BOX_HEIGHT,
+            "{least} {most} {top}"
+        );
+        // The links that arrive at one box stand apart the same way.
+        let into = [(0, 2, 1), (1, 2, 1)];
+        let plan = laid_out(3, &into, Routing::CLEAN);
+        let arrive = [0, 1].map(|edge| ends_at(wire_of(&plan, edge)).1 .1);
+        assert_eq!((arrive[0] - arrive[1]).abs(), PORT_GAP);
+        assert_eq!(
+            arrive[0] < arrive[1],
+            plan.nodes[0].y < plan.nodes[1].y,
+            "{plan:?}"
+        );
+    }
+    #[test]
+    fn links_that_pass_layers_together_share_one_slot_in_each() {
+        // A chain of four layers, and from its first box three links that
+        // pass two layers to three boxes of the last.
+        let edges = [
+            (0, 1, 1),
+            (1, 2, 1),
+            (2, 3, 1),
+            (2, 4, 1),
+            (2, 5, 1),
+            (0, 3, 1),
+            (0, 4, 1),
+            (0, 5, 1),
+        ];
+        let plain = laid_out(6, &edges, Routing::PLAIN);
+        let bundled = laid_out(
+            6,
+            &edges,
+            Routing {
+                portals: None,
+                ..Routing::CLEAN
+            },
+        );
+        // Each of the three had a slot of its own in the two layers it
+        // passes; together they take one in each.
+        let slots = |plan: &Plan| {
+            plan.wires
+                .iter()
+                .filter(|wire| wire.edge >= 5)
+                .flat_map(|wire| {
+                    wire.path
+                        .split(" L")
+                        .skip(1)
+                        .map(|run| run.split(' ').take(2).collect::<Vec<_>>().join(" "))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<BTreeSet<_>>()
+                .len()
+        };
+        assert_eq!((slots(&plain), slots(&bundled)), (6, 2));
+        // They run as one through the layers they pass and part at the end.
+        let run = |edge: usize| {
+            let path = &wire_of(&bundled, edge).path;
+            path[path.find(" L").unwrap()..path.rfind(" C").unwrap()].to_owned()
+        };
+        assert_eq!(run(5), run(6));
+        assert_eq!(run(6), run(7));
+        let ends = [5, 6, 7].map(|edge| ends_at(wire_of(&bundled, edge)).1);
+        assert!(ends[0] != ends[1] && ends[1] != ends[2]);
+        // Links that lead to one box from boxes of several layers join the
+        // same way: 3 is used by 0 past two layers and by 1 past one.
+        let into = [(0, 1, 1), (1, 2, 1), (2, 3, 1), (0, 3, 1), (1, 3, 1)];
+        let (plain, bundled) = (
+            laid_out(4, &into, Routing::PLAIN),
+            laid_out(
+                4,
+                &into,
+                Routing {
+                    portals: None,
+                    ..Routing::CLEAN
+                },
+            ),
+        );
+        let bends = |plan: &Plan| {
+            plan.wires
+                .iter()
+                .map(|w| w.path.matches(" L").count())
+                .sum::<usize>()
+        };
+        assert_eq!((bends(&plain), bends(&bundled)), (3, 3));
+        let last_run = |plan: &Plan, edge: usize| {
+            let path = &wire_of(plan, edge).path;
+            path[path.rfind(" L").unwrap()..path.rfind(" C").unwrap()].to_owned()
+        };
+        assert_ne!(last_run(&plain, 3), last_run(&plain, 4));
+        assert_eq!(last_run(&bundled, 3), last_run(&bundled, 4));
+        // A single link that passes a layer keeps a slot of its own: with
+        // nothing to share, the links are led as they were.
+        let alone = [(0, 1, 1), (1, 2, 1), (0, 2, 1)];
+        let shared = Routing {
+            trunks: true,
+            ..Routing::PLAIN
+        };
+        assert_eq!(
+            laid_out(3, &alone, shared).wires,
+            laid_out(3, &alone, Routing::PLAIN).wires
+        );
+    }
+    #[test]
+    fn a_layer_that_many_links_pass_is_lower_once_they_share_a_slot() {
+        // Four boxes use one far box past a layer of ten boxes: four slots
+        // among those ten where each link had its own, one where they
+        // share, and the picture is lower. A slot is thin, so it is lower
+        // by little: what a shared slot saves is the room of the links,
+        // which adds up where many pass.
+        let (sources, middle, target) = (0..4, 4..14, 14);
+        let mut edges = vec![];
+        for box_ in middle.clone() {
+            edges.push((0, box_, 1));
+            edges.push((box_, target, 1));
+        }
+        for source in sources.clone().skip(1) {
+            edges.push((source, 3 + source, 1));
+        }
+        for source in sources {
+            edges.push((source, target, 1));
+        }
+        let plain = laid_out(15, &edges, Routing::PLAIN);
+        let bundled = laid_out(
+            15,
+            &edges,
+            Routing {
+                portals: None,
+                ..Routing::CLEAN
+            },
+        );
+        assert!(plain.nodes[..4].iter().all(|node| node.layer == Some(0)));
+        assert_eq!(plain.nodes[14].layer, Some(2));
+        let slots = |plan: &Plan| {
+            plan.wires
+                .iter()
+                .flat_map(|wire| {
+                    wire.path
+                        .split(" L")
+                        .skip(1)
+                        .map(|run| run.split(' ').take(2).collect::<Vec<_>>().join(" "))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<BTreeSet<_>>()
+                .len()
+        };
+        assert_eq!((slots(&plain), slots(&bundled)), (4, 1));
+        let saved = plain.height - bundled.height;
+        assert!(
+            (BEND_HEIGHT + BEND_GAP..=3.0 * (BEND_HEIGHT + BEND_GAP)).contains(&saved),
+            "{} {}",
+            plain.height,
+            bundled.height
+        );
+    }
+    #[test]
+    fn a_link_that_passes_many_layers_is_a_portal_and_takes_no_slot() {
+        // A chain of five layers and a link from its first box to its last.
+        let edges = [(0, 1, 1), (1, 2, 1), (2, 3, 1), (3, 4, 1), (0, 4, 1)];
+        let plain = laid_out(5, &edges, Routing::PLAIN);
+        let plan = laid_out(5, &edges, Routing::CLEAN);
+        assert_eq!(PORTAL_SPAN, 4);
+        let far = wire_of(&plan, 4);
+        assert!(far.portal);
+        assert!(plan.wires.iter().filter(|wire| wire.portal).count() == 1);
+        // One curve from the right side of the first box to the left side
+        // of the last, where it passed three slots before.
+        assert_eq!(wire_of(&plain, 4).path.matches(" L").count(), 3);
+        assert_eq!(far.path.matches(" L").count(), 0);
+        assert_eq!(
+            ends_at(far),
+            (
+                (
+                    plan.nodes[0].x + BOX_WIDTH,
+                    plan.nodes[0].y + BOX_HEIGHT / 2.0
+                ),
+                (plan.nodes[4].x, plan.nodes[4].y + BOX_HEIGHT / 2.0)
+            )
+        );
+        // The picture is as tall as the chain alone.
+        let chain = laid_out(5, &edges[..4], Routing::CLEAN);
+        assert_eq!(plan.height, chain.height);
+        assert!(plan.height < plain.height);
+        // One layer fewer and it is led through the layers as any other.
+        let near = [(0, 1, 1), (1, 2, 1), (2, 3, 1), (0, 3, 1)];
+        assert!(laid_out(4, &near, Routing::CLEAN)
+            .wires
+            .iter()
+            .all(|wire| !wire.portal));
+        // A link that closes a cycle is drawn however far it runs.
+        let ring = [(0, 1, 9), (1, 2, 9), (2, 3, 9), (3, 4, 9), (4, 0, 1)];
+        let plan = laid_out(5, &ring, Routing::CLEAN);
+        let back = wire_of(&plan, 4);
+        assert!(back.back && !back.portal, "{plan:?}");
     }
     #[test]
     fn unlinked_nodes_sit_below_and_nothing_overlaps() {
@@ -18702,7 +20217,7 @@ mod tests {
         let html = canvas(&view);
         assert!(html.starts_with("<div class=\"graph-map-plane\" data-names=\"true\" style=\""));
         assert_eq!(html.matches("<bdi>").count(), 4);
-        assert!(html.contains("title=\"Price.of() · src/Cart/Price.php:9\" aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Price.of()</bdi></span></button>"), "{html}");
+        assert!(html.contains("title=\"Price.of() · src/Cart/Price.php:9\" aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Price.of()</bdi></span><span class=\"graph-map-node-detail\" aria-hidden=\"true\">Price.php:9</span></button>"), "{html}");
         // The node of a file has no letter and no line, and its name is text.
         assert!(html.contains("title=\"Notifier&lt;T&gt;.php · src/Order/Notifier.php\" aria-label=\"Notifier&lt;T&gt;.php, the file itself, for what belongs to no symbol in it, such as its imports, uses others"), "{html}");
         assert!(html.contains(
@@ -18980,7 +20495,7 @@ mod tests {
         ]);
         let html = canvas(&named);
         assert!(html.starts_with("<div class=\"graph-map-plane\" data-names=\"true\" style=\""));
-        assert!(html.contains("title=\"Price.of() · src/Cart/Price.php:9\" aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links, the path ends here\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Price.of()</bdi></span></button>"), "{html}");
+        assert!(html.contains("title=\"Price.of() · src/Cart/Price.php:9\" aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links, the path ends here\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Price.of()</bdi></span><span class=\"graph-map-node-detail\" aria-hidden=\"true\">Price.php:9</span></button>"), "{html}");
         assert!(html.contains("the path starts here\""));
         assert!(!html.contains("graph-map-more"));
         assert!(legend(&named, true).ends_with("the two ends of the path. T type · m method · f function · P property · K const · c case · # heading. A box without a letter is a plain name, or a file itself for its imports. Highlighted: touched by the change."));
@@ -22061,10 +23576,9 @@ mod tests {
             &view,
             "session-graph",
             CanvasOverlayContext {
-                live_focus: None,
                 changes: Some(&changes),
                 impact: Some(&impact),
-                links_off: [false; 7],
+                ..Default::default()
             },
         );
         let bbox = rendered.selected_bbox.expect("selected_bbox present");
@@ -22486,9 +24000,7 @@ mod tests {
             "session-graph",
             CanvasOverlayContext {
                 live_focus: Some(&focus),
-                changes: None,
-                impact: None,
-                links_off: [false; 7],
+                ..Default::default()
             },
         );
         assert!(rendered.html.contains("data-visibility=\"protected\""));
@@ -23974,5 +25486,748 @@ mod tests {
         assert!(html.contains(
             "data-edge-kind=\"imports\" data-kinds=\"imports\" stroke-width=\"2\" marker-end=\"url(#graph-map-arrow-imports)\"><title>A (removed dependency · imports)</title>"
         ));
+    }
+    #[test]
+    fn a_link_that_a_longer_way_joins_says_nothing_new() {
+        // 0 uses 1 uses 2 uses 3, and 0 uses 2 and 3 as well: both of
+        // those are said by the chain. 1 uses 3 past 2, which is said too.
+        let links = [(0, 1), (1, 2), (2, 3), (0, 2), (0, 3), (1, 3)];
+        assert_eq!(
+            transitive(4, &links),
+            [false, false, false, true, true, true]
+        );
+        // Without a longer way a link stays, however many links there are.
+        assert_eq!(transitive(3, &[(0, 1), (0, 2)]), [false, false]);
+        assert_eq!(transitive(3, &[(0, 1), (1, 2)]), [false, false]);
+        // Boxes that reach each other are one place: no link among them is
+        // left out, a way may lead through them, and a link into the group
+        // that another of its boxes already brings is said twice.
+        let ring = [(0, 1), (1, 2), (2, 1), (2, 3), (0, 3), (0, 2), (1, 3)];
+        assert_eq!(
+            transitive(4, &ring),
+            [false, false, false, false, true, false, false]
+        );
+        // Every box still reaches what it reached once they are left out.
+        let reaches = |links: &[(usize, usize)], count: usize| {
+            (0..count)
+                .map(|from| {
+                    let mut seen = vec![false; count];
+                    let mut todo = vec![from];
+                    while let Some(at) = todo.pop() {
+                        for (a, b) in links {
+                            if *a == at && !seen[*b] {
+                                seen[*b] = true;
+                                todo.push(*b);
+                            }
+                        }
+                    }
+                    seen
+                })
+                .collect::<Vec<_>>()
+        };
+        for (count, links) in [
+            (4, links.to_vec()),
+            (4, ring.to_vec()),
+            (
+                7,
+                vec![
+                    (0, 1),
+                    (0, 2),
+                    (1, 3),
+                    (2, 3),
+                    (3, 4),
+                    (0, 4),
+                    (4, 5),
+                    (5, 6),
+                    (6, 4),
+                    (0, 6),
+                    (2, 5),
+                ],
+            ),
+        ] {
+            let said = transitive(count, &links);
+            let kept = links
+                .iter()
+                .zip(&said)
+                .filter(|(_, said)| !**said)
+                .map(|(link, _)| *link)
+                .collect::<Vec<_>>();
+            assert!(kept.len() < links.len(), "{links:?}");
+            assert_eq!(reaches(&kept, count), reaches(&links, count), "{links:?}");
+        }
+        // Links that name no box, and a box that uses itself, are no way.
+        assert_eq!(
+            transitive(2, &[(0, 1), (0, 9), (1, 1)]),
+            [false, false, false]
+        );
+        assert_eq!(transitive(0, &[]), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn the_reach_of_a_box_is_told_in_links_along_and_against_the_arrows() {
+        // 0 uses 1 uses 2 uses 3; 4 uses 2; 5 uses 4.
+        let links = [(0, 1), (1, 2), (2, 3), (4, 2), (5, 4)];
+        let from_two = |up, down| cone(6, &links, 2, up, down);
+        // One link each way: what it uses, and what uses it.
+        assert_eq!(
+            from_two(1, 1),
+            [None, Some(-1), Some(0), Some(1), Some(-1), None]
+        );
+        // Two against the arrows reach what uses its users.
+        assert_eq!(
+            from_two(2, 1),
+            [Some(-2), Some(-1), Some(0), Some(1), Some(-1), Some(-2)]
+        );
+        // Further than the picture goes changes nothing.
+        assert_eq!(from_two(3, 3), from_two(2, 1));
+        assert_eq!(
+            cone(6, &links, 0, 1, 3),
+            [Some(0), Some(1), Some(2), Some(3), None, None]
+        );
+        // The links of a cone lead one step on from the box, or one step
+        // nearer to it: a link between two boxes as far as each other is
+        // none of them, nor is one that leads back towards the box.
+        let depth = from_two(2, 1);
+        let lit = links
+            .iter()
+            .map(|link| in_cone(&depth, *link))
+            .collect::<Vec<_>>();
+        assert_eq!(lit, [true, true, true, true, true]);
+        let narrow = from_two(1, 1);
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| in_cone(&narrow, *link))
+                .collect::<Vec<_>>(),
+            [false, true, true, true, false]
+        );
+        let beside = cone(4, &[(0, 1), (0, 2), (1, 2), (2, 3)], 0, 1, 1);
+        assert_eq!(beside, [Some(0), Some(1), Some(1), None]);
+        assert!(!in_cone(&beside, (1, 2)));
+        // In a cycle a box lies both ways: it is told by the nearer, and by
+        // what the box uses where both are as near.
+        let ring = cone(3, &[(0, 1), (1, 2), (2, 0)], 0, 2, 2);
+        assert_eq!(ring, [Some(0), Some(1), Some(-1)]);
+        let pair = cone(2, &[(0, 1), (1, 0)], 0, 1, 1);
+        assert_eq!(pair, [Some(0), Some(1)]);
+        // A box the picture does not hold reaches nothing.
+        assert_eq!(cone(2, &[(0, 1)], 7, 1, 1), [None, None]);
+    }
+
+    #[test]
+    fn a_picture_leaves_out_what_longer_ways_say_and_lights_a_wider_reach() {
+        // A uses B uses C uses D, and A uses C and D past them.
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/A.php", "name": "A", "folder": false},
+                {"path": "src/B.php", "name": "B", "folder": false},
+                {"path": "src/C.php", "name": "C", "folder": false},
+                {"path": "src/D.php", "name": "D", "folder": false}
+            ],
+            "edges": [
+                {"from": "src/A.php", "to": "src/B.php", "links": 1, "guessed": 0},
+                {"from": "src/B.php", "to": "src/C.php", "links": 1, "guessed": 0},
+                {"from": "src/C.php", "to": "src/D.php", "links": 1, "guessed": 0},
+                {"from": "src/A.php", "to": "src/C.php", "links": 1, "guessed": 0},
+                {"from": "src/A.php", "to": "src/D.php", "links": 1, "guessed": 0, "architecture_violation": 1},
+                {"from": "src/A.php", "to": "src/E.php", "links": 1, "guessed": 0}
+            ],
+            "focus": {"path": "src/A.php"}
+        });
+        // The link against the rules is said by a longer way and is kept
+        // all the same; the link to what is not drawn is none to count.
+        assert_eq!(transitive_links(&view), 1);
+        let drawn = |context: CanvasOverlayContext| {
+            let html = canvas_with_overlays(&view, "graph-map", context).html;
+            html.match_indices(" data-ends=\"")
+                .filter(|(at, _)| {
+                    html[..*at].ends_with('"')
+                        && html[..*at]
+                            .rfind("<path class=\"graph-map-edge")
+                            .is_some_and(|start| !html[start..*at].contains('>'))
+                        && !html[html[..*at].rfind("<path class=\"").unwrap()..*at]
+                            .contains("graph-map-edge-core")
+                })
+                .map(|(at, _)| html[at + 12..].split('"').next().unwrap().to_owned())
+                .collect::<BTreeSet<_>>()
+        };
+        let all = drawn(CanvasOverlayContext::default());
+        assert_eq!(all.len(), 5, "{all:?}");
+        let fewer = drawn(CanvasOverlayContext {
+            hide_transitive: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            fewer.into_iter().collect::<Vec<_>>(),
+            ["0 1", "0 3", "1 2", "2 3"]
+        );
+        // A way, a cycle or a pattern leaves nothing out.
+        let mut way = view.clone();
+        way["mode"] = json!("path");
+        way["path"] = json!({"found": true});
+        assert_eq!(transitive_links(&way), 0);
+        // With A selected its links are lit; with a reach of two, those of
+        // what it uses as well.
+        let lit = |cone| {
+            let html = canvas_with_overlays(
+                &view,
+                "graph-map",
+                CanvasOverlayContext {
+                    hide_transitive: true,
+                    cone,
+                    ..Default::default()
+                },
+            )
+            .html;
+            html.matches("class=\"graph-map-edge graph-map-edge-on")
+                .count()
+        };
+        // D is one link from A by the link against the rules, so the link
+        // from C to D leads no further from A and is not one of its reach.
+        assert_eq!(
+            (lit((0, 0)), lit((1, 1)), lit((1, 2)), lit((1, 3))),
+            (2, 2, 3, 3)
+        );
+    }
+
+    #[test]
+    fn the_key_offers_to_leave_out_transitive_links_and_to_widen_the_reach() {
+        let mut view = kinds_view();
+        view["edges"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"from": "src/A.php", "to": "src/C.php", "links": 1, "guessed": 0}));
+        // A uses B uses C, so A uses C is said twice; A extends D past C.
+        assert_eq!(transitive_links(&view), 2);
+        let key = KeyState::default();
+        let html = key_html(&view, &key, "modal");
+        assert!(html.contains(
+            "data-action=\"graph-transitive-toggle\" data-payload=\"{&quot;surface&quot;:&quot;modal&quot;}\" aria-pressed=\"false\""
+        ), "{html}");
+        assert!(html.contains("Hide transitive <span class=\"graph-arrow-legend-count\">2</span>"));
+        // Nothing is selected: no reach to set.
+        assert!(!html.contains("graph-cone"));
+        // The note that ends the key stays its last part.
+        assert!(
+            html.rfind("graph-transitive-toggle").unwrap()
+                < html.rfind("graph-arrow-legend-note").unwrap()
+        );
+        let on = key_html(
+            &view,
+            &KeyState {
+                hide_transitive: true,
+                ..key
+            },
+            "modal",
+        );
+        assert!(
+            on.contains("data-action=\"graph-transitive-toggle\"")
+                && on.contains("aria-pressed=\"true\" title=\"2 links are left out")
+        );
+        // A selected box: one to three links on each side, the reach that
+        // is set pressed.
+        view["focus"] = json!({"path": "src/B.php"});
+        let html = key_html(
+            &view,
+            &KeyState {
+                cone: (2, 1),
+                ..key
+            },
+            "session",
+        );
+        assert_eq!(html.matches("data-action=\"graph-cone\"").count(), 6);
+        for (side, hops, pressed) in [
+            ("up", 2, true),
+            ("up", 1, false),
+            ("down", 1, true),
+            ("down", 3, false),
+        ] {
+            assert!(html.contains(&format!(
+                "data-payload=\"{{&quot;hops&quot;:{hops},&quot;side&quot;:&quot;{side}&quot;,&quot;surface&quot;:&quot;session&quot;}}\" aria-pressed=\"{pressed}\""
+            )), "{side} {hops} in {html}");
+        }
+        // What is selected outside the picture has no links there to light.
+        view["focus"] = json!({"path": "lib/Other.php"});
+        assert!(!key_html(&view, &key, "modal").contains("graph-cone"));
+        // A picture of a way has neither.
+        let mut way = view.clone();
+        way["mode"] = json!("path");
+        way["path"] = json!({"found": true});
+        let html = key_html(&way, &key, "modal");
+        assert!(!html.contains("graph-transitive-toggle") && !html.contains("graph-cone"));
+        // The reach of a state.
+        assert_eq!(cone_of(&json!({})), (1, 1));
+        let state = reaching(json!({}), "up", 3);
+        assert_eq!(cone_of(&state), (3, 1));
+        let state = reaching(state, "down", 2);
+        assert_eq!(cone_of(&state), (3, 2));
+        assert_eq!(cone_of(&reaching(state.clone(), "down", 99)), (3, 3));
+        assert_eq!(cone_of(&reaching(state.clone(), "up", 0)), (1, 2));
+        assert_eq!(reaching(state.clone(), "sideways", 2), state);
+    }
+
+    #[test]
+    fn a_picture_tells_more_or_less_by_the_scale_it_is_drawn_at() {
+        assert_eq!(lod(1.0), "mid");
+        assert_eq!(lod(0.5), "mid");
+        assert_eq!(lod(0.49), "far");
+        assert_eq!(lod(CAMERA_MIN), "far");
+        assert_eq!(lod(1.4), "mid");
+        assert_eq!(lod(1.41), "near");
+        assert_eq!(lod(CAMERA_MAX), "near");
+        // A scale that is none is the picture as it is laid out.
+        assert_eq!(lod(0.0), "mid");
+        assert_eq!(lod(f64::NAN), "mid");
+    }
+
+    #[test]
+    fn a_box_holds_a_second_line_for_a_picture_drawn_large() {
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/Billing/Invoice.php", "name": "Invoice.php", "folder": false, "in": 3, "out": 12},
+                {"path": "src/Billing", "name": "Billing", "folder": true, "files": 7, "in": 0, "out": 2},
+                {"path": "src/Billing/Invoice.php::total", "name": "total", "symbol": true, "kind": "method", "line": 42, "file": "src/Billing/Invoice.php", "in": 1, "out": 0},
+                {"path": "Top.php", "name": "Top.php", "folder": false}
+            ],
+            "edges": []
+        });
+        let html = canvas(&view);
+        let line = |text: &str| {
+            format!("<span class=\"graph-map-node-detail\" aria-hidden=\"true\">{text}</span>")
+        };
+        // Through how many links it is used and uses others, then where it
+        // lies: the folder of a file, the file and line of a name, and for
+        // a folder how many files it holds.
+        assert!(html.contains(&line("3→ →12 · src/Billing")), "{html}");
+        assert!(html.contains(&line("0→ →2 · 7 files")), "{html}");
+        assert!(html.contains(&line("1→ →0 · Invoice.php:42")), "{html}");
+        // A file at the top of the project that no link touches adds nothing.
+        assert_eq!(html.matches("graph-map-node-detail").count(), 3);
+    }
+
+    #[test]
+    fn the_small_picture_frames_what_the_window_shows() {
+        let (room, picture) = ((400.0, 300.0), (1000.0, 600.0));
+        // The corner of the picture at the corner of its window.
+        assert_eq!(
+            in_window((0.0, 0.0), 1.0, room, picture),
+            Some((0.0, 0.0, 400.0, 300.0))
+        );
+        // Moved on, and drawn at half its size: twice as much is seen.
+        assert_eq!(
+            in_window((-100.0, -50.0), 0.5, room, picture),
+            Some((200.0, 100.0, 800.0, 500.0))
+        );
+        // What lies past the picture is no part of it.
+        assert_eq!(
+            in_window((-450.0, 100.0), 0.5, room, picture),
+            Some((900.0, 0.0, 100.0, 400.0))
+        );
+        // A window that shows all of the picture has nothing to frame,
+        // wherever in the window the picture lies.
+        assert_eq!(in_window((0.0, 0.0), 0.4, room, picture), None);
+        assert_eq!(in_window((50.0, 40.0), 0.25, room, picture), None);
+        // Wide enough and not tall enough is not all of it.
+        assert_eq!(
+            in_window((0.0, -30.0), 0.4, (400.0, 200.0), picture),
+            Some((0.0, 75.0, 1000.0, 500.0))
+        );
+        // A window moved off the picture frames nothing at the side the
+        // picture lies on.
+        assert_eq!(
+            in_window((500.0, 0.0), 1.0, room, picture),
+            Some((0.0, 0.0, 0.0, 300.0))
+        );
+        // No scale and no picture are nothing to show.
+        assert_eq!(in_window((0.0, 0.0), 0.0, room, picture), None);
+        assert_eq!(in_window((0.0, 0.0), 1.0, room, (0.0, 600.0)), None);
+        // Looking at a point brings it to the middle of the window.
+        let corner = centred((500.0, 300.0), 2.0, room);
+        assert_eq!(corner, (-800.0, -450.0));
+        let seen = in_window(corner, 2.0, room, picture).unwrap();
+        assert_eq!(
+            (seen.0 + seen.2 / 2.0, seen.1 + seen.3 / 2.0),
+            (500.0, 300.0)
+        );
+        // The small picture is as large as its room lets its shape be, and
+        // a long thin one keeps a side wide enough to press.
+        assert_eq!(radar_size((1000.0, 500.0)), (176.0, 88.0));
+        assert_eq!(radar_size((500.0, 1000.0)), (88.0, 176.0));
+        assert_eq!(radar_size((4000.0, 100.0)), (176.0, 18.0));
+        assert_eq!(radar_size((0.0, 100.0)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_picture_is_drawn_in_small_with_what_its_boxes_are() {
+        // A changed file uses B; B and C use each other; C is selected.
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/A.php", "name": "A", "folder": false, "changed": 1, "status": "M"},
+                {"path": "src/B.php", "name": "B", "folder": false},
+                {"path": "src/C.php", "name": "C", "folder": false}
+            ],
+            "edges": [
+                {"from": "src/A.php", "to": "src/B.php", "links": 1, "guessed": 0},
+                {"from": "src/B.php", "to": "src/C.php", "links": 2, "guessed": 0},
+                {"from": "src/C.php", "to": "src/B.php", "links": 1, "guessed": 0}
+            ],
+            "focus": {"path": "src/C.php"}
+        });
+        let rendered = canvas_with_overlays(&view, "graph-map", CanvasOverlayContext::default());
+        let radar = &rendered.radar;
+        let (width, height) = radar_size((rendered.width, rendered.height));
+        assert!(
+            radar.starts_with(&format!(
+                "<svg class=\"graph-radar-picture\" width=\"{width:.0}\" height=\"{height:.0}\" viewBox=\"0 0 {:.0} {:.0}\" preserveAspectRatio=\"none\" data-w=\"{:.0}\" data-h=\"{:.0}\"",
+                rendered.width, rendered.height, rendered.width, rendered.height
+            )),
+            "{radar}"
+        );
+        // A box for each box of the picture, where it stands there.
+        assert_eq!(radar.matches("class=\"graph-radar-box\"").count(), 3);
+        let plan = plan(3, &[(0, 1, 1), (1, 2, 2), (2, 1, 1)]);
+        for placed in &plan.nodes {
+            assert!(
+                radar.contains(&format!(
+                    "<rect class=\"graph-radar-box\" x=\"{:.0}\" y=\"{:.0}\" width=\"{BOX_WIDTH:.0}\" height=\"{BOX_HEIGHT:.0}\"",
+                    placed.x, placed.y
+                )),
+                "{radar}"
+            );
+        }
+        // One thing is told of a box: selected before changed before part
+        // of a cycle.
+        assert_eq!(radar.matches("data-state=\"changed\"").count(), 1);
+        assert_eq!(radar.matches("data-state=\"selected\"").count(), 1);
+        assert_eq!(radar.matches("data-state=\"cycle\"").count(), 1);
+        // What the window shows is framed once the picture is measured.
+        assert!(radar.ends_with(
+            "<rect class=\"graph-radar-view\" x=\"0\" y=\"0\" width=\"0\" height=\"0\"/></svg>"
+        ));
+        // A picture of nothing has no small picture.
+        let none = json!({"scope": "src", "nodes": [], "edges": []});
+        assert_eq!(
+            canvas_with_overlays(&none, "graph-map", CanvasOverlayContext::default()).radar,
+            ""
+        );
+    }
+
+    #[test]
+    fn a_box_says_it_is_part_of_a_circle_of_files_wherever_the_rest_lies() {
+        // Order.php is part of a circle of four files, and this picture
+        // draws no other of them as a file. The folder cart holds two of
+        // them, so that circle leads out of it and back. The folder mail
+        // holds a circle that stays inside it.
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/Order.php", "name": "Order.php", "folder": false,
+                 "circle": {"files": 1, "groups": 1, "largest": 4, "leaves": true}},
+                {"path": "src/cart", "name": "cart", "folder": true, "files": 5,
+                 "circle": {"files": 2, "groups": 1, "largest": 4, "leaves": true}},
+                {"path": "src/mail", "name": "mail", "folder": true, "files": 3,
+                 "circle": {"files": 2, "groups": 1, "largest": 2, "leaves": false}},
+                {"path": "src/Plain.php", "name": "Plain.php", "folder": false}
+            ],
+            "edges": [{"from": "src/Order.php", "to": "src/cart", "links": 1, "guessed": 0}],
+            "circles": {"groups": 3, "files": 9, "largest": 4, "here": 2, "listed": [
+                {"files": 4, "start": "src/cart/Cart.php",
+                 "names": ["Cart.php", "Price.php", "Order.php", "Stock.php"], "more": 0},
+                {"files": 2, "start": "src/mail/Mailer.php", "names": ["Mailer.php", "Queue.php"], "more": 0}
+            ]}
+        });
+        let html = canvas(&view);
+        // No link of the picture closes a cycle: the picture alone would
+        // mark nothing.
+        assert_eq!(html.matches("data-cycle=\"true\"").count(), 0);
+        assert!(
+            html.contains("is used through 0 links, part of a cycle of 4 files\""),
+            "{html}"
+        );
+        assert!(html.contains(", holds 2 files of cycles that lead out of it and back\""));
+        assert!(html.contains(", holds 2 files that use each other in cycles\""));
+        assert_eq!(html.matches(" data-circle=\"through\"").count(), 2);
+        assert_eq!(html.matches(" data-circle=\"inside\"").count(), 1);
+        // The mark of a file, and that of a folder with how many of its
+        // files are part of circles.
+        let mark = |held: &str| {
+            format!("<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻{held}</span>")
+        };
+        assert_eq!(html.matches(&mark("")).count(), 1);
+        assert_eq!(html.matches(&mark("2")).count(), 2);
+        // Beside the map: the circles that touch what is open, each shown
+        // through the file that has most to do with the others.
+        let side = circles_side(&view);
+        assert!(
+            side.starts_with("<h4>Cycles of files <span class=\"graph-map-total\">2</span></h4><p class=\"knowledge-note\">2 of the 3 cycles of the project touch what is open."),
+            "{side}"
+        );
+        assert!(
+            side.contains("data-action=\"graph-map-cycle\" data-payload=\"&quot;src/cart/Cart.php&quot;\" title=\"Show the shortest cycle through src/cart/Cart.php\"><span class=\"graph-map-row-name\">Cart.php, Price.php, Order.php, Stock.php</span><span class=\"graph-map-row-links\">4 files</span></button>"),
+            "{side}"
+        );
+        assert_eq!(side.matches("data-action=\"graph-map-cycle\"").count(), 2);
+        assert!(side.ends_with("</ul>"));
+        // Where every circle of the project touches what is open, the
+        // project is told as a whole.
+        let mut all = view.clone();
+        all["circles"]["groups"] = json!(2);
+        assert!(circles_side(&all)
+            .contains("9 files of the project use each other in 2 cycles; the largest holds 4."));
+        // More files than are named, and more circles than are listed.
+        let mut many = view.clone();
+        many["circles"]["here"] = json!(9);
+        many["circles"]["groups"] = json!(9);
+        many["circles"]["listed"][0]["more"] = json!(12);
+        let side = circles_side(&many);
+        assert!(side.contains("Stock.php, +12</span>"), "{side}");
+        assert!(side.ends_with("<p class=\"knowledge-note\">and 7 more</p>"));
+        // A project without circles lists none, and neither does the
+        // picture of one cycle.
+        assert_eq!(circles_side(&json!({"scope": "src"})), "");
+        let mut cycle = view.clone();
+        cycle["mode"] = json!("cycle");
+        assert_eq!(circles_side(&cycle), "");
+    }
+
+    #[test]
+    fn the_key_of_a_path_offers_its_longer_ways_and_the_picture_marks_them() {
+        // a reaches c through b in two links, and through d and e in three.
+        let view = json!({
+            "mode": "path",
+            "scope": "src",
+            "path": {
+                "from": {"path": "src/a.php", "name": "a.php"},
+                "to": {"path": "src/c.php", "name": "c.php"},
+                "names": false, "found": true, "reversed": false, "within": false,
+                "steps": 2, "places": 3, "shown": 5, "links": 2, "wide": 8,
+                "longer": 1, "detours": 1, "detours_more": false
+            },
+            "nodes": [
+                {"path": "src/a.php", "name": "a.php", "folder": false, "start": true, "step": 0},
+                {"path": "src/b.php", "name": "b.php", "folder": false, "step": 1},
+                {"path": "src/c.php", "name": "c.php", "folder": false, "end": true, "step": 2},
+                {"path": "src/d.php", "name": "d.php", "folder": false, "step": 1, "detour": true},
+                {"path": "src/e.php", "name": "e.php", "folder": false, "step": 2, "detour": true}
+            ],
+            "edges": [
+                {"from": "src/a.php", "to": "src/b.php", "links": 1, "guessed": 0},
+                {"from": "src/b.php", "to": "src/c.php", "links": 1, "guessed": 0},
+                {"from": "src/a.php", "to": "src/d.php", "links": 1, "guessed": 0, "detour": true},
+                {"from": "src/d.php", "to": "src/e.php", "links": 1, "guessed": 0, "detour": true},
+                {"from": "src/e.php", "to": "src/c.php", "links": 1, "guessed": 0, "detour": true}
+            ]
+        });
+        let html = canvas(&view);
+        // The three links and the two boxes that only the longer way has
+        // say so, in their marks and in what is read out for them.
+        assert_eq!(html.matches(" data-detour=\"true\" d=\"").count(), 3);
+        assert_eq!(html.matches(" data-detour=\"true\"").count(), 5);
+        assert_eq!(html.matches(", on a longer way only\"").count(), 2);
+        assert_eq!(html.matches(" · on a longer way only").count(), 3);
+        // The key: the shortest ways alone, or with them those longer by
+        // one, two or three links; what is asked for is pressed, and the
+        // key says how many ways round the picture draws.
+        let key = key_html(&view, &KeyState::default(), "modal");
+        assert_eq!(key.matches("data-action=\"graph-map-longer\"").count(), 4);
+        assert!(
+            key.contains("data-payload=\"{&quot;longer&quot;:1,&quot;surface&quot;:&quot;modal&quot;}\" aria-pressed=\"true\" title=\"Also the ways longer than the shortest by 1 link\">+1</button>"),
+            "{key}"
+        );
+        assert!(key.contains("data-payload=\"{&quot;longer&quot;:0,&quot;surface&quot;:&quot;modal&quot;}\" aria-pressed=\"false\" title=\"The shortest ways alone\">none</button>"));
+        assert!(
+            key.contains("title=\"Also the ways longer than the shortest by 3 links\">+3</button>")
+        );
+        assert!(key.contains("<span class=\"graph-arrow-legend-side\">1 drawn, lighter</span>"));
+        // It stands before the note that ends the key, and a path has
+        // neither links to leave out nor a reach to widen.
+        assert!(
+            key.rfind("graph-map-longer").unwrap() < key.rfind("graph-arrow-legend-note").unwrap()
+        );
+        assert!(!key.contains("graph-transitive-toggle") && !key.contains("graph-cone"));
+        let told = |change: &dyn Fn(&mut V)| {
+            let mut other = view.clone();
+            change(&mut other);
+            key_html(&other, &KeyState::default(), "session")
+        };
+        // More ways than are drawn, none at all, and the shortest alone.
+        let more = told(&|view| {
+            view["path"]["detours"] = json!(12);
+            view["path"]["detours_more"] = json!(true);
+        });
+        assert!(more.contains(">12+ drawn, lighter</span>"), "{more}");
+        assert!(more.contains("&quot;surface&quot;:&quot;session&quot;}"));
+        assert!(told(&|view| view["path"]["detours"] = json!(0)).contains(">none found</span>"));
+        let shortest = told(&|view| view["path"]["longer"] = json!(0));
+        assert!(shortest
+            .contains("aria-pressed=\"true\" title=\"The shortest ways alone\">none</button>"));
+        assert!(!shortest.contains("graph-arrow-legend-side"));
+        // Above the picture the path says how many ways round it draws,
+        // and the note under it what they are.
+        assert_eq!(
+            summary(&view),
+            "Path from a.php to c.php · 2 links · 3 places on the shortest ways · 1 longer way"
+        );
+        assert!(
+            note(&view)
+                .ends_with("Drawn lighter with them: 1 way longer by 1 link at most, each whole."),
+            "{}",
+            note(&view)
+        );
+        let mut many = view.clone();
+        many["path"]["longer"] = json!(3);
+        many["path"]["detours"] = json!(12);
+        many["path"]["detours_more"] = json!(true);
+        assert!(summary(&many).ends_with(" · at least 12 longer ways"));
+        assert!(note(&many).ends_with(
+            "Drawn lighter with them: 12 ways longer by 3 links at most, each whole; there are more."
+        ));
+        let mut none = view.clone();
+        none["path"]["detours"] = json!(0);
+        assert!(summary(&none).ends_with("3 places on the shortest ways"));
+        assert!(note(&none).ends_with("No way that is longer by 1 link at most leads there."));
+        // A path that leads nowhere has no ways round to offer.
+        assert!(!told(&|view| view["path"]["found"] = json!(false)).contains("graph-map-longer"));
+        // The request names how much longer only for a path, and no more
+        // than may be asked for.
+        let mut state = fresh("work");
+        state["path"] = json!(["src/a.php", "src/c.php"]);
+        assert!(!build_map_path("p", &state, false).contains("longer="));
+        state["longer"] = json!(2);
+        assert!(build_map_path("p", &state, false).contains("longer=2"));
+        state["longer"] = json!(9);
+        assert!(build_map_path("p", &state, false).contains("longer=3"));
+        state["shared"] = json!(true);
+        assert!(!build_map_path("p", &state, false).contains("longer="));
+    }
+
+    #[test]
+    fn the_cards_under_a_box_lie_on_no_other_box() {
+        // a, b and c use x, so the three stand under each other in one
+        // layer. Five files that no link touches stand in a grid of two
+        // rows under them. A session made two names in b and one in the
+        // first file of the grid.
+        let file = |name: &str| json!({"path": format!("src/{name}.php"), "name": format!("{name}.php"), "folder": false});
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                file("a"), file("b"), file("c"), file("x"),
+                file("lone"), file("u1"), file("u2"), file("u3"), file("u4")
+            ],
+            "edges": [
+                {"from": "src/a.php", "to": "src/x.php", "links": 1, "guessed": 0},
+                {"from": "src/b.php", "to": "src/x.php", "links": 1, "guessed": 0},
+                {"from": "src/c.php", "to": "src/x.php", "links": 1, "guessed": 0}
+            ]
+        });
+        let focus = parse_live_focus(&json!({
+            "phase": "active",
+            "summary": "Adding two methods",
+            "target_paths": ["src/b.php"],
+            "created_entities": [
+                {"id": "e1", "kind": "method", "name": "one", "parent": "src/b.php", "path": "src/b.php#L3:one"},
+                {"id": "e2", "kind": "method", "name": "two", "parent": "src/b.php", "path": "src/b.php#L9:two"},
+                {"id": "e3", "kind": "function", "name": "alone", "parent": "src/lone.php", "path": "src/lone.php#L2:alone"}
+            ]
+        }))
+        .unwrap();
+        // Where each box stands in a picture, by its number.
+        let boxes = |html: &str| {
+            html.split("<button type=\"button\" class=\"graph-map-node\" data-n=\"")
+                .skip(1)
+                .map(|part| {
+                    let side = |key: &str| {
+                        part.split(key)
+                            .nth(1)
+                            .and_then(|rest| rest.split("px").next())
+                            .and_then(|number| number.parse::<f64>().ok())
+                            .unwrap()
+                    };
+                    (side("style=\"left:"), side(";top:"))
+                })
+                .collect::<Vec<_>>()
+        };
+        let plain = boxes(&canvas(&view));
+        let rendered = canvas_with(&view, "session-graph", Some(&focus));
+        let roomy = boxes(&rendered.html);
+        assert_eq!((plain.len(), roomy.len()), (9, 9));
+        // The cards hang under b and under the first file of the grid.
+        assert_eq!(rendered.focus.under, BTreeMap::from([(1, 2), (4, 1)]));
+        assert_eq!(rendered.focus.entities.len(), 3);
+        // Without them the boxes of a layer stand a row gap apart, and
+        // the rows of the grid too: a card would lie on the next box.
+        assert_eq!(plain[2].1 - plain[1].1, BOX_HEIGHT + ROW_GAP);
+        assert_eq!(plain[8].1 - plain[4].1, BOX_HEIGHT + ROW_GAP);
+        // With them the box under b stands as much lower as two cards
+        // take, and the rows of the grid as much further apart as one.
+        assert_eq!(
+            (entity_room(0), entity_room(1), entity_room(2)),
+            (0.0, 34.0, 62.0)
+        );
+        assert_eq!(entity_room(9), entity_room(3));
+        assert_eq!(
+            roomy[2].1 - roomy[1].1,
+            BOX_HEIGHT + ROW_GAP + entity_room(2)
+        );
+        assert_eq!(roomy[1].1 - roomy[0].1, BOX_HEIGHT + ROW_GAP);
+        assert_eq!(
+            roomy[8].1 - roomy[4].1,
+            BOX_HEIGHT + ROW_GAP + entity_room(1)
+        );
+        // No card lies on a box, and none on another card.
+        let meet = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| {
+            a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+        };
+        let cards = rendered
+            .focus
+            .entities
+            .iter()
+            .map(|card| (card.x, card.y, ENTITY_WIDTH, ENTITY_HEIGHT))
+            .collect::<Vec<_>>();
+        for (at, card) in cards.iter().enumerate() {
+            for (node, (x, y)) in roomy.iter().enumerate() {
+                assert!(
+                    !meet(*card, (*x, *y, BOX_WIDTH, BOX_HEIGHT)),
+                    "card {at} {card:?} lies on box {node} at {x},{y}"
+                );
+            }
+            for other in &cards[at + 1..] {
+                assert!(!meet(*card, *other), "{card:?} lies on {other:?}");
+            }
+        }
+        // Laid out as it was, the same cards would lie on what stands under.
+        let old = plan_routed(
+            9,
+            &[(0, 3, 1), (1, 3, 1), (2, 3, 1)],
+            &Frames::default(),
+            None,
+            Routing::CLEAN,
+        );
+        let under_b = (
+            old.nodes[1].x + 8.0,
+            old.nodes[1].y + BOX_HEIGHT + 6.0,
+            ENTITY_WIDTH,
+            ENTITY_HEIGHT,
+        );
+        assert!(meet(
+            under_b,
+            (old.nodes[2].x, old.nodes[2].y, BOX_WIDTH, BOX_HEIGHT)
+        ));
+        // Room that is none, and room for boxes that are not there, leave
+        // the picture as it was.
+        assert_eq!(
+            plan_roomy(
+                9,
+                &[(0, 3, 1), (1, 3, 1), (2, 3, 1)],
+                &Frames::default(),
+                None,
+                Routing::CLEAN,
+                &[0.0, -4.0, f64::NAN]
+            ),
+            old
+        );
     }
 }

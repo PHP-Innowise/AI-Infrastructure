@@ -296,6 +296,40 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-violation-halo[data-edge-state="off"] { opacity:.14; }
 .graph-map-hit { fill:none; stroke:var(--purple); stroke-opacity:0; stroke-width:12px; pointer-events:stroke; cursor:pointer; }
 .graph-map-hit:hover { stroke-opacity:.16; }
+/* A link that passes four layers or more is led through none of them. It is drawn from end to end while a box at one of its ends is rested on or selected; until then a mark at each end says it is there. */
+.graph-map-edge-portal { visibility:hidden; }
+.graph-map-edge-portal:is(.graph-map-edge-on,[data-lit="true"],[data-shared-path="true"]) { visibility:visible; }
+.graph-map-canvas[data-kind-hover="calls"] .graph-map-edge-portal[data-kinds~="calls"],.graph-map-canvas[data-kind-hover="imports"] .graph-map-edge-portal[data-kinds~="imports"],.graph-map-canvas[data-kind-hover="extends"] .graph-map-edge-portal[data-kinds~="extends"],.graph-map-canvas[data-kind-hover="implements"] .graph-map-edge-portal[data-kinds~="implements"],.graph-map-canvas[data-kind-hover="writes"] .graph-map-edge-portal[data-kinds~="writes"],.graph-map-canvas[data-kind-hover="reads"] .graph-map-edge-portal[data-kinds~="reads"],.graph-map-canvas[data-kind-hover="uses"] .graph-map-edge-portal[data-kinds~="uses"] { visibility:visible; }
+.graph-map-hit-portal { pointer-events:none; }
+.graph-map-portal { position:absolute; z-index:1; min-width:20px; height:14px; padding:0 4px; border:1px solid var(--map-edge-from); border-radius:var(--radius-pill); background:var(--paper); color:var(--ink-2); font-size:10px; line-height:12px; font-weight:var(--weight-strong); font-variant-numeric:tabular-nums; white-space:nowrap; cursor:pointer; transform:translate(-22%,-50%); transition:opacity var(--motion-fast) var(--ease-standard),background-color var(--motion-fast) var(--ease-standard); }
+.graph-map-portal[data-side="in"] { border-color:var(--map-edge-calls); transform:translate(-78%,-50%); }
+.graph-map-portal:hover,.graph-map-portal:focus-visible { background:var(--hover); color:var(--ink); }
+.graph-map-portal[data-dim="true"] { opacity:.45; }
+/* Of a path, what only a longer way has: drawn lighter, so that the shortest ways are read first. Selecting or resting on a box draws its links in full. */
+.graph-map-edge[data-detour="true"] { opacity:.5; }
+.graph-map-edge[data-detour="true"].graph-map-edge-on { opacity:1; }
+.graph-map-node[data-detour="true"] { border-style:dotted; color:var(--ink-2); }
+/* What a picture tells at a scale. Drawn small it is an overview: the names are drawn larger and the small marks are left out. Drawn large a box has a second line: through how many links it is used and uses others, and where it lies. */
+.graph-map-node-detail { display:none; }
+.graph-map-canvas[data-lod="near"] .graph-map-node:has(> .graph-map-node-detail) { align-items:flex-start; padding-top:2px; line-height:15px; }
+.graph-map-canvas[data-lod="near"] .graph-map-node-detail { display:block; position:absolute; left:8px; right:8px; bottom:1px; overflow:hidden; color:var(--muted); font-size:8px; font-weight:var(--weight-regular); line-height:10px; font-variant-numeric:tabular-nums; text-overflow:ellipsis; white-space:nowrap; pointer-events:none; }
+.graph-map-canvas[data-lod="far"] :is(.graph-map-edge-mark,.graph-map-edge-tie,.graph-map-edge-chevron,.graph-map-portal,.graph-map-spread,.graph-map-more) { display:none; }
+.graph-map-canvas[data-lod="far"] .graph-map-node > :is(.graph-map-node-kind,.graph-map-node-count,.graph-vis-pill,.graph-map-node-layer) { display:none; }
+.graph-map-canvas[data-lod="far"] .graph-map-node:not(.graph-map-entity-node) { padding:0 4px; font-size:min(calc(var(--text-ui) * var(--map-mark-scale)),24px); line-height:1; }
+.graph-map-canvas[data-lod="far"] .graph-map-frame-name { font-size:calc(var(--text-meta) * min(var(--map-mark-scale),1.8)); line-height:1; }
+/* The picture in small, in the corner of its window: what the window shows is framed, and a press looks at what is pressed. A window that shows all of its picture has none. */
+.graph-map-body,.session-graph-body { position:relative; }
+.graph-map-radar { position:absolute; z-index:3; padding:3px; border:1px solid var(--field-line-hover); border-radius:var(--radius-sm); background:var(--paper); box-shadow:0 2px 8px var(--shadow-md); line-height:0; cursor:crosshair; touch-action:none; user-select:none; opacity:.9; transition:opacity var(--motion-fast) var(--ease-standard); }
+.graph-map-radar:hover { opacity:1; }
+.graph-map-radar[hidden],.graph-map-radar:empty { display:none; }
+:is(.graph-map-body,.session-graph-body):not(:has(> .graph-map-canvas > .graph-map-plane)) > .graph-map-radar { display:none; }
+.graph-radar-picture { display:block; overflow:hidden; }
+.graph-radar-frame { fill:none; stroke:var(--line); stroke-width:1px; vector-effect:non-scaling-stroke; }
+.graph-radar-box { fill:var(--muted); stroke:var(--muted); stroke-width:1px; vector-effect:non-scaling-stroke; opacity:.55; }
+.graph-radar-box[data-state="changed"] { fill:var(--success); stroke:var(--success); opacity:1; }
+.graph-radar-box[data-state="cycle"] { fill:var(--error-dot); stroke:var(--error-dot); opacity:1; }
+.graph-radar-box[data-state="selected"] { fill:var(--graph-target-border); stroke:var(--graph-target-border); stroke-width:3px; opacity:1; }
+.graph-radar-view { fill:var(--graph-target-border); fill-opacity:.14; stroke:var(--graph-target-border); stroke-width:1.5px; vector-effect:non-scaling-stroke; pointer-events:none; }
 .graph-map-edge.graph-map-edge-guess { opacity:.8; }
 :is(.graph-map-edge,.graph-map-edge-core).graph-map-edge-back { stroke-dasharray:0 5; stroke-linecap:round; }
 .graph-map-edge.graph-map-edge-back { opacity:.6; }
@@ -452,7 +486,9 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-map-node-count { color:var(--muted); font-size:var(--text-meta); font-variant-numeric:tabular-nums; }
 .graph-map-node-kind { flex:none; width:12px; color:var(--muted); font-family:var(--font-mono); font-size:var(--text-meta); font-weight:var(--weight-strong); text-align:center; }
 .graph-map-node[data-selected="true"] .graph-map-node-kind { color:inherit; }
-.graph-map-node-cycle { color:var(--warning); }
+.graph-map-node-cycle { flex:none; color:var(--warning); font-variant-numeric:tabular-nums; }
+/* A folder whose circles of files all stay inside it: no cycle passes through it as one place. */
+.graph-map-node[data-circle="inside"]:not([data-cycle="true"]) .graph-map-node-cycle { color:var(--muted); }
 .graph-map-node-pattern { flex:none; padding:1px 4px; border:1px solid var(--purple-line); border-radius:var(--radius-pill); background:var(--purple-soft); color:var(--purple); font-size:var(--text-meta); font-weight:var(--weight-strong); line-height:var(--leading-tight); font-variant-numeric:tabular-nums; }
 .graph-map-node[data-pattern-family="arch"] .graph-map-node-pattern { border-color:var(--arch-line); background:var(--arch-soft); color:var(--arch); }
 .graph-map-node[data-pattern-family="design"] .graph-map-node-pattern { border-color:var(--design-line); background:var(--design-soft); color:var(--design); }
@@ -540,6 +576,11 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-arrow-legend-preset { border-color:var(--field-line); }
 .graph-arrow-legend-preset[aria-pressed="true"] { border-color:var(--field-line-hover); background:var(--hover); color:var(--ink); }
 .graph-arrow-legend-note { flex:1 1 100%; color:var(--muted); }
+/* What the key sets beside the kinds: links that longer ways already say, and how far from the selected box the links are lit. */
+.graph-arrow-legend-switch[aria-pressed="true"] .graph-arrow-legend-count { color:inherit; }
+.graph-arrow-legend-reach { display:inline-flex; flex-wrap:wrap; align-items:center; gap:2px; }
+.graph-arrow-legend-side { margin-left:4px; color:var(--muted); }
+.graph-arrow-legend-reach .graph-arrow-legend-preset { min-width:20px; justify-content:center; padding:1px 4px; font-variant-numeric:tabular-nums; }
 .graph-arrow-swatch { flex:none; overflow:visible; }
 .graph-arrow-swatch-line { fill:none; stroke:var(--map-edge-calls); stroke-width:1.6px; }
 .graph-arrow-swatch .graph-map-arrow path { transform:none; }
@@ -552,7 +593,7 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-arrow-swatch[data-edge-kind="reads"] .graph-arrow-swatch-line { stroke:var(--map-edge-reads); stroke-dasharray:2 3; }
 .graph-arrow-swatch[data-edge-kind="uses"] .graph-arrow-swatch-line { stroke:var(--map-edge-uses); }
 @media (max-width:860px) { .graph-map-body { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1fr) minmax(0,38%); } .graph-member-list { max-height:144px; } .graph-impact-members { padding:4px; } .graph-member-filter { padding:2px 4px; } .graph-vis-pill { padding:0 4px; } }
-@media (forced-colors:active) { .graph-map-edge,.graph-map-edge[data-edge-kind],.graph-map-edge-chevron,.graph-map-edge-chevron[data-edge-kind] { stroke:CanvasText; } .graph-map-edge-core,.graph-arrow-swatch-hollow .graph-arrow-swatch-core { stroke:Canvas; } .graph-map-port circle,.graph-map-port-multi .graph-map-port-eye { fill:CanvasText; } .graph-map-port-multi circle { fill:Canvas; stroke:CanvasText; } .graph-arrow-legend-item[aria-pressed="false"] { opacity:1; } .graph-map-edge.graph-map-edge-on,.graph-map-edge.graph-map-edge-against,.graph-map-edge[data-cycle-added="true"],.graph-map-edge[data-diff="added"],.graph-map-edge[data-diff="removed"] { stroke:Highlight; } .graph-map-violation-halo { display:none; } .graph-map-canvas[data-pattern-family] { background-image:none; } .graph-map-arch-band,.graph-map-frame { fill:none; stroke:CanvasText; } .graph-map-arrow path,.graph-map-arrow-writes path,.graph-map-arrow-uses path,.graph-map-arrow-against path { fill:CanvasText; stroke:none; } .graph-map-arrow-imports path { fill:none; stroke:CanvasText; } .graph-map-arrow-extends path,.graph-map-arrow-implements path,.graph-map-arrow-reads path { fill:Canvas; stroke:CanvasText; } .graph-arrow-swatch[data-edge-kind] .graph-arrow-swatch-line { stroke:CanvasText; } .graph-arrow-legend { border-color:CanvasText; } .graph-map-node[data-selected="true"] { outline:2px solid Highlight; } .graph-map-node::before,.graph-map-node::after,.graph-map-key,.graph-map-node-pattern,.graph-map-part-chip,.graph-map-layer-order { forced-color-adjust:none; } }
+@media (forced-colors:active) { .graph-map-edge,.graph-map-edge[data-edge-kind],.graph-map-edge-chevron,.graph-map-edge-chevron[data-edge-kind] { stroke:CanvasText; } .graph-map-edge-core,.graph-arrow-swatch-hollow .graph-arrow-swatch-core { stroke:Canvas; } .graph-map-port circle,.graph-map-port-multi .graph-map-port-eye { fill:CanvasText; } .graph-map-port-multi circle { fill:Canvas; stroke:CanvasText; } .graph-arrow-legend-item[aria-pressed="false"] { opacity:1; } .graph-map-edge.graph-map-edge-on,.graph-map-edge.graph-map-edge-against,.graph-map-edge[data-cycle-added="true"],.graph-map-edge[data-diff="added"],.graph-map-edge[data-diff="removed"] { stroke:Highlight; } .graph-map-violation-halo { display:none; } .graph-map-canvas[data-pattern-family] { background-image:none; } .graph-map-arch-band,.graph-map-frame { fill:none; stroke:CanvasText; } .graph-map-arrow path,.graph-map-arrow-writes path,.graph-map-arrow-uses path,.graph-map-arrow-against path { fill:CanvasText; stroke:none; } .graph-map-arrow-imports path { fill:none; stroke:CanvasText; } .graph-map-arrow-extends path,.graph-map-arrow-implements path,.graph-map-arrow-reads path { fill:Canvas; stroke:CanvasText; } .graph-arrow-swatch[data-edge-kind] .graph-arrow-swatch-line { stroke:CanvasText; } .graph-arrow-legend { border-color:CanvasText; } .graph-map-node[data-selected="true"] { outline:2px solid Highlight; } .graph-map-radar { border-color:CanvasText; } .graph-radar-frame { stroke:GrayText; } .graph-radar-box,.graph-radar-box[data-state] { fill:CanvasText; stroke:CanvasText; opacity:1; } .graph-radar-box[data-state="selected"],.graph-radar-view { stroke:Highlight; } .graph-radar-view { fill:none; } .graph-map-node::before,.graph-map-node::after,.graph-map-key,.graph-map-node-pattern,.graph-map-part-chip,.graph-map-layer-order { forced-color-adjust:none; } }
 .settings-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; max-width:1160px; margin:0; }
 .settings-grid > .model-field { grid-column:span 2; }
 .field-label { display:flex; align-items:center; gap:4px; }

@@ -1,0 +1,482 @@
+//! The files of a project that use each other in a circle.
+//!
+//! Files that all reach each other along the links form one group: every
+//! file of a group lies on a cycle with every other file of it, and with no
+//! file outside it. The groups are found once, over every file of the graph,
+//! so a picture can say of a box that it is part of a cycle also where the
+//! rest of the cycle is not drawn: in another folder, or past what the
+//! picture has room for.
+
+use super::*;
+
+/// No group.
+const NONE: u32 = u32::MAX;
+/// How many groups a picture lists, and how many files of each it names.
+const LISTED: usize = 6;
+const NAMED: usize = 4;
+
+#[derive(Debug, Default)]
+pub(super) struct Circles {
+    /// The files of each group in their order; the largest group first.
+    groups: Vec<Vec<u32>>,
+    /// Of each group the file with the most links inside the group: a cycle
+    /// shown through it is the one most of the group has to do with.
+    busiest: Vec<u32>,
+}
+
+impl Circles {
+    /// The groups among `count` files, of which `links` says which uses
+    /// which and through how many links. A file that uses itself is no
+    /// circle of files.
+    pub(super) fn of(count: usize, links: &[(u32, u32, u64)]) -> Self {
+        let mut next = vec![Vec::new(); count];
+        for (from, to, _) in links {
+            if from != to && (*from as usize) < count && (*to as usize) < count {
+                next[*from as usize].push(*to);
+            }
+        }
+        let mut groups = reaching_each_other(&next);
+        groups.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+        // For each file its group, to tell the links inside one.
+        let mut group = vec![NONE; count];
+        for (id, files) in groups.iter().enumerate() {
+            for file in files {
+                group[*file as usize] = id as u32;
+            }
+        }
+        let mut inside = vec![0u64; count];
+        for (from, to, weight) in links {
+            if from != to
+                && (*from as usize) < count
+                && (*to as usize) < count
+                && group[*from as usize] != NONE
+                && group[*from as usize] == group[*to as usize]
+            {
+                inside[*from as usize] += weight;
+                inside[*to as usize] += weight;
+            }
+        }
+        let busiest = groups
+            .iter()
+            .map(|files| {
+                *files
+                    .iter()
+                    .max_by(|a, b| {
+                        inside[**a as usize]
+                            .cmp(&inside[**b as usize])
+                            .then(b.cmp(a))
+                    })
+                    .expect("a group holds files")
+            })
+            .collect();
+        Self { groups, busiest }
+    }
+}
+
+/// The groups of two places or more that all reach each other, each in the
+/// order of its places. Found in one walk that goes as deep as the links
+/// lead and remembers its way in a list, so the longest chain of a large
+/// project is walked like any other.
+fn reaching_each_other(next: &[Vec<u32>]) -> Vec<Vec<u32>> {
+    let count = next.len();
+    // When a place was first met, and the earliest met place it leads back to.
+    let mut met = vec![NONE; count];
+    let mut back = vec![0u32; count];
+    let mut open = vec![false; count];
+    let mut waiting: Vec<u32> = Vec::new();
+    let mut found = Vec::new();
+    let mut clock = 0u32;
+    for start in 0..count as u32 {
+        if met[start as usize] != NONE {
+            continue;
+        }
+        let mut way: Vec<(u32, usize)> = vec![(start, 0)];
+        met[start as usize] = clock;
+        back[start as usize] = clock;
+        clock += 1;
+        waiting.push(start);
+        open[start as usize] = true;
+        while let Some((at, tried)) = way.last_mut() {
+            let at = *at;
+            if let Some(to) = next[at as usize].get(*tried).copied() {
+                *tried += 1;
+                if met[to as usize] == NONE {
+                    met[to as usize] = clock;
+                    back[to as usize] = clock;
+                    clock += 1;
+                    waiting.push(to);
+                    open[to as usize] = true;
+                    way.push((to, 0));
+                } else if open[to as usize] {
+                    back[at as usize] = back[at as usize].min(met[to as usize]);
+                }
+                continue;
+            }
+            way.pop();
+            if let Some((before, _)) = way.last() {
+                back[*before as usize] = back[*before as usize].min(back[at as usize]);
+            }
+            if back[at as usize] == met[at as usize] {
+                let mut group = Vec::new();
+                while let Some(place) = waiting.pop() {
+                    open[place as usize] = false;
+                    group.push(place);
+                    if place == at {
+                        break;
+                    }
+                }
+                if group.len() > 1 {
+                    group.sort_unstable();
+                    found.push(group);
+                }
+            }
+        }
+    }
+    found
+}
+
+impl Index {
+    /// The circles among the files, by every link or by the links the tool
+    /// read from the code. Found once for each.
+    fn circles(&self, certain: bool) -> &Circles {
+        self.circles[usize::from(certain)].get_or_init(|| {
+            let links = self
+                .pairs
+                .iter()
+                .map(|(from, to, pair)| (*from, *to, pair.weight(certain)))
+                .filter(|(_, _, weight)| *weight > 0)
+                .collect::<Vec<_>>();
+            Circles::of(self.files.len(), &links)
+        })
+    }
+
+    /// Says of each file and folder a picture draws whether it is part of
+    /// a circle of files, wherever the rest of that circle lies, and of the
+    /// picture how many circles the project holds and which touch what is
+    /// open. A file is part of one group at most. A folder is told how many
+    /// of its files are part of how many groups, and whether one of those
+    /// leads out of the folder and back: only then does a cycle pass
+    /// through the folder as the place the picture draws.
+    pub(crate) fn mark_circles(&self, view: &mut Value) {
+        let circles = self.circles(view["certain"] == true);
+        if circles.groups.is_empty() {
+            return;
+        }
+        let grouped = circles
+            .groups
+            .iter()
+            .enumerate()
+            .flat_map(|(id, files)| {
+                files
+                    .iter()
+                    .map(move |file| (self.files[*file as usize].as_str(), id))
+            })
+            .collect::<HashMap<_, _>>();
+        let held = |folder: &str, files: &[u32]| {
+            files
+                .iter()
+                .filter(|file| {
+                    self.files[**file as usize]
+                        .strip_prefix(folder)
+                        .is_some_and(|rest| rest.starts_with('/'))
+                })
+                .count()
+        };
+        if let Some(nodes) = view["nodes"].as_array_mut() {
+            for node in nodes {
+                if node["symbol"] == true {
+                    continue;
+                }
+                let Some(path) = node["path"].as_str() else {
+                    continue;
+                };
+                let told = if node["folder"] == true {
+                    let (mut files, mut groups, mut largest, mut leaves) = (0, 0, 0, false);
+                    for group in &circles.groups {
+                        let inside = held(path, group);
+                        if inside > 0 {
+                            files += inside;
+                            groups += 1;
+                            largest = largest.max(group.len());
+                            leaves |= inside < group.len();
+                        }
+                    }
+                    (files > 0).then_some((files, groups, largest, leaves))
+                } else {
+                    grouped
+                        .get(path)
+                        .map(|group| (1, 1, circles.groups[*group].len(), true))
+                };
+                if let Some((files, groups, largest, leaves)) = told {
+                    node["circle"] = json!({
+                        "files": files, "groups": groups, "largest": largest, "leaves": leaves,
+                    });
+                }
+            }
+        }
+        // What is open: a folder, or the folder of an opened file.
+        let scope = view["scope"].as_str().unwrap_or("").trim_matches('/');
+        let scope = if scope.is_empty() || self.folder(scope) {
+            scope
+        } else {
+            holder(scope)
+        };
+        let here = circles
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, files)| scope.is_empty() || held(scope, files) > 0)
+            .collect::<Vec<_>>();
+        let listed = here
+            .iter()
+            .take(LISTED)
+            .map(|(id, files)| {
+                let start = circles.busiest[*id];
+                // The file a cycle is shown through first, then the others.
+                let names = std::iter::once(start)
+                    .chain(files.iter().copied().filter(|file| *file != start))
+                    .take(NAMED)
+                    .map(|file| name(&self.files[file as usize]))
+                    .collect::<Vec<_>>();
+                json!({
+                    "files": files.len(),
+                    "start": self.files[start as usize],
+                    "names": names,
+                    "more": files.len().saturating_sub(NAMED),
+                })
+            })
+            .collect::<Vec<_>>();
+        view["circles"] = json!({
+            "groups": circles.groups.len(),
+            "files": circles.groups.iter().map(Vec::len).sum::<usize>(),
+            "largest": circles.groups.first().map_or(0, Vec::len),
+            "here": here.len(),
+            "listed": listed,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn groups(count: usize, links: &[(u32, u32)]) -> Vec<Vec<u32>> {
+        let links = links
+            .iter()
+            .map(|(from, to)| (*from, *to, 1))
+            .collect::<Vec<_>>();
+        Circles::of(count, &links).groups
+    }
+
+    #[test]
+    fn files_that_all_reach_each_other_are_one_group() {
+        // 0 → 1 → 2 → 0 is a circle; 3 uses it and 4 is used by it, and
+        // neither is part of it. 5 ⇄ 6 is a second, smaller circle.
+        let links = [(0, 1), (1, 2), (2, 0), (3, 0), (2, 4), (5, 6), (6, 5)];
+        assert_eq!(groups(7, &links), [vec![0, 1, 2], vec![5, 6]]);
+        // Two circles that share a file are one group.
+        assert_eq!(
+            groups(5, &[(0, 1), (1, 0), (1, 2), (2, 3), (3, 1), (3, 4)]),
+            [vec![0, 1, 2, 3]]
+        );
+        // A chain is none, and neither is a file that uses itself.
+        assert!(groups(4, &[(0, 1), (1, 2), (2, 3), (3, 3)]).is_empty());
+        // A link that names a file the graph does not hold is no link.
+        assert!(groups(2, &[(0, 1), (1, 9), (9, 0)]).is_empty());
+        assert!(groups(0, &[]).is_empty());
+        // Of two groups as large as each other the one of the earlier
+        // files comes first.
+        assert_eq!(
+            groups(4, &[(2, 3), (3, 2), (0, 1), (1, 0)]),
+            [vec![0, 1], vec![2, 3]]
+        );
+    }
+
+    #[test]
+    fn a_chain_as_long_as_a_large_project_is_walked() {
+        // A hundred thousand files in one chain that closes: a walk that
+        // called itself for each would run out of room.
+        let count = 100_000u32;
+        let links = (0..count)
+            .map(|at| (at, (at + 1) % count))
+            .collect::<Vec<_>>();
+        let found = groups(count as usize, &links);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].len(), count as usize);
+        // Without the link that closes it there is no circle at all.
+        assert!(groups(count as usize, &links[..links.len() - 1]).is_empty());
+    }
+
+    #[test]
+    fn the_file_a_group_is_shown_through_has_the_most_links_inside_it() {
+        // 1 has links with both others of its group; what 0 has with 3,
+        // outside the group, counts for nothing.
+        let circles = Circles::of(4, &[(0, 1, 1), (1, 2, 5), (2, 0, 1), (0, 3, 90), (2, 1, 2)]);
+        assert_eq!(circles.groups, [vec![0, 1, 2]]);
+        assert_eq!(circles.busiest, [1]);
+        // As many links: the earlier file.
+        assert_eq!(Circles::of(2, &[(0, 1, 1), (1, 0, 1)]).busiest, [0]);
+    }
+
+    fn project() -> Index {
+        let node = |id: &str, file: &str| json!({"id": id, "label": format!("{id}()"), "source_file": file, "source_location": "L2"});
+        let edge = |from: &str, to: &str, confidence: &str| json!({"source": from, "target": to, "relation": "calls", "confidence": confidence});
+        // In src/cart, Cart and Price use each other. Order (src/order)
+        // uses Cart, which uses Stock (src/stock), which uses Order again:
+        // one group of four across three folders. The link from Stock to
+        // Order is only guessed. In src/mail, Mailer and Queue use each
+        // other and nothing else: a group that stays inside its folder.
+        let graph = json!({
+            "nodes": [
+                node("cart", "src/cart/Cart.php"),
+                node("price", "src/cart/Price.php"),
+                node("order", "src/order/Order.php"),
+                node("stock", "src/stock/Stock.php"),
+                node("mailer", "src/mail/Mailer.php"),
+                node("queue", "src/mail/Queue.php"),
+                node("entry", "web/index.php"),
+            ],
+            "links": [
+                edge("cart", "price", "EXTRACTED"),
+                edge("price", "cart", "EXTRACTED"),
+                edge("order", "cart", "EXTRACTED"),
+                edge("cart", "stock", "EXTRACTED"),
+                edge("stock", "order", "INFERRED"),
+                edge("mailer", "queue", "EXTRACTED"),
+                edge("queue", "mailer", "EXTRACTED"),
+                edge("entry", "order", "EXTRACTED"),
+                edge("entry", "mailer", "EXTRACTED"),
+            ]
+        });
+        Index::read(graph.to_string().as_bytes(), Path::new("/work/shop")).unwrap()
+    }
+
+    fn node<'a>(view: &'a Value, path: &str) -> &'a Value {
+        view["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["path"] == path)
+            .unwrap_or_else(|| panic!("{path} in {view}"))
+    }
+
+    #[test]
+    fn a_picture_says_which_of_its_places_are_part_of_a_circle() {
+        let index = project();
+        // The folders of src: the picture draws four boxes and no file.
+        let mut view = index.view("shop", "src", None, false, "");
+        index.mark_circles(&mut view);
+        // src/cart holds two files of the large group, which leads out of
+        // it and back; so do src/order and src/stock, with one file each.
+        assert_eq!(
+            node(&view, "src/cart")["circle"],
+            json!({"files": 2, "groups": 1, "largest": 4, "leaves": true})
+        );
+        assert_eq!(
+            node(&view, "src/order")["circle"],
+            json!({"files": 1, "groups": 1, "largest": 4, "leaves": true})
+        );
+        // The circle of src/mail never leaves it: no cycle passes through
+        // the folder as one place.
+        assert_eq!(
+            node(&view, "src/mail")["circle"],
+            json!({"files": 2, "groups": 1, "largest": 2, "leaves": false})
+        );
+        assert_eq!(
+            view["circles"],
+            json!({
+                "groups": 2, "files": 6, "largest": 4, "here": 2,
+                "listed": [
+                    {"files": 4, "start": "src/cart/Cart.php", "names": ["Cart.php", "Price.php", "Order.php", "Stock.php"], "more": 0},
+                    {"files": 2, "start": "src/mail/Mailer.php", "names": ["Mailer.php", "Queue.php"], "more": 0}
+                ]
+            })
+        );
+        // The files of one folder: each is told its own group, though the
+        // rest of the group lies in folders this picture does not draw.
+        let mut view = index.view("shop", "src/order", None, false, "");
+        index.mark_circles(&mut view);
+        assert_eq!(
+            node(&view, "src/order/Order.php")["circle"],
+            json!({"files": 1, "groups": 1, "largest": 4, "leaves": true})
+        );
+        // Only the group that touches the open folder is listed.
+        assert_eq!(view["circles"]["here"], 1);
+        assert_eq!(view["circles"]["groups"], 2);
+        assert_eq!(view["circles"]["listed"][0]["start"], "src/cart/Cart.php");
+        // The top of the project: web holds no file of a circle, and all
+        // of both circles lies inside src.
+        let mut view = index.view("shop", "", None, false, "");
+        index.mark_circles(&mut view);
+        assert!(node(&view, "web")["circle"].is_null());
+        assert_eq!(
+            node(&view, "src")["circle"],
+            json!({"files": 6, "groups": 2, "largest": 4, "leaves": false})
+        );
+    }
+
+    #[test]
+    fn a_circle_closed_by_a_guess_is_none_among_the_links_read_from_the_code() {
+        let index = project();
+        let mut view = index.view("shop", "src", None, true, "");
+        index.mark_circles(&mut view);
+        // Without the guessed link from Stock to Order only Cart and Price
+        // are left of the large group, and they stay inside their folder.
+        assert_eq!(
+            node(&view, "src/cart")["circle"],
+            json!({"files": 2, "groups": 1, "largest": 2, "leaves": false})
+        );
+        assert!(node(&view, "src/order")["circle"].is_null());
+        assert!(node(&view, "src/stock")["circle"].is_null());
+        assert_eq!(view["circles"]["groups"], 2);
+        assert_eq!(view["circles"]["files"], 4);
+    }
+
+    #[test]
+    fn a_cycle_can_be_shown_through_every_place_that_is_told_one() {
+        let index = project();
+        let steps = |place: &str, certain: bool| {
+            index.cycle("shop", place, &[], &|_| None, None, certain)["cycle"]["steps"]
+                .as_u64()
+                .unwrap()
+        };
+        for certain in [false, true] {
+            for scope in ["", "src", "src/cart", "src/order", "src/mail"] {
+                let mut view = index.view("shop", scope, None, certain, "");
+                index.mark_circles(&mut view);
+                for node in view["nodes"].as_array().unwrap() {
+                    let path = node["path"].as_str().unwrap();
+                    let through = steps(path, certain) > 0;
+                    assert_eq!(
+                        node["circle"]["leaves"] == true,
+                        through,
+                        "{path} in {scope:?}, certain {certain}: {}",
+                        node["circle"]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_project_without_circles_is_told_nothing() {
+        let graph = json!({
+            "nodes": [
+                {"id": "a", "label": "a()", "source_file": "src/a.php", "source_location": "L1"},
+                {"id": "b", "label": "b()", "source_file": "src/b.php", "source_location": "L1"}
+            ],
+            "links": [{"source": "a", "target": "b", "relation": "calls", "confidence": "EXTRACTED"}]
+        });
+        let index = Index::read(graph.to_string().as_bytes(), Path::new("/work/shop")).unwrap();
+        let mut view = index.view("shop", "src", None, false, "");
+        index.mark_circles(&mut view);
+        assert!(view["circles"].is_null());
+        assert!(
+            view["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|node| node["circle"].is_null())
+        );
+    }
+}

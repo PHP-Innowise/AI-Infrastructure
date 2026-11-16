@@ -2389,6 +2389,7 @@ impl HarnessCodeGraphBridge {
                     spread: &[],
                     link: None,
                     path: None,
+                    longer: 0,
                     cycle: None,
                     base: None,
                     shared: None,

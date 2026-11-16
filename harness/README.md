@@ -1912,6 +1912,45 @@ asked, and the key says how many links it hides. A link against the layer rules 
 drawn whatever the key says. The choice holds for every picture of links, the
 window of one link included, and is kept in this browser.
 
+Beside the kinds the key holds what else is chosen for a picture as a whole.
+**Hide transitive** leaves out every link that a longer way already joins: where A
+uses B and B uses C, the link from A to C says nothing new. It says how many links
+that is before it is selected; every box still reaches what it reached, the boxes
+that reach each other in a circle keep all the links among them, and a link against
+the layer rules is drawn all the same. In the unfolded picture of a sample monorepo
+of 141 files it takes out 76 of the 200 links drawn. With a box selected,
+**Reach** says how many links from it are lit on each side: what uses it and what
+it uses, one link away as before, or two or three, so the picture shows what a
+change to the box reaches and what the box rests on. Neither asks the server.
+
+**How the links are led.** The links of one box leave it side by side in the order
+of where they lead, and arrive side by side in the order of where they come from,
+so links that part do not cross at the box. Links that leave one box, or arrive at
+one box, and pass the same layers share one slot in each of them instead of a slot
+each: they run as one line and part where they end. A link that passes four layers
+or more is led through none of them. A mark at each of its two ends says how many
+such links the box has there, `⇢2` for what it uses far away and `⇠3` for what uses
+it from far away, and the links themselves are drawn while the box or the mark is
+rested on or the box is selected. In the same picture of that sample the slots that
+passing links take fall from 225 to 50; the picture itself is only about a twentieth
+lower, because its height is that of the folders it draws under each other.
+
+**The scale tells how much.** Below half its size a picture is an overview: the
+names of boxes and folders are drawn larger, and the numbers on links, the marks of
+far links and the corners that open and fold are left out. Above 140 % a box has a
+second line: through how many links it is used and uses others, as `3→ →12`, and
+where it lies: the folder of a file, the file and line of a name, or how many files
+a folder holds. Between the two the picture is as it is laid out.
+
+**The picture in small** stands in the corner of a picture that is larger than its
+window: every box and every folder that is drawn, the selected box, the changed ones
+and those of a cycle told by their colour, and a frame around what the window shows.
+A press on it brings what is pressed to the middle of the window, and the window
+follows the pointer while it is held down. A picture that fits its window has none.
+
+Where a session has made new names in a file, their cards hang under the box of
+that file. The picture keeps room for them, so a card lies on no other box.
+
 **Without tests** leaves the tests out of every picture: the folders, an opened
 file, followed links and a change. A file is a test by where it lies or how it is
 named, by the conventions of the common languages: a folder of tests or of what
@@ -1965,6 +2004,17 @@ file**, **Follow links** or another **Path to…**. Inside a chosen change the c
 files and the touched symbols keep their marks, and with **Only links read from the
 code** the ways are found without the guessed links, which a hollow arrow marks: a
 chain is as true as its weakest link.
+
+The shortest ways are not all that leads from one place to another, and a dependency
+is not gone once the shortest way is cut. **Longer ways**, in the key under a picture
+of a path, adds the ways that are longer than the shortest by one, two or three
+links. Each is a chain in which no place comes twice and that passes neither end on
+its way, drawn whole and lighter than the shortest ways, its boxes with a dotted
+border; a link between two boxes of the shortest ways that only a longer way takes
+is drawn lighter too. A picture draws 12 such ways at most, the shorter first and of
+ways as long those along the stronger links, and says where there are more. The
+summary still counts the places and links of the shortest ways; the ways round are
+counted beside them.
 
 **What they share**, beside the path above a picture of two places, asks what ties
 the two together apart from the way between them: what both use, and what uses both.
@@ -2240,6 +2290,19 @@ return through different files. Grouped folders can make a loop on the overview
 when the underlying links do not connect into a chain. When a cycle is too long
 to draw, the side panel lists every step and marks inferred links. **Back to map**
 restores the previous view, including its page, filters and selected place.
+
+A picture marks a cycle among the boxes it draws. The cycles of a project are found
+apart from any picture, once for a graph: the files that all reach each other along
+the links form one group, and every file of a group lies on a cycle with every other
+file of it. A file of such a group carries ↻ wherever the rest of its group lies, in
+another folder or past what the picture has room for, and **Show cycle** shows the
+shortest chain through it. A folder carries ↻ with the number of its files that are
+part of such groups: in the colour of a cycle where one of those groups leads out of
+the folder and back, so that a cycle passes through the folder as one place, and
+fainter where every group stays inside it. The side panel lists the groups that
+touch what is open, the largest first, each with its first files, and selecting one
+shows the shortest cycle through the file that has the most links inside the group.
+**Only links read from the code** finds the groups without the guessed links.
 
 After choosing a pull request, select a place and choose **Show cycle** to check
 whether a cycle through it already existed at the base shown for that PR. The
