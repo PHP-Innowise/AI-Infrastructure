@@ -108,23 +108,22 @@ pub fn parse_relates_to(raw: &str) -> Vec<V> {
             continue;
         }
         let (relation, target_id) = if let Some((rel, target)) = trimmed.split_once(':') {
-            let rel_trimmed = rel.trim();
+            let rel_lower = rel.trim().to_ascii_lowercase();
             let target_trimmed = target.trim();
             if target_trimmed.is_empty() {
                 continue;
             }
-            (
-                if rel_trimmed.is_empty() {
-                    "relates_to"
+            let relation =
+                if rel_lower.is_empty() || matches!(rel_lower.as_str(), "relates_to" | "related") {
+                    "supports".to_owned()
                 } else {
-                    rel_trimmed
-                },
-                target_trimmed,
-            )
+                    rel_lower
+                };
+            (relation, target_trimmed)
         } else {
-            ("relates_to", trimmed)
+            ("supports".to_owned(), trimmed)
         };
-        if seen.insert((relation.to_owned(), target_id.to_owned())) {
+        if seen.insert((relation.clone(), target_id.to_owned())) {
             out.push(json!({
                 "target_id": target_id,
                 "relation": relation,
@@ -2407,6 +2406,40 @@ pub fn key(event: &web_sys::KeyboardEvent) -> bool {
     false
 }
 
+fn apply_merged_session_state(sid: &str, branch: &str, res: &V) {
+    let merge_status = res["outcome"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("merged");
+    if res["session"].is_object() {
+        let mut updated = res["session"].clone();
+        if updated["omnigraph"].is_object()
+            && updated["omnigraph"]["merge_status"]
+                .as_str()
+                .is_none_or(str::is_empty)
+        {
+            updated["omnigraph"]["merge_status"] = json!(merge_status);
+        }
+        m::upsert(updated);
+    }
+    m::write(|s| {
+        let patch = |entry: &mut V| {
+            let eid = entry["id"].as_str().unwrap_or("");
+            let ebranch = entry["omnigraph"]["branch"].as_str().unwrap_or("");
+            let matches_target =
+                (!sid.is_empty() && eid == sid) || (!branch.is_empty() && ebranch == branch);
+            if matches_target && entry["omnigraph"].is_object() {
+                entry["omnigraph"]["merge_status"] = json!(merge_status);
+                entry["omnigraph"]["last_error"] = V::Null;
+            }
+        };
+        patch(&mut s.selected);
+        for item in &mut s.sessions {
+            patch(item);
+        }
+    });
+}
+
 pub async fn event(
     kind: &str,
     id: &str,
@@ -3078,37 +3111,33 @@ pub async fn event(
         }
         "session-omnigraph-merge" => {
             let session = m::read(|s| s.selected.clone());
+            let sid = m::text(&session, "id");
             let branch = session["omnigraph"]["branch"].as_str().unwrap_or("");
             let project = m::text(&session, "project_id");
             if branch.is_empty() || branch == "main" {
                 return true;
             }
             dom::error("session-omnigraph-error", "");
-            match api::post(
-                "/api/omnigraph/branches",
-                json!({
-                    "action": "merge",
-                    "project_id": if project.is_empty() { current_project_id() } else { project },
-                    "source": branch,
-                    "target": "main",
-                    "dry_run": false,
-                    "delete_branch": false,
-                }),
-            )
-            .await
-            {
+            let mut body = json!({
+                "action": "merge",
+                "project_id": if project.is_empty() { current_project_id() } else { project },
+                "source": branch,
+                "target": "main",
+                "dry_run": false,
+                "delete_branch": false,
+            });
+            if !sid.is_empty() {
+                body["session_id"] = json!(sid);
+            }
+            match api::post("/api/omnigraph/branches", body).await {
                 Ok(res) => {
                     if let Err(msg) = branch_merge_outcome(&res) {
                         dom::error("session-omnigraph-error", &msg);
                     } else {
-                        if res["session"].is_object() {
-                            m::upsert(res["session"].clone());
-                            let updated_id = m::text(&res["session"], "id");
-                            if !updated_id.is_empty()
-                                && m::read(|s| m::text(&s.selected, "id")) == updated_id
-                            {
-                                render_session_bar(&res["session"]);
-                            }
+                        apply_merged_session_state(&sid, branch, &res);
+                        let cur = m::read(|s| s.selected.clone());
+                        if !sid.is_empty() && m::text(&cur, "id") == sid {
+                            render_session_bar(&cur);
                         }
                         dom::text("session-omnigraph-meta", &format!("Merged {branch} → main"));
                         dom::hidden("session-omnigraph-merge", true);
@@ -3400,12 +3429,15 @@ mod tests {
     #[test]
     fn backend_contract_alignment_relates_to_conflicts_raw_changes_and_session_bar() {
         assert_eq!(
-            parse_relates_to("atom-1, supports: atom-2, atom-1, contradicts:atom-3, :atom-4"),
+            parse_relates_to(
+                "atom-1, supports: atom-2, atom-1, contradicts:atom-3, :atom-4, relates_to: atom-5, RELATED:atom-1"
+            ),
             vec![
-                json!({ "target_id": "atom-1", "relation": "relates_to" }),
+                json!({ "target_id": "atom-1", "relation": "supports" }),
                 json!({ "target_id": "atom-2", "relation": "supports" }),
                 json!({ "target_id": "atom-3", "relation": "contradicts" }),
-                json!({ "target_id": "atom-4", "relation": "relates_to" }),
+                json!({ "target_id": "atom-4", "relation": "supports" }),
+                json!({ "target_id": "atom-5", "relation": "supports" }),
             ]
         );
 
@@ -3488,5 +3520,29 @@ mod tests {
         assert_eq!(atoms.len(), 2);
         assert!(!can_merge);
         assert_eq!(session_bar_error(&merged_session), "post-merge warning");
+
+        m::write(|s| {
+            let sess = json!({
+                "id": "s-merge-sync",
+                "omnigraph": {
+                    "enabled": true,
+                    "branch": "session/s-merge-sync",
+                    "last_error": "stale error"
+                }
+            });
+            s.selected = sess.clone();
+            s.sessions = vec![sess];
+        });
+        apply_merged_session_state(
+            "s-merge-sync",
+            "session/s-merge-sync",
+            &json!({ "ok": true, "outcome": "fast_forward" }),
+        );
+        m::read(|s| {
+            assert_eq!(s.selected["omnigraph"]["merge_status"], "fast_forward");
+            assert!(s.selected["omnigraph"]["last_error"].is_null());
+            assert_eq!(s.sessions[0]["omnigraph"]["merge_status"], "fast_forward");
+            assert!(!session_bar_summary(&s.sessions[0]).4);
+        });
     }
 }
