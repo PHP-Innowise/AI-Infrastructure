@@ -26,6 +26,8 @@ use std::{
 pub const OUTPUT_LIMIT: usize = 512 * 1024;
 pub type CheckReply<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 pub type TargetReply<'a> = Pin<Box<dyn Future<Output = Result<Capture>> + Send + 'a>>;
+type OmnigraphOutputsFuture<'a> =
+    dyn Future<Output = Result<(Vec<Value>, Vec<String>, String)>> + Send + 'a;
 /// The production implementation is a Weak<Sessions> adapter to the same Job
 /// channel, admission lock, generation registry and cancellation owner as turns.
 pub trait ResultsBackend: Send + Sync {
@@ -113,6 +115,7 @@ pub struct Results {
     pub store: SessionStore,
     pub(crate) backend: Arc<dyn ResultsBackend>,
     target: RwLock<Option<Weak<dyn TargetCheckWorkflow>>>,
+    omnigraph: RwLock<Option<Arc<crate::omnigraph::OmnigraphManager>>>,
 }
 impl Results {
     pub fn new(store: SessionStore, backend: Arc<dyn ResultsBackend>) -> Result<Self> {
@@ -141,6 +144,7 @@ impl Results {
             store,
             backend,
             target: RwLock::new(None),
+            omnigraph: RwLock::new(None),
         };
         for raw in checks {
             let mut c = db_json(raw)?;
@@ -169,6 +173,22 @@ impl Results {
         }
         *target = Some(executor);
         Ok(())
+    }
+    /// Attach the shared Omnigraph manager used to publish session outputs after runs complete.
+    pub fn install_omnigraph(
+        &self,
+        manager: Arc<crate::omnigraph::OmnigraphManager>,
+    ) -> Result<()> {
+        let mut slot = self
+            .omnigraph
+            .write()
+            .map_err(|_| HarnessError::unavailable("Omnigraph manager lock failed"))?;
+        *slot = Some(manager);
+        Ok(())
+    }
+    /// Return the installed Omnigraph manager, if any.
+    pub fn omnigraph(&self) -> Option<Arc<crate::omnigraph::OmnigraphManager>> {
+        self.omnigraph.read().ok().and_then(|slot| slot.clone())
     }
     pub async fn capture(
         &self,
@@ -662,6 +682,9 @@ impl Results {
         let mut out = self.history(sid)?;
         out["session_id"] = sid.into();
         out["workspace"] = s["project_path"].clone();
+        if !s["omnigraph"].is_null() {
+            out["omnigraph"] = s["omnigraph"].clone();
+        }
         if include != "none" {
             let mut snapshot = if active(&s) {
                 Value::Null
@@ -804,6 +827,557 @@ impl Results {
         let context = self.backend.result_context(&s)?;
         Ok(NativeResultService::new(context).record(data)?)
     }
+
+    #[inline(never)]
+    fn snapshot_boxed<'a>(
+        &'a self,
+        sid: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
+        Box::pin(self.snapshot(sid))
+    }
+
+    #[inline(never)]
+    fn collect_omnigraph_outputs_boxed<'a>(
+        &'a self,
+        sid: &'a str,
+        generation: &'a str,
+        result_val: &'a Value,
+    ) -> std::pin::Pin<Box<OmnigraphOutputsFuture<'a>>> {
+        Box::pin(self.collect_omnigraph_outputs_inner(sid, generation, result_val))
+    }
+
+    /// Collect learnings, touched files, and a concise summary for Omnigraph publication.
+    pub async fn collect_omnigraph_outputs(
+        &self,
+        sid: &str,
+        generation: &str,
+        result_val: &Value,
+    ) -> Result<(Vec<Value>, Vec<String>, String)> {
+        self.collect_omnigraph_outputs_boxed(sid, generation, result_val)
+            .await
+    }
+
+    async fn collect_omnigraph_outputs_inner(
+        &self,
+        sid: &str,
+        generation: &str,
+        result_val: &Value,
+    ) -> Result<(Vec<Value>, Vec<String>, String)> {
+        let session = self.store.get(sid)?;
+        let mut learnings = Vec::new();
+        let mut draft_progress = String::new();
+
+        if let Ok(latest) = crate::memory_attempts::latest(&self.store, sid)
+            && latest.state == "drafted"
+            && let Some(draft) = latest.draft
+        {
+            if let Some(p) = draft["progress"].as_str() {
+                draft_progress = collapse_text(p, 600);
+            }
+            for item in draft["learnings"].as_array().into_iter().flatten() {
+                if item.is_object() {
+                    learnings.push(item.clone());
+                }
+            }
+        }
+
+        let clash_state = if result_val["kind"] == "clash_state" {
+            Some(result_val)
+        } else {
+            (!session["clash_result"].is_null()).then_some(&session["clash_result"])
+        };
+        if let Some(clash) = clash_state {
+            for item in clash["items"].as_array().into_iter().flatten().take(20) {
+                let status = item["status"].as_str().unwrap_or("");
+                if status == "withdrawn" {
+                    continue;
+                }
+                let claim = collapse_text(item["claim"].as_str().unwrap_or(""), 400);
+                if claim.is_empty() {
+                    continue;
+                }
+                let origin = item["origin"].as_str().unwrap_or("participant");
+                let severity = item["severity"].as_str().unwrap_or("unrated");
+                let kind = if item["kind"] == "objection" && status == "open" {
+                    "warning"
+                } else {
+                    "finding"
+                };
+                let evidence = collapse_text(item["evidence"].as_str().unwrap_or(""), 500);
+                let title = collapse_text(&format!("[Clash/{severity}] {claim}"), 200);
+                let body = if evidence.is_empty() {
+                    format!("{claim} (status: {status}, origin: {origin})")
+                } else {
+                    format!("{claim}\nEvidence ({status}, {origin}): {evidence}")
+                };
+                let mut files = Vec::new();
+                if let Some(f) = item["file"].as_str().and_then(clean_relative_path) {
+                    files.push(f);
+                }
+                let verified = matches!(status, "confirmed" | "resolved" | "fixed");
+                learnings.push(json!({
+                    "kind": kind,
+                    "title": title,
+                    "summary": claim,
+                    "body": body,
+                    "files": files,
+                    "tags": ["clash", origin, severity],
+                    "confidence": if verified { 0.92 } else { 0.75 },
+                    "pin_priority": if severity == "high" { 20 } else { 12 },
+                    "verified": verified,
+                }));
+            }
+        }
+
+        let fleet_state = if result_val["kind"] == "fleet_state" {
+            Some(result_val)
+        } else {
+            (!session["fleet_result"].is_null()).then_some(&session["fleet_result"])
+        };
+        if let Some(fleet) = fleet_state
+            && fleet["status"] == "completed"
+        {
+            for item in fleet["findings"].as_array().into_iter().flatten().take(20) {
+                let claim = collapse_text(item["claim"].as_str().unwrap_or(""), 400);
+                if claim.is_empty() {
+                    continue;
+                }
+                let lens = item["lens"].as_str().unwrap_or("reviewer");
+                let severity = item["severity"].as_str().unwrap_or("medium");
+                let evidence = collapse_text(item["evidence"].as_str().unwrap_or(""), 500);
+                let kind = if severity == "high" {
+                    "warning"
+                } else {
+                    "finding"
+                };
+                let title = collapse_text(&format!("[{lens}/{severity}] {claim}"), 200);
+                let body = if evidence.is_empty() {
+                    claim.clone()
+                } else {
+                    format!("{claim}\nEvidence: {evidence}")
+                };
+                let mut files = Vec::new();
+                if let Some(f) = item["file"].as_str().and_then(clean_relative_path) {
+                    files.push(f);
+                }
+                learnings.push(json!({
+                    "kind": kind,
+                    "title": title,
+                    "summary": claim,
+                    "body": body,
+                    "files": files,
+                    "tags": ["fleet", lens, severity],
+                    "confidence": 0.9,
+                    "pin_priority": if severity == "high" { 20 } else { 15 },
+                    "verified": true,
+                }));
+            }
+        }
+
+        let mut files = Vec::new();
+        let mut seen_files = BTreeSet::new();
+        let mut push_file = |raw: &str| {
+            if files.len() >= 40 {
+                return;
+            }
+            if let Some(clean) = clean_relative_path(raw)
+                && seen_files.insert(clean.clone())
+            {
+                files.push(clean);
+            }
+        };
+
+        if let Some(receipt) = self.launch_receipt(sid, generation)? {
+            for key in ["edited_paths", "opened_paths"] {
+                for p in receipt[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    push_file(p);
+                }
+            }
+            for ent in receipt["created_entities"].as_array().into_iter().flatten() {
+                if let Some(p) = ent["path"].as_str().or_else(|| ent["file"].as_str()) {
+                    push_file(p);
+                }
+            }
+        }
+        if let Ok(Some(focus)) = crate::graph_live::session_focus(&self.store, sid) {
+            for p in &focus.target_paths {
+                push_file(p);
+            }
+            for ent in &focus.created_entities {
+                if !ent.path.is_empty() {
+                    push_file(&ent.path);
+                }
+            }
+        }
+        if let Ok(snapshot) = self.snapshot_boxed(sid).await
+            && snapshot["available"] == true
+        {
+            for item in snapshot["files"].as_array().into_iter().flatten() {
+                if let Some(p) = item["path"].as_str() {
+                    push_file(p);
+                }
+            }
+        }
+        for learning in &learnings {
+            for key in ["files", "sources"] {
+                for p in learning[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    push_file(p);
+                }
+            }
+        }
+
+        let summary = if !draft_progress.is_empty() {
+            draft_progress
+        } else if let Some(clash_summary) = clash_state
+            .and_then(|c| c["summary"].as_str().or_else(|| c["message"].as_str()))
+            .map(|s| collapse_text(s, 600))
+            .filter(|s| !s.is_empty())
+        {
+            clash_summary
+        } else if let Some(fleet) = fleet_state {
+            let count = fleet["findings"].as_array().map(Vec::len).unwrap_or(0);
+            format!("Fleet review completed with {count} finding(s).")
+        } else if let Some(text) = result_val["text"]
+            .as_str()
+            .map(|s| collapse_text(s, 600))
+            .filter(|s| !s.is_empty())
+        {
+            text
+        } else {
+            collapse_text(session["title"].as_str().unwrap_or(""), 300)
+        };
+
+        if learnings.is_empty() && (!summary.is_empty() || !files.is_empty()) {
+            let title_seed = collapse_text(
+                session["title"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(&summary),
+                120,
+            );
+            let title = if title_seed.is_empty() {
+                format!("Session {} outcome", &sid[..sid.len().min(8)])
+            } else {
+                format!("Session outcome: {title_seed}")
+            };
+            let body = if summary.is_empty() {
+                format!("Touched files: {}", files.join(", "))
+            } else {
+                summary.clone()
+            };
+            learnings.push(json!({
+                "kind": "insight",
+                "title": collapse_text(&title, 200),
+                "summary": if summary.is_empty() { body.clone() } else { summary.clone() },
+                "body": body,
+                "files": files.iter().take(8).cloned().collect::<Vec<_>>(),
+                "tags": ["session-outcome"],
+                "confidence": 0.7,
+                "pin_priority": 5,
+                "verified": false,
+            }));
+        }
+
+        Ok((learnings, files, summary))
+    }
+
+    fn launch_receipt(&self, sid: &str, generation: &str) -> Result<Option<Value>> {
+        let raw: Option<String> = self
+            .store
+            .connection()?
+            .query_row(
+                "SELECT receipt FROM launches WHERE id=?1 AND session_id=?2",
+                params![generation, sid],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        raw.map(db_json).transpose()
+    }
+
+    #[inline(never)]
+    fn publish_omnigraph_for_run_boxed<'a>(
+        &'a self,
+        sid: &'a str,
+        generation: &'a str,
+        result_val: &'a Value,
+        cancel: &'a AtomicBool,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Value>>> + Send + 'a>> {
+        Box::pin(self.publish_omnigraph_for_run_inner(sid, generation, result_val, cancel))
+    }
+
+    /// Publish completed session learnings, files, and summary into Omnigraph (fail-safe).
+    pub async fn publish_omnigraph_for_run(
+        &self,
+        sid: &str,
+        generation: &str,
+        result_val: &Value,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Value>> {
+        self.publish_omnigraph_for_run_boxed(sid, generation, result_val, cancel)
+            .await
+    }
+
+    async fn publish_omnigraph_for_run_inner(
+        &self,
+        sid: &str,
+        generation: &str,
+        result_val: &Value,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Value>> {
+        let Some(omnigraph) = self.omnigraph() else {
+            return Ok(None);
+        };
+        let session = self.store.get(sid)?;
+        if session["omnigraph"]["enabled"] != true
+            || session["omnigraph"]["auto_publish"] == false
+            || cancel.load(Ordering::Acquire)
+            || self.store.generation(sid).ok().as_deref() != Some(generation)
+        {
+            return Ok(None);
+        }
+
+        let (learnings, files, summary) = self
+            .collect_omnigraph_outputs_boxed(sid, generation, result_val)
+            .await?;
+        if learnings.is_empty() && files.is_empty() && summary.trim().is_empty() {
+            return Ok(None);
+        }
+
+        match publish_session_outputs_boxed(&omnigraph, &session, &learnings, &files, &summary)
+            .await
+        {
+            Ok(pub_res) => {
+                if pub_res["skipped"] == "omnigraph-off" {
+                    return Ok(Some(pub_res));
+                }
+                let updated_omni = apply_publish_metadata(&session["omnigraph"], &pub_res);
+                let _ = self.store.patch_guarded(
+                    sid,
+                    generation,
+                    &json!({ "omnigraph": updated_omni }),
+                    cancel,
+                );
+                let event = omnigraph_publish_event(&pub_res, &updated_omni);
+                let _ = self.store.guarded_event(sid, generation, &event);
+                Ok(Some(pub_res))
+            }
+            Err(err) => {
+                let mut omni = session["omnigraph"].clone();
+                if let Some(obj) = omni.as_object_mut() {
+                    obj.insert("last_error".into(), json!(err.message));
+                }
+                let _ = self.store.patch_guarded(
+                    sid,
+                    generation,
+                    &json!({ "omnigraph": omni }),
+                    cancel,
+                );
+                let _ = self.store.guarded_event(
+                    sid,
+                    generation,
+                    &json!({
+                        "kind": "omnigraph",
+                        "phase": "publish",
+                        "ok": false,
+                        "warning": err.message,
+                        "text": format!("Omnigraph publish skipped: {}", err.message),
+                    }),
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Publish manually saved learnings from `POST /api/sessions/{id}/memory` into Omnigraph (fail-safe).
+    pub async fn publish_manual_memory_to_omnigraph(
+        &self,
+        session: &Value,
+        data: &Value,
+    ) -> Result<Option<Value>> {
+        let Some(omnigraph) = self.omnigraph() else {
+            return Ok(None);
+        };
+        if session["omnigraph"]["enabled"] != true || session["omnigraph"]["auto_publish"] == false
+        {
+            return Ok(None);
+        }
+        let sid = text(session, "id")?;
+        let learnings = data["learnings"].as_array().cloned().unwrap_or_default();
+        let summary = collapse_text(data["progress"].as_str().unwrap_or(""), 600);
+        if learnings.is_empty() && summary.is_empty() {
+            return Ok(None);
+        }
+        let mut files = Vec::new();
+        let mut seen = BTreeSet::new();
+        for item in &learnings {
+            for raw in item["sources"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                if let Some(clean) = clean_relative_path(raw)
+                    && seen.insert(clean.clone())
+                {
+                    files.push(clean);
+                }
+            }
+        }
+        match publish_session_outputs_boxed(&omnigraph, session, &learnings, &files, &summary).await
+        {
+            Ok(pub_res) => {
+                if pub_res["skipped"] == "omnigraph-off" {
+                    return Ok(Some(pub_res));
+                }
+                let updated_omni = apply_publish_metadata(&session["omnigraph"], &pub_res);
+                let _ = self
+                    .store
+                    .patch(&sid, &json!({ "omnigraph": updated_omni }));
+                let event = omnigraph_publish_event(&pub_res, &updated_omni);
+                let _ = self.store.event(&sid, &event);
+                Ok(Some(pub_res))
+            }
+            Err(err) => {
+                let _ = self.store.event(
+                    &sid,
+                    &json!({
+                        "kind": "omnigraph",
+                        "phase": "publish",
+                        "ok": false,
+                        "warning": err.message,
+                        "text": format!("Omnigraph publish skipped: {}", err.message),
+                    }),
+                );
+                Ok(None)
+            }
+        }
+    }
+}
+
+#[inline(never)]
+fn publish_session_outputs_boxed<'a>(
+    omnigraph: &'a crate::omnigraph::OmnigraphManager,
+    session: &'a Value,
+    learnings: &'a [Value],
+    files: &'a [String],
+    summary: &'a str,
+) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
+    Box::pin(omnigraph.publish_session_outputs(session, learnings, files, summary))
+}
+
+fn clean_relative_path(raw: &str) -> Option<String> {
+    let trimmed = raw
+        .trim()
+        .split('#')
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("./");
+    safe_path(trimmed).then(|| trimmed.to_owned())
+}
+
+fn collapse_text(raw: &str, max_chars: usize) -> String {
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > max_chars {
+        let mut out: String = collapsed
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect();
+        out.push('…');
+        out
+    } else {
+        collapsed
+    }
+}
+
+fn apply_publish_metadata(existing: &Value, pub_res: &Value) -> Value {
+    let mut omni = if existing.is_object() {
+        existing.clone()
+    } else {
+        json!({ "enabled": true })
+    };
+    let mut published = Vec::new();
+    let mut seen = BTreeSet::new();
+    for item in omni["published_atoms"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if seen.insert(item.to_string()) {
+            published.push(Value::String(item.to_string()));
+        }
+    }
+    for item in pub_res["published_atom_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if seen.insert(item.to_string()) {
+            published.push(Value::String(item.to_string()));
+        }
+    }
+    let branch = pub_res["branch"].as_str().unwrap_or("main");
+    let merge_status = if pub_res["merged"] == true {
+        pub_res["merge_outcome"]
+            .as_str()
+            .unwrap_or("merged")
+            .to_string()
+    } else if omni["auto_merge"] == true && branch != "main" {
+        "conflict".to_string()
+    } else if branch == "main" {
+        "main".to_string()
+    } else {
+        "unmerged".to_string()
+    };
+    omni["branch"] = json!(branch);
+    omni["published_atoms"] = Value::Array(published);
+    omni["merge_status"] = json!(merge_status);
+    omni["last_error"] = Value::Null;
+    omni
+}
+
+fn omnigraph_publish_event(pub_res: &Value, updated_omni: &Value) -> Value {
+    let branch = pub_res["branch"].as_str().unwrap_or("main");
+    let atom_count = pub_res["published_atom_ids"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    let file_count = pub_res["file_count"].as_u64().unwrap_or(0);
+    let merged = pub_res["merged"] == true;
+    let merge_status = updated_omni["merge_status"].as_str().unwrap_or("unmerged");
+    let text = if merged {
+        format!(
+            "Published {atom_count} atom(s) and {file_count} file(s) to Omnigraph branch `{branch}` and merged into `main` ({merge_status})."
+        )
+    } else {
+        format!(
+            "Published {atom_count} atom(s) and {file_count} file(s) to Omnigraph branch `{branch}` ({merge_status})."
+        )
+    };
+    json!({
+        "kind": "omnigraph",
+        "phase": "publish",
+        "ok": true,
+        "branch": branch,
+        "published_atoms": pub_res["published_atom_ids"],
+        "published_count": atom_count,
+        "file_count": file_count,
+        "merged": merged,
+        "merge_status": merge_status,
+        "text": text,
+    })
 }
 impl CheckWorkflow for Results {
     fn run_check<'a>(

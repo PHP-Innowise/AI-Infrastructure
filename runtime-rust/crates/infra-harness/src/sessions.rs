@@ -80,6 +80,7 @@ pub struct Sessions {
     commands: Mutex<Option<Arc<crate::commands::CommandCatalog>>>,
     results: Mutex<Option<Arc<crate::results::Results>>>,
     graphs: Mutex<Option<Arc<crate::graph::Graphs>>>,
+    omnigraph: Mutex<Option<Arc<crate::omnigraph::OmnigraphManager>>>,
     lifecycle: Arc<crate::lifecycle::RunnerLifecycle>,
     pub default_seconds: u64,
 }
@@ -375,6 +376,7 @@ impl Sessions {
             commands: Mutex::new(None),
             results: Mutex::new(None),
             graphs: Mutex::new(None),
+            omnigraph: Mutex::new(None),
             lifecycle,
             default_seconds: limits.seconds,
         });
@@ -537,6 +539,7 @@ impl Sessions {
             "attachments",
             "clash",
             "system_explain",
+            "omnigraph",
         ];
         if !data.is_object()
             || data
@@ -707,6 +710,7 @@ impl Sessions {
         value["brain"] = crate::brain_settings::validate(&data["brain"], &prompt)?;
         value["prompt"] = prompt.into();
         let sid = store::id();
+        value["omnigraph"] = validate_omnigraph_options(&data["omnigraph"], &sid)?;
         let (root, branch, common) = projects::workspace(&self.store, &project, &value, &sid)?;
         value["_session_id"] = sid.into();
         value["_workspace_path"] = root.to_string_lossy().into_owned().into();
@@ -831,6 +835,98 @@ impl Sessions {
     pub fn install_graphs(&self, value: Arc<crate::graph::Graphs>) -> Result<()> {
         *lock(&self.graphs)? = Some(value);
         Ok(())
+    }
+    /// Omnigraph cross-session context sharing is optional: a session queue without one runs unchanged.
+    pub fn install_omnigraph(&self, value: Arc<crate::omnigraph::OmnigraphManager>) -> Result<()> {
+        *lock(&self.omnigraph)? = Some(value);
+        Ok(())
+    }
+    fn omnigraph(&self) -> Option<Arc<crate::omnigraph::OmnigraphManager>> {
+        lock(&self.omnigraph).ok().and_then(|slot| slot.clone())
+    }
+    #[inline(never)]
+    fn prepare_omnigraph_for_run<'a>(
+        &'a self,
+        session: &'a mut Value,
+        job: &'a Job,
+        workspace: &'a Path,
+        cancel: &'a AtomicBool,
+        emit: &'a Event,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if session["omnigraph"]["enabled"] != true {
+                return;
+            }
+            let Some(omnigraph) = self.omnigraph() else {
+                return;
+            };
+            match omnigraph.prepare_session_context(session, workspace).await {
+                Ok(prep) => {
+                    if prep["enabled"] != true {
+                        return;
+                    }
+                    let branch = prep["branch"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| crate::omnigraph::session_branch_name(&job.sid));
+                    let atoms = prep["atoms"].as_array().cloned().unwrap_or_default();
+                    let capsule_override = prep["capsule_text"].as_str();
+                    let mut updated_omni = merge_omnigraph_context(
+                        &session["omnigraph"],
+                        &atoms,
+                        &branch,
+                        capsule_override,
+                        None,
+                    );
+                    if prep.get("head_commit").is_some_and(|c| !c.is_null()) {
+                        updated_omni["head_commit"] = prep["head_commit"].clone();
+                    }
+                    updated_omni["last_error"] = Value::Null;
+                    if let Ok(updated) = self.store.patch_guarded(
+                        &job.sid,
+                        &job.generation,
+                        &json!({ "omnigraph": updated_omni }),
+                        cancel,
+                    ) {
+                        *session = updated;
+                    }
+                    let atom_count = updated_omni["injected_atoms"]
+                        .as_array()
+                        .map(Vec::len)
+                        .unwrap_or(0);
+                    let _ = emit(json!({
+                        "kind": "omnigraph",
+                        "phase": "prepare",
+                        "ok": true,
+                        "branch": branch,
+                        "atom_count": atom_count,
+                        "text": format!("Omnigraph prepared branch `{branch}` ({atom_count} shared context atom(s))."),
+                    }));
+                }
+                Err(err) => {
+                    let mut omni = session["omnigraph"].clone();
+                    if let Some(obj) = omni.as_object_mut() {
+                        obj.insert("last_error".into(), json!(err.message));
+                    }
+                    if let Ok(updated) = self.store.patch_guarded(
+                        &job.sid,
+                        &job.generation,
+                        &json!({ "omnigraph": omni }),
+                        cancel,
+                    ) {
+                        *session = updated;
+                    }
+                    let _ = emit(json!({
+                        "kind": "omnigraph",
+                        "phase": "prepare",
+                        "ok": false,
+                        "warning": err.message,
+                        "text": format!("Omnigraph context unavailable for this turn: {}", err.message),
+                    }));
+                }
+            }
+        })
     }
     /// A run starting or ending is when the project's graph is brought up to
     /// date; the build runs beside the session and never holds it.
@@ -1352,6 +1448,19 @@ impl Sessions {
         {
             self.stop_failed(&cancel);
         }
+        if let Ok(ref val) = result
+            && !cancel.load(Ordering::Acquire)
+            && val["kind"] != "awaiting_context"
+            && !matches!(
+                val["status"].as_str(),
+                Some("awaiting_approval" | "rejected")
+            )
+            && val["outcome"] != "incomplete"
+            && val["ok"] != false
+            && let Ok(results) = self.results()
+        {
+            let _ = spawn_omnigraph_publish(results, &job.sid, &job.generation, val, &cancel).await;
+        }
         match finalize_job(&self.store, &job, &result, &cancel) {
             Ok(status) => {
                 if let Ok(results) = self.results() {
@@ -1544,6 +1653,9 @@ impl Sessions {
                 .filter(|s| ["approve", "reject"].contains(s))
             {
                 fleet.decide(&job.sid, action == "approve")?;
+            } else {
+                self.prepare_omnigraph_for_run(&mut session, job, &config.project, &cancel, &emit)
+                    .await;
             }
             let _ =
                 self.emit_initial_focus(&job.sid, &session, &config.project, &job.prompt, &emit);
@@ -1561,6 +1673,8 @@ impl Sessions {
             return result;
         }
         if !session["clash"].is_null() {
+            self.prepare_omnigraph_for_run(&mut session, job, &workspace, &cancel, &emit)
+                .await;
             let mut executables = BTreeMap::new();
             for id in ["claude", "codex", "cursor"] {
                 if let Some(path) = self.providers.get(id)?.executable {
@@ -1573,15 +1687,23 @@ impl Sessions {
             } else {
                 "review"
             };
+            let brain_ctx = session["brain"]["capsule_text"].as_str().unwrap_or("");
+            let omni_ctx = session["omnigraph"]["capsule_text"]
+                .as_str()
+                .filter(|_| session["omnigraph"]["enabled"] == true)
+                .unwrap_or("");
+            let clash_context = match (brain_ctx.trim().is_empty(), omni_ctx.trim().is_empty()) {
+                (true, true) => String::new(),
+                (false, true) => brain_ctx.to_owned(),
+                (true, false) => format!("Shared Omnigraph Context:\n{omni_ctx}"),
+                (false, false) => format!("{brain_ctx}\n\nShared Omnigraph Context:\n{omni_ctx}"),
+            };
             let mut cycle = clash::Cycle {
                 store: self.store.clone(),
                 session: session.clone(),
                 launch,
                 executables,
-                context: session["brain"]["capsule_text"]
-                    .as_str()
-                    .unwrap_or("")
-                    .into(),
+                context: clash_context,
                 adapter: self.launch_adapter(&session)?,
             };
             let _ = self.emit_initial_focus(&job.sid, &session, &workspace, &job.prompt, &emit);
@@ -1634,6 +1756,8 @@ impl Sessions {
             return Ok(json!({"kind":"awaiting_context"}));
         }
         session = binding.session.clone();
+        self.prepare_omnigraph_for_run(&mut session, job, &workspace, &cancel, &emit)
+            .await;
         self.graph_moment(&job.sid, crate::graph::Trigger::Launch);
         let initial_focus =
             self.emit_initial_focus(&job.sid, &session, &workspace, &route.text, &emit)?;
@@ -1873,6 +1997,7 @@ impl Sessions {
             "agents_enabled",
             "agent_count",
             "clash",
+            "omnigraph",
         ];
         if !options.is_object()
             || options
@@ -1885,6 +2010,9 @@ impl Sessions {
         }
         let provider = session["provider"].as_str().unwrap_or("");
         let mut fields = followup_settings(&session, options, &self.providers.catalog(provider)?)?;
+        if let Some(raw_omni) = options.get("omnigraph") {
+            fields["omnigraph"] = merge_omnigraph_followup(&session["omnigraph"], raw_omni, sid)?;
+        }
         if let Some(brain) = session["brain"].as_object() {
             let mut brain = brain.clone();
             brain.insert("approved".into(), false.into());
@@ -2087,18 +2215,46 @@ impl Domain for Sessions {
                     return Ok(Payload::Json(self.knowledge.brain_action(&session, body)?));
                 }
                 "memory.save" => {
-                    let _admission = lock(&self.admission)?;
-                    let session = self.store.get(sid)?;
-                    if active(&session) {
-                        return Err(HarnessError::conflict("Wait for this session to finish."));
+                    let saved = {
+                        let _admission = lock(&self.admission)?;
+                        let session = self.store.get(sid)?;
+                        if active(&session) {
+                            return Err(HarnessError::conflict("Wait for this session to finish."));
+                        }
+                        let saved = self.knowledge.save_memory(&session, body)?;
+                        (session, saved)
+                    };
+                    if let Ok(results) = self.results() {
+                        let _ = results
+                            .publish_manual_memory_to_omnigraph(&saved.0, body)
+                            .await;
                     }
-                    return Ok(Payload::Json(self.knowledge.save_memory(&session, body)?));
+                    return Ok(Payload::Json(saved.1));
                 }
                 _ => return Err(HarnessError::missing("Unknown session operation.")),
             };
             Ok(Payload::Json(json!({"session":value})))
         })
     }
+}
+
+#[inline(never)]
+fn spawn_omnigraph_publish(
+    results: Arc<crate::results::Results>,
+    sid: &str,
+    generation: &str,
+    result_val: &Value,
+    cancel: &Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    let pub_sid = sid.to_owned();
+    let pub_gen = generation.to_owned();
+    let pub_val = result_val.clone();
+    let pub_cancel = cancel.clone();
+    tokio::spawn(async move {
+        let _ = results
+            .publish_omnigraph_for_run(&pub_sid, &pub_gen, &pub_val, &pub_cancel)
+            .await;
+    })
 }
 
 fn check_inbox_identity(
@@ -2188,6 +2344,381 @@ fn finalize_job(
     }
     // This is the old job's result, never a status fetched from a newer row.
     Ok(status)
+}
+
+fn validate_branch_token(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 128
+        || trimmed.chars().any(|c| c.is_control() || c.is_whitespace())
+        || trimmed.starts_with('/')
+        || trimmed.ends_with('/')
+        || trimmed.contains("..")
+        || trimmed.contains("//")
+    {
+        return Err(HarnessError::invalid("Invalid Omnigraph branch name."));
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn validate_omnigraph_fields(raw: &Value, sid: &str, base: Option<&Value>) -> Result<Value> {
+    let Some(obj) = raw.as_object() else {
+        return Err(HarnessError::invalid("Invalid Omnigraph session settings."));
+    };
+    let allowed = [
+        "enabled",
+        "branch",
+        "pull_branches",
+        "query",
+        "auto_publish",
+        "auto_merge",
+    ];
+    if obj.keys().any(|k| !allowed.contains(&k.as_str())) {
+        return Err(HarnessError::invalid("Unknown Omnigraph session setting."));
+    }
+
+    let mut out = match base.filter(|b| b.is_object()) {
+        Some(existing) => existing.clone(),
+        None => json!({
+            "enabled": true,
+            "branch": crate::omnigraph::session_branch_name(sid),
+            "pull_branches": ["main"],
+            "query": Value::Null,
+            "auto_publish": true,
+            "auto_merge": false,
+            "capsule_text": "",
+            "injected_atoms": [],
+            "published_atoms": [],
+            "merge_status": Value::Null,
+            "last_error": Value::Null,
+        }),
+    };
+
+    if let Some(v) = obj.get("enabled") {
+        let b = v
+            .as_bool()
+            .ok_or_else(|| HarnessError::invalid("Omnigraph `enabled` must be a boolean."))?;
+        out["enabled"] = json!(b);
+    }
+    if let Some(v) = obj.get("branch") {
+        let resolved = if v.is_null() {
+            crate::omnigraph::session_branch_name(sid)
+        } else {
+            let s = v
+                .as_str()
+                .ok_or_else(|| HarnessError::invalid("Omnigraph `branch` must be text."))?;
+            let trimmed = s.trim();
+            if trimmed.is_empty() || trimmed == "auto" {
+                crate::omnigraph::session_branch_name(sid)
+            } else {
+                validate_branch_token(trimmed)?
+            }
+        };
+        out["branch"] = json!(resolved);
+    }
+    if let Some(v) = obj.get("pull_branches") {
+        let arr = v
+            .as_array()
+            .ok_or_else(|| HarnessError::invalid("Omnigraph `pull_branches` must be an array."))?;
+        if arr.len() > 16 {
+            return Err(HarnessError::invalid(
+                "Omnigraph `pull_branches` allows at most 16 branches.",
+            ));
+        }
+        let mut parsed = Vec::with_capacity(arr.len());
+        for item in arr {
+            let s = item
+                .as_str()
+                .ok_or_else(|| HarnessError::invalid("Omnigraph branch names must be text."))?;
+            parsed.push(Value::String(validate_branch_token(s)?));
+        }
+        out["pull_branches"] = Value::Array(parsed);
+    }
+    if let Some(v) = obj.get("query") {
+        if v.is_null() {
+            out["query"] = Value::Null;
+        } else {
+            let s = v
+                .as_str()
+                .ok_or_else(|| HarnessError::invalid("Omnigraph `query` must be text."))?;
+            if s.chars().count() > 4000
+                || s.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+            {
+                return Err(HarnessError::invalid("Invalid Omnigraph `query`."));
+            }
+            let trimmed = s.trim();
+            out["query"] = if trimmed.is_empty() {
+                Value::Null
+            } else {
+                json!(trimmed)
+            };
+        }
+    }
+    for flag in ["auto_publish", "auto_merge"] {
+        if let Some(v) = obj.get(flag) {
+            let b = v.as_bool().ok_or_else(|| {
+                HarnessError::invalid(format!("Omnigraph `{flag}` must be a boolean."))
+            })?;
+            out[flag] = json!(b);
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn validate_omnigraph_options(raw: &Value, sid: &str) -> Result<Value> {
+    if raw.is_null() {
+        return Ok(Value::Null);
+    }
+    validate_omnigraph_fields(raw, sid, None)
+}
+
+fn merge_omnigraph_followup(existing: &Value, raw: &Value, sid: &str) -> Result<Value> {
+    if raw.is_null() {
+        return Ok(Value::Null);
+    }
+    validate_omnigraph_fields(raw, sid, Some(existing))
+}
+
+fn atom_id_of(atom: &Value) -> Option<String> {
+    atom["atom_id"]
+        .as_str()
+        .or_else(|| atom["id"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn compact_atom_summary(atom: &Value) -> Value {
+    let aid = atom_id_of(atom).unwrap_or_default();
+    json!({
+        "atom_id": aid,
+        "kind": atom["kind"].as_str().unwrap_or("insight"),
+        "title": atom["title"].as_str().unwrap_or("Shared context"),
+        "summary": atom["summary"].as_str().unwrap_or(""),
+        "source_branch": atom["source_branch"].as_str().unwrap_or("main"),
+        "confidence": atom["confidence"].as_f64().unwrap_or(0.85),
+        "pin_priority": atom["pin_priority"].as_i64().unwrap_or(10),
+    })
+}
+
+fn format_atom_line(atom: &Value) -> String {
+    let kind = atom["kind"].as_str().unwrap_or("insight");
+    let title = atom["title"].as_str().unwrap_or("Shared context");
+    let summary = atom["summary"].as_str().unwrap_or("");
+    let src = atom["source_branch"].as_str().unwrap_or("main");
+    if summary.trim().is_empty() {
+        format!("- [{kind}] {title} (from `{src}`)\n")
+    } else {
+        format!("- [{kind}] {title} (from `{src}`): {summary}\n")
+    }
+}
+
+/// Merge newly prepared or explicitly shared Omnigraph atoms into `session["omnigraph"]` without
+/// losing prior shared items, updating `injected_atoms` and bounded `capsule_text`.
+pub(crate) fn merge_omnigraph_context(
+    existing: &Value,
+    new_atoms: &[Value],
+    branch: &str,
+    capsule_override: Option<&str>,
+    source_branch_fallback: Option<&str>,
+) -> Value {
+    let mut omni = if existing.is_object() {
+        existing.clone()
+    } else {
+        json!({
+            "enabled": true,
+            "branch": branch,
+            "pull_branches": ["main"],
+            "query": Value::Null,
+            "auto_publish": true,
+            "auto_merge": false,
+            "capsule_text": "",
+            "injected_atoms": [],
+            "published_atoms": [],
+            "merge_status": Value::Null,
+            "last_error": Value::Null,
+        })
+    };
+    if omni["enabled"].is_null() {
+        omni["enabled"] = json!(true);
+    }
+
+    let mut merged = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for atom in new_atoms {
+        let mut entry = compact_atom_summary(atom);
+        if entry["source_branch"] == "main"
+            && let Some(fb) = source_branch_fallback.filter(|s| !s.trim().is_empty())
+            && atom["source_branch"].as_str().is_none()
+        {
+            entry["source_branch"] = json!(fb);
+        }
+        let aid = atom_id_of(&entry).unwrap_or_default();
+        if !aid.is_empty() && seen.insert(aid) {
+            merged.push(entry);
+        }
+    }
+    let mut carried = Vec::new();
+    for old in omni["injected_atoms"].as_array().into_iter().flatten() {
+        let entry = compact_atom_summary(old);
+        let aid = atom_id_of(&entry).unwrap_or_default();
+        if !aid.is_empty() && seen.insert(aid) && merged.len() < 24 {
+            carried.push(entry.clone());
+            merged.push(entry);
+        }
+    }
+    merged.truncate(24);
+
+    let mut capsule = if let Some(raw) = capsule_override.map(str::trim).filter(|s| !s.is_empty()) {
+        let mut out = format!("{raw}\n");
+        for item in &carried {
+            out.push_str(&format_atom_line(item));
+        }
+        out
+    } else if !merged.is_empty() {
+        let mut out = format!("Omnigraph Shared Context (branch `{branch}`):\n");
+        for item in &merged {
+            out.push_str(&format_atom_line(item));
+        }
+        out
+    } else {
+        omni["capsule_text"].as_str().unwrap_or("").to_owned()
+    };
+
+    if capsule.chars().count() > 8000 {
+        let truncated: String = capsule.chars().take(7980).collect();
+        capsule = format!("{}\n…[truncated]\n", truncated.trim_end());
+    }
+
+    omni["branch"] = json!(branch);
+    omni["injected_atoms"] = Value::Array(merged);
+    omni["capsule_text"] = json!(capsule);
+    omni["last_error"] = Value::Null;
+    omni
+}
+
+/// Update `session["omnigraph"]` (`injected_atoms` and `capsule_text`) and emit a session event
+/// after `omnigraph.share` succeeds for an existing Harness session.
+pub(crate) async fn sync_omnigraph_share_to_session(
+    store: &SessionStore,
+    omnigraph_domain: &dyn Domain,
+    body: &Value,
+    share_result: &Value,
+) -> Option<Value> {
+    if share_result["ok"] != true {
+        return None;
+    }
+    let target_session_id = share_result["target_session_id"]
+        .as_str()
+        .or_else(|| body["target_session_id"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let Ok(session) = store.get(target_session_id) else {
+        return None;
+    };
+    let atom_ids: Vec<String> = share_result["atom_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if atom_ids.is_empty() {
+        return None;
+    }
+    let source_branch = body["source_branch"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("main");
+    let target_branch = share_result["target_branch"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::omnigraph::session_branch_name(target_session_id));
+    let project_id = session["project_id"].as_str().unwrap_or("");
+    let mode = share_result["mode"]
+        .as_str()
+        .or_else(|| body["mode"].as_str())
+        .unwrap_or("reference");
+
+    let mut fetched = Vec::new();
+    let mut found_ids = std::collections::BTreeSet::new();
+    for branch in [source_branch, target_branch.as_str()] {
+        if found_ids.len() >= atom_ids.len() {
+            break;
+        }
+        if let Ok(Payload::Json(search)) = omnigraph_domain
+            .execute(
+                "omnigraph.search",
+                json!({
+                    "params": {},
+                    "query": { "project_id": project_id, "q": "", "branch": branch, "limit": "100" },
+                    "body": {},
+                }),
+            )
+            .await
+        {
+            for hit in search["hits"].as_array().into_iter().flatten() {
+                let atom = &hit["atom"];
+                if let Some(aid) = atom_id_of(atom)
+                    && atom_ids.contains(&aid)
+                    && found_ids.insert(aid)
+                {
+                    fetched.push(atom.clone());
+                }
+            }
+        }
+    }
+    for aid in &atom_ids {
+        if !found_ids.contains(aid) {
+            fetched.push(json!({
+                "atom_id": aid,
+                "kind": "insight",
+                "title": aid,
+                "summary": "",
+                "source_branch": source_branch,
+            }));
+        }
+    }
+
+    let updated_omni = merge_omnigraph_context(
+        &session["omnigraph"],
+        &fetched,
+        &target_branch,
+        None,
+        Some(source_branch),
+    );
+    let patched = store
+        .patch(target_session_id, &json!({ "omnigraph": updated_omni }))
+        .ok()?;
+    let status = session["status"].as_str().unwrap_or("");
+    let qualifier = if matches!(status, "queued" | "running") {
+        "active session"
+    } else {
+        "session"
+    };
+    let _ = store.event(
+        target_session_id,
+        &json!({
+            "kind": "omnigraph",
+            "phase": "share",
+            "ok": true,
+            "mode": mode,
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+            "atom_ids": atom_ids,
+            "session_status": status,
+            "text": format!(
+                "Shared {} Omnigraph context atom(s) from `{source_branch}` into {qualifier} `{target_session_id}` ({mode}).",
+                atom_ids.len()
+            ),
+        }),
+    );
+    Some(patched)
 }
 
 struct CancelRelay(tokio::task::JoinHandle<()>);
@@ -2336,6 +2867,7 @@ pub(crate) mod generation_completion_tests {
                 commands: Mutex::new(None),
                 results: Mutex::new(Some(results.clone())),
                 graphs: Mutex::new(None),
+                omnigraph: Mutex::new(None),
                 lifecycle: Arc::new(crate::lifecycle::RunnerLifecycle::new(
                     store, knowledge, source,
                 )),

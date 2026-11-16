@@ -64,7 +64,7 @@ fn safe_name(value: &Value) -> Value {
         .unwrap_or(Value::Null)
 }
 fn ledger(value: &Value) -> Value {
-    let mut result = object!({"message":count(&value["message"]),"capsule":null,"excerpts":null,"attachments":null,"total":count(&value["total"]),"instructions":count(&value["instructions"])});
+    let mut result = object!({"message":count(&value["message"]),"capsule":null,"excerpts":null,"attachments":null,"omnigraph":count(&value["omnigraph"]),"total":count(&value["total"]),"instructions":count(&value["instructions"])});
     if value["capsule"].is_object() {
         let capsule = &value["capsule"];
         result["capsule"] = object!({"characters":count(&capsule["characters"]),"inserted":count(&capsule["inserted"]),"repeats":count(&capsule["repeats"]),"dropped":count(&capsule["dropped"]),"kinds":null,"items":null});

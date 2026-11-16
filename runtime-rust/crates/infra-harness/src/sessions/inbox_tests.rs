@@ -443,6 +443,7 @@ async fn inbox_http_enforces_token_exact_body_idempotency_limits_and_cancellatio
         "updates",
         "providers",
         "knowledge",
+        "omnigraph",
     ]
     .into_iter()
     .map(|name| (name.into(), unused.clone()))

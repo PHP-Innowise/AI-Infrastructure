@@ -1259,6 +1259,93 @@ pub const ROUTES: &[Route] = &[
         token: true,
         query: &[],
     },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/status",
+        operation: "omnigraph.status",
+        status: 200,
+        token: false,
+        query: &["project_id"],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/setup",
+        operation: "omnigraph.setup",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/graph",
+        operation: "omnigraph.graph",
+        status: 200,
+        token: false,
+        query: &[
+            "project_id",
+            "branch",
+            "snapshot",
+            "kind",
+            "q",
+            "session_id",
+        ],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/search",
+        operation: "omnigraph.search",
+        status: 200,
+        token: false,
+        query: &["project_id", "q", "branch", "kind", "limit"],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/branches/diff",
+        operation: "omnigraph.branch_diff",
+        status: 200,
+        token: false,
+        query: &["project_id", "source", "target"],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/branches",
+        operation: "omnigraph.branch_act",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/atoms",
+        operation: "omnigraph.publish",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
+        pattern: "/api/omnigraph/share",
+        operation: "omnigraph.share",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/changes",
+        operation: "omnigraph.changes",
+        status: 200,
+        token: false,
+        query: &["project_id", "cursor", "branch"],
+    },
+    Route {
+        method: "GET",
+        pattern: "/api/omnigraph/commits/{commit_id}",
+        operation: "omnigraph.commit_detail",
+        status: 200,
+        token: false,
+        query: &["project_id"],
+    },
 ];
 fn equal(a: &[u8], b: &[u8]) -> bool {
     let mut diff = a.len() ^ b.len();
@@ -1509,6 +1596,8 @@ async fn serve(app: &App, request: Request<Body>, head: bool) -> Result<Response
             crate::attachments::MAX_JSON_BYTES
         } else if route.operation == "skills.create_preview" {
             131072
+        } else if ["omnigraph.publish", "omnigraph.share"].contains(&route.operation) {
+            512 * 1024
         } else if ["systems.preview", "discovery.start"].contains(&route.operation) {
             2 * 1024 * 1024
         } else {

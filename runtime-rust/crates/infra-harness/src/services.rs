@@ -67,6 +67,7 @@ impl NativeServices {
             "updates",
             "providers",
             "knowledge",
+            "omnigraph",
         ];
         if required.iter().any(|name| !domains.contains_key(*name)) {
             return Err(HarnessError::invalid(
@@ -97,7 +98,7 @@ impl Services for NativeServices {
             let sid = params["session_id"].as_str().unwrap_or("");
             match operation {
                 "bootstrap" => {
-                    let data = (self.bootstrap)()?;
+                    let mut data = (self.bootstrap)()?;
                     if let Some(graph) = self.domains.get("graph") {
                         let _ = graph
                             .execute(
@@ -105,6 +106,17 @@ impl Services for NativeServices {
                                 json!({"params":{},"body":{},"query":{}}),
                             )
                             .await;
+                    }
+                    if let Some(omnigraph) = self.domains.get("omnigraph")
+                        && let Ok(Payload::Json(status)) = omnigraph
+                            .execute(
+                                "omnigraph.status",
+                                json!({"params":{},"body":{},"query":{}}),
+                            )
+                            .await
+                        && status.get("state").is_some()
+                    {
+                        data["omnigraph"] = status;
                     }
                     Ok(Payload::Json(data))
                 }
@@ -237,6 +249,25 @@ impl Services for NativeServices {
                         json!({"session_id":sid,"sdd":session["sdd"],"files":crate::sdd::artifacts(std::path::Path::new(session["project_path"].as_str().unwrap_or("")),&session["sdd"])?}),
                     ))
                 }
+                "omnigraph.share" => {
+                    let domain = self.domains.get("omnigraph").ok_or_else(|| {
+                        HarnessError::unavailable("Required native service is unavailable.")
+                    })?;
+                    let mut payload = domain.execute(operation, request.clone()).await?;
+                    if let Payload::Json(ref mut val) = payload
+                        && let Some(updated_session) =
+                            crate::sessions::sync_omnigraph_share_to_session(
+                                &self.store,
+                                domain.as_ref(),
+                                &request["body"],
+                                val,
+                            )
+                            .await
+                    {
+                        val["session"] = updated_session;
+                    }
+                    Ok(payload)
+                }
                 _ => {
                     let (group, _) = operation.split_once('.').ok_or_else(|| {
                         HarnessError::missing("Unknown native service operation.")
@@ -302,6 +333,7 @@ mod tests {
             "updates",
             "providers",
             "knowledge",
+            "omnigraph",
         ]
         .into_iter()
         .map(|name| (name.to_owned(), Arc::clone(&stub)))

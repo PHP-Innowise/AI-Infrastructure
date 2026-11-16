@@ -59,6 +59,24 @@ fn attach(store: &SessionStore, sid: &str) -> Result<(String, u64)> {
     }
     Ok((listing, count))
 }
+const OMNIGRAPH_CAPSULE_LIMIT: usize = 6000;
+
+fn omnigraph_section(omnigraph: &Value) -> Option<String> {
+    let raw = omnigraph["capsule_text"].as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let bounded = if raw.chars().count() > OMNIGRAPH_CAPSULE_LIMIT {
+        let truncated: String = raw.chars().take(OMNIGRAPH_CAPSULE_LIMIT).collect();
+        format!("{}\n…[truncated]", truncated.trim_end())
+    } else {
+        raw.to_owned()
+    };
+    Some(format!(
+        "Shared Omnigraph Context (reference data across sessions; verify against canonical project sources):\n{bounded}\n\n"
+    ))
+}
+
 fn add(text: &mut String, ledger: &mut PromptLedger, category: &str, value: &str) {
     text.push_str(value);
     ledger.push(category, value);
@@ -91,6 +109,14 @@ pub fn build(
             let list = infra_core::domain::rstrip(&listing);
             text.push_str(list);
             ledger.attachments(files, list);
+        }
+        if session["omnigraph"]["enabled"] == true
+            && let Some(section) = omnigraph_section(&session["omnigraph"])
+        {
+            add(&mut text, &mut ledger, "instructions", "\n\n");
+            let trimmed = infra_core::domain::rstrip(&section);
+            text.push_str(trimmed);
+            ledger.push("omnigraph", trimmed);
         }
         return Ok(PreparedPrompt {
             text,
@@ -133,6 +159,12 @@ pub fn build(
             json!({"characters":body.chars().count(),"kinds":capsule_text_parts(&envelope)});
         text.push_str(&envelope);
         ledger.capsule(&detail, &envelope);
+    }
+    if session["omnigraph"]["enabled"] != false
+        && let Some(section) = omnigraph_section(&session["omnigraph"])
+    {
+        text.push_str(&section);
+        ledger.push("omnigraph", &section);
     }
     if session["project_context"] == true
         && !session["brain"]["capsule"].is_object()

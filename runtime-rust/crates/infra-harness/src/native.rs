@@ -77,17 +77,45 @@ fn projects(store: &SessionStore, accelerators: &Accelerators) -> Result<Vec<Val
     }
     Ok(result)
 }
+fn omnigraph_bootstrap_summary(
+    omnigraph: &crate::omnigraph::OmnigraphManager,
+    initial: &Value,
+) -> Value {
+    let mut summary = initial.clone();
+    let cfg_path = omnigraph.config_path();
+    if cfg_path.is_file()
+        && let Ok(bytes) = std::fs::read(&cfg_path)
+        && let Ok(cfg) = serde_json::from_slice::<crate::omnigraph::OmnigraphConfig>(&bytes)
+    {
+        summary["mode"] = json!(cfg.mode.as_str());
+        summary["endpoint"] = json!(cfg.endpoint);
+        summary["graph_id"] = json!(cfg.graph_id);
+        if cfg.mode == crate::omnigraph::OmnigraphMode::Off {
+            summary["connected"] = json!(false);
+            summary["state"] = json!("unconfigured");
+        }
+    }
+    summary
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bootstrap gathers the initial runtime snapshot across independent native services."
+)]
 fn bootstrap(
     store: &SessionStore,
     accelerators: &Accelerators,
     providers: &ProviderDomain,
     updates: &Updates,
+    omnigraph: &crate::omnigraph::OmnigraphManager,
+    initial_omnigraph: &Value,
     timeout: u64,
     concurrency: usize,
     engine: &Value,
 ) -> Result<Value> {
     Ok(
         json!({"projects":projects(store,accelerators)?,"providers":providers.listing()?,"sessions":store.summaries()?,"update":updates.status()?,
+ "omnigraph": omnigraph_bootstrap_summary(omnigraph, initial_omnigraph),
  "workflows":[{"id":"native","name":"Workspace","description":"Use the native agent and the project's own instructions."},{"id":"sdd","name":"SDD · Spec-Driven Development","description":"Specify, plan, break down tasks, implement and review one phase at a time."},{"id":"plan","name":"Plan","description":"Inspect the project and prepare a concrete implementation plan."},{"id":"review","name":"Review","description":"Review the requested scope and report actionable findings."},{"id":"fleet-review","name":"Fleet review","description":"Run reviewers, inspect findings and approve a saved report."}],
  "sdd_phases":[{"id":"initialize","name":"Initialize","description":"Create missing project principles and SDD guidance."},{"id":"specify","name":"Specify","description":"Write the feature specification: what and why."},{"id":"plan","name":"Plan","description":"Translate the reviewed specification into a technical plan."},{"id":"tasks","name":"Tasks","description":"Break the reviewed plan into test-first tasks and checkpoints."},{"id":"implement","name":"Implement / resume","description":"Execute the next task group and stop at its checkpoint."},{"id":"review","name":"Review","description":"Check implementation against acceptance criteria without editing files."}],
  "clash":{"workflows":["native","review"],"stages":{"implement":"The first participant implements, the challenger attacks the change, and the implementer fixes or rebuts objections.","review":"The first participant reviews, the challenger reviews independently and disputes findings, and the reviewer defends or withdraws each one."},"max_rounds":3,"default_rounds":2},
@@ -179,6 +207,14 @@ impl ServicesFactory for NativeFactory {
                 cancel: sessions.shutdown_cancel(),
             });
             let results = Arc::new(crate::results::Results::new(store.clone(), backend)?);
+            let omnigraph = Arc::new(crate::omnigraph::OmnigraphManager::new(
+                store.state.clone(),
+                Some(store.clone()),
+            )?);
+            let omnigraph_domain =
+                Arc::new(crate::omnigraph::OmnigraphDomain::new(omnigraph.clone()));
+            sessions.install_omnigraph(omnigraph.clone())?;
+            results.install_omnigraph(omnigraph.clone())?;
             sessions.install_results(results.clone())?;
             let delivery =
                 Arc::new(crate::delivery::Delivery::open(store.clone(), results.clone()).await?);
@@ -260,27 +296,55 @@ impl ServicesFactory for NativeFactory {
             domains.insert("providers".into(), providers.clone());
             domains.insert("graph".into(), graphs.clone());
             domains.insert("system_graph".into(), system_graphs);
+            domains.insert("omnigraph".into(), omnigraph_domain);
             let mut overrides: BTreeMap<String, Arc<dyn Domain>> = BTreeMap::new();
             overrides.insert("context.project".into(), knowledge.clone());
             overrides.insert("memory.save".into(), sessions.clone());
+            let initial_omnigraph =
+                tokio::time::timeout(std::time::Duration::from_secs(2), omnigraph.status_json(""))
+                    .await
+                    .ok()
+                    .and_then(std::result::Result::ok)
+                    .unwrap_or_else(|| {
+                        json!({
+                            "connected": false,
+                            "state": "unconfigured",
+                            "mode": "off",
+                            "api_contract": crate::omnigraph::client::HTTP_API_CONTRACT_VERSION,
+                        })
+                    });
             let bs = store.clone();
             let ba = accelerators.clone();
             let bp = providers.clone();
             let bu = updates.clone();
+            let bo = omnigraph.clone();
             let timeout = config.timeout;
             let concurrency = config.session_concurrency;
             let bootstrap = Arc::new(move || {
-                bootstrap(&bs, &ba, &bp, &bu, timeout, concurrency, &runtime_engine)
+                bootstrap(
+                    &bs,
+                    &ba,
+                    &bp,
+                    &bu,
+                    &bo,
+                    &initial_omnigraph,
+                    timeout,
+                    concurrency,
+                    &runtime_engine,
+                )
             });
             let closing = sessions.clone();
             let update_close = updates.clone();
             let startup_graphs = graphs.clone();
+            let startup_omnigraph = omnigraph.clone();
+            let omnigraph_close = omnigraph;
             let closer = Arc::new(move || {
                 let closing = closing.clone();
                 let updates = update_close.clone();
                 let systems = systems.clone();
                 let setup = setup.clone();
                 let graphs = graphs.clone();
+                let omnigraph = omnigraph_close.clone();
                 Box::pin(async move {
                     updates.close();
                     graphs.close();
@@ -288,7 +352,8 @@ impl ServicesFactory for NativeFactory {
                     setup.close().await;
                     systems.close().await;
                     let reaped = closing.wait_closed().await;
-                    requested.and(reaped)
+                    let omni = omnigraph.close().await;
+                    requested.and(reaped).and(omni)
                 }) as crate::services::CloseFuture<'static>
             });
             let services = Arc::new(NativeServices::new(
@@ -312,6 +377,22 @@ impl ServicesFactory for NativeFactory {
             store.set_setting("accelerator-startup-sync", &json!(reports))?;
             updates.start();
             startup_graphs.auto_start_projects();
+            let omni_cfg = startup_omnigraph.config().await;
+            if omni_cfg.auto_start {
+                match omni_cfg.mode {
+                    crate::omnigraph::OmnigraphMode::LocalSidecar => {
+                        tokio::spawn(async move {
+                            let _ = startup_omnigraph.start_local(None).await;
+                        });
+                    }
+                    crate::omnigraph::OmnigraphMode::Docker => {
+                        tokio::spawn(async move {
+                            let _ = startup_omnigraph.start_docker(None).await;
+                        });
+                    }
+                    _ => {}
+                }
+            }
             Ok(services as Arc<dyn Services>)
         })
     }

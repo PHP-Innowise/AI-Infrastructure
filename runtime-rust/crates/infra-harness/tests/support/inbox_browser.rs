@@ -153,6 +153,7 @@ pub(super) async fn serve(root: &Path, source: &Path) -> Result<()> {
         "updates",
         "providers",
         "knowledge",
+        "omnigraph",
     ]
     .into_iter()
     .map(|name| (name.into(), unused.clone()))

@@ -532,7 +532,7 @@ pub struct PromptLedger {
 impl PromptLedger {
     pub fn new() -> Self {
         Self {
-            value: object!({"message":0,"capsule":null,"excerpts":null,"attachments":null}),
+            value: object!({"message":0,"capsule":null,"excerpts":null,"attachments":null,"omnigraph":null}),
             total: 0,
         }
     }
@@ -560,6 +560,10 @@ impl PromptLedger {
                     .unwrap_or(0)
                     .saturating_add(size);
                 self.value["attachments"] = object!({"characters":size,"count":null});
+            }
+            "omnigraph" => {
+                let current = self.value["omnigraph"].as_u64().unwrap_or(0);
+                self.value["omnigraph"] = current.saturating_add(size).into();
             }
             _ => {}
         }
@@ -612,6 +616,7 @@ impl PromptLedger {
             .unwrap_or(0)
             .saturating_add(count(&value["capsule"]["inserted"]).unwrap_or(0))
             .saturating_add(count(&value["attachments"]["characters"]).unwrap_or(0))
+            .saturating_add(count(&value["omnigraph"]).unwrap_or(0))
             .saturating_add(excerpts);
         value["total"] = self.total.into();
         value["instructions"] = self.total.saturating_sub(accounted).into();
