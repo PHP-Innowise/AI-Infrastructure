@@ -1,4 +1,9 @@
-use crate::{catalog::System, common::*, discovery, execution, native, runner};
+use crate::{
+    catalog::System,
+    common::*,
+    discovery, execution, native, runner,
+    system_graph::{CodeGraphBridge, ServiceGraphOffer},
+};
 use infra_core::{Result, RuntimeError};
 use serde_json::{Value, json as object};
 use std::{
@@ -69,16 +74,248 @@ pub fn request_location(path: &Path, parent: &str) -> Result<(PathBuf, String)> 
 fn display(event: &mut impl FnMut(Value) -> Result<()>, value: Value) {
     let _ = event(value);
 }
+/// Selects the [`ServiceGraphOffer`]s permitted for a dispatch step.
+///
+/// - `contracts` and `verify` receive offers for `__system__` and all `selected` services.
+/// - `service-<sid>` receives its own service offer, or all `selected` offers when `access == "all"`.
+/// - Returns empty when `tell_agents_graph == Some(false)`.
+pub fn offers_for_step(
+    state: &Value,
+    step: &Value,
+    offers: &[ServiceGraphOffer],
+) -> Vec<ServiceGraphOffer> {
+    if state.get("tell_agents_graph") == Some(&Value::Bool(false)) {
+        return vec![];
+    }
+    let selected: BTreeSet<String> = texts(&state["selected"]).into_iter().collect();
+    let phase = string(&step["id"]);
+    let step_service = string(&step["service"]);
+    let all_scope =
+        phase == "contracts" || phase == "verify" || execution::access_scope(state) == "all";
+    offers
+        .iter()
+        .filter(|offer| {
+            if all_scope {
+                offer.service == "__system__" || selected.contains(&offer.service)
+            } else {
+                offer.service == step_service
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+fn collect_offer_readable_paths(offers: &[ServiceGraphOffer]) -> Vec<PathBuf> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for offer in offers {
+        if !offer.graph_path.as_os_str().is_empty() && seen.insert(offer.graph_path.clone()) {
+            out.push(offer.graph_path.clone());
+        }
+        for path in &offer.readable_paths {
+            if !path.as_os_str().is_empty() && seen.insert(path.clone()) {
+                out.push(path.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Builds Linux `bwrap` read-only bind arguments (`--ro-bind <path> <path>`) for offered code graphs.
+pub fn bwrap_ro_bind_args(offers: &[ServiceGraphOffer]) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    for path in collect_offer_readable_paths(offers) {
+        let p = path_string(&path)?;
+        args.extend(["--ro-bind".into(), p.clone(), p]);
+    }
+    Ok(args)
+}
+
+/// Builds macOS `sandbox-exec` read-only Seatbelt rules (`(allow file-read* ...)`) for offered code graphs.
+pub fn macos_seatbelt_read_rules(offers: &[ServiceGraphOffer]) -> Result<String> {
+    let mut profile = String::new();
+    for path in collect_offer_readable_paths(offers) {
+        let escaped = path_string(&path)?
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let matcher = if path.extension().is_some() || path.is_file() {
+            "literal"
+        } else {
+            "subpath"
+        };
+        profile.push_str(&format!("(allow file-read* ({matcher} \"{escaped}\"))\n"));
+    }
+    Ok(profile)
+}
+
+/// Applies [`ServiceGraphOffer`] environment variables, read-only sandbox grants, Codex `--add-dir`,
+/// and Claude `--settings` `permissions.allow` rules to a worker [`infra_host::provider::PreparedCommand`].
+pub fn prepare_worker(
+    provider: &str,
+    _mode: &str,
+    mut command: infra_host::provider::PreparedCommand,
+    offers: &[ServiceGraphOffer],
+) -> Result<infra_host::provider::PreparedCommand> {
+    if offers.is_empty() {
+        return Ok(command);
+    }
+    command
+        .remove
+        .retain(|key| key != "GRAPHIFY_NO_AUTO_REFRESH");
+    command
+        .environment
+        .insert("GRAPHIFY_NO_AUTO_REFRESH".into(), "1".into());
+    for offer in offers {
+        for (key, value) in &offer.env {
+            command.remove.retain(|removed| removed != key);
+            command.environment.insert(key.clone(), value.clone());
+        }
+    }
+
+    let readable_paths = collect_offer_readable_paths(offers);
+    for path in &readable_paths {
+        if !command.readable.contains(path) {
+            command.readable.push(path.clone());
+        }
+    }
+
+    let readable_dirs = {
+        let mut dirs = Vec::new();
+        let mut seen = BTreeSet::new();
+        for path in &readable_paths {
+            let dir = if path.is_dir() {
+                path.clone()
+            } else if path.extension().is_some() || path.is_file() {
+                path.parent()
+                    .map_or_else(|| path.clone(), Path::to_path_buf)
+            } else {
+                path.clone()
+            };
+            if seen.insert(dir.clone()) {
+                dirs.push(dir);
+            }
+        }
+        dirs
+    };
+
+    if provider == "codex" {
+        let mut existing_dirs = BTreeSet::new();
+        for pair in command.argv.windows(2) {
+            if (pair[0] == "--add-dir" || pair[0] == "-C") && !pair[1].is_empty() {
+                existing_dirs.insert(pair[1].clone());
+            }
+        }
+        let mut additions = Vec::new();
+        // Codex `--add-dir` grants write access in workspace-write mode, so
+        // it names only each published graph's own directory; program and
+        // virtualenv paths stay read-only sandbox grants.
+        let mut graph_dirs = Vec::new();
+        for offer in offers {
+            if let Some(dir) = offer
+                .graph_path
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                && !graph_dirs.contains(&dir.to_path_buf())
+            {
+                graph_dirs.push(dir.to_path_buf());
+            }
+        }
+        for dir in &graph_dirs {
+            let dir_str = path_string(dir)?;
+            if existing_dirs.insert(dir_str.clone()) {
+                additions.extend(["--add-dir".into(), dir_str]);
+            }
+        }
+        if !additions.is_empty() {
+            let insert_at = if command.argv.last().map(String::as_str) == Some("-") {
+                command.argv.len() - 1
+            } else {
+                command.argv.len()
+            };
+            command.argv.splice(insert_at..insert_at, additions);
+        }
+    } else if provider == "claude" {
+        let mut rules = Vec::new();
+        let mut seen_rules = BTreeSet::new();
+        for dir in &readable_dirs {
+            let read_rule = native::claude_read_rule(dir)?;
+            if seen_rules.insert(read_rule.clone()) {
+                rules.push(read_rule);
+            }
+        }
+        for offer in offers {
+            for rule in &offer.claude_allow_rules {
+                if !rule.trim().is_empty() && seen_rules.insert(rule.clone()) {
+                    rules.push(rule.clone());
+                }
+            }
+        }
+        if !rules.is_empty() {
+            merge_claude_settings_allow(&mut command.argv, &rules)?;
+        }
+    }
+
+    Ok(command)
+}
+
+fn merge_claude_settings_allow(argv: &mut Vec<String>, rules: &[String]) -> Result<()> {
+    let existing_idx = argv
+        .iter()
+        .enumerate()
+        .find_map(|(idx, arg)| (arg == "--settings" && idx + 1 < argv.len()).then_some(idx + 1));
+
+    let mut settings = if let Some(val_idx) = existing_idx {
+        let raw = &argv[val_idx];
+        parse_json(raw.as_bytes(), MAX_BYTES).unwrap_or_else(|_| object!({}))
+    } else {
+        object!({})
+    };
+    if !settings.is_object() {
+        settings = object!({});
+    }
+    if !settings["permissions"].is_object() {
+        settings["permissions"] = object!({});
+    }
+    let mut allow_list = settings["permissions"]["allow"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for rule in rules {
+        let val = Value::String(rule.clone());
+        if !allow_list.contains(&val) {
+            allow_list.push(val);
+        }
+    }
+    settings["permissions"]["allow"] = Value::Array(allow_list);
+    let encoded_settings = encoded(&settings)?;
+    if let Some(val_idx) = existing_idx {
+        argv[val_idx] = encoded_settings;
+    } else {
+        argv.extend(["--settings".into(), encoded_settings]);
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Internal request runner threads custody, observer, and optional graph bridge."
+)]
 async fn run_system_context(
     path: &Path,
     cancel: Arc<AtomicBool>,
     runner_lock: Option<Arc<File>>,
     adapter: Option<Arc<dyn infra_host::provider::LaunchAdapter>>,
     observer: Option<Arc<dyn infra_host::process::RunObserver>>,
+    bridge: Option<Arc<dyn CodeGraphBridge>>,
+    launch_id: Option<String>,
     mut event: impl FnMut(Value) -> Result<()> + Send,
     mut agent: impl FnMut(AgentSignal) -> Result<()> + Send,
 ) -> Result<Value> {
     let (directory, nonce) = request_location(path, "ai-system")?;
+    let system_run_id = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string);
     let request = read_json(
         &directory,
         &format!("request-{nonce}.json"),
@@ -98,8 +335,21 @@ async fn run_system_context(
             "retry_step",
             "accept_source_changes",
         ],
-        &["accept_unrun_checks"],
+        &["accept_unrun_checks", "tell_agents_graph", "launch_id"],
     )?;
+    if request
+        .get("tell_agents_graph")
+        .is_some_and(|v| !v.is_null() && !v.is_boolean())
+    {
+        return Err(fail("tell_agents_graph must be boolean"));
+    }
+    let resolved_launch_id = launch_id.or_else(|| {
+        request
+            .get("launch_id")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    });
     if absolute(Path::new(string(&request["directory"])))? != directory {
         return Err(fail("System request directory changed"));
     }
@@ -115,15 +365,21 @@ async fn run_system_context(
     let mut system = System::new(Path::new(string(&request["system_file"])), &allow)?;
     let journal = directory.join("execution");
     let state = if journal.join("run.json").exists() {
-        let state = native::validate_state_sync(&mut system, &journal, true)?;
+        let mut state = native::validate_state_sync(&mut system, &journal, true)?;
         let selected = native::executable(&provider, Some(string(&request["executable"]))).await?;
         if state["provider"] != provider || Path::new(string(&state["executable"])) != selected {
             return Err(fail("Configured provider changed; prepare a new plan"));
         }
+        if let Some(tell) = request.get("tell_agents_graph").and_then(Value::as_bool)
+            && state.get("tell_agents_graph").and_then(Value::as_bool) != Some(tell)
+        {
+            state["tell_agents_graph"] = object!(tell);
+            save(&journal, "run.json", &state, false)?;
+        }
         state
     } else {
         let plan = read_json(&directory, "approved-plan.json", execution::MAX_STATE)?;
-        native::create_run_context(
+        native::create_run_context_with_options(
             &mut system,
             &plan,
             &journal,
@@ -132,6 +388,7 @@ async fn run_system_context(
             string(&request["mode"]),
             crate::manager::integer(request.get("timeout"), 900, 1, 86400)?,
             string(&request["access"]),
+            request.get("tell_agents_graph").and_then(Value::as_bool),
             adapter.as_deref(),
         )
         .await?
@@ -161,12 +418,17 @@ async fn run_system_context(
         &mut event,
         object!({"kind":"status","text":"Sequential system dispatch started. Progress and receipts are saved after each dispatch."}),
     );
-    let result=runner::drive_run_context(&mut system,&journal,request["retry_step"].as_str(),runner::Acceptance{source_changes:request["accept_source_changes"]==true,unrun_checks:request["accept_unrun_checks"]==true},cancel.clone(),runner_lock,adapter.clone(),observer.clone(),None,&mut|value:Value|{
+    let hooks = runner::RunnerGraphHooks {
+        bridge,
+        system_run_id,
+        launch_id: resolved_launch_id,
+    };
+    let result=Box::pin(runner::drive_run_context_with_hooks(&mut system,&journal,request["retry_step"].as_str(),runner::Acceptance{source_changes:request["accept_source_changes"]==true,unrun_checks:request["accept_unrun_checks"]==true},cancel.clone(),runner_lock,adapter.clone(),observer.clone(),None,hooks,&mut|value:Value|{
  let kind=string(&value["type"]);match kind{
  "output"=>{if let Some(line)=value["line"].as_str(){signal(&mut agent,AgentSignal::Output{bytes:line.as_bytes().to_vec()});}},
  "dispatch_started"=>signal(&mut agent,AgentSignal::Started{agent:string(&value["phase"]).into(),attempt:value["attempt"].as_u64().unwrap_or(0),cwd:PathBuf::from(string(&value["root"])),details:object!({"service":value["service"],"label":match string(&value["phase"]){"contracts"=>"Contract agent".to_string(),"verify"=>"Verification agent".to_string(),_=>format!("{} agent",string(&value["service"]))},"mode":value["mode"],"provider":provider,"root":value["root"],"dispatch":value["dispatch_id"],"readable":value["readable"],"writable":value["writable"]})}),
  "dispatch_finished"=>{let report=&value["report"];let checks=report["checks"].as_array().cloned().unwrap_or_default();signal(&mut agent,AgentSignal::Finished{status:if value["interrupted"]==true{"interrupted"}else if value["ok"]==true{"completed"}else{"blocked"}.into(),details:object!({"ok":value["ok"],"error":value["error"],"duration_seconds":value["duration_seconds"],"summary":report["summary"],"changed_files":report["changed_files"].as_array().into_iter().flatten().take(100).cloned().collect::<Vec<_>>(),"checks":(["passed","failed","not_run"].iter().map(|status|((*status).to_string(),checks.iter().filter(|check|check["status"]==*status).count())).collect::<BTreeMap<_,_>>())})});},
- _=>{}}Ok(())}).await;
+ _=>{}}Ok(())})).await;
     match result {
         Ok(state) => {
             let ok = state["status"] == "completed";
@@ -565,15 +827,17 @@ pub async fn run_system_request(
     runner_lock: Option<Arc<File>>,
     event: impl FnMut(Value) -> Result<()> + Send,
 ) -> Result<Value> {
-    run_system_context(
+    Box::pin(run_system_context(
         path,
         cancel,
         runner_lock,
         None,
         None,
+        None,
+        None,
         event,
         |_: AgentSignal| Ok(()),
-    )
+    ))
     .await
 }
 pub async fn run_system_request_with_adapter(
@@ -585,15 +849,45 @@ pub async fn run_system_request_with_adapter(
     event: impl FnMut(Value) -> Result<()> + Send,
     agent: impl FnMut(AgentSignal) -> Result<()> + Send,
 ) -> Result<Value> {
-    run_system_context(
+    Box::pin(run_system_context(
         path,
         cancel,
         runner_lock,
         Some(adapter),
         Some(observer),
+        None,
+        None,
         event,
         agent,
-    )
+    ))
+    .await
+}
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bridge entry point carries explicit custody, observer, launch identity, and graph callbacks."
+)]
+pub async fn run_system_request_with_bridge(
+    path: &Path,
+    cancel: Arc<AtomicBool>,
+    runner_lock: Option<Arc<File>>,
+    adapter: Arc<dyn infra_host::provider::LaunchAdapter>,
+    observer: Arc<dyn infra_host::process::RunObserver>,
+    bridge: Arc<dyn CodeGraphBridge>,
+    launch_id: Option<String>,
+    event: impl FnMut(Value) -> Result<()> + Send,
+    agent: impl FnMut(AgentSignal) -> Result<()> + Send,
+) -> Result<Value> {
+    Box::pin(run_system_context(
+        path,
+        cancel,
+        runner_lock,
+        Some(adapter),
+        Some(observer),
+        Some(bridge),
+        launch_id,
+        event,
+        agent,
+    ))
     .await
 }
 pub async fn run_discovery_request(

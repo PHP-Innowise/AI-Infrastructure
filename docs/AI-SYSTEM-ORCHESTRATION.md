@@ -46,6 +46,10 @@ Run from the AI-Infrastructure repository root:
 infra-engine system validate --system docs/examples/ai-system/system.json
 infra-engine system catalog --system docs/examples/ai-system/system.json
 infra-engine system map --system docs/examples/ai-system/system.json
+infra-engine system map --system docs/examples/ai-system/system.json --format json
+infra-engine system graph status --system docs/examples/ai-system/system.json
+infra-engine system graph changes --system docs/examples/ai-system/system.json
+infra-engine system graph impact --system docs/examples/ai-system/system.json --service orders
 infra-engine system locate --system docs/examples/ai-system/system.json --task cancel-order
 infra-engine system plan --system docs/examples/ai-system/system.json \
   --task "Define cancellation and refund behavior" --change-id chg-001 \
@@ -56,7 +60,8 @@ infra-engine system verify --system docs/examples/ai-system/system.json \
 
 Choose a new output filename if the file already exists. Output creation never
 overwrites an existing file or follows a link; its parent must exist. The
-commands return JSON except `map`, which emits Mermaid. All declaration/query
+commands return JSON except `map` (`--format mermaid` by default, or
+`--format json` for the full cross-service `SystemGraph` JSON). All declaration/query
 commands are read-only. `plan --output` writes only the explicitly requested
 new file; `init` creates only the new system workspace.
 
@@ -306,6 +311,58 @@ Exit codes: `0` successful command/source-current verification, `1` incomplete
 validation or stale verification, `2` invalid input/refused operation. `validate`
 checks declaration structure and accessible passports; it does not test services
 or verify capability claims. Commands never run passport-provided test commands.
+
+## Cross-service system graph, member code graphs and run evidence
+
+`infra-engine system map --format json` and `infra-engine system graph {status,changes,impact}`
+build a queryable `SystemGraph` across `__system__` and every accessible member
+service (including monorepo subdirectories alongside standalone repositories):
+
+- **Nodes and expansion**: `__system__` and member `service` nodes record stack,
+  Git `HEAD`, dirty status, `relationships_complete`, capability/contract/source
+  counts and optional Graphify code-graph status (`ready`, `stale`, `unindexed`,
+  `unavailable`). Passing `--spread <service>` or `--whole` expands services into
+  `capability`, `contract` (`http`, `event`, `rpc`, `graphql`, `other`) and
+  declared `source` nodes with grouping frames.
+- **Typed edges, provenance and risks**: Cross-service edges carry contract
+  `kinds`, contract lists, `provenance` (`declared`, `verified` when backed by
+  member code/source references, or `undeclared_in_code` when code references
+  another service's contract without a passport `consumes` entry), `broken_risk`
+  (`provider_contract_unavailable` or `contract_version_mismatch`) and
+  architectural `violation` flags.
+- **Analytical queries**: `system map --format json` supports `--from`/`--to`
+  link inspection, `--shortest-path` (forward and reverse), `--shared`
+  (`both_use` providers and `uses_both` consumers), `--cycle` cross-service cycle
+  detection, `--layers` (inferred tiers or declared service-tier rules in
+  `system-architecture.json` / `.harness-architecture.json`), and blast-radius
+  waves via `--service` / `--contract` and `--depth`.
+- **CLI graph subcommands**:
+  - `infra-engine system graph status --system <file> [--allow-root <dir>] [--state-dir <dir>]`
+    reports per-service stack, Git `HEAD`, dirty file counts, passport counts
+    and published Graphify code-graph status without mutating state.
+  - `infra-engine system graph changes --system <file> [--service <id>] [--run-dir <dir>] [--notests]`
+    aggregates Git worktree and dispatch-level file/symbol changes across
+    services together with impacted provided contracts and downstream consumers.
+  - `infra-engine system graph impact --system <file> --service <id> [--path <rel>] [--contract <id>] [--run-dir <dir>]`
+    maps changed or selected service files/contracts to impacted capabilities,
+    provided contracts, downstream consumer services and their consumer handler
+    paths, reporting `cross_service_unopened` when a run left downstream
+    consumer files unopened across both the consumer dispatch and `verify`.
+
+During `execute` and `resume` (`--tell-agents-graph` / `--no-tell-agents-graph`
+on the CLI, or `"tell_agents_graph": bool` on `POST /api/system-runs/<id>`),
+published member-service Graphify `graph.json` artifacts are mounted read-only
+into worker sandboxes (`bwrap --ro-bind` on Linux, Seatbelt `file-read*` rules on
+macOS, Codex `--add-dir`, and Claude `--settings` `permissions.allow`) with
+`GRAPHIFY_NO_AUTO_REFRESH=1` so queries never rewrite home assistant skills:
+`contracts` and `verify` receive offers for all selected services, while
+`service-<id>` receives its own service graph (or all selected graphs when
+`access` is `all`). Each finished or stopped dispatch persists durable run
+evidence at `<run-dir>/<phase>-a<attempt>.evidence.json` (`git_changed`,
+`ledger_edited`, `opened`, `shell_reads` including `sed -n` slice reads,
+`graph_asked`, `file_touches`, `plan_items`, `command_runs`), and
+`GET /api/system-runs/<id>` surfaces aggregated `evidence` (including
+`cross_service_unopened` reach) alongside `launches` metadata.
 
 Historical pre-Rust invocation (reference only):
 

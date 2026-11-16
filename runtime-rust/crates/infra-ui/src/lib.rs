@@ -18,6 +18,7 @@ mod management;
 mod model;
 mod run;
 mod session;
+mod system_map;
 mod systems;
 
 #[wasm_bindgen(start)]
@@ -90,11 +91,16 @@ pub fn start() -> Result<(), JsValue> {
                     || commands::key(key)
                     || knowledge::key_event(key)
                     || graph_map::key(key)
+                    || system_map::key(key)
                 {
                     event.prevent_default();
                     return;
                 }
                 if key.key() == "Escape" {
+                    if run::escape() || activity::escape() {
+                        event.prevent_default();
+                        return;
+                    }
                     dom::class("sidebar", "open", false);
                     dom::class("scrim", "open", false);
                     dom::attr("menu-toggle", "aria-expanded", "false");
@@ -113,7 +119,11 @@ pub fn start() -> Result<(), JsValue> {
             ]
             .contains(&k.as_str())
             {
-                if !graph_map::pointer_event(&k, &event) {
+                if k == "pointerdown" {
+                    run::pointer_down(&target);
+                    activity::pointer_down(&target);
+                }
+                if !graph_map::pointer_event(&k, &event) && !system_map::pointer_event(&k, &event) {
                     session::resize_event(&k, &event);
                 }
                 return;
@@ -137,10 +147,17 @@ pub fn start() -> Result<(), JsValue> {
             let action = element
                 .get_attribute("data-action")
                 .unwrap_or_else(|| id.clone());
-            let payload = element
+            let mut payload = element
                 .get_attribute("data-payload")
                 .and_then(|v| serde_json::from_str::<V>(&v).ok())
                 .unwrap_or(V::Null);
+            if payload.is_null() && action == "inspect-system-file-graph" {
+                let svc = element.get_attribute("data-service").unwrap_or_default();
+                let path = element.get_attribute("data-path").unwrap_or_default();
+                if !svc.is_empty() || !path.is_empty() {
+                    payload = serde_json::json!({ "service": svc, "path": path });
+                }
+            }
             if let Some(view) = element.get_attribute("data-view").or_else(|| {
                 element
                     .get_attribute("data-nav")
@@ -161,6 +178,9 @@ pub fn start() -> Result<(), JsValue> {
             let value = dom::value_of(&element);
             let checked = dom::checked_of(&element);
             let kind = k.clone();
+            if system_map::event(&kind, &id, &action, &payload, &element) {
+                return;
+            }
             spawn_local(async move {
                 dispatch(&kind, &id, &action, payload, &field, value, checked).await;
             });
@@ -170,6 +190,7 @@ pub fn start() -> Result<(), JsValue> {
         callback.forget();
     }
     graph_map::attach_wheel_listeners();
+    system_map::attach_wheel_listeners();
     let pop = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
         spawn_local(async {
             let view = dom::hash_view();

@@ -129,11 +129,15 @@ to sign in again, or a host that blocks bubblewrap's user namespaces), and the
 editor warns before scanning when the sandbox cannot start on this host. See
 [Troubleshooting AI discovery](../docs/AI-SYSTEM-ORCHESTRATION.md#troubleshooting-ai-discovery).
 Alternatively, **Load system** reads an existing relative system file
-(`system.json` by default). Inspect the declared graph, capabilities and memory
-ownership, then **Plan a change** (or **New change** on the **Changes** tab):
-describe the task, choose starting services or changed contracts, and prepare a
-bounded context/impact plan. Review its sources before execution. The backend
-checks freshness again when queued work actually starts.
+(`system.json` by default). Inspect the interactive cross-service `SystemGraph`
+(contract kinds, `declared`/`verified`/`undeclared_in_code` provenance, version
+mismatch risks, cross-service cycles, shortest paths, shared providers/consumers,
+service tiers, and drill-down into any member service's Graphify code graph),
+capabilities and memory ownership, then **Plan a change** (or **New change** on
+the **Changes** tab): describe the task, choose starting services or changed
+contracts with live blast-radius preview, and prepare a bounded context/impact
+plan. Review its sources before execution. The backend checks freshness again
+when queued work actually starts.
 
 A change moves through **Plan**, **Review**, **Run** and **Receipts**. In the
 **Launch** card of the reviewed plan, choose **Codex, Claude Code or Cursor
@@ -160,12 +164,15 @@ Cursor Agent supports only own-service edits.
 
 The **Agents** panel follows a launched run live: one card per agent (contract,
 each service, verification) with state, time, granted folders, tool calls,
-tokens and changed files, and a timeline of what the selected agent says, plans,
-reads, runs and edits. Paths appear as `service · path`. It stores no file
-contents, diffs, command output or prompts, redacts detected secrets and is
-bounded per agent and launch; receipts stay authoritative. During **Fill with
-AI** the same panel follows the discovery agent and maps copied evidence back to
-original service paths.
+tokens and changed files, structured `Timeline | Files | Plan | Commands` views
+backed by durable `<phase>-a<attempt>.evidence.json` dispatch artifacts (including
+`sed -n` shell-read attribution, Graphify query usage when **Tell agents about
+service code graphs** is enabled, and cross-service unopened consumer reach), and
+a live system/service graph lens following active dispatches. Paths appear as
+`service · path`. It stores no file contents, diffs, command output or prompts,
+redacts detected secrets and is bounded per agent and launch; receipts stay
+authoritative. During **Fill with AI** the same panel follows the discovery agent
+and maps copied evidence back to original service paths.
 
 Saved changes show dispatch state, worker-reported checks, scoped changed files,
 the knowledge handoff and, behind a toggle, native task references and the

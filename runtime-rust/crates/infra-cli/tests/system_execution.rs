@@ -1934,3 +1934,491 @@ fn experimental_reports_are_screened_before_receipt_persistence() {
         assert!(!raw.contains(&secret));
     }
 }
+
+#[test]
+fn system_map_formats_and_graph_subcommands_cover_topology_changes_and_cross_service_impact() {
+    let root = Root::new();
+    let config = system(&root.0);
+    let services = root.0.join("services");
+
+    // Initialize git in system and services so git status/diff provenance works end-to-end.
+    for repo in [root.0.join("system"), services.clone()] {
+        for args in [
+            &["init", "-q"][..],
+            &["add", "."][..],
+            &["commit", "-q", "-m", "initial"][..],
+        ] {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+    }
+
+    // 1. Default `system map` and `--format mermaid` emit Mermaid diagram.
+    let (code, _, mermaid_default) = cli(
+        &root.0,
+        &[
+            "map",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{mermaid_default}");
+    assert!(
+        mermaid_default.contains("flowchart LR"),
+        "{mermaid_default}"
+    );
+
+    let (code, _, mermaid_explicit) = cli(
+        &root.0,
+        &[
+            "map",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--format",
+            "mermaid",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(mermaid_default, mermaid_explicit);
+
+    // Invalid format exits with code 2.
+    let (bad_code, _, bad_out) = cli(
+        &root.0,
+        &[
+            "map",
+            "--system",
+            config.to_str().unwrap(),
+            "--format",
+            "xml",
+        ],
+    );
+    assert_eq!(bad_code, 2, "{bad_out}");
+
+    // 2. `system map --format json` returns full SystemGraph JSON (nodes, edges, cycles, layers, contract_risks).
+    let (code, map_json, raw_json) = cli(
+        &root.0,
+        &[
+            "map",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(code, 0, "{raw_json}");
+    assert_eq!(map_json["kind"], "system_graph");
+    assert_eq!(map_json["system"], "Fixture system");
+    assert_eq!(map_json["summary"]["service_count"], 2);
+    assert!(map_json["cycles"].is_array());
+    assert!(map_json["layers"].is_object());
+    assert!(map_json["contract_risks"].is_array());
+    assert!(
+        map_json["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["from"] == "billing"
+                && e["to"] == "orders"
+                && e["kinds"] == json!(["event"])),
+        "{map_json:#}"
+    );
+
+    // `--spread orders` expands `orders` into capability, contract, and source nodes.
+    let (code, spread_json, spread_raw) = cli(
+        &root.0,
+        &[
+            "map",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--format",
+            "json",
+            "--spread",
+            "orders",
+        ],
+    );
+    assert_eq!(code, 0, "{spread_raw}");
+    assert!(
+        spread_json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "contract:orders:order.placed")
+    );
+
+    // 3. `system graph status` inspects service stacks, git heads, passport counts, and state_dir graphs.
+    let state_dir = root.0.join("state");
+    write_json(
+        &state_dir.join("graphs/orders/live/graph.json"),
+        &json!({ "nodes": [{"id": "n1"}, {"id": "n2"}], "links": [{"source": "n1", "target": "n2"}] }),
+    );
+    let (code, graph_status, status_raw) = cli(
+        &root.0,
+        &[
+            "graph",
+            "status",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--state-dir",
+            state_dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{status_raw}");
+    assert_eq!(graph_status["kind"], "system_graph_status");
+    assert_eq!(graph_status["ready_count"], 1);
+    assert_eq!(graph_status["services"]["orders"]["state"], "ready");
+    assert_eq!(graph_status["services"]["orders"]["nodes"], 2);
+    assert_eq!(graph_status["services"]["billing"]["state"], "unindexed");
+
+    // 4. Execute a run to verify `<phase>-a1.evidence.json` persistence, then inspect `graph changes` & `graph impact`.
+    let plan = root.0.join("plan.json");
+    let (p_code, _, p_text) = cli(
+        &root.0,
+        &[
+            "plan",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--task",
+            "Bill every placed order",
+            "--change-id",
+            "graph-cli-run",
+            "--service",
+            "orders",
+            "--output",
+            plan.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(p_code, 0, "{p_text}");
+
+    let script = adapter(&root.0);
+    let run_dir = root.0.join("run-with-evidence");
+    let (e_code, summary, e_text) = cli(
+        &root.0,
+        &[
+            "execute",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--plan",
+            plan.to_str().unwrap(),
+            "--run-dir",
+            run_dir.to_str().unwrap(),
+            "--provider",
+            "command",
+            "--executable",
+            script.to_str().unwrap(),
+            "--mode",
+            "edit",
+            "--tell-agents-graph",
+            "--timeout",
+            "60",
+        ],
+    );
+    assert_eq!(e_code, 0, "{e_text}");
+    assert_completed(&summary, &run_dir);
+
+    for phase in ["contracts", "service-orders", "service-billing", "verify"] {
+        assert!(
+            run_dir.join(format!("{phase}-a1.evidence.json")).is_file(),
+            "missing evidence artifact for {phase}"
+        );
+    }
+
+    // Dirty `orders/contracts/events.yaml` in the monorepo subfolder and verify `system graph changes` + `system graph impact`.
+    fs::write(
+        services.join("orders/contracts/events.yaml"),
+        "order.placed: v1\ncurrency: EUR\n",
+    )
+    .unwrap();
+
+    let (c_code, changes_val, c_text) = cli(
+        &root.0,
+        &[
+            "graph",
+            "changes",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--run-dir",
+            run_dir.to_str().unwrap(),
+            "--notests",
+        ],
+    );
+    assert_eq!(c_code, 0, "{c_text}");
+    assert!(
+        changes_val["total_files"].as_u64().unwrap() >= 2,
+        "{changes_val:#}"
+    );
+    assert_eq!(changes_val["downstream_services"], json!(["billing"]));
+
+    let (i_code, impact_val, i_text) = cli(
+        &root.0,
+        &[
+            "graph",
+            "impact",
+            "--system",
+            config.to_str().unwrap(),
+            "--allow-root",
+            services.to_str().unwrap(),
+            "--service",
+            "orders",
+            "--path",
+            "contracts/events.yaml",
+            "--run-dir",
+            run_dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(i_code, 0, "{i_text}");
+    assert_eq!(
+        impact_val["impacted_contracts"][0]["contract"],
+        "order.placed"
+    );
+    assert_eq!(impact_val["downstream_services"], json!(["billing"]));
+    // The billing passport names no consumer-side source for `order.placed`
+    // (only its policy file), so the engine reports the consumer without
+    // guessing handler files to flag as unopened.
+    assert_eq!(impact_val["contract_consumers"][0]["consumer"], "billing");
+    assert_eq!(
+        impact_val["contract_consumers"][0]["consumer_sources"],
+        json!([])
+    );
+    assert_eq!(
+        impact_val["cross_service_unopened"],
+        json!([]),
+        "{impact_val:#}"
+    );
+}
+
+#[test]
+fn drive_run_with_code_graph_bridge_captures_sed_shell_reads_graph_queries_and_hooks() {
+    #[derive(Default)]
+    struct RecordingBridge {
+        hooks: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl infra_system::CodeGraphBridge for RecordingBridge {
+        fn on_run_start(
+            &self,
+            run_id: &str,
+            _state: &Value,
+            _system: &infra_system::catalog::System,
+        ) -> infra_core::Result<()> {
+            self.hooks
+                .lock()
+                .unwrap()
+                .push(format!("run_start:{run_id}"));
+            Ok(())
+        }
+        fn offers_for_dispatch(
+            &self,
+            ctx: &infra_system::DispatchGraphContext,
+        ) -> infra_core::Result<Vec<infra_system::ServiceGraphOffer>> {
+            self.hooks
+                .lock()
+                .unwrap()
+                .push(format!("offers:{}", ctx.phase));
+            Ok(vec![infra_system::ServiceGraphOffer {
+                service: "orders".into(),
+                command: "graphify".into(),
+                graph_path: ctx.execution_dir.join("orders-graph.json"),
+                nodes: 12,
+                edges: 24,
+                commit: ctx.base_head.clone(),
+                readable_paths: vec![ctx.execution_dir.join("orders-graph.json")],
+                claude_allow_rules: vec![],
+                env: std::collections::BTreeMap::new(),
+                prompt_instructions: None,
+            }])
+        }
+        fn on_dispatch_start(
+            &self,
+            ctx: &infra_system::DispatchGraphContext,
+        ) -> infra_core::Result<()> {
+            self.hooks
+                .lock()
+                .unwrap()
+                .push(format!("start:{}", ctx.phase));
+            Ok(())
+        }
+        fn on_dispatch_signal(
+            &self,
+            ctx: &infra_system::DispatchGraphContext,
+            raw_line: &[u8],
+        ) -> infra_core::Result<()> {
+            if std::str::from_utf8(raw_line).is_ok_and(|s| s.contains("turn.completed")) {
+                self.hooks
+                    .lock()
+                    .unwrap()
+                    .push(format!("signal:{}", ctx.phase));
+            }
+            Ok(())
+        }
+        fn on_dispatch_finish(
+            &self,
+            ctx: &infra_system::DispatchGraphContext,
+            _receipt: &Value,
+        ) -> infra_core::Result<Option<infra_system::DispatchEvidence>> {
+            self.hooks
+                .lock()
+                .unwrap()
+                .push(format!("finish:{}", ctx.phase));
+            Ok(None)
+        }
+        fn on_run_finish(
+            &self,
+            run_id: &str,
+            state: &Value,
+            _system: &infra_system::catalog::System,
+        ) -> infra_core::Result<()> {
+            self.hooks.lock().unwrap().push(format!(
+                "run_finish:{run_id}:{}",
+                state["status"].as_str().unwrap_or("")
+            ));
+            Ok(())
+        }
+    }
+
+    infra_harness::process::use_guardian(engine()).unwrap();
+    let root = Root::new();
+    let config = system(&root.0);
+    let services = root.0.join("services");
+
+    // Mock `codex` CLI script that emits Codex JSONL stream events including `sed -n` and `graphify query --graph`!
+    let fake_codex = root.0.join("fake-codex.sh");
+    fs::write(
+        &fake_codex,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'codex-cli 0.0.0\n'
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  printf 'Usage: codex exec\n'
+  exit 0
+fi
+input=$(cat)
+begin() {
+cat <<'EOF'
+{"type":"thread.started","thread_id":"t-1"}
+{"type":"item.completed","item":{"type":"command_execution","command":"sed -n '1,10p' src/work.txt && graphify query \"Order\" --graph /tmp/g.json","exit_code":0}}
+EOF
+}
+end() {
+cat <<'EOF'
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}
+EOF
+}
+case "$input" in
+  *'"phase":"contracts"'*)
+    begin
+    cat <<'EOF'
+{"type":"item.completed","item":{"type":"agent_message","text":"{\"status\":\"completed\",\"summary\":\"Agreed\",\"checks\":[{\"name\":\"scope\",\"status\":\"passed\",\"detail\":\"ok\"}],\"changed_files\":[],\"service_order\":[\"orders\",\"billing\"]}"}}
+EOF
+    end
+    ;;
+  *)
+    begin
+    cat <<'EOF'
+{"type":"item.completed","item":{"type":"agent_message","text":"{\"status\":\"completed\",\"summary\":\"Checked\",\"checks\":[{\"name\":\"unit\",\"status\":\"passed\",\"detail\":\"ok\"}],\"changed_files\":[],\"service_order\":[]}"}}
+EOF
+    end
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut sys =
+        infra_system::catalog::System::new(&config, std::slice::from_ref(&services)).unwrap();
+    let plan = sys
+        .plan(
+            "Bill every placed order",
+            "bridge-e2e",
+            &["orders".into()],
+            &[],
+            16000,
+            2,
+        )
+        .unwrap();
+    let run_dir = root.0.join("bridge-run");
+    let bridge = std::sync::Arc::new(RecordingBridge::default());
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let state = rt.block_on(async {
+        infra_system::native::create_run_with_options(
+            &mut sys,
+            &plan,
+            &run_dir,
+            "codex",
+            fake_codex.to_str(),
+            "read-only",
+            60,
+            "service",
+            Some(true),
+        )
+        .await
+        .unwrap();
+        write_json(
+            &run_dir.join("orders-graph.json"),
+            &json!({"nodes":[],"links":[]}),
+        );
+        infra_system::runner::drive_run_with_bridge(
+            &mut sys,
+            &run_dir,
+            None,
+            infra_system::runner::Acceptance::default(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
+            None,
+            None,
+            bridge.clone(),
+            Some("launch-bridge-1".into()),
+            &mut |_| Ok(()),
+        )
+        .await
+        .unwrap()
+    });
+
+    assert_eq!(state["status"], "completed", "{state:#}");
+    let hooks = bridge.hooks.lock().unwrap().clone();
+    assert!(hooks.iter().any(|h| h.starts_with("run_start:")));
+    assert!(hooks.contains(&"offers:contracts".to_string()));
+    assert!(hooks.contains(&"signal:service-orders".to_string()));
+    assert!(hooks.contains(&"finish:verify".to_string()));
+    assert!(hooks.iter().any(|h| h.ends_with(":completed")));
+
+    let dispatches = infra_system::load_run_evidence(&run_dir, &state).unwrap();
+    assert_eq!(dispatches.len(), 4);
+    let orders_ev = dispatches
+        .iter()
+        .find(|d| d.phase == "service-orders")
+        .unwrap();
+    assert_eq!(orders_ev.launch_id.as_deref(), Some("launch-bridge-1"));
+    assert!(orders_ev.graph_asked);
+    assert!(orders_ev.shell_reads.contains_key("src/work.txt"));
+}

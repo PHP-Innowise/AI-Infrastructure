@@ -1,6 +1,6 @@
-use crate::{api, dom, management, model as m, session};
+use crate::{api, dom, management, model as m, session, system_map};
 use serde_json::{json, Value as V};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 fn editor_current(project: &str, config: &str, generation: u64) -> bool {
@@ -77,12 +77,18 @@ fn reset_system_target(project: &str, config: &str) {
     crate::activity::reset("system-agents");
     crate::activity::reset("system-discovery-agent");
     dom::cancel_timer("system-poll");
+    dom::cancel_timer("system-graph-poll");
     dom::cancel_timer("discovery-poll");
     for key in [
         "editor",
         "editor-generation",
         "system-run",
         "system-catalog",
+        "system-graph-status",
+        "system-graph-monotonic",
+        "system-live-focus",
+        "system-member-selected",
+        "system-change-selected-service",
         "discovery-id",
         "discovery-owner",
     ] {
@@ -95,6 +101,7 @@ fn reset_system_target(project: &str, config: &str) {
         "system-editor",
         "system-run",
         "system-catalog",
+        "system-change-map-workspace",
         "system-discovery-agents",
     ] {
         dom::hidden(id, true);
@@ -142,6 +149,634 @@ pub fn reset_system_project() {
     reset_system_target(&dom::value("system-project"), &dom::value("system-config"));
     controls();
 }
+pub fn leave_systems_view() {
+    dom::cancel_timer("system-graph-poll");
+    crate::graph_explanation::clear_system_context();
+    let status = m::data("graph");
+    let project = dom::value("project");
+    let view = crate::graph::graph_view(&status);
+    let (pill_state, pill_label) = crate::graph::sidebar_status(&project, &status, &view);
+    dom::attr("sidebar-graph-pill", "data-state", pill_state);
+    dom::text("sidebar-graph-label", &pill_label);
+    dom::attr("sidebar-graph-pill", "title", &pill_label);
+    dom::attr("sidebar-graph-pill", "aria-label", &pill_label);
+    spawn_local(async {
+        crate::graph::load(false).await;
+    });
+}
+
+pub fn focus_system_graph_workspace() {
+    let view = m::read(|s| s.view.clone());
+    let ws_id = if view == "system-changes" {
+        "system-change-map-workspace"
+    } else {
+        "system-map-workspace"
+    };
+    spawn_local(async {
+        poll_system_graph_status(true).await;
+    });
+    dom::attr(ws_id, "tabindex", "-1");
+    if let Some(el) = dom::get(ws_id) {
+        el.scroll_into_view();
+    }
+    dom::focus(ws_id);
+}
+
+/// Switches either `Services` (`surface == "services"`) or `Changes` (`surface == "changes"`)
+/// from the cross-service topology canvas into a member service's (or `__system__`'s) code map.
+pub fn drill_down_service_map(surface: &str, service_id: &str, focus_path: Option<&str>) {
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    if service_id.is_empty() {
+        return;
+    }
+    if surface == "changes" {
+        m::set("system-change-selected-service", json!(service_id));
+        dom::hidden("system-change-topology-panel", true);
+        dom::hidden("system-change-graph-workspace", false);
+        dom::attr("system-change-tab-topology", "aria-pressed", "false");
+        dom::text(
+            "system-change-graph-title",
+            &format!("Service: {service_id}"),
+        );
+        sync_change_service_tabs();
+        let scope = build_system_graph_scope(&project, &config, service_id, true);
+        crate::graph_map::load_system_embedded(
+            crate::graph_map::SystemEmbeddedKind::Change,
+            Some(scope.clone()),
+            false,
+        );
+        let st = &m::data("system-graph-status")["services"][service_id];
+        if st.is_object() {
+            crate::graph::sync_embedded_progress_for_surface("system-change-graph", st);
+        }
+        let live_focus = current_service_live_focus(service_id).unwrap_or(V::Null);
+        crate::graph_map::apply_system_live_focus(
+            crate::graph_map::SystemEmbeddedKind::Change,
+            &live_focus,
+        );
+        if let Some(path) = focus_path.filter(|p| !p.trim().is_empty()) {
+            crate::graph_map::open_system_file_impact(scope, path, None);
+        }
+    } else {
+        m::set("system-member-selected", json!(service_id));
+        dom::hidden("system-map", true);
+        dom::hidden("system-member-graph-workspace", false);
+        dom::hidden("system-member-picker-field", false);
+        dom::attr("system-map-level-topology", "aria-pressed", "false");
+        dom::attr("system-map-level-service", "aria-pressed", "true");
+        dom::set_value("system-member-select", service_id);
+        dom::text(
+            "system-member-graph-title",
+            &format!("Service: {service_id}"),
+        );
+        let scope = build_system_graph_scope(&project, &config, service_id, false);
+        crate::graph_map::load_system_embedded(
+            crate::graph_map::SystemEmbeddedKind::Member,
+            Some(scope.clone()),
+            false,
+        );
+        let st = &m::data("system-graph-status")["services"][service_id];
+        if st.is_object() {
+            crate::graph::sync_embedded_progress_for_surface("system-member-graph", st);
+        }
+        if let Some(path) = focus_path.filter(|p| !p.trim().is_empty()) {
+            crate::graph_map::open_system_file_impact(scope, path, None);
+        }
+    }
+}
+
+pub fn switch_services_to_topology() {
+    dom::hidden("system-map", false);
+    dom::hidden("system-member-graph-workspace", true);
+    dom::hidden("system-member-picker-field", true);
+    dom::attr("system-map-level-topology", "aria-pressed", "true");
+    dom::attr("system-map-level-service", "aria-pressed", "false");
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    let cat = m::data("system-catalog")["catalog"].clone();
+    let status = m::data("system-graph-status");
+    system_map::refresh_services_map(&project, &config, &cat, &status);
+}
+
+pub fn switch_changes_to_topology() {
+    m::take("system-change-selected-service");
+    dom::hidden("system-change-topology-panel", false);
+    dom::hidden("system-change-graph-workspace", true);
+    dom::attr("system-change-tab-topology", "aria-pressed", "true");
+    sync_change_service_tabs();
+    sync_changes_map_workspace();
+}
+
+/// Computes `(data-state, label)` for `#system-graphs-pill` and `#sidebar-graph-pill` from `/api/systems/graph/status`.
+pub fn aggregate_graphs_pill(status: &V) -> (&'static str, String) {
+    if !status.is_object() {
+        return ("idle", "Service graphs: loading…".to_owned());
+    }
+    let ready = status["ready_count"].as_u64().unwrap_or_else(|| {
+        status["services"]
+            .as_object()
+            .map(|m_obj| m_obj.values().filter(|s| s["state"] == "ready").count() as u64)
+            .unwrap_or(0)
+    });
+    let total = status["total_count"].as_u64().unwrap_or_else(|| {
+        status["services"]
+            .as_object()
+            .map(|m_obj| m_obj.len() as u64)
+            .unwrap_or(0)
+    });
+    let building = status["building_count"].as_u64().unwrap_or_else(|| {
+        status["services"]
+            .as_object()
+            .map(|m_obj| {
+                m_obj
+                    .values()
+                    .filter(|s| s["state"] == "building" || s["build"].is_object())
+                    .count() as u64
+            })
+            .unwrap_or(0)
+    });
+    if building > 0 || status["state"] == "building" {
+        return (
+            "building",
+            format!("Service graphs: {ready}/{total} ready · {building} building"),
+        );
+    }
+    match status["state"].as_str().unwrap_or("") {
+        "failed" => (
+            "failed",
+            format!("Service graphs: {ready}/{total} ready · failed"),
+        ),
+        "stale" => (
+            "stale",
+            format!("Service graphs: {ready}/{total} ready · stale"),
+        ),
+        "missing" => ("missing", "Graphify not installed".to_owned()),
+        "off" => (
+            "off",
+            format!("Service graphs: off ({ready}/{total} ready)"),
+        ),
+        _ if total > 0 && ready == total => {
+            ("ready", format!("Service graphs: {ready}/{total} ready"))
+        }
+        _ if total > 0 => ("empty", format!("Service graphs: {ready}/{total} ready")),
+        _ => ("idle", "Service graphs: 0/0 ready".to_owned()),
+    }
+}
+
+/// Clamps and enforces monotonic `1..=99%` progress per building member service so bars never jump backward.
+pub fn monotonic_service_graph_status(
+    service_id: &str,
+    raw: &V,
+    cache: &mut BTreeMap<String, u64>,
+) -> V {
+    if !raw.is_object() {
+        cache.remove(service_id);
+        return raw.clone();
+    }
+    let is_building = raw["state"] == "building" || raw["build"].is_object();
+    if !is_building {
+        cache.remove(service_id);
+        return raw.clone();
+    }
+    let mut out = raw.clone();
+    let reported = raw["build"]["percent"]
+        .as_u64()
+        .or_else(|| raw["percent"].as_u64())
+        .unwrap_or(1)
+        .clamp(1, 99);
+    let prev = cache.get(service_id).copied().unwrap_or(1);
+    let clamped = reported.max(prev).clamp(1, 99);
+    cache.insert(service_id.to_owned(), clamped);
+    if !out["build"].is_object() {
+        out["build"] = json!({});
+    }
+    out["build"]["percent"] = json!(clamped);
+    out
+}
+
+fn apply_monotonic_statuses(mut agg: V) -> V {
+    let mut map_cache: BTreeMap<String, u64> = m::data("system-graph-monotonic")
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_u64()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(services) = agg["services"].as_object_mut() {
+        for (sid, s_val) in services.iter_mut() {
+            *s_val = monotonic_service_graph_status(sid, s_val, &mut map_cache);
+        }
+    }
+    m::set("system-graph-monotonic", json!(map_cache));
+    agg
+}
+
+fn catalog_service_ids() -> Vec<String> {
+    let cat = &m::data("system-catalog")["catalog"];
+    let mut ids: Vec<String> = m::array(&cat["services"])
+        .into_iter()
+        .map(|s| m::text(&s, "id"))
+        .filter(|id| !id.is_empty())
+        .collect();
+    if !ids.iter().any(|s| s == "__system__") {
+        ids.push("__system__".to_owned());
+    }
+    ids
+}
+
+fn build_system_graph_scope(
+    project_id: &str,
+    config_path: &str,
+    service_id: &str,
+    include_run: bool,
+) -> crate::graph::GraphTargetScope {
+    let services = catalog_service_ids();
+    let run_doc = m::data("system-run");
+    let (run_id, run_title, launches) = if include_run && run_doc.is_object() {
+        let rid = m::text(&run_doc, "id");
+        let title = {
+            let cid = m::text(&run_doc, "change_id");
+            let task = m::text(&run_doc["plan"], "task");
+            if !cid.is_empty() && !task.is_empty() {
+                Some(format!("{cid} · {task}"))
+            } else if !cid.is_empty() {
+                Some(cid)
+            } else if !rid.is_empty() {
+                Some(rid.clone())
+            } else {
+                None
+            }
+        };
+        (
+            (!rid.is_empty()).then_some(rid),
+            title,
+            m::array(&run_doc["launches"]),
+        )
+    } else {
+        (None, None, Vec::new())
+    };
+    crate::graph::GraphTargetScope::SystemService {
+        project_id: project_id.to_owned(),
+        config_path: config_path.to_owned(),
+        service_id: service_id.to_owned(),
+        services,
+        run_id,
+        run_title,
+        launches,
+    }
+}
+
+fn sync_system_explanation_context_from_dom() {
+    let project = dom::value("system-project");
+    if project.is_empty() {
+        return;
+    }
+    let config = dom::value("system-config");
+    let provider = dom::value("system-provider");
+    crate::graph_explanation::set_system_context(
+        &project,
+        &config,
+        &provider,
+        catalog_service_ids(),
+    );
+}
+
+fn sync_system_graph_header(agg: &V) {
+    let (state, label) = aggregate_graphs_pill(agg);
+    dom::attr("system-graphs-pill", "data-state", state);
+    dom::text("system-graphs-pill-text", &label);
+    if let Some(tell) = agg["tell_agents"].as_bool().or(agg["agents"].as_bool()) {
+        dom::set_checked("system-graphs-agents", tell);
+        if !m::yes(&m::data("system-graph-prompt-touched")) {
+            dom::set_checked("system-graph-prompt", tell);
+        }
+    }
+    crate::graph::sync_sidebar_pill_for_system(agg);
+    session::sync_working_indicator();
+}
+
+async fn poll_system_graph_status(check: bool) {
+    dom::cancel_timer("system-graph-poll");
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    if project.is_empty() {
+        return;
+    }
+    let epoch = m::next("system-graph-status-fetch");
+    let q = dom::query(&[
+        ("project_id", project.clone()),
+        ("config_path", config.clone()),
+        ("check", if check { "1" } else { "0" }.to_owned()),
+    ]);
+    if let Ok(raw) = api::get(&format!("/api/systems/graph/status{q}")).await {
+        if !m::current("system-graph-status-fetch", epoch) {
+            return;
+        }
+        let agg = apply_monotonic_statuses(raw);
+        m::set("system-graph-status", agg.clone());
+        sync_system_graph_header(&agg);
+        update_service_card_pills(&agg);
+
+        if let Some(member_svc) = m::data("system-member-selected")
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            let st = &agg["services"][member_svc];
+            if st.is_object() {
+                crate::graph::sync_embedded_progress_for_surface("system-member-graph", st);
+            }
+        }
+        if let Some(change_svc) = m::data("system-change-selected-service")
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            let st = &agg["services"][change_svc];
+            if st.is_object() {
+                crate::graph::sync_embedded_progress_for_surface("system-change-graph", st);
+            }
+        }
+
+        let cat = m::data("system-catalog")["catalog"].clone();
+        if cat.is_object() {
+            system_map::refresh_services_map(&project, &config, &cat, &agg);
+            sync_changes_map_workspace();
+        }
+
+        let building =
+            agg["building_count"].as_u64().unwrap_or(0) > 0 || agg["state"] == "building";
+        if building && m::read(|s| matches!(s.view.as_str(), "systems" | "system-changes")) {
+            dom::later("system-graph-poll", 900, || {
+                spawn_local(async {
+                    poll_system_graph_status(false).await;
+                });
+            });
+        }
+    }
+}
+
+async fn post_system_graph_action(action: &str, service: Option<&str>) {
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    if project.is_empty() {
+        return;
+    }
+    let mut body = json!({
+        "project_id": project,
+        "config_path": config,
+        "action": action,
+    });
+    if let Some(svc) = service.filter(|s| !s.is_empty()) {
+        body["service"] = json!(svc);
+    }
+    let _ = api::post("/api/systems/graph", body).await;
+    poll_system_graph_status(true).await;
+}
+
+fn update_service_card_pills(agg: &V) {
+    let Some(services_obj) = agg["services"].as_object() else {
+        return;
+    };
+    for (sid, st) in services_obj {
+        if let Some(slot) = dom::get(&format!("system-service-graph-slot-{sid}")) {
+            slot.set_inner_html(&crate::graph::render_service_graph_pill_html(sid, st));
+        }
+    }
+}
+
+pub fn build_changes_overlay(
+    run_doc: &V,
+    plan_form_open: bool,
+    plan_seeds: &[String],
+    depth: u64,
+    raw_contracts: &str,
+) -> V {
+    let parsed_contracts: Vec<String> = raw_contracts
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    if !run_doc.is_object() || plan_form_open {
+        return json!({
+            "stage": "plan",
+            "run_id": "",
+            "seed_services": plan_seeds,
+            "depth": depth,
+            "changed_contracts": parsed_contracts,
+            "step_states": {},
+            "cross_service_unopened": [],
+        });
+    }
+
+    let run_id = m::text(run_doc, "id");
+    let running = m::yes(&run_doc["active"]);
+    let steps = if run_doc["execution"]["steps"].is_array() {
+        m::array(&run_doc["execution"]["steps"])
+    } else {
+        m::array(&run_doc["plan"]["steps"])
+    };
+    let mut step_states = serde_json::Map::new();
+    for step in &steps {
+        let svc = m::text(step, "service");
+        if !svc.is_empty() && svc != "__system__" {
+            let st = shown_status(step, &run_doc["receipts"], running);
+            step_states.insert(svc, json!(st));
+        }
+    }
+
+    let seeds: Vec<String> = m::array(&run_doc["plan"]["context"]["services"])
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let unopened = if run_doc["cross_service_unopened"].is_array() {
+        run_doc["cross_service_unopened"].clone()
+    } else if run_doc["evidence"]["cross_service_unopened"].is_array() {
+        run_doc["evidence"]["cross_service_unopened"].clone()
+    } else {
+        json!([])
+    };
+
+    let stage = if running {
+        "run"
+    } else if run_doc["session_id"].is_string() {
+        "receipts"
+    } else {
+        "review"
+    };
+
+    json!({
+        "stage": stage,
+        "run_id": run_id,
+        "seed_services": if seeds.is_empty() { plan_seeds } else { &seeds },
+        "depth": run_doc["plan"]["depth"].as_u64().unwrap_or(depth),
+        "changed_contracts": parsed_contracts,
+        "step_states": V::Object(step_states),
+        "evidence": run_doc["evidence"],
+        "cross_service_unopened": unopened,
+    })
+}
+
+fn extract_service_graph_focus_map(run_doc: &V) -> serde_json::Map<String, V> {
+    let mut out = serde_json::Map::new();
+    if let Some(gf) = run_doc["graph_focus"].as_object() {
+        if let Some(services_obj) = gf.get("services").and_then(V::as_object) {
+            for (k, v) in services_obj {
+                if v.is_object() {
+                    out.insert(k.clone(), v.clone());
+                }
+            }
+        } else if let Some(svc) = gf.get("service").and_then(V::as_str) {
+            let f = gf
+                .get("focus")
+                .cloned()
+                .unwrap_or_else(|| run_doc["graph_focus"].clone());
+            out.insert(svc.to_owned(), f);
+        } else {
+            for (k, v) in gf {
+                if k != "aggregate" && v.is_object() {
+                    out.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    for ev in m::array(&run_doc["events"]) {
+        if ev["kind"] == "graph_focus" {
+            let svc = m::text(&ev, "service");
+            if !svc.is_empty() && ev["focus"].is_object() {
+                out.insert(svc, ev["focus"].clone());
+            }
+        }
+    }
+    out
+}
+
+fn current_service_live_focus(service_id: &str) -> Option<V> {
+    let cache = m::data("system-live-focus");
+    if cache[service_id].is_object() {
+        return Some(cache[service_id].clone());
+    }
+    let run_doc = m::data("system-run");
+    extract_service_graph_focus_map(&run_doc)
+        .get(service_id)
+        .cloned()
+}
+
+fn ingest_run_graph_focus(run_doc: &V) {
+    let mut by_svc = m::data("system-live-focus")
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for (svc, focus) in extract_service_graph_focus_map(run_doc) {
+        by_svc.insert(svc, focus);
+    }
+    m::set("system-live-focus", V::Object(by_svc));
+    let selected_svc = m::text(
+        &json!({ "s": m::data("system-change-selected-service") }),
+        "s",
+    );
+    if !selected_svc.is_empty() {
+        let live_focus = current_service_live_focus(&selected_svc).unwrap_or(V::Null);
+        crate::graph_map::apply_system_live_focus(
+            crate::graph_map::SystemEmbeddedKind::Change,
+            &live_focus,
+        );
+    }
+}
+
+fn sync_change_service_tabs() {
+    let Some(wrap) = dom::get("system-change-service-tabs") else {
+        return;
+    };
+    let cat = &m::data("system-catalog")["catalog"];
+    let run_doc = m::data("system-run");
+    let active_svc = m::data("system-change-selected-service")
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+
+    let mut service_ids: Vec<String> = m::array(&run_doc["plan"]["context"]["services"])
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    if service_ids.is_empty() {
+        service_ids = m::array(&cat["services"])
+            .into_iter()
+            .map(|s| m::text(&s, "id"))
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    if !service_ids.is_empty() && !service_ids.iter().any(|s| s == "__system__") {
+        service_ids.push("__system__".to_owned());
+    }
+
+    let running = m::yes(&run_doc["active"]);
+    let steps = if run_doc["execution"]["steps"].is_array() {
+        m::array(&run_doc["execution"]["steps"])
+    } else {
+        m::array(&run_doc["plan"]["steps"])
+    };
+
+    wrap.set_text_content(None);
+    for sid in service_ids {
+        let step_st = steps
+            .iter()
+            .find(|s| s["service"] == sid)
+            .map(|s| shown_status(s, &run_doc["receipts"], running))
+            .unwrap_or_default();
+        let label = if sid == "__system__" {
+            "Shared (__system__)".to_owned()
+        } else if !step_st.is_empty() {
+            format!("{sid} · {step_st}")
+        } else {
+            sid.clone()
+        };
+        let btn = dom::button(
+            &label,
+            "system-change-service-tab",
+            json!({ "service": sid }),
+        );
+        btn.set_class_name("button compact session-graph-btn session-graph-toggle");
+        let _ = btn.set_attribute(
+            "aria-pressed",
+            if active_svc == sid { "true" } else { "false" },
+        );
+        dom::add(&wrap, &btn);
+    }
+}
+
+fn sync_changes_map_workspace() {
+    let cat_wrap = m::data("system-catalog");
+    let cat = &cat_wrap["catalog"];
+    let run_doc = m::data("system-run");
+    let has_content = cat.is_object() || run_doc.is_object();
+    dom::hidden("system-change-map-workspace", !has_content);
+    if !has_content {
+        return;
+    }
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    let checked_seeds: Vec<String> = dom::selected_checks("system-plan-services")
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let depth = dom::value("system-depth").parse::<u64>().unwrap_or(32);
+    let contracts_raw = dom::value("system-contracts");
+    let plan_form_open = dom::get("system-plan-form").is_some_and(|f| !f.has_attribute("hidden"));
+    let overlay = build_changes_overlay(
+        &run_doc,
+        plan_form_open,
+        &checked_seeds,
+        depth,
+        &contracts_raw,
+    );
+    let status = m::data("system-graph-status");
+    sync_change_service_tabs();
+    system_map::refresh_changes_map(&project, &config, cat, &status, &overlay);
+}
+
 pub async fn load() {
     if !sync_editor_target() {
         return;
@@ -156,6 +791,11 @@ pub async fn load() {
     if project.is_empty() {
         return;
     }
+    if m::data("system-catalog").is_null() && !m::yes(&m::data("editor-dirty")) {
+        catalog_fetch(true).await;
+    } else {
+        poll_system_graph_status(false).await;
+    }
     let path = format!("/api/system-runs?project_id={}", dom::enc(&project));
     match api::scoped("system-list", &path).await {
         Ok((epoch, value))
@@ -166,6 +806,8 @@ pub async fn load() {
             let id = dom::value("system-runs");
             if !id.is_empty() {
                 read(&id).await;
+            } else {
+                sync_changes_map_workspace();
             }
         }
         Err(error) if !error.aborted && system_current(&project, "", generation) => {
@@ -423,11 +1065,14 @@ async fn read_scoped(id: &str, project: &str, generation: u64) {
             }
             value["view_generation"] = json!(generation);
             m::set("system-run", value.clone());
+            ingest_run_graph_focus(&value);
+            crate::activity::set_run_evidence(id, &value);
             render_run();
             agents(&value).await;
             // Sessions shows each launch; its status changes when the run stops.
             if stopped {
                 session::refresh().await;
+                poll_system_graph_status(false).await;
             }
             if system_current(project, id, generation) && m::yes(&value["active"]) {
                 let id = id.to_owned();
@@ -592,6 +1237,7 @@ async fn catalog_fetch(quiet_when_missing: bool) {
         {
             m::set("system-catalog", value.clone());
             render_catalog(&value);
+            poll_system_graph_status(true).await;
         }
         Err(error)
             if editor_current(&project, &config, generation)
@@ -603,20 +1249,11 @@ async fn catalog_fetch(quiet_when_missing: bool) {
         _ => {}
     }
 }
-fn svg(tag: &str, attrs: &[(&str, String)], text: &str) -> web_sys::Element {
-    let e = dom::document()
-        .create_element_ns(Some("http://www.w3.org/2000/svg"), tag)
-        .expect("SVG element");
-    for (k, v) in attrs {
-        let _ = e.set_attribute(k, v);
-    }
-    e.set_text_content(Some(text));
-    e
-}
 /// The line from a provider node to a consumer node (190×76 boxes on a 236×124
 /// grid). It leaves and enters on the facing sides, so it never crosses its own
 /// two boxes; a pair linked both ways gets two parallel lines; a link that skips
 /// boxes in the same row arcs over them (forward) or under them (backward).
+#[cfg(test)]
 fn edge_path(a: (usize, usize), b: (usize, usize)) -> String {
     let (ax, ay) = (a.0 as i64, a.1 as i64);
     let (bx, by) = (b.0 as i64, b.1 as i64);
@@ -844,6 +1481,96 @@ fn warning_text(warning: &V) -> String {
     .collect::<Vec<_>>()
     .join(": ")
 }
+fn metric_list(rows: &[(&str, String, bool)]) -> web_sys::Element {
+    let dl = dom::el("dl", "memory-metrics", "");
+    for (term, val, is_zero) in rows {
+        dom::add(&dl, &dom::el("dt", "", term));
+        let dd = dom::el("dd", "", val);
+        if *is_zero {
+            let _ = dd.set_attribute("data-zero", "true");
+        }
+        dom::add(&dl, &dd);
+    }
+    dl
+}
+
+pub fn receipt_changed_files(receipt: &V) -> (String, Vec<String>) {
+    let phase = m::text(receipt, "phase");
+    let mut service = m::text(receipt, "service");
+    if service.is_empty() {
+        service = m::text(&receipt["evidence"], "service");
+    }
+    if service.is_empty() {
+        service = if let Some(rest) = phase.strip_prefix("service-") {
+            rest.to_owned()
+        } else {
+            "__system__".to_owned()
+        };
+    }
+    let mut seen = BTreeSet::new();
+    let mut files = Vec::new();
+    for src in [
+        &receipt["report"]["changed_files"],
+        &receipt["evidence"]["changed_files"],
+        &receipt["evidence"]["git_changed"],
+        &receipt["evidence"]["ledger_edited"],
+    ] {
+        for item in m::array(src) {
+            let path = item
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| m::text(&item, "path"));
+            let trimmed = path.trim();
+            if !trimmed.is_empty() && seen.insert(trimmed.to_owned()) {
+                files.push(trimmed.to_owned());
+            }
+        }
+    }
+    (service, files)
+}
+
+fn receipt_evidence_summary(evidence: &V) -> Option<(String, bool)> {
+    if !evidence.is_object() {
+        return None;
+    }
+    let opened_count = if evidence["opened"].is_array() {
+        m::array(&evidence["opened"]).len()
+    } else {
+        m::array(&evidence["opened_files"]).len()
+    };
+    let shell_reads_count = m::array(&evidence["shell_reads"]).len();
+    let (graph_part, has_graph) = if let Some(asked) = evidence["graph_asked"].as_bool() {
+        (
+            if asked {
+                "graph queried".to_owned()
+            } else {
+                "graph not queried".to_owned()
+            },
+            asked,
+        )
+    } else {
+        let queries = evidence["graph_query_count"]
+            .as_u64()
+            .unwrap_or_else(|| m::array(&evidence["graph_queries"]).len() as u64);
+        (format!("{queries} graph queries"), queries > 0)
+    };
+    let summary = if shell_reads_count > 0 {
+        format!("{opened_count} files · {shell_reads_count} shell reads · {graph_part}")
+    } else {
+        format!("{opened_count} files · {graph_part}")
+    };
+    Some((
+        summary,
+        opened_count == 0 && shell_reads_count == 0 && !has_graph,
+    ))
+}
+
+fn run_has_agent_activity(v: &V) -> bool {
+    !m::array(&v["launches"]).is_empty()
+        || !m::array(&v["evidence"]["dispatches"]).is_empty()
+        || !m::array(&v["receipts"]).is_empty()
+}
+
 fn render_catalog(v: &V) {
     let catalog = &v["catalog"];
     let services = m::array(&catalog["services"]);
@@ -891,154 +1618,51 @@ fn render_catalog(v: &V) {
             ordered.push(id);
         }
     }
-    let columns = ordered.len().clamp(1, 4);
-    let width = columns * 236 + 2;
-    let height = ordered.len().div_ceil(columns) * 124;
-    let map = svg(
-        "svg",
-        &[
-            ("viewBox", format!("0 0 {width} {height}")),
-            ("width", width.to_string()),
-            ("height", height.to_string()),
-            ("role", "img".into()),
-            ("aria-label", "Declared service contract graph".into()),
-        ],
-        "",
-    );
-    let defs = svg("defs", &[], "");
-    let marker = svg(
-        "marker",
-        &[
-            ("id", "system-arrow".into()),
-            ("viewBox", "0 0 10 10".into()),
-            ("refX", "9".into()),
-            ("refY", "5".into()),
-            ("markerWidth", "6".into()),
-            ("markerHeight", "6".into()),
-            ("orient", "auto-start-reverse".into()),
-        ],
-        "",
-    );
-    dom::add(
-        &marker,
-        &svg(
-            "path",
-            &[
-                ("d", "M 0 0 L 10 5 L 0 10 z".into()),
-                ("class", "system-arrow".into()),
-            ],
-            "",
-        ),
-    );
-    dom::add(&defs, &marker);
-    dom::add(&map, &defs);
-    let positions: BTreeMap<_, _> = ordered
-        .iter()
-        .enumerate()
-        .map(|(i, id)| {
-            (
-                id.clone(),
-                (24 + (i % columns) * 236, 24 + (i / columns) * 124),
-            )
-        })
-        .collect();
-    for edge in &edges {
-        if let (Some(a), Some(b)) = (
-            positions.get(&m::text(edge, "provider")),
-            positions.get(&m::text(edge, "consumer")),
-        ) {
-            let path = svg(
-                "path",
-                &[
-                    ("d", edge_path(*a, *b)),
-                    ("class", "system-edge".into()),
-                    ("marker-end", "url(#system-arrow)".into()),
-                ],
-                "",
-            );
-            dom::add(
-                &path,
-                &svg(
-                    "title",
-                    &[],
-                    &format!(
-                        "{} → {}: {}",
-                        m::text(edge, "provider"),
-                        m::text(edge, "consumer"),
-                        m::text(edge, "contract")
-                    ),
-                ),
-            );
-            dom::add(&map, &path);
+
+    let project = dom::value("system-project");
+    let config = dom::value("system-config");
+    let provider = {
+        let p = dom::value("system-provider");
+        if !p.is_empty() {
+            p
+        } else {
+            dom::value("system-discovery-provider")
         }
+    };
+
+    let mut member_options: Vec<V> = ordered
+        .iter()
+        .map(|sid| json!({ "id": sid, "label": sid }))
+        .collect();
+    member_options.push(json!({ "id": "__system__", "label": "Shared (__system__)" }));
+    let chosen_member = m::data("system-member-selected")
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| ordered.first().cloned());
+    dom::options(
+        "system-member-select",
+        &member_options,
+        m::summary,
+        chosen_member.as_deref(),
+    );
+
+    let mut explain_services = ordered.clone();
+    if !explain_services.iter().any(|s| s == "__system__") {
+        explain_services.push("__system__".to_owned());
     }
+    crate::graph_explanation::set_system_context(&project, &config, &provider, explain_services);
+
+    let graph_status = m::data("system-graph-status");
     dom::clear("system-services");
     let chosen = dom::selected_checks("system-plan-services");
     dom::clear("system-plan-services");
-    for id in ordered {
-        let Some(service) = services.iter().find(|s| s["id"] == id) else {
+    for id in &ordered {
+        let Some(service) = services.iter().find(|s| s["id"] == *id) else {
             continue;
         };
-        let (x, y) = positions[&id];
-        let group = svg(
-            "g",
-            &[(
-                "class",
-                format!(
-                    "system-node{}",
-                    if service["access"] == "available" {
-                        ""
-                    } else {
-                        " unavailable"
-                    }
-                ),
-            )],
-            "",
-        );
-        dom::add(
-            &group,
-            &svg(
-                "rect",
-                &[
-                    ("x", x.to_string()),
-                    ("y", y.to_string()),
-                    ("width", "190".into()),
-                    ("height", "76".into()),
-                    ("rx", "8".into()),
-                ],
-                "",
-            ),
-        );
-        dom::add(
-            &group,
-            &svg(
-                "text",
-                &[
-                    ("x", (x + 16).to_string()),
-                    ("y", (y + 28).to_string()),
-                    ("class", "system-node-title".into()),
-                ],
-                &id,
-            ),
-        );
-        dom::add(
-            &group,
-            &svg(
-                "text",
-                &[
-                    ("x", (x + 16).to_string()),
-                    ("y", (y + 48).to_string()),
-                    ("class", "system-node-meta".into()),
-                ],
-                service["declared"]["owner"]
-                    .as_str()
-                    .unwrap_or("No passport"),
-            ),
-        );
-        dom::add(&group, &svg("title", &[], &m::text(service, "root")));
-        dom::add(&map, &group);
         let card = dom::el("article", "system-card", "");
-        dom::add(&card, &dom::el("h4", "", &id));
+        dom::add(&card, &dom::el("h4", "", id));
         dom::add(
             &card,
             &dom::el("p", "", &m::text(&service["declared"], "description")),
@@ -1081,8 +1705,47 @@ fn render_catalog(v: &V) {
                 ),
             );
         }
+        let svc_graph = &graph_status["services"][id.as_str()];
+        let slot = dom::el("div", "system-service-graph-slot", "");
+        let _ = slot.set_attribute("id", &format!("system-service-graph-slot-{id}"));
+        slot.set_inner_html(&crate::graph::render_service_graph_pill_html(id, svc_graph));
+        dom::add(&card, &slot);
+
+        let svc_state = svc_graph["state"].as_str().unwrap_or("off");
+        let build_label = if matches!(svc_state, "off" | "empty" | "") {
+            "Enable code graph"
+        } else {
+            "Rebuild graph"
+        };
+        let actions = dom::el("div", "skills-actions system-card-actions", "");
+        let build_btn = dom::button(
+            build_label,
+            "system-service-graph-build",
+            json!({ "service": id, "state": svc_state }),
+        );
+        build_btn.set_class_name("button compact");
+        if matches!(svc_state, "building" | "missing") || service["access"] != "available" {
+            let _ = build_btn.set_attribute("disabled", "");
+        }
+        let map_btn = dom::button(
+            "Code map",
+            "system-service-code-map",
+            json!({ "service": id }),
+        );
+        map_btn.set_class_name("button compact");
+        let changes_btn = dom::button(
+            "Changes on map",
+            "system-service-changes-map",
+            json!({ "service": id }),
+        );
+        changes_btn.set_class_name("button compact");
+        dom::add(&actions, &build_btn);
+        dom::add(&actions, &map_btn);
+        dom::add(&actions, &changes_btn);
+        dom::add(&card, &actions);
+
         dom::append("system-services", &card);
-        let choice = dom::check(&id, "system-service", &id, chosen.iter().any(|v| v == &id));
+        let choice = dom::check(id, "system-service", id, chosen.iter().any(|v| v == id));
         if service["access"] != "available" {
             if let Ok(Some(input)) = choice.query_selector("input") {
                 let _ = input.set_attribute("disabled", "");
@@ -1090,8 +1753,10 @@ fn render_catalog(v: &V) {
         }
         dom::append("system-plan-services", &choice);
     }
-    dom::clear("system-map");
-    dom::append("system-map", &map);
+
+    system_map::refresh_services_map(&project, &config, catalog, &graph_status);
+    sync_changes_map_workspace();
+
     dom::rows(
         "system-relationships",
         &edges
@@ -1117,19 +1782,34 @@ fn render_catalog(v: &V) {
     }
     dom::clear("system-banks");
     for service in services {
-        dom::append(
-            "system-banks",
-            &dom::el(
-                "p",
-                "system-card-meta",
-                &format!(
-                    "{} · {}/project-brain · {}/memory-bank",
-                    m::text(&service, "id"),
-                    m::text(&service, "root"),
-                    m::text(&service, "root")
-                ),
+        let sid = m::text(&service, "id");
+        let root = m::text(&service, "root");
+        let access = m::text(&service, "access");
+        let gstate = graph_status["services"][&sid]["state"]
+            .as_str()
+            .unwrap_or("off");
+        let bank_card = dom::el("article", "system-card", "");
+        dom::add(&bank_card, &dom::el("h5", "", &sid));
+        let dl = metric_list(&[
+            ("Project Brain", format!("{root}/project-brain"), false),
+            ("Memory Bank", format!("{root}/memory-bank"), false),
+            (
+                "Access",
+                if access.is_empty() {
+                    "unknown".to_owned()
+                } else {
+                    m::label(&access)
+                },
+                access != "available",
             ),
-        );
+            (
+                "Code graph",
+                m::label(gstate),
+                matches!(gstate, "off" | "empty" | "missing"),
+            ),
+        ]);
+        dom::add(&bank_card, &dl);
+        dom::append("system-banks", &bank_card);
     }
     controls();
 }
@@ -1137,9 +1817,12 @@ fn render_run() {
     let v = m::data("system-run");
     if !v.is_object() {
         dom::hidden("system-run", true);
+        sync_changes_map_workspace();
         return;
     }
     dom::hidden("system-run", false);
+    ingest_run_graph_focus(&v);
+    crate::activity::set_run_evidence(&m::text(&v, "id"), &v);
     stepper(&v);
     // The list entry follows the run's status as it changes.
     if let Some(option) = dom::get("system-runs")
@@ -1157,16 +1840,26 @@ fn render_run() {
         &format!("{} · {}", m::text(&v, "change_id"), m::text(&v, "system")),
     );
     dom::text("system-run-status", &run_status(&v));
+    dom::hidden(
+        "system-selection-note",
+        v["plan"]["status"] != "needs_selection",
+    );
     dom::pretty("system-plan-json", &v["plan"]);
     dom::clear("system-plan-summary");
-    for (term, value) in [
-        ("Participants", joined(&v["plan"]["context"]["services"])),
-        ("Context", context_summary(&v["plan"])),
-        ("Shared memory", shared_memory_summary(&v["plan"])),
-        ("System file", m::text(&v, "config_path")),
+    let participants = joined(&v["plan"]["context"]["services"]);
+    let shared_mem = shared_memory_summary(&v["plan"]);
+    for (term, value, is_zero) in [
+        ("Participants", participants.clone(), participants == "none"),
+        ("Context", context_summary(&v["plan"]), false),
+        ("Shared memory", shared_mem.clone(), shared_mem == "none"),
+        ("System file", m::text(&v, "config_path"), false),
     ] {
         dom::append("system-plan-summary", &dom::el("dt", "", term));
-        dom::append("system-plan-summary", &dom::el("dd", "", &value));
+        let dd = dom::el("dd", "", &value);
+        if is_zero {
+            let _ = dd.set_attribute("data-zero", "true");
+        }
+        dom::append("system-plan-summary", &dd);
     }
     let steps = if v["execution"]["steps"].is_array() {
         m::array(&v["execution"]["steps"])
@@ -1205,6 +1898,11 @@ fn render_run() {
                 .unwrap_or(&dom::value("system-provider")),
         ),
     );
+    if !m::yes(&m::data("system-graph-prompt-touched")) {
+        if let Some(tell) = v["tell_agents_graph"].as_bool() {
+            dom::set_checked("system-graph-prompt", tell);
+        }
+    }
     let mut retry =
         vec![json!({"id":"","label":"Reconcile saved receipt / continue pending dispatch"})];
     let unfinished = steps
@@ -1252,61 +1950,124 @@ fn render_run() {
     {
         input.set_checked(false);
     }
-    dom::rows(
-        "system-receipts",
-        &m::array(&v["receipts"])
-            .iter()
-            .map(|receipt| {
-                let mut receipt = receipt.clone();
-                let accepted = steps.iter().any(|step| {
-                    step["id"] == receipt["phase"]
-                        && step["attempt"] == receipt["attempt"]
-                        && step["accepted_unrun_checks"].is_array()
-                });
-                let outcome = if accepted {
-                    format!("{}; a person accepted them", receipt_outcome(&receipt))
-                } else {
-                    receipt_outcome(&receipt)
-                };
-                receipt["title"] = json!(format!(
+
+    let receipts = m::array(&v["receipts"]);
+    dom::clear("system-receipts");
+    for receipt in &receipts {
+        let accepted = steps.iter().any(|step| {
+            step["id"] == receipt["phase"]
+                && step["attempt"] == receipt["attempt"]
+                && step["accepted_unrun_checks"].is_array()
+        });
+        let outcome = if accepted {
+            format!("{}; a person accepted them", receipt_outcome(receipt))
+        } else {
+            receipt_outcome(receipt)
+        };
+        let (svc_id, changed_files) = receipt_changed_files(receipt);
+        let checks = m::array(&receipt["report"]["checks"]);
+        let passed = checks.iter().filter(|c| c["status"] == "passed").count();
+        let failed = checks.iter().filter(|c| c["status"] == "failed").count();
+        let not_run = checks.iter().filter(|c| c["status"] == "not_run").count();
+        let checks_summary = if checks.is_empty() {
+            "none".to_owned()
+        } else {
+            format!("{passed} passed · {failed} failed · {not_run} not run")
+        };
+        let card = dom::el("article", "system-card system-receipt-card", "");
+        dom::add(
+            &card,
+            &dom::el(
+                "h5",
+                "",
+                &format!(
                     "{} · attempt {} · {}",
-                    m::text(&receipt, "phase"),
+                    m::text(receipt, "phase"),
                     m::string(&receipt["attempt"]),
                     outcome
-                ));
-                receipt
-            })
-            .collect::<Vec<_>>(),
-    );
+                ),
+            ),
+        );
+        let mut metrics = vec![
+            ("Service", svc_id.clone(), false),
+            ("Outcome", outcome.clone(), !m::yes(&receipt["ok"])),
+            ("Checks", checks_summary, checks.is_empty()),
+            (
+                "Changed files",
+                changed_files.len().to_string(),
+                changed_files.is_empty(),
+            ),
+        ];
+        if let Some((ev_summary, ev_zero)) = receipt_evidence_summary(&receipt["evidence"]) {
+            metrics.push(("Opened / Graph", ev_summary, ev_zero));
+        }
+        dom::add(&card, &metric_list(&metrics));
+
+        if !changed_files.is_empty() {
+            let file_list = dom::el("div", "system-receipt-files", "");
+            for path in &changed_files {
+                let row = dom::el("div", "system-receipt-file-row", "");
+                dom::add(&row, &dom::el("code", "system-receipt-file-path", path));
+                let map_btn = dom::button(
+                    "Map",
+                    "inspect-system-file-graph",
+                    json!({ "service": svc_id, "path": path }),
+                );
+                map_btn.set_class_name("button compact");
+                let _ = map_btn.set_attribute(
+                    "aria-label",
+                    &format!("Show {path} on {svc_id} dependency map"),
+                );
+                dom::add(&row, &map_btn);
+                dom::add(&file_list, &row);
+            }
+            dom::add(&card, &file_list);
+        }
+
+        let raw = serde_json::to_string_pretty(receipt).unwrap_or_default();
+        dom::add(&card, &dom::details("Receipt JSON", &raw));
+        dom::append("system-receipts", &card);
+    }
+
     dom::pretty("system-native-tasks", &v["execution"]["tasks"]);
     dom::hidden(
         "system-native-details",
         !v["execution"]["tasks"].is_object(),
     );
-    dom::text(
-        "system-handoff",
-        &if v["handoff"].is_null() {
-            String::new()
-        } else {
-            format!(
-                "Handoff saved: {}/handoff.json\n{}{}",
-                m::text(&v["execution"], "run_dir"),
-                m::text(&v["handoff"], "knowledge"),
-                handoff_memory(&v["handoff"])
-            )
-        },
+    let handoff_text = if v["handoff"].is_null() {
+        String::new()
+    } else {
+        format!(
+            "Handoff saved: {}/handoff.json\n{}{}",
+            m::text(&v["execution"], "run_dir"),
+            m::text(&v["handoff"], "knowledge"),
+            handoff_memory(&v["handoff"])
+        )
+    };
+    dom::text("system-handoff", &handoff_text);
+    dom::hidden(
+        "system-results",
+        receipts.is_empty() && handoff_text.is_empty() && !v["execution"]["tasks"].is_object(),
     );
-    dom::text(
-        "system-events",
-        &m::array(&v["events"])
-            .iter()
-            .filter(|v| v["kind"] != "user")
-            .map(|v| m::text(v, "text"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
+    let events_text = m::array(&v["events"])
+        .iter()
+        .filter(|v| v["kind"] != "user")
+        .map(|v| m::text(v, "text"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    dom::text("system-events", &events_text);
+    dom::hidden("system-events-log", events_text.trim().is_empty());
     let launches = m::array(&v["launches"]);
-    let options=launches.iter().enumerate().map(|(i,l)|json!({"id":l["session_id"],"label":format!("Launch {} · {}",i+1,m::text(l,"status"))})).collect::<Vec<_>>();
+    let options = launches
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            json!({
+                "id": l["session_id"],
+                "label": format!("Launch {} · {}", i + 1, m::text(l, "status"))
+            })
+        })
+        .collect::<Vec<_>>();
     let chosen = m::data("system-agent-launch")
         .as_str()
         .map(str::to_owned)
@@ -1317,9 +2078,10 @@ fn render_run() {
         m::summary,
         chosen.as_deref(),
     );
-    dom::hidden("system-agents-section", launches.is_empty());
+    dom::hidden("system-agents-section", !run_has_agent_activity(&v));
     dom::hidden("system-agents-live", !m::yes(&v["active"]));
     dom::hidden("system-open-session", !v["session_id"].is_string());
+    sync_changes_map_workspace();
     controls();
 }
 async fn mutate(action: &str, extra: V) {
@@ -1369,6 +2131,7 @@ async fn mutate(action: &str, extra: V) {
                 value.clone(),
             );
             render_run();
+            agents(&value).await;
             // A launch is a new session in Sessions.
             if matches!(action, "execute" | "resume") {
                 session::refresh().await;
@@ -1444,6 +2207,7 @@ async fn plan() {
             }
             dom::set_checked("system-reviewed", false);
             render_run();
+            agents(&m::data("system-run")).await;
             relist(&project, &id).await;
         }
         Err(error)
@@ -2368,33 +3132,60 @@ async fn restore_discovery() {
 }
 async fn agents(v: &V) {
     let launches = m::array(&v["launches"]);
-    dom::hidden("system-agents-section", launches.is_empty());
+    let show_agents = run_has_agent_activity(v);
+    dom::hidden("system-agents-section", !show_agents);
     dom::hidden("system-agents-live", !m::yes(&v["active"]));
-    if launches.is_empty() {
+    if !show_agents {
         crate::activity::reset("system-agents");
         return;
     }
-    let latest = launches
-        .last()
-        .map(|l| m::text(l, "session_id"))
-        .unwrap_or_default();
-    let count = m::data("agent-launch-count").as_u64().unwrap_or(0);
-    let preferred = m::data("system-agent-launch")
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_default();
-    let sid = if count != launches.len() as u64
-        || !launches.iter().any(|l| l["session_id"] == preferred)
-    {
-        latest.clone()
+    let (sid, current) = if launches.is_empty() {
+        m::set("agent-launch-count", json!(0));
+        m::set("system-agent-launch", json!(""));
+        dom::hidden("system-agents-launch-field", true);
+        (String::new(), true)
     } else {
-        preferred
+        let latest = launches
+            .last()
+            .map(|l| m::text(l, "session_id"))
+            .unwrap_or_default();
+        let count = m::data("agent-launch-count").as_u64().unwrap_or(0);
+        let preferred = m::data("system-agent-launch")
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_default();
+        let sid = if count != launches.len() as u64
+            || !launches.iter().any(|l| l["session_id"] == preferred)
+        {
+            latest.clone()
+        } else {
+            preferred
+        };
+        m::set("agent-launch-count", json!(launches.len()));
+        m::set("system-agent-launch", json!(sid.clone()));
+        dom::options(
+            "system-agents-launch",
+            &launches
+                .iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    json!({
+                        "id": l["session_id"],
+                        "label": format!(
+                            "Launch {} · {}",
+                            i + 1,
+                            m::label(l["status"].as_str().unwrap_or(""))
+                        )
+                    })
+                })
+                .collect::<Vec<_>>(),
+            m::summary,
+            Some(&sid),
+        );
+        dom::hidden("system-agents-launch-field", launches.len() < 2);
+        let is_current = sid == latest;
+        (sid, is_current)
     };
-    m::set("agent-launch-count", json!(launches.len()));
-    m::set("system-agent-launch", json!(sid));
-    dom::options("system-agents-launch",&launches.iter().enumerate().map(|(i,l)|json!({"id":l["session_id"],"label":format!("Launch {} · {}",i+1,m::label(l["status"].as_str().unwrap_or("")))})).collect::<Vec<_>>(),m::summary,Some(&sid));
-    dom::hidden("system-agents-launch-field", launches.len() < 2);
-    let current = sid == latest;
     let mut steps = m::array(&v["execution"]["steps"]);
     if steps.is_empty() {
         steps.push(json!({"id":"contracts","service":"__system__","mode":"read-only"}));
@@ -2430,6 +3221,7 @@ async fn agents(v: &V) {
         };
     }
     crate::activity::set_plan("system-agents", steps, active);
+    crate::activity::set_run_evidence(&m::text(v, "id"), v);
     crate::activity::load("system-agents", &sid).await;
 }
 fn context_summary(plan: &V) -> String {
@@ -2537,9 +3329,43 @@ pub async fn event(
     action: &str,
     payload: &V,
     value: &str,
-    _checked: bool,
+    checked: bool,
 ) -> bool {
+    if kind == "input" && crate::graph_map::handle_system_input(id, value) {
+        return true;
+    }
+    if kind == "change" && crate::graph_map::handle_system_change(id, value, checked) {
+        return true;
+    }
+    if kind == "input" && id == "system-task" {
+        crate::graph_map::focus_system_from_prompt(
+            crate::graph_map::SystemEmbeddedKind::Change,
+            value,
+        );
+    }
     if kind == "input" || kind == "change" {
+        if action == "system-service" || id == "system-depth" || id == "system-contracts" {
+            sync_changes_map_workspace();
+            return true;
+        }
+        if id == "system-member-select" {
+            if !value.is_empty() {
+                drill_down_service_map("services", value, None);
+            }
+            return true;
+        }
+        if id == "system-graphs-agents" {
+            let act = if checked { "offer" } else { "withhold" };
+            if !m::yes(&m::data("system-graph-prompt-touched")) {
+                dom::set_checked("system-graph-prompt", checked);
+            }
+            post_system_graph_action(act, None).await;
+            return true;
+        }
+        if id == "system-graph-prompt" {
+            m::set("system-graph-prompt-touched", json!(true));
+            return true;
+        }
         if id == "system-editor-name" {
             if !editor_ready() || m::yes(&m::data("editor-pending")) {
                 return true;
@@ -2557,6 +3383,16 @@ pub async fn event(
             if !m::yes(&m::data("editor-dirty")) {
                 m::take("system-run");
                 m::take("system-catalog");
+                crate::graph_map::load_system_embedded(
+                    crate::graph_map::SystemEmbeddedKind::Member,
+                    None,
+                    false,
+                );
+                crate::graph_map::load_system_embedded(
+                    crate::graph_map::SystemEmbeddedKind::Change,
+                    None,
+                    false,
+                );
                 load().await;
             }
             return true;
@@ -2588,6 +3424,9 @@ pub async fn event(
         ]
         .contains(&id)
         {
+            if id == "system-provider" {
+                sync_system_explanation_context_from_dom();
+            }
             controls();
             return true;
         }
@@ -2607,6 +3446,9 @@ pub async fn event(
     }
     if kind != "click" {
         return false;
+    }
+    if crate::graph_map::handle_system_click(id, action, payload) {
+        return true;
     }
     match action {
         "system-load" => catalog_load().await,
@@ -2691,6 +3533,7 @@ pub async fn event(
             dom::hidden("system-plan-form", false);
             // The form is the next step; "no changes yet" would only repeat it.
             dom::hidden("system-runs-empty", true);
+            sync_changes_map_workspace();
         }
         "system-replan" => {
             let v = m::data("system-run");
@@ -2701,14 +3544,142 @@ pub async fn event(
                 catalog_load().await;
             }
             replan(&v);
+            sync_changes_map_workspace();
         }
         "system-plan-cancel" => {
             dom::hidden("system-plan-form", true);
             dom::hidden("system-runs-empty", !dom::value("system-runs").is_empty());
+            sync_changes_map_workspace();
+        }
+        "system-graphs-rebuild" => {
+            let st = m::data("system-graph-status");
+            let act = if matches!(st["state"].as_str(), Some("off" | "empty" | "")) {
+                "enable"
+            } else {
+                "rebuild"
+            };
+            post_system_graph_action(act, None).await;
+        }
+        "system-map-level-topology" => switch_services_to_topology(),
+        "system-map-level-service" => {
+            let svc = m::data("system-member-selected")
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| dom::value("system-member-select"));
+            if !svc.is_empty() {
+                drill_down_service_map("services", &svc, None);
+            }
+        }
+        "system-change-tab-topology" => switch_changes_to_topology(),
+        "system-change-service-tab" => {
+            let svc = m::text(payload, "service");
+            if !svc.is_empty() {
+                drill_down_service_map("changes", &svc, None);
+            }
+        }
+        "system-change-attach-context" => {
+            let brief = system_map::current_context_brief();
+            if !brief.is_empty() {
+                if dom::get("system-plan-form").is_some_and(|f| f.has_attribute("hidden")) {
+                    dom::hidden("system-plan-form", false);
+                }
+                if session::append_draft_block("system-task", &brief, 2000) {
+                    dom::text(
+                        "system-run-message",
+                        "Attached blast-radius map context to the task prompt.",
+                    );
+                }
+            }
+        }
+        "system-working-pause" | "system-changes-working-pause" => {
+            let paused = !m::yes(&m::data("system-working-paused"));
+            m::set("system-working-paused", json!(paused));
+            let flag = if paused { "true" } else { "false" };
+            let label = if paused { "Resume" } else { "Pause" };
+            for box_id in [
+                "system-working",
+                "system-changes-working",
+                "system-map-workspace",
+                "system-change-map-workspace",
+            ] {
+                dom::attr(box_id, "data-motion-paused", flag);
+            }
+            for btn_id in ["system-working-pause", "system-changes-working-pause"] {
+                dom::attr(btn_id, "aria-pressed", flag);
+                dom::text(btn_id, label);
+            }
+        }
+        "system-service-graph-build" => {
+            let svc = m::text(payload, "service");
+            let svc_state = m::text(payload, "state");
+            let act = if matches!(svc_state.as_str(), "off" | "empty" | "") {
+                "enable"
+            } else {
+                "rebuild"
+            };
+            post_system_graph_action(act, Some(&svc)).await;
+        }
+        "system-service-code-map" => {
+            let svc = m::text(payload, "service");
+            let project = dom::value("system-project");
+            let config = dom::value("system-config");
+            if !svc.is_empty() && !project.is_empty() {
+                let scope = build_system_graph_scope(&project, &config, &svc, false);
+                crate::graph_map::open_system_service_map(scope, None);
+            }
+        }
+        "system-service-changes-map" => {
+            let svc = m::text(payload, "service");
+            let project = dom::value("system-project");
+            let config = dom::value("system-config");
+            if !svc.is_empty() {
+                switch_services_to_topology();
+                system_map::focus_service_changes(&svc);
+                if !project.is_empty() {
+                    let scope = build_system_graph_scope(&project, &config, &svc, false);
+                    crate::graph_map::open_system_service_map(scope, Some("work"));
+                }
+            }
+        }
+        "inspect-system-file-graph" => {
+            let svc = m::text(payload, "service");
+            let path = m::text(payload, "path");
+            let project = dom::value("system-project");
+            let config = dom::value("system-config");
+            let is_changes_view = m::read(|s| s.view == "system-changes");
+            let run_id = m::text(&m::data("system-run"), "id");
+            let target_opt = if is_changes_view && !run_id.is_empty() {
+                Some(format!("sysrun:{run_id}"))
+            } else {
+                Some("work".to_owned())
+            };
+            if !svc.is_empty() && !path.is_empty() {
+                let surf = if is_changes_view {
+                    "changes"
+                } else {
+                    "services"
+                };
+                drill_down_service_map(surf, &svc, None);
+                if !project.is_empty() {
+                    let scope = build_system_graph_scope(&project, &config, &svc, is_changes_view);
+                    crate::graph_map::open_system_file_impact(scope, &path, target_opt.as_deref());
+                }
+            }
         }
         "system-execute" => {
             if dom::checked("system-reviewed") {
-                mutate("execute",json!({"provider":dom::value("system-provider"),"mode":dom::value("system-mode"),"access":dom::value("system-access"),"timeout":dom::num("system-timeout")})).await;
+                mutate(
+                    "execute",
+                    json!({
+                        "provider": dom::value("system-provider"),
+                        "mode": dom::value("system-mode"),
+                        "access": dom::value("system-access"),
+                        "timeout": dom::num("system-timeout"),
+                        "tell_agents_graph": dom::checked("system-graph-prompt"),
+                    }),
+                )
+                .await;
             }
         }
         "system-cancel" => mutate("cancel", json!({})).await,
@@ -2719,7 +3690,10 @@ pub async fn event(
             }
         }
         "system-resume" => {
-            let mut extra = json!({"accept_source_changes":dom::checked("system-accept-changes")});
+            let mut extra = json!({
+                "accept_source_changes": dom::checked("system-accept-changes"),
+                "tell_agents_graph": dom::checked("system-graph-prompt"),
+            });
             // Accepting the unrun checks completes verification; it is not retried.
             if dom::checked("system-accept-unrun") {
                 extra["accept_unrun_checks"] = json!(true);
@@ -3208,5 +4182,225 @@ mod display_tests {
             service_agent_goal("payments", &json!("all"), &json!("edit")),
             "Works on payments; reads the system folder and every service of this change and edits any selected service."
         );
+    }
+    #[test]
+    fn aggregate_graphs_pill_summarizes_ready_building_and_failed_states() {
+        assert_eq!(
+            aggregate_graphs_pill(&V::Null),
+            ("idle", "Service graphs: loading…".to_owned())
+        );
+        let building = json!({
+            "state": "building",
+            "services": {
+                "orders": { "state": "ready" },
+                "payments": { "state": "building", "build": { "percent": 40 } },
+                "catalog": { "state": "empty" }
+            }
+        });
+        assert_eq!(
+            aggregate_graphs_pill(&building),
+            (
+                "building",
+                "Service graphs: 1/3 ready · 1 building".to_owned()
+            )
+        );
+        let ready = json!({
+            "state": "ready",
+            "ready_count": 3,
+            "total_count": 3,
+            "building_count": 0
+        });
+        assert_eq!(
+            aggregate_graphs_pill(&ready),
+            ("ready", "Service graphs: 3/3 ready".to_owned())
+        );
+    }
+    #[test]
+    fn monotonic_service_graph_status_clamps_and_never_regresses() {
+        let mut cache = BTreeMap::new();
+        let s1 = monotonic_service_graph_status(
+            "orders",
+            &json!({ "state": "building", "build": { "percent": 0 } }),
+            &mut cache,
+        );
+        assert_eq!(s1["build"]["percent"], 1);
+        let s2 = monotonic_service_graph_status(
+            "orders",
+            &json!({ "state": "building", "build": { "percent": 55 } }),
+            &mut cache,
+        );
+        assert_eq!(s2["build"]["percent"], 55);
+        let s3 = monotonic_service_graph_status(
+            "orders",
+            &json!({ "state": "building", "build": { "percent": 22 } }),
+            &mut cache,
+        );
+        assert_eq!(s3["build"]["percent"], 55);
+        let done =
+            monotonic_service_graph_status("orders", &json!({ "state": "ready" }), &mut cache);
+        assert_eq!(done["state"], "ready");
+        assert!(!cache.contains_key("orders"));
+    }
+    #[test]
+    fn build_changes_overlay_tracks_plan_blast_radius_and_live_run_waves() {
+        let plan_overlay = build_changes_overlay(
+            &V::Null,
+            true,
+            &["orders".to_owned()],
+            1,
+            "orders.http, order.placed",
+        );
+        assert_eq!(plan_overlay["stage"], "plan");
+        assert_eq!(plan_overlay["depth"], 1);
+        assert_eq!(
+            plan_overlay["changed_contracts"],
+            json!(["orders.http", "order.placed"])
+        );
+
+        let run_doc = json!({
+            "id": "run-42",
+            "active": true,
+            "session_id": "sess-1",
+            "plan": {
+                "depth": 32,
+                "context": { "services": ["orders", "inventory"] }
+            },
+            "execution": {
+                "steps": [
+                    { "id": "service-orders", "service": "orders", "status": "completed", "attempt": 1 },
+                    { "id": "service-inventory", "service": "inventory", "status": "running", "attempt": 1 }
+                ]
+            },
+            "receipts": [],
+            "evidence": {
+                "cross_service_unopened": ["gateway"]
+            }
+        });
+        let live_overlay = build_changes_overlay(&run_doc, false, &[], 32, "");
+        assert_eq!(live_overlay["stage"], "run");
+        assert_eq!(live_overlay["step_states"]["orders"], "completed");
+        assert_eq!(live_overlay["step_states"]["inventory"], "running");
+        assert_eq!(live_overlay["cross_service_unopened"], json!(["gateway"]));
+    }
+    #[test]
+    fn receipt_changed_files_deduplicates_report_and_evidence_paths() {
+        let receipt = json!({
+            "phase": "service-orders",
+            "report": { "changed_files": ["src/OrderService.php", "src/Dto.php"] },
+            "evidence": {
+                "changed_files": [
+                    { "path": "src/OrderService.php", "status": "M" },
+                    { "path": "tests/OrderTest.php", "status": "A" }
+                ]
+            }
+        });
+        let (svc, files) = receipt_changed_files(&receipt);
+        assert_eq!(svc, "orders");
+        assert_eq!(
+            files,
+            vec!["src/OrderService.php", "src/Dto.php", "tests/OrderTest.php"]
+        );
+    }
+    #[test]
+    fn integrated_service_graph_pill_and_scope_switcher_roundtrip() {
+        let pill = crate::graph::render_service_graph_pill_html(
+            "orders",
+            &json!({ "state": "building", "build": { "percent": 42, "phase": "indexing" } }),
+        );
+        assert!(pill.contains("data-service=\"orders\""));
+        assert!(pill.contains("value=\"42\""));
+
+        let scope = crate::graph::GraphTargetScope::SystemService {
+            project_id: "proj-1".to_owned(),
+            config_path: "system.toml".to_owned(),
+            service_id: "orders".to_owned(),
+            services: vec![
+                "orders".to_owned(),
+                "payments".to_owned(),
+                "__system__".to_owned(),
+            ],
+            run_id: Some("run-9".to_owned()),
+            run_title: Some("change-001".to_owned()),
+            launches: Vec::new(),
+        };
+        let opts = crate::graph_map::service_switcher_options_html(&scope);
+        assert!(opts.contains("__topology__"));
+        assert!(opts.contains("__system__"));
+        assert!(opts.contains("orders"));
+        assert!(opts.contains("payments"));
+    }
+    #[test]
+    fn dispatch_evidence_keys_graph_focus_wrapper_and_agent_visibility_align_with_backend() {
+        let receipt = json!({
+            "phase": "service-orders",
+            "report": { "changed_files": ["src/OrderService.php"] },
+            "evidence": {
+                "git_changed": ["src/OrderService.php", "routes/api.php"],
+                "ledger_edited": [{ "path": "app/Dto/OrderDto.php" }],
+                "opened": ["src/OrderService.php", "routes/api.php"],
+                "shell_reads": ["config/orders.php"],
+                "graph_asked": true
+            }
+        });
+        let (svc, files) = receipt_changed_files(&receipt);
+        assert_eq!(svc, "orders");
+        assert_eq!(
+            files,
+            vec![
+                "src/OrderService.php",
+                "routes/api.php",
+                "app/Dto/OrderDto.php"
+            ]
+        );
+        assert_eq!(
+            receipt_evidence_summary(&receipt["evidence"]),
+            Some(("2 files · 1 shell reads · graph queried".to_owned(), false))
+        );
+        assert_eq!(
+            receipt_evidence_summary(
+                &json!({ "opened": [], "shell_reads": [], "graph_asked": false })
+            ),
+            Some(("0 files · graph not queried".to_owned(), true))
+        );
+
+        let wrapped_run = json!({
+            "graph_focus": {
+                "services": {
+                    "orders": { "zone": ["src/OrderService.php"] },
+                    "gateway": { "zone": ["src/OrdersClient.ts"] }
+                },
+                "aggregate": { "services_count": 2 }
+            }
+        });
+        let focus_map = extract_service_graph_focus_map(&wrapped_run);
+        assert_eq!(
+            focus_map.get("orders"),
+            Some(&json!({ "zone": ["src/OrderService.php"] }))
+        );
+        assert!(!focus_map.contains_key("aggregate"));
+
+        let unrun_plan = json!({
+            "status": "needs_review",
+            "launches": [],
+            "receipts": [],
+            "evidence": { "dispatches": [], "files": [] }
+        });
+        assert!(!run_has_agent_activity(&unrun_plan));
+
+        let cli_run = json!({
+            "status": "completed",
+            "launches": [],
+            "receipts": [],
+            "evidence": { "dispatches": [{ "phase": "service-orders" }] }
+        });
+        assert!(run_has_agent_activity(&cli_run));
+
+        let session_run = json!({
+            "status": "running",
+            "launches": [{ "session_id": "sess-1" }],
+            "receipts": [],
+            "evidence": { "dispatches": [] }
+        });
+        assert!(run_has_agent_activity(&session_run));
     }
 }

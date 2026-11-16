@@ -4,7 +4,7 @@
 //! pass in the background and tells an agent that the result exists. A build
 //! starts without the previous graph, so a deleted file leaves no nodes behind,
 //! and the published graph is replaced only by a build that succeeded.
-mod shell_reads;
+pub(crate) mod shell_reads;
 
 use crate::{
     HarnessError, Result,
@@ -367,7 +367,11 @@ pub fn print(root: &Path) -> Option<Print> {
     let commit = (head.code == 0)
         .then(|| String::from_utf8_lossy(&head.stdout).trim().to_owned())
         .filter(|value| !value.is_empty());
-    let status = git(&["status", "--porcelain=v1", "-z"])?;
+    let prefix = git(&["rev-parse", "--show-prefix"])
+        .filter(|out| out.code == 0)
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        .unwrap_or_default();
+    let status = git(&["status", "--porcelain=v1", "-z", "--", "."])?;
     if status.code != 0 {
         return None;
     }
@@ -378,9 +382,10 @@ pub fn print(root: &Path) -> Option<Print> {
         let Some(path) = entry.get(3..).and_then(|raw| std::str::from_utf8(raw).ok()) else {
             continue;
         };
+        let rel = path.strip_prefix(&prefix).unwrap_or(path);
         // A folder's own time moves when a file inside is replaced, which says
         // nothing about the files Git already lists.
-        if let Ok(meta) = std::fs::metadata(root.join(path))
+        if let Ok(meta) = std::fs::metadata(root.join(rel))
             && meta.is_file()
         {
             let changed = meta
@@ -482,11 +487,11 @@ fn chosen(resolved: &Resolved) -> Value {
 /// A run of an agent as a change: the files it changed are what is mapped,
 /// the files it opened are laid over the map, and the rest is what a picture
 /// says of the run beside itself.
-struct RunChange {
-    resolved: Arc<Resolved>,
-    opened: BTreeSet<String>,
-    shell_reads: BTreeMap<String, u64>,
-    told: Value,
+pub(crate) struct RunChange {
+    pub(crate) resolved: Arc<Resolved>,
+    pub(crate) opened: BTreeSet<String>,
+    pub(crate) shell_reads: BTreeMap<String, u64>,
+    pub(crate) told: Value,
 }
 fn size(path: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(path) else {
@@ -556,7 +561,11 @@ struct Offer {
     graph: String,
     built: Value,
 }
-fn offer(store: &SessionStore, project: &str) -> Result<Option<Offer>> {
+fn offer_with_override(
+    store: &SessionStore,
+    project: &str,
+    force_offer: bool,
+) -> Result<Option<Offer>> {
     let Some(setting) = store.setting(&key(project))? else {
         return Ok(None);
     };
@@ -566,7 +575,7 @@ fn offer(store: &SessionStore, project: &str) -> Result<Option<Offer>> {
         return Ok(None);
     };
     if setting["enabled"] != true
-        || setting["agents"] != true
+        || (!force_offer && setting["agents"] != true)
         || !graph.is_file()
         || !program.is_file()
     {
@@ -582,6 +591,9 @@ fn offer(store: &SessionStore, project: &str) -> Result<Option<Offer>> {
         graph: word(&graph),
         built: built.clone(),
     }))
+}
+fn offer(store: &SessionStore, project: &str) -> Result<Option<Offer>> {
+    offer_with_override(store, project, false)
 }
 /// What a launch gives the agent along with the prompt's graph lines.
 pub struct Grant {
@@ -719,6 +731,81 @@ pub fn prompt_line(store: &SessionStore, session: &Value) -> Result<Option<Strin
             ""
         }
     )))
+}
+pub(crate) struct ServiceOfferData {
+    pub(crate) graph_path: PathBuf,
+    pub(crate) program_path: PathBuf,
+    pub(crate) nodes: Option<u64>,
+    pub(crate) commit: Option<String>,
+    pub(crate) claude_allow_rules: Vec<String>,
+    pub(crate) environment: Vec<(String, String)>,
+    pub(crate) readable_paths: Vec<PathBuf>,
+    pub(crate) prompt_block: String,
+}
+pub(crate) fn service_offer(
+    store: &SessionStore,
+    project: &str,
+    service_label: &str,
+    force_offer: bool,
+) -> Result<Option<ServiceOfferData>> {
+    let Some(Offer {
+        command,
+        graph,
+        built,
+    }) = offer_with_override(store, project, force_offer)?
+    else {
+        return Ok(None);
+    };
+    let graph_path = live(&store.state, project);
+    let Some(program_path) = built["program"].as_str().map(PathBuf::from) else {
+        return Ok(None);
+    };
+    let commit = built["commit"].as_str().map(str::to_owned);
+    let nodes = built["nodes"].as_u64();
+    let origin = commit
+        .as_deref()
+        .map(|c| format!(" at commit {c}"))
+        .unwrap_or_default();
+    let nodes_label = nodes
+        .map(|n| format!("{n} nodes"))
+        .unwrap_or_else(|| "a graph".to_owned());
+    let questions: String = QUESTIONS
+        .iter()
+        .map(|(verb, arguments)| format!("  {command} {verb} {arguments} --graph {graph}\n"))
+        .collect();
+    let prompt_block = format!(
+        "Code graph for `{service_label}` (optional; files remain the source of truth): Graphify indexed `{service_label}`{origin} into {nodes_label}.\n{questions}Keep --graph and its path last; confirm findings in the source files.\n"
+    );
+    let claude_allow_rules = QUESTIONS
+        .iter()
+        .map(|(verb, _)| format!("Bash({command} {verb} * --graph {graph})"))
+        .collect();
+    let mut readable_paths = vec![graph_path.clone()];
+    if let Some(parent) = graph_path.parent() {
+        readable_paths.push(parent.to_path_buf());
+    }
+    readable_paths.push(program_path.clone());
+    if let Some(bin_dir) = program_path.parent() {
+        readable_paths.push(bin_dir.to_path_buf());
+        if bin_dir
+            .file_name()
+            .is_some_and(|n| n == "bin" || n == "Scripts")
+            && let Some(venv) = bin_dir.parent()
+            && venv.join("pyvenv.cfg").is_file()
+        {
+            readable_paths.push(venv.to_path_buf());
+        }
+    }
+    Ok(Some(ServiceOfferData {
+        graph_path,
+        program_path,
+        nodes,
+        commit,
+        claude_allow_rules,
+        environment: vec![(NO_SKILL_REFRESH.0.to_owned(), NO_SKILL_REFRESH.1.to_owned())],
+        readable_paths,
+        prompt_block,
+    }))
 }
 /// Whether a shell command asks a code graph: `graphify` followed by `query`,
 /// `explain` or `path`, however the executable is spelled.
@@ -1086,7 +1173,14 @@ fn apply_graph_focus(
     view: &mut Value,
     keep_run: bool,
 ) -> Result<()> {
-    let graph_focus = crate::graph_live::project_focus_value(store, project, focus_session)?;
+    let graph_focus = if let Some(run_id) = focus_session.and_then(|s| s.strip_prefix("sysrun:"))
+        && let Some(sys_focus) =
+            crate::system_graph::load_system_focus_value(store, run_id, project)?
+    {
+        sys_focus
+    } else {
+        crate::graph_live::project_focus_value(store, project, focus_session)?
+    };
     if let (Some(index), Ok(focus)) = (
         index,
         serde_json::from_value::<crate::graph_live::GraphFocus>(graph_focus.clone()),
@@ -1144,6 +1238,7 @@ pub struct Shown<'a> {
     pub scenario: Option<(&'a str, usize)>,
     pub launch: Option<&'a str>,
     pub compare_launch: Option<&'a str>,
+    pub agent: Option<&'a str>,
     /// One found pattern to draw, instead of a folder: its pattern and the
     /// type it is named after.
     pub pattern: Option<&'a str>,
@@ -1239,6 +1334,8 @@ pub struct Graphs {
     revisions: Mutex<BTreeMap<String, (String, Arc<Job>)>>,
     /// Why the last build of a commit's graph failed.
     refused: Mutex<BTreeMap<(String, String), String>>,
+    /// Synthetic system service graph targets (`sys-<hash>` -> `(root, name)`).
+    targets: Mutex<BTreeMap<String, (PathBuf, String)>>,
 }
 type Listing = (Instant, Vec<Pull>, Option<String>);
 struct HistoryEntry {
@@ -1275,7 +1372,52 @@ impl Graphs {
             chosen: Mutex::new(BTreeMap::new()),
             revisions: Mutex::new(BTreeMap::new()),
             refused: Mutex::new(BTreeMap::new()),
+            targets: Mutex::new(BTreeMap::new()),
         })
+    }
+    /// Registers a synthetic system-service graph workspace (`sys-<hash>`) backed by `root`.
+    pub fn register_target(&self, project: &str, root: PathBuf, name: String) -> Result<()> {
+        lock(&self.targets)?.insert(project.to_owned(), (root.clone(), name.clone()));
+        if self.store.project(project).is_err() {
+            let root_str = root.to_string_lossy().into_owned();
+            let current = self.setting(project)?;
+            if current["target_root"].as_str() != Some(root_str.as_str())
+                || current["target_name"].as_str() != Some(name.as_str())
+            {
+                self.edit(project, |setting| {
+                    setting["target_root"] = json!(root_str);
+                    setting["target_name"] = json!(name);
+                })?;
+            }
+        }
+        Ok(())
+    }
+    fn target_info(&self, project: &str) -> Result<(PathBuf, String)> {
+        if let Ok(record) = self.store.project(project) {
+            let root = PathBuf::from(record["path"].as_str().unwrap_or(""));
+            let name = record["name"].as_str().unwrap_or("project").to_owned();
+            return Ok((root, name));
+        }
+        if let Some(found) = lock(&self.targets)?.get(project).cloned() {
+            return Ok(found);
+        }
+        let setting = self.setting(project)?;
+        if let Some(path) = setting["target_root"].as_str().filter(|s| !s.is_empty()) {
+            let root = PathBuf::from(path);
+            let name = setting["target_name"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    root.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                });
+            lock(&self.targets)?.insert(project.to_owned(), (root.clone(), name.clone()));
+            return Ok((root, name));
+        }
+        Err(HarnessError::missing("Project not found."))
     }
     pub fn live_index(&self, project: &str) -> Option<Arc<crate::graph_map::Index>> {
         let graph = live(&self.store.state, project);
@@ -1387,9 +1529,8 @@ impl Graphs {
     /// as it is without them. Reading a graph of a large project takes
     /// seconds, so callers keep this off the runtime.
     pub fn map(&self, project: &str, target: Option<&Target>, shown: &Shown) -> Result<Value> {
-        let record = self.store.project(project)?;
-        let root = PathBuf::from(record["path"].as_str().unwrap_or(""));
-        let name = record["name"].as_str().unwrap_or("project");
+        let (root, owned_name) = self.target_info(project)?;
+        let name = owned_name.as_str();
         let built = &self.setting(project)?["built"];
         let Shown {
             scope,
@@ -1412,6 +1553,7 @@ impl Graphs {
             scenario,
             launch,
             compare_launch,
+            agent,
             pattern,
             whole,
         } = *shown;
@@ -1428,7 +1570,7 @@ impl Graphs {
             ));
         }
         if (launch.is_some() || compare_launch.is_some())
-            && (!matches!(target, Some(Target::Run(_)))
+            && (!matches!(target, Some(Target::Run(_) | Target::SysRun(_)))
                 || compare_launch.is_some() && (launch.is_none() || launch == compare_launch))
         {
             return Err(HarnessError::invalid(
@@ -1611,6 +1753,18 @@ impl Graphs {
             Target::Run(session) => {
                 let (ran, comparison) =
                     self.run_launches(project, &root, session, launch, compare_launch)?;
+                (Some(ran), comparison)
+            }
+            Target::SysRun(run_id) => {
+                let (ran, comparison) = crate::system_graph::sysrun_launches(
+                    &self.store,
+                    project,
+                    &root,
+                    run_id,
+                    agent,
+                    launch,
+                    compare_launch,
+                )?;
                 (Some(ran), comparison)
             }
             _ => (None, None),
@@ -1831,8 +1985,13 @@ impl Graphs {
             &view["build"],
             found.failure.as_deref(),
         ));
+        let sysrun_focus_id;
         let focus_sid = match target {
             Target::Run(session) => Some(session.as_str()),
+            Target::SysRun(run_id) => {
+                sysrun_focus_id = format!("sysrun:{run_id}");
+                Some(sysrun_focus_id.as_str())
+            }
             _ => focus_session,
         };
         apply_graph_focus(
@@ -1889,11 +2048,11 @@ impl Graphs {
         query: &str,
         notests: bool,
     ) -> Result<Value> {
-        let record = self.store.project(project)?;
-        let root = PathBuf::from(record["path"].as_str().unwrap_or(""));
+        let (root, _) = self.target_info(project)?;
         let published = live(&self.store.state, project);
         let graph = match target {
-            None | Some(Target::Work | Target::Uncommitted | Target::Run(_)) => {
+            None
+            | Some(Target::Work | Target::Uncommitted | Target::Run(_) | Target::SysRun(_)) => {
                 Some((project.to_owned(), published, root))
             }
             Some(target) => {
@@ -1932,6 +2091,12 @@ impl Graphs {
         project: &str,
         focus_session: Option<&str>,
     ) -> Result<Option<crate::graph_live::GraphFocus>> {
+        if let Some(run_id) = focus_session.and_then(|s| s.strip_prefix("sysrun:"))
+            && let Some(value) =
+                crate::system_graph::load_system_focus_value(&self.store, run_id, project)?
+        {
+            return Ok(serde_json::from_value(value).ok());
+        }
         let value = crate::graph_live::project_focus_value(&self.store, project, focus_session)?;
         if value.is_null() {
             return Ok(None);
@@ -1964,6 +2129,7 @@ impl Graphs {
         project: &str,
         target: Option<&Target>,
         focus_session: Option<&str>,
+        agent: Option<&str>,
     ) -> Result<ImpactContext> {
         let focus_session = match focus_session.map(str::trim).filter(|s| !s.is_empty()) {
             Some(sid) if sid.len() <= 1024 && !sid.chars().any(char::is_control) => Some(sid),
@@ -1996,6 +2162,36 @@ impl Graphs {
                     run_edited,
                     live_focus,
                     target_label: Target::Run(session.clone()).text(),
+                })
+            }
+            Some(Target::SysRun(run_id)) => {
+                let (ran, _) = crate::system_graph::sysrun_launches(
+                    &self.store,
+                    project,
+                    &root,
+                    run_id,
+                    agent,
+                    None,
+                    None,
+                )?;
+                let run_edited = ran
+                    .resolved
+                    .files
+                    .iter()
+                    .map(|change| (change.path.clone(), change.status))
+                    .collect();
+                let sys_sid = format!("sysrun:{run_id}");
+                let live_focus = self
+                    .load_project_focus(project, Some(&sys_sid))?
+                    .or(self.load_project_focus(project, focus_session)?);
+                let index = live_index();
+                Ok(ImpactContext {
+                    root,
+                    index,
+                    resolved: Some(ran.resolved),
+                    run_edited,
+                    live_focus,
+                    target_label: Target::SysRun(run_id.clone()).text(),
                 })
             }
             Some(t @ (Target::Named(_) | Target::Commit(_) | Target::Pull(_))) => {
@@ -2134,7 +2330,18 @@ impl Graphs {
         focus_session: Option<&str>,
         notests: bool,
     ) -> Result<Value> {
-        let ctx = self.impact_context(project, target, focus_session)?;
+        self.changes_catalog_with_agent(project, target, focus_session, None, notests)
+    }
+
+    pub fn changes_catalog_with_agent(
+        &self,
+        project: &str,
+        target: Option<&Target>,
+        focus_session: Option<&str>,
+        agent: Option<&str>,
+        notests: bool,
+    ) -> Result<Value> {
+        let ctx = self.impact_context(project, target, focus_session, agent)?;
         let mut catalog = crate::graph_impact::changed_catalog(
             &ctx.root,
             ctx.index.as_deref(),
@@ -2158,10 +2365,22 @@ impl Graphs {
         focus_session: Option<&str>,
         certain: bool,
     ) -> Result<Value> {
+        self.file_impact_with_agent(project, path, target, focus_session, None, certain)
+    }
+
+    pub fn file_impact_with_agent(
+        &self,
+        project: &str,
+        path: &str,
+        target: Option<&Target>,
+        focus_session: Option<&str>,
+        agent: Option<&str>,
+        certain: bool,
+    ) -> Result<Value> {
         if path.trim().is_empty() || path.len() > 1024 || path.chars().any(char::is_control) {
             return Err(HarnessError::invalid("Invalid code graph file path."));
         }
-        let ctx = self.impact_context(project, target, focus_session)?;
+        let ctx = self.impact_context(project, target, focus_session, agent)?;
         let mut report = crate::graph_impact::file_impact(
             &ctx.root,
             ctx.index.as_deref(),
@@ -2219,15 +2438,13 @@ impl Graphs {
     }
     fn busy(&self, project: &str) -> Result<bool> {
         Ok(self.store.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sessions WHERE project_id=?1 AND status IN('queued','running'))",
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE project_id=?1 AND system_run IS NULL AND system_discovery IS NULL AND status IN('queued','running'))",
             [project],
             |row| row.get(0),
         )?)
     }
     fn root(&self, project: &str) -> Result<PathBuf> {
-        Ok(PathBuf::from(
-            self.store.project(project)?["path"].as_str().unwrap_or(""),
-        ))
+        Ok(self.target_info(project)?.0)
     }
     /// Starts a build when the trigger warrants one. An automatic trigger
     /// builds only what changed since the last attempt, never within the gap
@@ -2478,7 +2695,15 @@ impl Graphs {
         let hash = print.as_ref().map(|print| print.hash.clone());
         let _ = self.edit(project, |setting| {
             if purge {
+                let target_root = setting.get("target_root").cloned();
+                let target_name = setting.get("target_name").cloned();
                 *setting = json!({"enabled": false, "disabled_by_user": true});
+                if let Some(root) = target_root {
+                    setting["target_root"] = root;
+                }
+                if let Some(name) = target_name {
+                    setting["target_name"] = name;
+                }
                 return;
             }
             match outcome {
@@ -3003,6 +3228,19 @@ impl Graphs {
         let root = self.root(project)?;
         let resolved = match target {
             Target::Run(session) => self.ran(project, &root, session)?.resolved,
+            Target::SysRun(run_id) => {
+                crate::system_graph::sysrun_launches(
+                    &self.store,
+                    project,
+                    &root,
+                    run_id,
+                    None,
+                    None,
+                    None,
+                )?
+                .0
+                .resolved
+            }
             _ => Arc::new(graph_changes::resolve(
                 &root,
                 target,
@@ -3416,7 +3654,15 @@ impl Graphs {
             }
             "delete" => {
                 self.edit(project, |setting| {
+                    let target_root = setting.get("target_root").cloned();
+                    let target_name = setting.get("target_name").cloned();
                     *setting = json!({"enabled": false, "disabled_by_user": true});
+                    if let Some(root) = target_root {
+                        setting["target_root"] = root;
+                    }
+                    if let Some(name) = target_name {
+                        setting["target_name"] = name;
+                    }
                 })?;
                 // A commit's graph that is still being built writes into
                 // the folder. It is told to end first, and removes the
@@ -3596,6 +3842,10 @@ impl Domain for Graphs {
                     let origin = text("scenario")?;
                     let launch = text("launch")?;
                     let compare_launch = text("compare_launch")?;
+                    let agent = text("agent")?;
+                    if agent.chars().any(char::is_control) {
+                        return Err(HarnessError::invalid("Invalid code graph agent."));
+                    }
                     let target = match query["target"].as_str() {
                         None | Some("") => None,
                         Some(text) => Some(Target::parse(text)?),
@@ -3740,6 +3990,7 @@ impl Domain for Graphs {
                                 launch: (!launch.is_empty()).then_some(launch.as_str()),
                                 compare_launch: (!compare_launch.is_empty())
                                     .then_some(compare_launch.as_str()),
+                                agent: (!agent.is_empty()).then_some(agent.as_str()),
                                 scenario: (!origin.is_empty()).then_some((origin.as_str(), skip)),
                                 pattern: (!pattern.is_empty()).then_some(pattern.as_str()),
                                 whole,
@@ -3797,6 +4048,11 @@ impl Domain for Graphs {
                     }
                     let focus_session =
                         (!focus_session.trim().is_empty()).then(|| focus_session.trim().to_owned());
+                    let agent = query["agent"].as_str().unwrap_or("");
+                    if agent.len() > 256 || agent.chars().any(char::is_control) {
+                        return Err(HarnessError::invalid("Invalid code graph agent."));
+                    }
+                    let agent = (!agent.trim().is_empty()).then(|| agent.trim().to_owned());
                     let is_impact = operation == "graph.file_impact";
                     let path = if is_impact {
                         let value = query["path"].as_str().unwrap_or("");
@@ -3821,18 +4077,20 @@ impl Domain for Graphs {
                     let project = project.to_owned();
                     tokio::task::spawn_blocking(move || {
                         if is_impact {
-                            me.file_impact(
+                            me.file_impact_with_agent(
                                 &project,
                                 &path,
                                 target.as_ref(),
                                 focus_session.as_deref(),
+                                agent.as_deref(),
                                 toggle,
                             )
                         } else {
-                            me.changes_catalog(
+                            me.changes_catalog_with_agent(
                                 &project,
                                 target.as_ref(),
                                 focus_session.as_deref(),
+                                agent.as_deref(),
                                 toggle,
                             )
                         }

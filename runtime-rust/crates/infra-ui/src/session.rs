@@ -1020,30 +1020,30 @@ pub fn controls() {
     sync_working_indicator();
 }
 
-struct WorkingSignals<'a> {
-    selected: &'a V,
-    sessions: &'a [V],
-    pending: bool,
-    booting: bool,
-    update_page: &'a V,
-    results: &'a V,
-    delivery_preview: &'a V,
-    creator_pending: bool,
-    creator_run: &'a V,
-    system_pending: bool,
-    editor_pending: bool,
-    discovery_active: bool,
-    system_run_active: bool,
-    graph_building: bool,
-    knowledge_pending: bool,
-    skills_pending: bool,
-    setup_pending: bool,
-    create_skill_pending: bool,
-    sign_in_pending: bool,
-    sdd_pending: bool,
+pub(crate) struct WorkingSignals<'a> {
+    pub(crate) selected: &'a V,
+    pub(crate) sessions: &'a [V],
+    pub(crate) pending: bool,
+    pub(crate) booting: bool,
+    pub(crate) update_page: &'a V,
+    pub(crate) results: &'a V,
+    pub(crate) delivery_preview: &'a V,
+    pub(crate) creator_pending: bool,
+    pub(crate) creator_run: &'a V,
+    pub(crate) system_pending: bool,
+    pub(crate) editor_pending: bool,
+    pub(crate) discovery_active: bool,
+    pub(crate) system_run_active: bool,
+    pub(crate) graph_building: bool,
+    pub(crate) knowledge_pending: bool,
+    pub(crate) skills_pending: bool,
+    pub(crate) setup_pending: bool,
+    pub(crate) create_skill_pending: bool,
+    pub(crate) sign_in_pending: bool,
+    pub(crate) sdd_pending: bool,
 }
 
-fn working_message(signals: &WorkingSignals<'_>) -> Option<&'static str> {
+pub(crate) fn working_message(signals: &WorkingSignals<'_>) -> Option<&'static str> {
     if m::active(signals.selected) {
         return Some(if signals.selected["status"] == "queued" {
             "Queued — waiting for an available runner…"
@@ -1108,6 +1108,9 @@ pub fn sync_working_indicator() {
     let creator_detail = m::data("creator-detail");
     let system_run = m::data("system-run");
     let graph_data = m::data("graph");
+    let system_graph_status = m::data("system-graph-status");
+    let sys_graph_building = system_graph_status["building_count"].as_u64().unwrap_or(0) > 0
+        || system_graph_status["state"] == "building";
     let creator_pending = m::yes(&m::data("creator-pending"));
     let system_pending = m::yes(&m::data("system-pending"));
     let editor_pending = m::yes(&m::data("editor-pending"));
@@ -1133,7 +1136,7 @@ pub fn sync_working_indicator() {
             editor_pending,
             discovery_active,
             system_run_active: m::yes(&system_run["active"]),
-            graph_building: graph_data["build"].is_object(),
+            graph_building: graph_data["build"].is_object() || sys_graph_building,
             knowledge_pending,
             skills_pending,
             setup_pending,
@@ -1144,19 +1147,27 @@ pub fn sync_working_indicator() {
         working_message(&signals)
     });
     let active = if status.is_some() { "true" } else { "false" };
-    dom::attr("composer-working", "data-working", active);
-    dom::attr(
-        "composer-working",
-        "aria-hidden",
-        if status.is_some() { "false" } else { "true" },
-    );
-    dom::attr("session-form", "data-working", active);
-    if let Some(message) = status {
-        dom::text("composer-working-text", message);
+    let hidden_attr = if status.is_some() { "false" } else { "true" };
+    for (box_id, text_id) in [
+        ("composer-working", "composer-working-text"),
+        ("system-working", "system-working-text"),
+        ("system-changes-working", "system-changes-working-text"),
+    ] {
+        dom::attr(box_id, "data-working", active);
+        dom::attr(box_id, "aria-hidden", hidden_attr);
+        if let Some(message) = status {
+            dom::text(text_id, message);
+        }
     }
+    dom::attr("session-form", "data-working", active);
 }
 pub async fn open_view(view: &str, record: bool) {
     let previous_view = m::read(|state| state.view.clone());
+    if ["systems", "system-changes"].contains(&previous_view.as_str())
+        && !["systems", "system-changes"].contains(&view)
+    {
+        systems::leave_systems_view();
+    }
     if m::read(|s| s.view == "memory-use" && s.view != view) {
         knowledge::leave_memory();
     }
@@ -1900,6 +1911,39 @@ pub fn attach_map_context(project: &str, text: &str) -> bool {
             false
         }
     }
+}
+
+pub(crate) fn merge_draft_text(existing: &str, block: &str, max_chars: usize) -> String {
+    const MARKER: &str = "[System Architecture & Blast-Radius Context]";
+    let clean_block = block.trim();
+    if clean_block.is_empty() {
+        return existing.to_owned();
+    }
+    let base = if let Some(idx) = existing.find(MARKER) {
+        existing[..idx].trim_end()
+    } else {
+        existing.trim_end()
+    };
+    let combined = if base.is_empty() {
+        clean_block.to_owned()
+    } else {
+        format!("{base}\n\n{clean_block}")
+    };
+    if max_chars > 0 && combined.chars().count() > max_chars {
+        combined.chars().take(max_chars).collect()
+    } else {
+        combined
+    }
+}
+
+pub(crate) fn append_draft_block(textarea_id: &str, block: &str, max_chars: usize) -> bool {
+    if block.trim().is_empty() || dom::get(textarea_id).is_none() {
+        return false;
+    }
+    let next = merge_draft_text(&dom::value(textarea_id), block, max_chars);
+    dom::set_value(textarea_id, &next);
+    dom::focus(textarea_id);
+    true
 }
 
 pub async fn send() {
@@ -3204,6 +3248,10 @@ pub async fn event(
         dom::class("sidebar", "open", false);
         dom::class("scrim", "open", false);
         dom::attr("menu-toggle", "aria-expanded", "false");
+        if m::read(|s| matches!(s.view.as_str(), "systems" | "system-changes")) {
+            systems::focus_system_graph_workspace();
+            return true;
+        }
         if m::read(|s| s.view != "sessions") {
             open_view("sessions", true).await;
         } else {

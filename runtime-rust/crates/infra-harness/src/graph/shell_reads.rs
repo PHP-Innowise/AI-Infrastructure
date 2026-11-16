@@ -7,7 +7,7 @@ use std::{
 
 static PRINT: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
-        r"^sed[ \t]+-n[ \t]+'[1-9][0-9]*(?:,[1-9][0-9]*)?p'[ \t]+(?:--[ \t]+)?([A-Za-z0-9_./-]+)$",
+        r#"^sed[ \t]+-n[ \t]+(?:'[1-9][0-9]*(?:,[1-9][0-9]*)?p'|"[1-9][0-9]*(?:,[1-9][0-9]*)?p"|[1-9][0-9]*(?:,[1-9][0-9]*)?p)[ \t]+(?:--[ \t]+)?([A-Za-z0-9_./-]+)$"#,
     )
     .expect("literal sed print pattern")
 });
@@ -28,21 +28,17 @@ fn operands(command: &str) -> Option<Vec<&str>> {
         .collect()
 }
 
-pub(super) fn completed(event: &Value, workspace: &Path) -> Option<(u64, Vec<String>)> {
-    if event["kind"] != "tool"
-        || event["tool"] != "Shell"
-        || event["state"] != "completed"
-        || event["ok"] != true
-        || event["exit_code"] != 0
-        || event["outcome"] == "not_run"
-        || workspace.as_os_str().is_empty()
-    {
+pub(crate) fn completed_command(
+    id: u64,
+    detail: &str,
+    workspace: &Path,
+) -> Option<(u64, Vec<String>)> {
+    if id == 0 || workspace.as_os_str().is_empty() {
         return None;
     }
-    let id = event["id"].as_u64().filter(|id| *id > 0)?;
-    let paths = operands(event["detail"].as_str()?)?;
+    let paths = operands(detail)?;
     let root = workspace.canonicalize().ok()?;
-    let files = paths
+    let files: Vec<String> = paths
         .into_iter()
         .filter_map(|path| {
             let joined = workspace.join(path);
@@ -64,7 +60,25 @@ pub(super) fn completed(event: &Value, workspace: &Path) -> Option<(u64, Vec<Str
                 .flatten()
         })
         .collect();
-    Some((id, files))
+    (!files.is_empty()).then_some((id, files))
+}
+
+pub(crate) fn completed(event: &Value, workspace: &Path) -> Option<(u64, Vec<String>)> {
+    let is_tool =
+        event["kind"] == "tool" || (event["kind"] == "agent_activity" && event["type"] == "tool");
+    if !is_tool
+        || event["tool"] != "Shell"
+        || event["state"] != "completed"
+        || event["ok"] != true
+        || event["exit_code"] != 0
+        || event["outcome"] == "not_run"
+        || workspace.as_os_str().is_empty()
+    {
+        return None;
+    }
+    let id = event["id"].as_u64().filter(|id| *id > 0)?;
+    let detail = event["detail"].as_str()?;
+    completed_command(id, detail, workspace)
 }
 
 #[cfg(test)]

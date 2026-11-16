@@ -426,6 +426,17 @@ impl infra_host::provider::LaunchAdapter for ProjectLaunchAdapter {
         input: &infra_host::provider::Launch,
         mut command: infra_host::provider::PreparedCommand,
     ) -> Result<infra_host::provider::PreparedCommand> {
+        if let Some(session_id) = &self.session_id
+            && let Ok(session) = self.accelerators.store.get(session_id)
+            && session["system_explain"].is_object()
+        {
+            return crate::system_graph::adapt_system_explain_launch(
+                &self.accelerators.store,
+                &session,
+                input,
+                command,
+            );
+        }
         let project = self.accelerators.store.project(&self.project_id)?;
         let registered = PathBuf::from(
             project["path"]

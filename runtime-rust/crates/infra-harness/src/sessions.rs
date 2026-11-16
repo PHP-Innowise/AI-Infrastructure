@@ -536,6 +536,7 @@ impl Sessions {
             "model_routing",
             "attachments",
             "clash",
+            "system_explain",
         ];
         if !data.is_object()
             || data
@@ -603,6 +604,42 @@ impl Sessions {
             Value::Null
         };
         let dry = fleet["dry_run"] == true;
+        let is_system_explain = data.get("system_explain").is_some_and(|v| !v.is_null());
+        if is_system_explain {
+            if mode != "plan"
+                || data.get("project_context") != Some(&Value::Bool(false))
+                || workflow != "native"
+                || data["workspace"].as_str().unwrap_or("project") != "project"
+                || enabled
+            {
+                return Err(HarnessError::invalid(
+                    "System explanation requires a read-only plan session without project context.",
+                ));
+            }
+            value["system_explain"] = crate::system_graph::validate_system_explain(
+                &self.store,
+                &project,
+                &data["system_explain"],
+            )?;
+        } else {
+            value["system_explain"] = Value::Null;
+        }
+        let default =
+            json!({"seconds": if is_system_explain { 300 } else { self.default_seconds }});
+        let mut parsed_budgets = budgets(data.get("budgets").unwrap_or(&default), provider, dry)?;
+        if is_system_explain {
+            match parsed_budgets["seconds"].as_u64() {
+                None => {
+                    parsed_budgets["seconds"] = json!(300);
+                }
+                Some(secs) if secs > 300 => {
+                    return Err(HarnessError::invalid(
+                        "System explanation sessions allow at most 300 seconds.",
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
         if !discovered.available && !dry {
             return Err(HarnessError::unavailable(
                 "This provider CLI is unavailable.",
@@ -618,8 +655,7 @@ impl Sessions {
             ));
         }
         value["fleet"] = fleet;
-        let default = json!({"seconds":self.default_seconds});
-        value["budgets"] = budgets(data.get("budgets").unwrap_or(&default), provider, dry)?;
+        value["budgets"] = parsed_budgets;
         if !value["fleet"].is_null() {
             value["budgets"]["usd"] = value["fleet"]["budget_usd"].clone();
         }
@@ -680,6 +716,10 @@ impl Sessions {
             crate::sdd::require_documents(&root, &value["sdd"])?;
         }
         Ok(value)
+    }
+    #[cfg(test)]
+    pub(crate) fn create_options_for_test(&self, data: &Value) -> Result<Value> {
+        self.create_options(data)
     }
     fn create_ready(&self, options: Value) -> Result<Value> {
         let _operation = self
@@ -1084,11 +1124,15 @@ impl Sessions {
             .get(provider)?
             .executable
             .ok_or_else(|| HarnessError::unavailable("The provider CLI is unavailable."))?;
-        let root = PathBuf::from(
-            session["project_path"]
-                .as_str()
-                .ok_or_else(|| HarnessError::invalid("Session workspace missing."))?,
-        );
+        let root = if let Some(primary) = session["system_explain"]["primary_root"].as_str() {
+            PathBuf::from(primary)
+        } else {
+            PathBuf::from(
+                session["project_path"]
+                    .as_str()
+                    .ok_or_else(|| HarnessError::invalid("Session workspace missing."))?,
+            )
+        };
         if !session["sdd"].is_null() {
             crate::sdd::require_documents(&root, &session["sdd"])?;
         }
@@ -1124,6 +1168,7 @@ impl Sessions {
                 "creator",
                 "system_run",
                 "system_discovery",
+                "system_explain",
             ]
             .iter()
             .any(|field| !session[*field].is_null())
@@ -1607,7 +1652,18 @@ impl Sessions {
                 &route,
                 &binding.instructions,
             )?;
-            launch.prompt = prepared.text;
+            launch.prompt = if session["system_explain"].is_object() {
+                format!(
+                    "{}{}",
+                    crate::system_graph::system_explain_prompt_prefix(
+                        &self.store,
+                        &session["system_explain"],
+                    ),
+                    prepared.text
+                )
+            } else {
+                prepared.text
+            };
             self.lifecycle.set_prompt_ledger(
                 &binding,
                 &prepared.ledger,
@@ -1801,6 +1857,7 @@ impl Sessions {
             || !session["creator"].is_null()
             || !session["system_run"].is_null()
             || !session["system_discovery"].is_null()
+            || !session["system_explain"].is_null()
         {
             return Err(HarnessError::conflict(
                 "This session cannot accept a chat follow-up.",
