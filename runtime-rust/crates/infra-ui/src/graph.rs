@@ -4,6 +4,287 @@
 use crate::{api, dom, model as m};
 use serde_json::{json, Value as V};
 use wasm_bindgen_futures::spawn_local;
+
+/// Identifies whether a code-graph request targets a single registered project
+/// or a specific member service (`__system__`, standalone repo, or monorepo
+/// subfolder) of a multi-service System orchestration workspace.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GraphTargetScope {
+    SingleProject {
+        project_id: String,
+    },
+    SystemService {
+        project_id: String,
+        config_path: String,
+        service_id: String,
+        services: Vec<String>,
+        run_id: Option<String>,
+        run_title: Option<String>,
+        launches: Vec<V>,
+    },
+}
+
+#[cfg(target_arch = "wasm32")]
+fn encode_part(value: &str) -> String {
+    dom::enc(value)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn encode_part(value: &str) -> String {
+    let mut out = String::new();
+    for b in value.as_bytes() {
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')' => out.push(*b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[cfg(target_arch = "wasm32")]
+fn encode_query(params: &[(&str, String)]) -> String {
+    dom::query(params)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn encode_query(params: &[(&str, String)]) -> String {
+    if params.is_empty() {
+        return String::new();
+    }
+    let parts = params
+        .iter()
+        .map(|(k, v)| format!("{}={}", encode_part(k), encode_part(v)))
+        .collect::<Vec<_>>();
+    format!("?{}", parts.join("&"))
+}
+
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+impl GraphTargetScope {
+    pub fn single(project_id: impl Into<String>) -> Self {
+        Self::SingleProject {
+            project_id: project_id.into(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::SingleProject { project_id } => project_id.trim().is_empty(),
+            Self::SystemService {
+                project_id,
+                config_path,
+                service_id,
+                ..
+            } => {
+                project_id.trim().is_empty()
+                    || config_path.trim().is_empty()
+                    || service_id.trim().is_empty()
+            }
+        }
+    }
+
+    pub fn is_system(&self) -> bool {
+        matches!(self, Self::SystemService { .. })
+    }
+
+    pub fn project_id(&self) -> &str {
+        match self {
+            Self::SingleProject { project_id } | Self::SystemService { project_id, .. } => {
+                project_id
+            }
+        }
+    }
+
+    pub fn service_id(&self) -> Option<&str> {
+        match self {
+            Self::SingleProject { .. } => None,
+            Self::SystemService { service_id, .. } => Some(service_id.as_str()),
+        }
+    }
+
+    pub fn scope_key(&self) -> String {
+        match self {
+            Self::SingleProject { project_id } => format!("project:{project_id}"),
+            Self::SystemService {
+                project_id,
+                config_path,
+                service_id,
+                ..
+            } => format!("system:{project_id}\n{config_path}\n{service_id}"),
+        }
+    }
+
+    pub fn with_service(&self, next_service: &str) -> Self {
+        match self {
+            Self::SingleProject { project_id } => Self::SingleProject {
+                project_id: project_id.clone(),
+            },
+            Self::SystemService {
+                project_id,
+                config_path,
+                services,
+                run_id,
+                run_title,
+                launches,
+                ..
+            } => {
+                let mut all_services = services.clone();
+                if !next_service.is_empty()
+                    && next_service != "__system__"
+                    && !all_services.iter().any(|svc| svc == next_service)
+                {
+                    all_services.push(next_service.to_owned());
+                }
+                Self::SystemService {
+                    project_id: project_id.clone(),
+                    config_path: config_path.clone(),
+                    service_id: next_service.to_owned(),
+                    services: all_services,
+                    run_id: run_id.clone(),
+                    run_title: run_title.clone(),
+                    launches: launches.clone(),
+                }
+            }
+        }
+    }
+
+    pub fn to_json(&self) -> V {
+        match self {
+            Self::SingleProject { project_id } => json!({
+                "kind": "single",
+                "project_id": project_id,
+            }),
+            Self::SystemService {
+                project_id,
+                config_path,
+                service_id,
+                services,
+                run_id,
+                run_title,
+                launches,
+            } => json!({
+                "kind": "system_service",
+                "project_id": project_id,
+                "config_path": config_path,
+                "service_id": service_id,
+                "services": services,
+                "run_id": run_id,
+                "run_title": run_title,
+                "launches": launches,
+            }),
+        }
+    }
+
+    pub fn from_json(raw: &V) -> Option<Self> {
+        match raw["kind"].as_str()? {
+            "single" => Some(Self::SingleProject {
+                project_id: m::text(raw, "project_id"),
+            }),
+            "system_service" => Some(Self::SystemService {
+                project_id: m::text(raw, "project_id"),
+                config_path: m::text(raw, "config_path"),
+                service_id: m::text(raw, "service_id"),
+                services: m::array(&raw["services"])
+                    .into_iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+                run_id: raw["run_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+                run_title: raw["run_title"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+                launches: m::array(&raw["launches"]),
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn status_url(&self, check: bool) -> String {
+        match self {
+            Self::SingleProject { project_id } => format!(
+                "/api/projects/{}/graph{}",
+                encode_part(project_id),
+                if check { "?check=1" } else { "" }
+            ),
+            Self::SystemService {
+                project_id,
+                config_path,
+                service_id,
+                ..
+            } => {
+                let mut query = vec![
+                    ("project_id", project_id.clone()),
+                    ("config_path", config_path.clone()),
+                    ("service", service_id.clone()),
+                ];
+                if check {
+                    query.push(("check", "1".to_owned()));
+                }
+                format!("/api/systems/service-graph{}", encode_query(&query))
+            }
+        }
+    }
+
+    pub fn act_request(&self, action: &str, target: Option<&str>) -> (String, V) {
+        match self {
+            Self::SingleProject { project_id } => {
+                let mut body = json!({ "action": action });
+                if let Some(target) = target {
+                    body["target"] = json!(target);
+                }
+                (
+                    format!("/api/projects/{}/graph", encode_part(project_id)),
+                    body,
+                )
+            }
+            Self::SystemService {
+                project_id,
+                config_path,
+                service_id,
+                ..
+            } => {
+                let mut body = json!({
+                    "project_id": project_id,
+                    "config_path": config_path,
+                    "service": service_id,
+                    "action": action,
+                });
+                if let Some(target) = target {
+                    body["target"] = json!(target);
+                }
+                ("/api/systems/service-graph".to_owned(), body)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default, PartialEq)]
 pub struct GraphView {
     pub chip: String,
@@ -326,27 +607,24 @@ fn render() {
     set_progress_bar("graph-progress-bar", view.percent);
     dom::text("graph-progress-amount", &view.amount);
     dom::text("graph-progress-left", &view.left);
-    dom::hidden("session-graph-progress", !view.building);
-    let progress_text = build_progress_text(&status, &view);
-    dom::text("session-graph-progress-text", &progress_text);
-    set_progress_bar("session-graph-progress-bar", view.percent);
-    dom::text("session-graph-progress-amount", &view.amount);
-    dom::text("session-graph-progress-left", &view.left);
-    let (pill_state, pill_label) = sidebar_status(&project, &status, &view);
-    dom::attr("sidebar-graph-pill", "data-state", pill_state);
-    dom::text("sidebar-graph-label", &pill_label);
-    let pill_title = if view.note.is_empty() {
-        pill_label.clone()
-    } else {
-        view.note.clone()
-    };
-    dom::attr("sidebar-graph-pill", "title", &pill_title);
-    let pill_aria = if view.building && !view.left.is_empty() {
-        format!("{pill_label} ({})", view.left)
-    } else {
-        pill_label
-    };
-    dom::attr("sidebar-graph-pill", "aria-label", &pill_aria);
+    sync_embedded_progress_for_surface("session-graph", &status);
+    if !m::read(|s| matches!(s.view.as_str(), "systems" | "system-changes")) {
+        let (pill_state, pill_label) = sidebar_status(&project, &status, &view);
+        dom::attr("sidebar-graph-pill", "data-state", pill_state);
+        dom::text("sidebar-graph-label", &pill_label);
+        let pill_title = if view.note.is_empty() {
+            pill_label.clone()
+        } else {
+            view.note.clone()
+        };
+        dom::attr("sidebar-graph-pill", "title", &pill_title);
+        let pill_aria = if view.building && !view.left.is_empty() {
+            format!("{pill_label} ({})", view.left)
+        } else {
+            pill_label
+        };
+        dom::attr("sidebar-graph-pill", "aria-label", &pill_aria);
+    }
     dom::text("graph-detail", &view.detail);
     dom::hidden("graph-detail", view.detail.is_empty());
     // The map draws the published graph, also while a newer one is being built.
@@ -356,6 +634,253 @@ fn render() {
     dom::hidden("graph-delete", !view.delete);
     crate::session::sync_working_indicator();
 }
+
+/// Updates the embedded surface build progress strip (`#{prefix}-progress*`) from a service/project status payload.
+#[allow(dead_code)]
+pub(crate) fn sync_embedded_progress_for_surface(prefix: &str, status: &V) {
+    let view = graph_view(status);
+    dom::hidden(&format!("{prefix}-progress"), !view.building);
+    let progress_text = build_progress_text(status, &view);
+    dom::text(&format!("{prefix}-progress-text"), &progress_text);
+    set_progress_bar(
+        &format!("{prefix}-progress-bar"),
+        view.percent.map(|pct| pct.clamp(1, 99)),
+    );
+    dom::text(&format!("{prefix}-progress-amount"), &view.amount);
+    dom::text(&format!("{prefix}-progress-left"), &view.left);
+}
+
+/// Renders the per-service Graphify status pill and monotonic `1..=99%` build progress bar
+/// for `.system-card` entries in `#system-services`.
+#[allow(dead_code)]
+pub(crate) fn render_service_graph_pill_html(service_id: &str, status: &V) -> String {
+    let esc_service = escape_html(service_id);
+    if !status.is_object() {
+        return format!(
+            "<div class=\"service-graph-status\" data-service=\"{esc_service}\" data-state=\"idle\"><span class=\"sidebar-graph-pill service-graph-pill\" data-state=\"idle\" title=\"Code graph status loading\" aria-label=\"Code graph status loading for {esc_service}\"><span class=\"sidebar-graph-dot\" aria-hidden=\"true\"></span><span class=\"service-graph-chip\">Loading…</span></span></div>"
+        );
+    }
+    let view = graph_view(status);
+    let raw_state = status["state"].as_str().unwrap_or("");
+    let pill_state = if view.building || raw_state == "building" {
+        "building"
+    } else if matches!(
+        raw_state,
+        "ready" | "stale" | "failed" | "missing" | "empty" | "off" | "denied"
+    ) {
+        raw_state
+    } else if status["graph"].is_object() {
+        "ready"
+    } else {
+        "idle"
+    };
+    let chip = if view.chip.is_empty() {
+        match pill_state {
+            "denied" => "Denied",
+            "ready" => "Ready",
+            "building" => "Building",
+            "stale" => "Stale",
+            "failed" => "Failed",
+            "missing" => "Not installed",
+            "empty" => "Not built",
+            "off" => "Off",
+            _ => "Idle",
+        }
+        .to_owned()
+    } else {
+        view.chip.clone()
+    };
+    let title = if !view.note.is_empty() {
+        view.note.clone()
+    } else if !view.detail.is_empty() {
+        view.detail.clone()
+    } else {
+        format!("{service_id}: {chip}")
+    };
+    let esc_chip = escape_html(&chip);
+    let esc_title = escape_html(&title);
+    let mut html = format!(
+        "<div class=\"service-graph-status\" data-service=\"{esc_service}\" data-state=\"{pill_state}\"><span class=\"sidebar-graph-pill service-graph-pill\" data-state=\"{pill_state}\" title=\"{esc_title}\" aria-label=\"{esc_service} code graph: {esc_chip}\"><span class=\"sidebar-graph-dot\" aria-hidden=\"true\"></span><span class=\"service-graph-chip\">{esc_chip}</span></span>"
+    );
+    if view.building {
+        let clamped = view.percent.map(|pct| pct.clamp(1, 99));
+        let progress_text = build_progress_text(status, &view);
+        let value_attr = match clamped {
+            Some(pct) => format!(" value=\"{pct}\""),
+            None => String::new(),
+        };
+        let amount = match clamped {
+            Some(pct) => format!("{pct}%"),
+            None => view.amount.clone(),
+        };
+        html.push_str(&format!(
+            "<div class=\"graph-progress service-graph-progress\"><div class=\"graph-progress-line\"><span class=\"graph-progress-phase\">{}</span><span class=\"graph-progress-amount\">{}</span><span class=\"graph-progress-left\">{}</span></div><progress max=\"100\"{value_attr}></progress></div>",
+            escape_html(&progress_text),
+            escape_html(&amount),
+            escape_html(&view.left),
+        ));
+    } else if view.failed && !view.note.is_empty() {
+        html.push_str(&format!(
+            "<span class=\"service-graph-note knowledge-note\">{}</span>",
+            escape_html(&view.note),
+        ));
+    } else if !view.detail.is_empty() {
+        html.push_str(&format!(
+            "<span class=\"service-graph-detail knowledge-note\">{}</span>",
+            escape_html(&view.detail),
+        ));
+    }
+    html.push_str("</div>");
+    html
+}
+
+/// Computes `(data-state, label, title)` for `#sidebar-graph-pill` from `/api/systems/graph/status`.
+pub fn system_sidebar_status(agg_status: &V) -> (&'static str, String, String) {
+    if !agg_status.is_object() {
+        return (
+            "idle",
+            "System graphs: select a system".to_owned(),
+            "Select a project and system configuration to inspect service code graphs.".to_owned(),
+        );
+    }
+    let services_obj = agg_status["services"].as_object();
+    let mut counted_total = 0u64;
+    let mut counted_ready = 0u64;
+    let mut counted_building = 0u64;
+    let mut counted_failed = 0u64;
+    let mut counted_stale = 0u64;
+    let mut pct_sum = 0u64;
+    let mut pct_n = 0u64;
+    if let Some(map) = services_obj {
+        counted_total = map.len() as u64;
+        for svc_status in map.values() {
+            let st = svc_status["state"].as_str().unwrap_or("");
+            if st == "building" || svc_status["build"].is_object() {
+                counted_building += 1;
+                if let Some(p) = svc_status["build"]["percent"].as_u64() {
+                    pct_sum += p.clamp(1, 99);
+                    pct_n += 1;
+                }
+            }
+            if st == "ready" || svc_status["graph"].is_object() {
+                counted_ready += 1;
+            }
+            if st == "failed" {
+                counted_failed += 1;
+            }
+            if st == "stale" {
+                counted_stale += 1;
+            }
+        }
+    }
+    let total = agg_status["total_count"].as_u64().unwrap_or(counted_total);
+    let ready = agg_status["ready_count"].as_u64().unwrap_or(counted_ready);
+    let building = agg_status["building_count"]
+        .as_u64()
+        .unwrap_or(counted_building);
+    let top_state = agg_status["state"].as_str().unwrap_or("");
+
+    if building > 0 || top_state == "building" {
+        let pct_suffix = pct_sum
+            .checked_div(pct_n)
+            .map(|avg| format!(" · {}%", avg.clamp(1, 99)))
+            .unwrap_or_default();
+        let label = if total > 0 {
+            format!("Building service graphs… ({ready}/{total}){pct_suffix}")
+        } else {
+            format!("Building service graphs…{pct_suffix}")
+        };
+        let title = if total > 0 {
+            format!("{building} service graph(s) building · {ready} of {total} ready")
+        } else {
+            "Building system service code graphs…".to_owned()
+        };
+        return ("building", label, title);
+    }
+    if top_state == "missing" {
+        return (
+            "missing",
+            "Graphify not installed".to_owned(),
+            "Install Graphify (uv tool install graphifyy) to build service code graphs.".to_owned(),
+        );
+    }
+    if top_state == "failed" || (counted_failed > 0 && ready == 0) {
+        let failed = counted_failed.max(1);
+        let label = if total > 0 {
+            format!("Service graphs failed ({failed}/{total})")
+        } else {
+            "Service graphs build failed".to_owned()
+        };
+        return (
+            "failed",
+            label,
+            format!("{failed} service code graph build(s) failed."),
+        );
+    }
+    if total > 0 && ready >= total {
+        if counted_stale > 0 || top_state == "stale" {
+            return (
+                "stale",
+                format!("Service graphs stale ({ready}/{total})"),
+                format!("{ready} of {total} service graphs published; rebuild needed for recent changes."),
+            );
+        }
+        return (
+            "ready",
+            format!("Service graphs ready ({ready}/{total})"),
+            format!("All {total} system service code graphs are published and ready."),
+        );
+    }
+    if ready > 0 {
+        let state_key = if counted_stale > 0 || top_state == "stale" {
+            "stale"
+        } else {
+            "ready"
+        };
+        return (
+            state_key,
+            format!("Service graphs: {ready}/{total} ready"),
+            format!("{ready} of {total} system service code graphs published."),
+        );
+    }
+    if top_state == "off" {
+        return (
+            "off",
+            "Service graphs off".to_owned(),
+            "Enable code graphs on member services to map dependencies.".to_owned(),
+        );
+    }
+    if total > 0 {
+        return (
+            "empty",
+            format!("Service graphs: 0/{total} built"),
+            format!("0 of {total} service code graphs built yet."),
+        );
+    }
+    (
+        "idle",
+        "System graphs: idle".to_owned(),
+        "System code graphs idle.".to_owned(),
+    )
+}
+
+/// Updates `#sidebar-graph-pill` and `#sidebar-graph-label` for multi-service System views.
+#[allow(dead_code)]
+pub(crate) fn sync_sidebar_pill_for_system(agg_status: &V) {
+    let (pill_state, pill_label, pill_title) = system_sidebar_status(agg_status);
+    dom::attr("sidebar-graph-pill", "data-state", pill_state);
+    dom::text("sidebar-graph-label", &pill_label);
+    dom::attr("sidebar-graph-pill", "title", &pill_title);
+    dom::attr("sidebar-graph-pill", "aria-label", &pill_title);
+}
+
+/// Executes a graph mutation (`enable|disable|offer|withhold|rebuild|delete`) against any `GraphTargetScope`.
+#[allow(dead_code)]
+pub(crate) async fn act_for_scope(scope: &GraphTargetScope, action: &str) -> Result<V, api::Error> {
+    let (path, body) = scope.act_request(action, None);
+    api::post(&path, body).await
+}
+
 fn follow() {
     let status = m::data("graph");
     if status["build"].is_object() || status["state"] == "building" {
@@ -371,16 +896,13 @@ fn follow() {
 /// Reads the graph of the selected project. `visit` lets the server rebuild a
 /// graph whose files changed, as when the project is opened.
 pub async fn load(visit: bool) {
-    let project = dom::value("project");
-    if project.is_empty() {
+    let scope = GraphTargetScope::single(dom::value("project"));
+    if scope.is_empty() {
         apply_status("", V::Null);
         return;
     }
-    let path = format!(
-        "/api/projects/{}/graph{}",
-        dom::enc(&project),
-        if visit { "?check=1" } else { "" }
-    );
+    let project = scope.project_id().to_owned();
+    let path = scope.status_url(visit);
     if let Ok((epoch, status)) = api::scoped("project-graph", &path).await {
         if !m::current("project-graph", epoch) || dom::value("project") != project {
             return;
@@ -417,13 +939,13 @@ pub fn run_state(active: bool) {
     }
 }
 async fn act(action: &str) {
-    let project = dom::value("project");
-    if project.is_empty() {
+    let scope = GraphTargetScope::single(dom::value("project"));
+    if scope.is_empty() {
         return;
     }
+    let project = scope.project_id().to_owned();
     dom::error("graph-error", "");
-    let path = format!("/api/projects/{}/graph", dom::enc(&project));
-    match api::post(&path, json!({ "action": action })).await {
+    match act_for_scope(&scope, action).await {
         Ok(status) if dom::value("project") == project => {
             apply_status(&project, status);
             return;
@@ -680,5 +1202,120 @@ mod tests {
         assert!(sync_needed("proj-a", &off, "proj-a", &ready));
         assert!(sync_needed("proj-a", &stale, "proj-a", &ready));
         assert!(sync_needed("proj-a", &ready, "proj-a", &off));
+    }
+    #[test]
+    fn graph_target_scope_builds_single_and_system_service_urls_and_json_roundtrip() {
+        let single = GraphTargetScope::single("my/proj");
+        assert!(!single.is_empty());
+        assert!(!single.is_system());
+        assert_eq!(single.status_url(false), "/api/projects/my%2Fproj/graph");
+        assert_eq!(
+            single.status_url(true),
+            "/api/projects/my%2Fproj/graph?check=1"
+        );
+        let (act_url, act_body) = single.act_request("rebuild", None);
+        assert_eq!(act_url, "/api/projects/my%2Fproj/graph");
+        assert_eq!(act_body, json!({"action": "rebuild"}));
+        assert_eq!(GraphTargetScope::from_json(&single.to_json()), Some(single));
+
+        let sys = GraphTargetScope::SystemService {
+            project_id: "lab/root".to_owned(),
+            config_path: "harbor-system/system.json".to_owned(),
+            service_id: "orders".to_owned(),
+            services: vec!["orders".to_owned(), "inventory".to_owned()],
+            run_id: Some("chg-42".to_owned()),
+            run_title: Some("Update order contract".to_owned()),
+            launches: vec![json!({"id": "l1", "number": 1})],
+        };
+        assert!(!sys.is_empty());
+        assert!(sys.is_system());
+        assert_eq!(sys.service_id(), Some("orders"));
+        assert_eq!(
+            sys.status_url(true),
+            "/api/systems/service-graph?project_id=lab%2Froot&config_path=harbor-system%2Fsystem.json&service=orders&check=1"
+        );
+        let (sys_url, sys_body) = sys.act_request("changes", Some("pr:12"));
+        assert_eq!(sys_url, "/api/systems/service-graph");
+        assert_eq!(
+            sys_body,
+            json!({
+                "project_id": "lab/root",
+                "config_path": "harbor-system/system.json",
+                "service": "orders",
+                "action": "changes",
+                "target": "pr:12",
+            })
+        );
+        let switched = sys.with_service("__system__");
+        assert_eq!(switched.service_id(), Some("__system__"));
+        assert_eq!(GraphTargetScope::from_json(&sys.to_json()), Some(sys));
+    }
+    #[test]
+    fn service_graph_pill_renders_monotonic_progress_ready_detail_and_escapes_html() {
+        let building_zero = status(
+            "building",
+            json!({ "build": { "phase": "read", "done": 1, "total": 200, "percent": 0, "remaining_seconds": 18 } }),
+        );
+        let pill_zero = render_service_graph_pill_html("orders<svc>", &building_zero);
+        assert!(pill_zero.contains("data-service=\"orders&lt;svc&gt;\""));
+        assert!(pill_zero.contains("data-state=\"building\""));
+        assert!(pill_zero.contains("<progress max=\"100\" value=\"1\"></progress>"));
+
+        let building_hundred = status(
+            "building",
+            json!({ "build": { "phase": "assemble", "percent": 100, "remaining_seconds": 1 } }),
+        );
+        let pill_hundred = render_service_graph_pill_html("inventory", &building_hundred);
+        assert!(pill_hundred.contains("<progress max=\"100\" value=\"99\"></progress>"));
+
+        let ready = status("ready", json!({ "graph": graph() }));
+        let pill_ready = render_service_graph_pill_html("__system__", &ready);
+        assert!(pill_ready.contains("data-state=\"ready\""));
+        assert!(pill_ready.contains("Ready"));
+        assert!(pill_ready.contains("50,900 nodes"));
+    }
+    #[test]
+    fn system_sidebar_status_summarizes_building_ready_partial_and_failed_states() {
+        let building_agg = json!({
+            "state": "building",
+            "ready_count": 3,
+            "total_count": 5,
+            "building_count": 2,
+            "services": {
+                "orders": { "state": "building", "build": { "percent": 60 } },
+                "inventory": { "state": "building", "build": { "percent": 20 } },
+            }
+        });
+        let (st, label, _) = system_sidebar_status(&building_agg);
+        assert_eq!(st, "building");
+        assert_eq!(label, "Building service graphs… (3/5) · 40%");
+
+        let ready_agg = json!({
+            "state": "ready",
+            "ready_count": 5,
+            "total_count": 5,
+            "building_count": 0,
+        });
+        assert_eq!(system_sidebar_status(&ready_agg).0, "ready");
+        assert_eq!(
+            system_sidebar_status(&ready_agg).1,
+            "Service graphs ready (5/5)"
+        );
+
+        let failed_agg = json!({
+            "state": "failed",
+            "ready_count": 0,
+            "total_count": 4,
+            "building_count": 0,
+            "services": {
+                "orders": { "state": "failed" },
+                "payments": { "state": "failed" },
+            }
+        });
+        assert_eq!(system_sidebar_status(&failed_agg).0, "failed");
+        assert_eq!(
+            system_sidebar_status(&failed_agg).1,
+            "Service graphs failed (2/4)"
+        );
     }
 }

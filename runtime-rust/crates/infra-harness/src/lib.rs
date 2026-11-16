@@ -44,6 +44,7 @@ pub mod setup;
 pub mod skills;
 pub mod store;
 pub mod strict_json;
+pub mod system_graph;
 
 pub mod memory_draft;
 

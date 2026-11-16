@@ -406,7 +406,19 @@ pub fn prompt_for(
     prior: &[Value],
     scratch: Option<&Path>,
 ) -> Result<String> {
-    build_prompt(state, plan, step, prior, scratch, None, None)
+    build_prompt(state, plan, step, prior, scratch, None, None, &[])
+}
+
+/// Builds the input of one dispatch with offered member-service code graphs.
+pub fn prompt_for_with_graphs(
+    state: &Value,
+    plan: &Value,
+    step: &Value,
+    prior: &[Value],
+    scratch: Option<&Path>,
+    offers: &[crate::system_graph::ServiceGraphOffer],
+) -> Result<String> {
+    build_prompt(state, plan, step, prior, scratch, None, None, offers)
 }
 
 /// Maintainer-only working-memory pilot. The caller admits receipt-linked
@@ -421,7 +433,7 @@ pub fn prompt_for_with_working_memory(
     snapshot: &Value,
 ) -> Result<String> {
     validate_working_memory_snapshot(state, snapshot)?;
-    build_prompt(state, plan, step, prior, scratch, Some(snapshot), None)
+    build_prompt(state, plan, step, prior, scratch, Some(snapshot), None, &[])
 }
 
 /// Stable pilot namespace derived from the native run's system identity.
@@ -461,6 +473,7 @@ pub fn prompt_for_working_memory_experiment(
         scratch,
         snapshot,
         Some(producer_instruction),
+        &[],
     )
 }
 
@@ -512,6 +525,10 @@ fn validate_working_memory_snapshot(state: &Value, snapshot: &Value) -> Result<(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Prompt builder combines run state, plan, prior reports, pilot snapshot, and graph offers."
+)]
 fn build_prompt(
     state: &Value,
     plan: &Value,
@@ -520,6 +537,7 @@ fn build_prompt(
     scratch: Option<&Path>,
     working_memory: Option<&Value>,
     producer_instruction: Option<&str>,
+    offers: &[crate::system_graph::ServiceGraphOffer],
 ) -> Result<String> {
     // System dispatches are always read-only; the run's mode says whether
     // the change is implemented or only investigated. A real contract agent
@@ -572,6 +590,47 @@ fn build_prompt(
         Some(instruction) => format!("{head}{instruction}\n"),
         None => head,
     };
+    let active_offers = if state.get("tell_agents_graph") == Some(&Value::Bool(false)) {
+        &[][..]
+    } else {
+        offers
+    };
+    let head = if !active_offers.is_empty() {
+        let lines = active_offers
+            .iter()
+            .map(|offer| {
+                if let Some(custom) = &offer.prompt_instructions {
+                    format!("- [{}] {}", offer.service, custom)
+                } else {
+                    let g = offer.graph_path.to_string_lossy();
+                    let cmd = &offer.command;
+                    format!(
+                        "- [{}] {cmd} query \"<question>\" --graph {g} | {cmd} explain \"<name>\" --graph {g} | {cmd} path \"<A>\" \"<B>\" --graph {g}",
+                        offer.service
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "{head}Code graphs are available for this dispatch. Keep --graph and its path last; an option such as --budget N goes before them. The graph can lag behind later edits, so confirm in canonical files:\n{lines}\n"
+        )
+    } else {
+        head
+    };
+    let code_graphs_meta = active_offers
+        .iter()
+        .map(|offer| {
+            object!({
+                "service": offer.service,
+                "command": offer.command,
+                "graph": offer.graph_path,
+                "nodes": offer.nodes,
+                "edges": offer.edges,
+                "commit": offer.commit,
+            })
+        })
+        .collect::<Vec<_>>();
     // The earlier reports go in whole; only a prompt that would not fit has
     // them shortened, every report alike, each still naming its receipt.
     for level in 0..=CONDENSED_LEVELS {
@@ -579,7 +638,10 @@ fn build_prompt(
         if let Some(snapshot) = working_memory {
             shared["working_memory"] = snapshot.clone();
         }
-        let payload = object!({"dispatch":step["dispatch_id"],"phase":step["id"],"service":step["service"],"mode":step["mode"],"goal":goal,"native_task":state["tasks"][string(&step["service"])]["external_id"],"access":dispatch_access(state,step),"shared_context":shared});
+        let mut payload = object!({"dispatch":step["dispatch_id"],"phase":step["id"],"service":step["service"],"mode":step["mode"],"goal":goal,"native_task":state["tasks"][string(&step["service"])]["external_id"],"access":dispatch_access(state,step),"shared_context":shared});
+        if !code_graphs_meta.is_empty() {
+            payload["code_graphs"] = object!(code_graphs_meta);
+        }
         let prompt = format!("{head}{}", encoded(&payload)?);
         if prompt.chars().count() <= PROMPT_CHARS
             && (state["provider"] != "cursor" || prompt.len() <= CURSOR_PROMPT_BYTES)
@@ -672,6 +734,28 @@ pub(crate) async fn create_run_context(
     access: &str,
     adapter: Option<&dyn infra_host::provider::LaunchAdapter>,
 ) -> Result<Value> {
+    create_run_context_with_options(
+        system, plan, directory, provider, explicit, mode, timeout, access, None, adapter,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Compatibility API keeps explicit per-call custody and process controls."
+)]
+pub(crate) async fn create_run_context_with_options(
+    system: &mut System,
+    plan: &Value,
+    directory: &Path,
+    provider: &str,
+    explicit: Option<&str>,
+    mode: &str,
+    timeout: u64,
+    access: &str,
+    tell_agents_graph: Option<bool>,
+    adapter: Option<&dyn infra_host::provider::LaunchAdapter>,
+) -> Result<Value> {
     let selected = system.selected_plan(plan, true)?;
     if system.verify(plan)?["fresh"] != true {
         return Err(fail("Plan stale; regenerate before execution"));
@@ -693,6 +777,9 @@ pub(crate) async fn create_run_context(
         roots[sid] = object!(system.services[sid].root);
     }
     let mut state = object!({"schema_version":1,"kind":"ai-system-run","run_id":run,"change_id":plan["change_id"],"system_file":system.config,"roots":roots,"selected":selected,"provider":provider,"executable":executable,"executable_sha256":digest(&std::fs::read(&executable)?),"mode":mode,"access":access,"timeout":timeout,"status":"prepared","created_at":now(),"tasks":{},"steps":[],"closed_tasks":[],"error":null,"plan_sha256":digest((encoded(plan)?+"\n").as_bytes())});
+    if let Some(tell) = tell_agents_graph {
+        state["tell_agents_graph"] = object!(tell);
+    }
     for sid in roots
         .as_object()
         .ok_or_else(|| fail("Roots missing"))?
@@ -774,8 +861,14 @@ pub fn validate_state_sync(
             "error",
             "plan_sha256",
         ],
-        &["finished_at", "access"],
+        &["finished_at", "access", "tell_agents_graph"],
     )?;
+    if state
+        .get("tell_agents_graph")
+        .is_some_and(|value| !value.is_null() && !value.is_boolean())
+    {
+        return Err(fail("Invalid tell_agents_graph execution option"));
+    }
     if state["schema_version"] != 1
         || state["kind"] != "ai-system-run"
         || !hex(string(&state["run_id"]), 32)
@@ -1088,6 +1181,35 @@ pub async fn create_run(
 ) -> Result<Value> {
     create_run_context(
         system, plan, directory, provider, explicit, mode, timeout, access, None,
+    )
+    .await
+}
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Compatibility API keeps explicit per-call custody and process controls."
+)]
+pub async fn create_run_with_options(
+    system: &mut System,
+    plan: &Value,
+    directory: &Path,
+    provider: &str,
+    explicit: Option<&str>,
+    mode: &str,
+    timeout: u64,
+    access: &str,
+    tell_agents_graph: Option<bool>,
+) -> Result<Value> {
+    create_run_context_with_options(
+        system,
+        plan,
+        directory,
+        provider,
+        explicit,
+        mode,
+        timeout,
+        access,
+        tell_agents_graph,
+        None,
     )
     .await
 }

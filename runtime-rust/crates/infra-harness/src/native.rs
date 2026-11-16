@@ -115,6 +115,9 @@ impl ServicesFactory for NativeFactory {
             let runtime_engine =
                 infra_tooling::installer::Installer::new(&config.source)?.engine_capabilities()?;
             let gates = Arc::new(infra_adapters::generator_gate::Gate::current()?);
+            let graphs = crate::graph::Graphs::new(store.clone());
+            let code_graph_bridge =
+                crate::system_graph::HarnessCodeGraphBridge::new(store.clone(), graphs.clone());
             let mut special: BTreeMap<String, Arc<dyn SpecialWorkflow>> = BTreeMap::new();
             special.insert(
                 "creator".into(),
@@ -130,6 +133,7 @@ impl ServicesFactory for NativeFactory {
                     store: store.clone(),
                     links: links.clone(),
                     discovery: false,
+                    bridge: Some(code_graph_bridge.clone()),
                 }),
             );
             special.insert(
@@ -138,6 +142,7 @@ impl ServicesFactory for NativeFactory {
                     store: store.clone(),
                     links: links.clone(),
                     discovery: true,
+                    bridge: None,
                 }),
             );
             let sessions = Sessions::new(
@@ -166,7 +171,6 @@ impl ServicesFactory for NativeFactory {
                 providers.providers.clone(),
             ));
             sessions.install_commands(commands.clone())?;
-            let graphs = crate::graph::Graphs::new(store.clone());
             sessions.install_graphs(graphs.clone())?;
             let backend = Arc::new(ResultsBridge {
                 links: links.clone(),
@@ -184,13 +188,19 @@ impl ServicesFactory for NativeFactory {
                 links: links.clone(),
                 store: store.clone(),
             });
-            let systems = Arc::new(SystemsDomain::new(Arc::new(
-                infra_system::SystemManager::new(
-                    config.source.clone(),
-                    store.state.clone(),
-                    system_bridge,
-                )?,
-            )));
+            let system_manager = Arc::new(infra_system::SystemManager::new(
+                config.source.clone(),
+                store.state.clone(),
+                system_bridge,
+            )?);
+            system_manager.set_code_graph_bridge(code_graph_bridge.clone())?;
+            let systems = Arc::new(SystemsDomain::new(system_manager.clone()));
+            let system_graphs = Arc::new(crate::system_graph::SystemGraphDomain::new(
+                store.clone(),
+                graphs.clone(),
+                code_graph_bridge,
+                Some(system_manager),
+            ));
             let creator = Arc::new(CreatorManager::new(
                 store.clone(),
                 config.source.clone(),
@@ -249,6 +259,7 @@ impl ServicesFactory for NativeFactory {
             domains.insert("updates".into(), updates.clone());
             domains.insert("providers".into(), providers.clone());
             domains.insert("graph".into(), graphs.clone());
+            domains.insert("system_graph".into(), system_graphs);
             let mut overrides: BTreeMap<String, Arc<dyn Domain>> = BTreeMap::new();
             overrides.insert("context.project".into(), knowledge.clone());
             overrides.insert("memory.save".into(), sessions.clone());

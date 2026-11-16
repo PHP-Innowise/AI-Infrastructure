@@ -4,6 +4,7 @@ use crate::{
     common::*,
     editor::Editor,
     execution, native,
+    system_graph::{CodeGraphBridge, load_run_evidence, summarize_run_evidence},
 };
 use infra_core::{Result, RuntimeError};
 use serde_json::{Value, json as object};
@@ -21,6 +22,7 @@ pub fn active(value: &Value) -> bool {
 pub struct SystemManager {
     pub state: Arc<State>,
     editor: Mutex<Editor>,
+    code_graph: Mutex<Option<Arc<dyn CodeGraphBridge>>>,
 }
 impl SystemManager {
     pub fn new(source: PathBuf, state: PathBuf, host: Arc<dyn SessionBridge>) -> Result<Self> {
@@ -35,6 +37,7 @@ impl SystemManager {
         let manager = Self {
             state,
             editor: Mutex::new(Editor::new()),
+            code_graph: Mutex::new(None),
         };
         {
             let editor = manager
@@ -47,6 +50,25 @@ impl SystemManager {
             }
         }
         Ok(manager)
+    }
+    pub fn set_code_graph_bridge(&self, bridge: Arc<dyn CodeGraphBridge>) -> Result<()> {
+        *self
+            .code_graph
+            .lock()
+            .map_err(|_| fail("System code-graph bridge lock poisoned"))? = Some(bridge);
+        Ok(())
+    }
+    pub fn with_code_graph_bridge(self, bridge: Arc<dyn CodeGraphBridge>) -> Result<Self> {
+        self.set_code_graph_bridge(bridge)?;
+        Ok(self)
+    }
+    /// Loads and validates a registered [`System`] enforcing `State::allowed()` and edit recovery.
+    pub fn load_system(&self, project: &str, config: &str) -> Result<System> {
+        let editor = self
+            .editor
+            .lock()
+            .map_err(|_| fail("System manager lock poisoned"))?;
+        self.system(&editor, project, config)
     }
     fn system(&self, editor: &Editor, project: &str, config: &str) -> Result<System> {
         let (_, path) = editor.location(&self.state, project, config)?;
@@ -100,7 +122,7 @@ impl SystemManager {
             .db
             .put("system_runs", string(&record["id"]), record)
     }
-    fn view(&self, record: &Value, detail: bool) -> Result<Value> {
+    fn view(&self, editor: Option<&Editor>, record: &Value, detail: bool) -> Result<Value> {
         let mut result = record.clone();
         let session = record["session_id"]
             .as_str()
@@ -134,6 +156,11 @@ impl SystemManager {
             .cloned()
             .filter(|value| value.is_string())
             .unwrap_or(object!("service"));
+        result["tell_agents_graph"] = record
+            .get("tell_agents_graph")
+            .filter(|value| value.is_boolean())
+            .cloned()
+            .unwrap_or(Value::Bool(true));
         let directory = self
             .state
             .state
@@ -154,16 +181,25 @@ impl SystemManager {
                 Err(error) => Err(error),
             }
         };
-        if let Some(state) = read("run.json")? {
+        let loaded_state = read("run.json")?;
+        let dispatches = if detail && let Some(ref state) = loaded_state {
+            load_run_evidence(&journal, state).unwrap_or_default()
+        } else {
+            vec![]
+        };
+        if let Some(ref state) = loaded_state {
             result["status"] = state["status"].clone();
-            result["access"] = execution::access_scope(&state).into();
+            result["access"] = execution::access_scope(state).into();
+            if let Some(tell) = state.get("tell_agents_graph").filter(|v| v.is_boolean()) {
+                result["tell_agents_graph"] = tell.clone();
+            }
             if is_active {
                 result["status"] = session.as_ref().unwrap()["status"].clone();
             } else if matches!(string(&result["status"]), "prepared" | "running") {
                 result["status"] = "interrupted".into();
             }
             if detail {
-                result["execution"] = execution::run_summary(&state, &journal);
+                result["execution"] = execution::run_summary(state, &journal);
                 let mut receipts = vec![];
                 for step in items(&state["steps"], MAX_SERVICES + 2)? {
                     if step["attempt"].as_u64().unwrap_or(0) > 0
@@ -177,7 +213,15 @@ impl SystemManager {
                         } else {
                             Value::Null
                         };
-                        receipts.push(object!({"phase":step["id"],"service":step["service"],"attempt":step["attempt"],"ok":receipt["ok"],"error":receipt["error"],"rejection":receipt.get("rejection").cloned().unwrap_or(Value::Null),"failure":receipt.get("failure").cloned().unwrap_or(Value::Null),"report":receipt["report"],"input":input}));
+                        let step_ev = dispatches
+                            .iter()
+                            .find(|ev| {
+                                ev.phase == string(&step["id"])
+                                    && Some(ev.attempt) == step["attempt"].as_u64()
+                            })
+                            .and_then(|ev| serde_json::to_value(ev).ok())
+                            .unwrap_or(Value::Null);
+                        receipts.push(object!({"phase":step["id"],"service":step["service"],"attempt":step["attempt"],"ok":receipt["ok"],"error":receipt["error"],"rejection":receipt.get("rejection").cloned().unwrap_or(Value::Null),"failure":receipt.get("failure").cloned().unwrap_or(Value::Null),"report":receipt["report"],"input":input,"evidence":step_ev}));
                     }
                 }
                 result["receipts"] = object!(receipts);
@@ -208,13 +252,53 @@ impl SystemManager {
             result["launches"] = object!(
                 launches
                     .iter()
-                    .map(|sid| self
-                        .state
-                        .host
-                        .session(sid)
-                        .map(|session| object!({"session_id":sid,"status":session["status"]})))
+                    .enumerate()
+                    .map(|(idx, sid)| {
+                        let session = self.state.host.session(sid)?;
+                        let launch_phases = dispatches
+                            .iter()
+                            .filter(|ev| ev.launch_id.as_deref() == Some(sid.as_str()))
+                            .map(|ev| object!({ "phase": ev.phase, "attempt": ev.attempt, "service": ev.service }))
+                            .collect::<Vec<_>>();
+                        Ok(object!({
+                            "session_id": sid,
+                            "launch_number": idx + 1,
+                            "status": session["status"],
+                            "created_at": session.get("created_at").cloned().unwrap_or(Value::Null),
+                            "updated_at": session.get("updated_at").cloned().unwrap_or(Value::Null),
+                            "finished_at": session.get("finished_at").cloned().unwrap_or(Value::Null),
+                            "dispatches": launch_phases,
+                        }))
+                    })
                     .collect::<Result<Vec<_>>>()?
             );
+            let opt_system = editor.and_then(|ed| {
+                self.system(
+                    ed,
+                    string(&record["project_id"]),
+                    string(&record["config_path"]),
+                )
+                .ok()
+            });
+            result["evidence"] = summarize_run_evidence(
+                opt_system.as_ref(),
+                loaded_state.as_ref().unwrap_or(&Value::Null),
+                &dispatches,
+            );
+            let bridge_opt = self
+                .code_graph
+                .lock()
+                .map_err(|_| fail("System code-graph bridge lock poisoned"))?
+                .clone();
+            if let Some(bridge) = bridge_opt {
+                bridge.enrich_run_view(
+                    string(&record["id"]),
+                    opt_system.as_ref(),
+                    loaded_state.as_ref(),
+                    &dispatches,
+                    &mut result,
+                )?;
+            }
             result["providers"] = object!(
                 [
                     ("codex", "Codex"),
@@ -267,7 +351,7 @@ impl SystemManager {
         create_new(&directory, "approved-plan.json", &plan)?;
         let record = object!({"id":rid,"revision":0,"created_at":now(),"project_id":data["project_id"],"config_path":data["config_path"],"system":plan["system"],"change_id":plan["change_id"],"plan_status":plan["status"],"session_id":null,"provider":null,"mode":null,"timeout":null});
         self.save(&record)?;
-        self.view(&record, true)
+        self.view(Some(editor), &record, true)
     }
     fn act(&self, editor: &Editor, rid: &str, data: &Value) -> Result<Value> {
         fields(
@@ -281,6 +365,7 @@ impl SystemManager {
                 "retry_step",
                 "accept_source_changes",
                 "accept_unrun_checks",
+                "tell_agents_graph",
             ],
         )?;
         let mut record = self.record(rid)?;
@@ -292,7 +377,13 @@ impl SystemManager {
         let action = string(&data["action"]);
         let allowed = match action {
             "execute" => vec![
-                "action", "revision", "mode", "timeout", "provider", "access",
+                "action",
+                "revision",
+                "mode",
+                "timeout",
+                "provider",
+                "access",
+                "tell_agents_graph",
             ],
             "resume" => vec![
                 "action",
@@ -300,6 +391,7 @@ impl SystemManager {
                 "retry_step",
                 "accept_source_changes",
                 "accept_unrun_checks",
+                "tell_agents_graph",
             ],
             "cancel" | "archive" => vec!["action", "revision"],
             _ => return Err(fail("Invalid system run action")),
@@ -312,12 +404,18 @@ impl SystemManager {
         {
             return Err(fail("Invalid system run action fields"));
         }
-        let view = self.view(&record, true)?;
+        if data
+            .get("tell_agents_graph")
+            .is_some_and(|value| !value.is_null() && !value.is_boolean())
+        {
+            return Err(fail("tell_agents_graph must be boolean"));
+        }
+        let view = self.view(Some(editor), &record, true)?;
         if action == "cancel" {
             if view["active"] == true {
                 self.state.host.cancel(string(&record["session_id"]))?;
             }
-            return self.view(&record, true);
+            return self.view(Some(editor), &record, true);
         }
         // Removing a change from the list keeps its plan, receipts and the
         // services' native tasks; only a stopped change can be removed.
@@ -330,7 +428,7 @@ impl SystemManager {
             record["archived"] = true.into();
             record["revision"] = (record["revision"].as_u64().unwrap_or(0) + 1).into();
             self.save(&record)?;
-            return self.view(&record, true);
+            return self.view(Some(editor), &record, true);
         }
         if view["active"] == true {
             return Err(RuntimeError::conflict(
@@ -427,8 +525,16 @@ impl SystemManager {
             .host
             .provider(&provider)?
             .ok_or_else(|| fail("Selected system provider CLI is unavailable"))?;
+        let tell_agents_graph = data
+            .get("tell_agents_graph")
+            .and_then(Value::as_bool)
+            .or_else(|| record.get("tell_agents_graph").and_then(Value::as_bool));
         let nonce = id32();
-        let request = object!({"directory":directory,"system_file":system.config,"allowed_roots":self.state.allowed()?,"provider":provider,"executable":executable,"mode":mode,"timeout":timeout,"access":access,"retry_step":data.get("retry_step"),"accept_source_changes":data["accept_source_changes"]==true,"accept_unrun_checks":data["accept_unrun_checks"]==true});
+        let mut request = object!({"directory":directory,"system_file":system.config,"allowed_roots":self.state.allowed()?,"provider":provider,"executable":executable,"mode":mode,"timeout":timeout,"access":access,"retry_step":data.get("retry_step"),"accept_source_changes":data["accept_source_changes"]==true,"accept_unrun_checks":data["accept_unrun_checks"]==true});
+        if let Some(tell) = tell_agents_graph {
+            request["tell_agents_graph"] = object!(tell);
+            record["tell_agents_graph"] = object!(tell);
+        }
         create_new(&directory, &format!("request-{nonce}.json"), &request)?;
         record["pending_nonce"] = nonce.clone().into();
         record["provider"] = provider.clone().into();
@@ -455,7 +561,7 @@ impl SystemManager {
         record["pending_nonce"] = Value::Null;
         record["launches"] = object!(launches);
         self.save(&record)?;
-        self.view(&record, true)
+        self.view(Some(editor), &record, true)
     }
     pub fn execute(&self, operation: &str, envelope: &Value) -> Result<Value> {
         let data = envelope
@@ -493,10 +599,11 @@ impl SystemManager {
                     .ok_or_else(|| fail("Project identity required"))?;
                 self.state.project(project)?;
                 Ok(
-                    object!({"runs":self.state.db.all("system_runs",Some(project))?.into_iter().filter(|(_,record)|record["archived"]!=true).map(|(rid,record)|self.reconcile_record(&rid,record).and_then(|record|self.view(&record,false))).collect::<Result<Vec<_>>>()?}),
+                    object!({"runs":self.state.db.all("system_runs",Some(project))?.into_iter().filter(|(_,record)|record["archived"]!=true).map(|(rid,record)|self.reconcile_record(&rid,record).and_then(|record|self.view(Some(&editor),&record,false))).collect::<Result<Vec<_>>>()?}),
                 )
             }
             "systems.get" => self.view(
+                Some(&editor),
                 &self.record(
                     params["id"]
                         .as_str()

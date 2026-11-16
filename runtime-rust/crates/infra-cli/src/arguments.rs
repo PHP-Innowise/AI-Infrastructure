@@ -189,6 +189,7 @@ fn generic_family(operation: &str) -> String {
         _ => match stem {
             "install" => "install-accelerator",
             "collect" => "collect-context",
+            "system" => "ai-system",
             other => other,
         }
         .replace('_', "-"),
@@ -338,6 +339,48 @@ fn generic_schema(operation: &str) -> Result<Option<BTreeMap<String, Value>>> {
                 "--preview-dir",
                 "--max-text-bytes",
             ]);
+        }
+        if operation == "system" || operation.starts_with("system/") {
+            for flag in [
+                "--format",
+                "--state-dir",
+                "--path",
+                "--query",
+                "--scope",
+                "--focus",
+                "--filter",
+                "--follow",
+                "--from",
+                "--to",
+                "--side",
+            ] {
+                schema
+                    .entry(flag.into())
+                    .or_insert_with(|| json!({"flags":[flag],"actions":[null],"types":[null]}));
+            }
+            schema.entry("--spread".into()).or_insert_with(
+                || json!({"flags":["--spread"],"actions":["append"],"types":[null]}),
+            );
+            for flag in ["--out", "--into", "--skip", "--offset", "--depth"] {
+                schema
+                    .entry(flag.into())
+                    .or_insert_with(|| json!({"flags":[flag],"actions":[null],"types":["int"]}));
+            }
+            for flag in [
+                "--whole",
+                "--certain",
+                "--shortest-path",
+                "--shared",
+                "--cycle",
+                "--layers",
+                "--notests",
+                "--tell-agents-graph",
+                "--no-tell-agents-graph",
+            ] {
+                schema.entry(flag.into()).or_insert_with(
+                    || json!({"flags":[flag],"actions":["store_true"],"types":[null]}),
+                );
+            }
         }
         for flag in extra {
             schema.entry(flag.into()).or_insert_with(||json!({"flags":[flag],"actions":[if ["--help","-h","--examples","--include-generator","--include-oracles","--json","--auto-refresh","--summary","--provenance"].contains(&flag){Value::String("store_true".into())}else{Value::Null}],"types":[null]}));

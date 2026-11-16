@@ -140,6 +140,7 @@ impl SessionStore {
             ("creator", "TEXT"),
             ("system_run", "TEXT"),
             ("system_discovery", "TEXT"),
+            ("system_explain", "TEXT"),
             ("budgets", "TEXT"),
             ("budget_usage", "TEXT"),
             ("budget_revision", "INTEGER NOT NULL DEFAULT 0"),
@@ -360,7 +361,12 @@ impl SessionStore {
             &at,
             &generation,
         )?;
-        for key in ["creator", "system_run", "system_discovery"] {
+        for key in [
+            "creator",
+            "system_run",
+            "system_discovery",
+            "system_explain",
+        ] {
             if !options[key].is_null() {
                 tx.execute(
                     &format!("UPDATE sessions SET {key}=?1 WHERE id=?2"),
@@ -383,6 +389,14 @@ impl SessionStore {
             .map_err(Into::into)
     }
     pub fn guarded_event(&self, sid: &str, generation: &str, event: &Value) -> Result<bool> {
+        Ok(self.guarded_event_id(sid, generation, event)?.is_some())
+    }
+    pub fn guarded_event_id(
+        &self,
+        sid: &str,
+        generation: &str,
+        event: &Value,
+    ) -> Result<Option<u64>> {
         let mut db = self.connection()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current: Option<String> = tx
@@ -393,15 +407,16 @@ impl SessionStore {
             )
             .optional()?;
         if current.as_deref() != Some(generation) {
-            return Ok(false);
+            return Ok(None);
         }
         let raw = generation_event(generation, event)?;
         tx.execute(
             "INSERT INTO events(session_id,data)VALUES(?1,?2)",
             params![sid, raw],
         )?;
+        let id = u64::try_from(tx.last_insert_rowid()).unwrap_or(0);
         tx.commit()?;
-        Ok(true)
+        Ok(Some(id))
     }
     pub fn cancel_current(&self, sid: &str) -> Result<Value> {
         let mut db = self.connection()?;
@@ -547,6 +562,7 @@ impl SessionStore {
             "creator",
             "system_run",
             "system_discovery",
+            "system_explain",
             "budgets",
             "budget_usage",
             "budget_revision",
@@ -616,6 +632,7 @@ impl SessionStore {
             "creator",
             "system_run",
             "system_discovery",
+            "system_explain",
             "budgets",
             "budget_usage",
             "budget_revision",
@@ -875,6 +892,7 @@ fn decode_session(row: &rusqlite::Row<'_>, names: &[String]) -> Result<Value> {
         "creator",
         "system_run",
         "system_discovery",
+        "system_explain",
         "budgets",
         "budget_usage",
         "result_base",

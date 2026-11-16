@@ -2,12 +2,22 @@
 //! uses what. Whatever depends on something stands to its left, so entry
 //! points gather on the left edge and foundations on the right. A file opens
 //! in turn to its classes, methods and functions and the files around them.
-use crate::{api, dom, model as m};
+use crate::{api, dom, graph::GraphTargetScope, model as m};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as V};
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::spawn_local;
+
+/// Identifies which embedded System code-graph surface is targeted:
+/// - `Member`: `#system-member-graph-*` in `#systems-view`
+/// - `Change`: `#system-change-graph-*` in `#system-changes-view`
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum SystemEmbeddedKind {
+    Member,
+    Change,
+}
 const BOX_WIDTH: f64 = 164.0;
 const BOX_HEIGHT: f64 = 30.0;
 /// A link that skips a layer passes it in a thin slot of its own.
@@ -1987,6 +1997,78 @@ pub fn with_run(list: String, chosen: &str, session: &str) -> String {
         escape(&own)
     )
 }
+/// Adds the active System Change (`sysrun:{run_id}`) option to `#graph-map-target` (`Show:`).
+pub fn with_system_run(
+    list: String,
+    chosen: &str,
+    run_id: Option<&str>,
+    run_title: Option<&str>,
+) -> String {
+    let Some(rid) = run_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return list;
+    };
+    let own = format!("sysrun:{rid}");
+    let label = match run_title.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(title) => format!("System change: {title}"),
+        None => format!("System change: {rid}"),
+    };
+    let generic = format!(">System change {}</option>", escape(rid));
+    if chosen == own && list.contains(&generic) {
+        return list.replace(&generic, &format!(">{}</option>", escape(&label)));
+    }
+    if list.contains(&format!("value=\"{}\"", escape(&own))) {
+        return list;
+    }
+    format!(
+        "{list}<option value=\"{}\"{}>{}</option>",
+        escape(&own),
+        if chosen == own { " selected" } else { "" },
+        escape(&label),
+    )
+}
+/// Renders `<option>` items for the `#graph-map-service` header switcher when in `SystemService` scope.
+pub fn service_switcher_options_html(scope: &GraphTargetScope) -> String {
+    let GraphTargetScope::SystemService {
+        service_id,
+        services,
+        ..
+    } = scope
+    else {
+        return String::new();
+    };
+    let mut html = "<option value=\"__topology__\">System topology</option>".to_owned();
+    html.push_str(&format!(
+        "<option value=\"__system__\"{}>__system__ (System root)</option>",
+        if service_id == "__system__" {
+            " selected"
+        } else {
+            ""
+        },
+    ));
+    let mut seen = BTreeSet::new();
+    seen.insert("__system__".to_owned());
+    let mut all = services.clone();
+    if !service_id.is_empty() && !all.iter().any(|s| s == service_id) {
+        all.push(service_id.clone());
+    }
+    for svc in all {
+        let trimmed = svc.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_owned()) {
+            continue;
+        }
+        html.push_str(&format!(
+            "<option value=\"{}\"{}>Service: {}</option>",
+            escape(trimmed),
+            if trimmed == service_id {
+                " selected"
+            } else {
+                ""
+            },
+            escape(trimmed),
+        ));
+    }
+    html
+}
 /// What the Show list offers: the whole project and the checkout's own
 /// work. A commit, a pull request or a branch chosen in the picker stays in
 /// the list while it is the one shown.
@@ -2001,6 +2083,9 @@ pub fn targets(place: &V, chosen: &str) -> String {
     };
     let mut html = option("", "The whole project");
     if !m::yes(&place["git"]) {
+        if let Some(("sysrun", rid)) = chosen.split_once(':') {
+            html.push_str(&option(chosen, &format!("System change {rid}")));
+        }
         return html;
     }
     let branch = place["branch"].as_str().unwrap_or("this checkout");
@@ -2029,6 +2114,7 @@ pub fn targets(place: &V, chosen: &str) -> String {
                 format!("Commit {}", hash.chars().take(8).collect::<String>())
             }
             Some(("run", _)) => "A run of an agent".to_owned(),
+            Some(("sysrun", rid)) => format!("System change {rid}"),
             Some((_, name)) => name.to_owned(),
             None => chosen.to_owned(),
         };
@@ -2083,6 +2169,10 @@ pub fn chosen(view: &V) -> String {
         // What a run of an agent changed, as its session recorded it.
         (Some("run"), ..) if name.is_empty() => "What a run changed".to_owned(),
         (Some("run"), ..) => format!("What the run changed: {name}"),
+        (Some("sysrun" | "system_run"), ..) if name.is_empty() => {
+            "What the system change touched".to_owned()
+        }
+        (Some("sysrun" | "system_run"), ..) => format!("System change: {name}"),
         // One commit of the history: its own change, against its parent.
         (Some("commit"), ..) => format!(
             "commit {}",
@@ -2567,14 +2657,128 @@ fn run_notes(view: &V) -> Vec<String> {
 /// first. Each opens to what it holds, and the mark beside it looks into its
 /// link with the changed file it uses most. Nothing where no run is shown
 /// or nothing uses its change here.
+fn extract_cross_service_unopened(view: &V) -> (Vec<V>, u64) {
+    let sibling_more = view["run"]["reach"]["cross_service_more"]
+        .as_u64()
+        .or_else(|| view["run"]["cross_service_more"].as_u64())
+        .or_else(|| view["run"]["cross_service_unopened_more"].as_u64())
+        .or_else(|| view["cross_service_unopened_more"].as_u64())
+        .unwrap_or(0);
+    let candidates = [
+        &view["run"]["cross_service_unopened"],
+        &view["run"]["unopened_contract_consumers"],
+        &view["run"]["reach"]["cross_service_unopened"],
+        &view["run"]["reach"]["unopened_contract_consumers"],
+        &view["cross_service_unopened"],
+        &view["unopened_contract_consumers"],
+    ];
+    for candidate in candidates {
+        if let Some(arr) = candidate.as_array() {
+            if !arr.is_empty() || sibling_more > 0 {
+                return (arr.clone(), sibling_more);
+            }
+        } else if candidate.is_object() {
+            let rows = m::array(&candidate["rows"]);
+            let more = candidate["more"].as_u64().unwrap_or(sibling_more);
+            if !rows.is_empty() || more > 0 {
+                return (rows, more);
+            }
+        }
+    }
+    (Vec::new(), 0)
+}
+
+/// Renders sibling-service contract consumer files left unopened by a System Change run.
+pub fn cross_service_unopened_html(view: &V) -> String {
+    if view["run"]["comparison"].is_object() {
+        return String::new();
+    }
+    let (rows, more) = extract_cross_service_unopened(view);
+    if rows.is_empty() {
+        return String::new();
+    }
+    let total = rows.len() as u64 + more;
+    let mut html = format!(
+        "<h4>Cross-service consumers, not opened by the run <span class=\"graph-map-total\">{}</span></h4><ul class=\"graph-map-rows\">",
+        count(total)
+    );
+    for row in &rows {
+        let svc = {
+            let s = m::text(row, "service");
+            if !s.is_empty() {
+                s
+            } else {
+                let cs = m::text(row, "consumer_service");
+                if !cs.is_empty() {
+                    cs
+                } else {
+                    m::text(row, "consumer")
+                }
+            }
+        };
+        let path = {
+            let p = m::text(row, "path");
+            if !p.is_empty() {
+                p
+            } else {
+                m::array(&row["unopened_sources"])
+                    .into_iter()
+                    .chain(m::array(&row["consumer_sources"]))
+                    .chain(m::array(&row["sources"]))
+                    .find_map(|v| v.as_str().map(str::to_owned).filter(|s| !s.is_empty()))
+                    .unwrap_or_default()
+            }
+        };
+        let contract = m::text(row, "contract");
+        let kind = m::text(row, "kind");
+        let display_name = if !path.is_empty() {
+            format!("{svc} · {}", base(&path))
+        } else if !contract.is_empty() {
+            format!("{svc} · {contract}")
+        } else {
+            svc.clone()
+        };
+        let mut details = Vec::new();
+        if !path.is_empty() && !parent(&path).is_empty() {
+            details.push(escape(parent(&path)));
+        }
+        if !contract.is_empty() {
+            details.push(escape(&contract));
+        }
+        if !kind.is_empty() {
+            details.push(escape(&kind));
+        }
+        let jump_payload = payload(&json!({
+            "service": svc,
+            "path": path,
+        }));
+        html.push_str(&format!(
+            "<li><button type=\"button\" class=\"graph-map-row\" data-unopened=\"true\" data-cross-service=\"true\" data-action=\"graph-map-switch-service-file\" data-payload=\"{jump_payload}\" title=\"Open {} in service {}\"><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{}</span></button></li>",
+            escape(if path.is_empty() { &contract } else { &path }),
+            escape(&svc),
+            escape(&display_name),
+            details.join(" · "),
+        ));
+    }
+    html.push_str("</ul>");
+    if more > 0 {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">and {} more cross-service consumers</p>",
+            count(more)
+        ));
+    }
+    html
+}
+
 fn unopened(view: &V) -> String {
     if view["run"]["comparison"].is_object() {
         return String::new();
     }
+    let cross_html = cross_service_unopened_html(view);
     let reach = &view["run"]["reach"];
     let number = |key: &str| reach[key].as_u64().unwrap_or(0);
     if number("users") == 0 {
-        return String::new();
+        return cross_html;
     }
     let mut html = format!(
         "<h4>Use the change, not opened by the run <span class=\"graph-map-total\">{}</span></h4>",
@@ -2583,6 +2787,7 @@ fn unopened(view: &V) -> String {
     let rows = m::array(&reach["rows"]);
     if rows.is_empty() {
         html.push_str("<p class=\"knowledge-note\">The run opened every file that uses what it changed here.</p>");
+        html.push_str(&cross_html);
         return html;
     }
     html.push_str("<ul class=\"graph-map-rows\">");
@@ -2623,6 +2828,7 @@ fn unopened(view: &V) -> String {
             count(number("more"))
         ));
     }
+    html.push_str(&cross_html);
     html
 }
 /// What the map of a change says first: the notes of the change, what a
@@ -4754,8 +4960,13 @@ pub fn canvas_with_overlays(
             "x": placed_entity.x,
             "y": placed_entity.y,
         }));
+        let entity_action = if id_prefix.starts_with("system-") {
+            format!("{id_prefix}-entity")
+        } else {
+            "session-graph-entity".to_owned()
+        };
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node graph-map-entity-node is-blinking\" data-entity-id=\"{}\" data-entity-kind=\"{}\" data-entity-change=\"{change_key}\"{vis_attr} data-action=\"session-graph-entity\" data-payload=\"{entity_payload}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\"><span class=\"graph-map-entity-dot\" aria-hidden=\"true\"></span><span class=\"graph-map-entity-kind\" aria-hidden=\"true\">{kind_short}</span>{vis_pill}<span class=\"graph-map-entity-name\">{}</span><span class=\"graph-map-entity-badge\">{badge_label}</span></button>",
+            "<button type=\"button\" class=\"graph-map-node graph-map-entity-node is-blinking\" data-entity-id=\"{}\" data-entity-kind=\"{}\" data-entity-change=\"{change_key}\"{vis_attr} data-action=\"{entity_action}\" data-payload=\"{entity_payload}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\"><span class=\"graph-map-entity-dot\" aria-hidden=\"true\"></span><span class=\"graph-map-entity-kind\" aria-hidden=\"true\">{kind_short}</span>{vis_pill}<span class=\"graph-map-entity-name\">{}</span><span class=\"graph-map-entity-badge\">{badge_label}</span></button>",
             escape(&entity.id),
             escape(&entity.kind),
             placed_entity.x,
@@ -7892,6 +8103,10 @@ fn attach_canvas_hover(canvas_id: &'static str) {
     let Some(element) = dom::get(canvas_id) else {
         return;
     };
+    if element.get_attribute("data-hover-bound").as_deref() == Some("true") {
+        return;
+    }
+    let _ = element.set_attribute("data-hover-bound", "true");
     // Entering a part lights it; leaving the picture puts it out.
     for (kind, rests) in [
         ("mouseover", true),
@@ -7913,6 +8128,10 @@ fn attach_side_hover(side_id: &'static str, canvas_id: &'static str) {
     let Some(side_panel) = dom::get(side_id) else {
         return;
     };
+    if side_panel.get_attribute("data-hover-bound").as_deref() == Some("true") {
+        return;
+    }
+    let _ = side_panel.set_attribute("data-hover-bound", "true");
     for (kind, rests) in [
         ("mouseover", true),
         ("focusin", true),
@@ -7955,11 +8174,21 @@ fn ensure_resize_watch() {
         if open() {
             fit();
         }
-        refit_embedded_if_visible();
+        refit_surface_if_visible(SESSION_SURFACE);
+        refit_surface_if_visible(SYSTEM_EMBEDDED_SURFACE);
+        refit_surface_if_visible(SYSTEM_CHANGE_SURFACE);
     });
     let _ =
         dom::window().add_event_listener_with_callback("resize", resized.as_ref().unchecked_ref());
     resized.forget();
+}
+fn embedded_surface_for_canvas(canvas_id: &str) -> Option<MapSurface> {
+    match canvas_id {
+        "session-graph-canvas" => Some(SESSION_SURFACE),
+        "system-member-graph-canvas" => Some(SYSTEM_EMBEDDED_SURFACE),
+        "system-change-graph-canvas" => Some(SYSTEM_CHANGE_SURFACE),
+        _ => None,
+    }
 }
 fn wheel_event(canvas_id: &str, event: &web_sys::WheelEvent) -> bool {
     let Some(factor) = wheel_zoom_factor(event.delta_y(), event.delta_mode()) else {
@@ -7976,8 +8205,8 @@ fn wheel_event(canvas_id: &str, event: &web_sys::WheelEvent) -> bool {
     else {
         return false;
     };
-    if canvas_id == "session-graph-canvas" {
-        let cam = load_camera();
+    if let Some(surface) = embedded_surface_for_canvas(canvas_id) {
+        let cam = load_surface_camera(surface);
         if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
             return false;
         }
@@ -7988,11 +8217,13 @@ fn wheel_event(canvas_id: &str, event: &web_sys::WheelEvent) -> bool {
             event.client_x() as f64 - rect.left(),
             event.client_y() as f64 - rect.top(),
         );
-        dom::attr("session-graph-canvas", "data-wheeling", "true");
-        dom::later("session-graph-wheel-end", 140, || {
-            dom::attr("session-graph-canvas", "data-wheeling", "false");
+        let canvas_static = surface.canvas;
+        let wheel_timer = surface.wheel_timer_key;
+        dom::attr(canvas_static, "data-wheeling", "true");
+        dom::later(wheel_timer, 140, move || {
+            dom::attr(canvas_static, "data-wheeling", "false");
         });
-        zoom_camera_at(factor, Some(anchor));
+        zoom_surface_camera_at(surface, factor, Some(anchor));
         return true;
     }
     if plane.offset_width() <= 0 || plane.offset_height() <= 0 {
@@ -8036,16 +8267,26 @@ pub fn attach_wheel_listeners() {
     attach_canvas_wheel("session-graph-canvas");
     attach_canvas_wheel("graph-map-canvas");
     attach_canvas_wheel("graph-link-canvas");
+    attach_system_wheel_listeners();
 }
-fn ensure_embedded_watch() {
-    attach_wheel_listeners();
-    if m::yes(&m::data("session-graph-watched")) {
-        return;
-    }
-    m::set("session-graph-watched", json!(true));
+/// Attaches non-passive cursor-anchored wheel zoom + node/side hover listeners to the embedded
+/// System code-graph surfaces (`#system-member-graph-canvas`, `#system-change-graph-canvas`).
+#[allow(dead_code)]
+pub(crate) fn attach_system_wheel_listeners() {
     ensure_resize_watch();
-    attach_canvas_hover("session-graph-canvas");
-    attach_side_hover("session-graph-side", "session-graph-canvas");
+    attach_canvas_wheel("system-member-graph-canvas");
+    attach_canvas_hover("system-member-graph-canvas");
+    attach_side_hover("system-member-graph-side", "system-member-graph-canvas");
+    attach_canvas_wheel("system-change-graph-canvas");
+    attach_canvas_hover("system-change-graph-canvas");
+    attach_side_hover("system-change-graph-side", "system-change-graph-canvas");
+}
+fn ensure_surface_watch(surface: MapSurface) {
+    attach_wheel_listeners();
+    ensure_resize_watch();
+    attach_canvas_wheel(surface.canvas);
+    attach_canvas_hover(surface.canvas);
+    attach_side_hover(surface.side, surface.canvas);
 }
 /// Fits the picture again when the window changes its size, lights what
 /// the pointer or the keyboard rests on in the map and in the window of a
@@ -8433,19 +8674,16 @@ fn draw_link() {
         return;
     }
     let chosen = m::text(&link, "chosen");
-    let surface = if link["surface"].as_str() == Some("session") {
-        SESSION_SURFACE
-    } else {
-        MODAL_SURFACE
-    };
+    let surface = surface_by_name(link["surface"].as_str().unwrap_or("modal"));
     let st = surface_state(surface);
+    let scope = surface_scope(surface);
     let view_cached = m::data(surface.view_key);
     let impact = cached_impact_for_selection(
         surface,
         &st,
         view_cached.is_object().then_some(&view_cached),
     );
-    crate::graph_explanation::link_context(view, &st["cycle_base"]["revision"]);
+    crate::graph_explanation::scoped_link_context(view, &st["cycle_base"]["revision"], &scope);
     dom::text("graph-link-title", &link_title(view));
     dom::text("graph-link-summary", &link_summary(view));
     dom::text("graph-link-note", &link_note(view));
@@ -8473,22 +8711,46 @@ fn draw_link() {
     );
     html("graph-link-arrow-legend", &arrow_kinds_legend_html());
 }
+#[allow(dead_code)]
 pub(crate) fn link_request(project: &str, from: &str, to: &str, selection: &V) -> String {
-    graph_request(
-        project,
+    build_scoped_link_request(&GraphTargetScope::single(project), from, to, selection)
+}
+
+#[allow(dead_code)]
+pub(crate) fn graph_request(project: &str, query: Vec<(&str, String)>, selection: &V) -> String {
+    build_scoped_graph_request(&GraphTargetScope::single(project), query, selection)
+}
+
+pub(crate) fn build_scoped_link_request(
+    scope: &GraphTargetScope,
+    from: &str,
+    to: &str,
+    selection: &V,
+) -> String {
+    build_scoped_graph_request(
+        scope,
         vec![("from", from.to_owned()), ("to", to.to_owned())],
         selection,
     )
 }
 
-pub(crate) fn graph_request(
-    project: &str,
+pub(crate) fn build_scoped_graph_request(
+    scope: &GraphTargetScope,
     mut query: Vec<(&str, String)>,
     selection: &V,
 ) -> String {
+    let target = selection["target"].as_str().unwrap_or("");
     for key in ["target", "launch", "base"] {
         if let Some(value) = selection[key].as_str().filter(|value| !value.is_empty()) {
             query.push((key, value.to_owned()));
+        }
+    }
+    if scope.is_system() {
+        if let Some(rid) = effective_sysrun_id(scope, target, selection["run_id"].as_str()) {
+            query.push(("run_id", rid));
+        }
+        if let Some(agent) = selection["agent"].as_str().filter(|a| !a.is_empty()) {
+            query.push(("agent", agent.to_owned()));
         }
     }
     for key in ["certain", "notests", "whole"] {
@@ -8496,20 +8758,17 @@ pub(crate) fn graph_request(
             query.push((key, "1".to_owned()));
         }
     }
-    format!(
-        "/api/projects/{}/graph/map{}",
-        encode_part(project),
-        encode_query(&query)
-    )
+    format_scoped_endpoint(scope, "map", query)
 }
 /// Opens the window of one link of the map and reads what makes the link
 /// up, on the graph the map is read from. The map stays as it is behind it.
 async fn look_from(surface: MapSurface, from: &str, to: &str) {
     let state = surface_state(surface);
-    let project = dom::value("project");
-    if project.is_empty() || from.is_empty() || to.is_empty() {
+    let scope = surface_scope(surface);
+    if scope.is_empty() || from.is_empty() || to.is_empty() {
         return;
     }
+    let scope_key = scope.scope_key();
     m::set(
         "graph-link",
         json!({"from": from, "to": to, "chosen": "", "view": null, "surface": surface.name, "zoom": null}),
@@ -8524,12 +8783,13 @@ async fn look_from(surface: MapSurface, from: &str, to: &str) {
     html("graph-link-arrow-legend", "");
     dom::dialog("graph-link", true);
     attach_wheel_listeners();
-    let path = link_request(
-        &project,
+    let path = build_scoped_link_request(
+        &scope,
         from,
         to,
         &json!({
             "target": state["target"], "launch": state["launch"],
+            "agent": state["agent"],
             "base": state["cycle_base"]["revision"],
             "certain": state["certain"], "notests": state["notests"],
             "whole": state["whole"],
@@ -8537,7 +8797,7 @@ async fn look_from(surface: MapSurface, from: &str, to: &str) {
     );
     match api::scoped("graph-link", &path).await {
         Ok((epoch, view)) => {
-            if !m::current("graph-link", epoch) || dom::value("project") != project {
+            if !m::current("graph-link", epoch) || surface_scope(surface).scope_key() != scope_key {
                 return;
             }
             let mut link = looked();
@@ -8567,27 +8827,36 @@ fn finder() -> V {
         json!({"open": false, "query": "", "asked": "", "for": "", "active": 0, "rows": [], "found": 0, "loading": false, "failed": null, "missing": false, "notests": false})
     }
 }
-/// The request that searches for what is typed in the graph the map is
-/// drawn from; none where nothing is typed.
-fn find_path(finder: &V) -> Option<String> {
-    let state = state();
-    let project = dom::value("project");
-    let query = m::text(finder, "query").trim().to_owned();
-    if project.is_empty() || query.is_empty() || state["cycle_base"].is_object() {
+pub fn build_scoped_find_path(
+    scope: &GraphTargetScope,
+    state: &V,
+    raw_query: &str,
+) -> Option<String> {
+    let query = raw_query.trim().to_owned();
+    if scope.is_empty() || query.is_empty() || state["cycle_base"].is_object() {
         return None;
     }
     let mut asked = vec![("query", query)];
-    if !m::text(&state, "target").is_empty() {
-        asked.push(("target", m::text(&state, "target")));
+    let target = m::text(state, "target");
+    if !target.is_empty() {
+        asked.push(("target", target.clone()));
+    }
+    if scope.is_system() {
+        if let Some(rid) = effective_sysrun_id(scope, &target, None) {
+            asked.push(("run_id", rid));
+        }
     }
     if m::yes(&state["notests"]) {
         asked.push(("notests", "1".to_owned()));
     }
-    Some(format!(
-        "/api/projects/{}/graph/find{}",
-        dom::enc(&project),
-        dom::query(&asked)
-    ))
+    Some(format_scoped_endpoint(scope, "find", asked))
+}
+/// The request that searches for what is typed in the graph the map is
+/// drawn from; none where nothing is typed.
+fn find_path(finder: &V) -> Option<String> {
+    let state = state();
+    let scope = surface_scope(MODAL_SURFACE);
+    build_scoped_find_path(&scope, &state, &m::text(finder, "query"))
 }
 /// Whether what is listed answers what is typed now, in the graph the map
 /// is drawn from now.
@@ -8657,7 +8926,7 @@ async fn seek() {
     let Some(path) = find_path(&finder) else {
         return;
     };
-    let project = dom::value("project");
+    let scope_key = surface_scope(MODAL_SURFACE).scope_key();
     let asked = m::text(&finder, "query").trim().to_owned();
     let mut reading = finder;
     reading["loading"] = json!(true);
@@ -8669,7 +8938,9 @@ async fn seek() {
     let mut finder = self::finder();
     match found {
         Ok((epoch, found)) => {
-            if !m::current("graph-find", epoch) || dom::value("project") != project {
+            if !m::current("graph-find", epoch)
+                || surface_scope(MODAL_SURFACE).scope_key() != scope_key
+            {
                 return;
             }
             finder["rows"] = json!(m::array(&found["rows"]));
@@ -8828,19 +9099,57 @@ fn blank() {
     html("graph-map-side", "");
     html("graph-map-arrow-legend", "");
     dom::hidden("graph-map-launches", true);
+    dom::hidden("graph-map-agent", true);
+    dom::hidden("graph-map-agent-field", true);
     m::take("graph-map-attachment");
     dom::text("graph-map-summary", "");
 }
-/// The Show list as it stands, with the run of the session on the screen.
+fn sync_modal_service_switcher(scope: &GraphTargetScope) {
+    let is_sys = scope.is_system();
+    dom::hidden("graph-map-service", !is_sys);
+    dom::hidden("graph-map-service-field", !is_sys);
+    if is_sys {
+        html("graph-map-service", &service_switcher_options_html(scope));
+        if let Some(svc) = scope.service_id() {
+            dom::set_value("graph-map-service", svc);
+        }
+    }
+}
+/// The Show list as it stands, with the run of the session or active System Change on the screen.
 fn list() {
-    html(
-        "graph-map-target",
-        &with_run(
-            targets(&m::data("graph-map-place"), &m::text(&state(), "target")),
-            &m::text(&state(), "target"),
-            &m::read(|state| state.sid.clone()),
-        ),
-    );
+    let scope = surface_scope(MODAL_SURFACE);
+    sync_modal_service_switcher(&scope);
+    let chosen_target = m::text(&state(), "target");
+    let base_options = targets(&m::data("graph-map-place"), &chosen_target);
+    let rendered = match &scope {
+        GraphTargetScope::SingleProject { .. } => {
+            with_run(base_options, &chosen_target, &m::read(|s| s.sid.clone()))
+        }
+        GraphTargetScope::SystemService {
+            service_id,
+            run_id,
+            run_title,
+            ..
+        } => {
+            let whole_label = if service_id == "__system__" {
+                "The whole system root (__system__)".to_owned()
+            } else {
+                format!("The whole service ({service_id})")
+            };
+            let relabeled = base_options.replacen(
+                ">The whole project</option>",
+                &format!(">{}</option>", escape(&whole_label)),
+                1,
+            );
+            with_system_run(
+                relabeled,
+                &chosen_target,
+                run_id.as_deref(),
+                run_title.as_deref(),
+            )
+        }
+    };
+    html("graph-map-target", &rendered);
 }
 /// Draws the picker as it stands.
 fn show() {
@@ -8910,44 +9219,58 @@ fn into_view(list: &str, row: &str) {
         list.set_scroll_top(top + height - list.client_height());
     }
 }
+pub fn build_scoped_picker_path(
+    scope: &GraphTargetScope,
+    tab: &str,
+    pick: &V,
+    skip: usize,
+) -> String {
+    let query = m::text(pick, "query").trim().to_owned();
+    match tab {
+        "pulls" => {
+            let mut params = Vec::new();
+            let st = m::text(pick, "state");
+            if !st.is_empty() {
+                params.push(("state", st));
+            }
+            if !query.is_empty() {
+                params.push(("query", query));
+            }
+            format_scoped_endpoint(scope, "pulls", params)
+        }
+        "branches" => format_scoped_endpoint(scope, "branches", Vec::new()),
+        _ => {
+            let mut params = Vec::new();
+            let sc = m::text(pick, "scope");
+            if !sc.is_empty() {
+                params.push(("scope", sc));
+            }
+            if !query.is_empty() {
+                params.push(("query", query));
+            }
+            if skip > 0 {
+                params.push(("skip", skip.to_string()));
+            }
+            format_scoped_endpoint(scope, "commits", params)
+        }
+    }
+}
 /// Reads the rows of the picker's open tab, or, with `further`, the next
 /// page of a history after the ones it has.
 async fn fetch(further: bool) {
     let pick = picker();
-    let project = dom::value("project");
-    if project.is_empty() || !m::yes(&pick["open"]) {
+    let scope = surface_scope(MODAL_SURFACE);
+    if scope.is_empty() || !m::yes(&pick["open"]) {
         return;
     }
+    let scope_key = scope.scope_key();
     let tab = m::text(&pick, "tab");
     let had = if further {
         m::array(&pick["rows"])
     } else {
         vec![]
     };
-    let query = m::text(&pick, "query").trim().to_owned();
-    let base = format!("/api/projects/{}/graph", dom::enc(&project));
-    let path = match tab.as_str() {
-        "pulls" => format!(
-            "{base}/pulls{}",
-            dom::query(&[("state", m::text(&pick, "state")), ("query", query)])
-        ),
-        "branches" => format!("{base}/branches"),
-        _ => format!(
-            "{base}/commits{}",
-            dom::query(&[
-                ("scope", m::text(&pick, "scope")),
-                ("query", query),
-                (
-                    "skip",
-                    if had.is_empty() {
-                        String::new()
-                    } else {
-                        had.len().to_string()
-                    }
-                ),
-            ])
-        ),
-    };
+    let path = build_scoped_picker_path(&scope, &tab, &pick, had.len());
     let mut reading = pick;
     reading["loading"] = json!(true);
     dom::text("graph-pick-note", &remark(&reading));
@@ -8956,7 +9279,10 @@ async fn fetch(further: bool) {
     let mut pick = picker();
     match found {
         Ok((epoch, found)) => {
-            if !m::current("graph-pick", epoch) || m::text(&pick, "tab") != tab {
+            if !m::current("graph-pick", epoch)
+                || m::text(&pick, "tab") != tab
+                || surface_scope(MODAL_SURFACE).scope_key() != scope_key
+            {
                 return;
             }
             let mut rows = had;
@@ -8989,12 +9315,16 @@ async fn fetch(further: bool) {
 }
 /// The local branches, for the list of whose history to show.
 async fn histories() {
-    let project = dom::value("project");
-    let path = format!("/api/projects/{}/graph/branches", dom::enc(&project));
+    let scope = surface_scope(MODAL_SURFACE);
+    if scope.is_empty() {
+        return;
+    }
+    let scope_key = scope.scope_key();
+    let path = format_scoped_endpoint(&scope, "branches", Vec::new());
     let Ok(found) = api::get(&path).await else {
         return;
     };
-    if dom::value("project") == project {
+    if surface_scope(MODAL_SURFACE).scope_key() == scope_key {
         m::set("graph-pick-branches", found["branches"].clone());
         html(
             "graph-pick-scope",
@@ -9596,13 +9926,36 @@ fn launch_options(run: &V, comparison: bool) -> String {
         "<option value=\"\">All launches</option>"
     }
     .to_owned();
+    let active_launch = m::text(run, "launch");
     for launch in m::array(&run["launches"]) {
-        let id = m::text(&launch, "id");
-        if comparison && launch["id"] == run["launch"] {
+        let id = {
+            let direct = m::text(&launch, "id");
+            if !direct.is_empty() {
+                direct
+            } else {
+                let sid = m::text(&launch, "session_id");
+                if !sid.is_empty() {
+                    sid
+                } else {
+                    m::text(&launch, "launch_id")
+                }
+            }
+        };
+        if comparison && !id.is_empty() && id == active_launch {
             continue;
         }
-        let number = launch["number"].as_u64().unwrap_or(0);
-        let at = m::text(&launch, "at");
+        let number = launch["number"]
+            .as_u64()
+            .or_else(|| launch["launch_number"].as_u64())
+            .unwrap_or(0);
+        let at = {
+            let direct = m::text(&launch, "at");
+            if !direct.is_empty() {
+                direct
+            } else {
+                m::text(&launch, "created_at")
+            }
+        };
         let at = at.get(..16).unwrap_or(&at).replace('T', " ");
         let label = if at.is_empty() {
             format!("Launch {number}")
@@ -9618,10 +9971,93 @@ fn launch_options(run: &V, comparison: bool) -> String {
     options
 }
 
+pub fn agent_options_html(service_id: &str, run: &V, selected_agent: &str) -> String {
+    let mut items: Vec<(String, String)> = vec![
+        (String::new(), "All agents in launch".to_owned()),
+        ("contracts".to_owned(), "contracts".to_owned()),
+    ];
+    let trimmed_service = service_id.trim();
+    if !trimmed_service.is_empty() && trimmed_service != "__system__" {
+        let svc_agent = format!("service-{trimmed_service}");
+        items.push((svc_agent.clone(), svc_agent));
+    }
+    for extra in m::array(&run["agents"]) {
+        let Some(id) = extra.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if id != "verify" && !items.iter().any(|(k, _)| k == id) {
+            items.push((id.to_owned(), id.to_owned()));
+        }
+    }
+    if !items.iter().any(|(k, _)| k == "verify") {
+        items.push(("verify".to_owned(), "verify".to_owned()));
+    }
+    let selected_trimmed = selected_agent.trim();
+    if !selected_trimmed.is_empty() && !items.iter().any(|(k, _)| k == selected_trimmed) {
+        items.push((selected_trimmed.to_owned(), selected_trimmed.to_owned()));
+    }
+    let mut options = String::new();
+    for (val, label) in items {
+        options.push_str(&format!(
+            "<option value=\"{}\"{}>{}</option>",
+            escape(&val),
+            if val == selected_trimmed {
+                " selected"
+            } else {
+                ""
+            },
+            escape(&label),
+        ));
+    }
+    options
+}
+
 fn show_launches(view: &V) {
-    let run = &view["run"];
-    let hidden = m::array(&run["launches"]).len() < 2;
+    let scope = surface_scope(MODAL_SURFACE);
+    let modal_st = state();
+    let target = m::text(&modal_st, "target");
+    let is_sysrun = scope.is_system()
+        && (target.starts_with("sysrun:")
+            || view["run"]["kind"] == "sysrun"
+            || view["chosen"]["kind"] == "sysrun");
+    let view_launches = m::array(&view["run"]["launches"]);
+    let effective_launches = if !view_launches.is_empty() {
+        view_launches
+    } else if is_sysrun {
+        match &scope {
+            GraphTargetScope::SystemService { launches, .. } => launches.clone(),
+            GraphTargetScope::SingleProject { .. } => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let selected_launch = {
+        let from_view = m::text(&view["run"], "launch");
+        if !from_view.is_empty() {
+            from_view
+        } else {
+            m::text(&modal_st, "launch")
+        }
+    };
+    let selected_compare = {
+        let from_view = m::text(&view["run"], "compare_launch");
+        if !from_view.is_empty() {
+            from_view
+        } else {
+            m::text(&modal_st, "compare_launch")
+        }
+    };
+    let effective_run = json!({
+        "launches": effective_launches,
+        "launch": if selected_launch.is_empty() { V::Null } else { json!(selected_launch) },
+        "compare_launch": if selected_compare.is_empty() { V::Null } else { json!(selected_compare) },
+        "agents": view["run"]["agents"],
+    });
+    let launches_len = m::array(&effective_run["launches"]).len();
+    let hidden = !is_sysrun && launches_len < 2;
     dom::hidden("graph-map-launches", hidden);
+    dom::hidden("graph-map-agent", !is_sysrun);
+    dom::hidden("graph-map-agent-field", !is_sysrun);
     if hidden {
         return;
     }
@@ -9629,10 +10065,29 @@ fn show_launches(view: &V) {
         ("graph-map-launch", "launch", false),
         ("graph-map-compare-launch", "compare_launch", true),
     ] {
-        html(id, &launch_options(run, comparing));
-        dom::set_value(id, &m::text(run, key));
+        html(id, &launch_options(&effective_run, comparing));
+        dom::set_value(id, &m::text(&effective_run, key));
     }
-    dom::disabled("graph-map-compare-launch", !run["launch"].is_string());
+    dom::disabled(
+        "graph-map-compare-launch",
+        launches_len < 2 || !effective_run["launch"].is_string(),
+    );
+    if is_sysrun {
+        let svc = scope.service_id().unwrap_or("");
+        let selected_agent = {
+            let from_view = m::text(&view["run"], "agent");
+            if !from_view.is_empty() {
+                from_view
+            } else {
+                m::text(&modal_st, "agent")
+            }
+        };
+        html(
+            "graph-map-agent",
+            &agent_options_html(svc, &effective_run, &selected_agent),
+        );
+        dom::set_value("graph-map-agent", &selected_agent);
+    }
 }
 
 fn shell_event_button(session: &V, event: &V, launch: &str) -> String {
@@ -9770,12 +10225,24 @@ struct MapSurface {
     canvas: &'static str,
     side: &'static str,
     note: &'static str,
+    error_id: &'static str,
     attachment_key: &'static str,
+    scope_model_key: &'static str,
+    state_model_key: &'static str,
+    camera_key: &'static str,
+    focus_key: &'static str,
+    drag_key: &'static str,
+    pan_target_key: &'static str,
     view_key: &'static str,
+    map_epoch: &'static str,
     changes_key: &'static str,
     changes_epoch: &'static str,
     impact_key: &'static str,
     impact_epoch: &'static str,
+    wheel_timer_key: &'static str,
+    refit_timer_key: &'static str,
+    filter_timer_key: &'static str,
+    drag_timer_key: &'static str,
     embedded: bool,
 }
 const MODAL_SURFACE: MapSurface = MapSurface {
@@ -9784,12 +10251,24 @@ const MODAL_SURFACE: MapSurface = MapSurface {
     canvas: "graph-map-canvas",
     side: "graph-map-side",
     note: "graph-map-note",
+    error_id: "graph-map-error",
     attachment_key: "graph-map-attachment",
+    scope_model_key: "graph-map-scope",
+    state_model_key: "graph-map",
+    camera_key: "",
+    focus_key: "",
+    drag_key: "",
+    pan_target_key: "",
     view_key: "graph-map-view",
+    map_epoch: "graph-map",
     changes_key: "graph-map-changes",
     changes_epoch: "graph-map-changes-fetch",
     impact_key: "graph-map-impact",
     impact_epoch: "graph-map-impact-fetch",
+    wheel_timer_key: "graph-map-wheel",
+    refit_timer_key: "graph-map-refit",
+    filter_timer_key: "graph-map-filter",
+    drag_timer_key: "graph-map-drag-clear",
     embedded: false,
 };
 const SESSION_SURFACE: MapSurface = MapSurface {
@@ -9798,35 +10277,156 @@ const SESSION_SURFACE: MapSurface = MapSurface {
     canvas: "session-graph-canvas",
     side: "session-graph-side",
     note: "session-graph-note",
+    error_id: "session-graph-error",
     attachment_key: "session-graph-attachment",
+    scope_model_key: "session-graph-scope",
+    state_model_key: "session-graph-state",
+    camera_key: "session-graph-camera",
+    focus_key: "session-graph-focus",
+    drag_key: "session-graph-drag",
+    pan_target_key: "session-graph-pan-target",
     view_key: "session-graph-view",
+    map_epoch: "session-graph",
     changes_key: "session-graph-changes",
     changes_epoch: "session-graph-changes-fetch",
     impact_key: "session-graph-impact",
     impact_epoch: "session-graph-impact-fetch",
+    wheel_timer_key: "session-graph-wheel",
+    refit_timer_key: "session-graph-refit",
+    filter_timer_key: "session-graph-filter",
+    drag_timer_key: "session-graph-drag-clear",
     embedded: true,
 };
-fn surface_state(surface: MapSurface) -> V {
-    if surface.embedded {
-        embedded_state()
-    } else {
-        state()
+const SYSTEM_EMBEDDED_SURFACE: MapSurface = MapSurface {
+    name: "system-member",
+    id_prefix: "system-member-graph",
+    canvas: "system-member-graph-canvas",
+    side: "system-member-graph-side",
+    note: "system-member-graph-note",
+    error_id: "system-member-graph-error",
+    attachment_key: "system-member-graph-attachment",
+    scope_model_key: "system-member-graph-scope",
+    state_model_key: "system-member-graph-state",
+    camera_key: "system-member-graph-camera",
+    focus_key: "system-member-graph-focus",
+    drag_key: "system-member-graph-drag",
+    pan_target_key: "system-member-graph-pan-target",
+    view_key: "system-member-graph-view",
+    map_epoch: "system-member-graph",
+    changes_key: "system-member-graph-changes",
+    changes_epoch: "system-member-graph-changes-fetch",
+    impact_key: "system-member-graph-impact",
+    impact_epoch: "system-member-graph-impact-fetch",
+    wheel_timer_key: "system-member-graph-wheel",
+    refit_timer_key: "system-member-graph-refit",
+    filter_timer_key: "system-member-graph-filter",
+    drag_timer_key: "system-member-graph-drag-clear",
+    embedded: true,
+};
+const SYSTEM_CHANGE_SURFACE: MapSurface = MapSurface {
+    name: "system-change",
+    id_prefix: "system-change-graph",
+    canvas: "system-change-graph-canvas",
+    side: "system-change-graph-side",
+    note: "system-change-graph-note",
+    error_id: "system-change-graph-error",
+    attachment_key: "system-change-graph-attachment",
+    scope_model_key: "system-change-graph-scope",
+    state_model_key: "system-change-graph-state",
+    camera_key: "system-change-graph-camera",
+    focus_key: "system-change-graph-focus",
+    drag_key: "system-change-graph-drag",
+    pan_target_key: "system-change-graph-pan-target",
+    view_key: "system-change-graph-view",
+    map_epoch: "system-change-graph",
+    changes_key: "system-change-graph-changes",
+    changes_epoch: "system-change-graph-changes-fetch",
+    impact_key: "system-change-graph-impact",
+    impact_epoch: "system-change-graph-impact-fetch",
+    wheel_timer_key: "system-change-graph-wheel",
+    refit_timer_key: "system-change-graph-refit",
+    filter_timer_key: "system-change-graph-filter",
+    drag_timer_key: "system-change-graph-drag-clear",
+    embedded: true,
+};
+impl SystemEmbeddedKind {
+    fn surface(self) -> MapSurface {
+        match self {
+            Self::Member => SYSTEM_EMBEDDED_SURFACE,
+            Self::Change => SYSTEM_CHANGE_SURFACE,
+        }
     }
+}
+fn surface_by_name(name: &str) -> MapSurface {
+    match name {
+        "session" => SESSION_SURFACE,
+        "system-member" => SYSTEM_EMBEDDED_SURFACE,
+        "system-change" => SYSTEM_CHANGE_SURFACE,
+        _ => MODAL_SURFACE,
+    }
+}
+fn surface_scope(surface: MapSurface) -> GraphTargetScope {
+    if surface.name == "session" {
+        return GraphTargetScope::single(dom::value("project"));
+    }
+    if surface.name == "modal" {
+        if let Some(stored) = GraphTargetScope::from_json(&m::data(MODAL_SURFACE.scope_model_key)) {
+            if stored.is_system() {
+                return stored;
+            }
+            let live_project = dom::value("project");
+            if !live_project.is_empty() {
+                return GraphTargetScope::single(live_project);
+            }
+            return stored;
+        }
+        return GraphTargetScope::single(dom::value("project"));
+    }
+    GraphTargetScope::from_json(&m::data(surface.scope_model_key))
+        .unwrap_or_else(|| GraphTargetScope::single(""))
+}
+fn set_surface_scope(surface: MapSurface, scope: GraphTargetScope) {
+    m::set(surface.scope_model_key, scope.to_json());
+}
+fn surface_state(surface: MapSurface) -> V {
+    let raw = m::data(surface.state_model_key);
+    if raw.is_object() {
+        normalize_map_state(raw)
+    } else {
+        fresh("")
+    }
+}
+fn save_surface_state(surface: MapSurface, state: &V) {
+    m::set(surface.state_model_key, normalize_map_state(state.clone()));
 }
 fn surface_changes_doc(surface: MapSurface, state: &V) -> Option<V> {
     let raw = m::data(surface.changes_key);
     let data = if raw["data"].is_object() {
-        let project = dom::value("project");
+        let scope = surface_scope(surface);
+        if scope.is_empty() {
+            return None;
+        }
+        let scope_key = scope.scope_key();
         let target = m::text(state, "target");
         let target_key = if target.is_empty() {
             "work"
         } else {
             target.as_str()
         };
-        if !project.is_empty()
-            && m::text(&raw, "project") == project
-            && m::text(&raw, "target") == target_key
-        {
+        let stored_key = {
+            let sk = m::text(&raw, "scope_key");
+            if !sk.is_empty() {
+                sk
+            } else {
+                let proj = m::text(&raw, "project");
+                if proj.is_empty() {
+                    String::new()
+                } else {
+                    format!("project:{proj}")
+                }
+            }
+        };
+        if stored_key == scope_key && m::text(&raw, "target") == target_key {
             raw["data"].clone()
         } else {
             return None;
@@ -9838,7 +10438,7 @@ fn surface_changes_doc(surface: MapSurface, state: &V) -> Option<V> {
     };
     Some(data)
 }
-fn impact_cache_key(project: &str, path: &str, state: &V) -> String {
+fn impact_cache_key(scope_key: &str, path: &str, state: &V) -> String {
     let raw_target = m::text(state, "target");
     let target = if raw_target.is_empty() {
         "work"
@@ -9847,7 +10447,7 @@ fn impact_cache_key(project: &str, path: &str, state: &V) -> String {
     };
     let certain = if m::yes(&state["certain"]) { "1" } else { "0" };
     format!(
-        "{project}\n{}\n{target}\n{certain}",
+        "{scope_key}\n{}\n{target}\n{certain}",
         normalize_rel_path(path)
     )
 }
@@ -9926,13 +10526,17 @@ pub fn selected_impact_file(state: &V, view: Option<&V>, changes: Option<&V>) ->
 fn cached_impact_for_selection(surface: MapSurface, state: &V, view: Option<&V>) -> Option<V> {
     let changes = surface_changes_doc(surface, state);
     let path = selected_impact_file(state, view, changes.as_ref())?;
-    let project = dom::value("project");
+    let scope = surface_scope(surface);
+    if scope.is_empty() {
+        return None;
+    }
+    let scope_key = scope.scope_key();
     let raw = m::data(surface.impact_key);
     if !raw.is_object() {
         return None;
     }
     if raw["key"].is_string() {
-        let wanted = impact_cache_key(&project, &path, state);
+        let wanted = impact_cache_key(&scope_key, &path, state);
         if m::text(&raw, "key") == wanted && raw["data"].is_object() {
             return Some(raw["data"].clone());
         }
@@ -9984,28 +10588,103 @@ fn encode_query(params: &[(&str, String)]) -> String {
         .collect::<Vec<_>>();
     format!("?{}", parts.join("&"))
 }
-pub fn build_changes_path(
-    project: &str,
+fn effective_sysrun_id(
+    scope: &GraphTargetScope,
+    target: &str,
+    explicit_run_id: Option<&str>,
+) -> Option<String> {
+    if let Some(rid) = target
+        .strip_prefix("sysrun:")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(rid.to_owned());
+    }
+    if let Some(rid) = explicit_run_id.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(rid.to_owned());
+    }
+    if target == "sysrun" {
+        if let GraphTargetScope::SystemService {
+            run_id: Some(rid), ..
+        } = scope
+        {
+            let trimmed = rid.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+    }
+    None
+}
+fn format_scoped_endpoint(
+    scope: &GraphTargetScope,
+    endpoint: &str,
+    query: Vec<(&str, String)>,
+) -> String {
+    let endpoint = endpoint.trim_start_matches('/');
+    match scope {
+        GraphTargetScope::SingleProject { project_id } => format!(
+            "/api/projects/{}/graph/{}{}",
+            encode_part(project_id),
+            endpoint,
+            encode_query(&query)
+        ),
+        GraphTargetScope::SystemService {
+            project_id,
+            config_path,
+            service_id,
+            ..
+        } => {
+            let mut full_query = Vec::with_capacity(query.len() + 3);
+            full_query.push(("project_id", project_id.clone()));
+            full_query.push(("config_path", config_path.clone()));
+            full_query.push(("service", service_id.clone()));
+            full_query.extend(query);
+            format!(
+                "/api/systems/service-graph/{}{}",
+                endpoint,
+                encode_query(&full_query)
+            )
+        }
+    }
+}
+pub fn build_scoped_changes_path(
+    scope: &GraphTargetScope,
     target: &str,
     focus_session: &str,
     notests: bool,
 ) -> String {
     let effective_target = if target.is_empty() { "work" } else { target };
     let mut query = vec![("target", effective_target.to_owned())];
+    if scope.is_system() {
+        if let Some(rid) = effective_sysrun_id(scope, effective_target, None) {
+            query.push(("run_id", rid));
+        }
+    }
     if !focus_session.is_empty() {
         query.push(("focus_session", focus_session.to_owned()));
     }
     if notests {
         query.push(("notests", "1".to_owned()));
     }
-    format!(
-        "/api/projects/{}/graph/changes{}",
-        encode_part(project),
-        encode_query(&query)
+    format_scoped_endpoint(scope, "changes", query)
+}
+#[allow(dead_code)]
+pub fn build_changes_path(
+    project: &str,
+    target: &str,
+    focus_session: &str,
+    notests: bool,
+) -> String {
+    build_scoped_changes_path(
+        &GraphTargetScope::single(project),
+        target,
+        focus_session,
+        notests,
     )
 }
-pub fn build_file_impact_path(
-    project: &str,
+pub fn build_scoped_file_impact_path(
+    scope: &GraphTargetScope,
     path: &str,
     target: &str,
     focus_session: &str,
@@ -10016,16 +10695,33 @@ pub fn build_file_impact_path(
         ("path", normalize_rel_path(strip_symbol_suffix(path))),
         ("target", effective_target.to_owned()),
     ];
+    if scope.is_system() {
+        if let Some(rid) = effective_sysrun_id(scope, effective_target, None) {
+            query.push(("run_id", rid));
+        }
+    }
     if !focus_session.is_empty() {
         query.push(("focus_session", focus_session.to_owned()));
     }
     if certain {
         query.push(("certain", "1".to_owned()));
     }
-    format!(
-        "/api/projects/{}/graph/file-impact{}",
-        encode_part(project),
-        encode_query(&query)
+    format_scoped_endpoint(scope, "file-impact", query)
+}
+#[allow(dead_code)]
+pub fn build_file_impact_path(
+    project: &str,
+    path: &str,
+    target: &str,
+    focus_session: &str,
+    certain: bool,
+) -> String {
+    build_scoped_file_impact_path(
+        &GraphTargetScope::single(project),
+        path,
+        target,
+        focus_session,
+        certain,
     )
 }
 pub fn state_focus_file(mut state: V, raw_path: &str, view: &V) -> (V, bool) {
@@ -10077,36 +10773,45 @@ fn changes_count_of(changes: Option<&V>) -> u64 {
         .as_u64()
         .unwrap_or_else(|| m::array(&doc["files"]).len() as u64)
 }
-fn update_embedded_changes_badge(changes: Option<&V>) {
+fn update_surface_changes_badge(surface: MapSurface, changes: Option<&V>) {
+    if !surface.embedded {
+        return;
+    }
+    let badge_id = format!("{}-changes-count", surface.id_prefix);
     let n = changes_count_of(changes);
-    dom::text("session-graph-changes-count", &n.to_string());
-    dom::hidden("session-graph-changes-count", n == 0);
+    dom::text(&badge_id, &n.to_string());
+    dom::hidden(&badge_id, n == 0);
 }
-fn sync_embedded_toolbar(state: &V, changes: Option<&V>) {
+fn sync_surface_toolbar(surface: MapSurface, state: &V, changes: Option<&V>) {
+    if !surface.embedded {
+        return;
+    }
+    let prefix = surface.id_prefix;
     let target = m::text(state, "target");
     let changes_mode = !target.is_empty();
     let whole = m::yes(&state["whole"]);
     dom::attr(
-        "session-graph-mode-whole",
+        &format!("{prefix}-mode-whole"),
         "aria-pressed",
         if changes_mode { "false" } else { "true" },
     );
     dom::attr(
-        "session-graph-mode-changes",
+        &format!("{prefix}-mode-changes"),
         "aria-pressed",
         if changes_mode { "true" } else { "false" },
     );
     dom::attr(
-        "session-graph-unfold",
+        &format!("{prefix}-unfold"),
         "aria-pressed",
         if whole { "true" } else { "false" },
     );
-    dom::set_checked("session-graph-notests", m::yes(&state["notests"]));
+    dom::set_checked(&format!("{prefix}-notests"), m::yes(&state["notests"]));
+    let filter_id = format!("{prefix}-filter");
     let wanted_filter = m::text(state, "filter");
-    if dom::value("session-graph-filter") != wanted_filter {
-        dom::set_value("session-graph-filter", &wanted_filter);
+    if dom::value(&filter_id) != wanted_filter {
+        dom::set_value(&filter_id, &wanted_filter);
     }
-    update_embedded_changes_badge(changes);
+    update_surface_changes_badge(surface, changes);
 }
 fn side_tabs_html(side_tab: &str, changes_count: u64, surface: &str) -> String {
     let changes_selected = side_tab == "changes";
@@ -10123,8 +10828,13 @@ fn side_top_html(side_tab: &str, changes_count: u64, surface: &str, show_close: 
     if !show_close {
         return format!("<div class=\"graph-side-top\">{tabs}</div>");
     }
+    let close_action = match surface {
+        "system-member" => "system-member-graph-side-close",
+        "system-change" => "system-change-graph-side-close",
+        _ => "session-graph-side-close",
+    };
     format!(
-        "<div class=\"graph-side-top\">{tabs}<button type=\"button\" class=\"button compact graph-side-close\" data-action=\"session-graph-side-close\" title=\"Close details\" aria-label=\"Close details\">Close</button></div>"
+        "<div class=\"graph-side-top\">{tabs}<button type=\"button\" class=\"button compact graph-side-close\" data-action=\"{close_action}\" title=\"Close details\" aria-label=\"Close details\">Close</button></div>"
     )
 }
 pub fn changes_side_html(changes: &V, filter: &str, active_focus: &str, surface: &str) -> String {
@@ -10863,6 +11573,7 @@ pub fn impact_side_html_with_filter(
         }
         html.push_str("</div>");
     }
+    html.push_str(&contract_consumers_html(impact, surface));
     html.push_str(&format!(
         "<div class=\"graph-impact-group\"><h4>Architecture &amp; cycles</h4><div class=\"graph-impact-arch\"><span>↻ {} new cycles · {} resolved</span><span>· {} new violations · {} resolved</span></div></div>",
         count(new_cycles),
@@ -10883,36 +11594,231 @@ pub fn impact_side_html_with_filter(
     html.push_str("</section>");
     html
 }
-async fn fetch_surface_changes(surface: MapSurface, state: V) {
-    let project = dom::value("project");
-    if project.is_empty() {
-        m::set(surface.changes_key, V::Null);
-        if surface.embedded {
-            update_embedded_changes_badge(None);
+pub fn contract_consumers_html(impact: &V, surface: &str) -> String {
+    let consumers = {
+        let primary = m::array(&impact["contract_consumers"]);
+        if primary.is_empty() {
+            m::array(&impact["cross_service_consumers"])
+        } else {
+            primary
         }
+    };
+    if consumers.is_empty() {
+        return String::new();
+    }
+    let mut html = format!(
+        "<div class=\"graph-impact-group\" data-contract-consumers=\"true\"><h4>Cross-service contract consumers <span class=\"graph-map-total\">{}</span></h4>",
+        count(consumers.len() as u64)
+    );
+    for item in &consumers {
+        let service = {
+            let s = m::text(item, "service");
+            if !s.is_empty() {
+                s
+            } else {
+                let cs = m::text(item, "consumer_service");
+                if !cs.is_empty() {
+                    cs
+                } else {
+                    m::text(item, "consumer")
+                }
+            }
+        };
+        let contract = {
+            let c = m::text(item, "contract");
+            if !c.is_empty() {
+                c
+            } else {
+                m::text(item, "name")
+            }
+        };
+        let kind = {
+            let k = m::text(item, "kind");
+            if !k.is_empty() {
+                k
+            } else {
+                m::text(item, "protocol")
+            }
+        };
+        let version = {
+            let v = m::text(item, "version");
+            if !v.is_empty() {
+                v
+            } else {
+                let cv = m::text(item, "consumer_version");
+                if !cv.is_empty() {
+                    cv
+                } else {
+                    m::text(item, "provider_version")
+                }
+            }
+        };
+        let unopened_sources: Vec<String> = m::array(&item["unopened_sources"])
+            .into_iter()
+            .filter_map(|v| v.as_str().map(normalize_rel_path).filter(|s| !s.is_empty()))
+            .collect();
+        let mut consumer_paths = Vec::new();
+        for v in m::array(&item["consumer_paths"])
+            .into_iter()
+            .chain(m::array(&item["consumer_sources"]))
+            .chain(m::array(&item["unopened_sources"]))
+            .chain(m::array(&item["files"]))
+            .chain(m::array(&item["sources"]))
+        {
+            if let Some(norm) = v.as_str().map(normalize_rel_path).filter(|s| !s.is_empty()) {
+                if !consumer_paths.contains(&norm) {
+                    consumer_paths.push(norm);
+                }
+            }
+        }
+        let direct_path = {
+            let p = normalize_rel_path(strip_symbol_suffix(&m::text(item, "path")));
+            if !p.is_empty() {
+                p
+            } else {
+                let cp = normalize_rel_path(strip_symbol_suffix(&m::text(item, "consumer_path")));
+                if !cp.is_empty() {
+                    cp
+                } else {
+                    unopened_sources
+                        .first()
+                        .or_else(|| consumer_paths.first())
+                        .cloned()
+                        .unwrap_or_default()
+                }
+            }
+        };
+        let raw_impact = m::text(item, "impact").to_ascii_lowercase();
+        let unopened_flag = m::yes(&item["unopened"])
+            || item["opened"].as_bool() == Some(false)
+            || !unopened_sources.is_empty();
+        let risk = m::yes(&item["at_risk"])
+            || m::yes(&item["broken_risk"])
+            || raw_impact == "broken_risk"
+            || m::text(item, "risk") == "broken_risk";
+        let (status_attr, pill_label) = if risk {
+            ("broken_risk", "Broken risk")
+        } else if unopened_flag || raw_impact == "unopened" {
+            ("broken_risk", "Unopened consumer")
+        } else {
+            ("impacted", "Contract consumer")
+        };
+        let head_label = if !service.is_empty() && !direct_path.is_empty() {
+            format!("{service} · {direct_path}")
+        } else if !service.is_empty() {
+            service.clone()
+        } else if !direct_path.is_empty() {
+            direct_path.clone()
+        } else {
+            contract.clone()
+        };
+        let jump_payload = payload(&json!({
+            "service": service,
+            "path": direct_path,
+            "surface": surface,
+        }));
+        html.push_str(&format!(
+            "<div class=\"graph-impact-row\" data-risk=\"{}\" data-diff=\"{}\"><div class=\"graph-impact-row-main\">",
+            risk || unopened_flag,
+            if risk || unopened_flag { "risk" } else { "impacted" },
+        ));
+        if !service.is_empty() {
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"graph-impact-row-btn\" data-action=\"graph-map-switch-service-file\" data-service=\"{}\" data-path=\"{}\" data-payload=\"{jump_payload}\"><span class=\"graph-status-pill\" data-status=\"{status_attr}\">{pill_label}</span> <span>{}</span></button>",
+                escape(&service),
+                escape(&direct_path),
+                escape(&head_label),
+            ));
+        } else {
+            html.push_str(&format!(
+                "<span class=\"graph-impact-row-btn\"><span class=\"graph-status-pill\" data-status=\"{status_attr}\">{pill_label}</span> <span>{}</span></span>",
+                escape(&head_label),
+            ));
+        }
+        html.push_str("</div>");
+        let mut meta = Vec::new();
+        if !contract.is_empty() {
+            meta.push(format!("contract: {}", escape(&contract)));
+        }
+        if !kind.is_empty() {
+            meta.push(escape(&kind));
+        }
+        if !version.is_empty() {
+            let trimmed_ver = version.strip_prefix('v').unwrap_or(&version);
+            meta.push(format!("v{}", escape(trimmed_ver)));
+        }
+        if unopened_flag {
+            meta.push("not opened in run".to_owned());
+        }
+        if consumer_paths.len() > 1 {
+            meta.push(escape(&consumer_paths.join(", ")));
+        }
+        if !meta.is_empty() {
+            html.push_str(&format!(
+                "<div class=\"graph-impact-symbols\">{}</div>",
+                meta.join(" · ")
+            ));
+        }
+        let reason = {
+            let r = m::text(item, "reason");
+            if !r.is_empty() {
+                r
+            } else {
+                let rr = m::text(item, "risk_reason");
+                if !rr.is_empty() {
+                    rr
+                } else {
+                    m::text(item, "note")
+                }
+            }
+        };
+        if !reason.is_empty() {
+            html.push_str(&format!(
+                "<p class=\"graph-impact-evidence\">{}</p>",
+                escape(&reason)
+            ));
+        }
+        html.push_str("</div>");
+    }
+    html.push_str("</div>");
+    html
+}
+async fn fetch_surface_changes(surface: MapSurface, state: V) {
+    let scope = surface_scope(surface);
+    if scope.is_empty() {
+        m::set(surface.changes_key, V::Null);
+        update_surface_changes_badge(surface, None);
         return;
     }
+    let scope_key = scope.scope_key();
     let raw_target = m::text(&state, "target");
     let effective_target = if raw_target.is_empty() {
         "work"
     } else {
         raw_target.as_str()
     };
-    let sid = if surface.embedded {
+    let sid = if surface.name == "session" {
         m::read(|s| s.sid.clone())
     } else {
-        String::new()
+        m::text(&state, "focus_session")
     };
     let notests = m::yes(&state["notests"]);
-    let url = build_changes_path(&project, effective_target, &sid, notests);
+    let url = build_scoped_changes_path(&scope, effective_target, &sid, notests);
     match api::scoped(surface.changes_epoch, &url).await {
         Ok((epoch, doc)) => {
-            if !m::current(surface.changes_epoch, epoch) || dom::value("project") != project {
+            if !m::current(surface.changes_epoch, epoch)
+                || surface_scope(surface).scope_key() != scope_key
+            {
                 return;
             }
             m::set(
                 surface.changes_key,
-                json!({"project": project, "target": effective_target, "data": doc}),
+                json!({
+                    "scope_key": scope_key,
+                    "project": scope.project_id(),
+                    "target": effective_target,
+                    "data": doc
+                }),
             );
             rerender_surface_preserving_camera(surface);
         }
@@ -10921,26 +11827,29 @@ async fn fetch_surface_changes(surface: MapSurface, state: V) {
     }
 }
 async fn fetch_surface_impact(surface: MapSurface, state: V, path: String, key: String) {
-    let project = dom::value("project");
-    if project.is_empty() || path.is_empty() {
+    let scope = surface_scope(surface);
+    if scope.is_empty() || path.is_empty() {
         return;
     }
+    let scope_key = scope.scope_key();
     let raw_target = m::text(&state, "target");
     let effective_target = if raw_target.is_empty() {
         "work"
     } else {
         raw_target.as_str()
     };
-    let sid = if surface.embedded {
+    let sid = if surface.name == "session" {
         m::read(|s| s.sid.clone())
     } else {
-        String::new()
+        m::text(&state, "focus_session")
     };
     let certain = m::yes(&state["certain"]);
-    let url = build_file_impact_path(&project, &path, effective_target, &sid, certain);
+    let url = build_scoped_file_impact_path(&scope, &path, effective_target, &sid, certain);
     match api::scoped(surface.impact_epoch, &url).await {
         Ok((epoch, doc)) => {
-            if !m::current(surface.impact_epoch, epoch) || dom::value("project") != project {
+            if !m::current(surface.impact_epoch, epoch)
+                || surface_scope(surface).scope_key() != scope_key
+            {
                 return;
             }
             m::set(
@@ -10962,15 +11871,15 @@ async fn fetch_surface_impact(surface: MapSurface, state: V, path: String, key: 
     }
 }
 fn ensure_surface_impact(surface: MapSurface, state: &V, view: Option<&V>, force: bool) {
-    let project = dom::value("project");
-    if project.is_empty() {
+    let scope = surface_scope(surface);
+    if scope.is_empty() {
         return;
     }
     let changes = surface_changes_doc(surface, state);
     let Some(path) = selected_impact_file(state, view, changes.as_ref()) else {
         return;
     };
-    let wanted_key = impact_cache_key(&project, &path, state);
+    let wanted_key = impact_cache_key(&scope.scope_key(), &path, state);
     let cached = m::data(surface.impact_key);
     if !force && m::text(&cached, "key") == wanted_key {
         return;
@@ -10984,8 +11893,8 @@ fn ensure_surface_impact(surface: MapSurface, state: &V, view: Option<&V>, force
         fetch_surface_impact(surface, state_clone, path, wanted_key).await;
     });
 }
-fn embedded_unindexed_side_html(state: &V, changes: Option<&V>) -> String {
-    if dom::value("project").is_empty() {
+fn surface_unindexed_side_html(surface: MapSurface, state: &V, changes: Option<&V>) -> String {
+    if surface_scope(surface).is_empty() {
         return String::new();
     }
     let side_tab = m::text(state, "side_tab");
@@ -10994,23 +11903,23 @@ fn embedded_unindexed_side_html(state: &V, changes: Option<&V>) -> String {
         let active = selected_impact_file(state, None, changes);
         return format!(
             "{}{}",
-            side_top_html("changes", changes_count, "session", true),
+            side_top_html("changes", changes_count, surface.name, true),
             changes_side_html(
                 changes.unwrap_or(&V::Null),
                 &m::text(state, "changes_filter"),
                 active.as_deref().unwrap_or(""),
-                "session",
+                surface.name,
             ),
         );
     }
-    if let Some(impact) = cached_impact_for_selection(SESSION_SURFACE, state, None) {
+    if let Some(impact) = cached_impact_for_selection(surface, state, None) {
         return format!(
             "{}{}",
-            side_top_html("details", changes_count, "session", true),
+            side_top_html("details", changes_count, surface.name, true),
             impact_side_html_with_filter(
                 &impact,
                 &V::Null,
-                "session",
+                surface.name,
                 &m::text(state, "member_filter")
             ),
         );
@@ -11020,32 +11929,46 @@ fn embedded_unindexed_side_html(state: &V, changes: Option<&V>) -> String {
 fn rerender_surface_preserving_camera(surface: MapSurface) {
     let view = m::data(surface.view_key);
     if surface.embedded {
-        let state = embedded_state();
-        let changes = surface_changes_doc(SESSION_SURFACE, &state);
-        sync_embedded_toolbar(&state, changes.as_ref());
+        let state = surface_state(surface);
+        let changes = surface_changes_doc(surface, &state);
+        sync_surface_toolbar(surface, &state, changes.as_ref());
         if view["nodes"].is_array() {
-            render_embedded(&view, false, false);
+            render_embedded_surface(surface, &view, false, false);
         } else {
             html(
-                "session-graph-side",
-                &embedded_unindexed_side_html(&state, changes.as_ref()),
+                surface.side,
+                &surface_unindexed_side_html(surface, &state, changes.as_ref()),
             );
         }
     } else if open() && view.is_object() {
         render(&view);
     }
 }
-fn build_map_path(project: &str, state: &V, embedded: bool) -> String {
+pub fn build_scoped_map_path(scope: &GraphTargetScope, state: &V, embedded: bool) -> String {
     let mut query = vec![("scope", m::text(state, "scope"))];
     if embedded {
-        let sid = m::read(|s| s.sid.clone());
+        let sid = if scope.is_system() {
+            m::text(state, "focus_session")
+        } else {
+            m::read(|s| s.sid.clone())
+        };
         if !sid.is_empty() {
             query.push(("focus_session", sid));
         }
     }
+    let target = m::text(state, "target");
     for key in ["focus", "filter", "target", "launch", "compare_launch"] {
         if !m::text(state, key).is_empty() {
             query.push((key, m::text(state, key)));
+        }
+    }
+    if scope.is_system() {
+        if let Some(rid) = effective_sysrun_id(scope, &target, state["run_id"].as_str()) {
+            query.push(("run_id", rid));
+        }
+        let agent = m::text(state, "agent");
+        if !agent.is_empty() {
+            query.push(("agent", agent));
         }
     }
     for key in [
@@ -11107,11 +12030,11 @@ fn build_map_path(project: &str, state: &V, embedded: bool) -> String {
     } else if !unfolded(state, "spread").is_empty() {
         query.push(("spread", json!(unfolded(state, "spread")).to_string()));
     }
-    format!(
-        "/api/projects/{}/graph/map{}",
-        encode_part(project),
-        encode_query(&query)
-    )
+    format_scoped_endpoint(scope, "map", query)
+}
+#[cfg(test)]
+fn build_map_path(project: &str, state: &V, embedded: bool) -> String {
+    build_scoped_map_path(&GraphTargetScope::single(project), state, embedded)
 }
 fn combine_note(before: String, view: &V) -> String {
     [
@@ -11136,9 +12059,14 @@ fn map_side_html(
     attach_action: &str,
 ) -> String {
     let attachment = map_attachment(view);
+    let scope = surface_scope(surface);
     m::set(
         surface.attachment_key,
-        json!({"project": view["project_id"], "text": attachment}),
+        json!({
+            "project": if view["project_id"].is_string() { view["project_id"].clone() } else { json!(scope.project_id()) },
+            "scope": scope.to_json(),
+            "text": attachment
+        }),
     );
     let attach = if attachment.is_some() {
         format!(
@@ -11272,7 +12200,12 @@ fn set_surface_attrs(surface: MapSurface, view: &V) {
 }
 
 fn render(view: &V) {
-    crate::graph_explanation::map_context(view, &state()["cycle_base"]["revision"]);
+    crate::graph_explanation::surface_map_context(
+        MODAL_SURFACE.canvas,
+        view,
+        &state()["cycle_base"]["revision"],
+        &surface_scope(MODAL_SURFACE),
+    );
     show_launches(view);
     let module_mode = m::yes(&state()["modules"]);
     let scenario_mode = view["mode"] == "scenario";
@@ -11549,15 +12482,25 @@ fn render(view: &V) {
 /// starts the graph of its commit when there is none. `false` when it could
 /// not, or when something else was chosen meanwhile.
 async fn choose(target: &str) -> bool {
-    let project = dom::value("project");
+    let scope = surface_scope(MODAL_SURFACE);
+    if scope.is_empty() {
+        return false;
+    }
+    let scope_key = scope.scope_key();
     dom::error("graph-map-error", "");
     dom::hidden("graph-map-progress", true);
     blank();
     dom::text("graph-map-chosen", "");
     dom::text("graph-map-note", "Reading the change…");
-    let path = format!("/api/projects/{}/graph", dom::enc(&project));
-    let asked = api::post(&path, json!({"action": "changes", "target": target})).await;
-    if dom::value("project") != project || m::text(&state(), "target") != target {
+    let (path, body) = if target.starts_with("sysrun:") || target.is_empty() {
+        scope.act_request("rebuild", None)
+    } else {
+        scope.act_request("changes", Some(target))
+    };
+    let asked = api::post(&path, body).await;
+    if surface_scope(MODAL_SURFACE).scope_key() != scope_key
+        || m::text(&state(), "target") != target
+    {
         return false;
     }
     match asked {
@@ -11616,12 +12559,13 @@ fn reconcile_view_state(mut state: V, view: &V, current_fit: V, target: &str) ->
 /// while a graph is being built, which leaves the picture as it is.
 async fn load(quiet: bool) {
     let state = state();
-    let project = dom::value("project");
-    if project.is_empty() {
+    let scope = surface_scope(MODAL_SURFACE);
+    if scope.is_empty() {
         return;
     }
+    let scope_key = scope.scope_key();
     let target = m::text(&state, "target");
-    let path = build_map_path(&project, &state, false);
+    let path = build_scoped_map_path(&scope, &state, false);
     if !quiet {
         dom::attr("graph-map-canvas", "aria-busy", "true");
         let ch_state = state.clone();
@@ -11637,7 +12581,9 @@ async fn load(quiet: bool) {
     let mut again = false;
     match api::scoped("graph-map", &path).await {
         Ok((epoch, view)) => {
-            if !m::current("graph-map", epoch) || dom::value("project") != project {
+            if !m::current("graph-map", epoch)
+                || surface_scope(MODAL_SURFACE).scope_key() != scope_key
+            {
                 return;
             }
             let (next_state, retry) =
@@ -11708,15 +12654,16 @@ async fn load(quiet: bool) {
 }
 /// What the checkout is on and its open pull requests, for the Show list.
 async fn place() {
-    let project = dom::value("project");
-    if project.is_empty() {
+    let scope = surface_scope(MODAL_SURFACE);
+    if scope.is_empty() {
         return;
     }
-    let path = format!("/api/projects/{}/graph/pulls", dom::enc(&project));
+    let scope_key = scope.scope_key();
+    let path = format_scoped_endpoint(&scope, "pulls", Vec::new());
     let Ok(found) = api::get(&path).await else {
         return;
     };
-    if dom::value("project") == project {
+    if surface_scope(MODAL_SURFACE).scope_key() == scope_key {
         m::set("graph-map-place", found);
         list();
     }
@@ -11735,6 +12682,7 @@ struct ClickOutcome {
     save_notests: Option<bool>,
     save_fit: Option<bool>,
     open_link: Option<(String, String)>,
+    switch_service: Option<(String, String)>,
 }
 impl ClickOutcome {
     fn unhandled() -> Self {
@@ -11749,6 +12697,7 @@ impl ClickOutcome {
             save_notests: None,
             save_fit: None,
             open_link: None,
+            switch_service: None,
         }
     }
     fn stay() -> Self {
@@ -11819,8 +12768,8 @@ fn apply_click_action(
             let (next_state, needs_reload) = state_focus_file(state.clone(), path, &view);
             *state = next_state;
             let file_path = normalize_rel_path(strip_symbol_suffix(path));
-            if surface.embedded && !file_path.is_empty() {
-                m::set("session-graph-pan-target", json!(file_path));
+            if surface.embedded && !file_path.is_empty() && !surface.pan_target_key.is_empty() {
+                m::set(surface.pan_target_key, json!(file_path));
             }
             return ClickOutcome {
                 handled: true,
@@ -11828,6 +12777,19 @@ fn apply_click_action(
                 rerender: !needs_reload,
                 force_impact: true,
                 clear_filter: Some(m::text(state, "filter")),
+                ..ClickOutcome::unhandled()
+            };
+        }
+        "graph-map-switch-service-file" => {
+            let svc = m::text(payload, "service");
+            if svc.is_empty() {
+                return ClickOutcome::stay();
+            }
+            let file_path = normalize_rel_path(strip_symbol_suffix(&m::text(payload, "path")));
+            return ClickOutcome {
+                handled: true,
+                reload: false,
+                switch_service: Some((svc, file_path)),
                 ..ClickOutcome::unhandled()
             };
         }
@@ -12098,6 +13060,103 @@ fn apply_click_action(
     }
     out
 }
+/// Formats and appends a service-scoped dependency-map context block onto the `#system-task` draft.
+pub fn append_system_task_draft(existing: &str, service_id: &str, context_text: &str) -> String {
+    let body = context_text.trim();
+    if body.is_empty() {
+        return existing.to_owned();
+    }
+    let svc_label = if service_id.is_empty() || service_id == "__system__" {
+        "__system__ (root workspace)".to_owned()
+    } else {
+        format!("service `{service_id}`")
+    };
+    let block = format!("### Code Map Context ({svc_label})\n{body}");
+    let trimmed_existing = existing.trim_end();
+    if trimmed_existing.is_empty() {
+        block
+    } else if trimmed_existing.contains(&block) {
+        existing.to_owned()
+    } else {
+        format!("{trimmed_existing}\n\n{block}")
+    }
+}
+fn attach_map_context_to_system_task(service_id: &str, context_text: &str) -> bool {
+    if context_text.trim().is_empty() {
+        return false;
+    }
+    let next = append_system_task_draft(&dom::value("system-task"), service_id, context_text);
+    dom::set_value("system-task", &next);
+    true
+}
+fn switch_surface_to_service_file(
+    surface: MapSurface,
+    next_service: &str,
+    file_path: &str,
+) -> bool {
+    let cur_scope = surface_scope(surface);
+    if !cur_scope.is_system() || next_service.trim().is_empty() {
+        return false;
+    }
+    let next_scope = cur_scope.with_service(next_service);
+    set_surface_scope(surface, next_scope);
+    m::next(surface.map_epoch);
+    m::next(surface.changes_epoch);
+    m::next(surface.impact_epoch);
+    m::take(surface.changes_key);
+    m::take(surface.impact_key);
+    m::set(surface.view_key, V::Null);
+    let prev = surface_state(surface);
+    let prev_target = m::text(&prev, "target");
+    let kept_target = if prev_target.is_empty()
+        || matches!(prev_target.as_str(), "work" | "uncommitted")
+        || prev_target.starts_with("sysrun:")
+    {
+        prev_target
+    } else {
+        String::new()
+    };
+    let mut next_state = fresh(&kept_target);
+    next_state["notests"] = prev["notests"].clone();
+    next_state["certain"] = prev["certain"].clone();
+    next_state["fit"] = prev["fit"].clone();
+    next_state["patterns"] = prev["patterns"].clone();
+    next_state["launch"] = prev["launch"].clone();
+    next_state["compare_launch"] = prev["compare_launch"].clone();
+    next_state["run_id"] = prev["run_id"].clone();
+    let prev_agent = m::text(&prev, "agent");
+    if prev_agent.starts_with("service-") {
+        next_state["agent"] = json!(if next_service == "__system__" {
+            String::new()
+        } else {
+            format!("service-{next_service}")
+        });
+    } else {
+        next_state["agent"] = prev["agent"].clone();
+    }
+    let clean_file = normalize_rel_path(strip_symbol_suffix(file_path));
+    if !clean_file.is_empty() {
+        let folder = parent(&clean_file);
+        if !folder.is_empty() {
+            let mut acc = String::new();
+            for part in folder.split('/').filter(|p| !p.is_empty()) {
+                if !acc.is_empty() {
+                    acc.push('/');
+                }
+                acc.push_str(part);
+                next_state = spread(next_state, &acc, false);
+            }
+        }
+        next_state["focus"] = json!(clean_file.clone());
+        next_state["side_tab"] = json!("details");
+        next_state["side_pinned"] = json!(true);
+        if surface.embedded && !surface.pan_target_key.is_empty() {
+            m::set(surface.pan_target_key, json!(clean_file));
+        }
+    }
+    save_surface_state(surface, &next_state);
+    true
+}
 pub async fn event(
     kind: &str,
     id: &str,
@@ -12107,8 +13166,15 @@ pub async fn event(
     checked: bool,
 ) -> bool {
     if id.starts_with("session-graph-")
+        || id.starts_with("system-member-graph-")
+        || id.starts_with("system-change-graph-")
         || action.starts_with("session-graph-")
-        || payload["surface"].as_str() == Some("session")
+        || action.starts_with("system-member-graph-")
+        || action.starts_with("system-change-graph-")
+        || matches!(
+            payload["surface"].as_str(),
+            Some("session" | "system-member" | "system-change")
+        )
     {
         return false;
     }
@@ -12143,6 +13209,10 @@ pub async fn event(
     }
     match (kind, id, action) {
         ("click", "graph-view" | "graph-changes", _) => {
+            set_surface_scope(
+                MODAL_SURFACE,
+                GraphTargetScope::single(dom::value("project")),
+            );
             dom::disabled("graph-find-search", false);
             let changes = id == "graph-changes";
             state = anew(if changes { "work" } else { "" });
@@ -12181,6 +13251,39 @@ pub async fn event(
             } else {
                 spawn_local(place());
             }
+        }
+        ("change", "graph-map-service", _) => {
+            if matches!(value, "__topology__" | "topology") {
+                dom::cancel_timer("graph-map-poll");
+                shut();
+                close_found();
+                dom::dialog("graph-map", false);
+                if let Some(ws) = dom::get("system-map-workspace") {
+                    if !ws.has_attribute("tabindex") {
+                        let _ = ws.set_attribute("tabindex", "-1");
+                    }
+                }
+                dom::focus("system-map-workspace");
+                return true;
+            }
+            if !value.is_empty() && switch_surface_to_service_file(MODAL_SURFACE, value, "") {
+                dom::set_value("graph-map-filter", "");
+                dom::set_checked("graph-map-whole", false);
+                m::next("graph-find");
+                dom::cancel_timer("graph-find-search");
+                m::set("graph-find", V::Null);
+                dom::set_value("graph-find-search", "");
+                show_found();
+                dom::error("graph-map-error", "");
+                blank();
+                dom::text("graph-map-chosen", "");
+                dom::text("graph-map-note", "Reading the graph…");
+                shut();
+                list();
+                spawn_local(place());
+                load(false).await;
+            }
+            return true;
         }
         ("click", _, "graph-map-shell-event") => {
             show_shell_event(payload).await;
@@ -12381,13 +13484,21 @@ pub async fn event(
             let Some(target) = payload.as_str() else {
                 return true;
             };
+            let prev_agent = m::text(&state, "agent");
             shut();
             state = anew(target);
+            if target.starts_with("sysrun:") && !prev_agent.is_empty() {
+                state["agent"] = json!(prev_agent);
+            }
             chosen = true;
         }
         ("change", "graph-map-target", _) => {
+            let prev_agent = m::text(&state, "agent");
             shut();
             state = anew(value);
+            if value.starts_with("sysrun:") && !prev_agent.is_empty() {
+                state["agent"] = json!(prev_agent);
+            }
             chosen = true;
         }
         ("change", "graph-map-launch", _) => {
@@ -12399,14 +13510,30 @@ pub async fn event(
         ("change", "graph-map-compare-launch", _) => {
             state["compare_launch"] = json!(value);
         }
+        ("change", "graph-map-agent", _) => {
+            state["agent"] = json!(value);
+        }
         ("click", _, "graph-map-attach") => {
             if !open() || busy() || !m::data("graph-map-attachment")["text"].is_string() {
                 return true;
             }
             let context = m::data("graph-map-attachment");
-            if context["text"].as_str().is_some_and(|text| {
-                crate::session::attach_map_context(&m::text(&context, "project"), text)
-            }) {
+            let scope = GraphTargetScope::from_json(&context["scope"])
+                .unwrap_or_else(|| surface_scope(MODAL_SURFACE));
+            let Some(text) = context["text"].as_str() else {
+                return true;
+            };
+            if let GraphTargetScope::SystemService { service_id, .. } = &scope {
+                if attach_map_context_to_system_task(service_id, text) {
+                    dom::cancel_timer("graph-map-poll");
+                    shut();
+                    close_found();
+                    dom::dialog("graph-map", false);
+                    dom::focus("system-task");
+                }
+                return true;
+            }
+            if crate::session::attach_map_context(&m::text(&context, "project"), text) {
                 dom::cancel_timer("graph-map-poll");
                 shut();
                 close_found();
@@ -12440,17 +13567,18 @@ pub async fn event(
                 return true;
             };
             dom::dialog("graph-link", false);
-            if link["surface"].as_str() == Some("session") {
-                let mut emb = unfollowed(embedded_state());
+            let target_surface = surface_by_name(link["surface"].as_str().unwrap_or("modal"));
+            if target_surface.embedded {
+                let mut emb = unfollowed(surface_state(target_surface));
                 emb["scope"] = file["path"].clone();
                 emb["focus"] = json!(key);
                 emb["side_tab"] = json!("details");
                 emb["side_pinned"] = json!(true);
                 emb["filter"] = json!("");
-                dom::set_value("session-graph-filter", "");
-                save_embedded_state(&emb);
-                ensure_surface_impact(SESSION_SURFACE, &emb, None, true);
-                load_embedded(false).await;
+                dom::set_value(&format!("{}-filter", target_surface.id_prefix), "");
+                save_surface_state(target_surface, &emb);
+                ensure_surface_impact(target_surface, &emb, None, true);
+                load_embedded_surface(target_surface, false).await;
                 return true;
             }
             state = normalize_map_state(unfollowed(state));
@@ -12552,6 +13680,23 @@ pub async fn event(
             if !outcome.handled {
                 return false;
             }
+            if let Some((svc, file_path)) = outcome.switch_service {
+                if switch_surface_to_service_file(MODAL_SURFACE, &svc, &file_path) {
+                    dom::set_value("graph-map-filter", "");
+                    dom::set_checked("graph-map-whole", false);
+                    close_found();
+                    dom::error("graph-map-error", "");
+                    blank();
+                    dom::text("graph-map-note", "Reading the graph…");
+                    shut();
+                    list();
+                    let switched = self::state();
+                    ensure_surface_impact(MODAL_SURFACE, &switched, None, true);
+                    spawn_local(place());
+                    load(false).await;
+                }
+                return true;
+            }
             if let Some(filter) = outcome.clear_filter {
                 dom::set_value("graph-map-filter", &filter);
             }
@@ -12607,7 +13752,7 @@ pub async fn event(
         dom::set_value("graph-map-filter", &m::text(&state, "filter"));
         list();
     }
-    if chosen && target.contains(':') && !choose(&target).await {
+    if chosen && target.contains(':') && !target.starts_with("sysrun:") && !choose(&target).await {
         return true;
     }
     load(false).await;
@@ -12648,8 +13793,11 @@ impl Default for Camera {
         }
     }
 }
-fn load_camera() -> Camera {
-    let raw = m::data("session-graph-camera");
+fn load_surface_camera(surface: MapSurface) -> Camera {
+    if surface.camera_key.is_empty() {
+        return Camera::default();
+    }
+    let raw = m::data(surface.camera_key);
     if !raw.is_object() {
         return Camera::default();
     }
@@ -12682,13 +13830,16 @@ fn load_camera() -> Camera {
         bbox,
     }
 }
-fn save_camera(cam: &Camera) {
+fn save_surface_camera(surface: MapSurface, cam: &Camera) {
+    if surface.camera_key.is_empty() {
+        return;
+    }
     let bbox_val = match cam.bbox {
         Some((x0, y0, x1, y1)) => json!([x0, y0, x1, y1]),
         None => V::Null,
     };
     m::set(
-        "session-graph-camera",
+        surface.camera_key,
         json!({
             "scale": cam.scale,
             "pan_x": cam.pan_x,
@@ -12704,19 +13855,11 @@ fn save_camera(cam: &Camera) {
         }),
     );
 }
-fn embedded_state() -> V {
-    let state = m::data("session-graph-state");
-    if state.is_object() {
-        normalize_map_state(state)
-    } else {
-        fresh("")
+fn current_surface_live_focus(surface: MapSurface) -> Option<LiveFocus> {
+    if surface.focus_key.is_empty() {
+        return None;
     }
-}
-fn save_embedded_state(state: &V) {
-    m::set("session-graph-state", normalize_map_state(state.clone()));
-}
-fn current_live_focus() -> Option<LiveFocus> {
-    parse_live_focus(&m::data("session-graph-focus"))
+    parse_live_focus(&m::data(surface.focus_key))
 }
 fn viewport_size(canvas_id: &str) -> (f64, f64, bool) {
     let Some(el) = dom::get(canvas_id) else {
@@ -12729,12 +13872,12 @@ fn viewport_size(canvas_id: &str) -> (f64, f64, bool) {
         (640.0, 420.0, false)
     }
 }
-fn apply_plane_transform(cam: &Camera) {
+fn apply_surface_plane_transform(surface: MapSurface, cam: &Camera) {
     dom::text(
-        "session-graph-zoom-level",
+        &format!("{}-zoom-level", surface.id_prefix),
         &format!("{}%", (cam.scale * 100.0).round() as i64),
     );
-    let Some(canvas) = dom::get("session-graph-canvas") else {
+    let Some(canvas) = dom::get(surface.canvas) else {
         return;
     };
     let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") else {
@@ -12749,51 +13892,63 @@ fn apply_plane_transform(cam: &Camera) {
     );
     let _ = plane.set_attribute("style", &style);
 }
-fn apply_camera(cam: &Camera) {
-    apply_plane_transform(cam);
+fn apply_surface_camera(surface: MapSurface, cam: &Camera) {
+    apply_surface_plane_transform(surface, cam);
+    let prefix = surface.id_prefix;
+    let ws_id = format!("{prefix}-workspace");
     dom::attr(
-        "session-graph-fit",
+        &format!("{prefix}-fit"),
         "aria-pressed",
         if cam.fit_mode { "true" } else { "false" },
     );
     dom::attr(
-        "session-graph-follow",
+        &format!("{prefix}-follow"),
         "aria-pressed",
         if cam.follow { "true" } else { "false" },
     );
     dom::attr(
-        "session-graph-pause-motion",
+        &format!("{prefix}-pause-motion"),
         "aria-pressed",
         if cam.paused { "true" } else { "false" },
     );
     dom::attr(
-        "session-graph-expand",
+        &format!("{prefix}-expand"),
         "aria-expanded",
         if cam.expanded { "true" } else { "false" },
     );
     dom::attr(
-        "session-graph-workspace",
+        &ws_id,
         "data-motion-paused",
         if cam.paused { "true" } else { "false" },
     );
+    let sync_sidebar = if surface.name == "session" {
+        !m::read(|s| matches!(s.view.as_str(), "systems" | "system-changes"))
+    } else {
+        m::read(|s| {
+            (surface.name == "system-member" && s.view == "systems")
+                || (surface.name == "system-change" && s.view == "system-changes")
+        })
+    };
+    if sync_sidebar {
+        dom::attr(
+            "sidebar-graph-pill",
+            "data-motion-paused",
+            if cam.paused { "true" } else { "false" },
+        );
+    }
     dom::attr(
-        "sidebar-graph-pill",
-        "data-motion-paused",
-        if cam.paused { "true" } else { "false" },
-    );
-    dom::attr(
-        "session-graph-workspace",
+        &ws_id,
         "data-expanded",
         if cam.expanded { "true" } else { "false" },
     );
     dom::attr(
-        "session-graph-workspace",
+        &ws_id,
         "data-following",
         if cam.follow { "true" } else { "false" },
     );
 }
-fn fit_camera(cam: &mut Camera) {
-    let (vw, vh, measured) = viewport_size("session-graph-canvas");
+fn fit_surface_camera(surface: MapSurface, cam: &mut Camera) {
+    let (vw, vh, measured) = viewport_size(surface.canvas);
     cam.needs_measure = !measured;
     cam.fit_mode = true;
     if cam.plane_w > 0.0 && cam.plane_h > 0.0 {
@@ -12802,23 +13957,23 @@ fn fit_camera(cam: &mut Camera) {
         cam.pan_x = px;
         cam.pan_y = py;
     }
-    save_camera(cam);
-    apply_camera(cam);
+    save_surface_camera(surface, cam);
+    apply_surface_camera(surface, cam);
 }
-fn zoom_camera_to_bbox(cam: &mut Camera, bbox: (f64, f64, f64, f64)) {
-    let (vw, vh, measured) = viewport_size("session-graph-canvas");
+fn zoom_surface_camera_to_bbox(surface: MapSurface, cam: &mut Camera, bbox: (f64, f64, f64, f64)) {
+    let (vw, vh, measured) = viewport_size(surface.canvas);
     cam.needs_measure = !measured;
     let (s, px, py) = camera_for_bbox(bbox, (vw, vh), FOCUS_CAMERA_MAX);
     cam.scale = s;
     cam.pan_x = px;
     cam.pan_y = py;
     cam.fit_mode = false;
-    save_camera(cam);
-    apply_camera(cam);
+    save_surface_camera(surface, cam);
+    apply_surface_camera(surface, cam);
 }
-fn zoom_camera_at(factor: f64, anchor: Option<(f64, f64)>) {
-    let mut cam = load_camera();
-    let (vw, vh, measured) = viewport_size("session-graph-canvas");
+fn zoom_surface_camera_at(surface: MapSurface, factor: f64, anchor: Option<(f64, f64)>) {
+    let mut cam = load_surface_camera(surface);
+    let (vw, vh, measured) = viewport_size(surface.canvas);
     cam.needs_measure = !measured;
     let anchor = anchor.unwrap_or((vw / 2.0, vh / 2.0));
     let (s, px, py) = zoom_at(cam.scale, cam.pan_x, cam.pan_y, anchor, cam.scale * factor);
@@ -12826,12 +13981,12 @@ fn zoom_camera_at(factor: f64, anchor: Option<(f64, f64)>) {
     cam.pan_x = px;
     cam.pan_y = py;
     cam.fit_mode = false;
-    save_camera(&cam);
-    apply_camera(&cam);
+    save_surface_camera(surface, &cam);
+    apply_surface_camera(surface, &cam);
 }
-fn reset_camera_100() {
-    let mut cam = load_camera();
-    let (vw, vh, measured) = viewport_size("session-graph-canvas");
+fn reset_surface_camera_100(surface: MapSurface) {
+    let mut cam = load_surface_camera(surface);
+    let (vw, vh, measured) = viewport_size(surface.canvas);
     cam.needs_measure = !measured;
     cam.scale = 1.0;
     cam.pan_x = if cam.plane_w > 0.0 && cam.plane_w < vw {
@@ -12845,40 +14000,48 @@ fn reset_camera_100() {
         12.0
     };
     cam.fit_mode = false;
-    save_camera(&cam);
-    apply_camera(&cam);
+    save_surface_camera(surface, &cam);
+    apply_surface_camera(surface, &cam);
 }
-fn refit_embedded_if_visible() {
-    let (_, _, measured) = viewport_size("session-graph-canvas");
+fn refit_surface_if_visible(surface: MapSurface) {
+    let (_, _, measured) = viewport_size(surface.canvas);
     if !measured {
         return;
     }
-    let mut cam = load_camera();
+    let mut cam = load_surface_camera(surface);
     if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
         return;
     }
     if (cam.follow || !cam.fit_mode) && (cam.needs_measure || cam.fit_mode) {
         if let Some(bbox) = cam.bbox {
-            zoom_camera_to_bbox(&mut cam, bbox);
+            zoom_surface_camera_to_bbox(surface, &mut cam, bbox);
             return;
         }
     }
     if cam.fit_mode || cam.needs_measure {
-        fit_camera(&mut cam);
+        fit_surface_camera(surface, &mut cam);
     }
 }
-fn embedded_drag_data() -> V {
-    m::data("session-graph-drag")
+fn surface_drag_data(surface: MapSurface) -> V {
+    if surface.drag_key.is_empty() {
+        V::Null
+    } else {
+        m::data(surface.drag_key)
+    }
 }
-fn clear_embedded_drag_suppress() {
-    let mut drag = embedded_drag_data();
+fn clear_surface_drag_suppress(surface: MapSurface) {
+    if surface.drag_key.is_empty() {
+        return;
+    }
+    let mut drag = surface_drag_data(surface);
     if drag.is_object() {
         drag["suppress_click"] = json!(false);
-        m::set("session-graph-drag", drag);
+        m::set(surface.drag_key, drag);
     }
 }
-/// Builds clickable chips markup for `#session-graph-focus-entities`.
-pub fn focus_strip_chips_html(focus: &LiveFocus) -> String {
+/// Builds clickable chips markup for `#{id_prefix}-focus-entities`.
+pub fn focus_strip_chips_html_for_surface(focus: &LiveFocus, id_prefix: &str) -> String {
+    let jump_action = format!("{id_prefix}-focus-jump");
     let mut html = String::new();
     for entity in focus.created_entities.iter().take(8) {
         let (change_attr, badge, change_verb) = entity_change_badge(entity.change.as_deref());
@@ -12911,7 +14074,8 @@ pub fn focus_strip_chips_html(focus: &LiveFocus) -> String {
             )
         };
         html.push_str(&format!(
-            "<button type=\"button\" class=\"session-graph-focus-chip\" data-action=\"session-graph-focus-jump\" data-entity-kind=\"{}\" data-entity-change=\"{}\" data-payload=\"{entity_payload}\" title=\"{}\"><span class=\"graph-map-entity-dot\" aria-hidden=\"true\"></span><span class=\"graph-map-entity-badge\">{badge}</span>{vis_pill}<span>{}: {}</span></button>",
+            "<button type=\"button\" class=\"session-graph-focus-chip\" data-action=\"{}\" data-entity-kind=\"{}\" data-entity-change=\"{}\" data-payload=\"{entity_payload}\" title=\"{}\"><span class=\"graph-map-entity-dot\" aria-hidden=\"true\"></span><span class=\"graph-map-entity-badge\">{badge}</span>{vis_pill}<span>{}: {}</span></button>",
+            escape(&jump_action),
             escape(&entity.kind),
             escape(change_attr),
             escape(&title),
@@ -12928,7 +14092,8 @@ pub fn focus_strip_chips_html(focus: &LiveFocus) -> String {
             let short = target.rsplit('/').next().unwrap_or(target);
             let chip_payload = payload(&json!({ "path": target }));
             html.push_str(&format!(
-                "<button type=\"button\" class=\"session-graph-focus-chip\" data-action=\"session-graph-focus-jump\" data-entity-kind=\"target\" data-payload=\"{chip_payload}\" title=\"{}\"><span>{}</span></button>",
+                "<button type=\"button\" class=\"session-graph-focus-chip\" data-action=\"{}\" data-entity-kind=\"target\" data-payload=\"{chip_payload}\" title=\"{}\"><span>{}</span></button>",
+                escape(&jump_action),
                 escape(target),
                 escape(short),
             ));
@@ -12936,11 +14101,20 @@ pub fn focus_strip_chips_html(focus: &LiveFocus) -> String {
     }
     html
 }
-fn render_focus_strip(focus: Option<&LiveFocus>) {
+/// Builds clickable chips markup for `#session-graph-focus-entities`.
+#[allow(dead_code)]
+pub fn focus_strip_chips_html(focus: &LiveFocus) -> String {
+    focus_strip_chips_html_for_surface(focus, SESSION_SURFACE.id_prefix)
+}
+fn render_surface_focus_strip(surface: MapSurface, focus: Option<&LiveFocus>) {
+    let prefix = surface.id_prefix;
+    let strip_id = format!("{prefix}-focus");
+    let label_id = format!("{prefix}-focus-label");
+    let entities_id = format!("{prefix}-focus-entities");
     let Some(focus) = focus else {
-        dom::hidden("session-graph-focus", true);
-        dom::text("session-graph-focus-label", "");
-        html("session-graph-focus-entities", "");
+        dom::hidden(&strip_id, true);
+        dom::text(&label_id, "");
+        html(&entities_id, "");
         return;
     };
     let label = if !focus.summary.is_empty() {
@@ -12952,94 +14126,125 @@ fn render_focus_strip(focus: Option<&LiveFocus>) {
     } else {
         "Focusing on live target area".to_owned()
     };
-    dom::text("session-graph-focus-label", &label);
+    dom::text(&label_id, &label);
     html(
-        "session-graph-focus-entities",
-        &focus_strip_chips_html(focus),
+        &entities_id,
+        &focus_strip_chips_html_for_surface(focus, prefix),
     );
-    dom::hidden("session-graph-focus", false);
+    dom::hidden(&strip_id, false);
 }
-fn blank_embedded(note_text: &str) {
-    let state = embedded_state();
-    let changes = surface_changes_doc(SESSION_SURFACE, &state);
-    sync_embedded_toolbar(&state, changes.as_ref());
-    html("session-graph-crumbs", "");
-    dom::hidden("session-graph-crumbs", true);
-    html("session-graph-canvas", "");
-    html("session-graph-arrow-legend", "");
-    dom::hidden("session-graph-arrow-legend", true);
+fn blank_embedded_surface(surface: MapSurface, note_text: &str) {
+    let prefix = surface.id_prefix;
+    let state = surface_state(surface);
+    let changes = surface_changes_doc(surface, &state);
+    sync_surface_toolbar(surface, &state, changes.as_ref());
+    let crumbs_id = format!("{prefix}-crumbs");
+    let legend_id = format!("{prefix}-arrow-legend");
+    let summary_id = format!("{prefix}-summary");
+    html(&crumbs_id, "");
+    dom::hidden(&crumbs_id, true);
+    html(surface.canvas, "");
+    html(&legend_id, "");
+    dom::hidden(&legend_id, true);
     html(
-        "session-graph-side",
-        &embedded_unindexed_side_html(&state, changes.as_ref()),
+        surface.side,
+        &surface_unindexed_side_html(surface, &state, changes.as_ref()),
     );
-    m::take(SESSION_SURFACE.attachment_key);
-    dom::text("session-graph-summary", "");
-    dom::text("session-graph-note", note_text);
-    dom::hidden("session-graph-note", note_text.is_empty());
+    m::take(surface.attachment_key);
+    dom::text(&summary_id, "");
+    dom::text(surface.note, note_text);
+    dom::hidden(surface.note, note_text.is_empty());
 }
-fn render_embedded(view: &V, auto_focus_camera: bool, scope_changed: bool) {
-    ensure_embedded_watch();
-    let live = current_live_focus();
-    render_focus_strip(live.as_ref());
+fn render_embedded_surface(
+    surface: MapSurface,
+    view: &V,
+    auto_focus_camera: bool,
+    scope_changed: bool,
+) {
+    ensure_surface_watch(surface);
+    let prefix = surface.id_prefix;
+    let live = current_surface_live_focus(surface);
+    render_surface_focus_strip(surface, live.as_ref());
     if !view.is_object() || !view["nodes"].is_array() {
-        let fallback = if m::text(view, "state") == "failed" {
+        let view_state = m::text(view, "state");
+        let fallback = if view_state == "failed" {
             format!("Could not build code graph: {}", m::text(view, "failure"))
+        } else if view_state == "building" {
+            "Building code graph and dependency map…".to_owned()
         } else {
             note(view)
         };
-        blank_embedded(if fallback.is_empty() {
-            "Code graph will appear once indexed for this project."
+        let default_note = if surface_scope(surface).is_system() {
+            "Code graph not built yet for this service — click Build graph to index."
         } else {
-            &fallback
-        });
-        let mut cam = load_camera();
+            "Code graph will appear once indexed for this project."
+        };
+        blank_embedded_surface(
+            surface,
+            if fallback.is_empty() {
+                default_note
+            } else {
+                &fallback
+            },
+        );
+        let mut cam = load_surface_camera(surface);
         cam.plane_w = 0.0;
         cam.plane_h = 0.0;
         cam.bbox = None;
-        save_camera(&cam);
-        apply_camera(&cam);
+        save_surface_camera(surface, &cam);
+        apply_surface_camera(surface, &cam);
         return;
     }
-    let state = embedded_state();
-    let changes_doc = surface_changes_doc(SESSION_SURFACE, &state);
-    sync_embedded_toolbar(&state, changes_doc.as_ref());
-    let impact_doc = cached_impact_for_selection(SESSION_SURFACE, &state, Some(view));
+    let state = surface_state(surface);
+    crate::graph_explanation::surface_map_context(
+        surface.canvas,
+        view,
+        &state["cycle_base"]["revision"],
+        &surface_scope(surface),
+    );
+    let changes_doc = surface_changes_doc(surface, &state);
+    sync_surface_toolbar(surface, &state, changes_doc.as_ref());
+    let impact_doc = cached_impact_for_selection(surface, &state, Some(view));
     let changes_tab = m::text(&state, "side_tab") == "changes";
     let module_mode = m::yes(&state["modules"]);
     let scenario_mode = view["mode"] == "scenario";
+    let crumbs_id = format!("{prefix}-crumbs");
+    let legend_id = format!("{prefix}-arrow-legend");
+    let summary_id = format!("{prefix}-summary");
     let crumbs_html = crumbs(view);
-    html("session-graph-crumbs", &crumbs_html);
-    dom::hidden("session-graph-crumbs", crumbs_html.is_empty());
-    dom::text("session-graph-summary", &summary(view));
+    html(&crumbs_id, &crumbs_html);
+    dom::hidden(&crumbs_id, crumbs_html.is_empty());
+    dom::text(&summary_id, &summary(view));
     let before = interim(view, "");
     let note_text = combine_note(before, view);
-    dom::text("session-graph-note", &note_text);
-    dom::hidden("session-graph-note", note_text.is_empty());
+    dom::text(surface.note, &note_text);
+    dom::hidden(surface.note, note_text.is_empty());
 
     let rendered = canvas_with_overlays(
         view,
-        SESSION_SURFACE.id_prefix,
+        prefix,
         CanvasOverlayContext {
             live_focus: live.as_ref(),
             changes: changes_doc.as_ref(),
             impact: impact_doc.as_ref(),
         },
     );
-    html("session-graph-canvas", &rendered.html);
-    html("session-graph-arrow-legend", &arrow_kinds_legend_html());
-    dom::hidden("session-graph-arrow-legend", false);
-    let was_empty = dom::get("session-graph-side").is_none_or(|el| el.inner_html().is_empty());
+    html(surface.canvas, &rendered.html);
+    html(&legend_id, &arrow_kinds_legend_html());
+    dom::hidden(&legend_id, false);
+    let was_empty = dom::get(surface.side).is_none_or(|el| el.inner_html().is_empty());
+    let attach_action = format!("{prefix}-attach");
     let side_html = if scenario_mode && !changes_tab {
-        m::take(SESSION_SURFACE.attachment_key);
-        dom::attr("session-graph-canvas", "data-picking", "false");
+        m::take(surface.attachment_key);
+        dom::attr(surface.canvas, "data-picking", "false");
         scenario_side(view)
     } else if module_mode && !changes_tab {
-        m::take(SESSION_SURFACE.attachment_key);
-        dom::attr("session-graph-canvas", "data-picking", "false");
+        m::take(surface.attachment_key);
+        dom::attr(surface.canvas, "data-picking", "false");
         modules_side(view)
     } else {
         dom::attr(
-            "session-graph-canvas",
+            surface.canvas,
             "data-picking",
             if state["pick"].is_object() {
                 "true"
@@ -13063,62 +14268,66 @@ fn render_embedded(view: &V, auto_focus_camera: bool, scope_changed: bool) {
         } else {
             ""
         };
-        set_surface_attrs(SESSION_SURFACE, view);
+        set_surface_attrs(surface, view);
         map_side_html(
-            SESSION_SURFACE,
+            surface,
             view,
             &state,
             &action,
             &scenario_button(view),
             test_back,
-            "session-graph-attach",
+            &attach_action,
         )
     };
-    html("session-graph-side", &side_html);
+    html(surface.side, &side_html);
     let now_empty = side_html.is_empty();
     let side_changed = was_empty != now_empty;
-    let pan_target = m::take("session-graph-pan-target");
-    let mut cam = load_camera();
+    let pan_target = if surface.pan_target_key.is_empty() {
+        V::Null
+    } else {
+        m::take(surface.pan_target_key)
+    };
+    let mut cam = load_surface_camera(surface);
     cam.plane_w = rendered.width;
     cam.plane_h = rendered.height;
     cam.bbox = rendered.selected_bbox.or(rendered.focus.bbox);
-    let (_, _, measured) = viewport_size("session-graph-canvas");
+    let (_, _, measured) = viewport_size(surface.canvas);
     cam.needs_measure = !measured || side_changed;
     let mut zoomed_bbox = false;
     if !pan_target.is_null() {
         if let Some(bbox) = rendered.selected_bbox {
-            zoom_camera_to_bbox(&mut cam, bbox);
+            zoom_surface_camera_to_bbox(surface, &mut cam, bbox);
             zoomed_bbox = true;
         }
     }
     if !zoomed_bbox && auto_focus_camera && cam.follow {
         if let Some(bbox) = cam.bbox {
-            zoom_camera_to_bbox(&mut cam, bbox);
+            zoom_surface_camera_to_bbox(surface, &mut cam, bbox);
             zoomed_bbox = true;
         }
     }
     if !zoomed_bbox {
         if cam.fit_mode || scope_changed || side_changed {
-            fit_camera(&mut cam);
+            fit_surface_camera(surface, &mut cam);
         } else {
-            save_camera(&cam);
-            apply_camera(&cam);
+            save_surface_camera(surface, &cam);
+            apply_surface_camera(surface, &cam);
         }
     }
     if side_changed {
         cam.needs_measure = true;
-        save_camera(&cam);
-        dom::later("session-graph-refit", 60, || {
-            refit_embedded_if_visible();
+        save_surface_camera(surface, &cam);
+        dom::later(surface.refit_timer_key, 60, move || {
+            refit_surface_if_visible(surface);
         });
     }
 }
-fn redraw_embedded_overlay(auto_focus_camera: bool) {
-    let view = m::data("session-graph-view");
+fn redraw_surface_overlay(surface: MapSurface, auto_focus_camera: bool) {
+    let view = m::data(surface.view_key);
     if view["nodes"].is_array() {
-        render_embedded(&view, auto_focus_camera, false);
+        render_embedded_surface(surface, &view, auto_focus_camera, false);
     } else {
-        render_focus_strip(current_live_focus().as_ref());
+        render_surface_focus_strip(surface, current_surface_live_focus(surface).as_ref());
     }
 }
 fn embedded_error_is_unbuilt(graph_status: &V, error_message: &str) -> bool {
@@ -13131,93 +14340,141 @@ fn embedded_error_is_unbuilt(graph_status: &V, error_message: &str) -> bool {
     let lower = error_message.to_ascii_lowercase();
     lower.contains("no published")
         || lower.contains("not built")
+        || lower.contains("not indexed")
         || lower.contains("building")
         || lower.contains("not enabled")
         || lower.contains("turned off")
 }
+#[cfg(test)]
 fn embedded_unbuilt_note(graph_status: &V) -> &'static str {
+    embedded_unbuilt_note_for_scope(graph_status, false)
+}
+fn embedded_unbuilt_note_for_scope(graph_status: &V, is_system: bool) -> &'static str {
     match m::text(graph_status, "state").as_str() {
         "building" => "Building code graph and dependency map…",
+        "off" if is_system => "Code graph is turned off for this service.",
         "off" => "Code graph is turned off for this project.",
+        _ if is_system => "Code graph not built yet for this service — click Build graph to index.",
         _ => "No published code graph yet for this project.",
     }
 }
-async fn load_embedded(quiet: bool) {
-    let state = embedded_state();
-    let project = dom::value("project");
-    if project.is_empty() {
-        m::next(SESSION_SURFACE.changes_epoch);
-        m::next(SESSION_SURFACE.impact_epoch);
-        m::take(SESSION_SURFACE.changes_key);
-        m::take(SESSION_SURFACE.impact_key);
-        m::take("session-graph-pan-target");
-        m::set("session-graph-view", V::Null);
-        dom::error("session-graph-error", "");
-        blank_embedded("Select a project to view its code graph.");
+async fn load_embedded_surface(surface: MapSurface, quiet: bool) {
+    let state = surface_state(surface);
+    let scope = surface_scope(surface);
+    let poll_key = format!("{}-poll", surface.id_prefix);
+    if scope.is_empty() {
+        dom::cancel_timer(&poll_key);
+        m::next(surface.changes_epoch);
+        m::next(surface.impact_epoch);
+        m::take(surface.changes_key);
+        m::take(surface.impact_key);
+        if !surface.pan_target_key.is_empty() {
+            m::take(surface.pan_target_key);
+        }
+        m::set(surface.view_key, V::Null);
+        dom::error(surface.error_id, "");
+        blank_embedded_surface(
+            surface,
+            if surface.name == "session" {
+                "Select a project to view its code graph."
+            } else {
+                "Select a system service to view its code graph."
+            },
+        );
         return;
     }
+    let scope_key = scope.scope_key();
     let target = m::text(&state, "target");
-    let prev_scope = m::text(&m::data("session-graph-view"), "scope");
-    let path = build_map_path(&project, &state, true);
+    let prev_scope = m::text(&m::data(surface.view_key), "scope");
+    let path = build_scoped_map_path(&scope, &state, true);
     if !quiet {
-        dom::attr("session-graph-canvas", "aria-busy", "true");
+        dom::attr(surface.canvas, "aria-busy", "true");
     }
-    if !quiet || surface_changes_doc(SESSION_SURFACE, &state).is_none() {
+    if !quiet || surface_changes_doc(surface, &state).is_none() {
         let ch_state = state.clone();
         spawn_local(async move {
-            fetch_surface_changes(SESSION_SURFACE, ch_state).await;
+            fetch_surface_changes(surface, ch_state).await;
         });
     }
-    match api::scoped("session-graph", &path).await {
+    match api::scoped(surface.map_epoch, &path).await {
         Ok((epoch, view)) => {
-            if !m::current("session-graph", epoch) || dom::value("project") != project {
+            if !m::current(surface.map_epoch, epoch)
+                || surface_scope(surface).scope_key() != scope_key
+            {
                 return;
             }
-            let (next_state, _) =
-                reconcile_view_state(state, &view, json!(load_camera().fit_mode), &target);
-            save_embedded_state(&next_state);
-            dom::error("session-graph-error", "");
+            if surface.name != "session" {
+                crate::graph::sync_embedded_progress_for_surface(surface.id_prefix, &view);
+                if view["state"] == "building" {
+                    dom::later(&poll_key, 1200, move || {
+                        let active_view = m::read(|s| s.view.clone());
+                        let visible = (surface.name == "system-member" && active_view == "systems")
+                            || (surface.name == "system-change" && active_view == "system-changes");
+                        if visible && !surface_scope(surface).is_empty() {
+                            spawn_local(load_embedded_surface(surface, true));
+                        }
+                    });
+                } else {
+                    dom::cancel_timer(&poll_key);
+                }
+            }
+            let (next_state, _) = reconcile_view_state(
+                state,
+                &view,
+                json!(load_surface_camera(surface).fit_mode),
+                &target,
+            );
+            save_surface_state(surface, &next_state);
+            dom::error(surface.error_id, "");
             let next_scope = m::text(&view, "scope");
             let scope_changed = !prev_scope.is_empty() && prev_scope != next_scope;
             let mut auto_focus = false;
-            if view["graph_focus"].is_object() {
+            if view["graph_focus"].is_object() && !surface.focus_key.is_empty() {
                 let incoming_phase = m::text(&view["graph_focus"], "phase");
-                let current = m::data("session-graph-focus");
+                let current = m::data(surface.focus_key);
                 let keep_predicting =
                     m::text(&current, "phase") == "predicting" && incoming_phase == "idle";
                 if !keep_predicting && current != view["graph_focus"] {
-                    m::set("session-graph-focus", view["graph_focus"].clone());
+                    m::set(surface.focus_key, view["graph_focus"].clone());
                     auto_focus = true;
                 }
             }
-            m::set("session-graph-view", view.clone());
-            render_embedded(&view, auto_focus, scope_changed);
-            ensure_surface_impact(SESSION_SURFACE, &next_state, Some(&view), false);
+            m::set(surface.view_key, view.clone());
+            render_embedded_surface(surface, &view, auto_focus, scope_changed);
+            ensure_surface_impact(surface, &next_state, Some(&view), false);
         }
         Err(error) if error.aborted => return,
         Err(error) => {
-            let graph_status = m::data("graph");
-            if embedded_error_is_unbuilt(&graph_status, &error.message) {
-                dom::error("session-graph-error", "");
-                blank_embedded(embedded_unbuilt_note(&graph_status));
+            dom::cancel_timer(&poll_key);
+            let graph_status = if surface.name == "session" {
+                m::data("graph")
             } else {
-                dom::error("session-graph-error", &error.message);
-                if !m::data("session-graph-view")["nodes"].is_array() {
-                    blank_embedded("");
+                V::Null
+            };
+            if embedded_error_is_unbuilt(&graph_status, &error.message) {
+                dom::error(surface.error_id, "");
+                blank_embedded_surface(
+                    surface,
+                    embedded_unbuilt_note_for_scope(&graph_status, scope.is_system()),
+                );
+            } else {
+                dom::error(surface.error_id, &error.message);
+                if !m::data(surface.view_key)["nodes"].is_array() {
+                    blank_embedded_surface(surface, "");
                 }
             }
         }
     }
-    dom::attr("session-graph-canvas", "aria-busy", "false");
+    dom::attr(surface.canvas, "aria-busy", "false");
 }
 /// Refreshes the inline Sessions graph `/graph/changes` catalog and toolbar badge.
 pub fn sync_embedded_changes() {
     let project = dom::value("project");
-    let state = embedded_state();
+    let state = surface_state(SESSION_SURFACE);
     if project.is_empty() {
         m::next(SESSION_SURFACE.changes_epoch);
         m::take(SESSION_SURFACE.changes_key);
-        sync_embedded_toolbar(&state, None);
+        sync_surface_toolbar(SESSION_SURFACE, &state, None);
         return;
     }
     spawn_local(async move {
@@ -13226,24 +14483,24 @@ pub fn sync_embedded_changes() {
 }
 /// Syncs the inline Sessions dependency map for the active project, fetching `/graph/map` when needed.
 pub fn sync_embedded(force: bool) {
-    ensure_embedded_watch();
+    ensure_surface_watch(SESSION_SURFACE);
     let project = dom::value("project");
-    let current = embedded_state();
+    let current = surface_state(SESSION_SURFACE);
     if project.is_empty() {
         m::next("session-graph");
         m::next(SESSION_SURFACE.changes_epoch);
         m::next(SESSION_SURFACE.impact_epoch);
         let reset = fresh("");
-        save_embedded_state(&reset);
-        m::set("session-graph-view", V::Null);
-        m::set("session-graph-focus", V::Null);
+        save_surface_state(SESSION_SURFACE, &reset);
+        m::set(SESSION_SURFACE.view_key, V::Null);
+        m::set(SESSION_SURFACE.focus_key, V::Null);
         m::take(SESSION_SURFACE.changes_key);
         m::take(SESSION_SURFACE.impact_key);
-        m::take("session-graph-pan-target");
-        render_focus_strip(None);
-        dom::error("session-graph-error", "");
-        blank_embedded("Select a project to view its code graph.");
-        dom::attr("session-graph-canvas", "aria-busy", "false");
+        m::take(SESSION_SURFACE.pan_target_key);
+        render_surface_focus_strip(SESSION_SURFACE, None);
+        dom::error(SESSION_SURFACE.error_id, "");
+        blank_embedded_surface(SESSION_SURFACE, "Select a project to view its code graph.");
+        dom::attr(SESSION_SURFACE.canvas, "aria-busy", "false");
         return;
     }
     let project_changed = m::text(&current, "project") != project;
@@ -13252,50 +14509,173 @@ pub fn sync_embedded(force: bool) {
         m::next(SESSION_SURFACE.impact_epoch);
         m::take(SESSION_SURFACE.changes_key);
         m::take(SESSION_SURFACE.impact_key);
-        m::take("session-graph-pan-target");
+        m::take(SESSION_SURFACE.pan_target_key);
         let mut next = fresh("");
         next["project"] = json!(project);
-        save_embedded_state(&next);
-        m::set("session-graph-view", V::Null);
-        m::set("session-graph-focus", V::Null);
-        let mut cam = load_camera();
+        save_surface_state(SESSION_SURFACE, &next);
+        m::set(SESSION_SURFACE.view_key, V::Null);
+        m::set(SESSION_SURFACE.focus_key, V::Null);
+        let mut cam = load_surface_camera(SESSION_SURFACE);
         cam.fit_mode = true;
         cam.needs_measure = true;
         cam.bbox = None;
         cam.plane_w = 0.0;
         cam.plane_h = 0.0;
-        save_camera(&cam);
-        render_focus_strip(None);
-        dom::error("session-graph-error", "");
-        blank_embedded("Loading code graph…");
-        apply_camera(&cam);
+        save_surface_camera(SESSION_SURFACE, &cam);
+        render_surface_focus_strip(SESSION_SURFACE, None);
+        dom::error(SESSION_SURFACE.error_id, "");
+        blank_embedded_surface(SESSION_SURFACE, "Loading code graph…");
+        apply_surface_camera(SESSION_SURFACE, &cam);
     }
-    let loaded_view = m::data("session-graph-view");
-    let has_rendered = dom::get("session-graph-canvas").is_some_and(|el| {
+    let loaded_view = m::data(SESSION_SURFACE.view_key);
+    let has_rendered = dom::get(SESSION_SURFACE.canvas).is_some_and(|el| {
         el.query_selector(".graph-map-plane")
             .ok()
             .flatten()
             .is_some()
     });
     if !force && !project_changed && loaded_view["nodes"].is_array() && has_rendered {
-        sync_embedded_toolbar(
+        sync_surface_toolbar(
+            SESSION_SURFACE,
             &current,
             surface_changes_doc(SESSION_SURFACE, &current).as_ref(),
         );
         if surface_changes_doc(SESSION_SURFACE, &current).is_none() {
             sync_embedded_changes();
         }
-        refit_embedded_if_visible();
+        refit_surface_if_visible(SESSION_SURFACE);
         return;
     }
     let quiet = loaded_view["nodes"].is_array() && !project_changed;
     spawn_local(async move {
-        load_embedded(quiet).await;
+        load_embedded_surface(SESSION_SURFACE, quiet).await;
     });
 }
-/// Immediately highlights and zooms onto graph nodes matching `prompt` on Send (0ms local match).
-pub fn focus_from_prompt(prompt: &str) {
-    let view = m::data("session-graph-view");
+/// Syncs/loads an embedded System code-graph surface (`Member` in `#systems-view` or `Change` in `#system-changes-view`).
+#[allow(dead_code)]
+pub(crate) fn load_system_embedded(
+    kind: SystemEmbeddedKind,
+    scope: Option<GraphTargetScope>,
+    force: bool,
+) {
+    let surface = kind.surface();
+    ensure_surface_watch(surface);
+    let poll_key = format!("{}-poll", surface.id_prefix);
+    let Some(next_scope) = scope.filter(|s| !s.is_empty()) else {
+        dom::cancel_timer(&poll_key);
+        set_surface_scope(surface, GraphTargetScope::single(""));
+        m::next(surface.map_epoch);
+        m::next(surface.changes_epoch);
+        m::next(surface.impact_epoch);
+        let reset = fresh("");
+        save_surface_state(surface, &reset);
+        m::set(surface.view_key, V::Null);
+        m::set(surface.focus_key, V::Null);
+        m::take(surface.changes_key);
+        m::take(surface.impact_key);
+        m::take(surface.pan_target_key);
+        render_surface_focus_strip(surface, None);
+        dom::error(surface.error_id, "");
+        blank_embedded_surface(surface, "Select a system service to view its code graph.");
+        dom::attr(surface.canvas, "aria-busy", "false");
+        return;
+    };
+    let prev_scope = surface_scope(surface);
+    let scope_changed = prev_scope.scope_key() != next_scope.scope_key();
+    let incoming_run_id = match &next_scope {
+        GraphTargetScope::SystemService { run_id, .. } => {
+            run_id.as_deref().map(str::trim).unwrap_or("").to_owned()
+        }
+        GraphTargetScope::SingleProject { .. } => String::new(),
+    };
+    set_surface_scope(surface, next_scope);
+    let mut current = surface_state(surface);
+    let mut run_changed = false;
+    if scope_changed {
+        dom::cancel_timer(&poll_key);
+        m::next(surface.map_epoch);
+        m::next(surface.changes_epoch);
+        m::next(surface.impact_epoch);
+        m::take(surface.changes_key);
+        m::take(surface.impact_key);
+        m::take(surface.pan_target_key);
+        let default_target =
+            if matches!(kind, SystemEmbeddedKind::Change) && !incoming_run_id.is_empty() {
+                format!("sysrun:{incoming_run_id}")
+            } else {
+                String::new()
+            };
+        let mut next_state = fresh(&default_target);
+        if !incoming_run_id.is_empty() {
+            next_state["run_id"] = json!(incoming_run_id);
+        }
+        if matches!(kind, SystemEmbeddedKind::Change) && !default_target.is_empty() {
+            next_state["side_tab"] = json!("changes");
+            next_state["side_pinned"] = json!(false);
+        }
+        save_surface_state(surface, &next_state);
+        current = next_state;
+        m::set(surface.view_key, V::Null);
+        m::set(surface.focus_key, V::Null);
+        let mut cam = load_surface_camera(surface);
+        cam.fit_mode = true;
+        cam.needs_measure = true;
+        cam.bbox = None;
+        cam.plane_w = 0.0;
+        cam.plane_h = 0.0;
+        save_surface_camera(surface, &cam);
+        render_surface_focus_strip(surface, None);
+        dom::error(surface.error_id, "");
+        blank_embedded_surface(surface, "Loading service code graph…");
+        apply_surface_camera(surface, &cam);
+    } else if matches!(kind, SystemEmbeddedKind::Change)
+        && m::text(&current, "run_id") != incoming_run_id
+    {
+        run_changed = true;
+        current["run_id"] = json!(incoming_run_id.clone());
+        let cur_target = m::text(&current, "target");
+        if cur_target.is_empty() || cur_target.starts_with("sysrun:") {
+            current["target"] = json!(if incoming_run_id.is_empty() {
+                String::new()
+            } else {
+                format!("sysrun:{incoming_run_id}")
+            });
+        }
+        m::next(surface.changes_epoch);
+        m::next(surface.impact_epoch);
+        m::take(surface.changes_key);
+        m::take(surface.impact_key);
+        save_surface_state(surface, &current);
+    }
+    let loaded_view = m::data(surface.view_key);
+    let has_rendered = dom::get(surface.canvas).is_some_and(|el| {
+        el.query_selector(".graph-map-plane")
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    if !force && !scope_changed && !run_changed && loaded_view["nodes"].is_array() && has_rendered {
+        sync_surface_toolbar(
+            surface,
+            &current,
+            surface_changes_doc(surface, &current).as_ref(),
+        );
+        if surface_changes_doc(surface, &current).is_none() {
+            let ch_state = current;
+            spawn_local(async move {
+                fetch_surface_changes(surface, ch_state).await;
+            });
+        }
+        refit_surface_if_visible(surface);
+        return;
+    }
+    let quiet = loaded_view["nodes"].is_array() && !scope_changed && !run_changed;
+    spawn_local(async move {
+        load_embedded_surface(surface, quiet).await;
+    });
+}
+fn focus_surface_from_prompt(surface: MapSurface, prompt: &str) {
+    let view = m::data(surface.view_key);
     let Some(matched) = match_prompt_targets(&view, prompt) else {
         return;
     };
@@ -13307,27 +14687,44 @@ pub fn focus_from_prompt(prompt: &str) {
         "target_nodes": matched.target_nodes,
         "created_entities": [],
     });
-    if m::data("session-graph-focus") == focus_json {
+    if m::data(surface.focus_key) == focus_json {
         return;
     }
-    m::set("session-graph-focus", focus_json);
-    redraw_embedded_overlay(true);
+    m::set(surface.focus_key, focus_json);
+    redraw_surface_overlay(surface, true);
 }
-/// Applies a backend `GraphFocus` update (`Value::Null` clears) to the Sessions map & camera.
-pub fn apply_focus(focus: &V) {
+/// Immediately highlights and zooms onto graph nodes matching `prompt` on Send (0ms local match).
+pub fn focus_from_prompt(prompt: &str) {
+    focus_surface_from_prompt(SESSION_SURFACE, prompt);
+}
+/// Immediately highlights and zooms onto graph nodes matching `prompt` on an embedded System surface.
+#[allow(dead_code)]
+pub(crate) fn focus_system_from_prompt(kind: SystemEmbeddedKind, prompt: &str) {
+    focus_surface_from_prompt(kind.surface(), prompt);
+}
+fn apply_surface_live_focus(surface: MapSurface, focus: &V) {
     let parsed = parse_live_focus(focus);
     let next_val = if parsed.is_some() {
         focus.clone()
     } else {
         V::Null
     };
-    if m::data("session-graph-focus") == next_val {
+    if m::data(surface.focus_key) == next_val {
         return;
     }
-    m::set("session-graph-focus", next_val);
-    redraw_embedded_overlay(parsed.is_some());
+    m::set(surface.focus_key, next_val);
+    redraw_surface_overlay(surface, parsed.is_some());
 }
-fn jump_to_entity_or_target(payload: &V) -> bool {
+/// Applies a backend `GraphFocus` update (`Value::Null` clears) to the Sessions map & camera.
+pub fn apply_focus(focus: &V) {
+    apply_surface_live_focus(SESSION_SURFACE, focus);
+}
+/// Applies a backend `GraphFocus` update (`Value::Null` clears) to an embedded System code-graph surface.
+#[allow(dead_code)]
+pub(crate) fn apply_system_live_focus(kind: SystemEmbeddedKind, focus: &V) {
+    apply_surface_live_focus(kind.surface(), focus);
+}
+fn jump_to_surface_entity_or_target(surface: MapSurface, payload: &V) -> bool {
     let raw_path = m::text(payload, "path");
     let raw_parent = m::text(payload, "parent");
     let raw_folder = m::text(payload, "folder");
@@ -13341,15 +14738,19 @@ fn jump_to_entity_or_target(payload: &V) -> bool {
     let is_entity_item = !m::text(payload, "id").is_empty()
         || (!m::text(payload, "kind").is_empty() && m::text(payload, "kind") != "target");
     if !entity_file.is_empty() && (is_entity_item || looks_like_file_path(&entity_file)) {
-        return focus_file_on_session(&entity_file);
+        return focus_file_on_surface(surface, &entity_file);
     }
 
     let target_x = payload["x"].as_f64();
     let target_y = payload["y"].as_f64();
-    let view = m::data("session-graph-view");
+    let view = m::data(surface.view_key);
     if let (Some(x), Some(y)) = (target_x, target_y) {
-        let mut cam = load_camera();
-        zoom_camera_to_bbox(&mut cam, (x, y, x + ENTITY_WIDTH, y + ENTITY_HEIGHT));
+        let mut cam = load_surface_camera(surface);
+        zoom_surface_camera_to_bbox(
+            surface,
+            &mut cam,
+            (x, y, x + ENTITY_WIDTH, y + ENTITY_HEIGHT),
+        );
         return true;
     }
     if view["nodes"].is_array() {
@@ -13402,8 +14803,8 @@ fn jump_to_entity_or_target(payload: &V) -> bool {
             plan_beside(nodes.len(), &weighted, &framed, None)
         };
         if let Some(bbox) = resolve_focus(&view, &plan, &probe).bbox {
-            let mut cam = load_camera();
-            zoom_camera_to_bbox(&mut cam, bbox);
+            let mut cam = load_surface_camera(surface);
+            zoom_surface_camera_to_bbox(surface, &mut cam, bbox);
             return true;
         }
     }
@@ -13415,50 +14816,57 @@ fn jump_to_entity_or_target(payload: &V) -> bool {
         normalize_rel_path(parent(strip_symbol_suffix(&raw_path)))
     };
     if !next_scope.is_empty() {
-        let mut state = embedded_state();
+        let mut state = surface_state(surface);
         state = unfollowed(state);
         state["scope"] = json!(next_scope);
         state["focus"] = json!("");
         state["filter"] = json!("");
-        save_embedded_state(&state);
-        spawn_local(async {
-            load_embedded(false).await;
+        save_surface_state(surface, &state);
+        spawn_local(async move {
+            load_embedded_surface(surface, false).await;
         });
         return true;
     }
     false
 }
-fn focus_file_on_session(raw_path: &str) -> bool {
+fn focus_file_on_surface(surface: MapSurface, raw_path: &str) -> bool {
     let file_path = normalize_rel_path(strip_symbol_suffix(raw_path));
     if file_path.is_empty() {
         return false;
     }
-    let view = m::data(SESSION_SURFACE.view_key);
-    let (next_state, needs_reload) = state_focus_file(embedded_state(), &file_path, &view);
-    save_embedded_state(&next_state);
-    m::set("session-graph-pan-target", json!(file_path));
-    dom::set_value("session-graph-filter", &m::text(&next_state, "filter"));
-    sync_embedded_toolbar(
+    let view = m::data(surface.view_key);
+    let (next_state, needs_reload) = state_focus_file(surface_state(surface), &file_path, &view);
+    save_surface_state(surface, &next_state);
+    if !surface.pan_target_key.is_empty() {
+        m::set(surface.pan_target_key, json!(file_path));
+    }
+    dom::set_value(
+        &format!("{}-filter", surface.id_prefix),
+        &m::text(&next_state, "filter"),
+    );
+    sync_surface_toolbar(
+        surface,
         &next_state,
-        surface_changes_doc(SESSION_SURFACE, &next_state).as_ref(),
+        surface_changes_doc(surface, &next_state).as_ref(),
     );
     let view_opt = view["nodes"].is_array().then_some(&view);
-    ensure_surface_impact(SESSION_SURFACE, &next_state, view_opt, true);
+    ensure_surface_impact(surface, &next_state, view_opt, true);
     if needs_reload {
-        spawn_local(async {
-            load_embedded(false).await;
+        spawn_local(async move {
+            load_embedded_surface(surface, false).await;
         });
     } else {
-        rerender_surface_preserving_camera(SESSION_SURFACE);
+        rerender_surface_preserving_camera(surface);
     }
     true
 }
 /// Focuses a workspace-relative file path on the embedded Sessions dependency map.
 pub fn focus_file_in_session(path: &str) {
-    let _ = focus_file_on_session(path);
+    let _ = focus_file_on_surface(SESSION_SURFACE, path);
 }
-async fn open_full_from_embedded() {
-    let emb = embedded_state();
+async fn open_full_from_surface(surface: MapSurface) {
+    set_surface_scope(MODAL_SURFACE, surface_scope(surface));
+    let emb = surface_state(surface);
     let target = m::text(&emb, "target");
     let mut modal = anew(&target);
     modal["whole"] = json!(m::yes(&emb["whole"]));
@@ -13468,6 +14876,10 @@ async fn open_full_from_embedded() {
     modal["scope"] = json!(m::text(&emb, "scope"));
     modal["spread"] = emb["spread"].clone();
     modal["focus"] = emb["focus"].clone();
+    modal["launch"] = emb["launch"].clone();
+    modal["compare_launch"] = emb["compare_launch"].clone();
+    modal["agent"] = emb["agent"].clone();
+    modal["run_id"] = emb["run_id"].clone();
     modal["side_tab"] = json!(if m::text(&emb, "side_tab") == "changes" {
         "changes"
     } else {
@@ -13485,13 +14897,17 @@ async fn open_full_from_embedded() {
     modal = normalize_map_state(modal);
     m::set("graph-map", modal.clone());
 
-    let emb_changes = m::data(SESSION_SURFACE.changes_key);
+    let emb_changes = m::data(surface.changes_key);
     if emb_changes.is_object() {
         m::set(MODAL_SURFACE.changes_key, emb_changes);
+    } else {
+        m::take(MODAL_SURFACE.changes_key);
     }
-    let emb_impact = m::data(SESSION_SURFACE.impact_key);
+    let emb_impact = m::data(surface.impact_key);
     if emb_impact.is_object() {
         m::set(MODAL_SURFACE.impact_key, emb_impact);
+    } else {
+        m::take(MODAL_SURFACE.impact_key);
     }
 
     dom::disabled("graph-find-search", false);
@@ -13523,146 +14939,375 @@ async fn open_full_from_embedded() {
     spawn_local(place());
     load(false).await;
 }
-/// Handles input/change events on embedded Sessions graph toolbar controls (`#session-graph-filter`, `#session-graph-notests`).
-pub fn handle_session_graph_input(id: &str, value: &str, checked: Option<bool>) -> bool {
-    match id {
-        "session-graph-filter" => {
-            let mut state = embedded_state();
+/// Opens the full `#graph-map` modal scoped to a System member service (`__system__`, standalone
+/// repo, or monorepo subfolder service) without mutating `#project`.
+#[allow(dead_code)]
+pub(crate) fn open_system_service_map(scope: GraphTargetScope, initial_target: Option<&str>) {
+    let target = initial_target.unwrap_or("").trim().to_owned();
+    set_surface_scope(MODAL_SURFACE, scope);
+    m::next(MODAL_SURFACE.map_epoch);
+    m::next(MODAL_SURFACE.changes_epoch);
+    m::next(MODAL_SURFACE.impact_epoch);
+    m::take(MODAL_SURFACE.changes_key);
+    m::take(MODAL_SURFACE.impact_key);
+    m::set(MODAL_SURFACE.view_key, V::Null);
+
+    let mut modal = anew(&target);
+    if let Some(rid) = target.strip_prefix("sysrun:").filter(|s| !s.is_empty()) {
+        modal["run_id"] = json!(rid);
+    }
+    if target == "work" {
+        modal["side_tab"] = json!("changes");
+    }
+    m::set("graph-map", modal.clone());
+
+    dom::disabled("graph-find-search", false);
+    dom::set_value("graph-map-filter", "");
+    dom::set_checked("graph-map-whole", false);
+    dom::set_checked("graph-map-notests", m::yes(&modal["notests"]));
+    dom::set_checked("graph-map-certain", m::yes(&modal["certain"]));
+    m::next("graph-find");
+    dom::cancel_timer("graph-find-search");
+    m::set("graph-find", V::Null);
+    dom::set_value("graph-find-search", "");
+    show_found();
+    dom::error("graph-map-error", "");
+    dom::hidden("graph-map-progress", true);
+    dom::text("graph-map-zoom-level", "100%");
+    blank();
+    dom::text("graph-map-chosen", "");
+    dom::text(
+        "graph-map-note",
+        if !target.is_empty() {
+            "Reading the change…"
+        } else {
+            "Reading the graph…"
+        },
+    );
+    shut();
+    list();
+    dom::dialog("graph-map", true);
+    watch();
+    spawn_local(async move {
+        let _ = place().await;
+        if target.contains(':') && !target.starts_with("sysrun:") && !choose(&target).await {
+            return;
+        }
+        load(false).await;
+    });
+}
+/// Opens `#graph-map` focused directly on `path` within a System member service, opening the
+/// Details / Impact side panel and fetching `/api/systems/service-graph/file-impact`.
+#[allow(dead_code)]
+pub(crate) fn open_system_file_impact(
+    scope: GraphTargetScope,
+    path: &str,
+    initial_target: Option<&str>,
+) {
+    let default_target = match &scope {
+        GraphTargetScope::SystemService {
+            run_id: Some(rid), ..
+        } if !rid.trim().is_empty() => format!("sysrun:{}", rid.trim()),
+        _ => "work".to_owned(),
+    };
+    let target = initial_target
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .unwrap_or(default_target);
+    set_surface_scope(MODAL_SURFACE, scope);
+    m::next(MODAL_SURFACE.map_epoch);
+    m::next(MODAL_SURFACE.changes_epoch);
+    m::next(MODAL_SURFACE.impact_epoch);
+    m::take(MODAL_SURFACE.changes_key);
+    m::take(MODAL_SURFACE.impact_key);
+    m::set(MODAL_SURFACE.view_key, V::Null);
+
+    let mut modal = anew(&target);
+    if let Some(rid) = target.strip_prefix("sysrun:").filter(|s| !s.is_empty()) {
+        modal["run_id"] = json!(rid);
+    }
+    let clean_path = normalize_rel_path(strip_symbol_suffix(path));
+    if !clean_path.is_empty() {
+        let folder = parent(&clean_path);
+        if !folder.is_empty() {
+            let mut acc = String::new();
+            for part in folder.split('/').filter(|p| !p.is_empty()) {
+                if !acc.is_empty() {
+                    acc.push('/');
+                }
+                acc.push_str(part);
+                modal = spread(modal, &acc, false);
+            }
+        }
+        modal["focus"] = json!(clean_path);
+        modal["side_tab"] = json!("details");
+        modal["side_pinned"] = json!(true);
+    }
+    m::set("graph-map", modal.clone());
+
+    dom::disabled("graph-find-search", false);
+    dom::set_value("graph-map-filter", "");
+    dom::set_checked("graph-map-whole", false);
+    dom::set_checked("graph-map-notests", m::yes(&modal["notests"]));
+    dom::set_checked("graph-map-certain", m::yes(&modal["certain"]));
+    m::next("graph-find");
+    dom::cancel_timer("graph-find-search");
+    m::set("graph-find", V::Null);
+    dom::set_value("graph-find-search", "");
+    show_found();
+    dom::error("graph-map-error", "");
+    dom::hidden("graph-map-progress", true);
+    dom::text("graph-map-zoom-level", "100%");
+    blank();
+    dom::text("graph-map-chosen", "");
+    dom::text("graph-map-note", "Reading dependency impact…");
+    shut();
+    list();
+    dom::dialog("graph-map", true);
+    watch();
+    ensure_surface_impact(MODAL_SURFACE, &modal, None, true);
+    spawn_local(async move {
+        let _ = place().await;
+        if target.contains(':') && !target.starts_with("sysrun:") && !choose(&target).await {
+            return;
+        }
+        load(false).await;
+    });
+}
+fn handle_surface_input(surface: MapSurface, id: &str, value: &str, checked: Option<bool>) -> bool {
+    let Some(suffix) = id.strip_prefix(surface.id_prefix) else {
+        return false;
+    };
+    match suffix {
+        "-filter" => {
+            let mut state = surface_state(surface);
             if m::text(&state, "filter") == value {
                 return true;
             }
             state["filter"] = json!(value);
             state["scenario_skip"] = json!(0);
             state["skip"] = json!([]);
-            save_embedded_state(&state);
+            save_surface_state(surface, &state);
             dom::later(
-                "session-graph-filter",
+                surface.filter_timer_key,
                 if value.is_empty() { 0 } else { 140 },
-                || {
-                    spawn_local(async {
-                        load_embedded(false).await;
+                move || {
+                    spawn_local(async move {
+                        load_embedded_surface(surface, false).await;
                     });
                 },
             );
             true
         }
-        "session-graph-notests" => {
-            let next = checked.unwrap_or_else(|| dom::checked("session-graph-notests"));
-            let mut state = embedded_state();
+        "-notests" => {
+            let next = checked.unwrap_or_else(|| dom::checked(id));
+            let mut state = surface_state(surface);
             if m::yes(&state["notests"]) == next {
                 return true;
             }
             state["notests"] = json!(next);
             state["skip"] = json!([]);
             dom::save(NOTESTS, next.then_some("1"));
-            save_embedded_state(&state);
-            sync_embedded_toolbar(
+            save_surface_state(surface, &state);
+            sync_surface_toolbar(
+                surface,
                 &state,
-                surface_changes_doc(SESSION_SURFACE, &state).as_ref(),
+                surface_changes_doc(surface, &state).as_ref(),
             );
             let ch_state = state;
             spawn_local(async move {
-                fetch_surface_changes(SESSION_SURFACE, ch_state).await;
+                fetch_surface_changes(surface, ch_state).await;
             });
-            spawn_local(async {
-                load_embedded(false).await;
+            spawn_local(async move {
+                load_embedded_surface(surface, false).await;
+            });
+            true
+        }
+        "-certain" => {
+            let next = checked.unwrap_or_else(|| dom::checked(id));
+            let mut state = surface_state(surface);
+            state["certain"] = json!(next);
+            state["skip"] = json!([]);
+            save_surface_state(surface, &state);
+            ensure_surface_impact(surface, &state, None, true);
+            spawn_local(async move {
+                load_embedded_surface(surface, false).await;
+            });
+            true
+        }
+        "-launch" => {
+            let mut state = surface_state(surface);
+            state["launch"] = json!(value);
+            if value.is_empty() || state["compare_launch"] == value {
+                state["compare_launch"] = V::Null;
+            }
+            save_surface_state(surface, &state);
+            spawn_local(async move {
+                load_embedded_surface(surface, false).await;
+            });
+            true
+        }
+        "-compare-launch" => {
+            let mut state = surface_state(surface);
+            state["compare_launch"] = json!(value);
+            save_surface_state(surface, &state);
+            spawn_local(async move {
+                load_embedded_surface(surface, false).await;
+            });
+            true
+        }
+        "-agent" => {
+            let mut state = surface_state(surface);
+            state["agent"] = json!(value);
+            save_surface_state(surface, &state);
+            spawn_local(async move {
+                load_embedded_surface(surface, false).await;
             });
             true
         }
         _ => false,
     }
 }
-/// Handles clicks inside `#session-graph-workspace` (toolbar zoom/pan/focus + embedded map navigation).
-pub fn handle_session_graph_click(id: &str, action: &str, payload: &V) -> bool {
+/// Handles input/change events on embedded Sessions graph toolbar controls (`#session-graph-filter`, `#session-graph-notests`).
+pub fn handle_session_graph_input(id: &str, value: &str, checked: Option<bool>) -> bool {
+    handle_surface_input(SESSION_SURFACE, id, value, checked)
+}
+/// Handles `input` events on embedded System code-graph toolbar controls (`#system-member-graph-filter`, `#system-change-graph-filter`).
+#[allow(dead_code)]
+pub(crate) fn handle_system_input(id: &str, value: &str) -> bool {
+    if id.starts_with(SYSTEM_EMBEDDED_SURFACE.id_prefix) {
+        return handle_surface_input(SYSTEM_EMBEDDED_SURFACE, id, value, None);
+    }
+    if id.starts_with(SYSTEM_CHANGE_SURFACE.id_prefix) {
+        return handle_surface_input(SYSTEM_CHANGE_SURFACE, id, value, None);
+    }
+    false
+}
+/// Handles `change` events on embedded System code-graph toolbar controls (`#system-member-graph-notests`, `#system-change-graph-notests`, launch/agent selectors).
+#[allow(dead_code)]
+pub(crate) fn handle_system_change(id: &str, value: &str, checked: bool) -> bool {
+    if id.starts_with(SYSTEM_EMBEDDED_SURFACE.id_prefix) {
+        return handle_surface_input(SYSTEM_EMBEDDED_SURFACE, id, value, Some(checked));
+    }
+    if id.starts_with(SYSTEM_CHANGE_SURFACE.id_prefix) {
+        return handle_surface_input(SYSTEM_CHANGE_SURFACE, id, value, Some(checked));
+    }
+    false
+}
+fn handle_surface_click(surface: MapSurface, id: &str, action: &str, payload: &V) -> bool {
+    let prefix = surface.id_prefix;
+    let id_suffix = id.strip_prefix(prefix);
+    let action_suffix = action.strip_prefix(prefix);
     let is_toolbar_or_strip = matches!(
-        id,
-        "session-graph-zoom-in"
-            | "session-graph-zoom-out"
-            | "session-graph-zoom-level"
-            | "session-graph-fit"
-            | "session-graph-follow"
-            | "session-graph-pause-motion"
-            | "session-graph-expand"
-            | "session-graph-mode-whole"
-            | "session-graph-mode-changes"
-            | "session-graph-changes-count"
-            | "session-graph-unfold"
-            | "session-graph-open-full"
+        id_suffix,
+        Some(
+            "-zoom-in"
+                | "-zoom-out"
+                | "-zoom-level"
+                | "-fit"
+                | "-follow"
+                | "-pause-motion"
+                | "-expand"
+                | "-mode-whole"
+                | "-mode-changes"
+                | "-changes-count"
+                | "-unfold"
+                | "-open-full"
+                | "-build"
+                | "-rebuild"
+        )
+    ) || matches!(
+        action_suffix,
+        Some(
+            "-zoom-in"
+                | "-zoom-out"
+                | "-zoom-reset"
+                | "-fit"
+                | "-follow"
+                | "-pause-motion"
+                | "-expand"
+                | "-mode-whole"
+                | "-mode-changes"
+                | "-unfold"
+                | "-open-full"
+                | "-focus-jump"
+                | "-side-close"
+                | "-attach"
+                | "-build"
+                | "-rebuild"
+        )
     ) || matches!(
         action,
-        "session-graph-zoom-in"
-            | "session-graph-zoom-out"
-            | "session-graph-zoom-reset"
-            | "session-graph-fit"
-            | "session-graph-follow"
-            | "session-graph-pause-motion"
-            | "session-graph-expand"
-            | "session-graph-mode-whole"
-            | "session-graph-mode-changes"
-            | "session-graph-unfold"
-            | "session-graph-open-full"
-            | "session-graph-focus-jump"
-            | "session-graph-side-close"
-            | "graph-side-tab"
+        "graph-side-tab"
             | "graph-changes-filter"
             | "graph-map-member-filter"
             | "graph-map-impact-focus"
+            | "graph-map-switch-service-file"
+            | "graph-map-shell-event"
     );
-    if !is_toolbar_or_strip && m::yes(&embedded_drag_data()["suppress_click"]) {
-        clear_embedded_drag_suppress();
+    if !is_toolbar_or_strip && m::yes(&surface_drag_data(surface)["suppress_click"]) {
+        clear_surface_drag_suppress(surface);
         return true;
     }
-    match (id, action) {
-        ("session-graph-zoom-in", _) | (_, "session-graph-zoom-in") => {
-            zoom_camera_at(ZOOM_STEP, None);
+    if action == "graph-map-shell-event" {
+        let owned = payload.clone();
+        spawn_local(async move {
+            show_shell_event(&owned).await;
+        });
+        return true;
+    }
+    match (id_suffix, action_suffix) {
+        (Some("-zoom-in"), _) | (_, Some("-zoom-in")) => {
+            zoom_surface_camera_at(surface, ZOOM_STEP, None);
             return true;
         }
-        ("session-graph-zoom-out", _) | (_, "session-graph-zoom-out") => {
-            zoom_camera_at(1.0 / ZOOM_STEP, None);
+        (Some("-zoom-out"), _) | (_, Some("-zoom-out")) => {
+            zoom_surface_camera_at(surface, 1.0 / ZOOM_STEP, None);
             return true;
         }
-        ("session-graph-zoom-level", _) | (_, "session-graph-zoom-reset") => {
-            reset_camera_100();
+        (Some("-zoom-level"), _) | (_, Some("-zoom-reset")) => {
+            reset_surface_camera_100(surface);
             return true;
         }
-        ("session-graph-fit", _) | (_, "session-graph-fit") => {
-            let mut cam = load_camera();
-            fit_camera(&mut cam);
+        (Some("-fit"), _) | (_, Some("-fit")) => {
+            let mut cam = load_surface_camera(surface);
+            fit_surface_camera(surface, &mut cam);
             return true;
         }
-        ("session-graph-follow", _) | (_, "session-graph-follow") => {
-            let mut cam = load_camera();
+        (Some("-follow"), _) | (_, Some("-follow")) => {
+            let mut cam = load_surface_camera(surface);
             cam.follow = !cam.follow;
             if cam.follow {
                 if let Some(bbox) = cam.bbox {
-                    zoom_camera_to_bbox(&mut cam, bbox);
+                    zoom_surface_camera_to_bbox(surface, &mut cam, bbox);
                     return true;
                 }
             }
-            save_camera(&cam);
-            apply_camera(&cam);
+            save_surface_camera(surface, &cam);
+            apply_surface_camera(surface, &cam);
             return true;
         }
-        ("session-graph-pause-motion", _) | (_, "session-graph-pause-motion") => {
-            let mut cam = load_camera();
+        (Some("-pause-motion"), _) | (_, Some("-pause-motion")) => {
+            let mut cam = load_surface_camera(surface);
             cam.paused = !cam.paused;
-            save_camera(&cam);
-            apply_camera(&cam);
+            save_surface_camera(surface, &cam);
+            apply_surface_camera(surface, &cam);
             return true;
         }
-        ("session-graph-expand", _) | (_, "session-graph-expand") => {
-            let mut cam = load_camera();
+        (Some("-expand"), _) | (_, Some("-expand")) => {
+            let mut cam = load_surface_camera(surface);
             cam.expanded = !cam.expanded;
             cam.needs_measure = true;
-            save_camera(&cam);
-            apply_camera(&cam);
-            dom::later("session-graph-refit", 60, || {
-                refit_embedded_if_visible();
+            save_surface_camera(surface, &cam);
+            apply_surface_camera(surface, &cam);
+            dom::later(surface.refit_timer_key, 60, move || {
+                refit_surface_if_visible(surface);
             });
             return true;
         }
-        ("session-graph-mode-whole", _) | (_, "session-graph-mode-whole") => {
-            let mut state = embedded_state();
+        (Some("-mode-whole"), _) | (_, Some("-mode-whole")) => {
+            let mut state = surface_state(surface);
             state["target"] = json!("");
             state["scope"] = json!("");
             state["focus"] = json!("");
@@ -13675,28 +15320,44 @@ pub fn handle_session_graph_click(id: &str, action: &str, payload: &V) -> bool {
             state["pick"] = V::Null;
             state["scenario"] = V::Null;
             state["skip"] = json!([]);
-            save_embedded_state(&state);
-            m::take(SESSION_SURFACE.impact_key);
-            m::take("session-graph-pan-target");
-            dom::set_value("session-graph-filter", "");
-            let mut cam = load_camera();
+            save_surface_state(surface, &state);
+            m::take(surface.impact_key);
+            if !surface.pan_target_key.is_empty() {
+                m::take(surface.pan_target_key);
+            }
+            dom::set_value(&format!("{prefix}-filter"), "");
+            let mut cam = load_surface_camera(surface);
             cam.follow = false;
             cam.fit_mode = true;
-            save_camera(&cam);
-            sync_embedded_toolbar(
+            save_surface_camera(surface, &cam);
+            sync_surface_toolbar(
+                surface,
                 &state,
-                surface_changes_doc(SESSION_SURFACE, &state).as_ref(),
+                surface_changes_doc(surface, &state).as_ref(),
             );
-            sync_embedded_changes();
-            spawn_local(async {
-                load_embedded(false).await;
+            let ch_state = state;
+            spawn_local(async move {
+                fetch_surface_changes(surface, ch_state).await;
+            });
+            spawn_local(async move {
+                load_embedded_surface(surface, false).await;
             });
             return true;
         }
-        ("session-graph-mode-changes" | "session-graph-changes-count", _)
-        | (_, "session-graph-mode-changes") => {
-            let mut state = embedded_state();
-            state["target"] = json!("work");
+        (Some("-mode-changes" | "-changes-count"), _) | (_, Some("-mode-changes")) => {
+            let mut state = surface_state(surface);
+            let scope = surface_scope(surface);
+            let next_target = if surface.name == "system-change" {
+                match &scope {
+                    GraphTargetScope::SystemService {
+                        run_id: Some(rid), ..
+                    } if !rid.trim().is_empty() => format!("sysrun:{}", rid.trim()),
+                    _ => "work".to_owned(),
+                }
+            } else {
+                "work".to_owned()
+            };
+            state["target"] = json!(next_target);
             state["side_tab"] = json!("changes");
             state["side_pinned"] = json!(true);
             state["modules"] = json!(false);
@@ -13705,19 +15366,19 @@ pub fn handle_session_graph_click(id: &str, action: &str, payload: &V) -> bool {
             state["pick"] = V::Null;
             state["scenario"] = V::Null;
             state["skip"] = json!([]);
-            save_embedded_state(&state);
-            rerender_surface_preserving_camera(SESSION_SURFACE);
+            save_surface_state(surface, &state);
+            rerender_surface_preserving_camera(surface);
             let ch_state = state;
             spawn_local(async move {
-                fetch_surface_changes(SESSION_SURFACE, ch_state).await;
+                fetch_surface_changes(surface, ch_state).await;
             });
-            spawn_local(async {
-                load_embedded(false).await;
+            spawn_local(async move {
+                load_embedded_surface(surface, false).await;
             });
             return true;
         }
-        ("session-graph-unfold", _) | (_, "session-graph-unfold") => {
-            let mut state = embedded_state();
+        (Some("-unfold"), _) | (_, Some("-unfold")) => {
+            let mut state = surface_state(surface);
             let next_whole = !m::yes(&state["whole"]);
             state["whole"] = json!(next_whole);
             if next_whole {
@@ -13727,56 +15388,77 @@ pub fn handle_session_graph_click(id: &str, action: &str, payload: &V) -> bool {
                 state["pattern"] = V::Null;
                 state["scenario"] = V::Null;
             }
-            save_embedded_state(&state);
-            let mut cam = load_camera();
+            save_surface_state(surface, &state);
+            let mut cam = load_surface_camera(surface);
             cam.follow = false;
             cam.fit_mode = true;
-            save_camera(&cam);
-            sync_embedded_toolbar(
+            save_surface_camera(surface, &cam);
+            sync_surface_toolbar(
+                surface,
                 &state,
-                surface_changes_doc(SESSION_SURFACE, &state).as_ref(),
+                surface_changes_doc(surface, &state).as_ref(),
             );
-            spawn_local(async {
-                load_embedded(false).await;
+            spawn_local(async move {
+                load_embedded_surface(surface, false).await;
             });
             return true;
         }
-        ("session-graph-open-full", _) | (_, "session-graph-open-full") => {
-            spawn_local(async {
-                open_full_from_embedded().await;
+        (Some("-open-full"), _) | (_, Some("-open-full")) => {
+            spawn_local(async move {
+                open_full_from_surface(surface).await;
             });
             return true;
         }
-        (_, "session-graph-side-close") => {
-            let mut state = embedded_state();
-            state["focus"] = json!("");
-            state["side_tab"] = json!("details");
-            state["side_pinned"] = json!(false);
-            save_embedded_state(&state);
-            m::take(SESSION_SURFACE.impact_key);
-            m::take("session-graph-pan-target");
-            sync_embedded_toolbar(
-                &state,
-                surface_changes_doc(SESSION_SURFACE, &state).as_ref(),
-            );
-            if m::data(SESSION_SURFACE.view_key)["nodes"].is_array() {
-                spawn_local(async {
-                    load_embedded(false).await;
+        (Some("-build" | "-rebuild"), _) | (_, Some("-build" | "-rebuild")) => {
+            let scope = surface_scope(surface);
+            if !scope.is_empty() {
+                blank_embedded_surface(surface, "Building code graph and dependency map…");
+                spawn_local(async move {
+                    let _ = crate::graph::act_for_scope(&scope, "rebuild").await;
+                    load_embedded_surface(surface, false).await;
                 });
-            } else {
-                blank_embedded("");
             }
             return true;
         }
-        (_, "session-graph-entity" | "session-graph-focus-jump") => {
-            return jump_to_entity_or_target(payload);
+        (_, Some("-side-close")) => {
+            let mut state = surface_state(surface);
+            state["focus"] = json!("");
+            state["side_tab"] = json!("details");
+            state["side_pinned"] = json!(false);
+            save_surface_state(surface, &state);
+            m::take(surface.impact_key);
+            if !surface.pan_target_key.is_empty() {
+                m::take(surface.pan_target_key);
+            }
+            sync_surface_toolbar(
+                surface,
+                &state,
+                surface_changes_doc(surface, &state).as_ref(),
+            );
+            if m::data(surface.view_key)["nodes"].is_array() {
+                spawn_local(async move {
+                    load_embedded_surface(surface, false).await;
+                });
+            } else {
+                blank_embedded_surface(surface, "");
+            }
+            return true;
         }
-        (_, "session-graph-attach") => {
-            let context = m::data(SESSION_SURFACE.attachment_key);
-            if context["text"].as_str().is_some_and(|text| {
-                crate::session::attach_map_context(&m::text(&context, "project"), text)
-            }) {
-                dom::focus("prompt");
+        (_, Some("-entity" | "-focus-jump")) => {
+            return jump_to_surface_entity_or_target(surface, payload);
+        }
+        (_, Some("-attach")) => {
+            let context = m::data(surface.attachment_key);
+            let scope = GraphTargetScope::from_json(&context["scope"])
+                .unwrap_or_else(|| surface_scope(surface));
+            if let Some(text) = context["text"].as_str() {
+                if let GraphTargetScope::SystemService { service_id, .. } = &scope {
+                    if attach_map_context_to_system_task(service_id, text) {
+                        dom::focus("system-task");
+                    }
+                } else if crate::session::attach_map_context(&m::text(&context, "project"), text) {
+                    dom::focus("prompt");
+                }
             }
             return true;
         }
@@ -13788,86 +15470,173 @@ pub fn handle_session_graph_click(id: &str, action: &str, payload: &V) -> bool {
     {
         return false;
     }
-    let busy = dom::get("session-graph-canvas")
+    let busy = dom::get(surface.canvas)
         .and_then(|el| el.get_attribute("aria-busy"))
         .as_deref()
         == Some("true");
-    let map_failed =
-        dom::get("session-graph-error").is_some_and(|error| !error.has_attribute("hidden"));
-    let mut state = embedded_state();
-    let outcome = apply_click_action(
-        &mut state,
-        action,
-        payload,
-        SESSION_SURFACE,
-        busy,
-        map_failed,
-    );
+    let map_failed = dom::get(surface.error_id).is_some_and(|error| !error.has_attribute("hidden"));
+    let mut state = surface_state(surface);
+    let outcome = apply_click_action(&mut state, action, payload, surface, busy, map_failed);
     if !outcome.handled {
         return false;
     }
-    save_embedded_state(&state);
+    if let Some((svc, file_path)) = outcome.switch_service {
+        if switch_surface_to_service_file(surface, &svc, &file_path) {
+            dom::set_value(&format!("{prefix}-filter"), "");
+            let switched = surface_state(surface);
+            sync_surface_toolbar(
+                surface,
+                &switched,
+                surface_changes_doc(surface, &switched).as_ref(),
+            );
+            ensure_surface_impact(surface, &switched, None, true);
+            spawn_local(async move {
+                load_embedded_surface(surface, false).await;
+            });
+        }
+        return true;
+    }
+    save_surface_state(surface, &state);
     if let Some(filter_val) = outcome.clear_filter.as_deref() {
-        dom::set_value("session-graph-filter", filter_val);
+        dom::set_value(&format!("{prefix}-filter"), filter_val);
     }
     if let Some(notests) = outcome.save_notests {
         dom::save(NOTESTS, notests.then_some("1"));
     }
-    sync_embedded_toolbar(
+    sync_surface_toolbar(
+        surface,
         &state,
-        surface_changes_doc(SESSION_SURFACE, &state).as_ref(),
+        surface_changes_doc(surface, &state).as_ref(),
     );
     if let Some((from, to)) = outcome.open_link {
         spawn_local(async move {
-            look_from(SESSION_SURFACE, &from, &to).await;
+            look_from(surface, &from, &to).await;
         });
         return true;
     }
-    let view = m::data(SESSION_SURFACE.view_key);
+    let view = m::data(surface.view_key);
     let view_opt = view["nodes"].is_array().then_some(&view);
-    ensure_surface_impact(SESSION_SURFACE, &state, view_opt, outcome.force_impact);
-    if m::text(&state, "side_tab") == "changes"
-        && surface_changes_doc(SESSION_SURFACE, &state).is_none()
-    {
+    ensure_surface_impact(surface, &state, view_opt, outcome.force_impact);
+    if m::text(&state, "side_tab") == "changes" && surface_changes_doc(surface, &state).is_none() {
         let ch_state = state;
         spawn_local(async move {
-            fetch_surface_changes(SESSION_SURFACE, ch_state).await;
+            fetch_surface_changes(surface, ch_state).await;
         });
     }
     if outcome.reload {
-        spawn_local(async {
-            load_embedded(false).await;
+        spawn_local(async move {
+            load_embedded_surface(surface, false).await;
         });
     } else if outcome.rerender {
-        rerender_surface_preserving_camera(SESSION_SURFACE);
+        rerender_surface_preserving_camera(surface);
     }
     true
 }
-/// Handles pointer pan (`pointerdown`/`pointermove`/`pointerup`/`pointercancel`) and `dblclick` zoom on `#session-graph-canvas`.
+/// Handles clicks inside `#session-graph-workspace` (toolbar zoom/pan/focus + embedded map navigation).
+pub fn handle_session_graph_click(id: &str, action: &str, payload: &V) -> bool {
+    handle_surface_click(SESSION_SURFACE, id, action, payload)
+}
+fn resolve_system_click_surface(id: &str, action: &str, payload: &V) -> Option<MapSurface> {
+    if id.starts_with(SYSTEM_EMBEDDED_SURFACE.id_prefix)
+        || action.starts_with(SYSTEM_EMBEDDED_SURFACE.id_prefix)
+        || payload["surface"].as_str() == Some(SYSTEM_EMBEDDED_SURFACE.name)
+    {
+        return Some(SYSTEM_EMBEDDED_SURFACE);
+    }
+    if id.starts_with(SYSTEM_CHANGE_SURFACE.id_prefix)
+        || action.starts_with(SYSTEM_CHANGE_SURFACE.id_prefix)
+        || payload["surface"].as_str() == Some(SYSTEM_CHANGE_SURFACE.name)
+    {
+        return Some(SYSTEM_CHANGE_SURFACE);
+    }
+    if open() {
+        return None;
+    }
+    if !(action.starts_with("graph-map-")
+        || matches!(action, "graph-side-tab" | "graph-changes-filter"))
+    {
+        return None;
+    }
+    if let Some(active) = dom::document().active_element() {
+        if active
+            .closest(
+                "#system-change-graph-workspace, #system-change-graph-canvas, #system-change-graph-side",
+            )
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Some(SYSTEM_CHANGE_SURFACE);
+        }
+        if active
+            .closest(
+                "#system-member-graph-workspace, #system-member-graph-canvas, #system-member-graph-side",
+            )
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Some(SYSTEM_EMBEDDED_SURFACE);
+        }
+    }
+    match m::read(|s| s.view.clone()).as_str() {
+        "system-changes" if !surface_scope(SYSTEM_CHANGE_SURFACE).is_empty() => {
+            Some(SYSTEM_CHANGE_SURFACE)
+        }
+        "systems" if !surface_scope(SYSTEM_EMBEDDED_SURFACE).is_empty() => {
+            Some(SYSTEM_EMBEDDED_SURFACE)
+        }
+        _ => None,
+    }
+}
+/// Handles clicks inside `#system-member-graph-*` (`#systems-view`) and `#system-change-graph-*` (`#system-changes-view`).
+#[allow(dead_code)]
+pub(crate) fn handle_system_click(id: &str, action: &str, payload: &V) -> bool {
+    let Some(surface) = resolve_system_click_surface(id, action, payload) else {
+        return false;
+    };
+    handle_surface_click(surface, id, action, payload)
+}
+fn target_embedded_surface(target_el: Option<&web_sys::Element>) -> Option<MapSurface> {
+    let canvas = target_el?
+        .closest("#session-graph-canvas, #system-member-graph-canvas, #system-change-graph-canvas")
+        .ok()
+        .flatten()?;
+    embedded_surface_for_canvas(&canvas.id())
+}
+fn active_drag_surface() -> Option<(MapSurface, V)> {
+    for surface in [
+        SESSION_SURFACE,
+        SYSTEM_EMBEDDED_SURFACE,
+        SYSTEM_CHANGE_SURFACE,
+    ] {
+        let drag = surface_drag_data(surface);
+        if m::yes(&drag["active"]) {
+            return Some((surface, drag));
+        }
+    }
+    None
+}
+/// Handles pointer pan (`pointerdown`/`pointermove`/`pointerup`/`pointercancel`) and `dblclick` zoom
+/// across `#session-graph-canvas`, `#system-member-graph-canvas`, and `#system-change-graph-canvas`.
 pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
     let target_el = event
         .target()
         .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
-    let in_canvas = target_el
-        .as_ref()
-        .and_then(|el| el.closest("#session-graph-canvas").ok().flatten())
-        .is_some();
-    let drag = embedded_drag_data();
-    let drag_active = m::yes(&drag["active"]);
     match kind {
         "pointerdown" => {
-            if !in_canvas {
+            let Some(surface) = target_embedded_surface(target_el.as_ref()) else {
                 return false;
-            }
+            };
             let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
                 return false;
             };
             if pe.button() != 0 {
                 return true;
             }
-            let cam = load_camera();
+            let cam = load_surface_camera(surface);
             m::set(
-                "session-graph-drag",
+                surface.drag_key,
                 json!({
                     "active": true,
                     "pointer_id": pe.pointer_id(),
@@ -13882,9 +15651,9 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
             true
         }
         "pointermove" => {
-            if !drag_active {
+            let Some((surface, drag)) = active_drag_surface() else {
                 return false;
-            }
+            };
             let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() else {
                 return true;
             };
@@ -13899,8 +15668,8 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                     return true;
                 }
                 moved = true;
-                dom::attr("session-graph-canvas", "data-panning", "true");
-                if let Some(canvas) = dom::get("session-graph-canvas") {
+                dom::attr(surface.canvas, "data-panning", "true");
+                if let Some(canvas) = dom::get(surface.canvas) {
                     let _ = canvas.set_pointer_capture(pe.pointer_id());
                 }
             }
@@ -13908,31 +15677,31 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
             let orig_pan_y = drag["orig_pan_y"].as_f64().unwrap_or(0.0);
             let mut next_drag = drag;
             next_drag["moved"] = json!(moved);
-            m::set("session-graph-drag", next_drag);
-            let mut cam = load_camera();
+            m::set(surface.drag_key, next_drag);
+            let mut cam = load_surface_camera(surface);
             cam.pan_x = (orig_pan_x + dx).round();
             cam.pan_y = (orig_pan_y + dy).round();
             cam.fit_mode = false;
             cam.needs_measure = false;
-            save_camera(&cam);
-            apply_camera(&cam);
+            save_surface_camera(surface, &cam);
+            apply_surface_camera(surface, &cam);
             true
         }
         "pointerup" | "pointercancel" => {
-            if !drag_active {
+            let Some((surface, drag)) = active_drag_surface() else {
                 return false;
-            }
-            dom::attr("session-graph-canvas", "data-panning", "false");
+            };
+            dom::attr(surface.canvas, "data-panning", "false");
             if let Ok(pe) = event.clone().dyn_into::<web_sys::PointerEvent>() {
                 if m::yes(&drag["moved"]) {
-                    if let Some(canvas) = dom::get("session-graph-canvas") {
+                    if let Some(canvas) = dom::get(surface.canvas) {
                         let _ = canvas.release_pointer_capture(pe.pointer_id());
                     }
                 }
             }
             let suppress = kind == "pointerup" && m::yes(&drag["moved"]);
             m::set(
-                "session-graph-drag",
+                surface.drag_key,
                 json!({
                     "active": false,
                     "moved": false,
@@ -13940,14 +15709,16 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
                 }),
             );
             if suppress {
-                dom::later("session-graph-drag-clear", 60, clear_embedded_drag_suppress);
+                dom::later(surface.drag_timer_key, 60, move || {
+                    clear_surface_drag_suppress(surface);
+                });
             }
             true
         }
         "dblclick" => {
-            if !in_canvas {
+            let Some(surface) = target_embedded_surface(target_el.as_ref()) else {
                 return false;
-            }
+            };
             if target_el
                 .as_ref()
                 .and_then(|el| {
@@ -13964,19 +15735,19 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
             let Ok(me) = event.clone().dyn_into::<web_sys::MouseEvent>() else {
                 return false;
             };
-            let cam = load_camera();
+            let cam = load_surface_camera(surface);
             if cam.scale < 1.35 {
-                let anchor = dom::get("session-graph-canvas").map(|canvas| {
+                let anchor = dom::get(surface.canvas).map(|canvas| {
                     let rect = canvas.get_bounding_client_rect();
                     (
                         me.client_x() as f64 - rect.left(),
                         me.client_y() as f64 - rect.top(),
                     )
                 });
-                zoom_camera_at(1.5, anchor);
+                zoom_surface_camera_at(surface, 1.5, anchor);
             } else {
                 let mut cam = cam;
-                fit_camera(&mut cam);
+                fit_surface_camera(surface, &mut cam);
             }
             true
         }
@@ -20836,5 +22607,416 @@ mod tests {
         let view = json!({"scope": "src", "nodes": [], "edges": []});
         assert!(legend(&view, false)
             .ends_with("Dotted: against the main direction, closing a cycle (↻)."));
+    }
+
+    #[test]
+    fn scoped_url_builders_cover_single_project_and_system_service_endpoints() {
+        let single = GraphTargetScope::single("billing-repo");
+        let sys = GraphTargetScope::SystemService {
+            project_id: "monorepo-root".to_owned(),
+            config_path: ".harness/system.yaml".to_owned(),
+            service_id: "packages/billing-api".to_owned(),
+            services: vec!["packages/billing-api".to_owned(), "web-gateway".to_owned()],
+            run_id: Some("sysrun-42".to_owned()),
+            run_title: Some("Split invoice schema".to_owned()),
+            launches: vec![json!({"launch": 1}), json!({"launch": 2})],
+        };
+
+        let mut st = fresh("");
+        st["scope"] = json!("src/Domain");
+        st["target"] = json!("sysrun:sysrun-42");
+        st["launch"] = json!("2");
+        st["compare_launch"] = json!("1");
+        st["agent"] = json!("service-packages/billing-api");
+        st["focus_session"] = json!("sess-live-9");
+        st["whole"] = json!(true);
+        st["notests"] = json!(true);
+        st["certain"] = json!(true);
+
+        let sys_map = build_scoped_map_path(&sys, &st, true);
+        assert!(sys_map.starts_with(
+            "/api/systems/service-graph/map?project_id=monorepo-root&config_path=.harness%2Fsystem.yaml&service=packages%2Fbilling-api&"
+        ));
+        assert!(sys_map.contains("scope=src%2FDomain"));
+        assert!(sys_map.contains("focus_session=sess-live-9"));
+        assert!(sys_map.contains("target=sysrun%3Asysrun-42"));
+        assert!(sys_map.contains("run_id=sysrun-42"));
+        assert!(sys_map.contains("launch=2"));
+        assert!(sys_map.contains("compare_launch=1"));
+        assert!(sys_map.contains("agent=service-packages%2Fbilling-api"));
+        assert!(sys_map.contains("whole=1"));
+        assert!(sys_map.contains("notests=1"));
+        assert!(sys_map.contains("certain=1"));
+
+        let single_map = build_scoped_map_path(&single, &fresh("work"), false);
+        assert!(single_map.starts_with("/api/projects/billing-repo/graph/map?"));
+        assert!(!single_map.contains("agent="));
+        assert!(!single_map.contains("run_id="));
+
+        let sys_changes = build_scoped_changes_path(&sys, "sysrun:sysrun-42", "sess-live-9", true);
+        assert!(sys_changes.starts_with(
+            "/api/systems/service-graph/changes?project_id=monorepo-root&config_path=.harness%2Fsystem.yaml&service=packages%2Fbilling-api&"
+        ));
+        assert!(sys_changes.contains("target=sysrun%3Asysrun-42"));
+        assert!(sys_changes.contains("run_id=sysrun-42"));
+        assert!(sys_changes.contains("focus_session=sess-live-9"));
+        assert!(sys_changes.contains("notests=1"));
+
+        let sys_impact = build_scoped_file_impact_path(
+            &sys,
+            "./src/Domain/Invoice.php#L12:Invoice",
+            "sysrun:sysrun-42",
+            "sess-live-9",
+            true,
+        );
+        assert!(sys_impact.starts_with(
+            "/api/systems/service-graph/file-impact?project_id=monorepo-root&config_path=.harness%2Fsystem.yaml&service=packages%2Fbilling-api&"
+        ));
+        assert!(sys_impact.contains("path=src%2FDomain%2FInvoice.php"));
+        assert!(sys_impact.contains("run_id=sysrun-42"));
+        assert!(sys_impact.contains("certain=1"));
+
+        let sys_find = build_scoped_find_path(&sys, &st, " Invoice ").expect("find path");
+        assert!(sys_find.starts_with(
+            "/api/systems/service-graph/find?project_id=monorepo-root&config_path=.harness%2Fsystem.yaml&service=packages%2Fbilling-api&"
+        ));
+        assert!(sys_find.contains("query=Invoice"));
+        assert!(sys_find.contains("run_id=sysrun-42"));
+        let mut base_st = st.clone();
+        base_st["cycle_base"] = json!({"place": "src/A.php", "revision": "abc1234"});
+        assert_eq!(build_scoped_find_path(&sys, &base_st, "Invoice"), None);
+
+        let sys_link = build_scoped_link_request(
+            &sys,
+            "src/A.php",
+            "src/B.php",
+            &json!({
+                "target": "sysrun:sysrun-42",
+                "launch": "2",
+                "agent": "contracts",
+                "certain": true,
+                "whole": true,
+            }),
+        );
+        assert!(sys_link.starts_with(
+            "/api/systems/service-graph/map?project_id=monorepo-root&config_path=.harness%2Fsystem.yaml&service=packages%2Fbilling-api&"
+        ));
+        assert!(sys_link.contains("from=src%2FA.php&to=src%2FB.php"));
+        assert!(sys_link.contains("run_id=sysrun-42"));
+        assert!(sys_link.contains("agent=contracts"));
+
+        assert_eq!(
+            build_scoped_picker_path(
+                &sys.with_service("__system__"),
+                "commits",
+                &json!({"scope": "*", "query": "feat"}),
+                20
+            ),
+            "/api/systems/service-graph/commits?project_id=monorepo-root&config_path=.harness%2Fsystem.yaml&service=__system__&scope=*&query=feat&skip=20"
+        );
+        assert_eq!(
+            build_scoped_picker_path(&sys, "pulls", &json!({"state": "open", "query": "invoice"}), 0),
+            "/api/systems/service-graph/pulls?project_id=monorepo-root&config_path=.harness%2Fsystem.yaml&service=packages%2Fbilling-api&state=open&query=invoice"
+        );
+        assert_eq!(
+            build_scoped_picker_path(&sys, "branches", &json!({}), 0),
+            "/api/systems/service-graph/branches?project_id=monorepo-root&config_path=.harness%2Fsystem.yaml&service=packages%2Fbilling-api"
+        );
+    }
+
+    #[test]
+    fn system_header_switcher_sysrun_target_and_agent_options_render_cleanly() {
+        assert_eq!(
+            service_switcher_options_html(&GraphTargetScope::single("proj")),
+            ""
+        );
+        let scope = GraphTargetScope::SystemService {
+            project_id: "root".to_owned(),
+            config_path: "system.yaml".to_owned(),
+            service_id: "billing".to_owned(),
+            services: vec![
+                "__system__".to_owned(),
+                "auth".to_owned(),
+                "billing".to_owned(),
+                "auth".to_owned(),
+            ],
+            run_id: Some("run-77".to_owned()),
+            run_title: Some("Contract v2 rollout".to_owned()),
+            launches: Vec::new(),
+        };
+        let switcher = service_switcher_options_html(&scope);
+        assert!(switcher.contains("<option value=\"__topology__\">System topology</option>"));
+        assert!(switcher.contains("<option value=\"__system__\">__system__ (System root)</option>"));
+        assert!(switcher.contains("<option value=\"auth\">Service: auth</option>"));
+        assert!(switcher.contains("<option value=\"billing\" selected>Service: billing</option>"));
+        assert_eq!(switcher.matches("value=\"auth\"").count(), 1);
+
+        let base_targets = targets(&json!({"git": true, "branch": "main"}), "sysrun:run-77");
+        let enriched = with_system_run(
+            base_targets,
+            "sysrun:run-77",
+            Some("run-77"),
+            Some("Contract v2 rollout"),
+        );
+        assert!(enriched.contains(
+            "<option value=\"sysrun:run-77\" selected>System change: Contract v2 rollout</option>"
+        ));
+        assert_eq!(enriched.matches("value=\"sysrun:run-77\"").count(), 1);
+
+        let whole_targets = with_system_run(
+            targets(&json!({"git": true, "branch": "main"}), ""),
+            "",
+            Some("run-77"),
+            Some("Contract v2 rollout"),
+        );
+        assert!(whole_targets.contains(
+            "<option value=\"sysrun:run-77\">System change: Contract v2 rollout</option>"
+        ));
+
+        let chosen_line = chosen(&json!({
+            "chosen": {
+                "kind": "sysrun",
+                "title": "Contract v2 rollout",
+                "head": {"name": "worktree", "commit": "abcdef123456"},
+                "base": {"name": "main", "commit": "1234567890ab"}
+            }
+        }));
+        assert!(chosen_line.contains("Contract v2 rollout"));
+
+        let svc_agents = agent_options_html(
+            "billing",
+            &json!({"agents": ["contracts", "service-billing", "migration-audit", "verify"]}),
+            "service-billing",
+        );
+        assert!(svc_agents.contains("<option value=\"\">All agents in launch</option>"));
+        assert!(svc_agents.contains("<option value=\"contracts\">contracts</option>"));
+        assert!(svc_agents
+            .contains("<option value=\"service-billing\" selected>service-billing</option>"));
+        assert!(svc_agents.contains("<option value=\"migration-audit\">migration-audit</option>"));
+        assert!(svc_agents.ends_with("<option value=\"verify\">verify</option>"));
+
+        let root_agents = agent_options_html("__system__", &json!({}), "verify");
+        assert!(!root_agents.contains("service-__system__"));
+        assert!(root_agents.contains("<option value=\"verify\" selected>verify</option>"));
+    }
+
+    #[test]
+    fn cross_service_unopened_and_contract_consumers_render_service_switch_rows() {
+        let run_view = json!({
+            "run": {
+                "reach": {
+                    "users": 1,
+                    "unopened": 1,
+                    "rows": [
+                        {"path": "src/LocalCaller.php", "name": "LocalCaller.php", "uses": 2}
+                    ],
+                    "cross_service_unopened": [
+                        {
+                            "service": "checkout-web",
+                            "path": "src/Http/BillingClient.php",
+                            "contract": "POST /v1/invoices",
+                            "kind": "openapi"
+                        }
+                    ],
+                    "cross_service_more": 2
+                }
+            }
+        });
+        let unopened_markup = unopened(&run_view);
+        assert!(unopened_markup.contains("Use the change, not opened by the run"));
+        assert!(unopened_markup.contains("Cross-service consumers, not opened by the run"));
+        assert!(unopened_markup.contains("data-cross-service=\"true\""));
+        assert!(unopened_markup.contains("data-action=\"graph-map-switch-service-file\""));
+        assert!(unopened_markup.contains("checkout-web · BillingClient.php"));
+        assert!(unopened_markup.contains("POST /v1/invoices"));
+        assert!(unopened_markup.contains("and 2 more cross-service consumers"));
+
+        let comparing_view = json!({
+            "run": {
+                "comparison": {"base_launch": 1},
+                "reach": run_view["run"]["reach"].clone()
+            }
+        });
+        assert_eq!(cross_service_unopened_html(&comparing_view), "");
+
+        let impact = json!({
+            "path": "src/Http/InvoiceController.php",
+            "status": "modified",
+            "summary": {"callers_total": 0, "broken_risk_count": 0},
+            "contract_consumers": [
+                {
+                    "service": "checkout-web",
+                    "path": "src/Http/BillingClient.php",
+                    "contract": "POST /v1/invoices",
+                    "kind": "http",
+                    "impact": "broken_risk",
+                    "opened": false,
+                    "reason": "Response field `total_cents` renamed"
+                }
+            ]
+        });
+        let side_html = impact_side_html_with_filter(&impact, &V::Null, "modal", "all");
+        assert!(side_html.contains("data-contract-consumers=\"true\""));
+        assert!(side_html.contains("Cross-service contract consumers"));
+        assert!(side_html.contains("data-action=\"graph-map-switch-service-file\""));
+        assert!(side_html.contains("checkout-web · src/Http/BillingClient.php"));
+        assert!(side_html.contains(">Broken risk</span>"));
+        assert!(side_html.contains("not opened in run"));
+        assert!(side_html.contains("Response field `total_cents` renamed"));
+    }
+
+    #[test]
+    fn append_system_task_draft_and_system_surface_live_focus_overlays() {
+        let first = append_system_task_draft("", "billing", "- Focus: src/Invoice.php");
+        assert_eq!(
+            first,
+            "### Code Map Context (service `billing`)\n- Focus: src/Invoice.php"
+        );
+        // Duplicate attachment is idempotent.
+        assert_eq!(
+            append_system_task_draft(&first, "billing", "- Focus: src/Invoice.php"),
+            first
+        );
+        let second = append_system_task_draft(
+            "Coordinate schema rollout.",
+            "__system__",
+            "- Root config: docker-compose.yml",
+        );
+        assert_eq!(
+            second,
+            "Coordinate schema rollout.\n\n### Code Map Context (__system__ (root workspace))\n- Root config: docker-compose.yml"
+        );
+
+        let view = json!({
+            "scope": "",
+            "nodes": [
+                {"path": "src/Invoice.php", "name": "Invoice.php", "what": "file"}
+            ],
+            "edges": []
+        });
+        let focus = LiveFocus {
+            phase: "editing".to_owned(),
+            summary: "Updating Invoice".to_owned(),
+            target_folders: Vec::new(),
+            target_paths: vec!["src/Invoice.php".to_owned()],
+            target_nodes: Vec::new(),
+            created_entities: vec![CreatedEntity {
+                id: "src/Invoice.php::issue".to_owned(),
+                kind: "method".to_owned(),
+                name: "issue".to_owned(),
+                parent: "Invoice".to_owned(),
+                path: "src/Invoice.php".to_owned(),
+                folder: "src".to_owned(),
+                line: 44,
+                change: Some("created".to_owned()),
+                visibility: Some("public".to_owned()),
+                modifiers: Vec::new(),
+            }],
+        };
+
+        let member_canvas = canvas_with(&view, "system-member-graph", Some(&focus));
+        assert!(member_canvas
+            .html
+            .contains("data-action=\"system-member-graph-entity\""));
+        assert!(member_canvas.html.contains("is-blinking"));
+        let member_chips = focus_strip_chips_html_for_surface(&focus, "system-member-graph");
+        assert!(member_chips.contains("data-action=\"system-member-graph-focus-jump\""));
+
+        let change_canvas = canvas_with(&view, "system-change-graph", Some(&focus));
+        assert!(change_canvas
+            .html
+            .contains("data-action=\"system-change-graph-entity\""));
+        let change_chips = focus_strip_chips_html_for_surface(&focus, "system-change-graph");
+        assert!(change_chips.contains("data-action=\"system-change-graph-focus-jump\""));
+
+        let session_canvas = canvas_with(&view, "session-graph", Some(&focus));
+        assert!(session_canvas
+            .html
+            .contains("data-action=\"session-graph-entity\""));
+        let session_chips = focus_strip_chips_html(&focus);
+        assert!(session_chips.contains("data-action=\"session-graph-focus-jump\""));
+    }
+
+    #[test]
+    fn backend_system_graph_impact_and_system_run_launch_schemas_render_cleanly() {
+        let backend_impact = json!({
+            "path": "src/Orders/CancelOrderHandler.php",
+            "status": "modified",
+            "summary": {"callers_total": 0, "broken_risk_count": 1},
+            "contract_consumers": [
+                {
+                    "provider": "orders",
+                    "consumer": "payments",
+                    "contract": "order.cancelled",
+                    "kind": "event",
+                    "consumer_version": "1.0",
+                    "provider_version": "2.0",
+                    "provenance": "verified",
+                    "broken_risk": true,
+                    "risk_reason": "Consumer expects v1.0, provider emits v2.0",
+                    "consumer_sources": [
+                        "src/Listeners/RefundOnCancel.php",
+                        "src/Subscribers/OrderSubscriber.php"
+                    ],
+                    "unopened_sources": ["src/Listeners/RefundOnCancel.php"]
+                }
+            ]
+        });
+        let html = contract_consumers_html(&backend_impact, "modal");
+        assert!(html.contains("data-service=\"payments\""));
+        assert!(html.contains("data-path=\"src/Listeners/RefundOnCancel.php\""));
+        assert!(html.contains("payments · src/Listeners/RefundOnCancel.php"));
+        assert!(html.contains(">Broken risk</span>"));
+        assert!(html.contains("contract: order.cancelled"));
+        assert!(html.contains("v1.0"));
+        assert!(html.contains("not opened in run"));
+        assert!(
+            html.contains("src/Listeners/RefundOnCancel.php, src/Subscribers/OrderSubscriber.php")
+        );
+        assert!(html.contains("Consumer expects v1.0, provider emits v2.0"));
+
+        let backend_unopened = json!({
+            "run": {
+                "cross_service_unopened": [
+                    {
+                        "consumer": "inventory",
+                        "contract": "order.cancelled",
+                        "kind": "event",
+                        "unopened_sources": ["src/Handlers/ReleaseStock.php"]
+                    }
+                ]
+            }
+        });
+        let unopened_html = cross_service_unopened_html(&backend_unopened);
+        assert!(unopened_html.contains("inventory · ReleaseStock.php"));
+        assert!(unopened_html.contains("Open src/Handlers/ReleaseStock.php in service inventory"));
+
+        let sys_run = json!({
+            "launch": "sess-launch-2",
+            "launches": [
+                {
+                    "session_id": "sess-launch-1",
+                    "launch_number": 1,
+                    "status": "failed",
+                    "created_at": "2026-11-15T19:10:00Z"
+                },
+                {
+                    "session_id": "sess-launch-2",
+                    "launch_number": 2,
+                    "status": "completed",
+                    "created_at": "2026-11-15T20:45:30Z"
+                }
+            ]
+        });
+        let primary_opts = launch_options(&sys_run, false);
+        assert!(primary_opts
+            .contains("<option value=\"sess-launch-1\">Launch 1 · 2026-11-15 19:10 UTC</option>"));
+        assert!(primary_opts
+            .contains("<option value=\"sess-launch-2\">Launch 2 · 2026-11-15 20:45 UTC</option>"));
+
+        let compare_opts = launch_options(&sys_run, true);
+        assert!(compare_opts
+            .contains("<option value=\"sess-launch-1\">Launch 1 · 2026-11-15 19:10 UTC</option>"));
+        assert!(!compare_opts.contains("value=\"sess-launch-2\""));
     }
 }

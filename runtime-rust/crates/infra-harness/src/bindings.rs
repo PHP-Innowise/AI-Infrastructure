@@ -306,6 +306,7 @@ pub struct SystemWorkflow {
     pub store: SessionStore,
     pub links: Arc<SessionLinks>,
     pub discovery: bool,
+    pub bridge: Option<Arc<crate::system_graph::HarnessCodeGraphBridge>>,
 }
 impl SpecialWorkflow for SystemWorkflow {
     fn run<'a>(
@@ -324,11 +325,12 @@ impl SpecialWorkflow for SystemWorkflow {
             }];
             let run = metadata["run_id"]
                 .as_str()
-                .ok_or_else(|| HarnessError::invalid("System run identity missing."))?;
+                .ok_or_else(|| HarnessError::invalid("System run identity missing."))?
+                .to_owned();
             let nonce = metadata["nonce"]
                 .as_str()
                 .ok_or_else(|| HarnessError::invalid("System nonce missing."))?;
-            if [run, nonce].iter().any(|s| {
+            if [run.as_str(), nonce].iter().any(|s| {
                 s.len() != 32
                     || !s
                         .bytes()
@@ -344,7 +346,7 @@ impl SpecialWorkflow for SystemWorkflow {
                 } else {
                     "ai-system"
                 })
-                .join(run);
+                .join(&run);
             let name = format!("request-{nonce}.json");
             crate::creator_files::read(&directory, &name, true, 16 * 1024 * 1024)?;
             let adapter: Arc<dyn infra_host::provider::LaunchAdapter> = if self.discovery {
@@ -354,14 +356,20 @@ impl SpecialWorkflow for SystemWorkflow {
             } else {
                 self.links.runner()?.system_launch_adapter()?
             };
+            let sid = session["id"].as_str().unwrap_or("").to_owned();
             let observer = Arc::new(WorkflowObserver {
                 store: self.store.clone(),
-                sid: session["id"].as_str().unwrap_or("").into(),
-                generation,
+                sid: sid.clone(),
+                generation: generation.clone(),
                 cancel: cancel.clone(),
             });
             let lock = Some(self.store.runner_lock());
             let display = emit.clone();
+            let activity_store = self.store.clone();
+            let activity_sid = sid.clone();
+            let activity_gen = generation.clone();
+            let activity_bridge = (!self.discovery).then(|| self.bridge.clone()).flatten();
+            let activity_run = run.clone();
             let mut activity: Option<crate::agent_activity::ActivityStream> = None;
             let agent =
                 move |signal: infra_system::workers::AgentSignal| -> infra_core::Result<()> {
@@ -380,13 +388,43 @@ impl SpecialWorkflow for SystemWorkflow {
                                 .into_iter()
                                 .map(|(path, value)| (path.to_string_lossy().into_owned(), value))
                                 .collect();
-                            let display = display.clone();
-                            activity = Some(crate::agent_activity::ActivityStream::new(
-                                move |event| display(event),
-                                &provider,
-                                roots,
-                                aliases,
-                            ));
+                            if let Some(bridge) = activity_bridge.clone() {
+                                let store = activity_store.clone();
+                                let sid = activity_sid.clone();
+                                let generation = activity_gen.clone();
+                                let run_id = activity_run.clone();
+                                activity =
+                                    Some(crate::agent_activity::ActivityStream::new_with_ids(
+                                        move |event| {
+                                            let Some(id) = store.guarded_event_id(
+                                                &sid,
+                                                &generation,
+                                                &event,
+                                            )?
+                                            else {
+                                                return Err(HarnessError::conflict(
+                                                    "The session generation changed.",
+                                                ));
+                                            };
+                                            Ok(Some(id))
+                                        },
+                                        move |event_id, event| {
+                                            bridge
+                                                .on_emitted_session_event(&run_id, event_id, event);
+                                        },
+                                        &provider,
+                                        roots,
+                                        aliases,
+                                    ));
+                            } else {
+                                let display = display.clone();
+                                activity = Some(crate::agent_activity::ActivityStream::new(
+                                    move |event| display(event),
+                                    &provider,
+                                    roots,
+                                    aliases,
+                                ));
+                            }
                         }
                         AgentSignal::Started {
                             agent,
@@ -418,6 +456,33 @@ impl SpecialWorkflow for SystemWorkflow {
                     lock,
                     adapter,
                     observer,
+                    move |event| emit(event).map_err(core),
+                    agent,
+                )
+                .await?
+            } else if let Some(bridge) = &self.bridge {
+                struct SessionGuard<'a> {
+                    bridge: &'a crate::system_graph::HarnessCodeGraphBridge,
+                    run_id: String,
+                }
+                impl Drop for SessionGuard<'_> {
+                    fn drop(&mut self) {
+                        self.bridge.unregister_session(&self.run_id);
+                    }
+                }
+                bridge.register_session(&run, &sid, &generation);
+                let _session_guard = SessionGuard {
+                    bridge,
+                    run_id: run.clone(),
+                };
+                infra_system::workers::run_system_request_with_bridge(
+                    &directory.join(name),
+                    cancel,
+                    lock,
+                    adapter,
+                    observer,
+                    bridge.clone(),
+                    Some(sid),
                     move |event| emit(event).map_err(core),
                     agent,
                 )

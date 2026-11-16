@@ -6,8 +6,12 @@ use crate::{
 use infra_host::activity::{activity_events, total_tokens};
 use serde_json::{Value as V, json};
 use std::collections::BTreeMap;
+type EmitFn = Box<dyn FnMut(V) -> Result<Option<u64>> + Send>;
+type ObserveFn = Box<dyn FnMut(Option<u64>, &V) + Send>;
+
 pub struct ActivityStream {
-    emit: Box<dyn FnMut(V) -> Result<()> + Send>,
+    emit: EmitFn,
+    observe: Option<ObserveFn>,
     provider: String,
     roots: Vec<(String, String)>,
     aliases: BTreeMap<String, (String, String)>,
@@ -25,11 +29,39 @@ pub struct ActivityStream {
     tokens: Option<u64>,
     cost: Option<f64>,
     reported: bool,
+    pending_tools: BTreeMap<String, (String, Option<String>)>,
     pub reasons: BTreeMap<String, String>,
 }
 impl ActivityStream {
     pub fn new(
-        emit: impl FnMut(V) -> Result<()> + Send + 'static,
+        mut emit: impl FnMut(V) -> Result<()> + Send + 'static,
+        provider: &str,
+        roots: BTreeMap<String, String>,
+        aliases: BTreeMap<String, (String, String)>,
+    ) -> Self {
+        Self::with_observer(
+            move |event| {
+                emit(event)?;
+                Ok(None)
+            },
+            None,
+            provider,
+            roots,
+            aliases,
+        )
+    }
+    pub fn new_with_ids(
+        emit: impl FnMut(V) -> Result<Option<u64>> + Send + 'static,
+        observe: impl FnMut(Option<u64>, &V) + Send + 'static,
+        provider: &str,
+        roots: BTreeMap<String, String>,
+        aliases: BTreeMap<String, (String, String)>,
+    ) -> Self {
+        Self::with_observer(emit, Some(Box::new(observe)), provider, roots, aliases)
+    }
+    fn with_observer(
+        emit: impl FnMut(V) -> Result<Option<u64>> + Send + 'static,
+        observe: Option<ObserveFn>,
         provider: &str,
         roots: BTreeMap<String, String>,
         aliases: BTreeMap<String, (String, String)>,
@@ -42,6 +74,7 @@ impl ActivityStream {
         let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok();
         Self {
             emit: Box::new(emit),
+            observe,
             provider: provider.into(),
             roots,
             aliases,
@@ -59,6 +92,7 @@ impl ActivityStream {
             tokens: Some(0),
             cost: Some(0.),
             reported: false,
+            pending_tools: BTreeMap::new(),
             reasons: BTreeMap::new(),
         }
     }
@@ -72,6 +106,7 @@ impl ActivityStream {
         self.tokens = Some(0);
         self.cost = Some(0.);
         self.reported = false;
+        self.pending_tools.clear();
         let mut event = bounded(details);
         event.as_object_mut().map(|o| o.remove("label"));
         event["kind"] = json!("agent");
@@ -201,6 +236,28 @@ impl ActivityStream {
             event[key] = redact(&value);
         }
         if let Some(changes) = item["changes"].as_array().filter(|_| kind == "tool") {
+            let mut normalized_changes = Vec::new();
+            for change in changes.iter().take(24) {
+                let Some(raw_path) = change["path"].as_str().filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                let (service, rel_path, outside) = self.locate(raw_path);
+                let change_kind = change["kind"].as_str().unwrap_or("update");
+                let mut entry = json!({
+                    "path": redact_command(&rel_path),
+                    "kind": change_kind,
+                });
+                if let Some(service) = service {
+                    entry["service"] = json!(service);
+                }
+                if outside {
+                    entry["outside"] = json!(true);
+                }
+                normalized_changes.push(entry);
+            }
+            if !normalized_changes.is_empty() {
+                event["changes"] = json!(normalized_changes);
+            }
             let detail = changes
                 .iter()
                 .filter_map(|change| {
@@ -229,6 +286,52 @@ impl ActivityStream {
             }
             if outside {
                 event["outside"] = json!(true);
+            }
+        }
+        if kind == "tool" {
+            let call_id = event["call"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let state_str = event["state"].as_str().unwrap_or("");
+            if state_str == "started" {
+                if let Some(cid) = call_id {
+                    let tname = event["tool"].as_str().unwrap_or("Tool").to_owned();
+                    let det = event["detail"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
+                    self.pending_tools.insert(cid, (tname, det));
+                }
+            } else if state_str == "completed" {
+                if let Some((started_tool, started_detail)) =
+                    call_id.and_then(|cid| self.pending_tools.remove(&cid))
+                {
+                    if event["tool"]
+                        .as_str()
+                        .is_none_or(|t| t.is_empty() || t == "Tool")
+                    {
+                        event["tool"] = json!(started_tool);
+                    }
+                    if event["detail"].as_str().is_none_or(str::is_empty)
+                        && let Some(det) = started_detail
+                    {
+                        event["detail"] = json!(det);
+                    }
+                }
+                if event["tool"].as_str().is_some_and(|t| {
+                    matches!(
+                        t.to_ascii_lowercase().as_str(),
+                        "bash"
+                            | "shell"
+                            | "run_terminal_cmd"
+                            | "run_command"
+                            | "terminal"
+                            | "powershell"
+                    )
+                }) {
+                    event["tool"] = json!("Shell");
+                }
             }
         }
         event["text"] = json!(describe(&event));
@@ -300,7 +403,10 @@ impl ActivityStream {
         }
         self.count += 1;
         self.bytes = self.bytes.saturating_add(size);
-        let _ = (self.emit)(event);
+        let id = (self.emit)(event.clone()).ok().flatten();
+        if let Some(observe) = &mut self.observe {
+            observe(id, &event);
+        }
     }
 }
 pub fn redact(value: &V) -> V {

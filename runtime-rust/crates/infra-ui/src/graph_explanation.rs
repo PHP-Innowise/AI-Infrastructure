@@ -1,5 +1,5 @@
 //! Context actions on the dependency map.
-use crate::{api, dom, graph_map, model as m, session};
+use crate::{api, dom, graph::GraphTargetScope, graph_map, model as m, session};
 use serde_json::{json, Value as V};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
@@ -8,6 +8,8 @@ use web_sys::{Element, HtmlElement, KeyboardEvent, MouseEvent};
 const DIALOG: &str = "graph-explanation";
 const MENU: &str = "graph-explain-action";
 const SELECTION: &str = "graph-explanation-selection";
+const SELECTION_META: &str = "graph-explanation-meta";
+const SYSTEM_CONTEXT: &str = "graph-explanation-system";
 /// The explanation session still writing what the window waits for.
 const RUNNING: &str = "graph-explanation-running";
 const LIMIT: usize = 8;
@@ -15,16 +17,114 @@ const LIMIT: usize = 8;
 /// instead of spending on.
 const SECONDS: u64 = 300;
 
+const EXPLAINABLE_CANVAS_SELECTOR: &str = concat!(
+    "#graph-map-canvas, ",
+    "#graph-link-canvas, ",
+    "#session-graph-canvas, ",
+    "#system-map-canvas, ",
+    "#system-change-topology-canvas, ",
+    "#system-member-graph-canvas, ",
+    "#system-change-graph-canvas"
+);
+
+const EXPLAINABLE_HIT_SELECTOR: &str = concat!(
+    ".graph-map-node, ",
+    ".graph-map-hit, ",
+    "[data-explain-services], ",
+    ".system-map-node, ",
+    ".system-map-edge, ",
+    ".system-map-hit"
+);
+
+#[allow(dead_code)]
 pub fn map_context(view: &V, base: &V) {
     let mut view = view.clone();
     view["explanation_base"] = base.clone();
     m::set("graph-explanation-map", view);
 }
 
+#[allow(dead_code)]
 pub fn link_context(view: &V, base: &V) {
     let mut view = view.clone();
     view["explanation_base"] = base.clone();
     m::set("graph-explanation-link", view);
+}
+
+pub(crate) fn surface_map_context(canvas_id: &str, view: &V, base: &V, scope: &GraphTargetScope) {
+    let mut view_with_base = view.clone();
+    view_with_base["explanation_base"] = base.clone();
+    if canvas_id == "graph-map-canvas" {
+        m::set("graph-explanation-map", view_with_base.clone());
+    }
+    m::set(
+        &format!("graph-explanation-surface:{canvas_id}"),
+        json!({
+            "view": view_with_base,
+            "scope": scope.to_json(),
+        }),
+    );
+}
+
+pub(crate) fn scoped_link_context(view: &V, base: &V, scope: &GraphTargetScope) {
+    let mut view_with_base = view.clone();
+    view_with_base["explanation_base"] = base.clone();
+    m::set("graph-explanation-link", view_with_base.clone());
+    m::set(
+        "graph-explanation-link-scoped",
+        json!({
+            "view": view_with_base,
+            "scope": scope.to_json(),
+        }),
+    );
+}
+
+/// Registers the active System Orchestration workspace so right-click `Explain node` /
+/// `Explain link` on topology or member-service canvases launches a multi-root read-only
+/// `system_explain` session.
+#[allow(dead_code)]
+pub(crate) fn set_system_context(
+    project_id: &str,
+    config_path: &str,
+    provider: &str,
+    services: Vec<String>,
+) {
+    m::set(
+        SYSTEM_CONTEXT,
+        json!({
+            "project_id": project_id,
+            "config_path": config_path,
+            "provider": provider,
+            "services": services,
+        }),
+    );
+}
+
+/// Clears the active System Orchestration explanation context when leaving Systems views.
+#[allow(dead_code)]
+pub(crate) fn clear_system_context() {
+    m::take(SYSTEM_CONTEXT);
+}
+
+/// Parses comma-separated service identifiers from `data-explain-services="svcA,svcB"`.
+pub fn parse_explain_services(attr: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in attr.unwrap_or("").split(',') {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() && !out.iter().any(|existing| existing == trimmed) {
+            out.push(trimmed.to_owned());
+        }
+    }
+    out
+}
+
+fn first_non_empty<'a>(candidates: impl IntoIterator<Item = &'a str>) -> String {
+    for candidate in candidates {
+        let trimmed = candidate.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    String::new()
 }
 
 fn graph_selection(view: &V, map: &V) -> V {
@@ -35,6 +135,8 @@ fn graph_selection(view: &V, map: &V) -> V {
             .or(view["built"]["commit"].as_str()),
         "target": view["target"],
         "launch": map["run"]["launch"],
+        "agent": map["run"]["agent"].as_str().or(view["run"]["agent"].as_str()),
+        "run_id": map["run"]["id"].as_str().or(view["run"]["id"].as_str()),
         "base": view["explanation_base"],
         "certain": view["certain"],
         "notests": view["notests"],
@@ -43,28 +145,189 @@ fn graph_selection(view: &V, map: &V) -> V {
     })
 }
 
+fn find_explainable_hit(target: &Element) -> Option<(Element, String)> {
+    let canvas = target.closest(EXPLAINABLE_CANVAS_SELECTOR).ok()??;
+    let hit = target.closest(EXPLAINABLE_HIT_SELECTOR).ok()??;
+    if !canvas.contains(Some(&hit)) {
+        return None;
+    }
+    Some((hit, canvas.id()))
+}
+
+fn resolve_surface_view_and_scope(canvas_id: &str) -> (V, V, Option<GraphTargetScope>) {
+    if canvas_id == "graph-link-canvas" {
+        let scoped = m::data("graph-explanation-link-scoped");
+        if scoped.is_object() {
+            let scope = GraphTargetScope::from_json(&scoped["scope"]);
+            let map_entry = m::data("graph-explanation-surface:graph-map-canvas");
+            let map_view = if map_entry["view"].is_object() {
+                map_entry["view"].clone()
+            } else {
+                m::data("graph-explanation-map")
+            };
+            return (scoped["view"].clone(), map_view, scope);
+        }
+        let link = m::data("graph-explanation-link");
+        let map = m::data("graph-explanation-map");
+        return (link, map, None);
+    }
+    let entry = m::data(&format!("graph-explanation-surface:{canvas_id}"));
+    if entry.is_object() && entry["view"].is_object() {
+        let view = entry["view"].clone();
+        let scope = GraphTargetScope::from_json(&entry["scope"]);
+        return (view.clone(), view, scope);
+    }
+    if canvas_id == "graph-map-canvas" {
+        let map = m::data("graph-explanation-map");
+        return (map.clone(), map, None);
+    }
+    (V::Null, V::Null, None)
+}
+
+fn parse_hit_payload(hit: &Element) -> Option<V> {
+    if let Some(raw) = hit.get_attribute("data-payload") {
+        if let Ok(parsed) = serde_json::from_str::<V>(&raw) {
+            return Some(parsed);
+        }
+        if !raw.trim().is_empty() {
+            return Some(json!(raw));
+        }
+    }
+    if let (Some(from), Some(to)) = (
+        hit.get_attribute("data-from")
+            .filter(|s| !s.trim().is_empty()),
+        hit.get_attribute("data-to")
+            .filter(|s| !s.trim().is_empty()),
+    ) {
+        return Some(json!({ "from": from, "to": to }));
+    }
+    if let Some(service) = hit
+        .get_attribute("data-service")
+        .filter(|s| !s.trim().is_empty())
+    {
+        return Some(json!({ "service": service }));
+    }
+    if hit.has_attribute("data-explain-services") {
+        let services =
+            parse_explain_services(hit.get_attribute("data-explain-services").as_deref());
+        return Some(match services.as_slice() {
+            [only] => json!({ "service": only, "services": services }),
+            [from, to, ..] => json!({ "from": from, "to": to, "services": services }),
+            [] => json!({}),
+        });
+    }
+    None
+}
+
+fn resolve_system_explain_meta(
+    canvas_id: &str,
+    hit: &Element,
+    data: &V,
+    scope: Option<&GraphTargetScope>,
+) -> Option<V> {
+    let explicit_services =
+        parse_explain_services(hit.get_attribute("data-explain-services").as_deref());
+    let is_topology_canvas = matches!(
+        canvas_id,
+        "system-map-canvas" | "system-change-topology-canvas"
+    );
+    let is_system_embedded_canvas = matches!(
+        canvas_id,
+        "system-member-graph-canvas" | "system-change-graph-canvas"
+    );
+    if let Some(GraphTargetScope::SystemService {
+        project_id,
+        config_path,
+        service_id,
+        ..
+    }) = scope
+    {
+        let services = if !explicit_services.is_empty() {
+            explicit_services
+        } else {
+            vec![service_id.clone()]
+        };
+        return Some(json!({
+            "project_id": project_id,
+            "config_path": config_path,
+            "services": services,
+        }));
+    }
+    if !is_topology_canvas && !is_system_embedded_canvas && explicit_services.is_empty() {
+        return None;
+    }
+    let stored = m::data(SYSTEM_CONTEXT);
+    let stored_proj = m::text(&stored, "project_id");
+    let dom_sys_proj = dom::value("system-project");
+    let dom_proj = dom::value("project");
+    let project_id = first_non_empty([
+        stored_proj.as_str(),
+        dom_sys_proj.as_str(),
+        dom_proj.as_str(),
+    ]);
+
+    let stored_cfg = m::text(&stored, "config_path");
+    let dom_sys_cfg = dom::value("system-config");
+    let config_path = first_non_empty([stored_cfg.as_str(), dom_sys_cfg.as_str()]);
+
+    let mut services = explicit_services;
+    if services.is_empty() {
+        for key in ["service", "from", "to"] {
+            if let Some(svc) = data[key].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                if !services.iter().any(|existing| existing == svc) {
+                    services.push(svc.to_owned());
+                }
+            }
+        }
+    }
+    if services.is_empty() {
+        services = m::array(&stored["services"])
+            .into_iter()
+            .filter_map(|v| {
+                v.as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+            .collect();
+    }
+    Some(json!({
+        "project_id": project_id,
+        "config_path": config_path,
+        "services": services,
+    }))
+}
+
 fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
-    let hit = target.closest(
-        "#graph-map-canvas .graph-map-node, #graph-link-canvas .graph-map-node, #graph-map-canvas .graph-map-hit",
-    ).ok()??;
-    let dialog = hit.closest("dialog[open]").ok()??;
+    let (hit, canvas_id) = find_explainable_hit(target)?;
     let menu = dom::get(MENU)?.dyn_into::<HtmlElement>().ok()?;
-    let data: V = serde_json::from_str(&hit.get_attribute("data-payload")?).ok()?;
-    let link = hit.class_list().contains("graph-map-hit");
+    let data = parse_hit_payload(&hit)?;
+    let link = hit.class_list().contains("graph-map-hit")
+        || hit.class_list().contains("system-map-edge")
+        || hit.class_list().contains("system-map-hit")
+        || hit.get_attribute("data-explain-kind").as_deref() == Some("link")
+        || (data.is_object() && data["from"].is_string() && data["to"].is_string());
     let label = hit
         .get_attribute("aria-label")
-        .or_else(|| hit.query_selector("title").ok()??.text_content())?;
+        .or_else(|| hit.get_attribute("title"))
+        .or_else(|| hit.query_selector("title").ok()??.text_content())
+        .or_else(|| {
+            hit.text_content()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        })?;
     let subject = if link {
-        format!("{} → {}", m::text(&data, "from"), m::text(&data, "to"))
+        let (from, to) = (m::text(&data, "from"), m::text(&data, "to"));
+        if !from.is_empty() || !to.is_empty() {
+            format!("{from} → {to}")
+        } else {
+            label.clone()
+        }
     } else {
         hit.get_attribute("title").unwrap_or_else(|| label.clone())
     };
-    let map = m::data("graph-explanation-map");
-    let view = if dialog.id() == "graph-link" {
-        m::data("graph-explanation-link")
-    } else {
-        map.clone()
-    };
+    let (view, map, scope_opt) = resolve_surface_view_and_scope(&canvas_id);
+    let system_explain = resolve_system_explain_meta(&canvas_id, &hit, &data, scope_opt.as_ref());
     let key = data.as_str().or(data["path"].as_str()).unwrap_or("");
     let node = view["nodes"]
         .as_array()
@@ -80,20 +343,38 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
             .and_then(|group| group["path"].as_str())
     });
     let aggregate = node.is_some_and(|node| m::yes(&node["layer"]) || m::yes(&node["module"]));
+    let mut selection = json!({
+        "kind": if link { "link" } else { "node" },
+        "subject": subject,
+        "label": label,
+        "data": data,
+        "context": graph_selection(&view, &map),
+        "file": file,
+        "aggregate": aggregate,
+        "graph_evidence": if link { V::Null } else { visible_neighbors(&view, key) },
+    });
+    if let Some(sys) = system_explain.as_ref() {
+        selection["system_services"] = sys["services"].clone();
+    }
+    m::set(SELECTION, selection);
     m::set(
-        SELECTION,
+        SELECTION_META,
         json!({
-            "kind": if link { "link" } else { "node" },
-            "subject": subject,
-            "label": label,
-            "data": data,
-            "context": graph_selection(&view, &map),
-            "file": file,
-            "aggregate": aggregate,
-            "graph_evidence": if link { V::Null } else { visible_neighbors(&view, key) },
+            "canvas_id": canvas_id,
+            "scope": scope_opt.as_ref().map(GraphTargetScope::to_json).unwrap_or(V::Null),
+            "system_explain": system_explain.unwrap_or(V::Null),
         }),
     );
-    dialog.append_child(&menu).ok()?;
+    if let Some(dialog) = hit.closest("dialog[open]").ok().flatten() {
+        dialog.append_child(&menu).ok()?;
+    } else if let Some(body) = dom::document().body() {
+        body.append_child(&menu).ok()?;
+    } else {
+        dom::document()
+            .document_element()?
+            .append_child(&menu)
+            .ok()?;
+    }
     dom::text(MENU, if link { "Explain link" } else { "Explain node" });
     dom::hidden(MENU, false);
     let bounds = hit.get_bounding_client_rect();
@@ -113,6 +394,7 @@ fn open_menu(target: &Element, position: Option<(i32, i32)>) -> Option<()> {
 fn dismiss_menu() {
     dom::hidden(MENU, true);
     m::take(SELECTION);
+    m::take(SELECTION_META);
 }
 
 pub fn context_menu(target: &Element, mouse: &MouseEvent) -> bool {
@@ -125,11 +407,7 @@ pub fn key(key: &KeyboardEvent) -> bool {
         close();
         return true;
     }
-    if key.key() == "Escape"
-        && dom::get(MENU).is_some_and(|menu| {
-            !menu.has_attribute("hidden") && menu.closest("dialog[open]").ok().flatten().is_some()
-        })
-    {
+    if key.key() == "Escape" && dom::get(MENU).is_some_and(|menu| !menu.has_attribute("hidden")) {
         dismiss_menu();
         return true;
     }
@@ -146,8 +424,9 @@ pub fn click(target: &Element) -> bool {
     match target.id().as_str() {
         MENU => {
             let selection = m::take(SELECTION);
+            let meta = m::take(SELECTION_META);
             dom::hidden(MENU, true);
-            spawn_local(explain(selection));
+            spawn_local(explain(selection, meta));
             true
         }
         "graph-explanation-close" => {
@@ -212,6 +491,24 @@ fn session_request(project: &str, provider: &str, model: V, selection: &V) -> V 
         "budgets": {"seconds": SECONDS},
         "prompt": prompt(selection),
     })
+}
+
+/// Multi-root read-only explanation session for a System member service or cross-service link.
+fn system_session_request(
+    project: &str,
+    config_path: &str,
+    services: &[String],
+    provider: &str,
+    model: V,
+    selection: &V,
+) -> V {
+    let mut req = session_request(project, provider, model, selection);
+    req["system_explain"] = json!({
+        "project_id": project,
+        "config_path": config_path,
+        "services": services,
+    });
+    req
 }
 
 fn show_error(error: &str) {
@@ -297,17 +594,19 @@ fn link_evidence(view: &V) -> V {
     json!({"pairs": pairs, "links": count, "omitted": count.saturating_sub(pairs.len() as u64)})
 }
 
-async fn add_evidence(selection: &mut V, project: &str) {
+async fn add_evidence(selection: &mut V, scope: &GraphTargetScope) {
+    if scope.is_empty() {
+        return;
+    }
     let context = &selection["context"];
     let data = &selection["data"];
     let link = selection["kind"] == "link";
     let request = if link {
-        graph_map::link_request(
-            project,
-            &m::text(data, "from"),
-            &m::text(data, "to"),
-            context,
-        )
+        let (from, to) = (m::text(data, "from"), m::text(data, "to"));
+        if from.is_empty() || to.is_empty() {
+            return;
+        }
+        graph_map::build_scoped_link_request(scope, &from, &to, context)
     } else {
         // The base endpoint currently supports cycle and link inspection only.
         if m::yes(&selection["aggregate"]) || context["base"].is_string() {
@@ -320,12 +619,12 @@ async fn add_evidence(selection: &mut V, project: &str) {
         else {
             return;
         };
-        let scope = selection["file"]
+        let scope_dir = selection["file"]
             .as_str()
             .unwrap_or_else(|| key.rsplit_once('/').map_or("", |(parent, _)| parent));
-        graph_map::graph_request(
-            project,
-            vec![("scope", scope.to_owned()), ("focus", key.to_owned())],
+        graph_map::build_scoped_graph_request(
+            scope,
+            vec![("scope", scope_dir.to_owned()), ("focus", key.to_owned())],
             context,
         )
     };
@@ -333,8 +632,8 @@ async fn add_evidence(selection: &mut V, project: &str) {
         return;
     };
     let actual = graph_selection(&view, &V::Null);
-    if view["project_id"] != project
-        || actual["revision"] != context["revision"]
+    if (!scope.is_system() && view["project_id"] != scope.project_id())
+        || (context["revision"].is_string() && actual["revision"] != context["revision"])
         || m::yes(&view["preliminary"])
     {
         return;
@@ -353,11 +652,51 @@ async fn add_evidence(selection: &mut V, project: &str) {
     }
 }
 
-async fn explain(mut selection: V) {
-    let project = dom::value("project");
-    if project.is_empty() || selection["context"]["project"] != project {
+fn resolve_system_provider_and_model() -> (String, V) {
+    let stored = m::data(SYSTEM_CONTEXT);
+    let sys_dom = dom::value("system-provider");
+    let sys_stored = m::text(&stored, "provider");
+    let main_dom = dom::value("provider");
+    let provider = first_non_empty([sys_dom.as_str(), sys_stored.as_str(), main_dom.as_str()]);
+    let sys_model = session::selected_model("system-");
+    let model = if !sys_model.is_null() && (sys_dom.is_empty() || sys_dom == provider) {
+        sys_model
+    } else if main_dom == provider {
+        session::selected_model("")
+    } else {
+        V::Null
+    };
+    (provider, model)
+}
+
+async fn explain(mut selection: V, meta: V) {
+    if !selection.is_object() {
         return;
     }
+    let sys_explain = &meta["system_explain"];
+    let is_system = sys_explain.is_object();
+    let (project, config_path, services, evidence_scope) = if is_system {
+        let pid = m::text(sys_explain, "project_id");
+        let cfg = m::text(sys_explain, "config_path");
+        let svcs = m::array(&sys_explain["services"])
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        if pid.is_empty() || cfg.is_empty() {
+            return;
+        }
+        let scope = GraphTargetScope::from_json(&meta["scope"]);
+        (pid, cfg, svcs, scope)
+    } else {
+        let pid = dom::value("project");
+        if pid.is_empty() || selection["context"]["project"] != pid {
+            return;
+        }
+        let scope = GraphTargetScope::from_json(&meta["scope"])
+            .unwrap_or_else(|| GraphTargetScope::single(pid.clone()));
+        (pid, String::new(), Vec::new(), Some(scope))
+    };
+
     // One explanation at a time: the window shows only the newest.
     stop();
     let epoch = m::next(DIALOG);
@@ -367,23 +706,34 @@ async fn explain(mut selection: V) {
     dom::error("graph-explanation-error", "");
     dom::text("graph-explanation-status", "Preparing explanation…");
     dom::dialog(DIALOG, true);
-    add_evidence(&mut selection, &project).await;
+    if let Some(scope) = evidence_scope.as_ref() {
+        add_evidence(&mut selection, scope).await;
+    }
     if selection["graph_evidence"].to_string().len() > 16_000 {
         selection["graph_evidence"] = json!({"state": "too_large"});
     }
-    if !visible(epoch) || dom::value("project") != project {
+    if !visible(epoch) || (!is_system && dom::value("project") != project) {
         return;
     }
-    let response = api::post(
-        "/api/sessions",
+    let req_body = if is_system {
+        let (provider, model) = resolve_system_provider_and_model();
+        system_session_request(
+            &project,
+            &config_path,
+            &services,
+            &provider,
+            model,
+            &selection,
+        )
+    } else {
         session_request(
             &project,
             &dom::value("provider"),
             session::selected_model(""),
             &selection,
-        ),
-    )
-    .await;
+        )
+    };
+    let response = api::post("/api/sessions", req_body).await;
     match response {
         Ok(value) if value["session"]["id"].is_string() => {
             let sid = m::text(&value["session"], "id");
@@ -561,5 +911,55 @@ mod tests {
             .unwrap()
             .starts_with("Explain a dependency-map node."));
         assert!(request["prompt"].as_str().unwrap().contains("src/Cart.php"));
+    }
+
+    #[test]
+    fn parse_explain_services_trims_and_deduplicates_comma_separated_services() {
+        assert_eq!(parse_explain_services(None), Vec::<String>::new());
+        assert_eq!(parse_explain_services(Some(" ,  , ")), Vec::<String>::new());
+        assert_eq!(
+            parse_explain_services(Some(" orders , inventory, orders , __system__ ")),
+            vec![
+                "orders".to_owned(),
+                "inventory".to_owned(),
+                "__system__".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn system_explanation_session_attaches_multi_root_system_explain_payload() {
+        let selection = json!({
+            "kind": "link",
+            "subject": "orders → inventory",
+            "data": {"from": "orders", "to": "inventory"},
+            "system_services": ["orders", "inventory"]
+        });
+        let services = vec!["orders".to_owned(), "inventory".to_owned()];
+        let request = system_session_request(
+            "harbor-root",
+            "harbor-system/system.json",
+            &services,
+            "claude",
+            json!("claude-sonnet-4-5"),
+            &selection,
+        );
+        assert_eq!(request["mode"], "plan");
+        assert_eq!(request["project_context"], false);
+        assert_eq!(request["budgets"], json!({"seconds": 300}));
+        assert_eq!(request["provider"], "claude");
+        assert_eq!(request["model"], "claude-sonnet-4-5");
+        assert_eq!(
+            request["system_explain"],
+            json!({
+                "project_id": "harbor-root",
+                "config_path": "harbor-system/system.json",
+                "services": ["orders", "inventory"],
+            })
+        );
+        assert!(request["prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("Explain a dependency-map link."));
     }
 }

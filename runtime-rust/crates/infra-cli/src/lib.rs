@@ -375,7 +375,16 @@ pub fn run(raw: &[String]) -> Result<Output> {
             .first()
             .filter(|argument| !argument.starts_with('-'))
             .map(String::as_str);
+        let mut skip_args = usize::from(nested.is_some());
         let route = match group {
+            "system" if nested == Some("graph") => {
+                if let Some(sub) = rest.get(1).filter(|arg| !arg.starts_with('-')) {
+                    skip_args = 2;
+                    format!("system/graph/{sub}")
+                } else {
+                    "system/graph".into()
+                }
+            }
             "repo" | "creator" | "kit" | "attach" | "system" | "skill-tools" | "bank"
             | "release" => nested
                 .map(|operation| format!("{group}/{operation}"))
@@ -395,6 +404,9 @@ pub fn run(raw: &[String]) -> Result<Output> {
                     } else {
                         None
                     };
+                    if command.is_some() {
+                        skip_args = 2;
+                    }
                     command
                         .map(|command| format!("eval/{family}/{command}"))
                         .unwrap_or_else(|| format!("eval/{family}"))
@@ -402,7 +414,7 @@ pub fn run(raw: &[String]) -> Result<Output> {
                 .unwrap_or_else(|| group.into()),
             other => other.into(),
         };
-        let options = if nested.is_some() { &rest[1..] } else { rest };
+        let options = &rest[skip_args..];
         if arguments::help_requested(options, &route)? {
             return Ok(Output::text(arguments::option_help(&route)?));
         }
@@ -851,8 +863,14 @@ pub fn run(raw: &[String]) -> Result<Output> {
         }
         "system" => {
             let (op, args) = operation(rest, None)?;
-            let request = parse(args, &format!("system/{op}"))?.value;
-            Output::envelope(infra_system::execute(op, &request)?)
+            if op == "graph" {
+                let (sub, args) = operation(args, Some("status"))?;
+                let request = parse(args, &format!("system/graph/{sub}"))?.value;
+                Output::envelope(infra_system::execute(&format!("graph-{sub}"), &request)?)
+            } else {
+                let request = parse(args, &format!("system/{op}"))?.value;
+                Output::envelope(infra_system::execute(op, &request)?)
+            }
         }
         "eval" | "bench" => {
             let (family, args) = operation(rest, None)?;
@@ -913,6 +931,7 @@ pub fn run(raw: &[String]) -> Result<Output> {
         }
         "harness" | "serve" | "app" | "internal-sandbox-child" | "internal-discovery-probe" => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
+                .thread_stack_size(8 * 1024 * 1024)
                 .enable_all()
                 .build()?;
             let code = runtime.block_on(infra_harness::run(group, rest))?;
@@ -927,6 +946,7 @@ pub fn run(raw: &[String]) -> Result<Output> {
                 _ => return Err(RuntimeError::invalid("Unknown internal command")),
             };
             let runtime = tokio::runtime::Builder::new_multi_thread()
+                .thread_stack_size(8 * 1024 * 1024)
                 .enable_all()
                 .build()?;
             let code = runtime.block_on(infra_harness::run(target, args))?;

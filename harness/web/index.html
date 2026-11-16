@@ -262,6 +262,7 @@
           <button class="button" type="button" id="system-edit">Edit system</button>
           <button class="button" type="button" id="system-choose-project">Choose system folder…</button>
         </div>
+        <div class="composer-working system-working" id="system-working" data-working="false" data-motion-paused="false" aria-hidden="true"><div class="composer-working-clip"><div class="composer-working-inner"><div class="composer-rabbit" aria-hidden="true"><svg class="rabbit-svg" viewBox="0 0 72 52" fill="none"><ellipse class="rabbit-shadow" cx="32" cy="48" rx="18" ry="2.2"/><g class="rabbit-body"><circle class="rabbit-fur rabbit-tail" cx="13" cy="36" r="4.5"/><ellipse class="rabbit-fur rabbit-foot" cx="25" cy="44.5" rx="7" ry="3.2"/><ellipse class="rabbit-fur" cx="26.5" cy="35.5" rx="12" ry="10.5"/><ellipse class="rabbit-fur-shade" cx="24" cy="37.5" rx="7.5" ry="6.5"/><g class="rabbit-head"><g class="rabbit-ear-back"><ellipse class="rabbit-fur" cx="30.5" cy="10.5" rx="3.5" ry="9.5" transform="rotate(-14 30.5 10.5)"/><ellipse class="rabbit-ear-inner" cx="30.8" cy="11" rx="1.7" ry="6.2" transform="rotate(-14 30.8 11)"/></g><g class="rabbit-ear-front"><ellipse class="rabbit-fur" cx="38" cy="10.5" rx="3.7" ry="10" transform="rotate(10 38 10.5)"/><ellipse class="rabbit-ear-inner" cx="38.1" cy="11" rx="1.8" ry="6.6" transform="rotate(10 38.1 11)"/></g><ellipse class="rabbit-fur" cx="36" cy="23.5" rx="9.8" ry="8.6"/><ellipse class="rabbit-cheek" cx="38.5" cy="26.5" rx="3.4" ry="2.2"/><g class="rabbit-jaw"><ellipse class="rabbit-fur rabbit-jaw-pad" cx="42.2" cy="27.8" rx="3.5" ry="2.3"/><path class="rabbit-mouth" d="M40.8 27.2 Q43 28.8 45 27.2"/></g><path class="rabbit-whisker" d="M39 24.8 L34.5 24 M39 26 L34.8 26.8"/><g class="rabbit-eye-group"><ellipse class="rabbit-eye" cx="39.8" cy="21.5" rx="1.6" ry="2.1"/><circle class="rabbit-eye-shine" cx="40.3" cy="20.7" r="0.6"/></g><ellipse class="rabbit-nose" cx="45.2" cy="24.2" rx="1.6" ry="1.15"/></g><g class="rabbit-carrot-group"><path class="carrot-leaf-dark" d="M60 28.5 C63 23.5 67 23 66 26.5 C65 28.5 62.5 29.5 60 29.5 Z"/><path class="carrot-leaf" d="M60.5 29.5 C65.5 26 70 28 67.5 31 C65.5 32.5 62.5 31.5 60.5 30 Z"/><path class="carrot-leaf-dark" d="M59.8 30.5 C64.5 31.5 68 35 64.5 36 C62 36.5 60.2 33 59.8 31 Z"/><path class="carrot-body" d="M43.8 25.4 C42.8 25.7 42.7 27.8 43.9 28.2 L59.5 33.4 C62 34 63.2 28.4 60.5 27.6 Z"/><path class="carrot-highlight" d="M46.5 26.4 L58.5 29.2"/><path class="carrot-stripe" d="M50.5 27.2 L49.9 29.5 M54.5 28.2 L53.8 31 M58 29.2 L57.2 32.2"/><ellipse class="rabbit-fur rabbit-paw" cx="39.8" cy="31.5" rx="4.4" ry="2.7" transform="rotate(-18 39.8 31.5)"/></g><circle class="carrot-crumb rabbit-crumb-a" cx="44" cy="29.5" r="1.1"/><circle class="carrot-crumb rabbit-crumb-b" cx="45.8" cy="30.5" r="0.9"/></g></svg></div><div class="composer-working-copy"><span class="composer-working-badge">Active</span><span class="composer-working-label" id="system-working-text">System is working…</span><button type="button" class="button compact system-working-pause" id="system-working-pause" aria-pressed="false">Pause</button><span class="composer-working-dots" aria-hidden="true"><i></i><i></i><i></i></span></div></div></div></div>
         <p class="error-text" id="system-error" role="alert" hidden></p><p class="skills-action-status" id="system-message" role="status"></p>
         <div class="system-empty" id="system-empty"><h3>No system loaded</h3><p class="system-note">Load this project's system file, or create the system from its service folders. <strong>Choose system folder…</strong> adds another folder to your projects and makes it the working project in every view.</p></div>
         <form id="system-editor" class="system-editor" hidden aria-labelledby="system-editor-title" novalidate>
@@ -284,16 +285,208 @@
           <div class="skills-actions system-editor-actions"><p class="skills-action-status" id="system-editor-status" role="status"></p><p class="system-note system-save-note">Save writes the system file and ai-service.json in each service folder.</p><button class="button" type="button" id="system-editor-discard">Discard changes</button><button class="button" type="button" id="system-editor-close">Close editor</button><button class="button primary" type="submit" id="system-editor-save">Save system</button></div>
         </form>
         <div id="system-catalog" class="system-catalog" hidden>
-          <div class="system-heading"><div><h3 id="system-name"></h3><p class="system-note" id="system-catalog-summary"></p></div><button class="button primary" type="button" id="system-plan-change">Plan a change</button></div>
-          <div class="system-map" id="system-map"></div>
+          <div class="system-heading">
+            <div><h3 id="system-name"></h3><p class="system-note" id="system-catalog-summary"></p></div>
+            <div class="system-heading-actions">
+              <span class="sidebar-graph-pill system-graphs-pill" id="system-graphs-pill" data-state="idle" role="status"><span class="sidebar-graph-dot" aria-hidden="true"></span><span class="sidebar-graph-label" id="system-graphs-pill-text">Service graphs: loading…</span></span>
+              <button class="button compact" type="button" id="system-graphs-rebuild">Build / Refresh all graphs</button>
+              <label class="checkbox system-graphs-agents"><input type="checkbox" id="system-graphs-agents">Tell system agents about code graphs</label>
+              <button class="button primary" type="button" id="system-plan-change">Plan a change</button>
+            </div>
+          </div>
+          <section class="session-graph-workspace system-map-workspace" id="system-map-workspace" aria-label="System architecture and service code maps" data-motion-paused="false" data-expanded="false">
+            <div class="system-map-scope-bar">
+              <div class="session-graph-mode-group" role="group" aria-label="Architecture map level">
+                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-map-level-topology" aria-pressed="true">System topology</button>
+                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-map-level-service" aria-pressed="false">Service code map</button>
+              </div>
+              <label class="field system-member-picker" id="system-member-picker-field" hidden>Service<select id="system-member-select"></select></label>
+            </div>
+            <div id="system-map" class="system-map">
+              <header class="session-graph-toolbar">
+                <div class="session-graph-heading">
+                  <h4 class="session-graph-title">Cross-service contracts</h4>
+                  <span class="session-graph-summary" id="system-map-summary"></span>
+                </div>
+                <div class="session-graph-controls" role="toolbar" aria-label="System topology map controls" aria-controls="system-map-canvas">
+                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-map-unfold" aria-pressed="false" title="Unfold contracts, capabilities, and shared sources">Unfold contracts &amp; sources</button>
+                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-map-certain" aria-pressed="false" title="Show confirmed contract and code links only">Confirmed links only</button>
+                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-map-layers" aria-pressed="false" title="Arrange services into architectural tiers and show violations">Layers</button>
+                  <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
+                  <div class="session-graph-zoom-group" role="group" aria-label="Zoom">
+                    <button type="button" class="button compact session-graph-btn" id="system-map-zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
+                    <button type="button" class="button compact session-graph-btn session-graph-zoom-level" id="system-map-zoom-level" title="Reset zoom to 100%" aria-label="Reset zoom level">100%</button>
+                    <button type="button" class="button compact session-graph-btn" id="system-map-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+                  </div>
+                  <button type="button" class="button compact session-graph-btn" id="system-map-fit" title="Fit topology map to view">Fit</button>
+                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-map-expand" aria-expanded="false" title="Expand topology workspace">Expand</button>
+                </div>
+              </header>
+              <div class="session-graph-subbar system-map-subbar">
+                <div class="graph-find system-map-find" id="system-map-find"><input id="system-map-find-search" type="search" maxlength="100" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="system-map-find-list" aria-autocomplete="list" aria-label="Search services, contracts, capabilities, and symbols" placeholder="Search services, contracts, capabilities, symbols (press /)" title="Search across all services, contracts, capabilities, and member symbols"><div class="graph-find-found" id="system-map-find-found" tabindex="-1" hidden><ul class="graph-pick-list" id="system-map-find-list" role="listbox" aria-label="System search results" tabindex="-1"></ul><p class="knowledge-note graph-find-note" id="system-map-find-note" role="status"></p></div></div>
+                <label class="session-graph-filter"><span class="sr-only">Filter visible services and contracts</span><input id="system-map-filter" type="search" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Filter visible nodes…"></label>
+              </div>
+              <div class="session-graph-body system-map-body">
+                <div class="graph-map-canvas session-graph-canvas system-map-canvas" id="system-map-canvas" data-panning="false" tabindex="0" role="region" aria-label="Interactive cross-service topology canvas"></div>
+                <aside class="graph-map-side session-graph-side system-map-side" id="system-map-side" aria-label="Selected service or contract details"></aside>
+              </div>
+              <div class="graph-arrow-legend-slot session-graph-arrow-legend" id="system-map-arrow-legend" hidden></div>
+              <p class="session-graph-note" id="system-map-note" hidden></p>
+              <p class="error-text session-graph-error" id="system-map-error" role="alert" hidden></p>
+            </div>
+            <div id="system-member-graph-workspace" class="system-embedded-graph" data-motion-paused="false" data-expanded="false" hidden>
+              <header class="session-graph-toolbar">
+                <div class="session-graph-heading">
+                  <h4 class="session-graph-title" id="system-member-graph-title">Service code graph</h4>
+                  <span class="session-graph-summary" id="system-member-graph-summary"></span>
+                </div>
+                <div class="session-graph-controls" role="toolbar" aria-label="Service code graph controls" aria-controls="system-member-graph-canvas">
+                  <div class="session-graph-mode-group" role="group" aria-label="Graph view mode">
+                    <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-member-graph-mode-whole" aria-pressed="true">Whole graph</button>
+                    <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-member-graph-mode-changes" aria-pressed="false">Changes <span class="session-graph-badge" id="system-member-graph-changes-count" hidden>0</span></button>
+                  </div>
+                  <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
+                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-member-graph-unfold" aria-pressed="false">Unfold all</button>
+                  <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
+                  <div class="session-graph-zoom-group" role="group" aria-label="Zoom">
+                    <button type="button" class="button compact session-graph-btn" id="system-member-graph-zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
+                    <button type="button" class="button compact session-graph-btn session-graph-zoom-level" id="system-member-graph-zoom-level" title="Reset zoom level" aria-label="Reset zoom level">100%</button>
+                    <button type="button" class="button compact session-graph-btn" id="system-member-graph-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+                  </div>
+                  <button type="button" class="button compact session-graph-btn" id="system-member-graph-fit">Fit</button>
+                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-member-graph-follow" aria-pressed="true">Follow focus</button>
+                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-member-graph-pause-motion" aria-pressed="false">Pause pulse</button>
+                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-member-graph-expand" aria-expanded="false">Expand</button>
+                  <button type="button" class="button compact session-graph-btn" id="system-member-graph-open-full">Full map</button>
+                </div>
+              </header>
+              <div class="session-graph-subbar">
+                <label class="session-graph-filter"><span class="sr-only">Filter service graph names</span><input id="system-member-graph-filter" type="search" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Filter files, folders, entities…"></label>
+                <label class="checkbox session-graph-check"><input id="system-member-graph-notests" type="checkbox">Without tests</label>
+              </div>
+              <div class="session-graph-progress" id="system-member-graph-progress" role="status" aria-live="polite" hidden>
+                <div class="session-graph-progress-head">
+                  <span class="session-graph-progress-text" id="system-member-graph-progress-text">Building code graph…</span>
+                  <span class="session-graph-progress-amount" id="system-member-graph-progress-amount">0%</span>
+                </div>
+                <progress class="session-graph-progress-bar" id="system-member-graph-progress-bar" max="100" aria-labelledby="system-member-graph-progress-text"></progress>
+                <p class="session-graph-progress-left" id="system-member-graph-progress-left"></p>
+              </div>
+              <div class="session-graph-focus" id="system-member-graph-focus" role="status" aria-live="polite" hidden>
+                <span class="session-graph-focus-label" id="system-member-graph-focus-label"></span>
+                <div class="session-graph-focus-entities" id="system-member-graph-focus-entities"></div>
+              </div>
+              <nav class="graph-map-crumbs session-graph-crumbs" id="system-member-graph-crumbs" aria-label="Service graph breadcrumbs" hidden></nav>
+              <div class="session-graph-body" id="system-member-graph-body">
+                <div class="graph-map-canvas session-graph-canvas" id="system-member-graph-canvas" data-panning="false" tabindex="0" role="region" aria-label="Interactive service code graph canvas"></div>
+                <aside class="graph-map-side session-graph-side" id="system-member-graph-side" aria-label="Selected service code unit details"></aside>
+              </div>
+              <div class="graph-arrow-legend-slot session-graph-arrow-legend" id="system-member-graph-arrow-legend" hidden></div>
+              <p class="session-graph-note" id="system-member-graph-note" hidden></p>
+              <p class="error-text session-graph-error" id="system-member-graph-error" role="alert" hidden></p>
+            </div>
+          </section>
           <div class="system-cards" id="system-services"></div>
           <details class="system-details"><summary>Contracts and memory ownership</summary><div id="system-relationships"></div><p class="system-note">System Brain coordinates the change. Each service owns its tasks and Memory Bank. Local SQLite indexes are disposable. Receipts become durable knowledge only through the owning runtime’s review and promotion workflow.</p><div id="system-banks" class="system-cards"></div></details>
         </div>
       </div></div></section>
       <section class="view" id="system-changes-view" aria-label="System changes" hidden><div class="page-scroll"><div class="page-content">
         <div class="page-toolbar system-runs-bar"><label class="field">Change<select id="system-runs"><option value="">No changes yet</option></select></label><button type="button" class="button" id="system-refresh">Refresh</button><button type="button" class="button" id="system-new-change" aria-controls="system-plan-form" aria-expanded="false">New change</button></div>
+        <div class="composer-working system-working" id="system-changes-working" data-working="false" data-motion-paused="false" aria-hidden="true"><div class="composer-working-clip"><div class="composer-working-inner"><div class="composer-rabbit" aria-hidden="true"><svg class="rabbit-svg" viewBox="0 0 72 52" fill="none"><ellipse class="rabbit-shadow" cx="32" cy="48" rx="18" ry="2.2"/><g class="rabbit-body"><circle class="rabbit-fur rabbit-tail" cx="13" cy="36" r="4.5"/><ellipse class="rabbit-fur rabbit-foot" cx="25" cy="44.5" rx="7" ry="3.2"/><ellipse class="rabbit-fur" cx="26.5" cy="35.5" rx="12" ry="10.5"/><ellipse class="rabbit-fur-shade" cx="24" cy="37.5" rx="7.5" ry="6.5"/><g class="rabbit-head"><g class="rabbit-ear-back"><ellipse class="rabbit-fur" cx="30.5" cy="10.5" rx="3.5" ry="9.5" transform="rotate(-14 30.5 10.5)"/><ellipse class="rabbit-ear-inner" cx="30.8" cy="11" rx="1.7" ry="6.2" transform="rotate(-14 30.8 11)"/></g><g class="rabbit-ear-front"><ellipse class="rabbit-fur" cx="38" cy="10.5" rx="3.7" ry="10" transform="rotate(10 38 10.5)"/><ellipse class="rabbit-ear-inner" cx="38.1" cy="11" rx="1.8" ry="6.6" transform="rotate(10 38.1 11)"/></g><ellipse class="rabbit-fur" cx="36" cy="23.5" rx="9.8" ry="8.6"/><ellipse class="rabbit-cheek" cx="38.5" cy="26.5" rx="3.4" ry="2.2"/><g class="rabbit-jaw"><ellipse class="rabbit-fur rabbit-jaw-pad" cx="42.2" cy="27.8" rx="3.5" ry="2.3"/><path class="rabbit-mouth" d="M40.8 27.2 Q43 28.8 45 27.2"/></g><path class="rabbit-whisker" d="M39 24.8 L34.5 24 M39 26 L34.8 26.8"/><g class="rabbit-eye-group"><ellipse class="rabbit-eye" cx="39.8" cy="21.5" rx="1.6" ry="2.1"/><circle class="rabbit-eye-shine" cx="40.3" cy="20.7" r="0.6"/></g><ellipse class="rabbit-nose" cx="45.2" cy="24.2" rx="1.6" ry="1.15"/></g><g class="rabbit-carrot-group"><path class="carrot-leaf-dark" d="M60 28.5 C63 23.5 67 23 66 26.5 C65 28.5 62.5 29.5 60 29.5 Z"/><path class="carrot-leaf" d="M60.5 29.5 C65.5 26 70 28 67.5 31 C65.5 32.5 62.5 31.5 60.5 30 Z"/><path class="carrot-leaf-dark" d="M59.8 30.5 C64.5 31.5 68 35 64.5 36 C62 36.5 60.2 33 59.8 31 Z"/><path class="carrot-body" d="M43.8 25.4 C42.8 25.7 42.7 27.8 43.9 28.2 L59.5 33.4 C62 34 63.2 28.4 60.5 27.6 Z"/><path class="carrot-highlight" d="M46.5 26.4 L58.5 29.2"/><path class="carrot-stripe" d="M50.5 27.2 L49.9 29.5 M54.5 28.2 L53.8 31 M58 29.2 L57.2 32.2"/><ellipse class="rabbit-fur rabbit-paw" cx="39.8" cy="31.5" rx="4.4" ry="2.7" transform="rotate(-18 39.8 31.5)"/></g><circle class="carrot-crumb rabbit-crumb-a" cx="44" cy="29.5" r="1.1"/><circle class="carrot-crumb rabbit-crumb-b" cx="45.8" cy="30.5" r="0.9"/></g></svg></div><div class="composer-working-copy"><span class="composer-working-badge">Active</span><span class="composer-working-label" id="system-changes-working-text">System is working…</span><button type="button" class="button compact system-working-pause" id="system-changes-working-pause" aria-pressed="false">Pause</button><span class="composer-working-dots" aria-hidden="true"><i></i><i></i><i></i></span></div></div></div></div>
         <p class="error-text" id="system-run-error" role="alert" hidden></p><p class="skills-action-status" id="system-run-message" role="status"></p><p class="system-warning" id="system-editor-lock" role="status" hidden></p>
         <div class="system-empty" id="system-runs-empty" hidden><h3>No changes yet</h3><p class="system-note">A change starts as a plan. You review its context and impact before any agent runs.</p></div>
+        <section class="session-graph-workspace system-map-workspace system-change-map-workspace" id="system-change-map-workspace" aria-label="Blast-radius and live multi-service code map" data-motion-paused="false" data-expanded="false" hidden>
+          <div class="system-map-scope-bar">
+            <div class="session-graph-mode-group" id="system-change-map-tabs" role="group" aria-label="Change map scope">
+              <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-tab-topology" aria-pressed="true">System wave overview</button>
+            </div>
+            <div class="system-change-service-tabs" id="system-change-service-tabs" role="group" aria-label="Member service code maps"></div>
+            <button type="button" class="button compact" id="system-change-attach-context" title="Append blast-radius and topology summary into the task prompt">Attach map context</button>
+          </div>
+          <div id="system-change-topology-panel" class="system-map">
+            <header class="session-graph-toolbar">
+              <div class="session-graph-heading">
+                <h4 class="session-graph-title" id="system-change-topology-title">Blast radius &amp; wave topology</h4>
+                <span class="session-graph-summary" id="system-change-topology-summary"></span>
+              </div>
+              <div class="session-graph-controls" role="toolbar" aria-label="Change topology map controls" aria-controls="system-change-topology-canvas">
+                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-topology-unfold" aria-pressed="false">Unfold contracts &amp; sources</button>
+                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-topology-certain" aria-pressed="false">Confirmed links only</button>
+                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-topology-layers" aria-pressed="false">Layers</button>
+                <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
+                <div class="session-graph-zoom-group" role="group" aria-label="Zoom">
+                  <button type="button" class="button compact session-graph-btn" id="system-change-topology-zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
+                  <button type="button" class="button compact session-graph-btn session-graph-zoom-level" id="system-change-topology-zoom-level" title="Reset zoom level" aria-label="Reset zoom level">100%</button>
+                  <button type="button" class="button compact session-graph-btn" id="system-change-topology-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+                </div>
+                <button type="button" class="button compact session-graph-btn" id="system-change-topology-fit">Fit</button>
+                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-topology-expand" aria-expanded="false">Expand</button>
+              </div>
+            </header>
+            <div class="session-graph-subbar system-map-subbar">
+              <div class="graph-find system-map-find" id="system-change-topology-find"><input id="system-change-topology-find-search" type="search" maxlength="100" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="system-change-topology-find-list" aria-autocomplete="list" aria-label="Search services, contracts, capabilities, and symbols" placeholder="Search services, contracts, capabilities, symbols (press /)"><div class="graph-find-found" id="system-change-topology-find-found" tabindex="-1" hidden><ul class="graph-pick-list" id="system-change-topology-find-list" role="listbox" aria-label="Change topology search results" tabindex="-1"></ul><p class="knowledge-note graph-find-note" id="system-change-topology-find-note" role="status"></p></div></div>
+              <label class="session-graph-filter"><span class="sr-only">Filter visible services and contracts</span><input id="system-change-topology-filter" type="search" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Filter visible nodes…"></label>
+            </div>
+            <div class="session-graph-body system-map-body">
+              <div class="graph-map-canvas session-graph-canvas system-map-canvas" id="system-change-topology-canvas" data-panning="false" tabindex="0" role="region" aria-label="Interactive change blast-radius and wave canvas"></div>
+              <aside class="graph-map-side session-graph-side system-map-side" id="system-change-topology-side" aria-label="Selected service or contract details"></aside>
+            </div>
+            <div class="graph-arrow-legend-slot session-graph-arrow-legend" id="system-change-topology-arrow-legend" hidden></div>
+            <p class="session-graph-note" id="system-change-topology-note" hidden></p>
+            <p class="error-text session-graph-error" id="system-change-topology-error" role="alert" hidden></p>
+          </div>
+          <div id="system-change-graph-workspace" class="system-embedded-graph" data-motion-paused="false" data-expanded="false" hidden>
+            <header class="session-graph-toolbar">
+              <div class="session-graph-heading">
+                <h4 class="session-graph-title" id="system-change-graph-title">Service live code map</h4>
+                <span class="session-graph-summary" id="system-change-graph-summary"></span>
+              </div>
+              <div class="session-graph-controls" role="toolbar" aria-label="Change service code graph controls" aria-controls="system-change-graph-canvas">
+                <div class="session-graph-mode-group" role="group" aria-label="Graph view mode">
+                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-graph-mode-whole" aria-pressed="true">Whole graph</button>
+                  <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-graph-mode-changes" aria-pressed="false">Changes <span class="session-graph-badge" id="system-change-graph-changes-count" hidden>0</span></button>
+                </div>
+                <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
+                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-graph-unfold" aria-pressed="false">Unfold all</button>
+                <span class="session-graph-sep" role="separator" aria-orientation="vertical"></span>
+                <div class="session-graph-zoom-group" role="group" aria-label="Zoom">
+                  <button type="button" class="button compact session-graph-btn" id="system-change-graph-zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
+                  <button type="button" class="button compact session-graph-btn session-graph-zoom-level" id="system-change-graph-zoom-level" title="Reset zoom level" aria-label="Reset zoom level">100%</button>
+                  <button type="button" class="button compact session-graph-btn" id="system-change-graph-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+                </div>
+                <button type="button" class="button compact session-graph-btn" id="system-change-graph-fit">Fit</button>
+                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-graph-follow" aria-pressed="true">Follow focus</button>
+                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-graph-pause-motion" aria-pressed="false">Pause pulse</button>
+                <button type="button" class="button compact session-graph-btn session-graph-toggle" id="system-change-graph-expand" aria-expanded="false">Expand</button>
+                <button type="button" class="button compact session-graph-btn" id="system-change-graph-open-full">Full map</button>
+              </div>
+            </header>
+            <div class="session-graph-subbar">
+              <label class="session-graph-filter"><span class="sr-only">Filter service graph names</span><input id="system-change-graph-filter" type="search" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Filter files, folders, entities…"></label>
+              <label class="checkbox session-graph-check"><input id="system-change-graph-notests" type="checkbox">Without tests</label>
+            </div>
+            <div class="session-graph-progress" id="system-change-graph-progress" role="status" aria-live="polite" hidden>
+              <div class="session-graph-progress-head">
+                <span class="session-graph-progress-text" id="system-change-graph-progress-text">Building code graph…</span>
+                <span class="session-graph-progress-amount" id="system-change-graph-progress-amount">0%</span>
+              </div>
+              <progress class="session-graph-progress-bar" id="system-change-graph-progress-bar" max="100" aria-labelledby="system-change-graph-progress-text"></progress>
+              <p class="session-graph-progress-left" id="system-change-graph-progress-left"></p>
+            </div>
+            <div class="session-graph-focus" id="system-change-graph-focus" role="status" aria-live="polite" hidden>
+              <span class="session-graph-focus-label" id="system-change-graph-focus-label"></span>
+              <div class="session-graph-focus-entities" id="system-change-graph-focus-entities"></div>
+            </div>
+            <nav class="graph-map-crumbs session-graph-crumbs" id="system-change-graph-crumbs" aria-label="Change service graph breadcrumbs" hidden></nav>
+            <div class="session-graph-body" id="system-change-graph-body">
+              <div class="graph-map-canvas session-graph-canvas" id="system-change-graph-canvas" data-panning="false" tabindex="0" role="region" aria-label="Interactive change service code graph canvas"></div>
+              <aside class="graph-map-side session-graph-side" id="system-change-graph-side" aria-label="Selected change service code unit details"></aside>
+            </div>
+            <div class="graph-arrow-legend-slot session-graph-arrow-legend" id="system-change-graph-arrow-legend" hidden></div>
+            <p class="session-graph-note" id="system-change-graph-note" hidden></p>
+            <p class="error-text session-graph-error" id="system-change-graph-error" role="alert" hidden></p>
+          </div>
+        </section>
         <form id="system-plan-form" class="system-plan" hidden aria-labelledby="system-plan-title">
           <h3 id="system-plan-title">New change</h3>
           <label class="field">Task<textarea id="system-task" required maxlength="2000" rows="3" placeholder="Describe the change and the expected result"></textarea></label>
@@ -304,13 +497,14 @@
         <section id="system-run" class="system-run" hidden aria-labelledby="system-run-title">
           <ol class="stepper" id="system-stepper" aria-label="Change steps"></ol>
           <div class="system-run-head"><div><h3 id="system-run-title" tabindex="-1"></h3><p id="system-run-status" class="system-run-status" role="status"></p></div><div class="system-run-actions" id="system-run-actions"><button type="button" class="button" id="system-open-session" hidden>Open runner session</button><button type="button" class="button danger" id="system-cancel" hidden>Cancel run</button><button type="button" class="button quiet" id="system-replan" hidden title="Open a new plan filled from this change, to revise its task">Plan again</button><button type="button" class="button quiet" id="system-archive" hidden title="Hide this change from the list; its plan, receipts and native tasks are kept">Remove from list</button></div></div>
-          <dl id="system-plan-summary" class="system-facts"></dl>
+          <dl id="system-plan-summary" class="system-facts memory-metrics"></dl>
           <ol id="system-flow" class="system-flow" aria-label="Planned steps"></ol>
           <details class="system-details"><summary>Context, impact, warnings and source fingerprints</summary><pre id="system-plan-json" class="system-json"></pre></details>
           <div id="system-launch" class="system-launch">
             <h4>Launch</h4>
             <p class="system-warning" id="system-selection-note" hidden>No service matched this plan, so it cannot launch. Prepare a new change with starting services or changed contracts.</p>
             <div class="system-launch-grid"><label class="field">Provider<select id="system-provider"></select></label><label class="field">Mode<select id="system-mode"><option value="read-only">Read-only investigation</option><option value="edit">Edit each selected service</option></select></label><label class="field">Service agents may edit<select id="system-access"><option value="all">All selected services</option><option value="service">Own service only</option></select></label><label class="field">Timeout per agent, seconds<input id="system-timeout" type="number" min="1" max="86400" value="900"></label></div>
+            <label class="checkbox system-graph-prompt-check"><input id="system-graph-prompt" type="checkbox" checked>Tell agents about the code graphs</label>
             <p class="system-note" id="system-provider-note">Every agent shares one context: it reads the system folder and every service of this change and receives the reviewed memory of all of them and the complete reports of the agents before it. Execution uses the selected CLI with its default model, sequential workers and native tasks. Read-only runs still create Brain task records. Edit mode writes in each service’s current checkout.</p>
             <div class="system-confirm"><label class="checkbox"><input id="system-reviewed" type="checkbox">I reviewed the scope and context</label><button type="button" class="button primary" id="system-execute">Execute reviewed plan</button></div>
           </div>
@@ -444,7 +638,7 @@
   </dialog>
   <dialog class="graph-map" id="graph-map" aria-labelledby="graph-map-title">
     <div class="graph-map-head"><h2 id="graph-map-title">Dependency map</h2><div class="graph-find" id="graph-find"><input id="graph-find-search" type="search" maxlength="100" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="graph-find-list" aria-autocomplete="list" aria-label="Search the project" placeholder="Search the project: a folder, a file, a class, a function" title="Search the whole project, whatever folder is open. Press / to come here."><div class="graph-find-found" id="graph-find-found" tabindex="-1" hidden><ul class="graph-pick-list" id="graph-find-list" role="listbox" aria-label="Found in the project" tabindex="-1"></ul><p class="knowledge-note graph-find-note" id="graph-find-note" role="status"></p></div></div><button class="button" id="graph-map-close" type="button">Close</button></div>
-    <div class="graph-map-pick"><label class="graph-map-target">Show<select id="graph-map-target"><option value="">The whole project</option></select></label><button class="button compact" id="graph-pick-open" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="graph-pick">Commits and pull requests…</button><p class="knowledge-note" id="graph-map-chosen"></p>
+    <div class="graph-map-pick"><label class="graph-map-target" id="graph-map-service-field" hidden>Service<select id="graph-map-service"></select></label><label class="graph-map-target">Show<select id="graph-map-target"><option value="">The whole project</option></select></label><button class="button compact" id="graph-pick-open" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="graph-pick">Commits and pull requests…</button><p class="knowledge-note" id="graph-map-chosen"></p>
       <div class="graph-pick" id="graph-pick" role="dialog" aria-label="Choose a commit, a pull request or a branch" hidden>
         <div class="graph-pick-head"><div class="graph-pick-tabs" role="tablist" aria-label="What to choose"><button class="graph-pick-tab" id="graph-pick-tab-commits" type="button" role="tab" aria-selected="true" aria-controls="graph-pick-list">Commits</button><button class="graph-pick-tab" id="graph-pick-tab-pulls" type="button" role="tab" aria-selected="false" aria-controls="graph-pick-list">Pull requests</button><button class="graph-pick-tab" id="graph-pick-tab-branches" type="button" role="tab" aria-selected="false" aria-controls="graph-pick-list">Branches</button></div><button class="button compact" id="graph-pick-close" type="button">Cancel</button></div>
         <div class="graph-pick-bar"><input id="graph-pick-search" type="search" maxlength="200" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="graph-pick-list" aria-autocomplete="list" aria-label="Search"><select id="graph-pick-scope" aria-label="History of"></select><select id="graph-pick-state" aria-label="State of the pull requests" hidden><option value="open">Open</option><option value="merged">Merged</option><option value="closed">Closed</option><option value="all">All</option></select></div>
@@ -453,6 +647,7 @@
       </div>
     </div>
     <div class="graph-map-pick" id="graph-map-launches" hidden>
+      <label class="graph-map-target" id="graph-map-agent-field" hidden>Agent<select id="graph-map-agent"></select></label>
       <label class="graph-map-target">Map launch<select id="graph-map-launch"></select></label>
       <label class="graph-map-target">Compare with<select id="graph-map-compare-launch"></select></label>
     </div>

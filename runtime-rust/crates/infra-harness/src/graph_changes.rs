@@ -47,6 +47,8 @@ pub enum Target {
     Commit(String),
     /// What a run of an agent changed, as its session recorded it.
     Run(String),
+    /// What a multi-service system change run changed, as its execution evidence recorded it.
+    SysRun(String),
 }
 impl Target {
     pub fn parse(text: &str) -> Result<Self> {
@@ -86,6 +88,18 @@ impl Target {
             .then(|| Self::Run(session.to_owned()))
             .ok_or_else(invalid);
         }
+        if let Some(run_id) = text
+            .strip_prefix("sysrun:")
+            .or_else(|| text.strip_prefix("system-run:"))
+        {
+            return (!run_id.is_empty()
+                && run_id.len() <= 64
+                && run_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'))
+            .then(|| Self::SysRun(run_id.to_owned()))
+            .ok_or_else(invalid);
+        }
         let name = text.strip_prefix("ref:").ok_or_else(invalid)?;
         if name.is_empty()
             || name.len() > 200
@@ -106,6 +120,7 @@ impl Target {
             Self::Named(name) => format!("ref:{name}"),
             Self::Commit(hash) => format!("commit:{hash}"),
             Self::Run(session) => format!("run:{session}"),
+            Self::SysRun(run_id) => format!("sysrun:{run_id}"),
         }
     }
 }
@@ -820,7 +835,7 @@ pub fn resolve(root: &Path, target: &Target, pulls: &[Pull]) -> Result<Resolved>
         Target::Commit(hash) => single(root, prefix, hash),
         Target::Pull(number) => pull(root, prefix, *number),
         // Git knows nothing of a run: its session does.
-        Target::Run(_) => Err(HarnessError::invalid(
+        Target::Run(_) | Target::SysRun(_) => Err(HarnessError::invalid(
             "A run is read from its session, not from Git.",
         )),
     }
@@ -1071,7 +1086,7 @@ pub(crate) fn history(root: &Path, revision: &str) -> Result<History> {
 /// that begins a commit's hash puts that commit first. The flag says whether
 /// more follow.
 pub fn log(root: &Path, scope: &str, query: &str, skip: usize) -> Result<(Vec<Value>, bool)> {
-    checkout(root)?;
+    let prefix = checkout(root)?;
     let count = format!("--max-count={}", PAGE + 1);
     let skipped = format!("--skip={skip}");
     let wanted = format!("--grep={query}");
@@ -1095,6 +1110,9 @@ pub fn log(root: &Path, scope: &str, query: &str, skip: usize) -> Result<(Vec<Va
         }
     }
     arguments.push("--");
+    if !prefix.is_empty() {
+        arguments.push(".");
+    }
     let remotes = line(root, &["remote"])?.unwrap_or_default();
     let remotes = remotes
         .lines()
@@ -1111,14 +1129,15 @@ pub fn log(root: &Path, scope: &str, query: &str, skip: usize) -> Result<(Vec<Va
         && (4..=64).contains(&query.len())
         && query.bytes().all(|byte| byte.is_ascii_hexdigit())
         && let Some(found) = commit(root, query)?
-        && let Some(bytes) = raw(
-            root,
-            &["log", "--no-color", "-z", "-1", LOGGED, &found, "--"],
-            QUERY,
-        )?
     {
-        commits.retain(|row| row["commit"].as_str() != Some(found.as_str()));
-        commits.splice(0..0, logged(&bytes, &remotes));
+        let mut single_args = vec!["log", "--no-color", "-z", "-1", LOGGED, &found, "--"];
+        if !prefix.is_empty() {
+            single_args.push(".");
+        }
+        if let Some(bytes) = raw(root, &single_args, QUERY)? {
+            commits.retain(|row| row["commit"].as_str() != Some(found.as_str()));
+            commits.splice(0..0, logged(&bytes, &remotes));
+        }
     }
     Ok((commits, more))
 }
