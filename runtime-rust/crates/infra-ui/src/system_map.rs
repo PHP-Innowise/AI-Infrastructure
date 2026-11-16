@@ -1336,6 +1336,94 @@ pub fn compute_blast_radius(
     result
 }
 
+/// The waves of the change a picture shows, as its overlay asks for them.
+fn blast_of(doc: &V, state: &V) -> BlastRadius {
+    let overlay = &state["overlay"];
+    let texts = |key: &str| {
+        m::array(&overlay[key])
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    compute_blast_radius(
+        doc,
+        &texts("seed_services"),
+        &texts("changed_contracts"),
+        overlay["depth"].as_u64().unwrap_or(32) as usize,
+    )
+}
+/// How many waves a change takes to reach every service it reaches.
+fn last_wave(blast: &BlastRadius) -> usize {
+    blast.wave_by_service.values().copied().max().unwrap_or(0)
+}
+/// Steps through the waves of a change: all of them, or the change as far
+/// as one wave, the services a later wave reaches left faint; and a button
+/// that plays them one after another. Nothing where the change reaches no
+/// service past what it starts in.
+pub fn wave_scrubber_html(surface: SysMapSurface, blast: &BlastRadius, state: &V) -> String {
+    let last = last_wave(blast);
+    if last == 0 {
+        return String::new();
+    }
+    let shown = state["wave"].as_u64().map(|wave| wave as usize);
+    let count = |wave: usize| {
+        blast
+            .wave_by_service
+            .values()
+            .filter(|reached| **reached == wave)
+            .count()
+    };
+    let mut html = String::from("<div class=\"system-waves\" role=\"group\" aria-label=\"Waves of the change\"><span class=\"graph-arrow-legend-title\">Waves:</span>");
+    html.push_str(&format!(
+        "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"system-map-wave\" data-payload=\"{}\" aria-pressed=\"{}\" title=\"Every service the change reaches\">All</button>",
+        payload_attr(&json!({"surface": surface.id, "wave": null})),
+        shown.is_none(),
+    ));
+    for wave in 0..=last {
+        let told = match wave {
+            0 => format!("Where the change starts: {}", plural_services(count(0))),
+            wave => format!(
+                "As far as wave {wave}: {} more",
+                plural_services(count(wave))
+            ),
+        };
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"system-map-wave\" data-payload=\"{}\" aria-pressed=\"{}\" title=\"{}\">{wave}</button>",
+            payload_attr(&json!({"surface": surface.id, "wave": wave})),
+            shown == Some(wave),
+            escape(&told),
+        ));
+    }
+    html.push_str(&format!(
+        "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"system-map-wave-play\" data-payload=\"{}\" title=\"Show the waves one after another\">▶ Play</button></div>",
+        payload_attr(&json!({"surface": surface.id})),
+    ));
+    html
+}
+fn plural_services(count: usize) -> String {
+    if count == 1 {
+        "1 service".to_owned()
+    } else {
+        format!("{count} services")
+    }
+}
+/// Shows the change as far as one wave, then the next, until the last.
+fn play_wave(surface: SysMapSurface, wave: usize) {
+    let mut state = surface_state(surface);
+    let last = last_wave(&blast_of(&m::data(surface.map_key), &state));
+    state["wave"] = json!(wave.min(last));
+    save_surface_state(surface, &state);
+    render_surface(surface, false);
+    if wave < last {
+        dom::later(
+            &format!("{}-wave-play", surface.id_prefix),
+            900,
+            move || {
+                play_wave(surface, wave + 1);
+            },
+        );
+    }
+}
 /// Detects cross-service dependency cycles using Tarjan's strongly connected components algorithm.
 pub fn find_cross_service_cycles(doc: &V) -> Vec<Vec<String>> {
     let mut service_ids = Vec::new();
@@ -2212,6 +2300,17 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         .collect();
     let depth = overlay["depth"].as_u64().unwrap_or(32) as usize;
     let blast = compute_blast_radius(&view_doc, &seeds, &changed_contracts, depth);
+    // The wave the change is shown as far as: a service a later wave
+    // reaches is not reached yet.
+    let shown_wave = state["wave"].as_u64().map(|wave| wave as usize);
+    let beyond = |service: &str| {
+        shown_wave.is_some_and(|shown| {
+            blast
+                .wave_by_service
+                .get(service)
+                .is_some_and(|wave| *wave > shown)
+        })
+    };
 
     let step_states = &overlay["step_states"];
     let unopened_consumers: BTreeSet<String> = m::array(&overlay["cross_service_unopened"])
@@ -2320,7 +2419,7 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         .unwrap_or_default();
 
     let mut html = format!(
-        "<div class=\"graph-map-plane system-map-plane\" data-surface=\"{}\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>{}</defs>",
+        "<div class=\"graph-map-plane system-map-plane\" data-surface=\"{}\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" role=\"group\" aria-label=\"Links between services\"><defs>{}</defs>",
         surface.id,
         layout.width,
         layout.height,
@@ -2398,6 +2497,12 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         } else {
             String::new()
         };
+        // A link the change has not passed yet, at the wave shown.
+        let dash_attr = if beyond(&from) {
+            format!("{dash_attr} data-beyond=\"true\"")
+        } else {
+            dash_attr
+        };
 
         let marker_id = if against {
             format!("{}-arrow-against", surface.id_prefix)
@@ -2438,7 +2543,7 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
 
         if !m::yes(&edge["child_link"]) {
             html.push_str(&format!(
-                "<g class=\"graph-map-edge-tie system-map-edge-label\" data-from=\"{}\" data-to=\"{}\"{}><rect x=\"{:.1}\" y=\"{:.1}\" width=\"54\" height=\"16\" rx=\"8\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
+                "<g class=\"graph-map-edge-tie system-map-edge-label\" aria-hidden=\"true\" data-from=\"{}\" data-to=\"{}\"{}><rect x=\"{:.1}\" y=\"{:.1}\" width=\"54\" height=\"16\" rx=\"8\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
                 escape(&from),
                 escape(&to),
                 if is_selected || is_highlighted { " data-edge-state=\"on\"" } else { "" },
@@ -2500,7 +2605,10 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         let is_selected = focus_id == placed.id;
         let is_highlighted = highlight_nodes.contains(&placed.id);
 
-        let blast_role = if blast.seeds.contains(&placed.id) {
+        let waiting = beyond(&placed.id);
+        let blast_role = if waiting {
+            ""
+        } else if blast.seeds.contains(&placed.id) {
             "seed"
         } else if blast.direct_consumers.contains(&placed.id) {
             "direct"
@@ -2611,7 +2719,13 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
             escape(&step_state),
             if unopened_warn { "true" } else { "false" },
             escape(&graph_state),
-            if is_highlighted { " data-shared-path=\"true\"" } else { "" },
+            if is_highlighted {
+                " data-shared-path=\"true\""
+            } else if waiting {
+                " data-beyond=\"true\""
+            } else {
+                ""
+            },
             placed.x,
             placed.y,
             placed.w,
@@ -2935,6 +3049,135 @@ fn render_node_details_html(surface: SysMapSurface, doc: &V, state: &V, node: &V
     html
 }
 
+/// Where the code on both sides of the selected link is kept for a picture.
+fn bridge_key(surface: SysMapSurface) -> String {
+    format!("{}-bridge", surface.id_prefix)
+}
+/// The code on both sides of a link between two services: the files of the
+/// consumer that name what it uses, the files of the provider that make it,
+/// and how far a change of each reaches inside its own service. Asked for
+/// on demand: until then, a button.
+pub fn bridge_html(surface: SysMapSurface, from: &str, to: &str, bridge: &V) -> String {
+    let mut html = String::from("<h5 class=\"system-side-subheading\">Code on both sides</h5>");
+    if bridge["from"].as_str() != Some(from) || bridge["to"].as_str() != Some(to) {
+        let asked = payload_attr(&json!({"from": from, "surface": surface.id, "to": to}));
+        html.push_str(&format!(
+            "<p class=\"system-note\">The files of {} that name what it uses of {}, and those of {} that make it.</p><div class=\"system-side-actions\"><button type=\"button\" class=\"button compact\" data-action=\"system-map-bridge\" data-payload=\"{asked}\">Show the code</button></div>",
+            escape(from),
+            escape(to),
+            escape(to),
+        ));
+        return html;
+    }
+    for (side, role, none) in [
+        ("consumer", "uses it", "No file was found to name it."),
+        (
+            "provider",
+            "makes it",
+            "Its passport names no file, and none was found to name it.",
+        ),
+    ] {
+        let part = &bridge[side];
+        let service = m::text(part, "service");
+        let sites = m::array(&part["sites"]);
+        html.push_str(&format!(
+            "<p class=\"system-note\"><strong>{}</strong> {role}{}</p>",
+            escape(&service),
+            if m::yes(&part["graph"]) {
+                ""
+            } else {
+                " · no code graph yet: how far each file reaches is not told"
+            },
+        ));
+        if sites.is_empty() {
+            html.push_str(&format!("<p class=\"system-note\">{none}</p>"));
+            continue;
+        }
+        html.push_str("<ul class=\"system-side-list system-bridge-sites\">");
+        for site in &sites {
+            let path = m::text(site, "path");
+            let how = match (
+                side == "provider" && m::yes(&site["declared"]),
+                m::yes(&site["found"]),
+                m::yes(&site["document"]),
+            ) {
+                (true, true, _) => "made here by its passport, and names it",
+                (true, false, _) => "made here by its passport",
+                (false, _, true) => "a document that names it",
+                _ => "names it",
+            };
+            let reach = match site["reach"]["files"].as_u64() {
+                Some(0) => " · nothing else in it uses this file".to_owned(),
+                Some(files) => format!(
+                    " · a change reaches {} of {}",
+                    if files == 1 {
+                        "1 file".to_owned()
+                    } else {
+                        format!("{files} files")
+                    },
+                    escape(&service)
+                ),
+                None => String::new(),
+            };
+            let open = payload_attr(&json!({"path": path, "service": service}));
+            html.push_str(&format!(
+                "<li class=\"system-bridge-site\"><div><code>{}</code><div class=\"system-note\">{how}{}{reach}</div></div><button type=\"button\" class=\"button compact\" data-action=\"inspect-system-file-graph\" data-payload=\"{open}\" aria-label=\"Show {} on the code map of {}\">Map</button></li>",
+                escape(&path),
+                {
+                    let named = m::array(&site["contracts"])
+                        .iter()
+                        .filter_map(|c| c.as_str().map(escape))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if named.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {named}")
+                    }
+                },
+                escape(&path),
+                escape(&service),
+            ));
+        }
+        html.push_str("</ul>");
+        let more = part["more"].as_u64().unwrap_or(0);
+        if more > 0 {
+            html.push_str(&format!("<p class=\"system-note\">and {more} more</p>"));
+        }
+        if m::yes(&part["cut"]) {
+            html.push_str(
+                "<p class=\"system-note\">Not every file of it was read: there may be more.</p>",
+            );
+        }
+    }
+    html
+}
+/// Asks for the code on both sides of a link and draws it beside the map.
+async fn fetch_bridge(surface: SysMapSurface, from: String, to: String) {
+    let state = surface_state(surface);
+    let project_id = m::text(&state, "project_id");
+    if project_id.is_empty() {
+        return;
+    }
+    let q = dom::query(&[
+        ("project_id", project_id),
+        ("config_path", m::text(&state, "config_path")),
+        ("from", from),
+        ("to", to),
+        (
+            "certain",
+            if m::yes(&state["certain"]) {
+                "1".to_owned()
+            } else {
+                String::new()
+            },
+        ),
+    ]);
+    if let Ok(doc) = api::get(&format!("/api/systems/graph/bridge{q}")).await {
+        m::set(&bridge_key(surface), doc);
+        render_surface(surface, false);
+    }
+}
 fn render_edge_details_html(surface: SysMapSurface, doc: &V, edge: &V) -> String {
     let from = m::text(edge, "from");
     let to = m::text(edge, "to");
@@ -3028,6 +3271,13 @@ fn render_edge_details_html(surface: SysMapSurface, doc: &V, edge: &V) -> String
         }
         html.push_str("</ul>");
     }
+
+    html.push_str(&bridge_html(
+        surface,
+        &from_svc,
+        &to_svc,
+        &m::data(&bridge_key(surface)),
+    ));
 
     let open_from = payload_attr(&json!({ "surface": surface.id, "service": from_svc }));
     let open_to = payload_attr(&json!({ "surface": surface.id, "service": to_svc }));
@@ -3547,7 +3797,14 @@ fn render_surface(surface: SysMapSurface, refit: bool) {
 
     let (canvas_html, pw, ph) = render_canvas_html(surface, &doc, &state);
     set_html(surface.canvas_id, &canvas_html);
-    set_html(surface.legend_id, &contract_arrow_legend_html());
+    set_html(
+        surface.legend_id,
+        &format!(
+            "{}{}",
+            wave_scrubber_html(surface, &blast_of(&doc, &state), &state),
+            contract_arrow_legend_html()
+        ),
+    );
     dom::hidden(surface.legend_id, canvas_html.is_empty());
 
     let svcs = m::array(&doc["nodes"])
@@ -4509,6 +4766,29 @@ pub fn event(kind: &str, id: &str, action: &str, payload: &V, element: &web_sys:
             });
             true
         }
+        "system-map-wave" => {
+            dom::cancel_timer(&format!("{}-wave-play", surface.id_prefix));
+            let mut state = surface_state(surface);
+            state["wave"] = match payload["wave"].as_u64() {
+                Some(wave) => json!(wave),
+                None => V::Null,
+            };
+            save_surface_state(surface, &state);
+            render_surface(surface, false);
+            true
+        }
+        "system-map-wave-play" => {
+            dom::cancel_timer(&format!("{}-wave-play", surface.id_prefix));
+            play_wave(surface, 0);
+            true
+        }
+        "system-map-bridge" => {
+            let (from, to) = (m::text(payload, "from"), m::text(payload, "to"));
+            spawn_local(async move {
+                fetch_bridge(surface, from, to).await;
+            });
+            true
+        }
         "system-map-contract-impact" => {
             let svc = m::text(payload, "service");
             let contract = m::text(payload, "contract");
@@ -5057,5 +5337,127 @@ mod tests {
         assert!(html.contains("Impact for orders-api"));
         assert!(html.contains("gateway (orders-api) src/OrdersClient.ts"));
         assert!(html.contains("src/OrderController.php"));
+    }
+
+    #[test]
+    fn a_link_between_services_shows_the_code_on_both_sides_when_asked() {
+        // Not asked yet, or asked for another link: a button.
+        let html = bridge_html(SERVICES_SURFACE, "web", "orders", &V::Null);
+        assert!(html.contains("<h5 class=\"system-side-subheading\">Code on both sides</h5>"));
+        assert!(html.contains("data-action=\"system-map-bridge\""), "{html}");
+        assert!(
+            html.contains("&quot;from&quot;:&quot;web&quot;")
+                && html.contains("&quot;to&quot;:&quot;orders&quot;")
+        );
+        let bridge = json!({
+            "kind": "system_bridge", "from": "web", "to": "orders",
+            "contracts": ["orders-http-v1"],
+            "consumer": {"service": "web", "graph": false, "more": 0, "sites": [
+                {"path": "src/OrdersClient.ts", "contracts": ["orders-http-v1"], "in_graph": false, "reach": null}
+            ]},
+            "provider": {"service": "orders", "graph": true, "more": 2, "cut": true, "sites": [
+                {"path": "src/OrderController.php", "contracts": ["orders-http-v1"], "declared": true, "found": false, "in_graph": true, "reach": {"files": 3, "tests": 1}},
+                {"path": "src/routes.php", "contracts": ["orders-http-v1"], "declared": false, "found": true, "in_graph": true, "reach": {"files": 0, "tests": 0}}
+            ]}
+        });
+        assert!(bridge_html(SERVICES_SURFACE, "billing", "orders", &bridge)
+            .contains("system-map-bridge"));
+        let html = bridge_html(SERVICES_SURFACE, "web", "orders", &bridge);
+        assert!(!html.contains("system-map-bridge"));
+        assert!(html.contains("<p class=\"system-note\"><strong>web</strong> uses it · no code graph yet: how far each file reaches is not told</p>"), "{html}");
+        assert!(html.contains("<p class=\"system-note\"><strong>orders</strong> makes it</p>"));
+        assert!(html.contains("<code>src/OrdersClient.ts</code><div class=\"system-note\">names it: orders-http-v1</div>"));
+        assert!(html.contains("<code>src/OrderController.php</code><div class=\"system-note\">made here by its passport: orders-http-v1 · a change reaches 3 files of orders</div>"));
+        assert!(html.contains("<code>src/routes.php</code><div class=\"system-note\">names it: orders-http-v1 · nothing else in it uses this file</div>"));
+        // A document that names the contract says it is one.
+        let mut documented = bridge.clone();
+        documented["consumer"]["sites"][0]["path"] = json!("README.md");
+        documented["consumer"]["sites"][0]["document"] = json!(true);
+        assert!(bridge_html(SERVICES_SURFACE, "web", "orders", &documented)
+            .contains("<code>README.md</code><div class=\"system-note\">a document that names it: orders-http-v1</div>"));
+        // Each file opens on the code map of its service.
+        assert!(html.contains("data-action=\"inspect-system-file-graph\" data-payload=\"{&quot;path&quot;:&quot;src/OrderController.php&quot;,&quot;service&quot;:&quot;orders&quot;}\""), "{html}");
+        assert_eq!(html.matches("inspect-system-file-graph").count(), 3);
+        assert!(html.contains("<p class=\"system-note\">and 2 more</p>"));
+        assert!(html.contains("Not every file of it was read: there may be more."));
+        // A side with nothing to show says so.
+        let mut empty = bridge.clone();
+        empty["consumer"]["sites"] = json!([]);
+        assert!(bridge_html(SERVICES_SURFACE, "web", "orders", &empty)
+            .contains("No file was found to name it."));
+    }
+
+    #[test]
+    fn the_waves_of_a_change_are_stepped_through_and_what_is_not_reached_yet_waits() {
+        let doc = synthesize_map_from_catalog(&sample_catalog(), &json!({}));
+        let mut state = default_surface_state();
+        state["overlay"] =
+            json!({"seed_services": ["payments"], "depth": 32, "changed_contracts": []});
+        // payments is where it starts, orders is wave 1, gateway and
+        // inventory are wave 2.
+        let blast = blast_of(&doc, &state);
+        assert_eq!(last_wave(&blast), 2);
+        let row = wave_scrubber_html(CHANGES_SURFACE, &blast, &state);
+        assert!(row.starts_with("<div class=\"system-waves\" role=\"group\" aria-label=\"Waves of the change\"><span class=\"graph-arrow-legend-title\">Waves:</span>"));
+        assert!(
+            row.contains(
+                "aria-pressed=\"true\" title=\"Every service the change reaches\">All</button>"
+            ),
+            "{row}"
+        );
+        assert!(row.contains("title=\"Where the change starts: 1 service\">0</button>"));
+        assert!(
+            row.contains("title=\"As far as wave 1: 1 service more\">1</button>"),
+            "{row}"
+        );
+        assert!(row.contains("title=\"As far as wave 2: 2 services more\">2</button>"));
+        assert!(row.contains("data-action=\"system-map-wave-play\""));
+        // As far as wave 1: gateway and inventory wait, faint, and so do
+        // the links from them; orders is reached.
+        state["wave"] = json!(1);
+        let row = wave_scrubber_html(CHANGES_SURFACE, &blast, &state);
+        assert!(row.contains(
+            "aria-pressed=\"true\" title=\"As far as wave 1: 1 service more\">1</button>"
+        ));
+        assert!(row.contains(
+            "aria-pressed=\"false\" title=\"Every service the change reaches\">All</button>"
+        ));
+        let (html, _, _) = render_canvas_html(CHANGES_SURFACE, &doc, &state);
+        let waiting = |id: &str| {
+            let at = html
+                .find(&format!("data-n=\"{id}\""))
+                .unwrap_or_else(|| panic!("{id} in {html}"));
+            let tag = &html[at..at + html[at..].find('>').unwrap()];
+            tag.contains("data-beyond=\"true\"")
+        };
+        assert!(waiting("gateway") && waiting("inventory"));
+        assert!(!waiting("orders") && !waiting("payments"));
+        // The links the change has not passed yet wait as well: those
+        // from the services of wave 2.
+        let links = html
+            .split("<path class=\"graph-map-edge system-map-edge")
+            .skip(1)
+            .map(|tag| &tag[..tag.find('>').unwrap()])
+            .collect::<Vec<_>>();
+        let link_waits = |from: &str, to: &str| {
+            links
+                .iter()
+                .find(|tag| tag.contains(&format!("data-from=\"{from}\" data-to=\"{to}\"")))
+                .unwrap_or_else(|| panic!("{from} -> {to} in {html}"))
+                .contains("data-beyond=\"true\"")
+        };
+        assert!(link_waits("gateway", "orders"));
+        assert!(!link_waits("orders", "payments"));
+        // All of it again: nothing waits.
+        state["wave"] = V::Null;
+        let (html, _, _) = render_canvas_html(CHANGES_SURFACE, &doc, &state);
+        assert!(!html.contains("data-beyond"));
+        // A change that reaches nothing past where it starts has no waves.
+        state["overlay"] =
+            json!({"seed_services": ["gateway"], "depth": 32, "changed_contracts": []});
+        assert_eq!(
+            wave_scrubber_html(CHANGES_SURFACE, &blast_of(&doc, &state), &state),
+            ""
+        );
     }
 }

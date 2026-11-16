@@ -65,6 +65,20 @@ pub fn start() -> Result<(), JsValue> {
             if k == "click" && graph_explanation::click(&target) {
                 return;
             }
+            // The keys held with a click, for what reads them: Alt on a
+            // kind of link shows that kind alone.
+            if k == "click" {
+                if let Some(mouse) = event.dyn_ref::<web_sys::MouseEvent>() {
+                    model::set(
+                        "pointer-mods",
+                        serde_json::json!({
+                            "alt": mouse.alt_key(),
+                            "shift": mouse.shift_key(),
+                            "ctrl": mouse.ctrl_key() || mouse.meta_key(),
+                        }),
+                    );
+                }
+            }
             if k == "keyup" {
                 if target.id() == "prompt" {
                     spawn_local(async {

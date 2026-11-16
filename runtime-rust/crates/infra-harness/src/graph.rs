@@ -1223,6 +1223,12 @@ pub struct Shown<'a> {
     /// Two places to find the shortest ways between, instead of a folder:
     /// the one they lead from and the one they lead to.
     pub path: Option<(&'a str, &'a str)>,
+    /// With a path, by how many links a way may be longer than the
+    /// shortest and still be drawn: the ways round, besides the shortest.
+    pub longer: usize,
+    /// With a change, the tests that fail, as a person named them: the
+    /// changed files are ranked by how likely each is behind them.
+    pub failing: &'a [String],
     /// A place to find the shortest directed cycle through.
     pub cycle: Option<&'a str>,
     /// The selected PR's base identifier for a cycle or link inspection.
@@ -1419,6 +1425,13 @@ impl Graphs {
         }
         Err(HarnessError::missing("Project not found."))
     }
+    /// What tells one published graph of a project from the next, without
+    /// reading it: the size of its file and when it was written. None while
+    /// no graph is published.
+    pub fn live_stamp(&self, project: &str) -> Option<(u64, std::time::SystemTime)> {
+        let meta = std::fs::metadata(live(&self.store.state, project)).ok()?;
+        Some((meta.len(), meta.modified().ok()?))
+    }
     pub fn live_index(&self, project: &str) -> Option<Arc<crate::graph_map::Index>> {
         let graph = live(&self.store.state, project);
         if !graph.is_file() {
@@ -1543,6 +1556,8 @@ impl Graphs {
             spread,
             link,
             path,
+            longer,
+            failing,
             cycle,
             shared,
             base,
@@ -1632,7 +1647,8 @@ impl Graphs {
             // before a followed place; a place the graph does not know
             // leaves what else was asked.
             if let Some((from, to)) = path
-                && let Some(view) = index.path(name, from, to, changed, edited, focus, certain)
+                && let Some(view) =
+                    index.path_with(name, from, to, changed, edited, focus, certain, longer)
             {
                 return Some(view);
             }
@@ -1732,6 +1748,14 @@ impl Graphs {
                 index.view_with_whole(name, scope, spread, focus, certain, filter, whole)
             });
             marked(&index, &mut view, &rules);
+            // The sources of the checkout say what the graph does not:
+            // which state a file reads of another, and which it writes.
+            index.mark_access(&mut view);
+            // Which of the places drawn are part of a circle of files,
+            // wherever the rest of the circle lies.
+            index.mark_circles(&mut view);
+            // What a change to the selected place reaches, a few links on.
+            index.mark_blast(&mut view);
             mark_history(&index, &mut view, None);
             mark_incoming(&index, &mut view);
             view["project_id"] = json!(project);
@@ -1912,10 +1936,24 @@ impl Graphs {
                     }
                 };
                 marked(&index, &mut view, &rules);
+                // Reads and writes are told from the sources, by line: on
+                // the checkout's own graph while it is of the same lines.
+                // The files kept beside the graph of a commit are no
+                // sources to read.
+                if own && !stale {
+                    index.mark_access(&mut view);
+                }
+                index.mark_circles(&mut view);
+                index.mark_blast(&mut view);
                 mark_history(&index, &mut view, resolved.revision.as_deref());
                 mark_incoming(&index, &mut view);
                 if !notests && !stale {
                     index.tests_reaching_changes(&mut view, &changed, scope, certain);
+                }
+                // The tests are looked for in the whole graph, also where
+                // the picture leaves them out.
+                if !failing.is_empty() {
+                    raw.suspects(&mut view, &changed, failing, certain);
                 }
                 // What a run opened is laid over whatever picture of its
                 // change is drawn.
@@ -3875,6 +3913,34 @@ impl Domain for Graphs {
                     if !ends.is_empty() && ends.len() != 2 {
                         return Err(HarnessError::invalid("Invalid code graph path."));
                     }
+                    // A change may be told which tests fail: as many as a
+                    // picture takes, each a name, a path or a line of the
+                    // output of a test run.
+                    let mut failing = places(
+                        query["failing"].as_str().unwrap_or(""),
+                        "Too many failing tests are named here.",
+                        "Invalid failing tests.",
+                    )?;
+                    if failing.iter().any(|told| {
+                        told.chars()
+                            .any(|letter| letter.is_control() && letter != '\t')
+                    }) {
+                        return Err(HarnessError::invalid("Invalid failing tests."));
+                    }
+                    failing.truncate(crate::graph_map::FAILING);
+                    // A path may ask for the ways that are longer than its
+                    // shortest by a few links; nothing else may.
+                    let longer = match query["longer"].as_str() {
+                        None | Some("") => 0,
+                        Some(text) if !ends.is_empty() => text
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|longer| *longer <= crate::graph_map::LONGER)
+                            .ok_or_else(|| HarnessError::invalid("Invalid code graph path."))?,
+                        Some(_) => {
+                            return Err(HarnessError::invalid("Invalid code graph path."));
+                        }
+                    };
                     // And what two places share: a list of the two, asked
                     // for instead of the path between them.
                     let sharing = places(
@@ -3972,6 +4038,8 @@ impl Domain for Graphs {
                                     [from, to] => Some((from.as_str(), to.as_str())),
                                     _ => None,
                                 },
+                                longer,
+                                failing: &failing,
                                 cycle: (!cycle.is_empty()).then_some(cycle.as_str()),
                                 base: (!base.is_empty()).then_some(base.as_str()),
                                 shared: match sharing.as_slice() {

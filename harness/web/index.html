@@ -217,6 +217,7 @@
             <nav class="graph-map-crumbs session-graph-crumbs" id="session-graph-crumbs" aria-label="Graph breadcrumbs" hidden></nav>
             <div class="session-graph-body">
               <div class="graph-map-canvas session-graph-canvas" id="session-graph-canvas" data-panning="false" tabindex="0" role="region" aria-label="Interactive code graph canvas"></div>
+              <div class="graph-map-radar" id="session-graph-canvas-radar" aria-hidden="true" hidden></div>
               <aside class="graph-map-side session-graph-side" id="session-graph-side" aria-label="Selected code unit details"></aside>
             </div>
             <div class="graph-arrow-legend-slot session-graph-arrow-legend" id="session-graph-arrow-legend" hidden></div>
@@ -379,6 +380,7 @@
               <nav class="graph-map-crumbs session-graph-crumbs" id="system-member-graph-crumbs" aria-label="Service graph breadcrumbs" hidden></nav>
               <div class="session-graph-body" id="system-member-graph-body">
                 <div class="graph-map-canvas session-graph-canvas" id="system-member-graph-canvas" data-panning="false" tabindex="0" role="region" aria-label="Interactive service code graph canvas"></div>
+                <div class="graph-map-radar" id="system-member-graph-canvas-radar" aria-hidden="true" hidden></div>
                 <aside class="graph-map-side session-graph-side" id="system-member-graph-side" aria-label="Selected service code unit details"></aside>
               </div>
               <div class="graph-arrow-legend-slot session-graph-arrow-legend" id="system-member-graph-arrow-legend" hidden></div>
@@ -480,6 +482,7 @@
             <nav class="graph-map-crumbs session-graph-crumbs" id="system-change-graph-crumbs" aria-label="Change service graph breadcrumbs" hidden></nav>
             <div class="session-graph-body" id="system-change-graph-body">
               <div class="graph-map-canvas session-graph-canvas" id="system-change-graph-canvas" data-panning="false" tabindex="0" role="region" aria-label="Interactive change service code graph canvas"></div>
+              <div class="graph-map-radar" id="system-change-graph-canvas-radar" aria-hidden="true" hidden></div>
               <aside class="graph-map-side session-graph-side" id="system-change-graph-side" aria-label="Selected change service code unit details"></aside>
             </div>
             <div class="graph-arrow-legend-slot session-graph-arrow-legend" id="system-change-graph-arrow-legend" hidden></div>
@@ -656,8 +659,8 @@
     <div class="graph-map-bar"><p class="knowledge-note" id="graph-map-summary" role="status" tabindex="-1"></p><label class="checkbox"><input id="graph-map-certain" type="checkbox">Only links read from the code</label><label class="checkbox"><input id="graph-map-notests" type="checkbox">Without tests</label><label class="checkbox"><input id="graph-map-patterns" type="checkbox">Patterns</label><label class="checkbox"><input id="graph-map-history" type="checkbox">Git history</label><label class="checkbox"><input id="graph-map-modules" type="checkbox">Modules</label><label class="checkbox"><input id="graph-map-no-incoming" type="checkbox">No incoming links</label><label class="checkbox"><input id="graph-map-fit" type="checkbox">Fit to window</label><div class="session-graph-zoom-group" role="group" aria-label="Zoom"><button type="button" class="button compact session-graph-btn" id="graph-map-zoom-out" title="Zoom out" aria-label="Zoom out">-</button><button type="button" class="button compact session-graph-btn session-graph-zoom-level" id="graph-map-zoom-level" title="Reset zoom to 100%" aria-label="Reset zoom level">100%</button><button type="button" class="button compact session-graph-btn" id="graph-map-zoom-in" title="Zoom in" aria-label="Zoom in">+</button></div><label class="checkbox"><input id="graph-map-whole" type="checkbox">Unfold all</label><label class="graph-map-filter">Filter names<input id="graph-map-filter" type="search" maxlength="100" autocomplete="off" spellcheck="false"></label></div>
     <p class="knowledge-note" id="graph-map-note" role="status"></p>
     <p class="error-text" id="graph-map-error" role="alert" hidden></p>
-    <div class="graph-map-body"><div class="graph-map-canvas" id="graph-map-canvas" aria-busy="false"></div><aside class="graph-map-side" id="graph-map-side" aria-label="Selected place"></aside></div>
-    <p class="graph-map-legend" id="graph-map-legend">An arrow runs from what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span> to what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, and a box is tinted by which it does more here. Solid: read from the code. Dashed: guessed by name. Thicker: more links. Dotted: against the main direction, closing a cycle (↻). Diff: <span class="graph-map-key graph-map-key-diff-added" aria-hidden="true"></span> + Added, <span class="graph-map-key graph-map-key-diff-removed" aria-hidden="true"></span> - Removed, = Kept. Members: P property · M method · K const · pub/prot/priv/pkg.</p>
+    <div class="graph-map-body"><div class="graph-map-canvas" id="graph-map-canvas" aria-busy="false"></div><div class="graph-map-radar" id="graph-map-canvas-radar" aria-hidden="true" hidden></div><aside class="graph-map-side" id="graph-map-side" aria-label="Selected place"></aside></div>
+    <p class="graph-map-legend" id="graph-map-legend">An arrow runs from what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span> to what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, and a box is tinted by which it does more here. Its head and its dashes tell its kind, as the key of the links shows. Hollow: only guessed by name. Thicker: more links. Dotted: against the main direction, closing a cycle (↻). Diff: <span class="graph-map-key graph-map-key-diff-added" aria-hidden="true"></span> + Added, <span class="graph-map-key graph-map-key-diff-removed" aria-hidden="true"></span> - Removed, = Kept. Members: P property · M method · K const · pub/prot/priv/pkg.</p>
     <div class="graph-arrow-legend-slot" id="graph-map-arrow-legend"></div>
   </dialog>
   <dialog class="graph-map graph-link" id="graph-link" aria-labelledby="graph-link-title">
@@ -666,7 +669,7 @@
     <p class="knowledge-note" id="graph-link-note" role="status"></p>
     <p class="error-text" id="graph-link-error" role="alert" hidden></p>
     <div class="graph-map-body"><div class="graph-map-canvas" id="graph-link-canvas"></div><aside class="graph-map-side" id="graph-link-side" aria-label="Selected name"></aside></div>
-    <p class="graph-map-legend" id="graph-link-legend">On the left what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span>, on the right what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, each name in the frame of its file. Solid: read from the code. Dashed: guessed by name. Diff: <span class="graph-map-key graph-map-key-diff-added" aria-hidden="true"></span> + Added, <span class="graph-map-key graph-map-key-diff-removed" aria-hidden="true"></span> - Removed, = Kept. Members: P property · M method · K const · pub/prot/priv/pkg.</p>
+    <p class="graph-map-legend" id="graph-link-legend">On the left what uses <span class="graph-map-key graph-map-key-uses" aria-hidden="true"></span>, on the right what is used <span class="graph-map-key graph-map-key-used" aria-hidden="true"></span>, each name in the frame of its file. The head and the dashes of a link tell its kind, as the key of the links shows. Hollow: only guessed by name. Diff: <span class="graph-map-key graph-map-key-diff-added" aria-hidden="true"></span> + Added, <span class="graph-map-key graph-map-key-diff-removed" aria-hidden="true"></span> - Removed, = Kept. Members: P property · M method · K const · pub/prot/priv/pkg.</p>
     <div class="graph-arrow-legend-slot" id="graph-link-arrow-legend"></div>
   </dialog>
   <div class="run-file-card" id="run-file-card" role="dialog" aria-label="File details" hidden></div>

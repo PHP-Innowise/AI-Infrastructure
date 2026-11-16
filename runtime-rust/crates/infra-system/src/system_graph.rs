@@ -263,6 +263,10 @@ pub trait CodeGraphBridge: Send + Sync {
         Ok(())
     }
 
+    /// Adds to the view of a run what the bridge knows of it. The view
+    /// comes without a summary of its evidence: a bridge that sums the
+    /// evidence up puts it in `view["evidence"]`, and where it leaves none
+    /// the manager sums the dispatches up itself.
     fn enrich_run_view(
         &self,
         _run_id: &str,
@@ -3130,6 +3134,8 @@ pub fn summarize_run_evidence(
         command_runs.extend(ev.command_runs.iter().cloned());
     }
 
+    let overlaps = edited_by_several(state, dispatches);
+
     let mut cross_service_unopened = Vec::new();
     let mut unopened_contract_consumers = Vec::new();
     if let Some(sys) = system {
@@ -3198,7 +3204,119 @@ pub fn summarize_run_evidence(
         "unopened_callers": [],
         "unopened_contract_consumers": unopened_contract_consumers,
         "cross_service_unopened": cross_service_unopened,
+        "overlaps": overlaps,
     })
+}
+
+/// How many files edited by several agents a run tells of.
+const OVERLAPS: usize = 24;
+
+/// The files that more than one step of a run edited, each with the steps in
+/// the order they ran. A run dispatches its agents one after another, and
+/// the Harness runs no two writers on one repository at once, so no two
+/// agents write a file at the same moment; a later agent can still change
+/// what an earlier one made, and a person reviewing the run should know
+/// where. A file is told apart by where it lies, so a file of a monorepo
+/// that two services edit is one file. Two attempts of one step are one
+/// step.
+fn edited_by_several(state: &Value, dispatches: &[DispatchEvidence]) -> Vec<Value> {
+    // Where each file lies, and the service and the path in it of the
+    // first step that edited it: where that path leaves the service, the
+    // file is shown from the folder that holds every root of the run.
+    type Inside = Option<(String, String)>;
+    type Steps = Vec<(String, String)>;
+    let mut files: BTreeMap<PathBuf, (Inside, Steps)> = BTreeMap::new();
+    for ev in dispatches {
+        let mut seen = BTreeSet::new();
+        for item in ev.ledger_edited.iter().chain(&ev.git_changed) {
+            // A path may name its service first where a step could write
+            // into every service of the run.
+            let (service, root, rest) = match item.path.split_once('/') {
+                Some((service, rest))
+                    if service != ev.service && state["roots"][service].is_string() =>
+                {
+                    (
+                        service,
+                        PathBuf::from(string(&state["roots"][service])),
+                        rest,
+                    )
+                }
+                _ => (
+                    ev.service.as_str(),
+                    PathBuf::from(&ev.root),
+                    item.path.as_str(),
+                ),
+            };
+            let place = lexical(&root.join(rest));
+            if !seen.insert(place.clone()) {
+                continue;
+            }
+            let inside = place
+                .strip_prefix(lexical(&root))
+                .ok()
+                .map(|inside| (service.to_owned(), inside.to_string_lossy().into_owned()));
+            let entry = files.entry(place).or_insert_with(|| (inside, Vec::new()));
+            if !entry.1.iter().any(|(phase, _)| *phase == ev.phase) {
+                entry.1.push((ev.phase.clone(), ev.service.clone()));
+            }
+        }
+    }
+    // The folder that holds every root of the run.
+    let common = dispatches
+        .iter()
+        .map(|ev| lexical(Path::new(&ev.root)))
+        .reduce(|held, root| {
+            held.components()
+                .zip(root.components())
+                .take_while(|(a, b)| a == b)
+                .map(|(part, _)| part.as_os_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut several = files
+        .into_iter()
+        .filter(|(_, (_, steps))| steps.len() > 1)
+        .map(|(place, (inside, steps))| {
+            let shown = match &inside {
+                Some((service, path)) => qualify_service_path(service, path),
+                None => place
+                    .strip_prefix(&common)
+                    .unwrap_or(&place)
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+            (shown, inside, steps)
+        })
+        .collect::<Vec<_>>();
+    several.sort_by(|a, b| a.0.cmp(&b.0));
+    several
+        .into_iter()
+        .take(OVERLAPS)
+        .map(|(shown, inside, steps)| {
+            object!({
+                "path": shown,
+                "service": inside.as_ref().map(|(service, _)| service.clone()),
+                "file": inside.map(|(_, path)| path),
+                "steps": steps.iter().map(|(phase, _)| phase.clone()).collect::<Vec<_>>(),
+                "services": steps.iter().map(|(_, service)| service.clone()).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
+/// A path with `.` and `..` worked out, without asking the file system.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn qualify_service_path(service: &str, path: &str) -> String {

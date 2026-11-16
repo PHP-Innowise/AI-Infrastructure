@@ -35,6 +35,9 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
+mod access;
+mod blast;
+mod circles;
 mod history;
 mod incoming;
 pub(crate) mod layer_rules;
@@ -49,6 +52,14 @@ pub const SHOWN: usize = 40;
 /// Links drawn between those children, strongest first.
 pub const DRAWN: usize = 160;
 const LISTED: usize = 12;
+/// By how many links a way between two places may be longer than the
+/// shortest and still be drawn, how many such ways a picture draws, and how
+/// many links the search for them tries before it gives up.
+pub(crate) const LONGER: usize = 3;
+/// How many failing tests a picture of a change may be told of.
+pub(crate) const FAILING: usize = 64;
+const DETOURS: usize = 12;
+const DETOUR_WALK: usize = 60_000;
 /// More links than this per child and the folder is drawn as a backbone:
 /// each child keeps its `STRONGEST` uses.
 const DENSE: usize = 2;
@@ -714,6 +725,12 @@ pub struct Index {
     /// The patterns the graph shows signs of, once they were asked for: by
     /// every link, and by the links the tool read from the code.
     patterns: [OnceLock<patterns::Patterns>; 2],
+    /// What the sources read and write of each other, file by file, as far
+    /// as pictures asked for it.
+    access: access::Access,
+    /// The files that use each other in a circle, once they were asked
+    /// for: by every link, and by the links the tool read from the code.
+    circles: [OnceLock<circles::Circles>; 2],
     /// What a graph without tests leaves out: test files, and tests inside
     /// the files it keeps.
     left: (u64, u64),
@@ -978,6 +995,8 @@ impl Index {
             plain: OnceLock::new(),
             wires: OnceLock::new(),
             patterns: Default::default(),
+            access: Default::default(),
+            circles: Default::default(),
             left: (0, 0),
             ruled,
             files: builder.files,
@@ -2532,6 +2551,8 @@ impl Index {
             plain: OnceLock::new(),
             wires: OnceLock::new(),
             patterns: Default::default(),
+            access: Default::default(),
+            circles: Default::default(),
             ties,
             left: (gone.iter().filter(|gone| **gone).count() as u64, inside),
             ruled,
@@ -3780,6 +3801,94 @@ impl<'a> Net<'a> {
         }
         far
     }
+    /// Ways from `origin` to `goal` that are longer than the `steps` of the
+    /// shortest, by `longer` links at most. Each is a chain of places in
+    /// which none comes twice, none but the first is of `origin` and none
+    /// but the last of `goal`: a way that passes an end is the shorter way
+    /// to it and something else. The shorter ways come first, and of ways
+    /// as long those along the stronger links. At most `DETOURS` are told,
+    /// which together add at most `room` places to those `known`; the flag
+    /// says that there are more, or that the search was given up.
+    fn detours(
+        &self,
+        origin: &[u32],
+        goal: &[u32],
+        steps: usize,
+        longer: usize,
+        room: usize,
+        known: &HashSet<u32>,
+    ) -> (Vec<Vec<u32>>, bool) {
+        let (first, last) = (
+            origin.iter().copied().collect::<HashSet<_>>(),
+            goal.iter().copied().collect::<HashSet<_>>(),
+        );
+        // How far every place lies from the goal: a way is only walked on
+        // where what is left of its length still reaches the goal.
+        let far = self.far(goal, &vec![0; self.count()], false);
+        let mut origin = origin.to_vec();
+        origin.sort_by(|a, b| self.tag(*a).cmp(&self.tag(*b)));
+        let mut ways: Vec<Vec<u32>> = Vec::new();
+        let mut added = known.clone();
+        let (mut walked, mut more) = (0usize, false);
+        'longer: for length in steps + 1..=steps + longer {
+            for start in &origin {
+                // The way so far, and for each of its places what it uses
+                // that is still to be tried.
+                let mut way = vec![*start];
+                let mut tries = vec![self.onward(*start)];
+                while let Some(open) = tries.last_mut() {
+                    let Some(next) = open.pop() else {
+                        tries.pop();
+                        way.pop();
+                        continue;
+                    };
+                    walked += 1;
+                    if walked > DETOUR_WALK {
+                        more = true;
+                        break 'longer;
+                    }
+                    if first.contains(&next) || way.contains(&next) {
+                        continue;
+                    }
+                    let left = length - way.len();
+                    if last.contains(&next) {
+                        if left > 0 {
+                            continue;
+                        }
+                        let fresh = way.iter().filter(|place| !added.contains(place)).count();
+                        if ways.len() == DETOURS
+                            || fresh > room.saturating_sub(added.len() - known.len())
+                        {
+                            more = true;
+                            break 'longer;
+                        }
+                        added.extend(way.iter().copied());
+                        let mut found = way.clone();
+                        found.push(next);
+                        ways.push(found);
+                        continue;
+                    }
+                    if left == 0 || far[next as usize] as usize > left {
+                        continue;
+                    }
+                    way.push(next);
+                    tries.push(self.onward(next));
+                }
+            }
+        }
+        (ways, more)
+    }
+    /// What a place uses, the weakest link first: taken from the end, the
+    /// strongest is tried first, and of links as strong the earlier place.
+    fn onward(&self, place: u32) -> Vec<u32> {
+        let mut uses = self.beside(place, true);
+        uses.sort_by(|a, b| {
+            a.1.links
+                .cmp(&b.1.links)
+                .then(self.tag(b.0).cmp(&self.tag(a.0)))
+        });
+        uses.into_iter().map(|(other, _)| other).collect()
+    }
     /// The shortest directed return to the origin. A folder stands for
     /// its files, so a return must leave the folder before re-entering it.
     fn cycle(&self, origin: &[u32]) -> Vec<(u32, u32, Flow)> {
@@ -4358,6 +4467,27 @@ impl Index {
         focus: Option<&str>,
         certain: bool,
     ) -> Option<Value> {
+        self.path_with(project, from, to, changed, edited, focus, certain, 0)
+    }
+    /// The shortest ways, and with them the ways that are longer by
+    /// `longer` links at most: what else leads from the one place to the
+    /// other, which a dependency is not rid of by cutting the shortest way.
+    /// The longer ways are drawn whole, each marked as a way round, as far
+    /// as `DETOURS` and the room of the picture go; the answer says how
+    /// many it draws and whether there are more.
+    #[allow(clippy::too_many_arguments)]
+    pub fn path_with(
+        &self,
+        project: &str,
+        from: &str,
+        to: &str,
+        changed: &[(String, char)],
+        edited: &dyn Fn(&str) -> Option<Edited>,
+        focus: Option<&str>,
+        certain: bool,
+        longer: usize,
+    ) -> Option<Value> {
+        let longer = longer.min(LONGER);
         let (start, end) = (self.reach(from)?, self.reach(to)?);
         let symbols = matches!(start, Reach::Symbol(_)) || matches!(end, Reach::Symbol(_));
         let net = Net::new(self, symbols, certain);
@@ -4438,6 +4568,10 @@ impl Index {
                 "shown": 0,
                 "links": 0,
                 "wide": WAY,
+                "longer": longer,
+                "detours": 0,
+                "detours_more": false,
+                "aside": 0,
             },
             "children": 0,
             "matching": 0,
@@ -4533,10 +4667,50 @@ impl Index {
         for level in &mut kept {
             level.sort_by(|a, b| tag(*a).cmp(&tag(*b)));
         }
-        let shown = kept
+        let mut shown = kept
             .iter()
             .enumerate()
             .flat_map(|(step, level)| level.iter().map(move |place| (*place, step)))
+            .collect::<Vec<_>>();
+        // The longer ways, where they were asked for: each adds the places
+        // of it that are not drawn yet, at the step they have on it. A
+        // place that lies on a shortest way keeps the step it has there.
+        let direct = shown.len();
+        let (detours, detours_more) = if longer == 0 {
+            (Vec::new(), false)
+        } else {
+            let known = shown.iter().map(|(place, _)| *place).collect();
+            net.detours(
+                if reversed { &ends } else { &starts },
+                goal,
+                steps,
+                longer,
+                FOLLOWED.saturating_sub(direct),
+                &known,
+            )
+        };
+        let on_shortest = levels
+            .iter()
+            .enumerate()
+            .flat_map(|(step, level)| level.iter().map(move |place| (*place, step)))
+            .collect::<HashMap<_, _>>();
+        {
+            let mut drawn = shown
+                .iter()
+                .map(|(place, _)| *place)
+                .collect::<HashSet<_>>();
+            for way in &detours {
+                for (at, place) in way.iter().enumerate() {
+                    if drawn.insert(*place) {
+                        shown.push((*place, on_shortest.get(place).copied().unwrap_or(at)));
+                    }
+                }
+            }
+        }
+        // A place off every shortest way is neither end of the path.
+        let aside = shown
+            .iter()
+            .map(|(place, _)| !on_shortest.contains_key(place))
             .collect::<Vec<_>>();
         let keys = shown
             .iter()
@@ -4557,17 +4731,41 @@ impl Index {
         }
         let between = edges.len();
         let edges = ways_drawn(edges, &keys);
+        // The links of the longer ways that the shortest ways do not have.
+        let mut round: Vec<(usize, usize, Flow)> = Vec::new();
+        {
+            let mut drawn = edges
+                .iter()
+                .map(|(source, target, _)| (*source, *target))
+                .collect::<HashSet<_>>();
+            for way in &detours {
+                for pair in way.windows(2) {
+                    let (source, target) = (slot[&pair[0]], slot[&pair[1]]);
+                    if drawn.insert((source, target))
+                        && let Some((_, flow)) = net
+                            .beside(pair[0], true)
+                            .into_iter()
+                            .find(|(other, _)| *other == pair[1])
+                    {
+                        round.push((source, target, flow));
+                    }
+                }
+            }
+        }
         // A file is named by the end of its path that no other drawn shares.
         let paths = keys.iter().map(String::as_str).collect::<Vec<_>>();
         let node = |index: usize| {
             let (place, step) = shown[index];
             let mut node = net.node(&names, place, &keys[index], &paths);
             for (key, value) in [
-                ("start", json!(step == 0)),
-                ("end", json!(step == steps)),
+                ("start", json!(!aside[index] && step == 0)),
+                ("end", json!(!aside[index] && step == steps)),
                 ("step", json!(step)),
             ] {
                 node[key] = value;
+            }
+            if aside[index] {
+                node["detour"] = json!(true);
             }
             node
         };
@@ -4617,6 +4815,28 @@ impl Index {
                     .collect();
                 focus["used_by_more"] = json!(leading.len() - prior.len());
                 focus["kinds"] = net.kinds(&[place], &used);
+                // Among longer ways a place leads on along every link that
+                // is drawn from it, and is led to along every one drawn to
+                // it: those of the ways round too.
+                if longer > 0 {
+                    let rows = |outgoing: bool| {
+                        edges
+                            .iter()
+                            .chain(&round)
+                            .filter(|(source, target, _)| {
+                                index == if outgoing { *source } else { *target }
+                            })
+                            .map(|(source, target, flow)| {
+                                let other = if outgoing { *target } else { *source };
+                                row(shown[other].0, *flow, shown[*source].0, shown[*target].0)
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    focus["uses"] = json!(rows(true));
+                    focus["used_by"] = json!(rows(false));
+                    focus["uses_more"] = json!(0);
+                    focus["used_by_more"] = json!(0);
+                }
                 focus
             });
         for (key, value) in [
@@ -4624,9 +4844,17 @@ impl Index {
             ("reversed", json!(reversed)),
             ("steps", json!(steps)),
             ("places", json!(places)),
-            ("shown", json!(shown.len())),
+            // Of the places on the shortest ways, those drawn; the
+            // places that only a longer way has are counted apart.
+            (
+                "shown",
+                json!(aside.iter().filter(|aside| !**aside).count()),
+            ),
             ("links", json!(links)),
             ("wide", json!(per)),
+            ("detours", json!(detours.len())),
+            ("detours_more", json!(detours_more)),
+            ("aside", json!(aside.iter().filter(|aside| **aside).count())),
         ] {
             view["path"][key] = value;
         }
@@ -4645,6 +4873,17 @@ impl Index {
                     *flow,
                 )
             })
+            .chain(round.iter().map(|(source, target, flow)| {
+                let mut edge = net.edge_json(
+                    &[shown[*source].0],
+                    &[shown[*target].0],
+                    &keys[*source],
+                    &keys[*target],
+                    *flow,
+                );
+                edge["detour"] = json!(true);
+                edge
+            }))
             .collect();
         view["focus"] = json!(focus);
         Some(view)
@@ -10333,6 +10572,182 @@ where
                 .count(),
             8
         );
+    }
+    #[test]
+    fn ways_longer_than_the_shortest_are_drawn_whole_when_they_are_asked_for() {
+        let files = |uses: &[(&str, &str)]| {
+            let mut names = uses
+                .iter()
+                .flat_map(|(from, to)| [*from, *to])
+                .collect::<Vec<_>>();
+            names.sort_unstable();
+            names.dedup();
+            self::index(json!({
+                "nodes": names.iter().map(|name| json!({
+                    "id": name, "label": name, "source_file": format!("{name}.py"),
+                })).collect::<Vec<_>>(),
+                "links": uses.iter().map(|(from, to)| json!({
+                    "source": from, "target": to, "relation": "calls",
+                    "source_file": format!("{from}.py"),
+                })).collect::<Vec<_>>(),
+            }))
+        };
+        // a reaches d in two links, through b and through c. Through e and
+        // f it takes three, and so it does through b and then c. Through
+        // g, h and i it takes four. j uses d and nothing leads to j.
+        let index = files(&[
+            ("a", "b"),
+            ("b", "d"),
+            ("a", "c"),
+            ("c", "d"),
+            ("a", "e"),
+            ("e", "f"),
+            ("f", "d"),
+            ("b", "c"),
+            ("a", "g"),
+            ("g", "h"),
+            ("h", "i"),
+            ("i", "d"),
+            ("j", "d"),
+        ]);
+        let ways = |from: &str, to: &str, focus: Option<&str>, longer: usize| {
+            index
+                .path_with("ways", from, to, &[], &|_| None, focus, false, longer)
+                .unwrap()
+        };
+        let round = |view: &Value, key: &str| {
+            view[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|part| part["detour"] == true)
+                .count()
+        };
+        // The shortest ways alone: what was drawn before longer ways could
+        // be asked for, and what `path` still answers.
+        let shortest = ways("a.py", "d.py", None, 0);
+        assert_eq!(told_of(&shortest), "found steps=2 places=4 links=4 shown=4");
+        assert_eq!(
+            calls(&shortest),
+            [
+                "a.py -> b.py 1/0",
+                "a.py -> c.py 1/0",
+                "b.py -> d.py 1/0",
+                "c.py -> d.py 1/0"
+            ]
+        );
+        assert_eq!(shortest["path"]["longer"], 0);
+        assert_eq!(shortest["path"]["detours"], 0);
+        assert_eq!(
+            (round(&shortest, "nodes"), round(&shortest, "edges")),
+            (0, 0)
+        );
+        assert_eq!(
+            shortest,
+            index
+                .path("ways", "a.py", "d.py", &[], &|_| None, None, false)
+                .unwrap()
+        );
+        // One link longer: the way through e and f, with its two places,
+        // and the link from b to c, which joins two places already drawn.
+        // The shortest ways are told and counted as before.
+        let one = ways("a.py", "d.py", None, 1);
+        assert_eq!(told_of(&one), "found steps=2 places=4 links=4 shown=4");
+        assert_eq!(one["path"]["longer"], 1);
+        assert_eq!(one["path"]["detours"], 2);
+        assert_eq!(one["path"]["aside"], 2);
+        assert_eq!(one["children"], 6);
+        assert_eq!(one["path"]["detours_more"], false);
+        assert_eq!(
+            calls(&one),
+            [
+                "a.py -> b.py 1/0",
+                "a.py -> c.py 1/0",
+                "b.py -> d.py 1/0",
+                "c.py -> d.py 1/0",
+                "b.py -> c.py 1/0",
+                "a.py -> e.py 1/0",
+                "e.py -> f.py 1/0",
+                "f.py -> d.py 1/0",
+            ]
+        );
+        assert_eq!((round(&one, "nodes"), round(&one, "edges")), (2, 4));
+        // A place of a way round is neither end of the path, though it
+        // stands as many steps in as the far end.
+        assert_eq!(
+            boxes(&one),
+            ["a.py first", "b.py", "c.py", "d.py second", "e.py", "f.py"]
+        );
+        // Every box lies on a way that is drawn whole.
+        assert_eq!(loose(&one), Vec::<String>::new());
+        // Two links longer adds the way of four links; no way is five long.
+        let two = ways("a.py", "d.py", None, 2);
+        assert_eq!(two["path"]["detours"], 3);
+        assert_eq!(told_of(&two), "found steps=2 places=4 links=4 shown=4");
+        assert_eq!(two["path"]["aside"], 5);
+        assert!(calls(&two).contains(&"h.py -> i.py 1/0".to_owned()));
+        let three = ways("a.py", "d.py", None, 3);
+        assert_eq!(three["path"]["detours"], 3);
+        assert_eq!(three["edges"], two["edges"]);
+        // More than a picture may ask for is as much as it may.
+        assert_eq!(ways("a.py", "d.py", None, 9)["path"]["longer"], LONGER);
+        // Nothing that leads nowhere is drawn: j uses d, and no way from a
+        // passes it.
+        assert!(!boxes(&three).iter().any(|name| name.starts_with("j.py")));
+        // Beside a selected box stand all the links drawn at it: c is led
+        // to from a on a shortest way and from b on a way round.
+        let paths = |rows: &Value| {
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["path"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let beside = ways("a.py", "d.py", Some("c.py"), 1);
+        assert_eq!(paths(&beside["focus"]["uses"]), ["d.py"]);
+        assert_eq!(paths(&beside["focus"]["used_by"]), ["a.py", "b.py"]);
+        let beside = ways("a.py", "d.py", Some("c.py"), 0);
+        assert_eq!(paths(&beside["focus"]["used_by"]), ["a.py"]);
+        // Asked the other way round, the ways are those that exist, and
+        // their longer ones with them.
+        let turned = ways("d.py", "a.py", None, 1);
+        assert_eq!(
+            told_of(&turned),
+            "found reversed steps=2 places=4 links=4 shown=4"
+        );
+        assert_eq!(turned["path"]["detours"], 2);
+        // Where nothing leads either way there is nothing longer either.
+        let none = ways("j.py", "a.py", None, 2);
+        assert_eq!(told_of(&none), "none steps=0 places=0 links=0 shown=0");
+        assert_eq!(none["path"]["detours"], 0);
+        // Twenty ways of three links beside one of two: as many are drawn
+        // as a picture holds, each whole, and the answer says there are
+        // more.
+        let mut uses = vec![
+            ("a".to_owned(), "z".to_owned()),
+            ("z".to_owned(), "d".to_owned()),
+        ];
+        for at in 0..20 {
+            uses.push(("a".to_owned(), format!("m{at:02}")));
+            uses.push((format!("m{at:02}"), format!("n{at:02}")));
+            uses.push((format!("n{at:02}"), "d".to_owned()));
+        }
+        let borrowed = uses
+            .iter()
+            .map(|(from, to)| (from.as_str(), to.as_str()))
+            .collect::<Vec<_>>();
+        let index = files(&borrowed);
+        let many = index
+            .path_with("ways", "a.py", "d.py", &[], &|_| None, None, false, 1)
+            .unwrap();
+        assert_eq!(many["path"]["detours"], DETOURS);
+        assert_eq!(many["path"]["detours_more"], true);
+        assert_eq!(round(&many, "nodes"), 2 * DETOURS);
+        assert_eq!(round(&many, "edges"), 3 * DETOURS);
+        assert_eq!(loose(&many), Vec::<String>::new());
+        // The first of them in the order of their files.
+        assert!(calls(&many).contains(&"m00.py -> n00.py 1/0".to_owned()));
+        assert!(!calls(&many).contains(&"m19.py -> n19.py 1/0".to_owned()));
     }
     /// Graphs made at random, and every path asked between their places
     /// checked against distances worked out apart: the fewest links, the way

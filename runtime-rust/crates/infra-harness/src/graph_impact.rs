@@ -10,9 +10,9 @@ use crate::{
     HarnessError, Result,
     graph_changes::Resolved,
     graph_deps::{
-        DeclaredMember, DepDiff, DepMemberRef, DepRef, EntityChange, diff_entities, diff_file_deps,
-        extract_declared_members, extract_file_deps, find_matching_member_references,
-        find_matching_references,
+        DeclaredMember, DepDiff, DepMemberRef, DepRef, EntityChange, access_kind, diff_entities,
+        diff_file_deps, extract_declared_members, extract_file_deps,
+        find_matching_member_references, find_matching_references,
     },
     graph_live::{GraphFocus, clean_rel_key, folder_of},
     graph_map::{Index, Kind, check_layer_rule, is_test_path, layer_rules::Rules},
@@ -168,7 +168,36 @@ pub(crate) fn changed_catalog(
         merged.retain(|path, _| !is_test_path(path));
     }
 
-    let candidate_callers = collect_workspace_scan_candidates(&ctx, index, &merged, live_focus);
+    // The callers the graph knows of each changed file, the strongest of
+    // every file in turn, so that one much-used file does not take the
+    // whole scan from the others.
+    let per_file = merged
+        .iter()
+        .filter(|(_, entry)| entry.status != "deleted" || entry.previous_path.is_some())
+        .map(|(path, entry)| {
+            index_callers(
+                index,
+                path,
+                entry.previous_path.as_deref(),
+                false,
+                MAX_CALLER_SCAN,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut known_callers = Vec::new();
+    let longest = per_file.iter().map(Vec::len).max().unwrap_or(0);
+    for at in 0..longest {
+        known_callers.extend(
+            per_file
+                .iter()
+                .filter_map(|callers| callers.get(at).cloned()),
+        );
+        if known_callers.len() >= MAX_CALLER_SCAN * 2 {
+            break;
+        }
+    }
+    let candidate_callers =
+        collect_workspace_scan_candidates(&ctx, index, &merged, live_focus, &known_callers);
     let caller_cache = build_caller_dep_cache(&ctx, &candidate_callers);
     let index_incoming = build_index_incoming(index);
 
@@ -374,33 +403,17 @@ pub(crate) fn file_impact(
         status: status.clone(),
         previous_path: previous_path.clone(),
     });
-    let mut candidates = collect_workspace_scan_candidates(&ctx, index, &scan_scope, live_focus);
-    if let Some(idx) = index {
-        for fid in [
-            idx.file_id(&rel_path),
-            previous_path.as_deref().and_then(|old| idx.file_id(old)),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            for &(from_sym, to_sym, _, guessed) in idx.uses() {
-                if certain && guessed {
-                    continue;
-                }
-                let syms = idx.symbol_entries();
-                if syms[to_sym as usize].file == fid {
-                    let from_file = syms[from_sym as usize].file;
-                    if from_file != fid {
-                        let caller = &idx.files()[from_file as usize];
-                        if caller != &rel_path && !candidates.contains(caller) {
-                            candidates.push(caller.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    candidates.truncate(MAX_CALLER_SCAN);
+    // The files the graph knows to use this one are read before any file
+    // that only might: a scan that stops at its limit keeps the callers.
+    let known_callers = index_callers(
+        index,
+        &rel_path,
+        previous_path.as_deref(),
+        certain,
+        MAX_CALLER_SCAN,
+    );
+    let candidates =
+        collect_workspace_scan_candidates(&ctx, index, &scan_scope, live_focus, &known_callers);
     let caller_cache = build_caller_dep_cache(&ctx, &candidates);
     let index_incoming = build_index_incoming(index);
 
@@ -1691,12 +1704,72 @@ fn load_target_member_profile<'a>(
     &profiles[target_path]
 }
 
+/// The kinds of dependency a file has on each of its targets, by target.
+fn kinds_by_target<'a>(
+    deps: impl Iterator<Item = &'a DepRef>,
+) -> HashMap<String, BTreeSet<String>> {
+    let mut kinds: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for dep in deps.filter(|dep| dep.resolved) {
+        kinds
+            .entry(clean_rel_key(&dep.target))
+            .or_default()
+            .insert(dep.kind.clone());
+    }
+    kinds
+}
+
+/// The kind of dependency a member reference makes by itself: a property,
+/// a field or a constant is read or written, a method or a function is
+/// called. A reference to a type is none of these.
+pub(crate) fn member_ref_kind(mref: &DepMemberRef) -> Option<&'static str> {
+    let own = access_kind(&mref.access)?;
+    let fits = match own {
+        "calls" => matches!(mref.kind.as_str(), "method" | "function"),
+        _ => matches!(mref.kind.as_str(), "property" | "field" | "const"),
+    };
+    fits.then_some(own)
+}
+
+/// The kinds a member reference falls back to where the file has no
+/// dependency of the reference's own kind on a target: the plainest first.
+/// An import comes last, since it is given members only where it is the
+/// file's one dependency on the target.
+const GENERAL_KINDS: [&str; 7] = [
+    "uses",
+    "extends",
+    "implements",
+    "calls",
+    "reads",
+    "writes",
+    "imports",
+];
+
+/// Whether a member reference is listed under a dependency of `kind`, so
+/// that a file's dependencies on one target tell each reference once. A
+/// write, a read or a call belongs to the dependency of its own kind; where
+/// the file has none on that target, and for a reference to a type, it
+/// goes to the plainest dependency there is.
+fn member_ref_listed(kind: &str, mref: &DepMemberRef, siblings: Option<&BTreeSet<String>>) -> bool {
+    let Some(siblings) = siblings else {
+        return true;
+    };
+    let home = member_ref_kind(mref)
+        .filter(|own| siblings.contains(*own))
+        .or_else(|| {
+            GENERAL_KINDS
+                .into_iter()
+                .find(|general| siblings.contains(*general))
+        });
+    home.is_none_or(|home| home == kind)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn enrich_dep_bucket(
     caller_path: &str,
     caller_src: Option<&str>,
     deps: &mut [DepRef],
     non_import_targets: &HashSet<String>,
+    kinds: &HashMap<String, BTreeSet<String>>,
     ctx: &TargetContext<'_>,
     merged: &BTreeMap<String, MergedChange>,
     live_focus: Option<&GraphFocus>,
@@ -1740,6 +1813,8 @@ fn enrich_dep_bucket(
         }
         deduplicate_and_sort_member_refs(&mut dep.member_refs);
 
+        // What the caller uses of the target is marked from every reference;
+        // the list of this dependency then keeps the references of its kind.
         for mref in &dep.member_refs {
             if let Some(pos) = find_matching_declared_member_index(
                 &dep.target_members,
@@ -1750,6 +1825,10 @@ fn enrich_dep_bucket(
                 dep.target_members[pos].used_by_caller = true;
             }
         }
+        let siblings = kinds.get(&target_key);
+        let kind = dep.kind.clone();
+        dep.member_refs
+            .retain(|mref| member_ref_listed(&kind, mref, siblings));
     }
 }
 
@@ -1778,11 +1857,16 @@ fn enrich_uses_diff(
         .map(|d| clean_rel_key(&d.target))
         .collect();
 
+    // What the file has on a target now, and what it had before the change.
+    let kinds_after = kinds_by_target(diff.added.iter().chain(&diff.unchanged));
+    let kinds_before = kinds_by_target(diff.removed.iter().chain(&diff.unchanged));
+
     enrich_dep_bucket(
         rel_path,
         after,
         &mut diff.added,
         &non_import_active,
+        &kinds_after,
         ctx,
         merged,
         live_focus,
@@ -1793,6 +1877,7 @@ fn enrich_uses_diff(
         after.or(before),
         &mut diff.unchanged,
         &non_import_active,
+        &kinds_after,
         ctx,
         merged,
         live_focus,
@@ -1803,6 +1888,7 @@ fn enrich_uses_diff(
         before,
         &mut diff.removed,
         &non_import_removed,
+        &kinds_before,
         ctx,
         merged,
         live_focus,
@@ -2084,12 +2170,19 @@ fn merge_index_outgoing_edges(
     }
 }
 
+/// The kind of dependency a relation of the graph stands for. The same
+/// seven kinds as the map's arrows, so a dependency read from the graph and
+/// one read from the source are told alike.
 fn map_index_relation(relation: &str) -> &'static str {
     match relation {
-        "imports" | "imports_from" | "includes" | "requires" => "imports",
-        "calls" => "calls",
+        "imports" | "imports_from" | "includes" | "requires" | "dynamic_import" | "re_exports" => {
+            "imports"
+        }
+        "calls" | "instantiates" | "indirect_call" | "dispatches_to" => "calls",
         "inherits" | "extends" => "extends",
-        "implements" => "implements",
+        "implements" | "uses_trait" => "implements",
+        "writes" | "mutates" | "sets" => "writes",
+        "reads" | "references_constant" | "uses_const" | "uses_static_prop" => "reads",
         _ => "uses",
     }
 }
@@ -2158,11 +2251,65 @@ fn build_index_incoming(index: Option<&Index>) -> HashMap<u32, Vec<(u32, String,
     incoming
 }
 
+/// The files the graph links to `rel_path`, or to the path it had before a
+/// rename: the most linked first, then by path, at most `limit` of them.
+fn index_callers(
+    index: Option<&Index>,
+    rel_path: &str,
+    previous_path: Option<&str>,
+    certain: bool,
+    limit: usize,
+) -> Vec<String> {
+    let Some(idx) = index else {
+        return Vec::new();
+    };
+    let targets = [
+        idx.file_id(rel_path),
+        previous_path.and_then(|old| idx.file_id(old)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let symbols = idx.symbol_entries();
+    let mut links: HashMap<u32, u64> = HashMap::new();
+    for &(from_sym, to_sym, _, guessed) in idx.uses() {
+        if certain && guessed {
+            continue;
+        }
+        let (from_file, to_file) = (
+            symbols[from_sym as usize].file,
+            symbols[to_sym as usize].file,
+        );
+        if targets.contains(&to_file) && !targets.contains(&from_file) {
+            *links.entry(from_file).or_default() += 1;
+        }
+    }
+    let mut callers = links
+        .into_iter()
+        .map(|(file, links)| (links, idx.files()[file as usize].as_str()))
+        .filter(|(_, path)| *path != rel_path)
+        .collect::<Vec<_>>();
+    callers.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    callers
+        .into_iter()
+        .take(limit)
+        .map(|(_, path)| path.to_owned())
+        .collect()
+}
+
+/// The files read to find who uses a changed file, at most
+/// `MAX_CALLER_SCAN`: the changed files, what the run is working on, the
+/// callers the graph knows (`known_callers`, strongest first), and only
+/// then the rest of the project in the order of its paths.
 fn collect_workspace_scan_candidates(
     ctx: &TargetContext<'_>,
     index: Option<&Index>,
     changed: &BTreeMap<String, MergedChange>,
     live_focus: Option<&GraphFocus>,
+    known_callers: &[String],
 ) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -2188,6 +2335,9 @@ fn collect_workspace_scan_candidates(
                 push(&p);
             }
         }
+    }
+    for caller in known_callers {
+        push(caller);
     }
     if let Some(idx) = index {
         for path in idx.files() {
@@ -2420,6 +2570,7 @@ fn evaluate_callers_for_file(
                         parent: tm.parent.clone(),
                         access: access.to_owned(),
                         line: None,
+                        lines: Vec::new(),
                         visibility: tm.visibility.clone(),
                         previous_visibility: tm.previous_visibility.clone(),
                         change: Some(tm.change.clone()),
@@ -3934,16 +4085,46 @@ mod tests {
                 >= 1
         );
         let unchanged_deps = consumer_impact["uses"]["unchanged"].as_array().unwrap();
-        let cfg_dep = unchanged_deps
-            .iter()
-            .find(|d| d["target"] == "src/Config.php" && d["kind"] == "uses")
-            .expect("Consumer -> Config uses dep");
+        let on_config = |kind: &str| {
+            unchanged_deps
+                .iter()
+                .find(|d| d["target"] == "src/Config.php" && d["kind"] == kind)
+        };
+        // Reading the constant and the property is a dependency of its own
+        // kind, and the members read are listed under it alone. The type
+        // hint stays a plain use: it lists no member, and still knows what
+        // the caller uses of the target.
+        let hint = on_config("uses").expect("Consumer -> Config uses dep");
         assert!(
+            hint["member_refs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .all(|m| !matches!(m["kind"].as_str(), Some("property" | "const"))),
+            "{hint}"
+        );
+        assert!(
+            hint["target_members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["name"] == "TTL_MIN" && m["used_by_caller"] == true)
+        );
+        assert!(on_config("writes").is_none());
+        let cfg_dep = on_config("reads").expect("Consumer -> Config reads dep");
+        assert_eq!(
             cfg_dep["member_refs"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|m| { m["name"] == "TTL_MIN" && m["access_risk"] == "inaccessible" })
+                .map(|m| format!(
+                    "{} {} {}",
+                    m["name"].as_str().unwrap(),
+                    m["access"].as_str().unwrap(),
+                    m["access_risk"].as_str().unwrap_or("-")
+                ))
+                .collect::<Vec<_>>(),
+            ["$region read inaccessible", "TTL_MIN const inaccessible"]
         );
         assert!(
             cfg_dep["target_members"]
@@ -4176,5 +4357,145 @@ mod tests {
                 .iter()
                 .any(|m| { m["name"] == "legacyReset" && m["access_risk"] == "deleted" })
         );
+    }
+
+    /// A project of more files than one scan reads, where the one file that
+    /// calls a removed method stands last, in the graph and by its path.
+    fn wide_project(fillers: usize) -> (TempRepo, Resolved, Index) {
+        let repo = TempRepo::new_git();
+        repo.write(
+            "src/Account.php",
+            "<?php\nnamespace App;\nclass Account {\n    public function legacyReset(): void {}\n}\n",
+        );
+        repo.write(
+            "zz/LegacyCaller.php",
+            "<?php\nnamespace App\\Zz;\nuse App\\Account;\nclass LegacyCaller {\n    public function wipe(Account $acc): void { $acc->legacyReset(); }\n}\n",
+        );
+        let mut nodes = vec![
+            json!({"id": "account", "label": "Account", "source_file": "src/Account.php", "source_location": "L3"}),
+            json!({"id": "reset", "label": ".legacyReset()", "source_file": "src/Account.php", "source_location": "L4"}),
+        ];
+        for at in 0..fillers {
+            let path = format!("aa/Filler{at:03}.php");
+            repo.write(
+                &path,
+                &format!("<?php\nnamespace App\\Aa;\nclass Filler{at:03} {{}}\n"),
+            );
+            nodes.push(json!({"id": format!("filler{at}"), "label": format!("Filler{at:03}"), "source_file": path, "source_location": "L3"}));
+        }
+        nodes.push(json!({"id": "wipe", "label": ".wipe()", "source_file": "zz/LegacyCaller.php", "source_location": "L5"}));
+        let head = repo.commit("initial");
+        repo.write(
+            "src/Account.php",
+            "<?php\nnamespace App;\nclass Account {\n}\n",
+        );
+        let resolved = resolved_work(
+            &head,
+            vec![Change {
+                path: "src/Account.php".into(),
+                status: 'M',
+                from: None,
+            }],
+        );
+        let index = Index::read(
+            json!({
+                "nodes": nodes,
+                "links": [
+                    {"source": "wipe", "target": "reset", "relation": "calls", "confidence": "EXTRACTED", "source_file": "zz/LegacyCaller.php"}
+                ]
+            })
+            .to_string()
+            .as_bytes(),
+            &repo.root,
+        )
+        .unwrap();
+        (repo, resolved, index)
+    }
+
+    #[test]
+    fn a_caller_the_graph_knows_is_read_past_the_limit_of_the_scan() {
+        // More files stand before the caller than one scan reads. The
+        // caller is known to the graph, so it is read all the same, and the
+        // removed method it calls is told as a break. It was so before the
+        // callers of the graph were put first in the scan as well: a caller
+        // the scan left out is read when it is reported.
+        let (repo, resolved, index) = wide_project(MAX_CALLER_SCAN + 12);
+        assert_eq!(
+            index_callers(Some(&index), "src/Account.php", None, false, 8),
+            ["zz/LegacyCaller.php"]
+        );
+        let impact = file_impact(
+            &repo.root,
+            Some(&index),
+            Some(&resolved),
+            None,
+            "src/Account.php",
+            false,
+        )
+        .unwrap();
+        let caller = impact["used_by"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["path"] == "zz/LegacyCaller.php")
+            .expect("the caller the graph knows");
+        assert_eq!(caller["impact"], "broken_risk", "{caller}");
+        assert!(
+            caller["used_members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["name"] == "legacyReset" && m["access_risk"] == "deleted"),
+            "{caller}"
+        );
+        // The catalog of the whole change reads the same caller.
+        let catalog = changed_catalog(
+            &repo.root,
+            Some(&index),
+            Some(&resolved),
+            None,
+            &[],
+            "work",
+            false,
+        );
+        let changed = catalog["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["path"] == "src/Account.php")
+            .expect("the changed file");
+        assert_eq!(changed["summary"]["callers_at_risk"], 1, "{changed}");
+    }
+
+    #[test]
+    fn the_callers_of_the_graph_come_strongest_first() {
+        let index = Index::read(
+            json!({
+                "nodes": [
+                    {"id": "t", "label": "target()", "source_file": "lib/target.php", "source_location": "L2"},
+                    {"id": "a1", "label": "a1()", "source_file": "app/a.php", "source_location": "L2"},
+                    {"id": "b1", "label": "b1()", "source_file": "app/b.php", "source_location": "L2"},
+                    {"id": "b2", "label": "b2()", "source_file": "app/b.php", "source_location": "L5"},
+                    {"id": "c1", "label": "c1()", "source_file": "app/c.php", "source_location": "L2"}
+                ],
+                "links": [
+                    {"source": "a1", "target": "t", "relation": "calls", "confidence": "EXTRACTED", "source_file": "app/a.php"},
+                    {"source": "b1", "target": "t", "relation": "calls", "confidence": "EXTRACTED", "source_file": "app/b.php"},
+                    {"source": "b2", "target": "t", "relation": "calls", "confidence": "EXTRACTED", "source_file": "app/b.php"},
+                    {"source": "c1", "target": "t", "relation": "calls", "confidence": "INFERRED", "source_file": "app/c.php"}
+                ]
+            })
+            .to_string()
+            .as_bytes(),
+            Path::new("."),
+        )
+        .unwrap();
+        let callers =
+            |certain, limit| index_callers(Some(&index), "lib/target.php", None, certain, limit);
+        assert_eq!(callers(false, 8), ["app/b.php", "app/a.php", "app/c.php"]);
+        assert_eq!(callers(true, 8), ["app/b.php", "app/a.php"]);
+        assert_eq!(callers(false, 1), ["app/b.php"]);
+        assert!(index_callers(Some(&index), "lib/none.php", None, false, 8).is_empty());
+        assert!(index_callers(None, "lib/target.php", None, false, 8).is_empty());
     }
 }

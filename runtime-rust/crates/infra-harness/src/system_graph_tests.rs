@@ -303,6 +303,49 @@ fn all_system_graph_routes_and_28_service_map_params_are_registered() {
             "missing query param {param}"
         );
     }
+    // What no handler reads is refused, so that a request naming it does
+    // not look answered.
+    for (operation, dead) in [
+        ("system_graph.service_map", &["phase", "attempt"][..]),
+        ("system_graph.service_find", &["agent", "focus_session"]),
+        (
+            "system_graph.service_changes",
+            &["phase", "attempt", "launch", "compare_launch"],
+        ),
+        (
+            "system_graph.service_file_impact",
+            &["phase", "attempt", "launch", "compare_launch"],
+        ),
+        (
+            "system_graph.map",
+            &[
+                "phase",
+                "compare_run_id",
+                "compare_launch",
+                "notests",
+                "pattern",
+                "longer",
+                "failing",
+            ],
+        ),
+        ("system_graph.find", &["target", "run_id", "agent"]),
+        (
+            "system_graph.changes",
+            &["phase", "launch", "focus_session"],
+        ),
+        (
+            "system_graph.impact",
+            &["contracts", "seed_services", "depth"],
+        ),
+    ] {
+        let route = ROUTES
+            .iter()
+            .find(|route| route.operation == operation)
+            .expect(operation);
+        for key in dead {
+            assert!(!route.query.contains(key), "{operation} accepts {key}");
+        }
+    }
 
     for op in [
         "system_graph.service_status",
@@ -1165,6 +1208,102 @@ fn code_graph_bridge_captures_live_focus_shell_read_event_ids_and_enriches_run_v
             .any(|c| c["service"] == "web"),
         "expected cross-service unopened web: {run_view}"
     );
+
+    // A run that is going on is asked for its view about once a second.
+    // Its evidence is summed up, and what it reaches is worked out, once
+    // for the same evidence over the same graphs; the views asked for
+    // meanwhile are the same.
+    use std::sync::atomic::Ordering;
+    let asked = |evidence: &DispatchEvidence| {
+        let mut view = json!({
+            "id": run_id,
+            "project_id": fx.monorepo_pid,
+            "config_path": "system.json",
+        });
+        fx.bridge
+            .enrich_run_view(
+                run_id,
+                Some(&system),
+                Some(&ctx.state),
+                std::slice::from_ref(evidence),
+                &mut view,
+            )
+            .unwrap();
+        view
+    };
+    let reached = || fx.bridge.reached.load(Ordering::Relaxed);
+    let (_, _, members) =
+        resolve_all_targets(&fx.store, Some(&fx.graphs), None, &fx.monorepo_pid, None).unwrap();
+    // Looking at a run brings the graph of an edited member up to date,
+    // which publishes it anew. The graphs stand still once nothing is built.
+    let rested = || {
+        let started = std::time::Instant::now();
+        while members.iter().any(|member| {
+            fx.graphs
+                .status(&member.graph_id, false)
+                .is_ok_and(|status| status["state"] == "building")
+        }) {
+            assert!(started.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    // An answer worked out on a graph that is then published anew is
+    // worked out once more: ask until an answer comes from what was kept.
+    let mut settled = Value::Null;
+    for round in 0.. {
+        assert!(round < 10, "the graphs never stood still");
+        rested();
+        let before = reached();
+        settled = asked(&evidence);
+        rested();
+        if reached() == before {
+            break;
+        }
+    }
+    let base = reached();
+    for _ in 0..20 {
+        assert_eq!(asked(&evidence), settled);
+    }
+    assert_eq!(reached(), base);
+    // Other evidence is another question: the caller that was not opened
+    // is opened now, and is no longer told.
+    let mut opened = evidence.clone();
+    opened.opened.push("src/OrderController.php".to_owned());
+    let after = asked(&opened);
+    assert_eq!(reached(), base + 1);
+    assert!(
+        !after["evidence"]["unopened_callers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|caller| caller["path"] == "src/OrderController.php"),
+        "{after}"
+    );
+    assert_eq!(asked(&opened), after);
+    assert_eq!(reached(), base + 1);
+    // So is an event of the run that passed the bridge, whatever it held.
+    fx.bridge
+        .on_emitted_session_event(run_id, None, &json!({"kind": "agent_activity"}));
+    assert_eq!(asked(&opened), after);
+    assert_eq!(reached(), base + 2);
+    // And a graph of a member that was published anew: what the answer is
+    // kept by tells one published graph from the next.
+    let key = || {
+        fx.bridge.reach_key(
+            run_id,
+            &system,
+            &ctx.state,
+            std::slice::from_ref(&opened),
+            &members,
+            &Value::Null,
+        )
+    };
+    let before = key();
+    assert_eq!(before, key());
+    let graph = crate::graph::live(&fx.store.state, &orders_t.graph_id);
+    let text = fs::read_to_string(&graph).unwrap();
+    fs::write(&graph, format!("{text}\n")).unwrap();
+    assert_ne!(before, key());
 }
 
 #[test]
@@ -2034,4 +2173,93 @@ fn audit_regressions_h1_through_h7_boolean_path_shared_depth_aliases_dirty_isola
             "expected intra_service Graphify file_impact overlay: {sys_impact}"
         );
     });
+}
+
+#[test]
+fn a_link_between_two_services_is_bridged_to_the_code_on_both_sides() {
+    let fx = setup_harbor_fixture();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let bridge = |from: &str, to: &str, contract: &str| {
+        let mut query = json!({"project_id": fx.monorepo_pid, "from": from, "to": to});
+        if !contract.is_empty() {
+            query["contract"] = json!(contract);
+        }
+        rt.block_on(
+            fx.domain
+                .execute("system_graph.bridge", json!({"query": query, "body": {}})),
+        )
+    };
+    let paths = |side: &Value| {
+        side["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|site| site["path"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    // web uses orders-http-v1 of orders: its client names it, and the
+    // passport of orders says where the contract is made.
+    let view = unwrap_json(bridge("web", "orders", "").unwrap());
+    assert_eq!(view["kind"], "system_bridge");
+    assert_eq!(view["contracts"], json!(["orders-http-v1"]));
+    assert_eq!(paths(&view["consumer"]), ["src/OrdersClient.ts"]);
+    assert_eq!(
+        view["consumer"]["sites"][0]["contracts"],
+        json!(["orders-http-v1"])
+    );
+    assert_eq!(paths(&view["provider"]), ["src/OrderController.php"]);
+    let made = &view["provider"]["sites"][0];
+    assert_eq!(
+        (made["declared"].clone(), made["found"].clone()),
+        (json!(true), json!(false))
+    );
+    // Without a code graph nothing is told of how far a file reaches.
+    assert_eq!(view["provider"]["graph"], false);
+    assert!(made["reach"].is_null());
+    assert_eq!(made["in_graph"], false);
+    // billing calls orders without declaring it: its code is the bridge.
+    let undeclared = unwrap_json(bridge("billing", "orders", "").unwrap());
+    assert_eq!(paths(&undeclared["consumer"]), ["src/InvoiceWorker.php"]);
+    // A contract the link does not hold has no code on either side.
+    let other = unwrap_json(bridge("web", "orders", "billing-events-v1").unwrap());
+    assert!(other["consumer"]["sites"].as_array().unwrap().is_empty());
+    assert!(other["provider"]["sites"].as_array().unwrap().is_empty());
+    // A link needs two different services.
+    assert!(bridge("web", "web", "").is_err());
+    assert!(bridge("", "orders", "").is_err());
+    // With the code graph of orders, a file of the contract is told how
+    // far a change of it reaches inside orders: the routes call the
+    // controller.
+    let (_, orders_t) = resolve_service_target(
+        &fx.store,
+        Some(&fx.graphs),
+        None,
+        &fx.monorepo_pid,
+        None,
+        "orders",
+    )
+    .unwrap();
+    write_sample_graphify_json(
+        &fx.store,
+        &orders_t.graph_id,
+        &fx.fake_graphify,
+        json!([
+            {"id": "n_svc", "label": "OrderService", "file_type": "code", "source_file": "src/OrderService.php", "source_location": "L2"},
+            {"id": "n_ctrl", "label": "OrderController", "file_type": "code", "source_file": "src/OrderController.php", "source_location": "L2"},
+            {"id": "n_routes", "label": "routes()", "file_type": "code", "source_file": "src/routes.php", "source_location": "L1"}
+        ]),
+        json!([
+            {"source": "n_ctrl", "target": "n_svc", "relation": "calls", "confidence": "EXTRACTED"},
+            {"source": "n_routes", "target": "n_ctrl", "relation": "calls", "confidence": "EXTRACTED"}
+        ]),
+    );
+    let view = unwrap_json(bridge("web", "orders", "orders-http-v1").unwrap());
+    assert_eq!(view["provider"]["graph"], true);
+    let made = &view["provider"]["sites"][0];
+    assert_eq!(made["in_graph"], true);
+    assert_eq!(made["reach"], json!({"files": 1, "tests": 0}));
+    assert_eq!(view["contract"], "orders-http-v1");
 }

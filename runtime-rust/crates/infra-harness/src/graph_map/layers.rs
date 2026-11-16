@@ -236,6 +236,9 @@ const NOUNS: &[&str] = &[
 /// Pairs of files against the order, and files of one layer, that are
 /// listed at once: the most linked first.
 pub const LISTED: usize = 30;
+/// Links against the rules that a picture draws although its own limits
+/// left them out: the most links first.
+pub const KEPT_VIOLATIONS: usize = 24;
 /// A folder is said to be in layers where they hold no fewer files than
 /// this, and no less of its code than `SHARES` says: a few files that happen
 /// to be named like a layer are no layered design.
@@ -740,12 +743,18 @@ impl Index {
         let mut visible = BTreeSet::new();
         let mut file_nodes = HashSet::new();
         let mut folder_nodes = HashSet::new();
+        // The file each box of an opened file stands in: a symbol in the
+        // file it says or in the open one, a file around them in itself.
+        let mut file_of: HashMap<String, String> = HashMap::new();
         for node in view["nodes"].as_array_mut().into_iter().flatten() {
             let node_path = node["path"].as_str().unwrap_or("");
             let path = node["file"]
                 .as_str()
                 .or_else(|| if node["symbol"] == true { opened } else { None })
                 .unwrap_or(node_path);
+            if node["folder"] != true {
+                file_of.insert(node_path.to_owned(), path.to_owned());
+            }
             let layer = if node["folder"] == true {
                 folder_nodes.insert(node_path.to_owned());
                 let mut under = self
@@ -782,24 +791,91 @@ impl Index {
             None
         };
         let mut drawn = HashMap::new();
+        let symbols = view["mode"] == "file";
         // Folder arrows represent many file links. Attribute a violation only
         // to the boxes representing its two ends.
-        if view["mode"] != "file" {
+        if !symbols {
             for (&(source, target), links) in &marked {
-                if let Some(ends) = box_for(source).zip(box_for(target)) {
+                if let Some(ends) = box_for(source).zip(box_for(target))
+                    && ends.0 != ends.1
+                {
                     *drawn.entry(ends).or_insert(0) += links;
+                }
+            }
+        }
+        // A picture draws the strongest links of a dense folder, and no more
+        // than its limit. A link that breaks a rule is what the rules are
+        // asked for, so it is drawn whatever those limits left out: the
+        // most links first, `KEPT_VIOLATIONS` of them.
+        let mut kept = 0;
+        if !symbols && !drawn.is_empty() {
+            let present = view["edges"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|edge| edge["from"].as_str().zip(edge["to"].as_str()))
+                .collect::<HashSet<_>>();
+            let mut missing: BTreeMap<(&str, &str), EdgeFlow> = drawn
+                .keys()
+                .filter(|ends| !present.contains(*ends))
+                .map(|ends| (*ends, EdgeFlow::default()))
+                .collect();
+            if !missing.is_empty() {
+                for (from, to, pair) in &self.pairs {
+                    if pair.weight(certain) == 0 {
+                        continue;
+                    }
+                    let ends = box_for(&self.files[*from as usize])
+                        .zip(box_for(&self.files[*to as usize]));
+                    if let Some(flow) = ends.and_then(|ends| missing.get_mut(&ends)) {
+                        flow.add_pair(pair, certain);
+                    }
+                }
+                let mut missing = missing
+                    .into_iter()
+                    .filter(|(_, flow)| flow.flow.links > 0)
+                    .collect::<Vec<_>>();
+                missing.sort_by(|(a, left), (b, right)| {
+                    drawn[b]
+                        .cmp(&drawn[a])
+                        .then(right.flow.links.cmp(&left.flow.links))
+                        .then(a.cmp(b))
+                });
+                missing.truncate(KEPT_VIOLATIONS);
+                kept = missing.len();
+                let added = missing
+                    .iter()
+                    .map(|((from, to), flow)| {
+                        let mut edge = self.edge_json(from, to, flow);
+                        edge["kept"] = json!("violation");
+                        edge
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(edges) = view["edges"].as_array_mut() {
+                    edges.extend(added);
                 }
             }
         }
         for edge in view["edges"].as_array_mut().into_iter().flatten() {
             let endpoints = edge["from"].as_str().zip(edge["to"].as_str());
-            if let Some(links) = endpoints.and_then(|ends| drawn.get(&ends)) {
+            if symbols {
+                // In an opened file every link from a file of one layer to a
+                // file of a layer it may not use breaks the rule.
+                let files = endpoints.and_then(|(from, to)| file_of.get(from).zip(file_of.get(to)));
+                if let Some((from, to)) = files
+                    && from != to
+                    && marked.contains_key(&(from.as_str(), to.as_str()))
+                {
+                    edge["architecture_violation"] = json!(edge["links"].as_u64().unwrap_or(1));
+                }
+            } else if let Some(links) = endpoints.and_then(|ends| drawn.get(&ends)) {
                 edge["architecture_violation"] = json!(links);
             }
         }
         view["architecture"] = json!({
             "declared":rules.is_some(),
             "layers":visible.into_iter().map(layer_json).collect::<Vec<_>>(),
+            "kept":kept,
             "violations":{"links":violation_links, "pairs":marked.len(),
                 "more":marked.len().saturating_sub(violations.len()), "rows":violations},
             "reciprocal_total":reciprocal.len(),

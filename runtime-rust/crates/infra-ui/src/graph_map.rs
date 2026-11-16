@@ -62,6 +62,42 @@ pub struct Wire {
     pub path: String,
     /// Runs right to left: the weaker direction of a cycle.
     pub back: bool,
+    /// Passes so many layers that it is led through none of them: one
+    /// curve from end to end, drawn only while it is lit.
+    pub portal: bool,
+}
+/// How far apart two links leave, or reach, one side of a box, and how much
+/// of that side all of them take together.
+const PORT_GAP: f64 = 4.0;
+const PORT_SPREAD: f64 = 18.0;
+/// A link that passes this many layers or more is a portal.
+pub const PORTAL_SPAN: usize = 4;
+/// How the links of a picture are led between its boxes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Routing {
+    /// The links of a box leave it, and reach it, apart along its side, in
+    /// the order of where they lead, so that they do not cross at once.
+    pub ports: bool,
+    /// Links that pass layers together, away from one box or towards one,
+    /// share one slot in each of them and part at its end.
+    pub trunks: bool,
+    /// A link that passes at least this many layers takes no slot in them.
+    pub portals: Option<usize>,
+}
+impl Routing {
+    /// Every link by itself: from the middle of a box, through a slot of
+    /// its own in each layer it passes.
+    pub const PLAIN: Self = Self {
+        ports: false,
+        trunks: false,
+        portals: None,
+    };
+    /// As the pictures lead them.
+    pub const CLEAN: Self = Self {
+        ports: true,
+        trunks: true,
+        portals: Some(PORTAL_SPAN),
+    };
 }
 /// The folders spread out in a picture: each is drawn as a frame around the
 /// boxes of what it holds.
@@ -133,6 +169,16 @@ pub struct FocusOverlay {
     pub frames: BTreeSet<usize>,
     pub entities: Vec<PlacedEntity>,
     pub bbox: Option<(f64, f64, f64, f64)>,
+    /// How many cards hang under each box that has some.
+    pub under: BTreeMap<usize, usize>,
+}
+/// How much room the cards under a box take: they stand three to a column,
+/// so three rows at most.
+pub fn entity_room(cards: usize) -> f64 {
+    match cards.min(3) {
+        0 => 0.0,
+        rows => 6.0 + rows as f64 * (ENTITY_HEIGHT + 4.0),
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum EntityAnchor {
@@ -487,6 +533,13 @@ pub fn resolve_focus(view: &V, plan: &Plan, focus: &LiveFocus) -> FocusOverlay {
             entity: entity.clone(),
         });
     }
+    overlay.under = anchor_counts
+        .iter()
+        .filter_map(|(anchor, cards)| match anchor {
+            EntityAnchor::Node(node) => Some((*node, *cards)),
+            _ => None,
+        })
+        .collect();
     for &idx in &overlay.nodes {
         let p = &plan.nodes[idx];
         overlay.bbox = Some(union_bbox(
@@ -834,6 +887,117 @@ fn order(count: usize, linked: &[bool], links: &BTreeMap<(usize, usize), u64>) -
     first.extend(last);
     first
 }
+/// Which links of a picture say nothing new of what depends on what: a link
+/// from one box to another that a longer way through other boxes already
+/// joins. Leaving them out keeps every box reaching what it reached.
+///
+/// Boxes that all reach each other are one place for this: a link inside
+/// such a group is never left out, and a way may lead through the group.
+/// Of two boxes joined by a link and by no longer way, the link stays.
+pub fn transitive(count: usize, links: &[(usize, usize)]) -> Vec<bool> {
+    let mut out = vec![vec![]; count];
+    for (from, to) in links {
+        if from != to && *from < count && *to < count && !out[*from].contains(to) {
+            out[*from].push(*to);
+        }
+    }
+    // The groups come out with what is used before what uses it, so every
+    // link between two groups leads from a later one to an earlier one.
+    let group = groups(count, &out);
+    let many = group.iter().copied().max().map_or(0, |last| last + 1);
+    let mut next: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); many];
+    for (from, to) in links {
+        if *from < count && *to < count && group[*from] != group[*to] {
+            next[group[*from]].insert(group[*to]);
+        }
+    }
+    // What each group reaches, itself left out, as a set of bits.
+    let words = many.div_ceil(64).max(1);
+    let mut reach = vec![vec![0u64; words]; many];
+    for at in 0..many {
+        let mut held = vec![0u64; words];
+        for used in &next[at] {
+            held[used / 64] |= 1 << (used % 64);
+            if *used < at {
+                for (word, more) in held.iter_mut().zip(&reach[*used]) {
+                    *word |= more;
+                }
+            }
+        }
+        reach[at] = held;
+    }
+    links
+        .iter()
+        .map(|(from, to)| {
+            if *from >= count || *to >= count {
+                return false;
+            }
+            let (user, used) = (group[*from], group[*to]);
+            user != used
+                && next[user]
+                    .iter()
+                    .any(|by| *by != used && reach[*by][used / 64] & (1 << (used % 64)) != 0)
+        })
+        .collect()
+}
+/// How far each box of a picture lies from one of them along its links:
+/// what the box uses within `down` links is so many links after it, what
+/// uses it within `up` links so many before it, and the box itself at none.
+/// A box that lies both ways, as in a cycle, is told by the nearer way, and
+/// by what the box uses where both are as near.
+pub fn cone(
+    count: usize,
+    links: &[(usize, usize)],
+    from: usize,
+    up: usize,
+    down: usize,
+) -> Vec<Option<i32>> {
+    let mut depth = vec![None; count];
+    if from >= count {
+        return depth;
+    }
+    let walk = |outgoing: bool, limit: usize| {
+        let mut found = vec![None; count];
+        found[from] = Some(0usize);
+        let mut edge = vec![from];
+        for step in 1..=limit {
+            let mut further = vec![];
+            for (a, b) in links {
+                let (near, far) = if outgoing { (*a, *b) } else { (*b, *a) };
+                if near < count && far < count && edge.contains(&near) && found[far].is_none() {
+                    found[far] = Some(step);
+                    further.push(far);
+                }
+            }
+            if further.is_empty() {
+                break;
+            }
+            edge = further;
+        }
+        found
+    };
+    let (after, before) = (walk(true, down), walk(false, up));
+    for node in 0..count {
+        depth[node] = match (after[node], before[node]) {
+            (Some(after), Some(before)) if before < after => Some(-(before as i32)),
+            (Some(after), _) => Some(after as i32),
+            (None, Some(before)) => Some(-(before as i32)),
+            (None, None) => None,
+        };
+    }
+    depth
+}
+/// Whether a link lies in the cone of a box: it leads one step further
+/// from the box along the arrows, or one step nearer to it against them.
+pub fn in_cone(depth: &[Option<i32>], link: (usize, usize)) -> bool {
+    match (
+        depth.get(link.0).copied().flatten(),
+        depth.get(link.1).copied().flatten(),
+    ) {
+        (Some(from), Some(to)) => (from >= 0 && to == from + 1) || (to <= 0 && from == to - 1),
+        _ => false,
+    }
+}
 fn curve(path: &mut String, from: (f64, f64), to: (f64, f64)) {
     let reach = (to.0 - from.0) / 2.0;
     path.push_str(&format!(
@@ -879,6 +1043,48 @@ pub fn plan_beside(
     frames: &Frames,
     pair: Option<([usize; 2], bool)>,
 ) -> Plan {
+    plan_routed(count, edges, frames, pair, Routing::PLAIN)
+}
+/// The same picture with its links led as `routing` says. The boxes of a
+/// layer stand as their links put them either way; what changes is how
+/// much room the links that pass a layer take there, and so how tall the
+/// picture is.
+///
+/// With `ports` the links of a box leave its side one under another, in the
+/// order of where they lead next, and reach a box the same way. With
+/// `trunks` the links that leave one box and pass layers share one slot in
+/// each layer they pass together; so do the links that lead to one box. A
+/// link joins the larger of the two bundles it could. With `portals` a link
+/// that passes that many layers takes no slot at all.
+pub fn plan_routed(
+    count: usize,
+    edges: &[(usize, usize, u64)],
+    frames: &Frames,
+    pair: Option<([usize; 2], bool)>,
+    routing: Routing,
+) -> Plan {
+    plan_roomy(count, edges, frames, pair, routing, &[])
+}
+/// The same picture with room kept under some of its boxes: `room` says for
+/// each box how much. What hangs under a box, such as the cards of what a
+/// session made in a file, then lies on nothing else. A box no link touches
+/// stands in a grid, whose rows all stand as far apart as the most room
+/// asked for among such boxes.
+pub fn plan_roomy(
+    count: usize,
+    edges: &[(usize, usize, u64)],
+    frames: &Frames,
+    pair: Option<([usize; 2], bool)>,
+    routing: Routing,
+    room: &[f64],
+) -> Plan {
+    let under = |node: usize| {
+        room.get(node)
+            .copied()
+            .filter(|room| room.is_finite())
+            .unwrap_or(0.0)
+            .max(0.0)
+    };
     let mut links: BTreeMap<(usize, usize), u64> = BTreeMap::new();
     let mut out = vec![vec![]; count];
     let mut linked = vec![false; count];
@@ -1040,25 +1246,85 @@ pub fn plan_beside(
     }
     let mut chains: Vec<Vec<usize>> = vec![];
     let mut heights = vec![BOX_HEIGHT; count];
+    // The layer each item stands in: a box in its own, a slot in the layer
+    // its link passes there.
+    let mut column_of = layer.clone();
     let (mut above, mut below): (Vec<Vec<usize>>, Vec<Vec<usize>>) =
         (vec![vec![]; count], vec![vec![]; count]);
-    for (near, far, ..) in &wired {
+    // A link that passes many layers is a portal: it takes no slot in them,
+    // and is drawn from end to end only while it is lit. A link that runs
+    // back closes a cycle and is always drawn.
+    let passes = |near: usize, far: usize| layer[far].saturating_sub(layer[near]);
+    let portal = wired
+        .iter()
+        .map(|(near, far, back, _)| {
+            !*back
+                && routing
+                    .portals
+                    .is_some_and(|least| passes(*near, *far) >= least)
+        })
+        .collect::<Vec<_>>();
+    // Links that pass layers together share one slot in each: those that
+    // leave one box, or those that lead to one.
+    let (mut leaving, mut reaching) = (vec![0usize; count], vec![0usize; count]);
+    for ((near, far, back, _), portal) in wired.iter().zip(&portal) {
+        if routing.trunks && !*back && !*portal && passes(*near, *far) >= 2 {
+            leaving[*near] += 1;
+            reaching[*far] += 1;
+        }
+    }
+    // The slot of a bundle in a layer and a band: by whether it leaves a
+    // box or leads to one, and by that box.
+    let mut trunks: BTreeMap<(bool, usize, usize, usize), usize> = BTreeMap::new();
+    for ((near, far, back, _), portal) in wired.iter().zip(&portal) {
         let mut chain = vec![*near];
         // A link passes through the band that holds both of its ends.
         let through = meet(band[*near], band[*far]);
-        for column in columns.iter_mut().take(layer[*far]).skip(layer[*near] + 1) {
-            let bend = heights.len();
-            heights.push(BEND_HEIGHT);
-            band.push(through);
-            above.push(vec![]);
-            below.push(vec![]);
-            column.push(bend);
-            chain.push(bend);
+        // A link joins the larger bundle of the two it could.
+        let trunk = if !routing.trunks || *back || *portal {
+            None
+        } else if leaving[*near] >= 2 && leaving[*near] >= reaching[*far] {
+            Some((true, *near))
+        } else if reaching[*far] >= 2 {
+            Some((false, *far))
+        } else {
+            None
+        };
+        if !*portal {
+            // The number of a layer names its slots as well as its column.
+            #[allow(clippy::needless_range_loop)]
+            for at in layer[*near] + 1..layer[*far] {
+                let shared =
+                    trunk.and_then(|(out, of)| trunks.get(&(out, of, at, through)).copied());
+                let bend = match shared {
+                    Some(bend) => bend,
+                    None => {
+                        let bend = heights.len();
+                        heights.push(BEND_HEIGHT);
+                        band.push(through);
+                        column_of.push(at);
+                        above.push(vec![]);
+                        below.push(vec![]);
+                        columns[at].push(bend);
+                        if let Some((out, of)) = trunk {
+                            trunks.insert((out, of, at, through), bend);
+                        }
+                        bend
+                    }
+                };
+                chain.push(bend);
+            }
         }
         chain.push(*far);
-        for pair in chain.windows(2) {
-            below[pair[0]].push(pair[1]);
-            above[pair[1]].push(pair[0]);
+        // A portal pulls no box towards the other: it is not there to be
+        // kept short.
+        if !*portal {
+            for pair in chain.windows(2) {
+                if !below[pair[0]].contains(&pair[1]) {
+                    below[pair[0]].push(pair[1]);
+                    above[pair[1]].push(pair[0]);
+                }
+            }
         }
         chains.push(chain);
     }
@@ -1134,6 +1400,9 @@ pub fn plan_beside(
             }
             offset[*item] = y;
             y += heights[*item];
+            if *item < count {
+                y += under(*item);
+            }
         }
         if let Some(last) = column.last() {
             runs.insert((at, band[*last]), y);
@@ -1161,6 +1430,13 @@ pub fn plan_beside(
         widen(&mut span[band[node]], layer[node], layer[node]);
     }
     pass(&mut span);
+    // How far apart the rows of a grid stand.
+    let pitch = BOX_HEIGHT
+        + ROW_GAP
+        + (0..count)
+            .filter(|node| !linked[*node])
+            .map(under)
+            .fold(0.0, f64::max);
     // What a frame holds that no link here touches lies in a grid under the
     // rest of it, from the frame's first layer on.
     let apart_in = |frame: usize| {
@@ -1207,7 +1483,7 @@ pub fn plan_beside(
                     }
                     grid_in[frame] = y;
                     let rows = unlinked.div_ceil(across[frame]);
-                    y += rows as f64 * (BOX_HEIGHT + ROW_GAP) - ROW_GAP;
+                    y += rows as f64 * pitch - ROW_GAP;
                 }
             }
             Step::End(frame) => {
@@ -1259,7 +1535,7 @@ pub fn plan_beside(
                 .unwrap_or(0);
             Placed {
                 x: left(span[frame].map_or(0, |(first, _)| first) + at % across[frame]),
-                y: grid_in[frame] + (at / across[frame]) as f64 * (BOX_HEIGHT + ROW_GAP),
+                y: grid_in[frame] + (at / across[frame]) as f64 * pitch,
                 layer: None,
                 cycle: false,
             }
@@ -1267,7 +1543,7 @@ pub fn plan_beside(
             let at = loose.iter().position(|other| *other == node).unwrap_or(0);
             Placed {
                 x: MARGIN + inset + (at % per_row) as f64 * (BOX_WIDTH + ROW_GAP),
-                y: grid_top + (at / per_row) as f64 * (BOX_HEIGHT + ROW_GAP),
+                y: grid_top + (at / per_row) as f64 * pitch,
                 layer: None,
                 cycle: false,
             }
@@ -1287,20 +1563,73 @@ pub fn plan_beside(
             None => Framed::default(),
         })
         .collect::<Vec<_>>();
+    // Where each link leaves the box at its near end and reaches the box
+    // at its far end, as a distance from the middle of the side: the links
+    // of one side stand in the order of where they lead next, so the one
+    // that leads up leaves above the one that leads down.
+    let centre = |item: usize| top[item] + heights[item] / 2.0;
+    let mut port = vec![(0.0f64, 0.0f64); chains.len()];
+    if routing.ports {
+        // For each box the links at one of its sides: where each leads
+        // next, and which link it is.
+        type Side = Vec<Vec<(f64, usize)>>;
+        let (mut right, mut left_side): (Side, Side) = (vec![vec![]; count], vec![vec![]; count]);
+        for (index, chain) in chains.iter().enumerate() {
+            if portal[index] {
+                continue;
+            }
+            let last = chain.len() - 1;
+            right[chain[0]].push((centre(chain[1]), index));
+            left_side[chain[last]].push((centre(chain[last - 1]), index));
+        }
+        let apart = |side: &mut Vec<(f64, usize)>| {
+            side.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let many = side.len();
+            let room = PORT_SPREAD.min(PORT_GAP * many.saturating_sub(1) as f64);
+            side.iter()
+                .enumerate()
+                .map(|(place, (_, index))| {
+                    let part = if many < 2 {
+                        0.0
+                    } else {
+                        place as f64 / (many - 1) as f64 - 0.5
+                    };
+                    (*index, room * part)
+                })
+                .collect::<Vec<_>>()
+        };
+        for node in 0..count {
+            for (index, offset) in apart(&mut right[node]) {
+                port[index].0 = offset;
+            }
+            for (index, offset) in apart(&mut left_side[node]) {
+                port[index].1 = offset;
+            }
+        }
+    }
     let mut wires = vec![];
-    for (chain, (near, _, back, pair)) in chains.iter().zip(&wired) {
+    for (index, (chain, (_, _, back, pair))) in chains.iter().zip(&wired).enumerate() {
         let edge = edges
             .iter()
             .position(|(from, to, _)| (*from, *to) == *pair)
             .unwrap_or(0);
         // The stops of the link from left to right; a slot is crossed straight.
         let mut stops = vec![];
+        let last = chain.len() - 1;
         for (step, item) in chain.iter().enumerate() {
-            let (x, y) = (left(layer[*near] + step), top[*item] + heights[*item] / 2.0);
+            let x = left(column_of[*item]);
+            let y = centre(*item)
+                + if step == 0 {
+                    port[index].0
+                } else if step == last {
+                    port[index].1
+                } else {
+                    0.0
+                };
             if step > 0 {
                 stops.push(((x, y), false));
             }
-            if step + 1 < chain.len() {
+            if step < last {
                 stops.push(((x + BOX_WIDTH, y), step > 0));
             }
         }
@@ -1327,6 +1656,7 @@ pub fn plan_beside(
             edge,
             path,
             back: *back,
+            portal: portal[index],
         });
     }
     let rows = loose.len().div_ceil(per_row);
@@ -1346,7 +1676,7 @@ pub fn plan_beside(
         height: if loose.is_empty() {
             below_all + MARGIN
         } else {
-            grid_top + rows as f64 * (BOX_HEIGHT + ROW_GAP)
+            grid_top + rows as f64 * pitch
         }
         .max(BOX_HEIGHT + 2.0 * MARGIN),
         apart,
@@ -1456,6 +1786,7 @@ pub fn plan_row(count: usize, edges: &[(usize, usize, u64)]) -> Plan {
                 ),
             },
             back: from > to,
+            portal: false,
         })
         .collect();
     Plan {
@@ -2384,6 +2715,18 @@ fn shown(view: &V) -> String {
         if number("shown") < number("places") {
             text.push_str(&format!(", {} drawn", count(number("shown"))));
         }
+        // The ways round that were asked for and found.
+        if number("detours") > 0 {
+            text.push_str(&format!(
+                " · {}{}",
+                if m::yes(&path["detours_more"]) {
+                    "at least "
+                } else {
+                    ""
+                },
+                plural(number("detours"), "longer way", "longer ways")
+            ));
+        }
         return text;
     }
     if shares(view) {
@@ -3099,6 +3442,23 @@ fn path_note(view: &V) -> String {
         "Each box uses the next: these are the ways that take the fewest links. Select a link to see what makes it up."
             .to_owned(),
     );
+    // With them the ways round that were asked for, as far as there are any.
+    let longer = number("longer");
+    if longer > 0 {
+        let by = plural(longer, "link", "links");
+        parts.push(match number("detours") {
+            0 => format!("No way that is longer by {by} at most leads there."),
+            found => format!(
+                "Drawn lighter with them: {} longer by {by} at most, each whole{}",
+                plural(found, "way", "ways"),
+                if m::yes(&path["detours_more"]) {
+                    "; there are more."
+                } else {
+                    "."
+                }
+            ),
+        });
+    }
     if number("shown") < number("places") {
         parts.push(format!(
             "{} places lie on such ways; each step shows its {} most linked.",
@@ -3221,22 +3581,121 @@ fn changed_order(change: &V) -> String {
         ),
     }
 }
-/// The middle of a link drawn as one curve, where a word about it can stand:
-/// the point halfway along `M x y C x y x y x y`. None for any other path.
-fn middle(path: &str) -> Option<(f64, f64)> {
-    let (start, curve) = path.strip_prefix('M')?.split_once(" C")?;
-    let at = start
-        .split(' ')
-        .chain(curve.split(' '))
-        .map(|number| number.parse::<f64>().ok())
-        .collect::<Option<Vec<_>>>()?;
-    let [x0, y0, x1, y1, x2, y2, x3, y3] = at[..] else {
-        return None;
+/// One piece of a drawn link: a curve by its two handles and its end, or a
+/// straight run to a point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Piece {
+    Curve([(f64, f64); 3]),
+    Line((f64, f64)),
+}
+/// The pieces of a link as the pictures draw them: `M x y`, then curves
+/// `C x y x y x y` and straight runs `L x y` in any order. None for any
+/// other path.
+fn pieces(path: &str) -> Option<((f64, f64), Vec<Piece>)> {
+    let mut runs: Vec<(char, Vec<f64>)> = Vec::new();
+    for token in path.split_whitespace() {
+        let number = match token.chars().next()? {
+            command @ ('M' | 'C' | 'L') => {
+                runs.push((command, Vec::new()));
+                &token[1..]
+            }
+            _ => token,
+        };
+        if !number.is_empty() {
+            runs.last_mut()?.1.push(number.parse().ok()?);
+        }
+    }
+    let mut runs = runs.into_iter();
+    let start = match runs.next()? {
+        ('M', at) if at.len() == 2 => (at[0], at[1]),
+        _ => return None,
     };
-    Some((
-        (x0 + 3.0 * (x1 + x2) + x3) / 8.0,
-        (y0 + 3.0 * (y1 + y2) + y3) / 8.0,
-    ))
+    let pieces = runs
+        .map(|(command, at)| match (command, &at[..]) {
+            ('C', [x1, y1, x2, y2, x3, y3]) => {
+                Some(Piece::Curve([(*x1, *y1), (*x2, *y2), (*x3, *y3)]))
+            }
+            ('L', [x, y]) => Some(Piece::Line((*x, *y))),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!pieces.is_empty()).then_some((start, pieces))
+}
+/// A point of a curve and the way it runs there, `t` of the way along it.
+fn on_curve(from: (f64, f64), [a, b, to]: [(f64, f64); 3], t: f64) -> ((f64, f64), (f64, f64)) {
+    let s = 1.0 - t;
+    let at = |p0: f64, p1: f64, p2: f64, p3: f64| {
+        s * s * s * p0 + 3.0 * s * s * t * p1 + 3.0 * s * t * t * p2 + t * t * t * p3
+    };
+    let way = |p0: f64, p1: f64, p2: f64, p3: f64| {
+        3.0 * s * s * (p1 - p0) + 6.0 * s * t * (p2 - p1) + 3.0 * t * t * (p3 - p2)
+    };
+    (
+        (at(from.0, a.0, b.0, to.0), at(from.1, a.1, b.1, to.1)),
+        (way(from.0, a.0, b.0, to.0), way(from.1, a.1, b.1, to.1)),
+    )
+}
+/// How finely a curve is measured.
+const CURVE_STEPS: usize = 16;
+/// The point halfway along a drawn link, where a word about it can stand,
+/// and the angle the link runs at there, in degrees clockwise from the
+/// right. A link of one curve is halved where the curve is; a link of
+/// several pieces, as one that passes layers in slots of its own, is
+/// halved by its length, so the point lies on it whatever its shape.
+fn halfway(path: &str) -> Option<(f64, f64, f64)> {
+    let (start, pieces) = pieces(path)?;
+    let angle = |(dx, dy): (f64, f64)| dy.atan2(dx).to_degrees();
+    if let [Piece::Curve(curve)] = pieces[..] {
+        let ((x, y), way) = on_curve(start, curve, 0.5);
+        return Some((x, y, angle(way)));
+    }
+    // The link as short straight steps, each with where it ends.
+    let mut steps: Vec<((f64, f64), (f64, f64))> = Vec::new();
+    let mut from = start;
+    for piece in &pieces {
+        match *piece {
+            Piece::Line(to) => {
+                steps.push((from, to));
+                from = to;
+            }
+            Piece::Curve(curve) => {
+                let mut last = from;
+                for step in 1..=CURVE_STEPS {
+                    let (point, _) = on_curve(from, curve, step as f64 / CURVE_STEPS as f64);
+                    steps.push((last, point));
+                    last = point;
+                }
+                from = curve[2];
+            }
+        }
+    }
+    let long = |(a, b): &((f64, f64), (f64, f64))| (b.0 - a.0).hypot(b.1 - a.1);
+    let mut left = steps.iter().map(long).sum::<f64>() / 2.0;
+    for step in &steps {
+        let length = long(step);
+        if length >= left && length > 0.0 {
+            let (a, b) = *step;
+            let part = left / length;
+            return Some((
+                a.0 + (b.0 - a.0) * part,
+                a.1 + (b.1 - a.1) * part,
+                angle((b.0 - a.0, b.1 - a.1)),
+            ));
+        }
+        left -= length;
+    }
+    let (a, b) = *steps.last()?;
+    Some((b.0, b.1, angle((b.0 - a.0, b.1 - a.1))))
+}
+/// The middle of a drawn link, where a word about it can stand.
+fn middle(path: &str) -> Option<(f64, f64)> {
+    halfway(path).map(|(x, y, _)| (x, y))
+}
+/// Whether a drawn link passes layers on its way: it then runs in several
+/// pieces, straight through the slot of each layer it passes. Such a link
+/// is long, and its head is far from where it leaves.
+fn passes_layers(path: &str) -> bool {
+    path.contains(" L") && path.contains(" C")
 }
 /// Whether what a change did to the order of the layers is still being found
 /// out, so that the picture is asked for again.
@@ -3296,7 +3755,7 @@ fn pattern_note(view: &V) -> String {
             .filter_map(|told| told.as_str().map(str::to_owned)),
     );
     if m::yes(&pattern["guessed"]) {
-        parts.push("A dashed link is one the tool only guessed.".to_owned());
+        parts.push("A hollow link is one the tool only guessed.".to_owned());
     }
     let comparison = order_comparison(&pattern["change"]);
     if !comparison.is_empty() {
@@ -3592,6 +4051,10 @@ struct ImpactLookup {
     callers_impacted: Vec<String>,
     callers_added: Vec<String>,
     callers_unchanged: Vec<String>,
+    /// The kinds of the dependencies a change added and took away, by
+    /// their target: one target may be called, read and written.
+    kinds_added: BTreeMap<String, [u64; 7]>,
+    kinds_removed: BTreeMap<String, [u64; 7]>,
 }
 
 impl ImpactLookup {
@@ -3609,6 +4072,20 @@ impl ImpactLookup {
                     (!target.is_empty()).then_some(target)
                 })
                 .collect()
+        };
+        let collect_kinds = |arr: &V| -> BTreeMap<String, [u64; 7]> {
+            let mut kinds: BTreeMap<String, [u64; 7]> = BTreeMap::new();
+            for dep in m::array(arr) {
+                let target = normalize_rel_path(strip_symbol_suffix(&m::text(&dep, "target")));
+                if target.is_empty() {
+                    continue;
+                }
+                let held = EdgeKinds::of(&dep).counts;
+                for (count, more) in kinds.entry(target).or_default().iter_mut().zip(held) {
+                    *count += more;
+                }
+            }
+            kinds
         };
         let mut callers_risk = Vec::new();
         let mut callers_impacted = Vec::new();
@@ -3636,7 +4113,19 @@ impl ImpactLookup {
             callers_impacted,
             callers_added,
             callers_unchanged,
+            kinds_added: collect_kinds(&doc["uses"]["added"]),
+            kinds_removed: collect_kinds(&doc["uses"]["removed"]),
         })
+    }
+    /// The kind a dependency on `target` that a change added, or took
+    /// away, is drawn as: the strongest of the kinds it had.
+    fn dep_kind(&self, target: &str, added: bool) -> &'static str {
+        let kinds = if added {
+            &self.kinds_added
+        } else {
+            &self.kinds_removed
+        };
+        kinds.get(target).map_or("calls", pick_precedence_kind)
     }
 
     fn node_matches_any(&self, node: &V, paths: &[String]) -> bool {
@@ -3850,70 +4339,139 @@ fn pick_precedence_kind(counts: &[u64; 7]) -> &'static str {
     "calls"
 }
 
-fn edge_kind_stats(edge: &V) -> (&'static str, bool, Option<String>) {
-    if let Some(kinds) = edge["kinds"].as_array().filter(|arr| !arr.is_empty()) {
+/// The kinds of links the key of a picture has switched off, in the order of
+/// `EDGE_ARROW_SPECS`.
+pub type KindsOff = [bool; 7];
+/// The kinds a state keeps switched off: `links_off` holds their names.
+pub fn kinds_off(state: &V) -> KindsOff {
+    let mut off = [false; 7];
+    for kind in state["links_off"].as_array().into_iter().flatten() {
+        if let Some(at) = kind
+            .as_str()
+            .and_then(|kind| EDGE_ARROW_SPECS.iter().position(|spec| spec.kind == kind))
+        {
+            off[at] = true;
+        }
+    }
+    off
+}
+/// What a link holds of each of the seven kinds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EdgeKinds {
+    /// Links of each kind, in the order of `EDGE_ARROW_SPECS`.
+    pub counts: [u64; 7],
+    /// The kinds as the graph worded them, the most links first.
+    pub breakdown: Option<String>,
+}
+impl EdgeKinds {
+    /// Read from a link of a picture: its kinds with their counts, or its
+    /// one kind, or how a pattern words what ties two parts. A link that
+    /// says nothing is a call, as it is drawn.
+    pub fn of(edge: &V) -> Self {
         let mut counts = [0u64; 7];
-        let mut items: Vec<(String, u64)> = Vec::with_capacity(kinds.len());
-        for entry in kinds {
-            let raw = entry
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .unwrap_or_else(|| m::text(entry, "kind"));
-            if raw.is_empty() {
-                continue;
+        let mut add = |raw: &str, links: u64| {
+            let at = edge_arrow_spec_index(normalize_edge_arrow_kind(raw));
+            counts[at] = counts[at].saturating_add(links.max(1));
+        };
+        if let Some(kinds) = edge["kinds"].as_array().filter(|arr| !arr.is_empty()) {
+            let mut items: Vec<(String, u64)> = Vec::with_capacity(kinds.len());
+            for entry in kinds {
+                let raw = entry
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| m::text(entry, "kind"));
+                if raw.is_empty() {
+                    continue;
+                }
+                let links = entry["links"].as_u64().unwrap_or(1);
+                add(&raw, links);
+                items.push((raw.replace('_', " "), links));
             }
-            let links = entry["links"].as_u64().unwrap_or(1);
-            let norm = normalize_edge_arrow_kind(&raw);
-            let idx = edge_arrow_spec_index(norm);
-            counts[idx] = counts[idx].saturating_add(links.max(1));
-            items.push((raw.replace('_', " "), links));
+            if !items.is_empty() {
+                items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                let breakdown = items
+                    .into_iter()
+                    .map(|(label, count)| format!("{label} {count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Self {
+                    counts,
+                    breakdown: Some(breakdown),
+                };
+            }
         }
-        if !items.is_empty() {
-            let multi = counts.iter().filter(|&&c| c > 0).count() > 1;
-            let primary = pick_precedence_kind(&counts);
-            items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            let breakdown = items
-                .into_iter()
-                .map(|(label, count)| format!("{label} {count}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return (primary, multi, Some(breakdown));
-        }
-    }
-    if let Some(kind) = edge["kind"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return (normalize_edge_arrow_kind(kind), false, None);
-    }
-    if let Some(tie) = edge["tie"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let mut counts = [0u64; 7];
-        let mut any = false;
-        for part in tie
-            .split(" and ")
-            .flat_map(|s| s.split(','))
-            .flat_map(|s| s.split('&'))
+        if let Some(kind) = edge["kind"]
+            .as_str()
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let norm = normalize_edge_arrow_kind(part);
-            let idx = edge_arrow_spec_index(norm);
-            counts[idx] = counts[idx].saturating_add(1);
-            any = true;
+            add(kind, 1);
+        } else if let Some(tie) = edge["tie"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            for part in tie
+                .split(" and ")
+                .flat_map(|s| s.split(','))
+                .flat_map(|s| s.split('&'))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                add(part, 1);
+            }
         }
-        if any {
-            let multi = counts.iter().filter(|&&c| c > 0).count() > 1;
-            return (pick_precedence_kind(&counts), multi, None);
+        if counts == [0; 7] {
+            counts[0] = 1;
+        }
+        Self {
+            counts,
+            breakdown: None,
         }
     }
-    ("calls", false, None)
+    /// The counts of the kinds that are not switched off.
+    fn shown(&self, off: &KindsOff) -> [u64; 7] {
+        let mut shown = self.counts;
+        for (count, off) in shown.iter_mut().zip(off) {
+            if *off {
+                *count = 0;
+            }
+        }
+        shown
+    }
+    /// The kind a link is drawn as: the strongest of those not switched
+    /// off. None where every kind it holds is switched off, so that the
+    /// link is not drawn.
+    pub fn primary(&self, off: &KindsOff) -> Option<&'static str> {
+        let shown = self.shown(off);
+        (shown != [0; 7]).then(|| pick_precedence_kind(&shown))
+    }
+    /// Whether the link holds more than one kind that is not switched off.
+    pub fn multi(&self, off: &KindsOff) -> bool {
+        self.shown(off).iter().filter(|count| **count > 0).count() > 1
+    }
+    /// The names of every kind the link holds, whatever is switched off.
+    pub fn held(&self) -> String {
+        EDGE_ARROW_SPECS
+            .iter()
+            .zip(&self.counts)
+            .filter(|(_, count)| **count > 0)
+            .map(|(spec, _)| spec.kind)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+#[cfg(test)]
+fn edge_kind_stats(edge: &V) -> (&'static str, bool, Option<String>) {
+    let kinds = EdgeKinds::of(edge);
+    let all = [false; 7];
+    (
+        kinds.primary(&all).unwrap_or("calls"),
+        kinds.multi(&all),
+        kinds.breakdown,
+    )
 }
 
 /// Resolves the canonical arrow kind for an aggregated or link-level dependency edge.
@@ -3956,31 +4514,339 @@ fn arrow_defs_svg(id_prefix: &str, include_against: bool) -> String {
             "<marker id=\"{id_prefix}-arrow-against\" class=\"graph-map-arrow graph-map-arrow-against\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\"/></marker>"
         ));
     }
+    // Where a link leaves: a dot for a link of one kind, a ring with an
+    // eye for a link that holds several.
+    defs.push_str(&format!(
+        "<marker id=\"{id_prefix}-port\" class=\"graph-map-port\" viewBox=\"0 0 8 8\" refX=\"4\" refY=\"4\" markerWidth=\"6\" markerHeight=\"6\" markerUnits=\"userSpaceOnUse\"><circle cx=\"4\" cy=\"4\" r=\"2.6\"/></marker><marker id=\"{id_prefix}-port-multi\" class=\"graph-map-port graph-map-port-multi\" viewBox=\"0 0 8 8\" refX=\"4\" refY=\"4\" markerWidth=\"6\" markerHeight=\"6\" markerUnits=\"userSpaceOnUse\"><circle cx=\"4\" cy=\"4\" r=\"2.9\"/><circle class=\"graph-map-port-eye\" cx=\"4\" cy=\"4\" r=\"1.1\"/></marker>"
+    ));
     defs
 }
 
-/// Renders an accessible compact key of all 7 canonical dependency arrow styles.
-pub fn arrow_kinds_legend_html() -> String {
+/// The kinds the presets of the key leave shown, by the name of the preset.
+const KIND_PRESETS: [(&str, &str, &str, [&str; 7]); 4] = [
+    (
+        "all",
+        "All",
+        "Show every kind of link",
+        [
+            "calls",
+            "imports",
+            "extends",
+            "implements",
+            "writes",
+            "reads",
+            "uses",
+        ],
+    ),
+    (
+        "runtime",
+        "Runtime",
+        "What runs: calls, writes and reads",
+        ["calls", "writes", "reads", "", "", "", ""],
+    ),
+    (
+        "hierarchy",
+        "Hierarchy",
+        "What is built on what: extends and implements",
+        ["extends", "implements", "", "", "", "", ""],
+    ),
+    (
+        "no-imports",
+        "No imports",
+        "Everything but the imports",
+        [
+            "calls",
+            "extends",
+            "implements",
+            "writes",
+            "reads",
+            "uses",
+            "",
+        ],
+    ),
+];
+/// The kinds a preset switches off; none for a name that is no preset.
+pub fn preset_off(preset: &str) -> Option<KindsOff> {
+    let (.., shown) = KIND_PRESETS.iter().find(|(name, ..)| *name == preset)?;
+    let mut off = [true; 7];
+    for (at, spec) in EDGE_ARROW_SPECS.iter().enumerate() {
+        off[at] = !shown.contains(&spec.kind);
+    }
+    Some(off)
+}
+/// The state with one kind of link switched on or off, or, with `only`,
+/// with that kind alone left on. Switching the last shown kind off, or
+/// asking again for the one kind that is alone, shows every kind: a
+/// picture is never left without its links by its own key.
+pub fn switched_kind(mut state: V, kind: &str, only: bool) -> V {
+    let Some(at) = EDGE_ARROW_SPECS.iter().position(|spec| spec.kind == kind) else {
+        return state;
+    };
+    let mut off = kinds_off(&state);
+    if only {
+        let alone = off[at] || off.iter().filter(|off| !**off).count() > 1;
+        off = [alone; 7];
+        off[at] = false;
+    } else {
+        off[at] = !off[at];
+        if off == [true; 7] {
+            off = [false; 7];
+        }
+    }
+    state["links_off"] = json!(names_off(&off));
+    state
+}
+/// The state with the kinds of a preset shown and the others switched off.
+pub fn preset_kinds(mut state: V, preset: &str) -> V {
+    if let Some(off) = preset_off(preset) {
+        state["links_off"] = json!(names_off(&off));
+    }
+    state
+}
+fn names_off(off: &KindsOff) -> Vec<&'static str> {
+    EDGE_ARROW_SPECS
+        .iter()
+        .zip(off)
+        .filter(|(_, off)| **off)
+        .map(|(spec, _)| spec.kind)
+        .collect()
+}
+/// How many links of a picture hold each kind, and how many of them are
+/// not drawn because every kind they hold is switched off.
+pub fn kind_counts(view: &V, off: &KindsOff) -> ([u64; 7], u64) {
+    let nodes = m::array(&view["nodes"]);
+    let boxed = view["nodes"].is_array();
+    let drawn = |path: &V| !boxed || nodes.iter().any(|node| &node["path"] == path);
+    let mut counts = [0u64; 7];
+    let mut hidden = 0;
+    for edge in m::array(&view["edges"])
+        .iter()
+        .filter(|edge| drawn(&edge["from"]) && drawn(&edge["to"]))
+    {
+        let kinds = EdgeKinds::of(edge);
+        for (count, held) in counts.iter_mut().zip(&kinds.counts) {
+            *count += u64::from(*held > 0);
+        }
+        hidden += u64::from(kinds.primary(off).is_none());
+    }
+    (counts, hidden)
+}
+/// The key of a picture's links, which is also their switchboard. Each of
+/// the seven kinds is a button with the arrow it is drawn as and how many
+/// links of the picture hold it: selecting it hides those links and shows
+/// them again, and resting on it lights them. A link that holds several
+/// kinds stays while one of them is shown, drawn as the strongest shown.
+/// The presets beside them switch several kinds at once. `surface` names
+/// the picture the buttons act on.
+pub fn kinds_legend_html(view: &V, off: &KindsOff, surface: &str) -> String {
+    let (counts, hidden) = kind_counts(view, off);
     let mut html = String::from(
-        "<div class=\"graph-arrow-legend\" role=\"list\" aria-label=\"Dependency arrow types\"><span class=\"graph-arrow-legend-title\">Arrows:</span>",
+        "<div class=\"graph-arrow-legend\" role=\"group\" aria-label=\"Kinds of links: select one to hide or show its links\"><span class=\"graph-arrow-legend-title\">Links:</span>",
     );
-    for spec in EDGE_ARROW_SPECS {
+    for (at, spec) in EDGE_ARROW_SPECS.iter().enumerate() {
         let dash = spec
             .dash_array
             .map(|d| format!(" stroke-dasharray=\"{d}\""))
             .unwrap_or_default();
         let arrow_class = arrow_class_for_kind(spec.kind);
+        let told = format!(
+            "{} · {} here · select to {}, Alt+select to show it alone",
+            spec.description,
+            plural(counts[at], "link", "links"),
+            if off[at] { "show" } else { "hide" },
+        );
         html.push_str(&format!(
-            "<span class=\"graph-arrow-legend-item\" role=\"listitem\" title=\"{}\"><svg class=\"graph-arrow-swatch\" data-edge-kind=\"{}\" viewBox=\"0 0 30 12\" width=\"30\" height=\"12\" aria-hidden=\"true\"><line class=\"graph-arrow-swatch-line\" x1=\"2\" y1=\"6\" x2=\"{:.1}\" y2=\"6\"{dash}/><g transform=\"translate(20 2)\" class=\"{arrow_class}\">{}</g></svg><span>{}</span></span>",
-            escape(spec.description),
+            "<button type=\"button\" class=\"graph-arrow-legend-item\" data-action=\"graph-kind-toggle\" data-payload=\"{}\" data-edge-kind=\"{}\" data-empty=\"{}\" aria-pressed=\"{}\" title=\"{}\"><svg class=\"graph-arrow-swatch\" data-edge-kind=\"{}\" viewBox=\"0 0 30 12\" width=\"30\" height=\"12\" aria-hidden=\"true\"><line class=\"graph-arrow-swatch-line\" x1=\"2\" y1=\"6\" x2=\"{:.1}\" y2=\"6\"{dash}/><g transform=\"translate(20 2)\" class=\"{arrow_class}\">{}</g></svg><span class=\"graph-arrow-legend-name\">{}</span><span class=\"graph-arrow-legend-count\">{}</span></button>",
+            payload(&json!({"kind": spec.kind, "surface": surface})),
+            spec.kind,
+            counts[at] == 0,
+            !off[at],
+            escape(&told),
             spec.kind,
             spec.swatch_line_end,
             spec.marker_body,
             spec.label,
+            count(counts[at]),
         ));
     }
+    html.push_str(
+        "<span class=\"graph-arrow-legend-presets\" role=\"group\" aria-label=\"Presets\">",
+    );
+    for (name, label, told, _) in KIND_PRESETS {
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"graph-kind-preset\" data-payload=\"{}\" aria-pressed=\"{}\" title=\"{told}\">{label}</button>",
+            payload(&json!({"preset": name, "surface": surface})),
+            preset_off(name).as_ref() == Some(off),
+        ));
+    }
+    html.push_str("</span>");
+    html.push_str(&format!(
+        "<span class=\"graph-arrow-legend-note\">{}<svg class=\"graph-arrow-swatch graph-arrow-swatch-hollow\" viewBox=\"0 0 22 12\" width=\"22\" height=\"12\" aria-hidden=\"true\"><line class=\"graph-arrow-swatch-line\" x1=\"2\" y1=\"6\" x2=\"20\" y2=\"6\"/><line class=\"graph-arrow-swatch-core\" x1=\"2\" y1=\"6\" x2=\"20\" y2=\"6\"/></svg> hollow: only inferred · ● leaves as one kind · ◎ holds several</span>",
+        match hidden {
+            0 => String::new(),
+            hidden => format!(
+                "<span class=\"graph-arrow-legend-hidden\">{} hidden by this key · </span>",
+                plural(hidden, "link", "links")
+            ),
+        },
+    ));
     html.push_str("</div>");
     html
+}
+/// What the key under a picture is set to: the kinds of links switched
+/// off, whether links that longer ways already join are left out, and how
+/// far the links of the selected box are lit (to what uses it, to what it
+/// uses).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct KeyState {
+    pub off: KindsOff,
+    pub hide_transitive: bool,
+    pub cone: (usize, usize),
+}
+/// How far from a selected box its links can be lit.
+pub const CONE_REACH: usize = 3;
+/// The key of a picture of the map: the kinds of its links, and beside
+/// them what else is chosen for the picture as a whole. **Hide transitive**
+/// leaves out the links that a longer way already joins and says how many
+/// that is. With a box selected, **Reach** says how many links from it are
+/// lit on each side: one, as always, or two or three.
+pub fn key_html(view: &V, key: &KeyState, surface: &str) -> String {
+    let mut html = kinds_legend_html(view, &key.off, surface);
+    let mut more = String::new();
+    // A path that was found can be asked for the ways round as well.
+    if paths(view) && m::yes(&view["path"]["found"]) {
+        more.push_str(&longer_ways(view, surface));
+    }
+    let plain = plain_map(view);
+    let said = transitive_links(view);
+    if plain && (said > 0 || key.hide_transitive) {
+        let told = if key.hide_transitive {
+            format!(
+                "{} left out: a longer way already joins their two ends. Select to draw them again",
+                plural(said as u64, "link is", "links are")
+            )
+        } else {
+            format!(
+                "Leave out {}: a longer way already joins their two ends, so every box still reaches what it reached",
+                plural(said as u64, "link", "links")
+            )
+        };
+        more.push_str(&format!(
+            "<button type=\"button\" class=\"graph-arrow-legend-preset graph-arrow-legend-switch\" data-action=\"graph-transitive-toggle\" data-payload=\"{}\" aria-pressed=\"{}\" title=\"{}\">Hide transitive <span class=\"graph-arrow-legend-count\">{}</span></button>",
+            payload(&json!({"surface": surface})),
+            key.hide_transitive,
+            escape(&told),
+            count(said as u64),
+        ));
+    }
+    let nodes = m::array(&view["nodes"]);
+    let selected = view["focus"]["path"]
+        .as_str()
+        .is_some_and(|path| nodes.iter().any(|node| node["path"] == path));
+    if plain && selected {
+        more.push_str("<span class=\"graph-arrow-legend-reach\" role=\"group\" aria-label=\"How many links from the selected box are lit\"><span class=\"graph-arrow-legend-title\">Reach:</span>");
+        for (side, word, told, now) in [
+            ("up", "used by", "what uses it", key.cone.0.max(1)),
+            ("down", "uses", "what it uses", key.cone.1.max(1)),
+        ] {
+            more.push_str(&format!(
+                "<span class=\"graph-arrow-legend-side\">{word}</span>"
+            ));
+            for hops in 1..=CONE_REACH {
+                more.push_str(&format!(
+                    "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"graph-cone\" data-payload=\"{}\" aria-pressed=\"{}\" title=\"Light {told} within {}\">{hops}</button>",
+                    payload(&json!({"hops": hops, "side": side, "surface": surface})),
+                    now == hops,
+                    plural(hops as u64, "link", "links"),
+                ));
+            }
+        }
+        more.push_str("</span>");
+    }
+    if !more.is_empty() {
+        // Before the note that ends the key.
+        let at = html
+            .rfind("<span class=\"graph-arrow-legend-note\">")
+            .unwrap_or(html.len());
+        html.insert_str(at, &more);
+    }
+    html
+}
+/// By how many links a way between two places may be longer than the
+/// shortest and still be asked for.
+const LONGER: u64 = 3;
+/// What the key of a path offers beside the kinds of its links: the
+/// shortest ways alone, or with them the ways that are longer by one, two
+/// or three links, each drawn whole as a way round. It says how many of
+/// those the picture draws, with a + where there are more.
+fn longer_ways(view: &V, surface: &str) -> String {
+    let path = &view["path"];
+    let now = path["longer"].as_u64().unwrap_or(0);
+    let mut html = String::from("<span class=\"graph-arrow-legend-reach\" role=\"group\" aria-label=\"Ways longer than the shortest\"><span class=\"graph-arrow-legend-title\">Longer ways:</span>");
+    for longer in 0..=LONGER {
+        let (word, told) = match longer {
+            0 => ("none".to_owned(), "The shortest ways alone".to_owned()),
+            longer => (
+                format!("+{longer}"),
+                format!(
+                    "Also the ways longer than the shortest by {}",
+                    plural(longer, "link", "links")
+                ),
+            ),
+        };
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"graph-map-longer\" data-payload=\"{}\" aria-pressed=\"{}\" title=\"{told}\">{word}</button>",
+            payload(&json!({"longer": longer, "surface": surface})),
+            now == longer,
+        ));
+    }
+    if now > 0 {
+        let found = path["detours"].as_u64().unwrap_or(0);
+        html.push_str(&format!(
+            "<span class=\"graph-arrow-legend-side\">{}</span>",
+            match found {
+                0 => "none found".to_owned(),
+                found => format!(
+                    "{}{} drawn, lighter",
+                    count(found),
+                    if m::yes(&path["detours_more"]) {
+                        "+"
+                    } else {
+                        ""
+                    }
+                ),
+            }
+        ));
+    }
+    html.push_str("</span>");
+    html
+}
+/// The state with the reach of a selected box set on one side, one to
+/// `CONE_REACH` links; the other side stays as it was.
+pub fn reaching(mut state: V, side: &str, hops: u64) -> V {
+    let hops = hops.clamp(1, CONE_REACH as u64);
+    let (up, down) = cone_of(&state);
+    state["cone"] = match side {
+        "up" => json!({"up": hops, "down": down}),
+        "down" => json!({"up": up, "down": hops}),
+        _ => return state,
+    };
+    state
+}
+/// The reach a state holds: to what uses the selected box, and to what it
+/// uses. One on each side where none was set.
+pub fn cone_of(state: &V) -> (usize, usize) {
+    let side = |key: &str| {
+        state["cone"][key]
+            .as_u64()
+            .map_or(1, |hops| hops.clamp(1, CONE_REACH as u64) as usize)
+    };
+    (side("up"), side("down"))
+}
+/// The key of the links where no picture is there to count them.
+#[cfg(test)]
+pub fn arrow_kinds_legend_html() -> String {
+    kinds_legend_html(&V::Null, &[false; 7], "modal")
 }
 
 /// Optional live focus, changed-files catalog, and selected file-impact overlays for `canvas_with_overlays`.
@@ -3989,6 +4855,53 @@ pub struct CanvasOverlayContext<'a> {
     pub live_focus: Option<&'a LiveFocus>,
     pub changes: Option<&'a V>,
     pub impact: Option<&'a V>,
+    /// The kinds of links the key of the picture has switched off.
+    pub links_off: KindsOff,
+    /// Whether the links that a longer way already joins are left out.
+    pub hide_transitive: bool,
+    /// How many links from the selected box are lit: against the arrows,
+    /// to what uses it, and along them, to what it uses. None is one.
+    pub cone: (usize, usize),
+}
+/// Whether a picture is one of the map itself: a folder, a change, an
+/// opened file or followed links. In a picture of a way, of a cycle, of
+/// what two places share, of a pattern, of a scenario or of modules every
+/// link is what was asked for, and none of them is held back or left out.
+fn plain_map(view: &V) -> bool {
+    !(paths(view)
+        || cycles(view)
+        || shares(view)
+        || patterned(view)
+        || matches!(view["mode"].as_str(), Some("scenario" | "modules")))
+}
+/// The links a picture would leave out as said by longer ways: those whose
+/// ends are drawn, and that break no rule.
+fn said_twice(view: &V) -> Vec<bool> {
+    let nodes = m::array(&view["nodes"]);
+    let at = |path: &V| nodes.iter().position(|node| &node["path"] == path);
+    let edges = m::array(&view["edges"]);
+    let drawn = edges
+        .iter()
+        .map(|edge| at(&edge["from"]).zip(at(&edge["to"])))
+        .collect::<Vec<_>>();
+    let pairs = drawn.iter().flatten().copied().collect::<Vec<_>>();
+    let mut said = transitive(nodes.len(), &pairs).into_iter();
+    edges
+        .iter()
+        .zip(&drawn)
+        .map(|(edge, ends)| {
+            ends.is_some()
+                && said.next().unwrap_or(false)
+                && edge["architecture_violation"].as_u64().unwrap_or(0) == 0
+        })
+        .collect()
+}
+/// How many links of a picture a longer way already joins.
+pub fn transitive_links(view: &V) -> usize {
+    if !plain_map(view) {
+        return 0;
+    }
+    said_twice(view).into_iter().filter(|said| *said).count()
 }
 
 /// Canvas markup plus resolved plane size and live focus overlay coordinates.
@@ -3999,6 +4912,8 @@ pub struct RenderedCanvas {
     pub height: f64,
     pub focus: FocusOverlay,
     pub selected_bbox: Option<(f64, f64, f64, f64)>,
+    /// The picture in small, for the corner of its window.
+    pub radar: String,
 }
 /// Renders a dependency map view using the default `"graph-map"` SVG ID prefix.
 #[cfg(test)]
@@ -4013,8 +4928,7 @@ pub fn canvas_with(view: &V, id_prefix: &str, live_focus: Option<&LiveFocus>) ->
         id_prefix,
         CanvasOverlayContext {
             live_focus,
-            changes: None,
-            impact: None,
+            ..Default::default()
         },
     )
 }
@@ -4032,10 +4946,21 @@ pub fn canvas_with_overlays(
         .and_then(|doc| ImpactLookup::from_value(doc, &nodes));
     let edges = m::array(&view["edges"]);
     let at = |path: &V| nodes.iter().position(|node| &node["path"] == path);
-    // A link whose end is not drawn is not drawn either.
+    // A link whose end is not drawn is not drawn either. Nor is, where
+    // that was asked for, a link that a longer way already joins: without
+    // those the picture holds fewer links that pass layers, and every box
+    // still reaches what it reached.
+    let plain = plain_map(view);
+    let left_out = if overlay.hide_transitive && plain {
+        said_twice(view)
+    } else {
+        vec![false; edges.len()]
+    };
     let edges = edges
         .iter()
-        .filter(|edge| at(&edge["from"]).is_some() && at(&edge["to"]).is_some())
+        .zip(&left_out)
+        .filter(|(edge, said)| !**said && at(&edge["from"]).is_some() && at(&edge["to"]).is_some())
+        .map(|(edge, _)| edge)
         .collect::<Vec<_>>();
     let pairs = edges
         .iter()
@@ -4063,10 +4988,38 @@ pub fn canvas_with_overlays(
     // Layers stand in a row in their own order, whatever their links say.
     let layered_view = layered(view);
     let declared = m::yes(&view["pattern"]["declared"]);
+    // In a picture of a way, of a cycle, of what two places share, of a
+    // pattern or of a scenario every link is what is asked for: there no
+    // link is held back until its box is rested on.
+    let routing = if plain {
+        Routing::CLEAN
+    } else {
+        Routing {
+            portals: None,
+            ..Routing::CLEAN
+        }
+    };
     let plan = if layered_view && !declared {
         plan_row(nodes.len(), &weighted)
     } else {
-        plan_beside(nodes.len(), &weighted, &framed, pair)
+        let plan = plan_routed(nodes.len(), &weighted, &framed, pair, routing);
+        // What a session made hangs under the box of its file as cards.
+        // Where there are some, the picture is laid out again with room
+        // for them, so that they lie on no other box.
+        let under = live_focus
+            .map(|focus| resolve_focus(view, &plan, focus).under)
+            .unwrap_or_default();
+        if under.is_empty() {
+            plan
+        } else {
+            let mut room = vec![0.0; nodes.len()];
+            for (node, cards) in under {
+                if let Some(room) = room.get_mut(node) {
+                    *room = entity_room(cards);
+                }
+            }
+            plan_roomy(nodes.len(), &weighted, &framed, pair, routing, &room)
+        }
     };
     // How much each box uses and is used through the links drawn here.
     let mut flow = vec![(0u64, 0u64); nodes.len()];
@@ -4076,9 +5029,10 @@ pub fn canvas_with_overlays(
             flow[*to].1 += (*links).max(1);
         }
     }
-    // A link starts in the colour of using and ends in the colour of being
-    // used. It shades along the way between its two columns, so the links
-    // between the same two columns share one shading.
+    // A link starts in the colour every link leaves in and ends in the
+    // colour of its kind. It shades along the way between its two columns,
+    // so the links of one kind between the same two columns share one
+    // shading.
     let span = |wire: &Wire| {
         let (from, to) = pairs[wire.edge];
         let (start, end) = (plan.nodes[from].x, plan.nodes[to].x);
@@ -4091,6 +5045,25 @@ pub fn canvas_with_overlays(
     let mut spans = plan.wires.iter().map(span).collect::<Vec<_>>();
     spans.sort_unstable();
     spans.dedup();
+    // The kinds each link holds, and the kind it is drawn as: the
+    // strongest of those the key of the picture has not switched off.
+    let links_off = overlay.links_off;
+    let wire_kinds = plan
+        .wires
+        .iter()
+        .map(|wire| EdgeKinds::of(edges[wire.edge]))
+        .collect::<Vec<_>>();
+    let shadings: BTreeSet<(usize, &'static str)> = plan
+        .wires
+        .iter()
+        .zip(&wire_kinds)
+        .filter_map(|(wire, kinds)| {
+            Some((
+                spans.binary_search(&span(wire)).unwrap_or(0),
+                kinds.primary(&links_off)?,
+            ))
+        })
+        .collect();
     let focus = view["focus"]["path"].as_str();
     let chosen = focus.and_then(|path| at(&json!(path)));
     // Among layers a link is selected too: its two ends.
@@ -4116,11 +5089,21 @@ pub fn canvas_with_overlays(
         .flatten()
         .filter_map(|edge| Some((at(&edge[0])?, at(&edge[1])?)))
         .collect();
+    // The links of the selected box are lit, and, where more was asked
+    // for, those that lead on from them: so many links along the arrows
+    // to what it uses, and so many against them to what uses it.
+    let reach = (overlay.cone.0.max(1), overlay.cone.1.max(1));
+    let depth = chosen
+        .filter(|_| plain && shared_edges.is_empty() && reach != (1, 1))
+        .map(|chosen| cone(nodes.len(), &pairs, chosen, reach.0, reach.1));
     let lit = |pair: (usize, usize)| {
         cycle_view
             || chosen_link == Some(pair)
-            || match chosen {
-                Some(chosen) if shared_edges.is_empty() => pair.0 == chosen || pair.1 == chosen,
+            || match (&depth, chosen) {
+                (Some(depth), _) => in_cone(depth, pair),
+                (None, Some(chosen)) if shared_edges.is_empty() => {
+                    pair.0 == chosen || pair.1 == chosen
+                }
                 _ => shared_edges.contains(&pair),
             }
     };
@@ -4184,9 +5167,15 @@ pub fn canvas_with_overlays(
             .iter()
             .any(|edge| edge["architecture_violation"].as_u64().unwrap_or(0) > 0);
     html.push_str(&arrow_defs_svg(id_prefix, include_against));
-    for (index, (start, end)) in spans.iter().enumerate() {
+    for (index, kind) in &shadings {
+        let (start, end) = spans[*index];
+        let (suffix, kind_attr) = if *kind == "calls" {
+            (String::new(), String::new())
+        } else {
+            (format!("-{kind}"), format!(" data-edge-kind=\"{kind}\""))
+        };
         html.push_str(&format!(
-            "<linearGradient id=\"{id_prefix}-flow-{index}\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
+            "<linearGradient id=\"{id_prefix}-flow-{index}{suffix}\" class=\"graph-map-flow\"{kind_attr} gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
         ));
     }
     html.push_str("</defs>");
@@ -4246,7 +5235,11 @@ pub fn canvas_with_overlays(
     // and steps back with its link.
     let mut marks = String::new();
     let mut placed_ties = Vec::new();
-    for wire in &plan.wires {
+    let mut hidden_wires = Vec::with_capacity(plan.wires.len());
+    // What each box is joined with by links that are led through no layer:
+    // the boxes it uses far away, and the boxes far away that use it.
+    let mut far: Vec<(Vec<usize>, Vec<usize>)> = vec![(vec![], vec![]); nodes.len()];
+    for (wire, kinds) in plan.wires.iter().zip(&wire_kinds) {
         let edge = edges[wire.edge];
         let (links, guessed) = (
             edge["links"].as_u64().unwrap_or(0),
@@ -4264,6 +5257,12 @@ pub fn canvas_with_overlays(
             layered_view && wire.back
         };
         let grew = edge["added"].as_u64().filter(|_| against);
+        // Of a path, a link that only a longer way has.
+        let detour_attr = if m::yes(&edge["detour"]) {
+            " data-detour=\"true\""
+        } else {
+            ""
+        };
         let back = wire.back && cycles && !layered_view;
         let on_path = shared_edges.contains(&(from, to));
         let added = cycle_view && m::yes(&edge["added"]);
@@ -4306,36 +5305,69 @@ pub fn canvas_with_overlays(
         let edge_diff_attr = edge_diff
             .map(|diff| format!(" data-diff=\"{diff}\""))
             .unwrap_or_default();
+        // A link whose every kind the key has switched off stays in the
+        // picture, so that nothing moves, and is not drawn. A link against
+        // the rules is drawn whatever the key says.
+        let shown_kind = kinds.primary(&links_off);
+        let hidden = shown_kind.is_none() && !against;
+        let hidden_attr = if hidden {
+            " data-kind-hidden=\"true\""
+        } else {
+            ""
+        };
+        hidden_wires.push(hidden);
         if against {
             html.push_str(&format!(
                 "<path class=\"graph-map-violation-halo\"{edge_state_attr} data-ends=\"{from} {to}\" d=\"{}\"/>",
                 wire.path,
             ));
         }
-        let (arrow_kind, multi_kind, kinds_breakdown) = edge_kind_stats(edge);
+        let arrow_kind = shown_kind.unwrap_or_else(|| pick_precedence_kind(&kinds.counts));
+        let multi_kind = kinds.multi(&links_off);
         let multi_attr = if multi_kind {
             " data-edge-multi=\"true\""
         } else {
             ""
         };
         let marker_suffix = arrow_marker_suffix(arrow_kind, against);
-        let breakdown_note = kinds_breakdown
+        let breakdown_note = kinds
+            .breakdown
             .as_deref()
             .map(|text| format!(" · {}", escape(text)))
             .unwrap_or_default();
+        // What the tool only inferred is drawn hollow: the link a little
+        // wider, and over it its own middle in the colour of the ground.
+        let guess = guessed == links;
+        let width = (1.0 + ((links.max(1) as f64).log2() * 0.5).min(2.5))
+            // A link that closes a cycle is a row of dots, kept thin.
+            .min(if back { 1.8 } else { 3.5 })
+            + if added { 1.5 } else { 0.0 };
+        // A link that passes many layers is led through none of them: it
+        // is drawn from end to end while its box is rested on or selected,
+        // and a mark at each of its ends says that it is there. One against
+        // the rules is always drawn.
+        let portal = wire.portal && !against;
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}{}{}\" data-ends=\"{from} {to}\"{edge_diff_attr}{}{} d=\"{}\" data-edge-kind=\"{arrow_kind}\"{multi_attr} stroke=\"url(#{id_prefix}-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#{id_prefix}-arrow{marker_suffix})\"><title>{told}{}{}{}{breakdown_note}</title></path>",
-            if guessed == links { " graph-map-edge-guess" } else { "" },
+            "<path class=\"graph-map-edge{state}{}{}{}{}\" data-ends=\"{from} {to}\"{edge_diff_attr}{}{}{hidden_attr}{detour_attr} d=\"{}\" data-edge-kind=\"{arrow_kind}\" data-kinds=\"{}\"{multi_attr} stroke=\"url(#{id_prefix}-flow-{}{})\" stroke-width=\"{:.1}\" marker-start=\"url(#{id_prefix}-port{})\" marker-end=\"url(#{id_prefix}-arrow{marker_suffix})\"><title>{told}{}{}{}{breakdown_note}</title></path>",
+            if guess { " graph-map-edge-guess" } else { "" },
             if back { " graph-map-edge-back" } else { "" },
             if against { " graph-map-edge-against" } else { "" },
+            if portal { " graph-map-edge-portal" } else { "" },
             if on_path { " data-shared-path=\"true\"" } else { "" },
             if added { " data-cycle-added=\"true\"" } else { "" },
             wire.path,
+            kinds.held(),
             spans.binary_search(&span(wire)).unwrap_or(0),
-            // A link that closes a cycle is a row of dots, kept thin.
-            (1.0 + ((links.max(1) as f64).log2() * 0.5).min(2.5)).min(if back { 1.8 } else { 3.5 })
-                + if added { 1.5 } else { 0.0 },
-            if back { " · against the main direction, closes a cycle" } else { "" },
+            if arrow_kind == "calls" { String::new() } else { format!("-{arrow_kind}") },
+            width + if guess { 2.0 } else { 0.0 },
+            if multi_kind { "-multi" } else { "" },
+            if !detour_attr.is_empty() {
+                " · on a longer way only"
+            } else if back {
+                " · against the main direction, closes a cycle"
+            } else {
+                ""
+            },
             match grew {
                 Some(links) => format!(
                     " · against the order of the layers · {} added by this change",
@@ -4348,19 +5380,38 @@ pub fn canvas_with_overlays(
             },
             if added { " · added in PR" } else { "" },
         ));
+        if guess {
+            html.push_str(&format!(
+                "<path class=\"graph-map-edge-core{}{}{}\" data-ends=\"{from} {to}\"{hidden_attr} d=\"{}\" data-edge-kind=\"{arrow_kind}\" stroke-width=\"{width:.1}\"/>",
+                if back { " graph-map-edge-back" } else { "" },
+                if portal { " graph-map-edge-portal" } else { "" },
+                if portal { state } else { "" },
+                wire.path,
+            ));
+        }
+        if portal && !hidden {
+            far[from].0.push(to);
+            far[to].1.push(from);
+        }
+        // What stands at the middle of a link: a word of a pattern, what a
+        // change did to it, or, on a link that passes layers and carries
+        // no word, a chevron that says which way it runs.
+        let mut worded = false;
         if pattern_view && !layered_view {
             if let Some((tie, (x, y))) = edge["tie"]
                 .as_str()
                 .zip(middle(&wire.path).and_then(|mid| place_tie(&mut placed_ties, mid)))
             {
+                worded = true;
                 marks.push_str(&format!(
-                    "<text class=\"graph-map-edge-tie\"{edge_state_attr} data-ends=\"{from} {to}\" data-pattern-family=\"{}\" x=\"{x:.1}\" y=\"{y:.1}\">{}</text>",
+                    "<text class=\"graph-map-edge-tie\"{edge_state_attr} data-ends=\"{from} {to}\" data-pattern-family=\"{}\"{hidden_attr} x=\"{x:.1}\" y=\"{y:.1}\">{}</text>",
                     escape(pattern_family.as_deref().unwrap_or("design")),
                     escape(&short_tie(tie)),
                 ));
             }
         }
         if let Some((links, (x, y))) = grew.zip(middle(&wire.path)) {
+            worded = true;
             marks.push_str(&format!(
                 "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" x=\"{x:.1}\" y=\"{y:.1}\">+{}</text>",
                 count(links)
@@ -4369,10 +5420,20 @@ pub fn canvas_with_overlays(
             .filter(|diff| matches!(*diff, "added" | "removed"))
             .zip(middle(&wire.path))
         {
+            worded = true;
             let symbol = if diff == "added" { "+" } else { "-" };
             marks.push_str(&format!(
-                "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" data-diff=\"{diff}\" x=\"{x:.1}\" y=\"{y:.1}\">{symbol}</text>"
+                "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" data-diff=\"{diff}\"{hidden_attr} x=\"{x:.1}\" y=\"{y:.1}\">{symbol}</text>"
             ));
+        }
+        if !worded && passes_layers(&wire.path) {
+            if let Some((x, y, angle)) = halfway(&wire.path) {
+                marks.push_str(&format!(
+                    "<path class=\"graph-map-edge-chevron{state}{}\" data-ends=\"{from} {to}\" data-edge-kind=\"{arrow_kind}\" data-kinds=\"{}\"{hidden_attr} transform=\"translate({x:.1} {y:.1}) rotate({angle:.0})\" d=\"M-3 -3.4 L1.4 0 L-3 3.4\"/>",
+                    if against { " graph-map-edge-against" } else { "" },
+                    kinds.held(),
+                ));
+            }
         }
     }
     if let Some(lookup) = impact_lookup.as_ref() {
@@ -4382,7 +5443,8 @@ pub fn canvas_with_overlays(
             let mut add_synthetic = |from_idx: usize,
                                      to_idx: usize,
                                      diff: &'static str,
-                                     label: &str| {
+                                     label: &str,
+                                     kind: &'static str| {
                 if from_idx == to_idx
                     || rendered_pairs.contains(&(from_idx, to_idx))
                     || !synthetic_drawn.insert((from_idx, to_idx, diff))
@@ -4394,7 +5456,8 @@ pub fn canvas_with_overlays(
                 curve(&mut d, fp, tp);
                 let mark_symbol = if diff == "added" { "+" } else { "-" };
                 html.push_str(&format!(
-                    "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\" data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"calls\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow)\"><title>{} ({label})</title></path>",
+                    "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\" data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"{kind}\" data-kinds=\"{kind}\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow{})\"><title>{} ({label} · {kind})</title></path>",
+                    arrow_marker_suffix(kind, false),
                     escape(&m::text(&nodes[from_idx], "name")),
                 ));
                 if let Some((mx, my)) = middle(&d) {
@@ -4405,22 +5468,34 @@ pub fn canvas_with_overlays(
             };
             for target in &lookup.uses_added {
                 if let Some(target_idx) = resolve_canvas_node_by_path(&nodes, target) {
-                    add_synthetic(sel_idx, target_idx, "added", "added dependency");
+                    add_synthetic(
+                        sel_idx,
+                        target_idx,
+                        "added",
+                        "added dependency",
+                        lookup.dep_kind(target, true),
+                    );
                 }
             }
             for target in &lookup.uses_removed {
                 if let Some(target_idx) = resolve_canvas_node_by_path(&nodes, target) {
-                    add_synthetic(sel_idx, target_idx, "removed", "removed dependency");
+                    add_synthetic(
+                        sel_idx,
+                        target_idx,
+                        "removed",
+                        "removed dependency",
+                        lookup.dep_kind(target, false),
+                    );
                 }
             }
             for caller in &lookup.callers_added {
                 if let Some(caller_idx) = resolve_canvas_node_by_path(&nodes, caller) {
-                    add_synthetic(caller_idx, sel_idx, "added", "added caller");
+                    add_synthetic(caller_idx, sel_idx, "added", "added caller", "calls");
                 }
             }
             for caller in &lookup.callers_risk {
                 if let Some(caller_idx) = resolve_canvas_node_by_path(&nodes, caller) {
-                    add_synthetic(caller_idx, sel_idx, "removed", "caller at risk");
+                    add_synthetic(caller_idx, sel_idx, "removed", "caller at risk", "calls");
                 }
             }
         }
@@ -4431,16 +5506,24 @@ pub fn canvas_with_overlays(
     // none of them is hidden under a link drawn later. A link between two
     // layers is many links of many files: selecting it lists the pairs of
     // files it is made of beside the picture.
-    for wire in plan.wires.iter().filter(|_| view["mode"] != "modules") {
+    for ((wire, kinds), hidden) in plan
+        .wires
+        .iter()
+        .zip(&wire_kinds)
+        .zip(&hidden_wires)
+        .filter(|_| view["mode"] != "modules")
+    {
         let (from, to) = pairs[wire.edge];
         let edge = edges[wire.edge];
-        let (_, _, kinds_breakdown) = edge_kind_stats(edge);
-        let breakdown_note = kinds_breakdown
+        let breakdown_note = kinds
+            .breakdown
             .as_deref()
             .map(|text| format!(" · {}", escape(text)))
             .unwrap_or_default();
         html.push_str(&format!(
-            "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{}{breakdown_note} · select to see {}</title></path>",
+            "<path class=\"graph-map-hit{}\" data-ends=\"{from} {to}\"{} d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{}{breakdown_note} · select to see {}</title></path>",
+            if wire.portal && edge["architecture_violation"].as_u64().unwrap_or(0) == 0 { " graph-map-hit-portal" } else { "" },
+            if *hidden { " data-kind-hidden=\"true\"" } else { "" },
             wire.path,
             payload(&json!({"from": nodes[from]["path"], "to": nodes[to]["path"]})),
             escape(&m::text(&nodes[from], "name")),
@@ -4459,6 +5542,7 @@ pub fn canvas_with_overlays(
             "<span class=\"graph-map-caption\" style=\"top:{apart:.0}px\">Not linked to anything here</span>"
         ));
     }
+    let blast = blast_marks(view, &nodes);
     for (index, node) in nodes.iter().enumerate() {
         let placed = &plan.nodes[index];
         let folder = m::yes(&node["folder"]);
@@ -4505,9 +5589,49 @@ pub fn canvas_with_overlays(
             plural(used, "link", "links")
         ));
         let cycle = placed.cycle && cycles;
-        if cycle {
+        // The whole project says more than the picture: a box is part of
+        // a circle of files also where the rest of the circle is not drawn.
+        let circle = &node["circle"];
+        if let Some(told) = circle_told(circle, folder) {
+            label.push_str(&told);
+        } else if cycle {
             label.push_str(", part of a cycle");
         }
+        let circle_attr = match (circle.is_object(), m::yes(&circle["leaves"])) {
+            (true, true) => " data-circle=\"through\"",
+            (true, false) => " data-circle=\"inside\"",
+            _ => "",
+        };
+        // Where it stands among the changes the failing tests reach.
+        let suspect = node["suspect"]["rank"].as_u64();
+        if let Some(rank) = suspect {
+            label.push_str(&match node["suspect"]["files"].as_u64() {
+                Some(files) => format!(
+                    ", holds {} the failing tests reach, the first ranked {rank}",
+                    plural(files, "changed file", "changed files")
+                ),
+                None => format!(", ranked {rank} among the changes by the failing tests"),
+            });
+        }
+        // What a change to the selected place leaves here.
+        let blast_attr = match blast[index] {
+            Some((hop, left)) => {
+                label.push_str(&format!(
+                    ", a change to the selected place reaches it in {}, {} % of it",
+                    plural(hop, "link", "links"),
+                    (left * 100.0).round() as u64
+                ));
+                format!(" data-blast=\"{hop}\"")
+            }
+            None => String::new(),
+        };
+        // Of a path, a box that lies on a longer way only.
+        let detour_attr = if m::yes(&node["detour"]) {
+            label.push_str(", on a longer way only");
+            " data-detour=\"true\""
+        } else {
+            ""
+        };
         let lit = near(index);
         let path_mark = if !shared_edges.is_empty() && lit {
             " data-shared-path=\"true\""
@@ -4720,6 +5844,12 @@ pub fn canvas_with_overlays(
         } else {
             architecture
         };
+        let position = match blast[index] {
+            Some((_, left)) => {
+                position.replacen(" style=\"", &format!(" style=\"--blast:{left:.2};"), 1)
+            }
+            None => position,
+        };
         let mut pattern_node_attrs = String::new();
         if patterns > 0 {
             pattern_node_attrs.push_str(" data-has-patterns=\"true\"");
@@ -4767,7 +5897,7 @@ pub fn canvas_with_overlays(
             ""
         };
         html.push_str(&format!(
-            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark}{focus_target_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{position} title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>{node_vis_pill}",
+            "<button type=\"button\" class=\"graph-map-node\" data-n=\"{index}\" data-action=\"{node_action}\" data-payload=\"{}\" data-folder=\"{folder}\" data-kind=\"{}\" data-open=\"{opens}\" data-outside=\"{}\" data-changed=\"{}\" data-selected=\"{}\" data-dim=\"{}\" data-cycle=\"{}\" data-flow=\"{}\" data-out=\"{}\" data-in=\"{}\" data-start=\"{start}\"{}{}{path_mark}{run_mark}{focus_target_attr}{circle_attr}{detour_attr}{blast_attr}{node_change_attr}{node_impact_attr}{node_vis_attr}{pattern_node_attrs}{position} title=\"{}\"{pressed} aria-label=\"{}\">{prefix_badge}{}<span class=\"graph-map-node-name\">{}</span>{node_vis_pill}",
             payload(&node_payload),
             escape(kind),
             opened && !symbol,
@@ -4794,11 +5924,49 @@ pub fn canvas_with_overlays(
                 escape(&m::text(node, "name"))
             },
         ));
+        // A second line for a picture drawn large: through how many links
+        // the box is used and uses others, and where it lies.
+        let place = if m::yes(&node["layer"]) || m::yes(&node["module"]) {
+            String::new()
+        } else if symbol {
+            let file = home.rsplit('/').next().unwrap_or(&home);
+            match line {
+                0 => file.to_owned(),
+                line => format!("{file}:{line}"),
+            }
+        } else if folder {
+            plural(node["files"].as_u64().unwrap_or(0), "file", "files")
+        } else {
+            m::text(node, "path")
+                .rsplit_once('/')
+                .map(|(folder, _)| folder.to_owned())
+                .unwrap_or_default()
+        };
+        let detail = [
+            if uses + used > 0 {
+                format!("{}→ →{}", count(used), count(uses))
+            } else {
+                String::new()
+            },
+            place,
+        ]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
         if pattern_view && !layered_view && start {
             html.push_str("<span class=\"graph-map-node-anchor\" aria-hidden=\"true\">★</span>");
         }
-        if cycle {
-            html.push_str("<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻</span>");
+        if cycle || circle.is_object() {
+            // A folder says how many of its files are part of circles.
+            let held = circle["files"]
+                .as_u64()
+                .filter(|_| folder)
+                .map(count)
+                .unwrap_or_default();
+            html.push_str(&format!(
+                "<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻{held}</span>"
+            ));
         }
         if patterns > 0 {
             html.push_str(&format!(
@@ -4841,6 +6009,22 @@ pub fn canvas_with_overlays(
                 count(node["files"].as_u64().unwrap_or(0))
             ));
         }
+        // The second line is the last of what a box holds: it is laid out
+        // under the rest, and only where the picture is drawn large.
+        if !detail.is_empty() {
+            html.push_str(&format!(
+                "<span class=\"graph-map-node-detail\" aria-hidden=\"true\">{}</span>",
+                escape(&detail)
+            ));
+        }
+        if !blast_attr.is_empty() {
+            html.push_str("<span class=\"graph-map-node-blast\" aria-hidden=\"true\"></span>");
+        }
+        if let Some(rank) = suspect {
+            html.push_str(&format!(
+                "<span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#{rank}</span>"
+            ));
+        }
         html.push_str("</button>");
         if followed {
             html.push_str(&handles(
@@ -4849,6 +6033,41 @@ pub fn canvas_with_overlays(
                 placed.x,
                 placed.y,
                 chosen.is_some() && !near(index),
+            ));
+        }
+        // The links of this box that are led through no layer: a mark at
+        // the side they leave by, and one at the side they arrive at, each
+        // with how many there are. Resting on a mark draws them.
+        for (side, others, sign) in [("out", &far[index].0, "⇢"), ("in", &far[index].1, "⇠")] {
+            if others.is_empty() {
+                continue;
+            }
+            let names = others
+                .iter()
+                .take(6)
+                .map(|other| m::text(&nodes[*other], "name"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let told = format!(
+                "{} {} {}{} — drawn while this is rested on or the box is selected",
+                m::text(node, "name"),
+                if side == "out" {
+                    "uses, far from here:"
+                } else {
+                    "is used from far away by:"
+                },
+                names,
+                if others.len() > 6 { ", …" } else { "" },
+            );
+            html.push_str(&format!(
+                "<button type=\"button\" class=\"graph-map-portal\" data-of=\"{index}\" data-side=\"{side}\" data-dim=\"{}\" data-action=\"{node_action}\" data-payload=\"{}\" style=\"left:{:.0}px;top:{:.0}px\" title=\"{}\" aria-label=\"{}\">{sign}{}</button>",
+                chosen.is_some() && !near(index),
+                payload(&node_payload),
+                if side == "out" { placed.x + BOX_WIDTH } else { placed.x },
+                placed.y + BOX_HEIGHT,
+                escape(&told),
+                escape(&told),
+                count(others.len() as u64),
             ));
         }
         if folder && spreads(view) {
@@ -5017,16 +6236,249 @@ pub fn canvas_with_overlays(
         }
         (min_x, min_y, max_x, max_y)
     });
+    // In small a box tells one thing: that it is selected, else that it
+    // changed, else that it closes a cycle.
+    let boxes = nodes
+        .iter()
+        .zip(&plan.nodes)
+        .enumerate()
+        .map(|(index, (node, placed))| {
+            let state = if selected_idx == Some(index) {
+                "selected"
+            } else if node["changed"].as_u64().unwrap_or(0) > 0 || node["status"].is_string() {
+                "changed"
+            } else if placed.cycle && cycles {
+                "cycle"
+            } else {
+                ""
+            };
+            (placed.x, placed.y, state)
+        })
+        .collect::<Vec<_>>();
+    let radar = radar((plane_w, plane_h), &plan.frames, &boxes);
     RenderedCanvas {
         html,
         width: plane_w,
         height: plane_h,
         focus: focus_overlay,
         selected_bbox,
+        radar,
     }
 }
 /// How far past a corner the second handle of a side hangs.
 const HANDLE_GAP: f64 = 11.0;
+/// What the whole project says of a box and the circles of files: a file is
+/// part of one, a folder holds files of some, and of those some lead out of
+/// the folder and back.
+fn circle_told(circle: &V, folder: bool) -> Option<String> {
+    let files = circle["files"].as_u64().filter(|files| *files > 0)?;
+    Some(if !folder {
+        format!(
+            ", part of a cycle of {}",
+            plural(circle["largest"].as_u64().unwrap_or(0), "file", "files")
+        )
+    } else if m::yes(&circle["leaves"]) {
+        format!(
+            ", holds {} of cycles that lead out of it and back",
+            plural(files, "file", "files")
+        )
+    } else {
+        format!(
+            ", holds {} that use each other in cycles",
+            plural(files, "file", "files")
+        )
+    })
+}
+/// The circles of files that touch what is open, the largest first. Each
+/// is shown as the shortest cycle through the file that has most to do
+/// with the others.
+fn blast_side(view: &V) -> String {
+    let blast = &view["focus"]["blast"];
+    if !blast.is_object() {
+        return String::new();
+    }
+    let number = |key: &str| blast[key].as_u64().unwrap_or(0);
+    let (files, hops) = (number("files"), number("hops"));
+    let mut html = format!(
+        "<h4>A change here reaches <span class=\"graph-map-total\">{}</span></h4>",
+        count(files)
+    );
+    if files == 0 {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">Nothing else uses it within {}.</p>",
+            plural(hops, "link", "links")
+        ));
+        return html;
+    }
+    // How many files each link further first reaches.
+    let steps = m::array(&blast["by_hop"])
+        .iter()
+        .filter(|row| row["files"].as_u64().unwrap_or(0) > 0)
+        .map(|row| {
+            format!(
+                "{} at {}",
+                count(row["files"].as_u64().unwrap_or(0)),
+                plural(row["hop"].as_u64().unwrap_or(0), "link", "links")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tests = number("tests");
+    html.push_str(&format!(
+        "<p class=\"knowledge-note\">Files that use it, and what uses those, up to {} away: {steps}.{} Each link passes on less of a change than it receives: a type built on it and a call most, an import little, a guessed link less; past an interface the type implements, less again. The bar under a box says how much is left there.{}</p>",
+        plural(hops, "link", "links"),
+        match tests {
+            0 => String::new(),
+            1 => " 1 of them is a test.".to_owned(),
+            tests => format!(" {} of them are tests.", count(tests)),
+        },
+        if m::yes(&blast["cut"]) {
+            " The walk stopped before the end: there is more."
+        } else {
+            ""
+        },
+    ));
+    html.push_str("<ul class=\"graph-map-rows\">");
+    for row in m::array(&blast["listed"]) {
+        let path = m::text(&row, "path");
+        let folder = parent(&path);
+        let hop = row["hop"].as_u64().unwrap_or(0);
+        let left = (row["left"].as_f64().unwrap_or(0.0) * 100.0).round() as u64;
+        let through = m::yes(&row["through"]);
+        html.push_str(&format!(
+            "<li><button type=\"button\" class=\"graph-map-row\" data-blast-hop=\"{hop}\" data-action=\"graph-map-open\" data-payload=\"{}\" title=\"{} · reached at {} by {}{} · select to open it\"><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{}{} · {left} %{}{}</span></button></li>",
+            payload(&row["path"]),
+            escape(&path),
+            escape(&m::text(&row, "name")),
+            escape(&m::text(&row, "via")),
+            if through { " through an interface" } else { "" },
+            escape(base(&path)),
+            if folder.is_empty() {
+                String::new()
+            } else {
+                format!("{} · ", escape(folder))
+            },
+            plural(hop, "link", "links"),
+            if through { " · past an interface" } else { "" },
+            if m::yes(&row["test"]) { " · test" } else { "" },
+        ));
+    }
+    html.push_str("</ul>");
+    let more = number("more");
+    if more > 0 {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">and {} more</p>",
+            count(more)
+        ));
+    }
+    html
+}
+/// What a change to the selected place reaches of each box of a picture:
+/// the fewest links to it and the most of the change left there. A file is
+/// told by itself, a name by its file, a folder by the most reached file in
+/// it. The selected box is told nothing.
+fn blast_marks(view: &V, nodes: &[V]) -> Vec<Option<(u64, f64)>> {
+    let marked = m::array(&view["focus"]["blast"]["marked"])
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row[0].as_str()?.to_owned(),
+                row[1].as_u64()?,
+                row[2].as_f64()?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if marked.is_empty() {
+        return vec![None; nodes.len()];
+    }
+    let focus = m::text(&view["focus"], "path");
+    nodes
+        .iter()
+        .map(|node| {
+            let path = m::text(node, "path");
+            if path == focus {
+                return None;
+            }
+            let folder = m::yes(&node["folder"]);
+            let file = node["file"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| strip_symbol_suffix(&path).to_owned());
+            marked
+                .iter()
+                .filter(|(reached, ..)| {
+                    if folder {
+                        reached
+                            .strip_prefix(path.as_str())
+                            .is_some_and(|rest| rest.starts_with('/'))
+                    } else {
+                        *reached == file
+                    }
+                })
+                .fold(None, |best: Option<(u64, f64)>, (_, hop, left)| {
+                    Some(best.map_or((*hop, *left), |(near, most)| {
+                        (near.min(*hop), most.max(*left))
+                    }))
+                })
+        })
+        .collect()
+}
+fn circles_side(view: &V) -> String {
+    let circles = &view["circles"];
+    let listed = m::array(&circles["listed"]);
+    if listed.is_empty() || cycles(view) {
+        return String::new();
+    }
+    let number = |key: &str| circles[key].as_u64().unwrap_or(0);
+    let (groups, here) = (number("groups"), number("here"));
+    let mut html = format!(
+        "<h4>Cycles of files <span class=\"graph-map-total\">{}</span></h4><p class=\"knowledge-note\">{}</p><ul class=\"graph-map-rows\">",
+        count(here),
+        if here == groups {
+            format!(
+                "{} of the project use each other in {}; the largest holds {}. A box marked ↻ is part of one, wherever the rest of it lies.",
+                plural(number("files"), "file", "files"),
+                plural(groups, "cycle", "cycles"),
+                count(number("largest")),
+            )
+        } else {
+            format!(
+                "{} of the {} of the project touch what is open. A box marked ↻ is part of one, wherever the rest of it lies.",
+                count(here),
+                plural(groups, "cycle", "cycles"),
+            )
+        }
+    );
+    for circle in &listed {
+        let start = m::text(circle, "start");
+        let more = circle["more"].as_u64().unwrap_or(0);
+        let names = m::array(&circle["names"])
+            .iter()
+            .filter_map(|name| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        html.push_str(&format!(
+            "<li><button type=\"button\" class=\"graph-map-row\" data-action=\"graph-map-cycle\" data-payload=\"{}\" title=\"Show the shortest cycle through {}\"><span class=\"graph-map-row-name\">{}{}</span><span class=\"graph-map-row-links\">{}</span></button></li>",
+            payload(&circle["start"]),
+            escape(&start),
+            escape(&names),
+            if more > 0 {
+                format!(", +{}", count(more))
+            } else {
+                String::new()
+            },
+            plural(circle["files"].as_u64().unwrap_or(0), "file", "files"),
+        ));
+    }
+    html.push_str("</ul>");
+    if here > listed.len() as u64 {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">and {} more</p>",
+            count(here - listed.len() as u64)
+        ));
+    }
+    html
+}
 /// The handles at the top corners of a box whose links are followed. The
 /// right corner is for what the box uses and the left one for what uses it,
 /// as the links leave on the right and arrive on the left. A side that is
@@ -5396,10 +6848,11 @@ fn diff_badge_sign(diff: &str) -> &'static str {
 /// every link between two of them. `chosen` is the name whose links are lit.
 #[cfg(test)]
 pub fn link_canvas(view: &V, chosen: &str) -> String {
-    link_canvas_with(view, chosen, None)
+    link_canvas_with(view, chosen, None, &[false; 7])
 }
 /// Renders the link detail canvas with optional change-impact diff annotations (`+`/`-`/`=`).
-pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
+/// A link of a kind the key has switched off (`off`) keeps its place and is not drawn.
+pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>, off: &KindsOff) -> String {
     let diff_info = LinkDiffInfo::from_view(view, impact);
     let (names, held) = link_names(view);
     let at = |key: &V| names.iter().position(|(name, _)| &name["key"] == key);
@@ -5426,16 +6879,38 @@ pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
                 })
         })
     };
+    // Every link runs between the same two columns, so the links of one
+    // kind share one shading: from the colour of leaving to that of the kind.
+    let link_kinds = pairs
+        .iter()
+        .map(|(_, _, edge)| EdgeKinds::of(edge))
+        .collect::<Vec<_>>();
+    let shadings: BTreeSet<&'static str> = link_kinds
+        .iter()
+        .filter_map(|kinds| kinds.primary(off))
+        .chain(["calls"])
+        .collect();
     let mut html = format!(
-        "<div class=\"graph-map-plane\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>{}<linearGradient id=\"graph-link-flow\" gradientUnits=\"userSpaceOnUse\" x1=\"{:.0}\" y1=\"0\" x2=\"{:.0}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient></defs>",
+        "<div class=\"graph-map-plane\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>{}",
         plan.width,
         plan.height,
         plan.width,
         plan.height,
         arrow_defs_svg("graph-link", false),
-        MARGIN + FRAME_PAD + LINK_BOX,
-        MARGIN + FRAME_PAD + LINK_BOX + LINK_GAP,
     );
+    for kind in &shadings {
+        let (suffix, kind_attr) = if *kind == "calls" {
+            (String::new(), String::new())
+        } else {
+            (format!("-{kind}"), format!(" data-edge-kind=\"{kind}\""))
+        };
+        html.push_str(&format!(
+            "<linearGradient id=\"graph-link-flow{suffix}\" class=\"graph-map-flow\"{kind_attr} gradientUnits=\"userSpaceOnUse\" x1=\"{:.0}\" y1=\"0\" x2=\"{:.0}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>",
+            MARGIN + FRAME_PAD + LINK_BOX,
+            MARGIN + FRAME_PAD + LINK_BOX + LINK_GAP,
+        ));
+    }
+    html.push_str("</defs>");
     for frame in &plan.files {
         if frame.width > 0.0 {
             html.push_str(&format!(
@@ -5444,7 +6919,7 @@ pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
             ));
         }
     }
-    for ((from, to, edge), wire) in pairs.iter().zip(&plan.wires) {
+    for (((from, to, edge), wire), kinds) in pairs.iter().zip(&plan.wires).zip(&link_kinds) {
         let state = match picked {
             Some(picked) if picked == *from || picked == *to => " graph-map-edge-on",
             Some(_) => " graph-map-edge-off",
@@ -5491,7 +6966,15 @@ pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
         let risk_note = edge_risk
             .map(|r| format!(" · risk: {r}"))
             .unwrap_or_default();
-        let (arrow_kind, multi_kind, kinds_breakdown) = edge_kind_stats(edge);
+        let shown_kind = kinds.primary(off);
+        let hidden_attr = if shown_kind.is_none() {
+            " data-kind-hidden=\"true\""
+        } else {
+            ""
+        };
+        let arrow_kind = shown_kind.unwrap_or_else(|| pick_precedence_kind(&kinds.counts));
+        let multi_kind = kinds.multi(off);
+        let kinds_breakdown = kinds.breakdown.clone();
         let raw_kind = m::text(edge, "kind");
         let kind_label = match (raw_kind.is_empty(), kinds_breakdown) {
             (true, Some(breakdown)) => breakdown,
@@ -5512,8 +6995,12 @@ pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
         };
         let marker_suffix = arrow_marker_suffix(arrow_kind, false);
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}\" data-ends=\"{from} {to}\"{diff_attr} d=\"{wire}\" data-edge-kind=\"{arrow_kind}\"{multi_attr} stroke=\"url(#graph-link-flow)\" stroke-width=\"1.4\" marker-end=\"url(#graph-link-arrow{marker_suffix})\"><title>{} uses {} · {}{}{diff_note}{}{}</title></path>",
+            "<path class=\"graph-map-edge{state}{}\" data-ends=\"{from} {to}\"{diff_attr}{hidden_attr} d=\"{wire}\" data-edge-kind=\"{arrow_kind}\" data-kinds=\"{}\"{multi_attr} stroke=\"url(#graph-link-flow{})\" stroke-width=\"{}\" marker-start=\"url(#graph-link-port{})\" marker-end=\"url(#graph-link-arrow{marker_suffix})\"><title>{} uses {} · {}{}{diff_note}{}{}</title></path>",
             if guessed { " graph-map-edge-guess" } else { "" },
+            kinds.held(),
+            if arrow_kind == "calls" { String::new() } else { format!("-{arrow_kind}") },
+            if guessed { "3.4" } else { "1.4" },
+            if multi_kind { "-multi" } else { "" },
             escape(&from_name),
             escape(&to_name),
             escape(&kind_label),
@@ -5521,6 +7008,12 @@ pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
             escape(&vis_note),
             escape(&risk_note),
         ));
+        // What was only guessed by name is drawn hollow.
+        if guessed {
+            html.push_str(&format!(
+                "<path class=\"graph-map-edge-core\" data-ends=\"{from} {to}\"{hidden_attr} d=\"{wire}\" data-edge-kind=\"{arrow_kind}\" stroke-width=\"1.4\"/>"
+            ));
+        }
     }
     html.push_str("</svg>");
     // The head of a frame: the file its names lie in.
@@ -7312,7 +8805,7 @@ fn legend(view: &V, change: bool) -> String {
         _ => LEGEND.to_owned(),
     };
     format!(
-        "An arrow runs from what uses {} to what is used {}, and a box is tinted by which it does more here. Solid: read from the code. Dashed: guessed by name. Thicker: more links. {particular}{}",
+        "An arrow runs from what uses {} to what is used {}, and a box is tinted by which it does more here. Its head and its dashes tell its kind, as the key of the links shows. Hollow: only guessed by name. Thicker: more links. {particular}{}",
         patch("uses"),
         patch("used"),
         if view["patterns"].is_object() {
@@ -7746,6 +9239,107 @@ pub fn scaled(size: (f64, f64), scale: f64) -> String {
         "{plain};transform:scale({scale:.4});transform-origin:0 0;margin:0 {dx:.0}px {dy:.0}px 0"
     )
 }
+/// Below this scale a picture is an overview: names are drawn larger and the
+/// small marks are left out.
+const LOD_FAR: f64 = 0.5;
+/// Above this scale a box has room for a second line.
+const LOD_NEAR: f64 = 1.4;
+/// How much a picture tells at a scale: `far` is an overview of names,
+/// `near` adds to each box where it lies and how many links it has, and
+/// `mid` is the picture as it is laid out.
+pub fn lod(scale: f64) -> &'static str {
+    if !scale.is_finite() || scale <= 0.0 {
+        "mid"
+    } else if scale < LOD_FAR {
+        "far"
+    } else if scale > LOD_NEAR {
+        "near"
+    } else {
+        "mid"
+    }
+}
+/// The room the small picture of a map may take, and its least side.
+const RADAR_ROOM: (f64, f64) = (176.0, 176.0);
+const RADAR_LEAST: f64 = 18.0;
+/// How large the small picture of a map is drawn: as large as its room
+/// lets a picture of that shape be.
+pub fn radar_size(picture: (f64, f64)) -> (f64, f64) {
+    if !(picture.0 > 0.0 && picture.1 > 0.0) {
+        return (0.0, 0.0);
+    }
+    let by = (RADAR_ROOM.0 / picture.0).min(RADAR_ROOM.1 / picture.1);
+    (
+        (picture.0 * by).round().max(RADAR_LEAST),
+        (picture.1 * by).round().max(RADAR_LEAST),
+    )
+}
+/// What of a picture a window onto it shows, in the measures of the
+/// picture: left, top, width and height. The window is `room` large, the
+/// picture is drawn at `scale`, and its corner lies `corner` from the corner
+/// of the window. `None` once the window shows all of the picture: there is
+/// nowhere else to look.
+pub fn in_window(
+    corner: (f64, f64),
+    scale: f64,
+    room: (f64, f64),
+    picture: (f64, f64),
+) -> Option<(f64, f64, f64, f64)> {
+    if !(scale.is_finite() && scale > 0.0 && picture.0 > 0.0 && picture.1 > 0.0) {
+        return None;
+    }
+    let side = |corner: f64, room: f64, picture: f64| {
+        let from = -corner / scale;
+        let to = from + room / scale;
+        // Half a point of the screen is no part of the picture left out.
+        let all = from <= 0.5 / scale && to >= picture - 0.5 / scale;
+        let (from, to) = (from.clamp(0.0, picture), to.clamp(0.0, picture));
+        (from, (to - from).max(0.0), all)
+    };
+    let (x, width, wide) = side(corner.0, room.0, picture.0);
+    let (y, height, tall) = side(corner.1, room.1, picture.1);
+    (!(wide && tall)).then_some((x, y, width, height))
+}
+/// Where the corner of a picture lies from the corner of its window once
+/// `point` of the picture is in the middle of the window.
+pub fn centred(point: (f64, f64), scale: f64, room: (f64, f64)) -> (f64, f64) {
+    (
+        room.0 / 2.0 - point.0 * scale,
+        room.1 / 2.0 - point.1 * scale,
+    )
+}
+/// The small picture of a map: its frames and its boxes, each box told by
+/// what it is to the picture, and a frame around what the window shows,
+/// which is set once the picture is measured.
+fn radar(picture: (f64, f64), frames: &[Framed], boxes: &[(f64, f64, &'static str)]) -> String {
+    let (width, height) = radar_size(picture);
+    if width <= 0.0 || boxes.is_empty() {
+        return String::new();
+    }
+    let mut svg = format!(
+        "<svg class=\"graph-radar-picture\" width=\"{width:.0}\" height=\"{height:.0}\" viewBox=\"0 0 {:.0} {:.0}\" preserveAspectRatio=\"none\" data-w=\"{:.0}\" data-h=\"{:.0}\" focusable=\"false\">",
+        picture.0, picture.1, picture.0, picture.1
+    );
+    for frame in frames.iter().filter(|frame| frame.width > 0.0) {
+        svg.push_str(&format!(
+            "<rect class=\"graph-radar-frame\" x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"{:.0}\"/>",
+            frame.x, frame.y, frame.width, frame.height
+        ));
+    }
+    for (x, y, state) in boxes {
+        svg.push_str(&format!(
+            "<rect class=\"graph-radar-box\" x=\"{x:.0}\" y=\"{y:.0}\" width=\"{BOX_WIDTH:.0}\" height=\"{BOX_HEIGHT:.0}\"{}/>",
+            if state.is_empty() {
+                String::new()
+            } else {
+                format!(" data-state=\"{state}\"")
+            }
+        ));
+    }
+    svg.push_str(
+        "<rect class=\"graph-radar-view\" x=\"0\" y=\"0\" width=\"0\" height=\"0\"/></svg>",
+    );
+    svg
+}
 /// Computes the multiplicative zoom factor for a single DOM `wheel` event.
 /// Returns `None` for zero or non-finite vertical deltas so pure horizontal
 /// trackpad swipes pass through unintercepted.
@@ -7803,16 +9397,258 @@ fn apply_scroll_canvas_scale(
     let scale_value = scale_value.clamp(CAMERA_MIN, CAMERA_MAX);
     let size = (plane.offset_width() as f64, plane.offset_height() as f64);
     let scale_text = format!("{scale_value:.4}");
-    let _ = plane.set_attribute("style", &scaled(size, scale_value));
+    // The scale is told to the stylesheet too: the heads of the arrows are
+    // kept large enough to read in a picture made small.
+    let _ = plane.set_attribute(
+        "style",
+        &format!("{};--graph-scale:{scale_text}", scaled(size, scale_value)),
+    );
     let _ = plane.set_attribute("data-scale", &scale_text);
     let _ = canvas.set_attribute("data-scale", &scale_text);
+    let _ = canvas.set_attribute("data-lod", lod(scale_value));
     if let Some(label_id) = scroll_canvas_label_id(canvas_id) {
         dom::text(
             label_id,
             &format!("{}%", (scale_value * 100.0).round() as i64),
         );
     }
+    sync_scroll_radar(canvas_id);
     scale_value
+}
+/// How far the small picture of a map stands from the corner of its window.
+const RADAR_INSET: i32 = 10;
+/// Draws, in the small picture of a map, around what the window of the map
+/// shows, and puts the small picture in the corner of that window. A window
+/// that shows all of its picture has none: there is nowhere else to look.
+fn sync_radar(canvas_id: &str, seen: Option<(f64, f64, f64, f64)>) {
+    let Some(radar) = dom::get(&format!("{canvas_id}-radar")) else {
+        return;
+    };
+    let frame = radar.query_selector(".graph-radar-view").ok().flatten();
+    let (Some(seen), Some(frame)) = (seen, frame) else {
+        dom::hide(&radar, true);
+        return;
+    };
+    for (key, value) in [
+        ("x", seen.0),
+        ("y", seen.1),
+        ("width", seen.2),
+        ("height", seen.3),
+    ] {
+        let _ = frame.set_attribute(key, &format!("{value:.1}"));
+    }
+    dom::hide(&radar, false);
+    let (Some(canvas), Ok(radar)) = (
+        dom::get(canvas_id).and_then(|canvas| canvas.dyn_into::<web_sys::HtmlElement>().ok()),
+        radar.dyn_into::<web_sys::HtmlElement>(),
+    ) else {
+        return;
+    };
+    // The corner inside the scroll bars, measured from what both lie in.
+    let left = canvas.offset_left() + canvas.client_left() + canvas.client_width()
+        - radar.offset_width()
+        - RADAR_INSET;
+    let top = canvas.offset_top() + canvas.client_top() + canvas.client_height()
+        - radar.offset_height()
+        - RADAR_INSET;
+    let _ = radar.set_attribute("style", &format!("left:{left}px;top:{top}px"));
+}
+/// Where the corner of a scrolled picture lies from the corner of its
+/// window, the scale it is drawn at, the room of the window and the size
+/// of the picture.
+#[allow(clippy::type_complexity)]
+fn scroll_window(canvas_id: &str) -> Option<((f64, f64), f64, (f64, f64), (f64, f64))> {
+    let canvas = dom::get(canvas_id)?;
+    let plane = canvas
+        .query_selector(".graph-map-plane")
+        .ok()
+        .flatten()
+        .and_then(|plane| plane.dyn_into::<web_sys::HtmlElement>().ok())?;
+    let picture = (plane.offset_width() as f64, plane.offset_height() as f64);
+    let (window, drawn) = (
+        canvas.get_bounding_client_rect(),
+        plane.get_bounding_client_rect(),
+    );
+    Some((
+        (
+            drawn.left() - window.left() - canvas.client_left() as f64,
+            drawn.top() - window.top() - canvas.client_top() as f64,
+        ),
+        current_scroll_canvas_scale(&plane, canvas_id),
+        (canvas.client_width() as f64, canvas.client_height() as f64),
+        picture,
+    ))
+}
+/// The small picture of a map that is scrolled, drawn again for where the
+/// map is scrolled to.
+fn sync_scroll_radar(canvas_id: &str) {
+    if dom::get(&format!("{canvas_id}-radar")).is_none() {
+        return;
+    }
+    let seen = scroll_window(canvas_id)
+        .and_then(|(corner, scale, room, picture)| in_window(corner, scale, room, picture));
+    sync_radar(canvas_id, seen);
+}
+/// The small picture of an embedded map, drawn again for where its camera
+/// looks.
+fn sync_surface_radar(surface: MapSurface, cam: &Camera) {
+    let (width, height, measured) = viewport_size(surface.canvas);
+    let seen = (measured && cam.plane_w > 0.0 && cam.plane_h > 0.0)
+        .then(|| {
+            in_window(
+                (cam.pan_x, cam.pan_y),
+                cam.scale,
+                (width, height),
+                (cam.plane_w, cam.plane_h),
+            )
+        })
+        .flatten();
+    sync_radar(surface.canvas, seen);
+}
+/// The point of a picture under a point of its small picture.
+fn radar_point(radar: &web_sys::Element, client: (f64, f64)) -> Option<(f64, f64)> {
+    let picture = radar
+        .query_selector(".graph-radar-picture")
+        .ok()
+        .flatten()?;
+    let size = |key: &str| {
+        picture
+            .get_attribute(key)
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| *value > 0.0)
+    };
+    let (width, height) = (size("data-w")?, size("data-h")?);
+    let drawn = picture.get_bounding_client_rect();
+    if drawn.width() <= 0.0 || drawn.height() <= 0.0 {
+        return None;
+    }
+    Some((
+        ((client.0 - drawn.left()) / drawn.width()).clamp(0.0, 1.0) * width,
+        ((client.1 - drawn.top()) / drawn.height()).clamp(0.0, 1.0) * height,
+    ))
+}
+/// Brings a point of a picture to the middle of its window.
+fn look_at(canvas_id: &str, point: (f64, f64)) {
+    if let Some(surface) = embedded_surface_for_canvas(canvas_id) {
+        let mut cam = load_surface_camera(surface);
+        let (width, height, measured) = viewport_size(surface.canvas);
+        if !measured {
+            return;
+        }
+        let (x, y) = centred(point, cam.scale, (width, height));
+        cam.pan_x = x.round();
+        cam.pan_y = y.round();
+        cam.fit_mode = false;
+        cam.needs_measure = false;
+        save_surface_camera(surface, &cam);
+        apply_surface_camera(surface, &cam);
+        return;
+    }
+    let (Some(canvas), Some((corner, scale, room, _))) =
+        (dom::get(canvas_id), scroll_window(canvas_id))
+    else {
+        return;
+    };
+    let wanted = centred(point, scale, room);
+    canvas.set_scroll_left((canvas.scroll_left() as f64 + corner.0 - wanted.0).round() as i32);
+    canvas.set_scroll_top((canvas.scroll_top() as f64 + corner.1 - wanted.1).round() as i32);
+    sync_scroll_radar(canvas_id);
+}
+/// The small picture the pointer is held down on, by the window it is of.
+const RADAR_DRAG: &str = "graph-radar-drag";
+/// A press on the small picture of a map looks at what is pressed, and the
+/// window follows the pointer while it is held down.
+fn radar_pointer(kind: &str, event: &web_sys::Event, target: Option<&web_sys::Element>) -> bool {
+    let held = m::data(RADAR_DRAG);
+    let pointer = event.dyn_ref::<web_sys::PointerEvent>();
+    match kind {
+        "pointerdown" => {
+            let Some(radar) =
+                target.and_then(|target| target.closest(".graph-map-radar").ok().flatten())
+            else {
+                return false;
+            };
+            let Some(pointer) = pointer.filter(|pointer| pointer.button() == 0) else {
+                return true;
+            };
+            let id = radar.id();
+            let Some(canvas_id) = id.strip_suffix("-radar") else {
+                return true;
+            };
+            event.prevent_default();
+            let _ = radar.set_pointer_capture(pointer.pointer_id());
+            m::set(
+                RADAR_DRAG,
+                json!({"canvas": canvas_id, "pointer_id": pointer.pointer_id(), "moved": false}),
+            );
+            if let Some(point) = radar_point(
+                &radar,
+                (pointer.client_x() as f64, pointer.client_y() as f64),
+            ) {
+                look_at(canvas_id, point);
+            }
+            true
+        }
+        "pointermove" => {
+            let Some(canvas_id) = held["canvas"].as_str() else {
+                return false;
+            };
+            let Some(pointer) = pointer
+                .filter(|pointer| Some(pointer.pointer_id() as i64) == held["pointer_id"].as_i64())
+            else {
+                return true;
+            };
+            let Some(radar) = dom::get(&format!("{canvas_id}-radar")) else {
+                return true;
+            };
+            if !m::yes(&held["moved"]) {
+                // While the pointer leads, the picture follows it at once.
+                dom::attr(canvas_id, "data-panning", "true");
+                let mut held = held.clone();
+                held["moved"] = json!(true);
+                m::set(RADAR_DRAG, held);
+            }
+            if let Some(point) = radar_point(
+                &radar,
+                (pointer.client_x() as f64, pointer.client_y() as f64),
+            ) {
+                look_at(canvas_id, point);
+            }
+            true
+        }
+        "pointerup" | "pointercancel" => {
+            let Some(canvas_id) = held["canvas"].as_str() else {
+                return false;
+            };
+            if m::yes(&held["moved"]) {
+                dom::attr(canvas_id, "data-panning", "false");
+            }
+            if let (Some(radar), Some(pointer)) = (dom::get(&format!("{canvas_id}-radar")), pointer)
+            {
+                let _ = radar.release_pointer_capture(pointer.pointer_id());
+            }
+            m::take(RADAR_DRAG);
+            true
+        }
+        _ => false,
+    }
+}
+/// Draws the small picture of a scrolled map again as the map is scrolled.
+fn attach_canvas_scroll(canvas_id: &'static str) {
+    let Some(canvas) = dom::get(canvas_id) else {
+        return;
+    };
+    if canvas.get_attribute("data-scroll-bound").as_deref() == Some("true") {
+        return;
+    }
+    let _ = canvas.set_attribute("data-scroll-bound", "true");
+    let scrolled = Closure::<dyn FnMut()>::new(move || sync_scroll_radar(canvas_id));
+    if canvas
+        .add_event_listener_with_callback("scroll", scrolled.as_ref().unchecked_ref())
+        .is_ok()
+    {
+        scrolled.forget();
+    }
 }
 fn current_scroll_canvas_scale(plane: &web_sys::HtmlElement, canvas_id: &str) -> f64 {
     if let Some(scale_value) = plane
@@ -8174,9 +10010,19 @@ fn ensure_resize_watch() {
         if open() {
             fit();
         }
-        refit_surface_if_visible(SESSION_SURFACE);
-        refit_surface_if_visible(SYSTEM_EMBEDDED_SURFACE);
-        refit_surface_if_visible(SYSTEM_CHANGE_SURFACE);
+        for surface in [
+            SESSION_SURFACE,
+            SYSTEM_EMBEDDED_SURFACE,
+            SYSTEM_CHANGE_SURFACE,
+        ] {
+            refit_surface_if_visible(surface);
+            // A window of another size shows another part of its picture,
+            // also where the picture is left as it was.
+            let (_, _, measured) = viewport_size(surface.canvas);
+            if measured {
+                sync_surface_radar(surface, &load_surface_camera(surface));
+            }
+        }
     });
     let _ =
         dom::window().add_event_listener_with_callback("resize", resized.as_ref().unchecked_ref());
@@ -8277,9 +10123,17 @@ pub(crate) fn attach_system_wheel_listeners() {
     attach_canvas_wheel("system-member-graph-canvas");
     attach_canvas_hover("system-member-graph-canvas");
     attach_side_hover("system-member-graph-side", "system-member-graph-canvas");
+    attach_legend_hover(
+        "system-member-graph-arrow-legend",
+        "system-member-graph-canvas",
+    );
     attach_canvas_wheel("system-change-graph-canvas");
     attach_canvas_hover("system-change-graph-canvas");
     attach_side_hover("system-change-graph-side", "system-change-graph-canvas");
+    attach_legend_hover(
+        "system-change-graph-arrow-legend",
+        "system-change-graph-canvas",
+    );
 }
 fn ensure_surface_watch(surface: MapSurface) {
     attach_wheel_listeners();
@@ -8287,6 +10141,10 @@ fn ensure_surface_watch(surface: MapSurface) {
     attach_canvas_wheel(surface.canvas);
     attach_canvas_hover(surface.canvas);
     attach_side_hover(surface.side, surface.canvas);
+    attach_legend_hover(
+        &format!("{}-arrow-legend", surface.id_prefix),
+        surface.canvas,
+    );
 }
 /// Fits the picture again when the window changes its size, lights what
 /// the pointer or the keyboard rests on in the map and in the window of a
@@ -8299,9 +10157,12 @@ fn watch() {
     }
     m::set("graph-map-watched", json!(true));
     ensure_resize_watch();
+    attach_canvas_scroll("graph-map-canvas");
     attach_canvas_hover("graph-map-canvas");
     attach_canvas_hover("graph-link-canvas");
     attach_side_hover("graph-map-side", "graph-map-canvas");
+    attach_legend_hover("graph-map-arrow-legend", "graph-map-canvas");
+    attach_legend_hover("graph-link-arrow-legend", "graph-link-canvas");
     // What a search found is closed once the keyboard leaves the search;
     // moving on into the list keeps it open.
     if let Some(search) = dom::get("graph-find") {
@@ -8348,6 +10209,147 @@ const NOTESTS: &str = "graph-map-notests";
 const FIT: &str = "graph-map-fit";
 /// And whether it marks its pictures with the patterns found in them.
 const PATTERNS: &str = "graph-map-patterns";
+/// And the kinds of links its key has switched off, their names joined by
+/// commas. One choice holds for every picture of links.
+const LINKS_OFF: &str = "graph-map-links-off";
+/// And whether the links that longer ways already join are left out.
+const HIDE_TRANSITIVE: &str = "graph-map-hide-transitive";
+/// What the keys of the pictures hold in common, as they left it, or, the
+/// first time it is asked for, as this browser kept it.
+fn key_store() -> V {
+    let held = m::data(LINKS_OFF);
+    if held.is_object() {
+        return held;
+    }
+    let kept = dom::storage(LINKS_OFF).unwrap_or_default();
+    let held = json!({
+        "links_off": kept.split(',').filter(|kind| !kind.is_empty()).collect::<Vec<_>>(),
+        "hide_transitive": dom::storage(HIDE_TRANSITIVE).as_deref() == Some("1"),
+    });
+    m::set(LINKS_OFF, held.clone());
+    held
+}
+/// The kinds of links switched off now.
+fn links_off_now() -> KindsOff {
+    kinds_off(&key_store())
+}
+/// What the key of a picture is set to: what all pictures share, and the
+/// reach its own state holds.
+fn key_now(state: &V) -> KeyState {
+    let held = key_store();
+    KeyState {
+        off: kinds_off(&held),
+        hide_transitive: m::yes(&held["hide_transitive"]),
+        cone: cone_of(state),
+    }
+}
+/// A kind of link, or a preset of them, was selected in the key of a
+/// picture: the choice is kept, and the picture that key belongs to is
+/// drawn again from what it holds. The server is asked nothing.
+fn switch_kinds(action: &str, asked: &V) {
+    let held = key_store();
+    let surface = m::text(asked, "surface");
+    match action {
+        // How far the links of the selected box are lit is a choice of
+        // the one picture.
+        "graph-cone" => {
+            if surface == "link" {
+                return;
+            }
+            let surface = surface_by_name(&surface);
+            let next = reaching(
+                surface_state(surface),
+                &m::text(asked, "side"),
+                asked["hops"].as_u64().unwrap_or(1),
+            );
+            save_surface_state(surface, &next);
+        }
+        "graph-transitive-toggle" => {
+            let mut next = held;
+            let hide = !m::yes(&next["hide_transitive"]);
+            next["hide_transitive"] = json!(hide);
+            dom::save(HIDE_TRANSITIVE, hide.then_some("1"));
+            m::set(LINKS_OFF, next);
+        }
+        _ => {
+            let mut next = if action == "graph-kind-preset" {
+                preset_kinds(held.clone(), &m::text(asked, "preset"))
+            } else {
+                switched_kind(
+                    held.clone(),
+                    &m::text(asked, "kind"),
+                    m::yes(&m::data("pointer-mods")["alt"]),
+                )
+            };
+            next["hide_transitive"] = held["hide_transitive"].clone();
+            let kept = names_off(&kinds_off(&next)).join(",");
+            dom::save(LINKS_OFF, (!kept.is_empty()).then_some(kept.as_str()));
+            m::set(LINKS_OFF, next);
+        }
+    }
+    let legend = if surface == "link" {
+        draw_link();
+        "graph-link-arrow-legend".to_owned()
+    } else {
+        let surface = surface_by_name(&surface);
+        rerender_surface_preserving_camera(surface);
+        format!("{}-arrow-legend", surface.id_prefix)
+    };
+    // The key was drawn again: the keyboard goes back to what was selected.
+    let wanted = asked.to_string();
+    if let Some(button) = dom::all(&format!("#{legend} [data-action='{action}']"))
+        .into_iter()
+        .find(|button| button.get_attribute("data-payload").as_deref() == Some(wanted.as_str()))
+        .and_then(|button| button.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = button.focus();
+    }
+}
+/// Resting on a kind in the key of a picture lights the links that hold
+/// it, and leaving the key puts them back: a mark on the canvas the
+/// stylesheet reads, so nothing is drawn again.
+fn attach_legend_hover(legend_id: &str, canvas_id: &str) {
+    let Some(legend) = dom::get(legend_id) else {
+        return;
+    };
+    if legend.get_attribute("data-hover-bound").as_deref() == Some("true") {
+        return;
+    }
+    let _ = legend.set_attribute("data-hover-bound", "true");
+    for (kind, rests) in [
+        ("mouseover", true),
+        ("focusin", true),
+        ("mouseleave", false),
+        ("focusout", false),
+    ] {
+        let canvas_id = canvas_id.to_owned();
+        let moved = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let held = rests
+                .then(|| {
+                    event
+                        .target()
+                        .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                })
+                .flatten()
+                .and_then(|target| {
+                    target
+                        .closest(".graph-arrow-legend-item[aria-pressed='true']")
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|item| item.get_attribute("data-edge-kind"));
+            let Some(canvas) = dom::get(&canvas_id) else {
+                return;
+            };
+            let _ = match held {
+                Some(kind) => canvas.set_attribute("data-kind-hover", &kind),
+                None => canvas.remove_attribute("data-kind-hover"),
+            };
+        });
+        let _ = legend.add_event_listener_with_callback(kind, moved.as_ref().unchecked_ref());
+        moved.forget();
+    }
+}
 /// A map begun anew, with tests left out and pictures fitted where they
 /// were the last time.
 fn anew(target: &str) -> V {
@@ -8689,7 +10691,7 @@ fn draw_link() {
     dom::text("graph-link-note", &link_note(view));
     html(
         "graph-link-canvas",
-        &link_canvas_with(view, &chosen, impact.as_ref()),
+        &link_canvas_with(view, &chosen, impact.as_ref(), &links_off_now()),
     );
     if let Some(canvas) = dom::get("graph-link-canvas") {
         if let Some(plane) = canvas
@@ -8709,7 +10711,10 @@ fn draw_link() {
         "graph-link-side",
         &link_side_with(view, &chosen, impact.as_ref()),
     );
-    html("graph-link-arrow-legend", &arrow_kinds_legend_html());
+    html(
+        "graph-link-arrow-legend",
+        &kinds_legend_html(view, &links_off_now(), "link"),
+    );
 }
 #[allow(dead_code)]
 pub(crate) fn link_request(project: &str, from: &str, to: &str, selection: &V) -> String {
@@ -9423,6 +11428,145 @@ pub fn key(e: &web_sys::KeyboardEvent) -> bool {
         }
         _ => false,
     }
+}
+/// How many failing tests a picture of a change may be told of, and how
+/// long a name of one may be.
+const FAILING: usize = 64;
+const FAILING_NAME: usize = 300;
+/// The failing tests a person pasted: a test, a path or a line of the
+/// output of a test run on each line, each once, as many as are taken.
+pub fn failing_lines(text: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || lines.iter().any(|known| known == line) {
+            continue;
+        }
+        lines.push(line.chars().take(FAILING_NAME).collect());
+        if lines.len() == FAILING {
+            break;
+        }
+    }
+    lines
+}
+/// The changed files ranked by the tests that fail: a field to paste the
+/// failing tests into, and what the server made of them.
+fn suspects_side(view: &V, state: &V, surface: MapSurface) -> String {
+    if !changes(view) {
+        return String::new();
+    }
+    let named = m::array(&state["failing"])
+        .into_iter()
+        .filter_map(|told| told.as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let suspects = &view["suspects"];
+    let mut html = String::from("<h4>Failing tests</h4>");
+    if suspects.is_object() {
+        let failing = m::array(&suspects["failing"]);
+        let rows = m::array(&suspects["rows"]);
+        if failing.is_empty() {
+            html.push_str("<p class=\"knowledge-note\">None of the names is a test file of this graph. A test is found by its path, or by the name of its file standing as a word of its own.</p>");
+        } else if rows.is_empty() {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">No changed file is reached by {}.</p>",
+                match failing.len() {
+                    1 => "the failing test".to_owned(),
+                    many => format!("the {} failing tests", count(many as u64)),
+                }
+            ));
+        } else {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">The changed files that {} reach{}, first those that the failing tests reach and the passing ones do not. The graph stands in for what a test runs: this says where to look first, not what broke.</p><ol class=\"graph-map-rows graph-suspects\">",
+                plural(failing.len() as u64, "failing test file", "failing test files"),
+                if failing.len() == 1 { "es" } else { "" },
+            ));
+            for row in &rows {
+                let path = m::text(row, "path");
+                let folder = parent(&path);
+                let (fail, pass, nearest) = (
+                    row["failing"].as_u64().unwrap_or(0),
+                    row["passing"].as_u64().unwrap_or(0),
+                    row["nearest"].as_u64().unwrap_or(0),
+                );
+                let rank = row["rank"].as_u64().unwrap_or(0);
+                html.push_str(&format!(
+                    "<li><button type=\"button\" class=\"graph-map-row\" data-suspect-rank=\"{rank}\" data-action=\"graph-map-node\" data-payload=\"{}\" title=\"{} · select it in the picture\"><span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#{rank}</span><span class=\"graph-map-row-name\">{}</span><span class=\"graph-map-row-links\">{}{} of {} failing, {} passing · {} from a failing test</span></button></li>",
+                    payload(&row["path"]),
+                    escape(&path),
+                    escape(base(&path)),
+                    if folder.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} · ", escape(folder))
+                    },
+                    count(fail),
+                    count(failing.len() as u64),
+                    count(pass),
+                    plural(nearest, "link", "links"),
+                ));
+            }
+            html.push_str("</ol>");
+            let more = suspects["more"].as_u64().unwrap_or(0);
+            if more > 0 {
+                html.push_str(&format!(
+                    "<p class=\"knowledge-note\">and {} more</p>",
+                    count(more)
+                ));
+            }
+        }
+        let clear = suspects["clear"].as_u64().unwrap_or(0);
+        if clear > 0 && !failing.is_empty() {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">No failing test reaches {}.</p>",
+                plural(clear, "other changed file", "other changed files")
+            ));
+        }
+        let unmatched = m::array(&suspects["unmatched"])
+            .iter()
+            .filter_map(|told| told.as_str().map(escape))
+            .collect::<Vec<_>>();
+        if !unmatched.is_empty() {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">No test file found for: {}.</p>",
+                unmatched.join(", ")
+            ));
+        }
+        if !m::yes(&suspects["complete"]) {
+            html.push_str("<p class=\"knowledge-note\">The search stopped before the end: some tests may be missing.</p>");
+        }
+    } else if named.is_empty() {
+        html.push_str("<p class=\"knowledge-note\">Paste the tests that fail to rank the changed files by how likely each is behind them.</p>");
+    }
+    let asked = |clear: bool| {
+        // Keys in the order of their names: a payload reads the same whether
+        // or not the map keeps the order keys are put in.
+        payload(&if clear {
+            json!({"clear": true, "surface": surface.name})
+        } else {
+            json!({"surface": surface.name})
+        })
+    };
+    html.push_str(&format!(
+        "<details class=\"graph-suspects-ask\"{}><summary>{}</summary><textarea id=\"{}-failing\" class=\"graph-suspects-field\" rows=\"4\" spellcheck=\"false\" aria-label=\"Failing tests, one on each line\" placeholder=\"One on each line: a test, its file, or a line of the output of a test run\">{}</textarea><div class=\"graph-suspects-actions\"><button type=\"button\" class=\"button compact\" data-action=\"graph-map-failing\" data-payload=\"{}\">Rank the changes</button>{}</div></details>",
+        if named.is_empty() { " open" } else { "" },
+        if named.is_empty() {
+            "Name the failing tests"
+        } else {
+            "Change the failing tests"
+        },
+        surface.id_prefix,
+        escape(&named.join("\n")),
+        asked(false),
+        if named.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<button type=\"button\" class=\"button compact\" data-action=\"graph-map-failing\" data-payload=\"{}\">Clear</button>",
+                asked(true)
+            )
+        },
+    ));
+    html
 }
 fn test_paths(view: &V) -> String {
     let rows = m::array(&view["test_reach"]);
@@ -11996,6 +14140,14 @@ pub fn build_scoped_map_path(scope: &GraphTargetScope, state: &V, embedded: bool
             query.push((key, json!(places).to_string()));
         }
     }
+    let failing = m::array(&state["failing"])
+        .iter()
+        .filter_map(|told| told.as_str().map(str::to_owned))
+        .take(FAILING)
+        .collect::<Vec<_>>();
+    if !target.is_empty() && !failing.is_empty() {
+        query.push(("failing", json!(failing).to_string()));
+    }
     if let Some(origin) = state["scenario"].as_str() {
         query.push(("scenario", origin.to_owned()));
         query.push((
@@ -12019,6 +14171,11 @@ pub fn build_scoped_map_path(scope: &GraphTargetScope, state: &V, embedded: bool
             "path"
         };
         query.push((asked, json!(ends).to_string()));
+        // With a path, the ways longer than its shortest by as many links.
+        let longer = state["longer"].as_u64().unwrap_or(0).min(LONGER);
+        if asked == "path" && longer > 0 {
+            query.push(("longer", longer.to_string()));
+        }
         if asked == "shared" && !m::text(state, "side").is_empty() {
             query.push(("side", m::text(state, "side")));
         }
@@ -12119,7 +14276,7 @@ fn map_side_html(
     }
     let details_body = if let Some(impact) = impact_doc.as_ref() {
         format!(
-            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}",
+            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}{}{}{}",
             choosing(state),
             paging(view),
             run_comparison(view),
@@ -12130,24 +14287,30 @@ fn map_side_html(
                 surface.name,
                 &m::text(state, "member_filter")
             ),
+            blast_side(view),
             without_incoming_side(view),
+            suspects_side(view, state, surface),
             test_paths(view),
             history_side(view),
+            circles_side(view),
             architecture_side(view),
             found_patterns(view, &unfolded(state, "kinds")),
         )
     } else if let Some(focused_path) = active_focus.as_deref() {
         if view["focus"].is_object() {
             format!(
-                "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}<p class=\"knowledge-note\">Reading dependency impact…</p>{}{}{}{}",
+                "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}<p class=\"knowledge-note\">Reading dependency impact…</p>{}{}{}{}{}{}{}",
                 choosing(state),
                 paging(view),
                 run_comparison(view),
                 shell_reads(view),
                 side(view),
+                blast_side(view),
                 without_incoming_side(view),
+                suspects_side(view, state, surface),
                 test_paths(view),
                 history_side(view),
+                circles_side(view),
                 architecture_side(view),
                 found_patterns(view, &unfolded(state, "kinds")),
             )
@@ -12171,15 +14334,18 @@ fn map_side_html(
         "<p class=\"knowledge-note\">Select a file or folder on the map to inspect its dependencies and change impact.</p>".to_owned()
     } else {
         format!(
-            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}",
+            "{}{}{test_back}{action}{scenario_action}{}{}{}{attach}{}{}{}{}{}{}{}{}",
             choosing(state),
             paging(view),
             run_comparison(view),
             shell_reads(view),
             side(view),
+            blast_side(view),
             without_incoming_side(view),
+            suspects_side(view, state, surface),
             test_paths(view),
             history_side(view),
+            circles_side(view),
             architecture_side(view),
             found_patterns(view, &unfolded(state, "kinds")),
         )
@@ -12310,6 +14476,7 @@ fn render(view: &V) {
     let modal_state = state();
     let modal_changes = surface_changes_doc(MODAL_SURFACE, &modal_state);
     let modal_impact = cached_impact_for_selection(MODAL_SURFACE, &modal_state, Some(view));
+    let modal_key = key_now(&modal_state);
     let rendered = canvas_with_overlays(
         view,
         MODAL_SURFACE.id_prefix,
@@ -12317,11 +14484,18 @@ fn render(view: &V) {
             live_focus: None,
             changes: modal_changes.as_ref(),
             impact: modal_impact.as_ref(),
+            links_off: modal_key.off,
+            hide_transitive: modal_key.hide_transitive,
+            cone: modal_key.cone,
         },
     );
     html("graph-map-canvas", &rendered.html);
+    html("graph-map-canvas-radar", &rendered.radar);
     fit();
-    html("graph-map-arrow-legend", &arrow_kinds_legend_html());
+    html(
+        "graph-map-arrow-legend",
+        &key_html(view, &modal_key, "modal"),
+    );
     let changes_tab = m::text(&modal_state, "side_tab") == "changes";
     if scenario_mode && !changes_tab {
         let focused = dom::document().active_element().is_some_and(|element| {
@@ -12361,7 +14535,7 @@ fn render(view: &V) {
         );
         dom::text(
             "graph-map-legend",
-            "Arrows show dependencies between Graphify communities. Dashed links are inferred.",
+            "Arrows show dependencies between Graphify communities. Hollow links are inferred.",
         );
         if let Some(key) = view["focus"]["path"].as_str().filter(|_| module_focus) {
             let key = json!(key).to_string();
@@ -12403,7 +14577,7 @@ fn render(view: &V) {
         && !state["pick"].is_object()
         && (pull_place
             || !dom::all(
-                "#graph-map-canvas .graph-map-node[data-selected=\"true\"][data-cycle=\"true\"]",
+                "#graph-map-canvas .graph-map-node[data-selected=\"true\"]:is([data-cycle=\"true\"],[data-circle=\"through\"])",
             )
             .is_empty());
     let action = if cycles(view) {
@@ -12862,6 +15036,13 @@ fn apply_click_action(
             state["path"] = json!(ends);
             state["focus"] = json!("");
         }
+        // How much longer than the shortest a way of the path may be.
+        "graph-map-longer" => {
+            if busy || unfolded(state, "path").len() != 2 {
+                return ClickOutcome::stay();
+            }
+            state["longer"] = json!(payload["longer"].as_u64().unwrap_or(0).min(LONGER));
+        }
         "graph-map-shared" => {
             match sharing(state.clone(), payload) {
                 Some(shown) => *state = shown,
@@ -13165,6 +15346,29 @@ pub async fn event(
     value: &str,
     checked: bool,
 ) -> bool {
+    // The key of the links is the same in every picture.
+    if kind == "click"
+        && matches!(
+            action,
+            "graph-kind-toggle" | "graph-kind-preset" | "graph-transitive-toggle" | "graph-cone"
+        )
+    {
+        switch_kinds(action, payload);
+        return true;
+    }
+    // The failing tests of a change are read from their field when they
+    // are asked to rank it, or dropped.
+    if kind == "click" && action == "graph-map-failing" && payload["surface"] == "modal" {
+        let mut asked = state();
+        asked["failing"] = if m::yes(&payload["clear"]) {
+            json!([])
+        } else {
+            json!(failing_lines(&dom::value("graph-map-failing")))
+        };
+        m::set("graph-map", asked);
+        load(false).await;
+        return true;
+    }
     if id.starts_with("session-graph-")
         || id.starts_with("system-member-graph-")
         || id.starts_with("system-change-graph-")
@@ -13881,11 +16085,14 @@ fn apply_surface_plane_transform(surface: MapSurface, cam: &Camera) {
         return;
     };
     let Ok(Some(plane)) = canvas.query_selector(".graph-map-plane") else {
+        sync_radar(surface.canvas, None);
         return;
     };
+    sync_surface_radar(surface, cam);
     if cam.plane_w <= 0.0 || cam.plane_h <= 0.0 {
         return;
     }
+    let _ = canvas.set_attribute("data-lod", lod(cam.scale));
     let style = format!(
         "width:{:.0}px;height:{:.0}px;--graph-scale:{:.4};--graph-pan-x:{:.1}px;--graph-pan-y:{:.1}px;transform:translate({:.1}px,{:.1}px) scale({:.4});transform-origin:0 0",
         cam.plane_w, cam.plane_h, cam.scale, cam.pan_x, cam.pan_y, cam.pan_x, cam.pan_y, cam.scale
@@ -14220,6 +16427,7 @@ fn render_embedded_surface(
     dom::text(surface.note, &note_text);
     dom::hidden(surface.note, note_text.is_empty());
 
+    let surface_key = key_now(&state);
     let rendered = canvas_with_overlays(
         view,
         prefix,
@@ -14227,10 +16435,14 @@ fn render_embedded_surface(
             live_focus: live.as_ref(),
             changes: changes_doc.as_ref(),
             impact: impact_doc.as_ref(),
+            links_off: surface_key.off,
+            hide_transitive: surface_key.hide_transitive,
+            cone: surface_key.cone,
         },
     );
     html(surface.canvas, &rendered.html);
-    html(&legend_id, &arrow_kinds_legend_html());
+    html(&format!("{}-radar", surface.canvas), &rendered.radar);
+    html(&legend_id, &key_html(view, &surface_key, surface.name));
     dom::hidden(&legend_id, false);
     let was_empty = dom::get(surface.side).is_none_or(|el| el.inner_html().is_empty());
     let attach_action = format!("{prefix}-attach");
@@ -14996,84 +17208,12 @@ pub(crate) fn open_system_service_map(scope: GraphTargetScope, initial_target: O
         load(false).await;
     });
 }
-/// Opens `#graph-map` focused directly on `path` within a System member service, opening the
-/// Details / Impact side panel and fetching `/api/systems/service-graph/file-impact`.
-#[allow(dead_code)]
-pub(crate) fn open_system_file_impact(
-    scope: GraphTargetScope,
-    path: &str,
-    initial_target: Option<&str>,
-) {
-    let default_target = match &scope {
-        GraphTargetScope::SystemService {
-            run_id: Some(rid), ..
-        } if !rid.trim().is_empty() => format!("sysrun:{}", rid.trim()),
-        _ => "work".to_owned(),
-    };
-    let target = initial_target
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_owned)
-        .unwrap_or(default_target);
-    set_surface_scope(MODAL_SURFACE, scope);
-    m::next(MODAL_SURFACE.map_epoch);
-    m::next(MODAL_SURFACE.changes_epoch);
-    m::next(MODAL_SURFACE.impact_epoch);
-    m::take(MODAL_SURFACE.changes_key);
-    m::take(MODAL_SURFACE.impact_key);
-    m::set(MODAL_SURFACE.view_key, V::Null);
-
-    let mut modal = anew(&target);
-    if let Some(rid) = target.strip_prefix("sysrun:").filter(|s| !s.is_empty()) {
-        modal["run_id"] = json!(rid);
-    }
-    let clean_path = normalize_rel_path(strip_symbol_suffix(path));
-    if !clean_path.is_empty() {
-        let folder = parent(&clean_path);
-        if !folder.is_empty() {
-            let mut acc = String::new();
-            for part in folder.split('/').filter(|p| !p.is_empty()) {
-                if !acc.is_empty() {
-                    acc.push('/');
-                }
-                acc.push_str(part);
-                modal = spread(modal, &acc, false);
-            }
-        }
-        modal["focus"] = json!(clean_path);
-        modal["side_tab"] = json!("details");
-        modal["side_pinned"] = json!(true);
-    }
-    m::set("graph-map", modal.clone());
-
-    dom::disabled("graph-find-search", false);
-    dom::set_value("graph-map-filter", "");
-    dom::set_checked("graph-map-whole", false);
-    dom::set_checked("graph-map-notests", m::yes(&modal["notests"]));
-    dom::set_checked("graph-map-certain", m::yes(&modal["certain"]));
-    m::next("graph-find");
-    dom::cancel_timer("graph-find-search");
-    m::set("graph-find", V::Null);
-    dom::set_value("graph-find-search", "");
-    show_found();
-    dom::error("graph-map-error", "");
-    dom::hidden("graph-map-progress", true);
-    dom::text("graph-map-zoom-level", "100%");
-    blank();
-    dom::text("graph-map-chosen", "");
-    dom::text("graph-map-note", "Reading dependency impact…");
-    shut();
-    list();
-    dom::dialog("graph-map", true);
-    watch();
-    ensure_surface_impact(MODAL_SURFACE, &modal, None, true);
-    spawn_local(async move {
-        let _ = place().await;
-        if target.contains(':') && !target.starts_with("sysrun:") && !choose(&target).await {
-            return;
-        }
-        load(false).await;
-    });
+/// Selects a file of a member service in the picture embedded in the System
+/// view: the folders that hold it are opened there, the picture is brought
+/// to it, and what the change does to it is listed beside. Nothing is opened
+/// over the view; **Full map** of the embedded picture still does that.
+pub(crate) fn focus_system_file(kind: SystemEmbeddedKind, path: &str) -> bool {
+    focus_file_on_surface(kind.surface(), path)
 }
 fn handle_surface_input(surface: MapSurface, id: &str, value: &str, checked: Option<bool>) -> bool {
     let Some(suffix) = id.strip_prefix(surface.id_prefix) else {
@@ -15254,6 +17394,19 @@ fn handle_surface_click(surface: MapSurface, id: &str, action: &str, payload: &V
         let owned = payload.clone();
         spawn_local(async move {
             show_shell_event(&owned).await;
+        });
+        return true;
+    }
+    if action == "graph-map-failing" {
+        let mut state = surface_state(surface);
+        state["failing"] = if m::yes(&payload["clear"]) {
+            json!([])
+        } else {
+            json!(failing_lines(&dom::value(&format!("{prefix}-failing"))))
+        };
+        save_surface_state(surface, &state);
+        spawn_local(async move {
+            load_embedded_surface(surface, false).await;
         });
         return true;
     }
@@ -15623,6 +17776,9 @@ pub fn pointer_event(kind: &str, event: &web_sys::Event) -> bool {
     let target_el = event
         .target()
         .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+    if radar_pointer(kind, event, target_el.as_ref()) {
+        return true;
+    }
     match kind {
         "pointerdown" => {
             let Some(surface) = target_embedded_surface(target_el.as_ref()) else {
@@ -15919,6 +18075,265 @@ mod tests {
         let plan = plan(4, &[(0, 3, 1), (1, 2, 1)]);
         assert!(plan.nodes[0].y < plan.nodes[1].y);
         assert!(plan.nodes[3].y < plan.nodes[2].y);
+    }
+    /// A picture led as `routing` says, without frames.
+    fn laid_out(count: usize, edges: &[(usize, usize, u64)], routing: Routing) -> Plan {
+        plan_routed(count, edges, &Frames::default(), None, routing)
+    }
+    /// Where a drawn link starts and where it ends.
+    fn ends_at(wire: &Wire) -> ((f64, f64), (f64, f64)) {
+        let numbers = wire
+            .path
+            .split(|c: char| c == ' ' || c.is_ascii_alphabetic())
+            .filter_map(|part| part.parse::<f64>().ok())
+            .collect::<Vec<_>>();
+        (
+            (numbers[0], numbers[1]),
+            (numbers[numbers.len() - 2], numbers[numbers.len() - 1]),
+        )
+    }
+    fn wire_of(plan: &Plan, edge: usize) -> &Wire {
+        plan.wires.iter().find(|wire| wire.edge == edge).unwrap()
+    }
+    #[test]
+    fn the_links_of_a_box_leave_it_apart_in_the_order_of_where_they_lead() {
+        // 0 uses 1, 2 and 3, which stand one under another.
+        let edges = [(0, 1, 1), (0, 2, 1), (0, 3, 1)];
+        let plain = laid_out(4, &edges, Routing::PLAIN);
+        let middle = plain.nodes[0].y + BOX_HEIGHT / 2.0;
+        assert!(plain.wires.iter().all(|wire| ends_at(wire).0 .1 == middle));
+        let plan = laid_out(4, &edges, Routing::CLEAN);
+        // The boxes stand where they stood.
+        assert_eq!(plan.nodes, plain.nodes);
+        let mut used = [1, 2, 3];
+        used.sort_by(|a, b| plan.nodes[*a].y.total_cmp(&plan.nodes[*b].y));
+        let leaves = used.map(|node| {
+            let edge = edges.iter().position(|(_, to, _)| *to == node).unwrap();
+            ends_at(wire_of(&plan, edge)).0 .1
+        });
+        // The link to the box above leaves above, four apart, about the
+        // middle of the side.
+        assert_eq!(
+            leaves,
+            [middle - PORT_GAP, middle, middle + PORT_GAP],
+            "{plan:?}"
+        );
+        // Each of them reaches the middle of its own box: one link there.
+        for (edge, (_, to, _)) in edges.iter().enumerate() {
+            assert_eq!(
+                ends_at(wire_of(&plan, edge)).1 .1,
+                plan.nodes[*to].y + BOX_HEIGHT / 2.0
+            );
+        }
+        // Many links share the side: they never take more of it than
+        // `PORT_SPREAD`, and none leaves outside the box.
+        let fan = (1..12).map(|to| (0, to, 1)).collect::<Vec<_>>();
+        let plan = laid_out(12, &fan, Routing::CLEAN);
+        let top = plan.nodes[0].y;
+        let ys = plan
+            .wires
+            .iter()
+            .map(|wire| ends_at(wire).0 .1)
+            .collect::<Vec<_>>();
+        let (least, most) = (
+            ys.iter().copied().fold(f64::INFINITY, f64::min),
+            ys.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        );
+        assert_eq!(most - least, PORT_SPREAD);
+        assert!(
+            least > top && most < top + BOX_HEIGHT,
+            "{least} {most} {top}"
+        );
+        // The links that arrive at one box stand apart the same way.
+        let into = [(0, 2, 1), (1, 2, 1)];
+        let plan = laid_out(3, &into, Routing::CLEAN);
+        let arrive = [0, 1].map(|edge| ends_at(wire_of(&plan, edge)).1 .1);
+        assert_eq!((arrive[0] - arrive[1]).abs(), PORT_GAP);
+        assert_eq!(
+            arrive[0] < arrive[1],
+            plan.nodes[0].y < plan.nodes[1].y,
+            "{plan:?}"
+        );
+    }
+    #[test]
+    fn links_that_pass_layers_together_share_one_slot_in_each() {
+        // A chain of four layers, and from its first box three links that
+        // pass two layers to three boxes of the last.
+        let edges = [
+            (0, 1, 1),
+            (1, 2, 1),
+            (2, 3, 1),
+            (2, 4, 1),
+            (2, 5, 1),
+            (0, 3, 1),
+            (0, 4, 1),
+            (0, 5, 1),
+        ];
+        let plain = laid_out(6, &edges, Routing::PLAIN);
+        let bundled = laid_out(
+            6,
+            &edges,
+            Routing {
+                portals: None,
+                ..Routing::CLEAN
+            },
+        );
+        // Each of the three had a slot of its own in the two layers it
+        // passes; together they take one in each.
+        let slots = |plan: &Plan| {
+            plan.wires
+                .iter()
+                .filter(|wire| wire.edge >= 5)
+                .flat_map(|wire| {
+                    wire.path
+                        .split(" L")
+                        .skip(1)
+                        .map(|run| run.split(' ').take(2).collect::<Vec<_>>().join(" "))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<BTreeSet<_>>()
+                .len()
+        };
+        assert_eq!((slots(&plain), slots(&bundled)), (6, 2));
+        // They run as one through the layers they pass and part at the end.
+        let run = |edge: usize| {
+            let path = &wire_of(&bundled, edge).path;
+            path[path.find(" L").unwrap()..path.rfind(" C").unwrap()].to_owned()
+        };
+        assert_eq!(run(5), run(6));
+        assert_eq!(run(6), run(7));
+        let ends = [5, 6, 7].map(|edge| ends_at(wire_of(&bundled, edge)).1);
+        assert!(ends[0] != ends[1] && ends[1] != ends[2]);
+        // Links that lead to one box from boxes of several layers join the
+        // same way: 3 is used by 0 past two layers and by 1 past one.
+        let into = [(0, 1, 1), (1, 2, 1), (2, 3, 1), (0, 3, 1), (1, 3, 1)];
+        let (plain, bundled) = (
+            laid_out(4, &into, Routing::PLAIN),
+            laid_out(
+                4,
+                &into,
+                Routing {
+                    portals: None,
+                    ..Routing::CLEAN
+                },
+            ),
+        );
+        let bends = |plan: &Plan| {
+            plan.wires
+                .iter()
+                .map(|w| w.path.matches(" L").count())
+                .sum::<usize>()
+        };
+        assert_eq!((bends(&plain), bends(&bundled)), (3, 3));
+        let last_run = |plan: &Plan, edge: usize| {
+            let path = &wire_of(plan, edge).path;
+            path[path.rfind(" L").unwrap()..path.rfind(" C").unwrap()].to_owned()
+        };
+        assert_ne!(last_run(&plain, 3), last_run(&plain, 4));
+        assert_eq!(last_run(&bundled, 3), last_run(&bundled, 4));
+        // A single link that passes a layer keeps a slot of its own: with
+        // nothing to share, the links are led as they were.
+        let alone = [(0, 1, 1), (1, 2, 1), (0, 2, 1)];
+        let shared = Routing {
+            trunks: true,
+            ..Routing::PLAIN
+        };
+        assert_eq!(
+            laid_out(3, &alone, shared).wires,
+            laid_out(3, &alone, Routing::PLAIN).wires
+        );
+    }
+    #[test]
+    fn a_layer_that_many_links_pass_is_lower_once_they_share_a_slot() {
+        // Four boxes use one far box past a layer of ten boxes: four slots
+        // among those ten where each link had its own, one where they
+        // share, and the picture is lower. A slot is thin, so it is lower
+        // by little: what a shared slot saves is the room of the links,
+        // which adds up where many pass.
+        let (sources, middle, target) = (0..4, 4..14, 14);
+        let mut edges = vec![];
+        for box_ in middle.clone() {
+            edges.push((0, box_, 1));
+            edges.push((box_, target, 1));
+        }
+        for source in sources.clone().skip(1) {
+            edges.push((source, 3 + source, 1));
+        }
+        for source in sources {
+            edges.push((source, target, 1));
+        }
+        let plain = laid_out(15, &edges, Routing::PLAIN);
+        let bundled = laid_out(
+            15,
+            &edges,
+            Routing {
+                portals: None,
+                ..Routing::CLEAN
+            },
+        );
+        assert!(plain.nodes[..4].iter().all(|node| node.layer == Some(0)));
+        assert_eq!(plain.nodes[14].layer, Some(2));
+        let slots = |plan: &Plan| {
+            plan.wires
+                .iter()
+                .flat_map(|wire| {
+                    wire.path
+                        .split(" L")
+                        .skip(1)
+                        .map(|run| run.split(' ').take(2).collect::<Vec<_>>().join(" "))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<BTreeSet<_>>()
+                .len()
+        };
+        assert_eq!((slots(&plain), slots(&bundled)), (4, 1));
+        let saved = plain.height - bundled.height;
+        assert!(
+            (BEND_HEIGHT + BEND_GAP..=3.0 * (BEND_HEIGHT + BEND_GAP)).contains(&saved),
+            "{} {}",
+            plain.height,
+            bundled.height
+        );
+    }
+    #[test]
+    fn a_link_that_passes_many_layers_is_a_portal_and_takes_no_slot() {
+        // A chain of five layers and a link from its first box to its last.
+        let edges = [(0, 1, 1), (1, 2, 1), (2, 3, 1), (3, 4, 1), (0, 4, 1)];
+        let plain = laid_out(5, &edges, Routing::PLAIN);
+        let plan = laid_out(5, &edges, Routing::CLEAN);
+        assert_eq!(PORTAL_SPAN, 4);
+        let far = wire_of(&plan, 4);
+        assert!(far.portal);
+        assert!(plan.wires.iter().filter(|wire| wire.portal).count() == 1);
+        // One curve from the right side of the first box to the left side
+        // of the last, where it passed three slots before.
+        assert_eq!(wire_of(&plain, 4).path.matches(" L").count(), 3);
+        assert_eq!(far.path.matches(" L").count(), 0);
+        assert_eq!(
+            ends_at(far),
+            (
+                (
+                    plan.nodes[0].x + BOX_WIDTH,
+                    plan.nodes[0].y + BOX_HEIGHT / 2.0
+                ),
+                (plan.nodes[4].x, plan.nodes[4].y + BOX_HEIGHT / 2.0)
+            )
+        );
+        // The picture is as tall as the chain alone.
+        let chain = laid_out(5, &edges[..4], Routing::CLEAN);
+        assert_eq!(plan.height, chain.height);
+        assert!(plan.height < plain.height);
+        // One layer fewer and it is led through the layers as any other.
+        let near = [(0, 1, 1), (1, 2, 1), (2, 3, 1), (0, 3, 1)];
+        assert!(laid_out(4, &near, Routing::CLEAN)
+            .wires
+            .iter()
+            .all(|wire| !wire.portal));
+        // A link that closes a cycle is drawn however far it runs.
+        let ring = [(0, 1, 9), (1, 2, 9), (2, 3, 9), (3, 4, 9), (4, 0, 1)];
+        let plan = laid_out(5, &ring, Routing::CLEAN);
+        let back = wire_of(&plan, 4);
+        assert!(back.back && !back.portal, "{plan:?}");
     }
     #[test]
     fn unlinked_nodes_sit_below_and_nothing_overlaps() {
@@ -16774,7 +19189,7 @@ mod tests {
     fn an_opened_file_draws_its_symbols_with_a_letter_and_the_files_around_without() {
         let html = canvas(&file());
         assert_eq!(html.matches("<button").count(), 7);
-        assert_eq!(html.matches("<path class=\"graph-map-edge").count(), 3);
+        assert_eq!(html.matches(" marker-end=").count(), 3);
         // A type, a method and a function carry a letter; the file's own
         // node and a plain name carry none.
         for letter in ["T", "m", "f"] {
@@ -17055,13 +19470,23 @@ mod tests {
     fn the_map_marks_the_selection_its_links_and_guesses() {
         let html = canvas(&view());
         assert_eq!(html.matches("<button").count(), 3);
-        assert_eq!(html.matches("<path class=\"graph-map-edge").count(), 2);
+        assert_eq!(html.matches(" marker-end=").count(), 2);
         // The selected folder, its two neighbours undimmed, both links lit.
         assert_eq!(html.matches("data-selected=\"true\"").count(), 1);
         assert_eq!(html.matches("data-dim=\"true\"").count(), 0);
         assert_eq!(html.matches("graph-map-edge-on").count(), 2);
-        // Only the link that is all guesses is dashed.
+        // Only the link that is all guesses is hollow: drawn wider, with
+        // its own middle over it in the colour of the ground.
         assert_eq!(html.matches("graph-map-edge-guess").count(), 1);
+        assert_eq!(
+            html.matches("<path class=\"graph-map-edge-core\"").count(),
+            1
+        );
+        assert!(
+            html.contains("graph-map-edge-guess\" data-ends=\"1 2\""),
+            "{html}"
+        );
+        assert!(html.contains("<path class=\"graph-map-edge-core\" data-ends=\"1 2\""));
         assert!(html.contains("<title>Order uses Cart · 3 links, 1 guessed</title>"));
         assert!(html.contains("<title>Order uses a&lt;b&gt;.php · 2 links guessed</title>"));
         // Names from the project never become markup.
@@ -17081,11 +19506,17 @@ mod tests {
         let (start, end) = (MARGIN + BOX_WIDTH, MARGIN + BOX_WIDTH + COLUMN_GAP);
         assert_eq!(html.matches("<linearGradient ").count(), 1);
         assert!(html.contains(&format!(
-            "<linearGradient id=\"graph-map-flow-0\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
+            "<linearGradient id=\"graph-map-flow-0\" class=\"graph-map-flow\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
         )), "{html}");
         assert_eq!(html.matches("stroke=\"url(#graph-map-flow-0)\"").count(), 2);
-        // All 7 dependency arrow markers are registered; default edges use the calls arrowhead.
-        assert_eq!(html.matches("<marker ").count(), 7);
+        // All 7 dependency arrow markers are registered, and the two a link
+        // leaves by; default edges use the calls arrowhead.
+        assert_eq!(html.matches("<marker ").count(), 9);
+        assert_eq!(
+            html.matches("marker-start=\"url(#graph-map-port)\"")
+                .count(),
+            2
+        );
         assert_eq!(
             html.matches("marker-end=\"url(#graph-map-arrow)\"").count(),
             2
@@ -17106,7 +19537,7 @@ mod tests {
         });
         let html = canvas(&ring);
         assert!(html.contains(&format!(
-            "<linearGradient id=\"graph-map-flow-1\" gradientUnits=\"userSpaceOnUse\" x1=\"{end}\" y1=\"0\" x2=\"{start}\""
+            "<linearGradient id=\"graph-map-flow-1\" class=\"graph-map-flow\" gradientUnits=\"userSpaceOnUse\" x1=\"{end}\" y1=\"0\" x2=\"{start}\""
         )), "{html}");
         assert!(html.contains("stroke=\"url(#graph-map-flow-0)\" stroke-width=\"3.5\""));
         assert!(html.contains(" graph-map-edge-back\""));
@@ -17157,7 +19588,7 @@ mod tests {
     #[test]
     fn the_legend_shows_both_colours_and_what_is_particular_to_the_picture() {
         let folder = legend(&view(), false);
-        assert!(folder.starts_with("An arrow runs from what uses <span class=\"graph-map-key graph-map-key-uses\" aria-hidden=\"true\"></span> to what is used <span class=\"graph-map-key graph-map-key-used\" aria-hidden=\"true\"></span>, and a box is tinted by which it does more here. Solid: read from the code."), "{folder}");
+        assert!(folder.starts_with("An arrow runs from what uses <span class=\"graph-map-key graph-map-key-uses\" aria-hidden=\"true\"></span> to what is used <span class=\"graph-map-key graph-map-key-used\" aria-hidden=\"true\"></span>, and a box is tinted by which it does more here. Its head and its dashes tell its kind, as the key of the links shows. Hollow: only guessed by name."), "{folder}");
         assert!(folder.ends_with("Dotted: against the main direction, closing a cycle (↻)."));
         let around = legend(&change(), true);
         assert!(
@@ -17810,7 +20241,7 @@ mod tests {
             let html = canvas(&other);
             assert_eq!(
                 html.matches("<path class=\"graph-map-hit\"").count(),
-                html.matches("<path class=\"graph-map-edge").count()
+                html.matches(" marker-end=").count()
             );
         }
         // So does each row of a selected place: the link is named in the
@@ -17839,7 +20270,12 @@ mod tests {
         let html = link_canvas(&view, "");
         assert_eq!(html.matches("<rect class=\"graph-map-frame\"").count(), 3);
         assert_eq!(html.matches("data-action=\"graph-link-node\"").count(), 5);
-        assert_eq!(html.matches("<path class=\"graph-map-edge").count(), 4);
+        assert_eq!(html.matches(" marker-end=").count(), 4);
+        // The one link that was guessed by name is hollow.
+        assert_eq!(
+            html.matches("<path class=\"graph-map-edge-core\"").count(),
+            1
+        );
         assert_eq!(
             html.matches("class=\"graph-map-edge graph-map-edge-guess\"")
                 .count(),
@@ -18010,7 +20446,9 @@ mod tests {
             html.contains("class=\"graph-map-node\" data-n=\"2\" data-action=\"graph-map-node\"")
         );
         assert_eq!(html.matches(" data-ends=\"1 0\" ").count(), 2);
-        assert_eq!(html.matches(" data-ends=\"1 2\" ").count(), 2);
+        // A guessed link is hollow, and the middle drawn over it is a part
+        // of it: it is lit and steps back with it.
+        assert_eq!(html.matches(" data-ends=\"1 2\" ").count(), 3);
         assert!(html.contains("<path class=\"graph-map-hit\" data-ends=\"1 0\" d=\"M"));
         let spread = canvas(&spread_view());
         assert!(spread.contains("class=\"graph-map-spread\" data-of=\"1\" data-dim=\"false\" data-action=\"graph-map-spread\" data-payload=\"&quot;src/Cart/Rules&quot;\""));
@@ -18028,10 +20466,11 @@ mod tests {
         let link = link_canvas(&link_view(), "");
         assert!(link.contains("class=\"graph-map-node\" data-n=\"0\" data-action=\"graph-link-node\" data-payload=\"&quot;src/Order/Order.php#L3:Order&quot;\""));
         assert!(link.contains("class=\"graph-map-node\" data-n=\"4\" data-action=\"graph-link-node\" data-payload=\"&quot;src/Cart/Cart.php#L20:.add&lt;T&gt;()&quot;\""));
+        // The guessed one twice: the link, and its middle drawn over it.
         assert_eq!(
             ["0 3", "0 4", "1 3", "2 3"]
                 .map(|ends| link.matches(&format!(" data-ends=\"{ends}\" ")).count()),
-            [1; 4]
+            [1, 2, 1, 1]
         );
     }
     const TOTAL: &str = "src/Cart/Cart.php#L19:.total()";
@@ -18126,7 +20565,7 @@ mod tests {
         let html = canvas(&view);
         assert!(html.starts_with("<div class=\"graph-map-plane\" data-names=\"true\" style=\""));
         assert_eq!(html.matches("<bdi>").count(), 4);
-        assert!(html.contains("title=\"Price.of() · src/Cart/Price.php:9\" aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Price.of()</bdi></span></button>"), "{html}");
+        assert!(html.contains("title=\"Price.of() · src/Cart/Price.php:9\" aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Price.of()</bdi></span><span class=\"graph-map-node-detail\" aria-hidden=\"true\">Price.php:9</span></button>"), "{html}");
         // The node of a file has no letter and no line, and its name is text.
         assert!(html.contains("title=\"Notifier&lt;T&gt;.php · src/Order/Notifier.php\" aria-label=\"Notifier&lt;T&gt;.php, the file itself, for what belongs to no symbol in it, such as its imports, uses others"), "{html}");
         assert!(html.contains(
@@ -18404,7 +20843,7 @@ mod tests {
         ]);
         let html = canvas(&named);
         assert!(html.starts_with("<div class=\"graph-map-plane\" data-names=\"true\" style=\""));
-        assert!(html.contains("title=\"Price.of() · src/Cart/Price.php:9\" aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links, the path ends here\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Price.of()</bdi></span></button>"), "{html}");
+        assert!(html.contains("title=\"Price.of() · src/Cart/Price.php:9\" aria-label=\"Price.of(), method of Price, line 9, uses others through 0 links, is used through 0 links, the path ends here\"><span class=\"graph-map-node-kind\" aria-hidden=\"true\">m</span><span class=\"graph-map-node-name\"><bdi>Price.of()</bdi></span><span class=\"graph-map-node-detail\" aria-hidden=\"true\">Price.php:9</span></button>"), "{html}");
         assert!(html.contains("the path starts here\""));
         assert!(!html.contains("graph-map-more"));
         assert!(legend(&named, true).ends_with("the two ends of the path. T type · m method · f function · P property · K const · c case · # heading. A box without a letter is a plain name, or a file itself for its imports. Highlighted: touched by the change."));
@@ -19741,7 +22180,7 @@ mod tests {
         );
         assert_eq!(
             note(&view),
-            "An abstraction with several implementations. 12 implementations stand under Gateway. A dashed link is one the tool only guessed."
+            "An abstraction with several implementations. 12 implementations stand under Gateway. A hollow link is one the tool only guessed."
         );
         let html = canvas(&view);
         // A frame is named for what its parts are, says how many of them
@@ -20140,7 +22579,7 @@ mod tests {
         );
         assert_eq!(
             note(&view),
-            "Files filed in layers by their names. 1 file of code here is filed in no layer. A dashed link is one the tool only guessed."
+            "Files filed in layers by their names. 1 file of code here is filed in no layer. A hollow link is one the tool only guessed."
         );
         let html = canvas(&view);
         // One row, in the order of the layers, whatever the links say.
@@ -20538,15 +22977,55 @@ mod tests {
         );
         // Not the middle of its ends: the handles pull it.
         assert_eq!(middle("M0 0 C0 8 8 16 16 16"), Some((5.0, 11.0)));
+        // A straight run has a middle too, and the angle it runs at.
+        assert_eq!(halfway("M10.0 10.0 L20.0 20.0"), Some((15.0, 15.0, 45.0)));
+        assert_eq!(halfway("M30 4 L10 4"), Some((20.0, 4.0, 180.0)));
         for other in [
-            "M10.0 10.0 L20.0 20.0",
             "M1 2 C3 4 5 6 7",
             "M1 2 C3 4 5 6 7 8 9",
             "M1 2 C3 4 5 6 7 x",
+            "M1 2 L3",
+            "M1 2",
+            "M1 2 3 L4 5",
+            "M1 2 Q3 4 5 6",
             "L1 2 C3 4 5 6 7 8",
             "",
         ] {
             assert_eq!(middle(other), None, "{other}");
+        }
+    }
+    /// A link that passes layers runs in pieces: a curve into the slot of
+    /// each layer it passes, straight through it, and a curve on. A word
+    /// about it stands halfway along the whole of it, so the links that
+    /// reach furthest keep their marks.
+    #[test]
+    fn a_link_of_several_pieces_has_its_middle_halfway_along_them() {
+        // Curve, straight slot, curve: the middle lies in the slot.
+        let (x, y, angle) =
+            halfway("M164.0 15.0 C200.0 15.0 200.0 40.0 236.0 40.0 L400.0 40.0 C436.0 40.0 436.0 15.0 472.0 15.0")
+                .unwrap();
+        assert_eq!((x, y, angle), (318.0, 40.0, 0.0));
+        // Drawn right to left, as the weaker direction of a cycle is, it
+        // runs the other way at the same place.
+        let (x, y, angle) =
+            halfway("M472.0 15.0 C436.0 15.0 436.0 40.0 400.0 40.0 L236.0 40.0 C200.0 40.0 200.0 15.0 164.0 15.0")
+                .unwrap();
+        assert_eq!((x, y, angle), (318.0, 40.0, 180.0));
+        // Two slots of unlike length: halfway by length, not by pieces.
+        let (x, y, _) = halfway("M0 0 L10 0 L10 30").unwrap();
+        assert_eq!((x, y), (10.0, 10.0));
+        // Every long link of a picture has a middle that lies on it.
+        let plan = plan(4, &[(0, 1, 1), (1, 2, 1), (2, 3, 1), (0, 3, 1), (0, 2, 1)]);
+        let long = plan
+            .wires
+            .iter()
+            .filter(|wire| wire.path.contains(" L"))
+            .collect::<Vec<_>>();
+        assert_eq!(long.len(), 2, "{plan:?}");
+        for wire in long {
+            let (x, _) = middle(&wire.path).expect("a middle of a long link");
+            let (from, to) = (plan.nodes[0].x + BOX_WIDTH, plan.nodes[3].x);
+            assert!(x > from && x < to, "{x} of {}", wire.path);
         }
     }
     #[test]
@@ -21445,9 +23924,9 @@ mod tests {
             &view,
             "session-graph",
             CanvasOverlayContext {
-                live_focus: None,
                 changes: Some(&changes),
                 impact: Some(&impact),
+                ..Default::default()
             },
         );
         let bbox = rendered.selected_bbox.expect("selected_bbox present");
@@ -21508,7 +23987,7 @@ mod tests {
             },
             "used_by": []
         });
-        let canvas_html = link_canvas_with(&view, "", Some(&impact));
+        let canvas_html = link_canvas_with(&view, "", Some(&impact), &[false; 7]);
         assert!(canvas_html.contains("data-diff=\"added\""));
 
         let side_html = link_side_with(&view, "", Some(&impact));
@@ -21869,8 +24348,7 @@ mod tests {
             "session-graph",
             CanvasOverlayContext {
                 live_focus: Some(&focus),
-                changes: None,
-                impact: None,
+                ..Default::default()
             },
         );
         assert!(rendered.html.contains("data-visibility=\"protected\""));
@@ -22024,7 +24502,12 @@ mod tests {
             "kinds": [{ "kind": "reads", "links": 1 }, { "kind": "uses_const", "links": 1 }]
         });
 
-        let canvas = link_canvas_with(&view, "src/Billing/Checkout.php#L18:apply", None);
+        let canvas = link_canvas_with(
+            &view,
+            "src/Billing/Checkout.php#L18:apply",
+            None,
+            &[false; 7],
+        );
         assert!(canvas.contains(">P</span>"));
         assert!(canvas.contains(">K</span>"));
         assert!(canvas.contains("data-visibility=\"private\""));
@@ -22133,8 +24616,12 @@ mod tests {
             ],
             "kinds": []
         });
-        let link_canvas_html =
-            link_canvas_with(&link_view, "src/Billing/Checkout.php#L10:calc", None);
+        let link_canvas_html = link_canvas_with(
+            &link_view,
+            "src/Billing/Checkout.php#L10:calc",
+            None,
+            &[false; 7],
+        );
         assert!(link_canvas_html.contains(">P</span>"));
         assert!(link_canvas_html.contains(">K</span>"));
         assert!(link_canvas_html.contains("field of TaxRules"));
@@ -22473,7 +24960,7 @@ mod tests {
         });
 
         let html = canvas_with(&view, "session-graph", None).html;
-        assert_eq!(html.matches("<marker ").count(), 8);
+        assert_eq!(html.matches("<marker ").count(), 10);
         for suffix in [
             "",
             "-imports",
@@ -22498,7 +24985,19 @@ mod tests {
         // Multi-kind vs alias-only edges
         assert!(html.contains(
             "data-ends=\"0 1\" d=\"M"
-        ) && html.contains("data-edge-kind=\"calls\" data-edge-multi=\"true\" stroke=\"url(#session-graph-flow-"));
+        ) && html.contains("data-edge-kind=\"calls\" data-kinds=\"calls imports\" data-edge-multi=\"true\" stroke=\"url(#session-graph-flow-"));
+        // A link that holds several kinds leaves by a ring, one of a single
+        // kind by a dot.
+        assert_eq!(
+            html.matches("marker-start=\"url(#session-graph-port-multi)\"")
+                .count(),
+            1
+        );
+        assert_eq!(
+            html.matches("marker-start=\"url(#session-graph-port)\"")
+                .count(),
+            8
+        );
         assert!(html.contains(
             "marker-end=\"url(#session-graph-arrow)\"><title>A uses B · 3 links · calls 2, imports 1</title>"
         ));
@@ -22561,8 +25060,8 @@ mod tests {
             ]
         });
 
-        let html = link_canvas_with(&view, "", None);
-        assert_eq!(html.matches("<marker ").count(), 7);
+        let html = link_canvas_with(&view, "", None, &[false; 7]);
+        assert_eq!(html.matches("<marker ").count(), 9);
         assert!(!html.contains("graph-link-arrow-against"));
         assert!(html.contains("data-edge-kind=\"calls\""));
         assert!(html.contains("marker-end=\"url(#graph-link-arrow)\""));
@@ -22586,7 +25085,8 @@ mod tests {
     fn arrow_kinds_legend_html_and_existing_legend_endings_preserved() {
         let html = arrow_kinds_legend_html();
         assert_eq!(html.matches("class=\"graph-arrow-swatch\"").count(), 7);
-        assert_eq!(html.matches("aria-hidden=\"true\"").count(), 7);
+        // The seven arrows, and the hollow line of what was only inferred.
+        assert_eq!(html.matches("aria-hidden=\"true\"").count(), 8);
         assert!(!html.contains(" id=\""));
         for (kind, label) in [
             ("calls", "Calls"),
@@ -22598,7 +25098,9 @@ mod tests {
             ("uses", "Uses"),
         ] {
             assert!(html.contains(&format!("data-edge-kind=\"{kind}\"")));
-            assert!(html.contains(&format!("<span>{label}</span>")));
+            assert!(html.contains(&format!(
+                "<span class=\"graph-arrow-legend-name\">{label}</span>"
+            )));
         }
         assert!(html.contains("stroke-dasharray=\"8 4\""));
         assert!(html.contains("stroke-dasharray=\"6 3 2 3\""));
@@ -23018,5 +25520,1249 @@ mod tests {
         assert!(compare_opts
             .contains("<option value=\"sess-launch-1\">Launch 1 · 2026-11-15 19:10 UTC</option>"));
         assert!(!compare_opts.contains("value=\"sess-launch-2\""));
+    }
+
+    /// Four files in a row and one link that passes two of them.
+    fn kinds_view() -> V {
+        json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/A.php", "name": "A", "folder": false},
+                {"path": "src/B.php", "name": "B", "folder": false},
+                {"path": "src/C.php", "name": "C", "folder": false},
+                {"path": "src/D.php", "name": "D", "folder": false}
+            ],
+            "edges": [
+                {"from": "src/A.php", "to": "src/B.php", "links": 4, "guessed": 0,
+                 "kinds": [{"kind": "calls", "links": 3}, {"kind": "imports", "links": 1}]},
+                {"from": "src/B.php", "to": "src/C.php", "links": 1, "guessed": 1,
+                 "kinds": [{"kind": "imports_from", "links": 1}]},
+                {"from": "src/C.php", "to": "src/D.php", "links": 2, "guessed": 0,
+                 "kinds": [{"kind": "references", "links": 2}, {"kind": "writes", "links": 3, "by": "source"}]},
+                {"from": "src/A.php", "to": "src/D.php", "links": 1, "guessed": 0,
+                 "kinds": [{"kind": "inherits", "links": 1}]}
+            ],
+            "focus": null
+        })
+    }
+    fn off(kinds: &[&str]) -> KindsOff {
+        kinds_off(&json!({"links_off": kinds}))
+    }
+    fn drawn_with(view: &V, links_off: KindsOff) -> String {
+        canvas_with_overlays(
+            view,
+            "graph-map",
+            CanvasOverlayContext {
+                links_off,
+                ..Default::default()
+            },
+        )
+        .html
+    }
+
+    #[test]
+    fn a_link_holds_its_kinds_and_is_drawn_as_the_strongest_that_is_shown() {
+        let view = kinds_view();
+        let kinds = |at: usize| EdgeKinds::of(&view["edges"][at]);
+        assert_eq!(kinds(0).held(), "calls imports");
+        assert_eq!(kinds(2).held(), "writes uses");
+        let all = [false; 7];
+        assert_eq!(kinds(0).primary(&all), Some("calls"));
+        assert!(kinds(0).multi(&all));
+        // With its calls switched off the link is an import, of one kind.
+        let no_calls = off(&["calls"]);
+        assert_eq!(kinds(0).primary(&no_calls), Some("imports"));
+        assert!(!kinds(0).multi(&no_calls));
+        // With every kind it holds switched off it is not drawn.
+        assert_eq!(kinds(0).primary(&off(&["calls", "imports"])), None);
+        assert_eq!(kinds(1).primary(&off(&["imports"])), None);
+        // What the source told counts like what the graph told.
+        assert_eq!(kinds(2).primary(&all), Some("writes"));
+        assert_eq!(kinds(2).primary(&off(&["writes"])), Some("uses"));
+        // A link that says nothing of its kind is a call, as it is drawn.
+        let plain = EdgeKinds::of(&json!({"from": "a", "to": "b", "links": 2}));
+        assert_eq!(plain.held(), "calls");
+        assert_eq!(plain.primary(&off(&["calls"])), None);
+        // Names that are no kind switch nothing off.
+        assert_eq!(off(&["nothing", "calls"]), off(&["calls"]));
+    }
+
+    #[test]
+    fn a_hidden_link_keeps_its_place_and_is_neither_drawn_nor_hit() {
+        let view = kinds_view();
+        let shown = drawn_with(&view, [false; 7]);
+        assert_eq!(shown.matches("data-kind-hidden").count(), 0);
+        let html = drawn_with(&view, off(&["imports"]));
+        // The link of imports alone is hidden: itself, the middle of its
+        // hollow line, and the wide link over it that is hit.
+        assert_eq!(html.matches("data-kind-hidden=\"true\"").count(), 3);
+        for part in [
+            "<path class=\"graph-map-edge graph-map-edge-guess\" data-ends=\"1 2\" data-kind-hidden=\"true\"",
+            "<path class=\"graph-map-edge-core\" data-ends=\"1 2\" data-kind-hidden=\"true\"",
+            "<path class=\"graph-map-hit\" data-ends=\"1 2\" data-kind-hidden=\"true\"",
+        ] {
+            assert!(html.contains(part), "{part} in {html}");
+        }
+        // Every box stands where it stood: the key hides, it does not lay
+        // the picture out anew.
+        let places = |html: &str| {
+            html.match_indices("style=\"left:")
+                .map(|(at, _)| html[at..].split('"').nth(1).unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(places(&shown), places(&html));
+        // A link of calls and imports stays, as calls, of one kind now.
+        assert!(html.contains("data-ends=\"0 1\" d=\"M"));
+        assert!(html.contains("data-edge-kind=\"calls\" data-kinds=\"calls imports\" stroke="));
+        // With the calls off as well it is drawn as nothing at all.
+        let html = drawn_with(&view, off(&["imports", "calls"]));
+        assert!(html.contains("data-ends=\"0 1\" data-kind-hidden=\"true\""));
+        // A link against the rules is drawn whatever the key says.
+        let mut ruled = view.clone();
+        ruled["edges"][3]["architecture_violation"] = json!(1);
+        let html = drawn_with(&ruled, off(&["extends"]));
+        assert!(
+            html.contains("graph-map-edge-against\" data-ends=\"0 3\" d=\"M"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_link_shades_into_the_colour_of_its_kind_and_keeps_its_dashes_when_guessed() {
+        let html = drawn_with(&kinds_view(), [false; 7]);
+        // One shading for each kind between each two columns.
+        for (id, kind) in [
+            ("graph-map-flow-0", None),
+            ("graph-map-flow-1-extends", Some("extends")),
+            ("graph-map-flow-2-imports", Some("imports")),
+            ("graph-map-flow-3-writes", Some("writes")),
+        ] {
+            let kind_attr = kind
+                .map(|kind| format!(" data-edge-kind=\"{kind}\""))
+                .unwrap_or_default();
+            assert!(
+                html.contains(&format!(
+                    "<linearGradient id=\"{id}\" class=\"graph-map-flow\"{kind_attr} gradientUnits"
+                )),
+                "{id} in {html}"
+            );
+        }
+        assert!(html.contains("stroke=\"url(#graph-map-flow-2-imports)\""));
+        // No style of a link is set on the link itself but its shading: the
+        // stylesheet gives the dashes of the kind, and nothing of a guess
+        // takes them away.
+        assert!(!html.contains("stroke-dasharray"));
+        // The guessed import is hollow: two wider, its middle as wide as it
+        // would be.
+        assert!(html.contains(
+            "data-edge-kind=\"imports\" data-kinds=\"imports\" stroke=\"url(#graph-map-flow-2-imports)\" stroke-width=\"3.0\""
+        ), "{html}");
+        assert!(html.contains("<path class=\"graph-map-edge-core\" data-ends=\"1 2\" d=\"M"));
+        assert!(html.contains("data-edge-kind=\"imports\" stroke-width=\"1.0\"/>"));
+    }
+
+    #[test]
+    fn a_link_that_passes_layers_carries_a_chevron_halfway() {
+        let html = drawn_with(&kinds_view(), [false; 7]);
+        // One link passes two layers in slots of its own; the others reach
+        // the next layer by one curve and need none.
+        assert_eq!(
+            html.matches("<path class=\"graph-map-edge-chevron\"")
+                .count(),
+            1
+        );
+        assert!(html.contains(
+            "<path class=\"graph-map-edge-chevron\" data-ends=\"0 3\" data-edge-kind=\"extends\" data-kinds=\"extends\" transform=\"translate("
+        ), "{html}");
+        assert!(html.contains("rotate(0)\" d=\"M-3 -3.4 L1.4 0 L-3 3.4\"/>"));
+        // It is hidden with its link.
+        let html = drawn_with(&kinds_view(), off(&["extends"]));
+        assert!(html
+            .contains("data-kinds=\"extends\" data-kind-hidden=\"true\" transform=\"translate("));
+        // A word about the link stands where the chevron would: then the
+        // word is drawn and the chevron is not.
+        let mut ruled = kinds_view();
+        ruled["pattern"] = json!({"sort": "layers", "declared": true});
+        ruled["edges"][3]["against"] = json!(true);
+        ruled["edges"][3]["added"] = json!(2);
+        let html = drawn_with(&ruled, [false; 7]);
+        if html.contains("graph-map-edge-mark") {
+            assert_eq!(html.matches("graph-map-edge-chevron").count(), 0, "{html}");
+        }
+    }
+
+    #[test]
+    fn the_key_of_the_links_counts_them_and_switches_them() {
+        let view = kinds_view();
+        let all = [false; 7];
+        assert_eq!(kind_counts(&view, &all), ([1, 2, 1, 0, 1, 0, 1], 0));
+        assert_eq!(kind_counts(&view, &off(&["imports"])).1, 1);
+        assert_eq!(kind_counts(&view, &off(&["imports", "calls"])).1, 2);
+        // A link whose end is not drawn is not counted, as it is not drawn.
+        let mut cut = view.clone();
+        cut["nodes"].as_array_mut().unwrap().pop();
+        assert_eq!(kind_counts(&cut, &all).0, [1, 2, 0, 0, 0, 0, 0]);
+        // The window of one link has no boxes of that kind: all are counted.
+        let window = json!({"edges": [{"from": "a", "to": "b", "kind": "calls"}]});
+        assert_eq!(kind_counts(&window, &all).0[0], 1);
+
+        let html = kinds_legend_html(&view, &off(&["imports"]), "session");
+        assert_eq!(html.matches("data-action=\"graph-kind-toggle\"").count(), 7);
+        assert_eq!(html.matches("data-action=\"graph-kind-preset\"").count(), 4);
+        assert!(html.contains(
+            "data-payload=\"{&quot;kind&quot;:&quot;imports&quot;,&quot;surface&quot;:&quot;session&quot;}\" data-edge-kind=\"imports\" data-empty=\"false\" aria-pressed=\"false\""
+        ), "{html}");
+        assert!(html.contains(
+            "<span class=\"graph-arrow-legend-name\">Imports</span><span class=\"graph-arrow-legend-count\">2</span>"
+        ));
+        assert!(html
+            .contains("data-edge-kind=\"implements\" data-empty=\"true\" aria-pressed=\"true\""));
+        assert!(html.contains("1 link hidden by this key"));
+        // The preset that fits what is switched off is the pressed one.
+        let pressed = |html: &str| {
+            html.split("data-action=\"graph-kind-preset\"")
+                .skip(1)
+                .filter(|part| part.contains("aria-pressed=\"true\""))
+                .map(|part| {
+                    part.split("&quot;preset&quot;:&quot;")
+                        .nth(1)
+                        .unwrap()
+                        .split('&')
+                        .next()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pressed(&html), ["no-imports"]);
+        assert_eq!(pressed(&kinds_legend_html(&view, &all, "modal")), ["all"]);
+        assert_eq!(
+            pressed(&kinds_legend_html(
+                &view,
+                &off(&["imports", "extends", "implements", "uses"]),
+                "modal"
+            )),
+            ["runtime"]
+        );
+        assert!(!kinds_legend_html(&view, &all, "modal").contains("hidden by this key"));
+    }
+
+    #[test]
+    fn a_kind_is_switched_off_and_on_shown_alone_and_never_leaves_nothing() {
+        let held = |state: &V| {
+            m::array(&state["links_off"])
+                .iter()
+                .map(|kind| kind.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let state = json!({});
+        let state = switched_kind(state, "imports", false);
+        assert_eq!(held(&state), "imports");
+        let state = switched_kind(state, "uses", false);
+        assert_eq!(held(&state), "imports uses");
+        let state = switched_kind(state, "imports", false);
+        assert_eq!(held(&state), "uses");
+        // Alone: every other kind goes off, also where the kind was off.
+        let alone = switched_kind(state.clone(), "uses", true);
+        assert_eq!(
+            held(&alone),
+            "calls imports extends implements writes reads"
+        );
+        // Asked again for the kind that is alone, every kind is shown.
+        assert_eq!(held(&switched_kind(alone.clone(), "uses", true)), "");
+        // Switching the last shown kind off shows every kind.
+        assert_eq!(held(&switched_kind(alone.clone(), "uses", false)), "");
+        // Another kind alone takes its place.
+        assert_eq!(
+            held(&switched_kind(alone, "calls", true)),
+            "imports extends implements writes reads uses"
+        );
+        // A name that is no kind changes nothing.
+        assert_eq!(switched_kind(state.clone(), "nothing", false), state);
+        // The presets.
+        assert_eq!(held(&preset_kinds(state.clone(), "all")), "");
+        assert_eq!(
+            held(&preset_kinds(state.clone(), "runtime")),
+            "imports extends implements uses"
+        );
+        assert_eq!(
+            held(&preset_kinds(state.clone(), "hierarchy")),
+            "calls imports writes reads uses"
+        );
+        assert_eq!(held(&preset_kinds(state.clone(), "no-imports")), "imports");
+        assert_eq!(preset_kinds(state.clone(), "nothing"), state);
+    }
+
+    #[test]
+    fn a_dependency_a_change_added_is_drawn_as_the_kind_it_is() {
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/A.php", "name": "A", "folder": false},
+                {"path": "src/B.php", "name": "B", "folder": false},
+                {"path": "src/C.php", "name": "C", "folder": false}
+            ],
+            "edges": [],
+            "focus": {"path": "src/A.php"}
+        });
+        let impact = json!({
+            "path": "src/A.php",
+            "uses": {
+                "added": [
+                    {"target": "src/B.php", "kind": "writes"},
+                    {"target": "src/B.php", "kind": "reads"},
+                    {"target": "src/B.php", "kind": "writes"}
+                ],
+                "removed": [{"target": "src/C.php", "kind": "imports"}],
+                "unchanged": []
+            },
+            "used_by": []
+        });
+        let html = canvas_with_overlays(
+            &view,
+            "graph-map",
+            CanvasOverlayContext {
+                impact: Some(&impact),
+                ..Default::default()
+            },
+        )
+        .html;
+        assert!(html.contains(
+            "data-diff=\"added\" d=\"M"
+        ) && html.contains("data-edge-kind=\"writes\" data-kinds=\"writes\" stroke-width=\"2\" marker-end=\"url(#graph-map-arrow-writes)\"><title>A (added dependency · writes)</title>"), "{html}");
+        assert!(html.contains(
+            "data-edge-kind=\"imports\" data-kinds=\"imports\" stroke-width=\"2\" marker-end=\"url(#graph-map-arrow-imports)\"><title>A (removed dependency · imports)</title>"
+        ));
+    }
+    #[test]
+    fn a_link_that_a_longer_way_joins_says_nothing_new() {
+        // 0 uses 1 uses 2 uses 3, and 0 uses 2 and 3 as well: both of
+        // those are said by the chain. 1 uses 3 past 2, which is said too.
+        let links = [(0, 1), (1, 2), (2, 3), (0, 2), (0, 3), (1, 3)];
+        assert_eq!(
+            transitive(4, &links),
+            [false, false, false, true, true, true]
+        );
+        // Without a longer way a link stays, however many links there are.
+        assert_eq!(transitive(3, &[(0, 1), (0, 2)]), [false, false]);
+        assert_eq!(transitive(3, &[(0, 1), (1, 2)]), [false, false]);
+        // Boxes that reach each other are one place: no link among them is
+        // left out, a way may lead through them, and a link into the group
+        // that another of its boxes already brings is said twice.
+        let ring = [(0, 1), (1, 2), (2, 1), (2, 3), (0, 3), (0, 2), (1, 3)];
+        assert_eq!(
+            transitive(4, &ring),
+            [false, false, false, false, true, false, false]
+        );
+        // Every box still reaches what it reached once they are left out.
+        let reaches = |links: &[(usize, usize)], count: usize| {
+            (0..count)
+                .map(|from| {
+                    let mut seen = vec![false; count];
+                    let mut todo = vec![from];
+                    while let Some(at) = todo.pop() {
+                        for (a, b) in links {
+                            if *a == at && !seen[*b] {
+                                seen[*b] = true;
+                                todo.push(*b);
+                            }
+                        }
+                    }
+                    seen
+                })
+                .collect::<Vec<_>>()
+        };
+        for (count, links) in [
+            (4, links.to_vec()),
+            (4, ring.to_vec()),
+            (
+                7,
+                vec![
+                    (0, 1),
+                    (0, 2),
+                    (1, 3),
+                    (2, 3),
+                    (3, 4),
+                    (0, 4),
+                    (4, 5),
+                    (5, 6),
+                    (6, 4),
+                    (0, 6),
+                    (2, 5),
+                ],
+            ),
+        ] {
+            let said = transitive(count, &links);
+            let kept = links
+                .iter()
+                .zip(&said)
+                .filter(|(_, said)| !**said)
+                .map(|(link, _)| *link)
+                .collect::<Vec<_>>();
+            assert!(kept.len() < links.len(), "{links:?}");
+            assert_eq!(reaches(&kept, count), reaches(&links, count), "{links:?}");
+        }
+        // Links that name no box, and a box that uses itself, are no way.
+        assert_eq!(
+            transitive(2, &[(0, 1), (0, 9), (1, 1)]),
+            [false, false, false]
+        );
+        assert_eq!(transitive(0, &[]), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn the_reach_of_a_box_is_told_in_links_along_and_against_the_arrows() {
+        // 0 uses 1 uses 2 uses 3; 4 uses 2; 5 uses 4.
+        let links = [(0, 1), (1, 2), (2, 3), (4, 2), (5, 4)];
+        let from_two = |up, down| cone(6, &links, 2, up, down);
+        // One link each way: what it uses, and what uses it.
+        assert_eq!(
+            from_two(1, 1),
+            [None, Some(-1), Some(0), Some(1), Some(-1), None]
+        );
+        // Two against the arrows reach what uses its users.
+        assert_eq!(
+            from_two(2, 1),
+            [Some(-2), Some(-1), Some(0), Some(1), Some(-1), Some(-2)]
+        );
+        // Further than the picture goes changes nothing.
+        assert_eq!(from_two(3, 3), from_two(2, 1));
+        assert_eq!(
+            cone(6, &links, 0, 1, 3),
+            [Some(0), Some(1), Some(2), Some(3), None, None]
+        );
+        // The links of a cone lead one step on from the box, or one step
+        // nearer to it: a link between two boxes as far as each other is
+        // none of them, nor is one that leads back towards the box.
+        let depth = from_two(2, 1);
+        let lit = links
+            .iter()
+            .map(|link| in_cone(&depth, *link))
+            .collect::<Vec<_>>();
+        assert_eq!(lit, [true, true, true, true, true]);
+        let narrow = from_two(1, 1);
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| in_cone(&narrow, *link))
+                .collect::<Vec<_>>(),
+            [false, true, true, true, false]
+        );
+        let beside = cone(4, &[(0, 1), (0, 2), (1, 2), (2, 3)], 0, 1, 1);
+        assert_eq!(beside, [Some(0), Some(1), Some(1), None]);
+        assert!(!in_cone(&beside, (1, 2)));
+        // In a cycle a box lies both ways: it is told by the nearer, and by
+        // what the box uses where both are as near.
+        let ring = cone(3, &[(0, 1), (1, 2), (2, 0)], 0, 2, 2);
+        assert_eq!(ring, [Some(0), Some(1), Some(-1)]);
+        let pair = cone(2, &[(0, 1), (1, 0)], 0, 1, 1);
+        assert_eq!(pair, [Some(0), Some(1)]);
+        // A box the picture does not hold reaches nothing.
+        assert_eq!(cone(2, &[(0, 1)], 7, 1, 1), [None, None]);
+    }
+
+    #[test]
+    fn a_picture_leaves_out_what_longer_ways_say_and_lights_a_wider_reach() {
+        // A uses B uses C uses D, and A uses C and D past them.
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/A.php", "name": "A", "folder": false},
+                {"path": "src/B.php", "name": "B", "folder": false},
+                {"path": "src/C.php", "name": "C", "folder": false},
+                {"path": "src/D.php", "name": "D", "folder": false}
+            ],
+            "edges": [
+                {"from": "src/A.php", "to": "src/B.php", "links": 1, "guessed": 0},
+                {"from": "src/B.php", "to": "src/C.php", "links": 1, "guessed": 0},
+                {"from": "src/C.php", "to": "src/D.php", "links": 1, "guessed": 0},
+                {"from": "src/A.php", "to": "src/C.php", "links": 1, "guessed": 0},
+                {"from": "src/A.php", "to": "src/D.php", "links": 1, "guessed": 0, "architecture_violation": 1},
+                {"from": "src/A.php", "to": "src/E.php", "links": 1, "guessed": 0}
+            ],
+            "focus": {"path": "src/A.php"}
+        });
+        // The link against the rules is said by a longer way and is kept
+        // all the same; the link to what is not drawn is none to count.
+        assert_eq!(transitive_links(&view), 1);
+        let drawn = |context: CanvasOverlayContext| {
+            let html = canvas_with_overlays(&view, "graph-map", context).html;
+            html.match_indices(" data-ends=\"")
+                .filter(|(at, _)| {
+                    html[..*at].ends_with('"')
+                        && html[..*at]
+                            .rfind("<path class=\"graph-map-edge")
+                            .is_some_and(|start| !html[start..*at].contains('>'))
+                        && !html[html[..*at].rfind("<path class=\"").unwrap()..*at]
+                            .contains("graph-map-edge-core")
+                })
+                .map(|(at, _)| html[at + 12..].split('"').next().unwrap().to_owned())
+                .collect::<BTreeSet<_>>()
+        };
+        let all = drawn(CanvasOverlayContext::default());
+        assert_eq!(all.len(), 5, "{all:?}");
+        let fewer = drawn(CanvasOverlayContext {
+            hide_transitive: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            fewer.into_iter().collect::<Vec<_>>(),
+            ["0 1", "0 3", "1 2", "2 3"]
+        );
+        // A way, a cycle or a pattern leaves nothing out.
+        let mut way = view.clone();
+        way["mode"] = json!("path");
+        way["path"] = json!({"found": true});
+        assert_eq!(transitive_links(&way), 0);
+        // With A selected its links are lit; with a reach of two, those of
+        // what it uses as well.
+        let lit = |cone| {
+            let html = canvas_with_overlays(
+                &view,
+                "graph-map",
+                CanvasOverlayContext {
+                    hide_transitive: true,
+                    cone,
+                    ..Default::default()
+                },
+            )
+            .html;
+            html.matches("class=\"graph-map-edge graph-map-edge-on")
+                .count()
+        };
+        // D is one link from A by the link against the rules, so the link
+        // from C to D leads no further from A and is not one of its reach.
+        assert_eq!(
+            (lit((0, 0)), lit((1, 1)), lit((1, 2)), lit((1, 3))),
+            (2, 2, 3, 3)
+        );
+    }
+
+    #[test]
+    fn the_key_offers_to_leave_out_transitive_links_and_to_widen_the_reach() {
+        let mut view = kinds_view();
+        view["edges"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"from": "src/A.php", "to": "src/C.php", "links": 1, "guessed": 0}));
+        // A uses B uses C, so A uses C is said twice; A extends D past C.
+        assert_eq!(transitive_links(&view), 2);
+        let key = KeyState::default();
+        let html = key_html(&view, &key, "modal");
+        assert!(html.contains(
+            "data-action=\"graph-transitive-toggle\" data-payload=\"{&quot;surface&quot;:&quot;modal&quot;}\" aria-pressed=\"false\""
+        ), "{html}");
+        assert!(html.contains("Hide transitive <span class=\"graph-arrow-legend-count\">2</span>"));
+        // Nothing is selected: no reach to set.
+        assert!(!html.contains("graph-cone"));
+        // The note that ends the key stays its last part.
+        assert!(
+            html.rfind("graph-transitive-toggle").unwrap()
+                < html.rfind("graph-arrow-legend-note").unwrap()
+        );
+        let on = key_html(
+            &view,
+            &KeyState {
+                hide_transitive: true,
+                ..key
+            },
+            "modal",
+        );
+        assert!(
+            on.contains("data-action=\"graph-transitive-toggle\"")
+                && on.contains("aria-pressed=\"true\" title=\"2 links are left out")
+        );
+        // A selected box: one to three links on each side, the reach that
+        // is set pressed.
+        view["focus"] = json!({"path": "src/B.php"});
+        let html = key_html(
+            &view,
+            &KeyState {
+                cone: (2, 1),
+                ..key
+            },
+            "session",
+        );
+        assert_eq!(html.matches("data-action=\"graph-cone\"").count(), 6);
+        for (side, hops, pressed) in [
+            ("up", 2, true),
+            ("up", 1, false),
+            ("down", 1, true),
+            ("down", 3, false),
+        ] {
+            assert!(html.contains(&format!(
+                "data-payload=\"{{&quot;hops&quot;:{hops},&quot;side&quot;:&quot;{side}&quot;,&quot;surface&quot;:&quot;session&quot;}}\" aria-pressed=\"{pressed}\""
+            )), "{side} {hops} in {html}");
+        }
+        // What is selected outside the picture has no links there to light.
+        view["focus"] = json!({"path": "lib/Other.php"});
+        assert!(!key_html(&view, &key, "modal").contains("graph-cone"));
+        // A picture of a way has neither.
+        let mut way = view.clone();
+        way["mode"] = json!("path");
+        way["path"] = json!({"found": true});
+        let html = key_html(&way, &key, "modal");
+        assert!(!html.contains("graph-transitive-toggle") && !html.contains("graph-cone"));
+        // The reach of a state.
+        assert_eq!(cone_of(&json!({})), (1, 1));
+        let state = reaching(json!({}), "up", 3);
+        assert_eq!(cone_of(&state), (3, 1));
+        let state = reaching(state, "down", 2);
+        assert_eq!(cone_of(&state), (3, 2));
+        assert_eq!(cone_of(&reaching(state.clone(), "down", 99)), (3, 3));
+        assert_eq!(cone_of(&reaching(state.clone(), "up", 0)), (1, 2));
+        assert_eq!(reaching(state.clone(), "sideways", 2), state);
+    }
+
+    #[test]
+    fn a_picture_tells_more_or_less_by_the_scale_it_is_drawn_at() {
+        assert_eq!(lod(1.0), "mid");
+        assert_eq!(lod(0.5), "mid");
+        assert_eq!(lod(0.49), "far");
+        assert_eq!(lod(CAMERA_MIN), "far");
+        assert_eq!(lod(1.4), "mid");
+        assert_eq!(lod(1.41), "near");
+        assert_eq!(lod(CAMERA_MAX), "near");
+        // A scale that is none is the picture as it is laid out.
+        assert_eq!(lod(0.0), "mid");
+        assert_eq!(lod(f64::NAN), "mid");
+    }
+
+    #[test]
+    fn a_box_holds_a_second_line_for_a_picture_drawn_large() {
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/Billing/Invoice.php", "name": "Invoice.php", "folder": false, "in": 3, "out": 12},
+                {"path": "src/Billing", "name": "Billing", "folder": true, "files": 7, "in": 0, "out": 2},
+                {"path": "src/Billing/Invoice.php::total", "name": "total", "symbol": true, "kind": "method", "line": 42, "file": "src/Billing/Invoice.php", "in": 1, "out": 0},
+                {"path": "Top.php", "name": "Top.php", "folder": false}
+            ],
+            "edges": []
+        });
+        let html = canvas(&view);
+        let line = |text: &str| {
+            format!("<span class=\"graph-map-node-detail\" aria-hidden=\"true\">{text}</span>")
+        };
+        // Through how many links it is used and uses others, then where it
+        // lies: the folder of a file, the file and line of a name, and for
+        // a folder how many files it holds.
+        assert!(html.contains(&line("3→ →12 · src/Billing")), "{html}");
+        assert!(html.contains(&line("0→ →2 · 7 files")), "{html}");
+        assert!(html.contains(&line("1→ →0 · Invoice.php:42")), "{html}");
+        // A file at the top of the project that no link touches adds nothing.
+        assert_eq!(html.matches("graph-map-node-detail").count(), 3);
+    }
+
+    #[test]
+    fn the_small_picture_frames_what_the_window_shows() {
+        let (room, picture) = ((400.0, 300.0), (1000.0, 600.0));
+        // The corner of the picture at the corner of its window.
+        assert_eq!(
+            in_window((0.0, 0.0), 1.0, room, picture),
+            Some((0.0, 0.0, 400.0, 300.0))
+        );
+        // Moved on, and drawn at half its size: twice as much is seen.
+        assert_eq!(
+            in_window((-100.0, -50.0), 0.5, room, picture),
+            Some((200.0, 100.0, 800.0, 500.0))
+        );
+        // What lies past the picture is no part of it.
+        assert_eq!(
+            in_window((-450.0, 100.0), 0.5, room, picture),
+            Some((900.0, 0.0, 100.0, 400.0))
+        );
+        // A window that shows all of the picture has nothing to frame,
+        // wherever in the window the picture lies.
+        assert_eq!(in_window((0.0, 0.0), 0.4, room, picture), None);
+        assert_eq!(in_window((50.0, 40.0), 0.25, room, picture), None);
+        // Wide enough and not tall enough is not all of it.
+        assert_eq!(
+            in_window((0.0, -30.0), 0.4, (400.0, 200.0), picture),
+            Some((0.0, 75.0, 1000.0, 500.0))
+        );
+        // A window moved off the picture frames nothing at the side the
+        // picture lies on.
+        assert_eq!(
+            in_window((500.0, 0.0), 1.0, room, picture),
+            Some((0.0, 0.0, 0.0, 300.0))
+        );
+        // No scale and no picture are nothing to show.
+        assert_eq!(in_window((0.0, 0.0), 0.0, room, picture), None);
+        assert_eq!(in_window((0.0, 0.0), 1.0, room, (0.0, 600.0)), None);
+        // Looking at a point brings it to the middle of the window.
+        let corner = centred((500.0, 300.0), 2.0, room);
+        assert_eq!(corner, (-800.0, -450.0));
+        let seen = in_window(corner, 2.0, room, picture).unwrap();
+        assert_eq!(
+            (seen.0 + seen.2 / 2.0, seen.1 + seen.3 / 2.0),
+            (500.0, 300.0)
+        );
+        // The small picture is as large as its room lets its shape be, and
+        // a long thin one keeps a side wide enough to press.
+        assert_eq!(radar_size((1000.0, 500.0)), (176.0, 88.0));
+        assert_eq!(radar_size((500.0, 1000.0)), (88.0, 176.0));
+        assert_eq!(radar_size((4000.0, 100.0)), (176.0, 18.0));
+        assert_eq!(radar_size((0.0, 100.0)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_picture_is_drawn_in_small_with_what_its_boxes_are() {
+        // A changed file uses B; B and C use each other; C is selected.
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/A.php", "name": "A", "folder": false, "changed": 1, "status": "M"},
+                {"path": "src/B.php", "name": "B", "folder": false},
+                {"path": "src/C.php", "name": "C", "folder": false}
+            ],
+            "edges": [
+                {"from": "src/A.php", "to": "src/B.php", "links": 1, "guessed": 0},
+                {"from": "src/B.php", "to": "src/C.php", "links": 2, "guessed": 0},
+                {"from": "src/C.php", "to": "src/B.php", "links": 1, "guessed": 0}
+            ],
+            "focus": {"path": "src/C.php"}
+        });
+        let rendered = canvas_with_overlays(&view, "graph-map", CanvasOverlayContext::default());
+        let radar = &rendered.radar;
+        let (width, height) = radar_size((rendered.width, rendered.height));
+        assert!(
+            radar.starts_with(&format!(
+                "<svg class=\"graph-radar-picture\" width=\"{width:.0}\" height=\"{height:.0}\" viewBox=\"0 0 {:.0} {:.0}\" preserveAspectRatio=\"none\" data-w=\"{:.0}\" data-h=\"{:.0}\"",
+                rendered.width, rendered.height, rendered.width, rendered.height
+            )),
+            "{radar}"
+        );
+        // A box for each box of the picture, where it stands there.
+        assert_eq!(radar.matches("class=\"graph-radar-box\"").count(), 3);
+        let plan = plan(3, &[(0, 1, 1), (1, 2, 2), (2, 1, 1)]);
+        for placed in &plan.nodes {
+            assert!(
+                radar.contains(&format!(
+                    "<rect class=\"graph-radar-box\" x=\"{:.0}\" y=\"{:.0}\" width=\"{BOX_WIDTH:.0}\" height=\"{BOX_HEIGHT:.0}\"",
+                    placed.x, placed.y
+                )),
+                "{radar}"
+            );
+        }
+        // One thing is told of a box: selected before changed before part
+        // of a cycle.
+        assert_eq!(radar.matches("data-state=\"changed\"").count(), 1);
+        assert_eq!(radar.matches("data-state=\"selected\"").count(), 1);
+        assert_eq!(radar.matches("data-state=\"cycle\"").count(), 1);
+        // What the window shows is framed once the picture is measured.
+        assert!(radar.ends_with(
+            "<rect class=\"graph-radar-view\" x=\"0\" y=\"0\" width=\"0\" height=\"0\"/></svg>"
+        ));
+        // A picture of nothing has no small picture.
+        let none = json!({"scope": "src", "nodes": [], "edges": []});
+        assert_eq!(
+            canvas_with_overlays(&none, "graph-map", CanvasOverlayContext::default()).radar,
+            ""
+        );
+    }
+
+    #[test]
+    fn a_box_says_it_is_part_of_a_circle_of_files_wherever_the_rest_lies() {
+        // Order.php is part of a circle of four files, and this picture
+        // draws no other of them as a file. The folder cart holds two of
+        // them, so that circle leads out of it and back. The folder mail
+        // holds a circle that stays inside it.
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/Order.php", "name": "Order.php", "folder": false,
+                 "circle": {"files": 1, "groups": 1, "largest": 4, "leaves": true}},
+                {"path": "src/cart", "name": "cart", "folder": true, "files": 5,
+                 "circle": {"files": 2, "groups": 1, "largest": 4, "leaves": true}},
+                {"path": "src/mail", "name": "mail", "folder": true, "files": 3,
+                 "circle": {"files": 2, "groups": 1, "largest": 2, "leaves": false}},
+                {"path": "src/Plain.php", "name": "Plain.php", "folder": false}
+            ],
+            "edges": [{"from": "src/Order.php", "to": "src/cart", "links": 1, "guessed": 0}],
+            "circles": {"groups": 3, "files": 9, "largest": 4, "here": 2, "listed": [
+                {"files": 4, "start": "src/cart/Cart.php",
+                 "names": ["Cart.php", "Price.php", "Order.php", "Stock.php"], "more": 0},
+                {"files": 2, "start": "src/mail/Mailer.php", "names": ["Mailer.php", "Queue.php"], "more": 0}
+            ]}
+        });
+        let html = canvas(&view);
+        // No link of the picture closes a cycle: the picture alone would
+        // mark nothing.
+        assert_eq!(html.matches("data-cycle=\"true\"").count(), 0);
+        assert!(
+            html.contains("is used through 0 links, part of a cycle of 4 files\""),
+            "{html}"
+        );
+        assert!(html.contains(", holds 2 files of cycles that lead out of it and back\""));
+        assert!(html.contains(", holds 2 files that use each other in cycles\""));
+        assert_eq!(html.matches(" data-circle=\"through\"").count(), 2);
+        assert_eq!(html.matches(" data-circle=\"inside\"").count(), 1);
+        // The mark of a file, and that of a folder with how many of its
+        // files are part of circles.
+        let mark = |held: &str| {
+            format!("<span class=\"graph-map-node-cycle\" aria-hidden=\"true\">↻{held}</span>")
+        };
+        assert_eq!(html.matches(&mark("")).count(), 1);
+        assert_eq!(html.matches(&mark("2")).count(), 2);
+        // Beside the map: the circles that touch what is open, each shown
+        // through the file that has most to do with the others.
+        let side = circles_side(&view);
+        assert!(
+            side.starts_with("<h4>Cycles of files <span class=\"graph-map-total\">2</span></h4><p class=\"knowledge-note\">2 of the 3 cycles of the project touch what is open."),
+            "{side}"
+        );
+        assert!(
+            side.contains("data-action=\"graph-map-cycle\" data-payload=\"&quot;src/cart/Cart.php&quot;\" title=\"Show the shortest cycle through src/cart/Cart.php\"><span class=\"graph-map-row-name\">Cart.php, Price.php, Order.php, Stock.php</span><span class=\"graph-map-row-links\">4 files</span></button>"),
+            "{side}"
+        );
+        assert_eq!(side.matches("data-action=\"graph-map-cycle\"").count(), 2);
+        assert!(side.ends_with("</ul>"));
+        // Where every circle of the project touches what is open, the
+        // project is told as a whole.
+        let mut all = view.clone();
+        all["circles"]["groups"] = json!(2);
+        assert!(circles_side(&all)
+            .contains("9 files of the project use each other in 2 cycles; the largest holds 4."));
+        // More files than are named, and more circles than are listed.
+        let mut many = view.clone();
+        many["circles"]["here"] = json!(9);
+        many["circles"]["groups"] = json!(9);
+        many["circles"]["listed"][0]["more"] = json!(12);
+        let side = circles_side(&many);
+        assert!(side.contains("Stock.php, +12</span>"), "{side}");
+        assert!(side.ends_with("<p class=\"knowledge-note\">and 7 more</p>"));
+        // A project without circles lists none, and neither does the
+        // picture of one cycle.
+        assert_eq!(circles_side(&json!({"scope": "src"})), "");
+        let mut cycle = view.clone();
+        cycle["mode"] = json!("cycle");
+        assert_eq!(circles_side(&cycle), "");
+    }
+
+    #[test]
+    fn the_key_of_a_path_offers_its_longer_ways_and_the_picture_marks_them() {
+        // a reaches c through b in two links, and through d and e in three.
+        let view = json!({
+            "mode": "path",
+            "scope": "src",
+            "path": {
+                "from": {"path": "src/a.php", "name": "a.php"},
+                "to": {"path": "src/c.php", "name": "c.php"},
+                "names": false, "found": true, "reversed": false, "within": false,
+                "steps": 2, "places": 3, "shown": 5, "links": 2, "wide": 8,
+                "longer": 1, "detours": 1, "detours_more": false
+            },
+            "nodes": [
+                {"path": "src/a.php", "name": "a.php", "folder": false, "start": true, "step": 0},
+                {"path": "src/b.php", "name": "b.php", "folder": false, "step": 1},
+                {"path": "src/c.php", "name": "c.php", "folder": false, "end": true, "step": 2},
+                {"path": "src/d.php", "name": "d.php", "folder": false, "step": 1, "detour": true},
+                {"path": "src/e.php", "name": "e.php", "folder": false, "step": 2, "detour": true}
+            ],
+            "edges": [
+                {"from": "src/a.php", "to": "src/b.php", "links": 1, "guessed": 0},
+                {"from": "src/b.php", "to": "src/c.php", "links": 1, "guessed": 0},
+                {"from": "src/a.php", "to": "src/d.php", "links": 1, "guessed": 0, "detour": true},
+                {"from": "src/d.php", "to": "src/e.php", "links": 1, "guessed": 0, "detour": true},
+                {"from": "src/e.php", "to": "src/c.php", "links": 1, "guessed": 0, "detour": true}
+            ]
+        });
+        let html = canvas(&view);
+        // The three links and the two boxes that only the longer way has
+        // say so, in their marks and in what is read out for them.
+        assert_eq!(html.matches(" data-detour=\"true\" d=\"").count(), 3);
+        assert_eq!(html.matches(" data-detour=\"true\"").count(), 5);
+        assert_eq!(html.matches(", on a longer way only\"").count(), 2);
+        assert_eq!(html.matches(" · on a longer way only").count(), 3);
+        // The key: the shortest ways alone, or with them those longer by
+        // one, two or three links; what is asked for is pressed, and the
+        // key says how many ways round the picture draws.
+        let key = key_html(&view, &KeyState::default(), "modal");
+        assert_eq!(key.matches("data-action=\"graph-map-longer\"").count(), 4);
+        assert!(
+            key.contains("data-payload=\"{&quot;longer&quot;:1,&quot;surface&quot;:&quot;modal&quot;}\" aria-pressed=\"true\" title=\"Also the ways longer than the shortest by 1 link\">+1</button>"),
+            "{key}"
+        );
+        assert!(key.contains("data-payload=\"{&quot;longer&quot;:0,&quot;surface&quot;:&quot;modal&quot;}\" aria-pressed=\"false\" title=\"The shortest ways alone\">none</button>"));
+        assert!(
+            key.contains("title=\"Also the ways longer than the shortest by 3 links\">+3</button>")
+        );
+        assert!(key.contains("<span class=\"graph-arrow-legend-side\">1 drawn, lighter</span>"));
+        // It stands before the note that ends the key, and a path has
+        // neither links to leave out nor a reach to widen.
+        assert!(
+            key.rfind("graph-map-longer").unwrap() < key.rfind("graph-arrow-legend-note").unwrap()
+        );
+        assert!(!key.contains("graph-transitive-toggle") && !key.contains("graph-cone"));
+        let told = |change: &dyn Fn(&mut V)| {
+            let mut other = view.clone();
+            change(&mut other);
+            key_html(&other, &KeyState::default(), "session")
+        };
+        // More ways than are drawn, none at all, and the shortest alone.
+        let more = told(&|view| {
+            view["path"]["detours"] = json!(12);
+            view["path"]["detours_more"] = json!(true);
+        });
+        assert!(more.contains(">12+ drawn, lighter</span>"), "{more}");
+        assert!(more.contains("&quot;surface&quot;:&quot;session&quot;}"));
+        assert!(told(&|view| view["path"]["detours"] = json!(0)).contains(">none found</span>"));
+        let shortest = told(&|view| view["path"]["longer"] = json!(0));
+        assert!(shortest
+            .contains("aria-pressed=\"true\" title=\"The shortest ways alone\">none</button>"));
+        assert!(!shortest.contains("graph-arrow-legend-side"));
+        // Above the picture the path says how many ways round it draws,
+        // and the note under it what they are.
+        assert_eq!(
+            summary(&view),
+            "Path from a.php to c.php · 2 links · 3 places on the shortest ways · 1 longer way"
+        );
+        assert!(
+            note(&view)
+                .ends_with("Drawn lighter with them: 1 way longer by 1 link at most, each whole."),
+            "{}",
+            note(&view)
+        );
+        let mut many = view.clone();
+        many["path"]["longer"] = json!(3);
+        many["path"]["detours"] = json!(12);
+        many["path"]["detours_more"] = json!(true);
+        assert!(summary(&many).ends_with(" · at least 12 longer ways"));
+        assert!(note(&many).ends_with(
+            "Drawn lighter with them: 12 ways longer by 3 links at most, each whole; there are more."
+        ));
+        let mut none = view.clone();
+        none["path"]["detours"] = json!(0);
+        assert!(summary(&none).ends_with("3 places on the shortest ways"));
+        assert!(note(&none).ends_with("No way that is longer by 1 link at most leads there."));
+        // A path that leads nowhere has no ways round to offer.
+        assert!(!told(&|view| view["path"]["found"] = json!(false)).contains("graph-map-longer"));
+        // The request names how much longer only for a path, and no more
+        // than may be asked for.
+        let mut state = fresh("work");
+        state["path"] = json!(["src/a.php", "src/c.php"]);
+        assert!(!build_map_path("p", &state, false).contains("longer="));
+        state["longer"] = json!(2);
+        assert!(build_map_path("p", &state, false).contains("longer=2"));
+        state["longer"] = json!(9);
+        assert!(build_map_path("p", &state, false).contains("longer=3"));
+        state["shared"] = json!(true);
+        assert!(!build_map_path("p", &state, false).contains("longer="));
+    }
+
+    #[test]
+    fn the_cards_under_a_box_lie_on_no_other_box() {
+        // a, b and c use x, so the three stand under each other in one
+        // layer. Five files that no link touches stand in a grid of two
+        // rows under them. A session made two names in b and one in the
+        // first file of the grid.
+        let file = |name: &str| json!({"path": format!("src/{name}.php"), "name": format!("{name}.php"), "folder": false});
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                file("a"), file("b"), file("c"), file("x"),
+                file("lone"), file("u1"), file("u2"), file("u3"), file("u4")
+            ],
+            "edges": [
+                {"from": "src/a.php", "to": "src/x.php", "links": 1, "guessed": 0},
+                {"from": "src/b.php", "to": "src/x.php", "links": 1, "guessed": 0},
+                {"from": "src/c.php", "to": "src/x.php", "links": 1, "guessed": 0}
+            ]
+        });
+        let focus = parse_live_focus(&json!({
+            "phase": "active",
+            "summary": "Adding two methods",
+            "target_paths": ["src/b.php"],
+            "created_entities": [
+                {"id": "e1", "kind": "method", "name": "one", "parent": "src/b.php", "path": "src/b.php#L3:one"},
+                {"id": "e2", "kind": "method", "name": "two", "parent": "src/b.php", "path": "src/b.php#L9:two"},
+                {"id": "e3", "kind": "function", "name": "alone", "parent": "src/lone.php", "path": "src/lone.php#L2:alone"}
+            ]
+        }))
+        .unwrap();
+        // Where each box stands in a picture, by its number.
+        let boxes = |html: &str| {
+            html.split("<button type=\"button\" class=\"graph-map-node\" data-n=\"")
+                .skip(1)
+                .map(|part| {
+                    let side = |key: &str| {
+                        part.split(key)
+                            .nth(1)
+                            .and_then(|rest| rest.split("px").next())
+                            .and_then(|number| number.parse::<f64>().ok())
+                            .unwrap()
+                    };
+                    (side("style=\"left:"), side(";top:"))
+                })
+                .collect::<Vec<_>>()
+        };
+        let plain = boxes(&canvas(&view));
+        let rendered = canvas_with(&view, "session-graph", Some(&focus));
+        let roomy = boxes(&rendered.html);
+        assert_eq!((plain.len(), roomy.len()), (9, 9));
+        // The cards hang under b and under the first file of the grid.
+        assert_eq!(rendered.focus.under, BTreeMap::from([(1, 2), (4, 1)]));
+        assert_eq!(rendered.focus.entities.len(), 3);
+        // Without them the boxes of a layer stand a row gap apart, and
+        // the rows of the grid too: a card would lie on the next box.
+        assert_eq!(plain[2].1 - plain[1].1, BOX_HEIGHT + ROW_GAP);
+        assert_eq!(plain[8].1 - plain[4].1, BOX_HEIGHT + ROW_GAP);
+        // With them the box under b stands as much lower as two cards
+        // take, and the rows of the grid as much further apart as one.
+        assert_eq!(
+            (entity_room(0), entity_room(1), entity_room(2)),
+            (0.0, 34.0, 62.0)
+        );
+        assert_eq!(entity_room(9), entity_room(3));
+        assert_eq!(
+            roomy[2].1 - roomy[1].1,
+            BOX_HEIGHT + ROW_GAP + entity_room(2)
+        );
+        assert_eq!(roomy[1].1 - roomy[0].1, BOX_HEIGHT + ROW_GAP);
+        assert_eq!(
+            roomy[8].1 - roomy[4].1,
+            BOX_HEIGHT + ROW_GAP + entity_room(1)
+        );
+        // No card lies on a box, and none on another card.
+        let meet = |a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)| {
+            a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+        };
+        let cards = rendered
+            .focus
+            .entities
+            .iter()
+            .map(|card| (card.x, card.y, ENTITY_WIDTH, ENTITY_HEIGHT))
+            .collect::<Vec<_>>();
+        for (at, card) in cards.iter().enumerate() {
+            for (node, (x, y)) in roomy.iter().enumerate() {
+                assert!(
+                    !meet(*card, (*x, *y, BOX_WIDTH, BOX_HEIGHT)),
+                    "card {at} {card:?} lies on box {node} at {x},{y}"
+                );
+            }
+            for other in &cards[at + 1..] {
+                assert!(!meet(*card, *other), "{card:?} lies on {other:?}");
+            }
+        }
+        // Laid out as it was, the same cards would lie on what stands under.
+        let old = plan_routed(
+            9,
+            &[(0, 3, 1), (1, 3, 1), (2, 3, 1)],
+            &Frames::default(),
+            None,
+            Routing::CLEAN,
+        );
+        let under_b = (
+            old.nodes[1].x + 8.0,
+            old.nodes[1].y + BOX_HEIGHT + 6.0,
+            ENTITY_WIDTH,
+            ENTITY_HEIGHT,
+        );
+        assert!(meet(
+            under_b,
+            (old.nodes[2].x, old.nodes[2].y, BOX_WIDTH, BOX_HEIGHT)
+        ));
+        // Room that is none, and room for boxes that are not there, leave
+        // the picture as it was.
+        assert_eq!(
+            plan_roomy(
+                9,
+                &[(0, 3, 1), (1, 3, 1), (2, 3, 1)],
+                &Frames::default(),
+                None,
+                Routing::CLEAN,
+                &[0.0, -4.0, f64::NAN]
+            ),
+            old
+        );
+    }
+
+    #[test]
+    fn a_selected_place_tells_what_a_change_to_it_reaches_and_marks_the_boxes() {
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/price.php", "name": "price.php", "folder": false},
+                {"path": "src/cart.php", "name": "cart.php", "folder": false},
+                {"path": "src/web", "name": "web", "folder": true, "files": 3},
+                {"path": "src/alone.php", "name": "alone.php", "folder": false}
+            ],
+            "edges": [
+                {"from": "src/cart.php", "to": "src/price.php", "links": 2, "guessed": 0},
+                {"from": "src/web", "to": "src/cart.php", "links": 1, "guessed": 0}
+            ],
+            "focus": {"path": "src/price.php", "blast": {
+                "place": "src/price.php", "hops": 4, "files": 4, "names": 6, "tests": 1, "cut": false,
+                "by_hop": [
+                    {"hop": 1, "files": 2, "names": 3}, {"hop": 2, "files": 2, "names": 3},
+                    {"hop": 3, "files": 0, "names": 0}, {"hop": 4, "files": 0, "names": 0}
+                ],
+                "listed": [
+                    {"path": "src/cart.php", "hop": 1, "left": 0.85, "name": "Cart.total()", "via": "calls", "through": false, "names": 2, "test": false},
+                    {"path": "tests/PriceTest.php", "hop": 1, "left": 0.85, "name": "PriceTest.testTotal()", "via": "calls", "through": false, "names": 1, "test": true},
+                    {"path": "src/web/Checkout.php", "hop": 2, "left": 0.72, "name": "Checkout.pay()", "via": "calls", "through": false, "names": 2, "test": false},
+                    {"path": "src/web/Gate.php", "hop": 2, "left": 0.34, "name": "Gate", "via": "calls", "through": true, "names": 1, "test": false}
+                ],
+                "more": 0,
+                "marked": [
+                    ["src/cart.php", 1, 0.85], ["tests/PriceTest.php", 1, 0.85],
+                    ["src/web/Checkout.php", 2, 0.72], ["src/web/Gate.php", 2, 0.34]
+                ]
+            }}
+        });
+        let side = blast_side(&view);
+        assert!(
+            side.starts_with("<h4>A change here reaches <span class=\"graph-map-total\">4</span></h4><p class=\"knowledge-note\">Files that use it, and what uses those, up to 4 links away: 2 at 1 link, 2 at 2 links. 1 of them is a test. Each link passes on less"),
+            "{side}"
+        );
+        assert!(side.contains(
+            "<li><button type=\"button\" class=\"graph-map-row\" data-blast-hop=\"1\" data-action=\"graph-map-open\" data-payload=\"&quot;src/cart.php&quot;\" title=\"src/cart.php · reached at Cart.total() by calls · select to open it\"><span class=\"graph-map-row-name\">cart.php</span><span class=\"graph-map-row-links\">src · 1 link · 85 %</span></button></li>"
+        ), "{side}");
+        assert!(side
+            .contains("<span class=\"graph-map-row-links\">tests · 1 link · 85 % · test</span>"));
+        assert!(side.contains("title=\"src/web/Gate.php · reached at Gate by calls through an interface · select to open it\""));
+        assert!(side.contains("<span class=\"graph-map-row-links\">src/web · 2 links · 34 % · past an interface</span>"));
+        assert!(side.ends_with("</ul>"));
+        // The boxes it reaches carry a bar as long as what is left there,
+        // a folder that of the most reached file in it; the selected box
+        // and what is not reached carry none.
+        let html = canvas(&view);
+        assert_eq!(
+            html.matches("<span class=\"graph-map-node-blast\" aria-hidden=\"true\"></span>")
+                .count(),
+            2
+        );
+        assert!(html.contains(" data-blast=\"1\""));
+        assert!(html.contains(" data-blast=\"2\""));
+        assert!(html.contains(" style=\"--blast:0.85;left:"), "{html}");
+        assert!(html.contains(" style=\"--blast:0.72;left:"));
+        assert!(html.contains("a change to the selected place reaches it in 1 link, 85 % of it\""));
+        assert!(html.contains("a change to the selected place reaches it in 2 links, 72 % of it\""));
+        // Nothing reached, more than is listed, a walk cut short.
+        let mut none = view.clone();
+        none["focus"]["blast"]["files"] = json!(0);
+        assert_eq!(
+            blast_side(&none),
+            "<h4>A change here reaches <span class=\"graph-map-total\">0</span></h4><p class=\"knowledge-note\">Nothing else uses it within 4 links.</p>"
+        );
+        let mut more = view.clone();
+        more["focus"]["blast"]["more"] = json!(17);
+        more["focus"]["blast"]["cut"] = json!(true);
+        more["focus"]["blast"]["tests"] = json!(3);
+        let side = blast_side(&more);
+        assert!(side.contains(" 3 of them are tests. "));
+        assert!(side.contains("there is more.</p>"));
+        assert!(side.ends_with("<p class=\"knowledge-note\">and 17 more</p>"));
+        // Without a selected place there is nothing to tell or to mark.
+        let mut plain = view.clone();
+        plain["focus"] = V::Null;
+        assert_eq!(blast_side(&plain), "");
+        assert!(!canvas(&plain).contains("graph-map-node-blast"));
+    }
+
+    #[test]
+    fn a_change_is_ranked_by_the_tests_that_fail() {
+        // What a person pastes: each test once, blanks and repeats left out.
+        assert_eq!(
+            failing_lines("  CartTest \n\nFAILED tests/a.py::t\nCartTest\r\n"),
+            ["CartTest", "FAILED tests/a.py::t"]
+        );
+        assert_eq!(failing_lines(&"x\n".repeat(3)).len(), 1);
+        let many = (0..100)
+            .map(|at| format!("T{at}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(failing_lines(&many).len(), FAILING);
+        assert_eq!(failing_lines(&"y".repeat(500))[0].len(), FAILING_NAME);
+        let view = json!({
+            "mode": "changes",
+            "scope": "",
+            "nodes": [
+                {"path": "src/cart.php", "name": "cart.php", "folder": false, "changed": 1, "status": "M",
+                 "suspect": {"rank": 1, "score": 1.0}},
+                {"path": "src/price.php", "name": "price.php", "folder": false, "changed": 1, "status": "M",
+                 "suspect": {"rank": 2, "score": 0.71}},
+                {"path": "src/mail.php", "name": "mail.php", "folder": false, "changed": 1, "status": "M"}
+            ],
+            "edges": [{"from": "src/cart.php", "to": "src/price.php", "links": 1, "guessed": 0}],
+            "suspects": {
+                "failing": ["tests/CartTest.php"], "unmatched": ["Cart"], "tests": 3,
+                "rows": [
+                    {"path": "src/cart.php", "status": "M", "rank": 1, "score": 1.0, "failing": 1, "passing": 0, "nearest": 1},
+                    {"path": "src/price.php", "status": "M", "rank": 2, "score": 0.71, "failing": 1, "passing": 1, "nearest": 2}
+                ],
+                "more": 0, "clear": 1, "complete": true
+            }
+        });
+        let state = json!({"failing": ["1) Tests\\Unit\\CartTest::testTotal", "Cart"]});
+        let side = suspects_side(&view, &state, SESSION_SURFACE);
+        assert!(side.starts_with("<h4>Failing tests</h4><p class=\"knowledge-note\">The changed files that 1 failing test file reaches, first those"), "{side}");
+        assert!(side.contains(
+            "<li><button type=\"button\" class=\"graph-map-row\" data-suspect-rank=\"1\" data-action=\"graph-map-node\" data-payload=\"&quot;src/cart.php&quot;\" title=\"src/cart.php · select it in the picture\"><span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#1</span><span class=\"graph-map-row-name\">cart.php</span><span class=\"graph-map-row-links\">src · 1 of 1 failing, 0 passing · 1 link from a failing test</span></button></li>"
+        ), "{side}");
+        assert!(side.contains("src · 1 of 1 failing, 1 passing · 2 links from a failing test"));
+        assert!(side.contains(
+            "<p class=\"knowledge-note\">No failing test reaches 1 other changed file.</p>"
+        ));
+        assert!(side.contains("<p class=\"knowledge-note\">No test file found for: Cart.</p>"));
+        // The field keeps what was pasted, and the tests can be changed or
+        // dropped; the buttons say which picture they rank.
+        assert!(side.contains("<details class=\"graph-suspects-ask\"><summary>Change the failing tests</summary><textarea id=\"session-graph-failing\""), "{side}");
+        assert!(side.contains(">1) Tests\\Unit\\CartTest::testTotal\nCart</textarea>"));
+        assert!(side.contains("data-action=\"graph-map-failing\" data-payload=\"{&quot;surface&quot;:&quot;session&quot;}\">Rank the changes</button>"));
+        assert!(side.contains("data-payload=\"{&quot;clear&quot;:true,&quot;surface&quot;:&quot;session&quot;}\">Clear</button>"));
+        // The boxes the failing tests reach carry their rank.
+        let html = canvas(&view);
+        assert!(
+            html.contains("<span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#1</span>")
+        );
+        assert!(
+            html.contains("<span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#2</span>")
+        );
+        assert_eq!(html.matches("graph-map-node-suspect").count(), 2);
+        assert!(html.contains(", ranked 1 among the changes by the failing tests,"));
+        // A folder that holds ranked files carries the best rank of them.
+        let mut folders = view.clone();
+        folders["nodes"] = json!([
+            {"path": "src", "name": "src", "folder": true, "files": 3, "changed": 3,
+             "suspect": {"rank": 1, "score": 1.0, "files": 2}}
+        ]);
+        folders["edges"] = json!([]);
+        let html = canvas(&folders);
+        assert!(
+            html.contains("<span class=\"graph-map-node-suspect\" aria-hidden=\"true\">#1</span>")
+        );
+        assert!(
+            html.contains(", holds 2 changed files the failing tests reach, the first ranked 1")
+        );
+        // Nothing asked yet: an open field and a word on what it does.
+        let mut plain = view.clone();
+        plain["suspects"] = V::Null;
+        let side = suspects_side(&plain, &json!({}), MODAL_SURFACE);
+        assert!(side.contains("Paste the tests that fail to rank the changed files"));
+        assert!(side.contains("<details class=\"graph-suspects-ask\" open><summary>Name the failing tests</summary><textarea id=\"graph-map-failing\""));
+        assert!(!side.contains(">Clear</button>"));
+        // No test named matched, or nothing changed is reached.
+        let mut none = view.clone();
+        none["suspects"]["failing"] = json!([]);
+        none["suspects"]["rows"] = json!([]);
+        assert!(suspects_side(&none, &state, MODAL_SURFACE)
+            .contains("None of the names is a test file of this graph."));
+        let mut apart = view.clone();
+        apart["suspects"]["rows"] = json!([]);
+        assert!(suspects_side(&apart, &state, MODAL_SURFACE)
+            .contains("No changed file is reached by the failing test."));
+        // Only a picture of a change is ranked.
+        let mut folder = view.clone();
+        folder["mode"] = json!("folder");
+        assert_eq!(suspects_side(&folder, &state, MODAL_SURFACE), "");
+        // The request names the failing tests only for a change.
+        let mut asked = fresh("work");
+        asked["failing"] = json!(["CartTest"]);
+        assert!(build_map_path("p", &asked, false).contains("failing="));
+        asked["target"] = json!("");
+        assert!(!build_map_path("p", &asked, false).contains("failing="));
     }
 }

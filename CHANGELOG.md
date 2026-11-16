@@ -24,6 +24,120 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Tell in the side panel of a selected place of the Harness dependency map what
+  a change to it reaches within four links (`graph_map/blast.rs`): the files
+  that use it, and what uses those, each with the fewest links to it, how much
+  of the change is left there, and the kind of link that led there. A call or
+  a type built on it passes on most, an import little, a guessed link less;
+  past an interface a type implements the change reaches the users of the
+  interface, with less left. A bar along the foot of each reached box is as
+  long as what is left there. A walk looks at 400,000 links at most; on a
+  synthetic graph of 30,000 names and 150,000 links it took 12–17 ms for a
+  file and 79 ms for a folder in a debug build.
+- Rank the changed files of a change by the tests that fail (`failing` on the
+  three map routes, **Failing tests** in the side panel of a change): a test is
+  named by its file, its path or a line of a test runner's output; the changed
+  files that the failing tests reach and the passing ones do not come first
+  (Ochiai over the reach of the graph), and a box and the folder that holds it
+  carry the rank. The graph stands in for what a test runs: it says where to
+  look first, not what broke.
+- Add `GET /api/systems/graph/bridge` and **Code on both sides** in the panel of
+  a link of the system map: the files of the consumer that name the contract,
+  the files of the provider its passport says the contract is made in and those
+  that name it, and how many files of its own service a change of each reaches.
+- Add **Waves** under the map of a system change: the change as far as one wave,
+  what a later wave reaches left faint, and **▶ Play** to step through them.
+- List in the evidence of a system run, and under its receipts, the files more
+  than one step edited (`overlaps`). A run dispatches its workers one after
+  another and the Harness starts no two writers on one repository at once, so
+  no two workers write a file at the same moment, and the view of a run, polled
+  every 1.1 seconds, is not streamed.
+- Refuse on the system routes the parameters no handler reads: `phase`,
+  `attempt`, `compare_run_id`, `compare_phase`, `compare_attempt`, and on the
+  routes that never used them `launch`, `compare_launch`, `focus_session`,
+  `contracts`, `seed_services`, `depth` and the parameters of a project map on
+  `/api/systems/graph/map`, where a request named them and looked answered.
+- Lead the links of the Harness dependency map so that fewer cross and fewer
+  lines run side by side. The links of one box leave it, and arrive at it, side
+  by side in the order of where they lead; links of one box that pass the same
+  layers share one slot in each; a link that passes four layers or more is led
+  through none of them and is drawn while a box at one of its ends, or the mark
+  that counts such links there, is rested on or selected. In the unfolded picture
+  of a sample monorepo of 141 files the slots of passing links fall from 225 to
+  50 and 40 of 200 links become such marks; the picture is about a twentieth
+  lower, not more, because its height is that of the folders drawn under each
+  other.
+- Add **Hide transitive** and **Reach** to the key of the links. The first leaves
+  out every link a longer way already joins (76 of the 200 links of that
+  picture) and keeps every box reaching what it reached; the second lights the
+  links of a selected box one, two or three links away on each side. Neither
+  asks the server.
+- Tell more or less by the scale a picture is drawn at: below half its size the
+  names are drawn larger and the small marks are left out, above 140 % a box
+  has a second line with the number of links it is used and uses others through
+  and where it lies. A picture larger than its window has itself in small in the
+  corner of the window, with a frame around what the window shows; a press on it
+  looks at what is pressed, and the window follows the pointer held down. The
+  Dependency Map, the Sessions code graph and both System code maps have it.
+- Find the files of a project that use each other in a circle once for a graph
+  (`graph_map/circles.rs`: the groups of files that all reach each other, by
+  every link and by the links read from the code) and mark them in every
+  picture, wherever the rest of a circle lies: a file with ↻, a folder with ↻
+  and the number of its files in such groups, fainter where every group stays
+  inside the folder. **Show cycle** is offered for each marked place a cycle
+  passes through, and the side panel lists the groups that touch what is open.
+  A picture marked only the cycles among the boxes and links it drew.
+- Add the ways longer than the shortest to a path between two places
+  (`longer=1..3` with `path` on the three map routes, **Longer ways** in the
+  key): each a chain that passes no place twice and neither end on its way,
+  drawn whole and lighter, 12 at most, the shorter and the stronger first, with
+  a note where there are more. `path.shown` still counts the places of the
+  shortest ways that are drawn; `path.aside` counts those only a longer way has.
+- Keep room in the Sessions code graph under a box that carries the cards of
+  what a session made in its file, so a card lies on no other box, and correct
+  the fixed text under the window of one link, which still called a guessed
+  link dashed.
+- Make the seven kinds of links of the Harness dependency map tell themselves
+  apart at once, and let none of an arrow's marks hide another. The native
+  source reader (`graph_deps`) now tells an assignment as `writes` and any other
+  access of a property, a field or a constant as `reads`, where it told both as
+  `uses`; a member reference is listed under the dependency of its own kind, once.
+  Pictures drawn on the checkout's own graph add to each drawn link how many
+  members the sources read and write (`graph_map/access.rs`, at most 160 sources
+  read anew for a picture, kept for the graph). An arrow's kind is the colour at
+  its head, its dashes and the shape of its head; its direction is the shade it
+  runs through, the dot it leaves by and a chevron halfway on a link that passes
+  layers; a link the tool only inferred is hollow, where it was dashed and lost
+  the dashes of its kind; the stylesheet no longer paints over the shading. Every
+  colour of an arrow stands at least 4.5 to 1 against its ground in both themes
+  (`--map-edge-from`, `--map-edge-calls`, a new `--map-edge-reads`), and the heads
+  keep their size in a picture made small.
+- Turn the key of the links into their switchboard in the Dependency Map, the
+  window of one link, the Sessions code graph and both System code maps: each
+  kind is a button with the number of links that hold it, resting on it lights
+  them, selecting it hides and shows them, Alt shows it alone, and **All**,
+  **Runtime**, **Hierarchy** and **No imports** switch several. Nothing is asked
+  of the server and no box moves; the choice is kept in the browser.
+- Give back the marks that links passing layers had lost: what a change added
+  to a link against the order of the layers (`+N`), the `+` and `-` of a
+  dependency diff and the word of a pattern stand halfway along a link of any
+  shape, where they stood only on a link of one curve.
+- Draw a link against the layer rules whatever the limits of a picture left out
+  (the 24 with the most links), and mark such links among the symbols of an
+  opened file.
+- Select a file of a member service in the code map embedded in the System view
+  instead of opening the Dependency Map window over it, from the search of the
+  system map and from **Map** beside a file of a receipt.
+- Keep the summed-up evidence of a system run and what it reaches while nothing
+  it is made from changed, instead of looking at the checkout of every member
+  and reading the graph of every edited service on each request of the run's
+  view. On the test fixture a repeated request went from 14-27 ms to 0.3-0.5 ms,
+  and from 30-34 ms to about 3 ms with a 4,000-file graph and a run of 1,500
+  events (debug build); it was not measured on a live system run.
+- Read the callers the graph knows before any other file when the callers of a
+  changed file are scanned, the most linked first, and expose the links of the
+  system map to assistive technology: they were focusable inside a hidden
+  drawing.
 - Add cross-service `SystemGraph` topology, contract provenance (`declared`, `verified`, `undeclared_in_code`), version/availability risk detection, cycle/path/shared/layer/blast-radius analysis, and cross-service change-impact reach (`cross_service_unopened`) in `infra-system`, together with `CodeGraphBridge` read-only Graphify worker sandbox/prompt grants (`GRAPHIFY_NO_AUTO_REFRESH=1`, `tell_agents_graph`), durable `<phase>-a<attempt>.evidence.json` dispatch evidence, and `infra-engine system map --format json` plus `infra-engine system graph {status,changes,impact}`.
 - Keep system runs from overflowing Tokio worker stacks (boxed run futures, 8 MiB runtime worker stacks), limit Codex `--add-dir` graph grants to the published graph folder, find Harness `sys-<digest>` member graphs from the CLI, and attribute run evidence only to files the run changed (pre-existing edits and `project-brain/`, `memory-bank/`, `.agentic-security/` records excluded).
 - Add distinct dependency-kind arrow markers, stroke/dash styles, dark/light/forced-colors CSS tokens (`--map-edge-*`), edge `<title>` kind breakdowns, and an accessible visual arrow legend (`arrow_kinds_legend_html`) across the Dependency Map modal, Link Detail modal, and Sessions Code Graph.

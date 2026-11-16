@@ -364,6 +364,52 @@ evidence at `<run-dir>/<phase>-a<attempt>.evidence.json` (`git_changed`,
 `GET /api/system-runs/<id>` surfaces aggregated `evidence` (including
 `cross_service_unopened` reach) alongside `launches` metadata.
 
+The browser asks for the view of a run that is going on about once a second.
+Summing its evidence up looks at the checkout of every member, and what the
+evidence reaches (`unopened_callers`, `cross_service_unopened`) is read from the
+graph of every edited service, so the Harness keeps the answer for a run and
+works it out again only when something it is made from changed: the evidence of
+a dispatch, an event of the run, the system file or the passports, the state of
+the run, or the published graph of a member. Whatever stands, an answer is no
+older than 15 seconds: what was edited in a member outside the run shows within
+that time. The answers of the 32 runs asked for last are kept.
+
+The evidence also lists the files that more than one step of the run edited
+(`overlaps`: the file, the steps in the order they ran, and their services). A
+run dispatches its workers one after another, and the Harness starts no two
+writers on one repository at once, so no two workers write a file at the same
+moment; a later step can still change what an earlier one made, and the receipts
+of a run end with these files, each with **Map** to open it on the code map of
+its service. A file is told apart by where it lies, so a file of a monorepo that
+two services edit is one file, and two attempts of one step are one step. The
+browser asks for a running run's view every 1.1 seconds, and the evidence of a
+dispatch is written when the dispatch ends, so the view is not streamed.
+
+`GET /api/systems/graph/bridge?project_id=…&config_path=…&from=<consumer>&to=<provider>`
+(with `contract` to keep one contract and `certain=1` for the links read from the
+code) answers what code a link between two services is made of. Of the consumer,
+the files whose text names what it uses of the provider, as the code references
+of the system graph found them. Of the provider, the files its passport says each
+contract is made in (`declared`) and the files that name the contract
+(`found`): its id, or the path, route, endpoint, topic, event or queue the
+passport gives for it; at most 400 files and 8 MiB are read. Each file is told
+how many files of its own service a change of it reaches within four links, where
+the service has a code graph (`reach`), so the answer says how deep the contract
+goes into each side. The selected link of the system map offers it as **Show the
+code** under **Code on both sides**: the passport's files first, then code, then
+the documents that name the contract, each with **Map**. In the view of a change,
+**Waves** under the map shows the change as far as one wave at a time, the
+services and links a later wave reaches left faint, and **▶ Play** steps through
+them.
+
+The system routes accept only the parameters a handler reads: `phase`,
+`attempt`, `compare_run_id`, `compare_phase` and `compare_attempt` were accepted
+and never read, and so were `launch` and `compare_launch` outside the project map
+of a member, `contracts`, `seed_services` and `depth` on
+`/api/systems/graph/impact`, and the parameters of a project map on
+`/api/systems/graph/map`. A request that names one is refused instead of looking
+answered.
+
 Historical pre-Rust invocation (reference only):
 
 ```text

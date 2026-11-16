@@ -132,8 +132,13 @@ Alternatively, **Load system** reads an existing relative system file
 (`system.json` by default). Inspect the interactive cross-service `SystemGraph`
 (contract kinds, `declared`/`verified`/`undeclared_in_code` provenance, version
 mismatch risks, cross-service cycles, shortest paths, shared providers/consumers,
-service tiers, and drill-down into any member service's Graphify code graph),
-capabilities and memory ownership, then **Plan a change** (or **New change** on
+service tiers, and drill-down into any member service's Graphify code graph).
+A file chosen there, from what the search of the system map finds or with **Map**
+beside a file of a receipt, is selected in the code map of its service that is
+embedded in the view: the folders that hold it open in that picture, the picture
+is brought to it, and what the change does to it is listed beside. No window
+opens over the view; **Full map** of the embedded picture still opens one. Then
+review capabilities and memory ownership, and **Plan a change** (or **New change** on
 the **Changes** tab): describe the task, choose starting services or changed
 contracts with live blast-radius preview, and prepare a bounded context/impact
 plan. Review its sources before execution. The backend checks freshness again
@@ -1848,15 +1853,103 @@ box reached with the keyboard is lit the same way. Nothing is selected by it, an
 once the pointer has left, the picture is as it was, with what was selected in it.
 The window of a link does the same for its names.
 
-Colour tells the direction. An arrow shades from the colour of using, where it
-leaves a box, to the colour of being used, where its head arrives, and every box
-wears the same two colours on its edges: one on the side arrows leave from, the
-other on the side they arrive at. A box is also tinted by which it does more
-through the links in the picture, in five steps from only using to only being used,
-so what uses stands out from what is leaned on. In a map of changes the same tint
-tells the files that use the change from the files it uses. A box that no link in
-the picture touches has no colour. The legend under the map shows both colours;
-they were chosen to stay apart for colour-blind readers in both themes.
+An arrow tells four things, each by a means of its own, so that none of them hides
+another.
+
+- **Its kind** is one of seven: it calls, imports, extends, implements, writes,
+  reads, or uses in some other way, such as by the type of a parameter. The kind
+  is the colour at the head of the arrow, the rhythm of its dashes and the shape
+  of its head: a filled triangle calls, an open chevron on a dashed line imports,
+  a hollow triangle extends, the same on a dash-dot line implements, a filled
+  diamond writes, a hollow diamond on a dotted line reads, and a barbed tip uses.
+  A link between two folders or files is many links of the graph: it is drawn as
+  the kind it holds most of, an inheritance before anything else, and resting on
+  it tells how many of each it holds.
+- **Its direction** is the shade it runs through, from the colour every arrow
+  leaves in to the colour of its kind, and the dot it leaves a box by. An arrow
+  that passes layers on its way carries a chevron halfway, where its head is far.
+  The dot is a ring where the arrow holds more than one kind.
+- **Whether it was read or inferred**: an arrow of which the tool inferred every
+  link is hollow, two rails with nothing between them. Its dashes stay those of
+  its kind.
+- **How much it carries**: an arrow of more links is thicker.
+
+Every box wears the colours of using and of being used on its edges: one on the
+side arrows leave from, the other on the side they arrive at. A box is also tinted
+by which it does more through the links in the picture, in five steps from only
+using to only being used, so what uses stands out from what is leaned on. In a map
+of changes the same tint tells the files that use the change from the files it
+uses. A box that no link in the picture touches has no colour. The colours were
+chosen to stay apart for colour-blind readers in both themes, and no kind is told
+by its colour alone; each colour of an arrow stands at least 4.5 to 1 against the
+ground it is drawn on. Where a picture is made small, the heads of its arrows are
+kept large enough to tell apart.
+
+The graph does not say that a method reads a property of another class, or assigns
+to it. The sources do. A picture drawn on the checkout's own graph therefore reads
+the sources of the files at the near end of each link it draws, and adds to the
+link how many members of what stands at its far end they read, and how many they
+write; an assignment writes, any other access of a property, a field or a constant
+reads, and a field named where a value is built is neither. These counts refine a
+link the graph holds: a read between two files the graph does not link draws
+nothing. A source is read once for a graph. One picture reads at most 160 sources
+it has not read yet, the strongest links first, and tells a link whole or not at
+all; the links left for the next picture are few, and opening the picture again
+tells them. A picture of another commit is drawn on that commit's graph, whose
+sources are not kept, and tells no reads or writes. PHP, Rust, TypeScript,
+JavaScript and Python are read.
+
+**The key of the links**, under each picture, is also their switchboard. Each kind
+is a button with the arrow it is drawn as and the number of links in the picture
+that hold it. Resting on a kind lights those links and leaves the rest faint.
+Selecting it hides them and shows them again, and with Alt it shows that kind
+alone, or every kind where it already stood alone. **Runtime** shows what runs:
+calls, writes and reads. **Hierarchy** shows what is built on what: extends and
+implements. **No imports** hides the imports, and **All** shows everything. A link
+that holds several kinds stays while one of them is shown, drawn as the strongest
+of those. A hidden link keeps its place: the boxes do not move, the server is not
+asked, and the key says how many links it hides. A link against the layer rules is
+drawn whatever the key says. The choice holds for every picture of links, the
+window of one link included, and is kept in this browser.
+
+Beside the kinds the key holds what else is chosen for a picture as a whole.
+**Hide transitive** leaves out every link that a longer way already joins: where A
+uses B and B uses C, the link from A to C says nothing new. It says how many links
+that is before it is selected; every box still reaches what it reached, the boxes
+that reach each other in a circle keep all the links among them, and a link against
+the layer rules is drawn all the same. In the unfolded picture of a sample monorepo
+of 141 files it takes out 76 of the 200 links drawn. With a box selected,
+**Reach** says how many links from it are lit on each side: what uses it and what
+it uses, one link away as before, or two or three, so the picture shows what a
+change to the box reaches and what the box rests on. Neither asks the server.
+
+**How the links are led.** The links of one box leave it side by side in the order
+of where they lead, and arrive side by side in the order of where they come from,
+so links that part do not cross at the box. Links that leave one box, or arrive at
+one box, and pass the same layers share one slot in each of them instead of a slot
+each: they run as one line and part where they end. A link that passes four layers
+or more is led through none of them. A mark at each of its two ends says how many
+such links the box has there, `⇢2` for what it uses far away and `⇠3` for what uses
+it from far away, and the links themselves are drawn while the box or the mark is
+rested on or the box is selected. In the same picture of that sample the slots that
+passing links take fall from 225 to 50; the picture itself is only about a twentieth
+lower, because its height is that of the folders it draws under each other.
+
+**The scale tells how much.** Below half its size a picture is an overview: the
+names of boxes and folders are drawn larger, and the numbers on links, the marks of
+far links and the corners that open and fold are left out. Above 140 % a box has a
+second line: through how many links it is used and uses others, as `3→ →12`, and
+where it lies: the folder of a file, the file and line of a name, or how many files
+a folder holds. Between the two the picture is as it is laid out.
+
+**The picture in small** stands in the corner of a picture that is larger than its
+window: every box and every folder that is drawn, the selected box, the changed ones
+and those of a cycle told by their colour, and a frame around what the window shows.
+A press on it brings what is pressed to the middle of the window, and the window
+follows the pointer while it is held down. A picture that fits its window has none.
+
+Where a session has made new names in a file, their cards hang under the box of
+that file. The picture keeps room for them, so a card lies on no other box.
 
 **Without tests** leaves the tests out of every picture: the folders, an opened
 file, followed links and a change. A file is a test by where it lies or how it is
@@ -1909,8 +2002,35 @@ summary counts all that lie on such ways. Selecting a box lists the next and the
 before it on the way; a link opens as in any picture, and a box leads on with **Open
 file**, **Follow links** or another **Path to…**. Inside a chosen change the changed
 files and the touched symbols keep their marks, and with **Only links read from the
-code** the ways are found without the guessed links, which a dashed arrow marks: a
+code** the ways are found without the guessed links, which a hollow arrow marks: a
 chain is as true as its weakest link.
+
+The shortest ways are not all that leads from one place to another, and a dependency
+is not gone once the shortest way is cut. **Longer ways**, in the key under a picture
+of a path, adds the ways that are longer than the shortest by one, two or three
+links. Each is a chain in which no place comes twice and that passes neither end on
+its way, drawn whole and lighter than the shortest ways, its boxes with a dotted
+border; a link between two boxes of the shortest ways that only a longer way takes
+is drawn lighter too. A picture draws 12 such ways at most, the shorter first and of
+ways as long those along the stronger links, and says where there are more. The
+summary still counts the places and links of the shortest ways; the ways round are
+counted beside them.
+
+**A change here reaches**, in the side panel of a selected place, lists what a
+change to it reaches within four links: the names that use it, those that use
+them, and so on, gathered by file, with how many files each link further first
+reaches and how many of them are tests. Each link passes on less of a change than
+it receives: a type that extends or implements it and a call most, a write and a
+read less, an import little, a link the tool only guessed less again. Where a type implements an interface or extends a
+base, the names that use the interface never name the type, yet they run its code:
+they are reached through the interface, with less left. A file is listed with the
+fewest links to it, how much of the change is left there in per cent, and the
+kind of the link that led there; the 12 with the most left come first, and a bar
+along the foot of each box that is reached is as long as what is left there, a
+folder's that of its most reached file. A walk looks at 400,000 links at most and
+says when it stopped early. On a synthetic graph of 30,000 names and 150,000 links,
+denser than a project, it took 12–17 ms for a file, 2 ms for a name and 79 ms for a
+folder in a debug build.
 
 **What they share**, beside the path above a picture of two places, asks what ties
 the two together apart from the way between them: what both use, and what uses both.
@@ -1933,7 +2053,7 @@ by its path and a symbol as it is shown; what it leaves is counted above the pic
 and gone through the same way. Each place is drawn with one shortest way between it
 and either of the two, the strongest where several are as short: what is shared
 carries its name in bold, and a box with a plain name lies on such a way. Select a
-shared place to highlight both paths. Inferred links stay dashed. Select the same
+shared place to highlight both paths. Inferred links stay hollow. Select the same
 place again to clear the selection. The side panel gives the distances and lists
 the links next to the selected place. It offers **Open file**, **Follow links** and
 **Path to…** as for a box on a path. A chosen change, **Only links read from the
@@ -1943,8 +2063,8 @@ Between folders and files the map counts the graph's links that cross a file
 boundary; the links inside one file show when that file is opened. The relations
 that only say where a symbol lives (`contains`, `method`, `defines`, `case_of`,
 `rationale_for`) are no links: they say what holds what. A link points from the file
-Graphify found it in. A solid arrow has at least one link Graphify read from the
-code; a dashed arrow has only links it inferred, usually by matching a name, and
+Graphify found it in. A filled arrow has at least one link Graphify read from the
+code; a hollow arrow has only links it inferred, usually by matching a name, and
 those can be wrong. **Only links read from the code** hides the inferred ones. A link
 whose file is neither of its two symbols' files is skipped and counted above the
 map; it comes from two symbols that share an id.
@@ -2077,7 +2197,11 @@ the links it has with the change.
 - **Patterns** adds layer colors to files and to folders whose files all
   belong to one layer. The Architecture panel gives the color key, links
   that violate the layer rules, and layer pairs that depend on each other.
-  When a file or folder arrow includes a violation, it is marked red.
+  When a file or folder arrow includes a violation, it is marked red. A
+  picture draws the strongest links of a dense folder and no more than its
+  limit; a link that violates the rules is drawn whatever those limits left
+  out, the 24 with the most links. In an opened file the links of its symbols
+  are marked the same way.
   **Adapter** candidates require a type to implement an abstraction and
   delegate an interface method to a different type it holds.
 - **Patterns → Layers** uses `.harness-architecture.json` from the project root
@@ -2115,6 +2239,22 @@ the links it has with the change.
   reachable in the graph. Execution coverage requires running the tests.
   The section is available on a current change graph with **Without tests**
   turned off.
+- **Failing tests** ranks the changed files by how likely each is behind the
+  tests that fail. Paste the failing tests under **Name the failing tests**, one
+  on each line: a test, its file, or a line of the output of a test run as a
+  runner prints it (`FAILED tests/test_cart.py::test_total`,
+  `1) Tests\Unit\CartTest::testTotal`). A test file is found by its path, or by
+  the name of its file standing as a word of its own; a fixture is no test, and
+  what names no test file is listed. **Rank the changes** puts first the changed
+  files that the failing tests reach along the links and the passing tests do
+  not: the share of the failing tests that reach a file, times the share of
+  failing among the tests that reach it, under a root, and of files as likely
+  the one nearer to a failing test. A ranked file carries `#1`, `#2` on its box,
+  and a folder of a change drawn by folder the best rank inside it. The graph
+  stands in for what a test runs, so this says where to look first, not what
+  broke. Up to 64 tests are taken, the tests are looked for in the whole graph
+  also where **Without tests** leaves them out of the picture, and **Clear**
+  drops them.
 - **Attach map context** puts `dependency-map.txt` in the current session draft
   for this project. Select a place to include it and its listed incoming and
   outgoing neighbors. Where available, the file also includes test candidates
@@ -2176,12 +2316,25 @@ strongest uses on the map and the side panel still lists all of them. A cycle ca
 be drawn left to right: its members carry ↻, and its weaker direction runs back,
 right to left, as a thin row of dots. Select a marked box and choose **Show cycle**
 to see the shortest chain that returns to it. Inferred links in that chain are
-dashed. **Only links read from the code** recomputes the chain and reports when no
+hollow. **Only links read from the code** recomputes the chain and reports when no
 cycle remains. A folder-level cycle crosses the folder boundary and can leave and
 return through different files. Grouped folders can make a loop on the overview
 when the underlying links do not connect into a chain. When a cycle is too long
 to draw, the side panel lists every step and marks inferred links. **Back to map**
 restores the previous view, including its page, filters and selected place.
+
+A picture marks a cycle among the boxes it draws. The cycles of a project are found
+apart from any picture, once for a graph: the files that all reach each other along
+the links form one group, and every file of a group lies on a cycle with every other
+file of it. A file of such a group carries ↻ wherever the rest of its group lies, in
+another folder or past what the picture has room for, and **Show cycle** shows the
+shortest chain through it. A folder carries ↻ with the number of its files that are
+part of such groups: in the colour of a cycle where one of those groups leads out of
+the folder and back, so that a cycle passes through the folder as one place, and
+fainter where every group stays inside it. The side panel lists the groups that
+touch what is open, the largest first, each with its first files, and selecting one
+shows the shortest cycle through the file that has the most links inside the group.
+**Only links read from the code** finds the groups without the guessed links.
 
 After choosing a pull request, select a place and choose **Show cycle** to check
 whether a cycle through it already existed at the base shown for that PR. The

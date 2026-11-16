@@ -280,16 +280,16 @@ impl SystemManager {
                 )
                 .ok()
             });
-            result["evidence"] = summarize_run_evidence(
-                opt_system.as_ref(),
-                loaded_state.as_ref().unwrap_or(&Value::Null),
-                &dispatches,
-            );
             let bridge_opt = self
                 .code_graph
                 .lock()
                 .map_err(|_| fail("System code-graph bridge lock poisoned"))?
                 .clone();
+            // Summing the evidence up looks at the checkout of every member.
+            // A bridge that knows the graphs sums it up itself, from these
+            // dispatches and the ones still going on, and keeps its answer
+            // while they stand as they are; a view it left without a
+            // summary is summed up here.
             if let Some(bridge) = bridge_opt {
                 bridge.enrich_run_view(
                     string(&record["id"]),
@@ -298,6 +298,13 @@ impl SystemManager {
                     &dispatches,
                     &mut result,
                 )?;
+            }
+            if !result["evidence"].is_object() {
+                result["evidence"] = summarize_run_evidence(
+                    opt_system.as_ref(),
+                    loaded_state.as_ref().unwrap_or(&Value::Null),
+                    &dispatches,
+                );
             }
             result["providers"] = object!(
                 [
