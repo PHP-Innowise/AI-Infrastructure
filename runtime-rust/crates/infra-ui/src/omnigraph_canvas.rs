@@ -1996,7 +1996,8 @@ fn layout_constellation(
 
     let max_x = nodes.iter().map(|n| n.x + n.w).fold(0.0, f64::max);
     let max_y = nodes.iter().map(|n| n.y + n.h).fold(0.0, f64::max);
-    let width = (max_x + MARGIN_X).max(MIN_PLANE_W);
+    let right_pad = MARGIN_X + if file_indices.is_empty() { 0.0 } else { 44.0 };
+    let width = (max_x + right_pad).max(MIN_PLANE_W);
     let height = (max_y + MARGIN_Y).max(MIN_PLANE_H);
     (nodes, width, height)
 }
@@ -2808,10 +2809,20 @@ fn string_list(v: &Value, keys: &[&str]) -> Vec<String> {
 
 fn short_hash(id: &str) -> String {
     let trimmed = id.trim();
-    if trimmed.chars().count() <= 10 {
-        trimmed.to_owned()
+    let core = trimmed.strip_prefix("hb1.").unwrap_or(trimmed);
+    let len = core.chars().count();
+    if len <= 10 {
+        core.to_owned()
     } else {
-        trimmed.chars().take(8).collect()
+        let tail: String = core
+            .chars()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("…{tail}")
     }
 }
 
@@ -3588,5 +3599,68 @@ mod tests {
         assert!(diff_html.contains("<code class=\"omni-diff-edge-end\">s0</code>"));
         assert!(diff_html.contains("data-change=\"deleted\" data-rel=\"published_by\""));
         assert_no_inline_hex_colors(&diff_html);
+    }
+
+    #[test]
+    fn short_hash_uses_distinguishing_tail_and_file_track_has_extra_right_padding() {
+        let hb_dag = render_branch_dag(
+            &json!({
+                "branches": [{"name": "main", "head_commit_id": "hb1.01M7JWJ7AAAAAAAAAA93XWDY"}],
+                "commits": [
+                    {
+                        "graph_commit_id": "hb1.01M7JWJ7AAAAAAAAAA93XWDY",
+                        "graph_branch": "main",
+                        "summary": "First"
+                    },
+                    {
+                        "graph_commit_id": "hb1.01M7JWJ7BBBBBBBBBB71KLPQ",
+                        "graph_branch": "main",
+                        "summary": "Second"
+                    }
+                ]
+            }),
+            "main",
+            None,
+        );
+        assert!(hb_dag.contains("…AA93XWDY"));
+        assert!(hb_dag.contains("…BB71KLPQ"));
+        assert!(!hb_dag.contains(">hb1.01M7<"));
+
+        // File anchors get >= 40px extra right-side canvas padding beyond MARGIN_X
+        let wide_graph = json!({
+            "sessions": [
+                {"id": "s1", "title": "S1", "branch": "main"}
+            ],
+            "atoms": [
+                {"id": "a1", "kind": "finding", "title": "A1", "branch": "main"},
+                {"id": "a2", "kind": "decision", "title": "A2", "branch": "main"},
+                {"id": "a3", "kind": "contract", "title": "A3", "branch": "main"},
+                {"id": "a4", "kind": "insight", "title": "A4", "branch": "main"},
+                {"id": "a5", "kind": "warning", "title": "A5", "branch": "main"},
+                {"id": "a6", "kind": "artifact", "title": "A6", "branch": "main"}
+            ],
+            "files": [
+                {"id": "f1", "path": "src/main.rs"}
+            ],
+            "edges": [
+                {"from": "a1", "to": "f1", "relation": "touches_file"}
+            ]
+        });
+        let res = render_constellation(
+            &wide_graph,
+            &ConstellationFilter {
+                show_files: true,
+                show_sessions: true,
+                ..ConstellationFilter::default()
+            },
+            &CanvasViewport::default(),
+        );
+        let file_right = res.positions["f1"].0 + FILE_W * 0.5;
+        assert!(
+            res.width >= file_right + MARGIN_X + 40.0,
+            "width {} should leave extra right padding past file_right {}",
+            res.width,
+            file_right
+        );
     }
 }
