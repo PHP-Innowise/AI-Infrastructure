@@ -89,8 +89,14 @@ pub(crate) struct DepMemberRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
     pub access: String,
+    /// The first line the member is reached in this way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
+    /// Every line it is reached in this way, in their order, where there is
+    /// more than one: a member read in two methods is one reference told
+    /// with both places.
+    #[serde(default, skip_serializing_if = "at_most_one")]
+    pub lines: Vec<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +107,10 @@ pub(crate) struct DepMemberRef {
     pub modifiers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_risk: Option<String>,
+}
+
+fn at_most_one(lines: &[u32]) -> bool {
+    lines.len() <= 1
 }
 
 impl DepMemberRef {
@@ -117,6 +127,7 @@ impl DepMemberRef {
             parent,
             access: access.to_owned(),
             line: Some(line),
+            lines: vec![line],
             visibility: None,
             previous_visibility: None,
             change: None,
@@ -159,7 +170,8 @@ pub(crate) struct DepRef {
     pub resolved: bool,
     #[serde(default)]
     pub exists: bool,
-    pub kind: String, // "imports" | "calls" | "extends" | "implements" | "uses"
+    /// `imports`, `calls`, `extends`, `implements`, `writes`, `reads` or `uses`.
+    pub kind: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub symbols: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -616,6 +628,11 @@ fn push_unique_member_ref(out: &mut Vec<DepMemberRef>, candidate: DepMemberRef) 
         {
             existing.line = candidate.line;
         }
+        for line in candidate.lines {
+            if let Err(at) = existing.lines.binary_search(&line) {
+                existing.lines.insert(at, line);
+            }
+        }
         if existing.visibility.is_none() {
             existing.visibility = candidate.visibility;
         }
@@ -741,6 +758,7 @@ pub(crate) fn find_matching_member_references(
                     parent: tm.parent.clone().or(r.parent),
                     access: r.access,
                     line: r.line,
+                    lines: r.lines,
                     visibility: tm.visibility.clone(),
                     previous_visibility: tm.previous_visibility.clone(),
                     change: Some(tm.change.clone()),
@@ -801,6 +819,7 @@ pub(crate) fn find_matching_member_references(
                         parent: tm.parent.clone(),
                         access: access.to_owned(),
                         line: Some(line_no),
+                        lines: vec![line_no],
                         visibility: tm.visibility.clone(),
                         previous_visibility: tm.previous_visibility.clone(),
                         change: Some(tm.change.clone()),
@@ -1362,6 +1381,21 @@ fn is_write_operator(rest: &str) -> bool {
     .any(|op| r.starts_with(op))
 }
 
+/// The kind of dependency a member access is drawn as: writing state,
+/// reading it, or calling. Anything else stays a plain use.
+pub(crate) fn access_kind(access: &str) -> Option<&'static str> {
+    match access {
+        "write" => Some("writes"),
+        "read" | "static_read" | "const" => Some("reads"),
+        "call" => Some("calls"),
+        _ => None,
+    }
+}
+
+/// What one member access is: the kind of the dependency it makes (`calls`,
+/// `writes`, `reads`), what the member is, and how it is reached. An
+/// assignment writes; every other access of a field, a static property or a
+/// constant reads.
 fn classify_member_access(
     member: &str,
     after_member: &str,
@@ -1374,26 +1408,24 @@ fn classify_member_access(
         let mk = if module_level { "function" } else { "method" };
         return ("calls", mk, "call");
     }
-    if is_static {
+    let (member_kind, access) = if is_static {
         if is_upper_snake(member) && !member.starts_with('$') {
-            return ("uses", "const", "const");
+            ("const", "const")
+        } else if is_write_operator(after_member) {
+            (field_kind, "write")
+        } else if member.starts_with('$') || field_kind == "field" || field_kind == "property" {
+            (field_kind, "static_read")
+        } else {
+            ("const", "const")
         }
-        if is_write_operator(after_member) {
-            return ("uses", field_kind, "write");
-        }
-        if member.starts_with('$') || field_kind == "field" || field_kind == "property" {
-            return ("uses", field_kind, "static_read");
-        }
-        return ("uses", "const", "const");
-    }
-    if is_upper_snake(member) && module_level {
-        return ("uses", "const", "const");
-    }
-    if is_write_operator(after_member) {
-        ("uses", field_kind, "write")
+    } else if is_upper_snake(member) && module_level {
+        ("const", "const")
+    } else if is_write_operator(after_member) {
+        (field_kind, "write")
     } else {
-        ("uses", field_kind, "read")
-    }
+        (field_kind, "read")
+    };
+    (access_kind(access).unwrap_or("uses"), member_kind, access)
 }
 
 fn take_ts_js_member_ident(s: &str) -> Option<(&str, &str)> {
@@ -2035,7 +2067,7 @@ fn extract_php_line_refs(
                     };
                     emit_php_ref(
                         cls,
-                        "uses",
+                        access_kind(access).unwrap_or("uses"),
                         Some(&prop_name),
                         Some(("property", access)),
                         current_ns,
@@ -3190,6 +3222,14 @@ fn is_rust_std_trait_method(name: &str) -> bool {
     )
 }
 
+/// A path that names a constant reads it; any other path keeps its kind.
+fn path_ref_kind(kind: &'static str, members: &[DepMemberRef]) -> &'static str {
+    match members.first().map(|member| member.access.as_str()) {
+        Some("const") if kind == "uses" => "reads",
+        _ => kind,
+    }
+}
+
 fn build_rust_path_member_ref(syms: &[&str], is_call: bool, line_no: u32) -> Option<DepMemberRef> {
     match syms.len() {
         0 => None,
@@ -3285,6 +3325,7 @@ fn extract_rust_line_refs(
                     };
                     let mref = build_rust_path_member_ref(&syms, is_call, line_no);
                     let members: Vec<DepMemberRef> = mref.into_iter().collect();
+                    let kind = path_ref_kind(kind, &members);
                     acc.add_resolved_members(target, kind, &syms, &members, line_no, line);
                 } else if let Some((Some(target), orig_sym)) = aliases.get(segs[0]) {
                     let mut syms = vec![orig_sym.as_str()];
@@ -3293,6 +3334,7 @@ fn extract_rust_line_refs(
                     }
                     let mref = build_rust_path_member_ref(&syms, is_call, line_no);
                     let members: Vec<DepMemberRef> = mref.into_iter().collect();
+                    let kind = path_ref_kind(kind, &members);
                     acc.add_resolved_members(target.clone(), kind, &syms, &members, line_no, line);
                 } else if !builtins.contains(&segs[0]) {
                     let dir = folder_of(rel_path);
@@ -3312,6 +3354,7 @@ fn extract_rust_line_refs(
                         }
                         let mref = build_rust_path_member_ref(&syms, is_call, line_no);
                         let members: Vec<DepMemberRef> = mref.into_iter().collect();
+                        let kind = path_ref_kind(kind, &members);
                         acc.add_resolved_members(target, kind, &syms, &members, line_no, line);
                     }
                 }
@@ -5796,34 +5839,41 @@ class TokenService {
                 && m.parent.as_deref() == Some("Signer")
                 && m.access == "call"
         }));
-        let cfg_uses = php_deps
-            .iter()
-            .find(|d| d.target == "src/Config/TokenConfig.php" && d.kind == "uses")
-            .expect("PHP TokenConfig uses dep");
-        assert!(cfg_uses.member_refs.iter().any(|m| {
-            m.name == "$ttl"
-                && m.kind == "property"
-                && m.parent.as_deref() == Some("TokenConfig")
-                && m.access == "read"
-        }));
-        assert!(cfg_uses.member_refs.iter().any(|m| {
-            m.name == "$ttl"
-                && m.kind == "property"
-                && m.parent.as_deref() == Some("TokenConfig")
-                && m.access == "write"
-        }));
-        assert!(cfg_uses.member_refs.iter().any(|m| {
-            m.name == "DEFAULT_TTL"
-                && m.kind == "const"
-                && m.parent.as_deref() == Some("TokenConfig")
-                && m.access == "const"
-        }));
-        assert!(cfg_uses.member_refs.iter().any(|m| {
-            m.name == "$shared"
-                && m.kind == "property"
-                && m.parent.as_deref() == Some("TokenConfig")
-                && m.access == "static_read"
-        }));
+        // A member access is a dependency of its own kind: an assignment
+        // writes, any other access of a property or a constant reads. The
+        // type hints stay plain uses and carry no member.
+        let held = |deps: &[DepRef], target: &str, kind: &str| {
+            deps.iter()
+                .find(|d| d.target == target && d.kind == kind)
+                .map(|d| {
+                    d.member_refs
+                        .iter()
+                        .map(|m| {
+                            format!(
+                                "{} {} {} {}",
+                                m.name,
+                                m.kind,
+                                m.parent.as_deref().unwrap_or("-"),
+                                m.access
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+        };
+        const PHP_CONFIG: &str = "src/Config/TokenConfig.php";
+        assert_eq!(
+            held(&php_deps, PHP_CONFIG, "writes"),
+            Some(vec!["$ttl property TokenConfig write".to_owned()])
+        );
+        assert_eq!(
+            held(&php_deps, PHP_CONFIG, "reads"),
+            Some(vec![
+                "DEFAULT_TTL const TokenConfig const".to_owned(),
+                "$shared property TokenConfig static_read".to_owned(),
+                "$ttl property TokenConfig read".to_owned(),
+            ])
+        );
+        assert_eq!(held(&php_deps, PHP_CONFIG, "uses"), Some(vec![]));
 
         // 2. Rust
         let rs_src = r#"
@@ -5855,28 +5905,24 @@ impl Service {
                 && m.parent.as_deref() == Some("Client")
                 && m.access == "call"
         }));
-        let rs_cfg_dep = rs_deps
-            .iter()
-            .find(|d| d.target == "crates/core/src/config.rs" && d.kind == "uses")
-            .expect("Rust TokenConfig uses dep");
-        assert!(rs_cfg_dep.member_refs.iter().any(|m| {
-            m.name == "timeout"
-                && m.kind == "field"
-                && m.parent.as_deref() == Some("TokenConfig")
-                && m.access == "read"
-        }));
-        assert!(rs_cfg_dep.member_refs.iter().any(|m| {
-            m.name == "timeout"
-                && m.kind == "field"
-                && m.parent.as_deref() == Some("TokenConfig")
-                && m.access == "write"
-        }));
-        assert!(rs_cfg_dep.member_refs.iter().any(|m| {
-            m.name == "DEFAULT_TTL"
-                && m.kind == "const"
-                && m.parent.as_deref() == Some("TokenConfig")
-                && m.access == "const"
-        }));
+        // A field named in a struct literal builds a value: it is no write
+        // to state, so it stays with the plain use of the type.
+        const RS_CONFIG: &str = "crates/core/src/config.rs";
+        assert_eq!(
+            held(&rs_deps, RS_CONFIG, "uses"),
+            Some(vec!["timeout field TokenConfig write".to_owned()])
+        );
+        assert_eq!(
+            held(&rs_deps, RS_CONFIG, "writes"),
+            Some(vec!["timeout field TokenConfig write".to_owned()])
+        );
+        assert_eq!(
+            held(&rs_deps, RS_CONFIG, "reads"),
+            Some(vec![
+                "DEFAULT_TTL const TokenConfig const".to_owned(),
+                "timeout field TokenConfig read".to_owned(),
+            ])
+        );
 
         // 3. TS/JS
         let ts_src = r#"
@@ -5916,34 +5962,19 @@ export class Service {
         assert!(ts_helpers.member_refs.iter().any(|m| {
             m.name == "notify" && m.kind == "function" && m.parent.is_none() && m.access == "call"
         }));
-        let ts_cfg = ts_deps
-            .iter()
-            .find(|d| d.target == "web/src/config.ts" && d.kind == "uses")
-            .expect("TS config uses");
-        assert!(
-            ts_cfg
-                .member_refs
-                .iter()
-                .any(|m| { m.name == "prop" && m.kind == "property" && m.access == "read" })
+        const TS_CONFIG: &str = "web/src/config.ts";
+        assert_eq!(
+            held(&ts_deps, TS_CONFIG, "writes"),
+            Some(vec!["prop property - write".to_owned()])
         );
-        assert!(
-            ts_cfg
-                .member_refs
-                .iter()
-                .any(|m| { m.name == "prop" && m.kind == "property" && m.access == "write" })
+        assert_eq!(
+            held(&ts_deps, TS_CONFIG, "reads"),
+            Some(vec![
+                "prop property - read".to_owned(),
+                "DEFAULT_TTL const TokenConfig const".to_owned(),
+                "timeout property TokenConfig read".to_owned(),
+            ])
         );
-        assert!(ts_cfg.member_refs.iter().any(|m| {
-            m.name == "timeout"
-                && m.kind == "property"
-                && m.parent.as_deref() == Some("TokenConfig")
-                && m.access == "read"
-        }));
-        assert!(ts_cfg.member_refs.iter().any(|m| {
-            m.name == "DEFAULT_TTL"
-                && m.kind == "const"
-                && m.parent.as_deref() == Some("TokenConfig")
-                && m.access == "const"
-        }));
 
         // 4. Python
         let py_src = r#"
@@ -5972,22 +6003,14 @@ class Service:
                 && m.parent.as_deref() == Some("Client")
                 && m.access == "call"
         }));
-        let py_client_uses = py_deps
-            .iter()
-            .find(|d| d.target == "pkg/client.py" && d.kind == "uses")
-            .expect("Py client uses");
-        assert!(py_client_uses.member_refs.iter().any(|m| {
-            m.name == "timeout"
-                && m.kind == "property"
-                && m.parent.as_deref() == Some("Config")
-                && m.access == "read"
-        }));
-        assert!(
-            py_client_uses
-                .member_refs
-                .iter()
-                .any(|m| { m.name == "prop" && m.kind == "property" && m.access == "read" })
+        assert_eq!(
+            held(&py_deps, "pkg/client.py", "reads"),
+            Some(vec![
+                "prop property - read".to_owned(),
+                "timeout property Config read".to_owned(),
+            ])
         );
+        assert_eq!(held(&py_deps, "pkg/client.py", "writes"), None);
         let py_helpers_call = py_deps
             .iter()
             .find(|d| d.target == "pkg/helpers.py" && d.kind == "calls")
@@ -5995,13 +6018,10 @@ class Service:
         assert!(py_helpers_call.member_refs.iter().any(|m| {
             m.name == "notify" && m.kind == "function" && m.parent.is_none() && m.access == "call"
         }));
-        let py_helpers_uses = py_deps
-            .iter()
-            .find(|d| d.target == "pkg/helpers.py" && d.kind == "uses")
-            .expect("Py helpers uses");
-        assert!(py_helpers_uses.member_refs.iter().any(|m| {
-            m.name == "MAX_TTL" && m.kind == "const" && m.parent.is_none() && m.access == "const"
-        }));
+        assert_eq!(
+            held(&py_deps, "pkg/helpers.py", "reads"),
+            Some(vec!["MAX_TTL const - const".to_owned()])
+        );
     }
 
     #[test]

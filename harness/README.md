@@ -132,8 +132,13 @@ Alternatively, **Load system** reads an existing relative system file
 (`system.json` by default). Inspect the interactive cross-service `SystemGraph`
 (contract kinds, `declared`/`verified`/`undeclared_in_code` provenance, version
 mismatch risks, cross-service cycles, shortest paths, shared providers/consumers,
-service tiers, and drill-down into any member service's Graphify code graph),
-capabilities and memory ownership, then **Plan a change** (or **New change** on
+service tiers, and drill-down into any member service's Graphify code graph).
+A file chosen there, from what the search of the system map finds or with **Map**
+beside a file of a receipt, is selected in the code map of its service that is
+embedded in the view: the folders that hold it open in that picture, the picture
+is brought to it, and what the change does to it is listed beside. No window
+opens over the view; **Full map** of the embedded picture still opens one. Then
+review capabilities and memory ownership, and **Plan a change** (or **New change** on
 the **Changes** tab): describe the task, choose starting services or changed
 contracts with live blast-radius preview, and prepare a bounded context/impact
 plan. Review its sources before execution. The backend checks freshness again
@@ -1848,15 +1853,64 @@ box reached with the keyboard is lit the same way. Nothing is selected by it, an
 once the pointer has left, the picture is as it was, with what was selected in it.
 The window of a link does the same for its names.
 
-Colour tells the direction. An arrow shades from the colour of using, where it
-leaves a box, to the colour of being used, where its head arrives, and every box
-wears the same two colours on its edges: one on the side arrows leave from, the
-other on the side they arrive at. A box is also tinted by which it does more
-through the links in the picture, in five steps from only using to only being used,
-so what uses stands out from what is leaned on. In a map of changes the same tint
-tells the files that use the change from the files it uses. A box that no link in
-the picture touches has no colour. The legend under the map shows both colours;
-they were chosen to stay apart for colour-blind readers in both themes.
+An arrow tells four things, each by a means of its own, so that none of them hides
+another.
+
+- **Its kind** is one of seven: it calls, imports, extends, implements, writes,
+  reads, or uses in some other way, such as by the type of a parameter. The kind
+  is the colour at the head of the arrow, the rhythm of its dashes and the shape
+  of its head: a filled triangle calls, an open chevron on a dashed line imports,
+  a hollow triangle extends, the same on a dash-dot line implements, a filled
+  diamond writes, a hollow diamond on a dotted line reads, and a barbed tip uses.
+  A link between two folders or files is many links of the graph: it is drawn as
+  the kind it holds most of, an inheritance before anything else, and resting on
+  it tells how many of each it holds.
+- **Its direction** is the shade it runs through, from the colour every arrow
+  leaves in to the colour of its kind, and the dot it leaves a box by. An arrow
+  that passes layers on its way carries a chevron halfway, where its head is far.
+  The dot is a ring where the arrow holds more than one kind.
+- **Whether it was read or inferred**: an arrow of which the tool inferred every
+  link is hollow, two rails with nothing between them. Its dashes stay those of
+  its kind.
+- **How much it carries**: an arrow of more links is thicker.
+
+Every box wears the colours of using and of being used on its edges: one on the
+side arrows leave from, the other on the side they arrive at. A box is also tinted
+by which it does more through the links in the picture, in five steps from only
+using to only being used, so what uses stands out from what is leaned on. In a map
+of changes the same tint tells the files that use the change from the files it
+uses. A box that no link in the picture touches has no colour. The colours were
+chosen to stay apart for colour-blind readers in both themes, and no kind is told
+by its colour alone; each colour of an arrow stands at least 4.5 to 1 against the
+ground it is drawn on. Where a picture is made small, the heads of its arrows are
+kept large enough to tell apart.
+
+The graph does not say that a method reads a property of another class, or assigns
+to it. The sources do. A picture drawn on the checkout's own graph therefore reads
+the sources of the files at the near end of each link it draws, and adds to the
+link how many members of what stands at its far end they read, and how many they
+write; an assignment writes, any other access of a property, a field or a constant
+reads, and a field named where a value is built is neither. These counts refine a
+link the graph holds: a read between two files the graph does not link draws
+nothing. A source is read once for a graph. One picture reads at most 160 sources
+it has not read yet, the strongest links first, and tells a link whole or not at
+all; the links left for the next picture are few, and opening the picture again
+tells them. A picture of another commit is drawn on that commit's graph, whose
+sources are not kept, and tells no reads or writes. PHP, Rust, TypeScript,
+JavaScript and Python are read.
+
+**The key of the links**, under each picture, is also their switchboard. Each kind
+is a button with the arrow it is drawn as and the number of links in the picture
+that hold it. Resting on a kind lights those links and leaves the rest faint.
+Selecting it hides them and shows them again, and with Alt it shows that kind
+alone, or every kind where it already stood alone. **Runtime** shows what runs:
+calls, writes and reads. **Hierarchy** shows what is built on what: extends and
+implements. **No imports** hides the imports, and **All** shows everything. A link
+that holds several kinds stays while one of them is shown, drawn as the strongest
+of those. A hidden link keeps its place: the boxes do not move, the server is not
+asked, and the key says how many links it hides. A link against the layer rules is
+drawn whatever the key says. The choice holds for every picture of links, the
+window of one link included, and is kept in this browser.
 
 **Without tests** leaves the tests out of every picture: the folders, an opened
 file, followed links and a change. A file is a test by where it lies or how it is
@@ -1909,7 +1963,7 @@ summary counts all that lie on such ways. Selecting a box lists the next and the
 before it on the way; a link opens as in any picture, and a box leads on with **Open
 file**, **Follow links** or another **Path to…**. Inside a chosen change the changed
 files and the touched symbols keep their marks, and with **Only links read from the
-code** the ways are found without the guessed links, which a dashed arrow marks: a
+code** the ways are found without the guessed links, which a hollow arrow marks: a
 chain is as true as its weakest link.
 
 **What they share**, beside the path above a picture of two places, asks what ties
@@ -1933,7 +1987,7 @@ by its path and a symbol as it is shown; what it leaves is counted above the pic
 and gone through the same way. Each place is drawn with one shortest way between it
 and either of the two, the strongest where several are as short: what is shared
 carries its name in bold, and a box with a plain name lies on such a way. Select a
-shared place to highlight both paths. Inferred links stay dashed. Select the same
+shared place to highlight both paths. Inferred links stay hollow. Select the same
 place again to clear the selection. The side panel gives the distances and lists
 the links next to the selected place. It offers **Open file**, **Follow links** and
 **Path to…** as for a box on a path. A chosen change, **Only links read from the
@@ -1943,8 +1997,8 @@ Between folders and files the map counts the graph's links that cross a file
 boundary; the links inside one file show when that file is opened. The relations
 that only say where a symbol lives (`contains`, `method`, `defines`, `case_of`,
 `rationale_for`) are no links: they say what holds what. A link points from the file
-Graphify found it in. A solid arrow has at least one link Graphify read from the
-code; a dashed arrow has only links it inferred, usually by matching a name, and
+Graphify found it in. A filled arrow has at least one link Graphify read from the
+code; a hollow arrow has only links it inferred, usually by matching a name, and
 those can be wrong. **Only links read from the code** hides the inferred ones. A link
 whose file is neither of its two symbols' files is skipped and counted above the
 map; it comes from two symbols that share an id.
@@ -2077,7 +2131,11 @@ the links it has with the change.
 - **Patterns** adds layer colors to files and to folders whose files all
   belong to one layer. The Architecture panel gives the color key, links
   that violate the layer rules, and layer pairs that depend on each other.
-  When a file or folder arrow includes a violation, it is marked red.
+  When a file or folder arrow includes a violation, it is marked red. A
+  picture draws the strongest links of a dense folder and no more than its
+  limit; a link that violates the rules is drawn whatever those limits left
+  out, the 24 with the most links. In an opened file the links of its symbols
+  are marked the same way.
   **Adapter** candidates require a type to implement an abstraction and
   delegate an interface method to a different type it holds.
 - **Patterns → Layers** uses `.harness-architecture.json` from the project root
@@ -2176,7 +2234,7 @@ strongest uses on the map and the side panel still lists all of them. A cycle ca
 be drawn left to right: its members carry ↻, and its weaker direction runs back,
 right to left, as a thin row of dots. Select a marked box and choose **Show cycle**
 to see the shortest chain that returns to it. Inferred links in that chain are
-dashed. **Only links read from the code** recomputes the chain and reports when no
+hollow. **Only links read from the code** recomputes the chain and reports when no
 cycle remains. A folder-level cycle crosses the folder boundary and can leave and
 return through different files. Grouped folders can make a loop on the overview
 when the underlying links do not connect into a chain. When a cycle is too long

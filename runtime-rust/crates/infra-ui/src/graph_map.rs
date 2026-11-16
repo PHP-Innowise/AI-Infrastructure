@@ -3221,22 +3221,121 @@ fn changed_order(change: &V) -> String {
         ),
     }
 }
-/// The middle of a link drawn as one curve, where a word about it can stand:
-/// the point halfway along `M x y C x y x y x y`. None for any other path.
-fn middle(path: &str) -> Option<(f64, f64)> {
-    let (start, curve) = path.strip_prefix('M')?.split_once(" C")?;
-    let at = start
-        .split(' ')
-        .chain(curve.split(' '))
-        .map(|number| number.parse::<f64>().ok())
-        .collect::<Option<Vec<_>>>()?;
-    let [x0, y0, x1, y1, x2, y2, x3, y3] = at[..] else {
-        return None;
+/// One piece of a drawn link: a curve by its two handles and its end, or a
+/// straight run to a point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Piece {
+    Curve([(f64, f64); 3]),
+    Line((f64, f64)),
+}
+/// The pieces of a link as the pictures draw them: `M x y`, then curves
+/// `C x y x y x y` and straight runs `L x y` in any order. None for any
+/// other path.
+fn pieces(path: &str) -> Option<((f64, f64), Vec<Piece>)> {
+    let mut runs: Vec<(char, Vec<f64>)> = Vec::new();
+    for token in path.split_whitespace() {
+        let number = match token.chars().next()? {
+            command @ ('M' | 'C' | 'L') => {
+                runs.push((command, Vec::new()));
+                &token[1..]
+            }
+            _ => token,
+        };
+        if !number.is_empty() {
+            runs.last_mut()?.1.push(number.parse().ok()?);
+        }
+    }
+    let mut runs = runs.into_iter();
+    let start = match runs.next()? {
+        ('M', at) if at.len() == 2 => (at[0], at[1]),
+        _ => return None,
     };
-    Some((
-        (x0 + 3.0 * (x1 + x2) + x3) / 8.0,
-        (y0 + 3.0 * (y1 + y2) + y3) / 8.0,
-    ))
+    let pieces = runs
+        .map(|(command, at)| match (command, &at[..]) {
+            ('C', [x1, y1, x2, y2, x3, y3]) => {
+                Some(Piece::Curve([(*x1, *y1), (*x2, *y2), (*x3, *y3)]))
+            }
+            ('L', [x, y]) => Some(Piece::Line((*x, *y))),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!pieces.is_empty()).then_some((start, pieces))
+}
+/// A point of a curve and the way it runs there, `t` of the way along it.
+fn on_curve(from: (f64, f64), [a, b, to]: [(f64, f64); 3], t: f64) -> ((f64, f64), (f64, f64)) {
+    let s = 1.0 - t;
+    let at = |p0: f64, p1: f64, p2: f64, p3: f64| {
+        s * s * s * p0 + 3.0 * s * s * t * p1 + 3.0 * s * t * t * p2 + t * t * t * p3
+    };
+    let way = |p0: f64, p1: f64, p2: f64, p3: f64| {
+        3.0 * s * s * (p1 - p0) + 6.0 * s * t * (p2 - p1) + 3.0 * t * t * (p3 - p2)
+    };
+    (
+        (at(from.0, a.0, b.0, to.0), at(from.1, a.1, b.1, to.1)),
+        (way(from.0, a.0, b.0, to.0), way(from.1, a.1, b.1, to.1)),
+    )
+}
+/// How finely a curve is measured.
+const CURVE_STEPS: usize = 16;
+/// The point halfway along a drawn link, where a word about it can stand,
+/// and the angle the link runs at there, in degrees clockwise from the
+/// right. A link of one curve is halved where the curve is; a link of
+/// several pieces, as one that passes layers in slots of its own, is
+/// halved by its length, so the point lies on it whatever its shape.
+fn halfway(path: &str) -> Option<(f64, f64, f64)> {
+    let (start, pieces) = pieces(path)?;
+    let angle = |(dx, dy): (f64, f64)| dy.atan2(dx).to_degrees();
+    if let [Piece::Curve(curve)] = pieces[..] {
+        let ((x, y), way) = on_curve(start, curve, 0.5);
+        return Some((x, y, angle(way)));
+    }
+    // The link as short straight steps, each with where it ends.
+    let mut steps: Vec<((f64, f64), (f64, f64))> = Vec::new();
+    let mut from = start;
+    for piece in &pieces {
+        match *piece {
+            Piece::Line(to) => {
+                steps.push((from, to));
+                from = to;
+            }
+            Piece::Curve(curve) => {
+                let mut last = from;
+                for step in 1..=CURVE_STEPS {
+                    let (point, _) = on_curve(from, curve, step as f64 / CURVE_STEPS as f64);
+                    steps.push((last, point));
+                    last = point;
+                }
+                from = curve[2];
+            }
+        }
+    }
+    let long = |(a, b): &((f64, f64), (f64, f64))| (b.0 - a.0).hypot(b.1 - a.1);
+    let mut left = steps.iter().map(long).sum::<f64>() / 2.0;
+    for step in &steps {
+        let length = long(step);
+        if length >= left && length > 0.0 {
+            let (a, b) = *step;
+            let part = left / length;
+            return Some((
+                a.0 + (b.0 - a.0) * part,
+                a.1 + (b.1 - a.1) * part,
+                angle((b.0 - a.0, b.1 - a.1)),
+            ));
+        }
+        left -= length;
+    }
+    let (a, b) = *steps.last()?;
+    Some((b.0, b.1, angle((b.0 - a.0, b.1 - a.1))))
+}
+/// The middle of a drawn link, where a word about it can stand.
+fn middle(path: &str) -> Option<(f64, f64)> {
+    halfway(path).map(|(x, y, _)| (x, y))
+}
+/// Whether a drawn link passes layers on its way: it then runs in several
+/// pieces, straight through the slot of each layer it passes. Such a link
+/// is long, and its head is far from where it leaves.
+fn passes_layers(path: &str) -> bool {
+    path.contains(" L") && path.contains(" C")
 }
 /// Whether what a change did to the order of the layers is still being found
 /// out, so that the picture is asked for again.
@@ -3296,7 +3395,7 @@ fn pattern_note(view: &V) -> String {
             .filter_map(|told| told.as_str().map(str::to_owned)),
     );
     if m::yes(&pattern["guessed"]) {
-        parts.push("A dashed link is one the tool only guessed.".to_owned());
+        parts.push("A hollow link is one the tool only guessed.".to_owned());
     }
     let comparison = order_comparison(&pattern["change"]);
     if !comparison.is_empty() {
@@ -3592,6 +3691,10 @@ struct ImpactLookup {
     callers_impacted: Vec<String>,
     callers_added: Vec<String>,
     callers_unchanged: Vec<String>,
+    /// The kinds of the dependencies a change added and took away, by
+    /// their target: one target may be called, read and written.
+    kinds_added: BTreeMap<String, [u64; 7]>,
+    kinds_removed: BTreeMap<String, [u64; 7]>,
 }
 
 impl ImpactLookup {
@@ -3609,6 +3712,20 @@ impl ImpactLookup {
                     (!target.is_empty()).then_some(target)
                 })
                 .collect()
+        };
+        let collect_kinds = |arr: &V| -> BTreeMap<String, [u64; 7]> {
+            let mut kinds: BTreeMap<String, [u64; 7]> = BTreeMap::new();
+            for dep in m::array(arr) {
+                let target = normalize_rel_path(strip_symbol_suffix(&m::text(&dep, "target")));
+                if target.is_empty() {
+                    continue;
+                }
+                let held = EdgeKinds::of(&dep).counts;
+                for (count, more) in kinds.entry(target).or_default().iter_mut().zip(held) {
+                    *count += more;
+                }
+            }
+            kinds
         };
         let mut callers_risk = Vec::new();
         let mut callers_impacted = Vec::new();
@@ -3636,7 +3753,19 @@ impl ImpactLookup {
             callers_impacted,
             callers_added,
             callers_unchanged,
+            kinds_added: collect_kinds(&doc["uses"]["added"]),
+            kinds_removed: collect_kinds(&doc["uses"]["removed"]),
         })
+    }
+    /// The kind a dependency on `target` that a change added, or took
+    /// away, is drawn as: the strongest of the kinds it had.
+    fn dep_kind(&self, target: &str, added: bool) -> &'static str {
+        let kinds = if added {
+            &self.kinds_added
+        } else {
+            &self.kinds_removed
+        };
+        kinds.get(target).map_or("calls", pick_precedence_kind)
     }
 
     fn node_matches_any(&self, node: &V, paths: &[String]) -> bool {
@@ -3850,70 +3979,139 @@ fn pick_precedence_kind(counts: &[u64; 7]) -> &'static str {
     "calls"
 }
 
-fn edge_kind_stats(edge: &V) -> (&'static str, bool, Option<String>) {
-    if let Some(kinds) = edge["kinds"].as_array().filter(|arr| !arr.is_empty()) {
+/// The kinds of links the key of a picture has switched off, in the order of
+/// `EDGE_ARROW_SPECS`.
+pub type KindsOff = [bool; 7];
+/// The kinds a state keeps switched off: `links_off` holds their names.
+pub fn kinds_off(state: &V) -> KindsOff {
+    let mut off = [false; 7];
+    for kind in state["links_off"].as_array().into_iter().flatten() {
+        if let Some(at) = kind
+            .as_str()
+            .and_then(|kind| EDGE_ARROW_SPECS.iter().position(|spec| spec.kind == kind))
+        {
+            off[at] = true;
+        }
+    }
+    off
+}
+/// What a link holds of each of the seven kinds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EdgeKinds {
+    /// Links of each kind, in the order of `EDGE_ARROW_SPECS`.
+    pub counts: [u64; 7],
+    /// The kinds as the graph worded them, the most links first.
+    pub breakdown: Option<String>,
+}
+impl EdgeKinds {
+    /// Read from a link of a picture: its kinds with their counts, or its
+    /// one kind, or how a pattern words what ties two parts. A link that
+    /// says nothing is a call, as it is drawn.
+    pub fn of(edge: &V) -> Self {
         let mut counts = [0u64; 7];
-        let mut items: Vec<(String, u64)> = Vec::with_capacity(kinds.len());
-        for entry in kinds {
-            let raw = entry
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .unwrap_or_else(|| m::text(entry, "kind"));
-            if raw.is_empty() {
-                continue;
+        let mut add = |raw: &str, links: u64| {
+            let at = edge_arrow_spec_index(normalize_edge_arrow_kind(raw));
+            counts[at] = counts[at].saturating_add(links.max(1));
+        };
+        if let Some(kinds) = edge["kinds"].as_array().filter(|arr| !arr.is_empty()) {
+            let mut items: Vec<(String, u64)> = Vec::with_capacity(kinds.len());
+            for entry in kinds {
+                let raw = entry
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| m::text(entry, "kind"));
+                if raw.is_empty() {
+                    continue;
+                }
+                let links = entry["links"].as_u64().unwrap_or(1);
+                add(&raw, links);
+                items.push((raw.replace('_', " "), links));
             }
-            let links = entry["links"].as_u64().unwrap_or(1);
-            let norm = normalize_edge_arrow_kind(&raw);
-            let idx = edge_arrow_spec_index(norm);
-            counts[idx] = counts[idx].saturating_add(links.max(1));
-            items.push((raw.replace('_', " "), links));
+            if !items.is_empty() {
+                items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                let breakdown = items
+                    .into_iter()
+                    .map(|(label, count)| format!("{label} {count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Self {
+                    counts,
+                    breakdown: Some(breakdown),
+                };
+            }
         }
-        if !items.is_empty() {
-            let multi = counts.iter().filter(|&&c| c > 0).count() > 1;
-            let primary = pick_precedence_kind(&counts);
-            items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            let breakdown = items
-                .into_iter()
-                .map(|(label, count)| format!("{label} {count}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return (primary, multi, Some(breakdown));
-        }
-    }
-    if let Some(kind) = edge["kind"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return (normalize_edge_arrow_kind(kind), false, None);
-    }
-    if let Some(tie) = edge["tie"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let mut counts = [0u64; 7];
-        let mut any = false;
-        for part in tie
-            .split(" and ")
-            .flat_map(|s| s.split(','))
-            .flat_map(|s| s.split('&'))
+        if let Some(kind) = edge["kind"]
+            .as_str()
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let norm = normalize_edge_arrow_kind(part);
-            let idx = edge_arrow_spec_index(norm);
-            counts[idx] = counts[idx].saturating_add(1);
-            any = true;
+            add(kind, 1);
+        } else if let Some(tie) = edge["tie"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            for part in tie
+                .split(" and ")
+                .flat_map(|s| s.split(','))
+                .flat_map(|s| s.split('&'))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                add(part, 1);
+            }
         }
-        if any {
-            let multi = counts.iter().filter(|&&c| c > 0).count() > 1;
-            return (pick_precedence_kind(&counts), multi, None);
+        if counts == [0; 7] {
+            counts[0] = 1;
+        }
+        Self {
+            counts,
+            breakdown: None,
         }
     }
-    ("calls", false, None)
+    /// The counts of the kinds that are not switched off.
+    fn shown(&self, off: &KindsOff) -> [u64; 7] {
+        let mut shown = self.counts;
+        for (count, off) in shown.iter_mut().zip(off) {
+            if *off {
+                *count = 0;
+            }
+        }
+        shown
+    }
+    /// The kind a link is drawn as: the strongest of those not switched
+    /// off. None where every kind it holds is switched off, so that the
+    /// link is not drawn.
+    pub fn primary(&self, off: &KindsOff) -> Option<&'static str> {
+        let shown = self.shown(off);
+        (shown != [0; 7]).then(|| pick_precedence_kind(&shown))
+    }
+    /// Whether the link holds more than one kind that is not switched off.
+    pub fn multi(&self, off: &KindsOff) -> bool {
+        self.shown(off).iter().filter(|count| **count > 0).count() > 1
+    }
+    /// The names of every kind the link holds, whatever is switched off.
+    pub fn held(&self) -> String {
+        EDGE_ARROW_SPECS
+            .iter()
+            .zip(&self.counts)
+            .filter(|(_, count)| **count > 0)
+            .map(|(spec, _)| spec.kind)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+#[cfg(test)]
+fn edge_kind_stats(edge: &V) -> (&'static str, bool, Option<String>) {
+    let kinds = EdgeKinds::of(edge);
+    let all = [false; 7];
+    (
+        kinds.primary(&all).unwrap_or("calls"),
+        kinds.multi(&all),
+        kinds.breakdown,
+    )
 }
 
 /// Resolves the canonical arrow kind for an aggregated or link-level dependency edge.
@@ -3956,31 +4154,189 @@ fn arrow_defs_svg(id_prefix: &str, include_against: bool) -> String {
             "<marker id=\"{id_prefix}-arrow-against\" class=\"graph-map-arrow graph-map-arrow-against\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"7\" markerHeight=\"7\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><path d=\"M0 0 L8 4 L0 8 z\"/></marker>"
         ));
     }
+    // Where a link leaves: a dot for a link of one kind, a ring with an
+    // eye for a link that holds several.
+    defs.push_str(&format!(
+        "<marker id=\"{id_prefix}-port\" class=\"graph-map-port\" viewBox=\"0 0 8 8\" refX=\"4\" refY=\"4\" markerWidth=\"6\" markerHeight=\"6\" markerUnits=\"userSpaceOnUse\"><circle cx=\"4\" cy=\"4\" r=\"2.6\"/></marker><marker id=\"{id_prefix}-port-multi\" class=\"graph-map-port graph-map-port-multi\" viewBox=\"0 0 8 8\" refX=\"4\" refY=\"4\" markerWidth=\"6\" markerHeight=\"6\" markerUnits=\"userSpaceOnUse\"><circle cx=\"4\" cy=\"4\" r=\"2.9\"/><circle class=\"graph-map-port-eye\" cx=\"4\" cy=\"4\" r=\"1.1\"/></marker>"
+    ));
     defs
 }
 
-/// Renders an accessible compact key of all 7 canonical dependency arrow styles.
-pub fn arrow_kinds_legend_html() -> String {
+/// The kinds the presets of the key leave shown, by the name of the preset.
+const KIND_PRESETS: [(&str, &str, &str, [&str; 7]); 4] = [
+    (
+        "all",
+        "All",
+        "Show every kind of link",
+        [
+            "calls",
+            "imports",
+            "extends",
+            "implements",
+            "writes",
+            "reads",
+            "uses",
+        ],
+    ),
+    (
+        "runtime",
+        "Runtime",
+        "What runs: calls, writes and reads",
+        ["calls", "writes", "reads", "", "", "", ""],
+    ),
+    (
+        "hierarchy",
+        "Hierarchy",
+        "What is built on what: extends and implements",
+        ["extends", "implements", "", "", "", "", ""],
+    ),
+    (
+        "no-imports",
+        "No imports",
+        "Everything but the imports",
+        [
+            "calls",
+            "extends",
+            "implements",
+            "writes",
+            "reads",
+            "uses",
+            "",
+        ],
+    ),
+];
+/// The kinds a preset switches off; none for a name that is no preset.
+pub fn preset_off(preset: &str) -> Option<KindsOff> {
+    let (.., shown) = KIND_PRESETS.iter().find(|(name, ..)| *name == preset)?;
+    let mut off = [true; 7];
+    for (at, spec) in EDGE_ARROW_SPECS.iter().enumerate() {
+        off[at] = !shown.contains(&spec.kind);
+    }
+    Some(off)
+}
+/// The state with one kind of link switched on or off, or, with `only`,
+/// with that kind alone left on. Switching the last shown kind off, or
+/// asking again for the one kind that is alone, shows every kind: a
+/// picture is never left without its links by its own key.
+pub fn switched_kind(mut state: V, kind: &str, only: bool) -> V {
+    let Some(at) = EDGE_ARROW_SPECS.iter().position(|spec| spec.kind == kind) else {
+        return state;
+    };
+    let mut off = kinds_off(&state);
+    if only {
+        let alone = off[at] || off.iter().filter(|off| !**off).count() > 1;
+        off = [alone; 7];
+        off[at] = false;
+    } else {
+        off[at] = !off[at];
+        if off == [true; 7] {
+            off = [false; 7];
+        }
+    }
+    state["links_off"] = json!(names_off(&off));
+    state
+}
+/// The state with the kinds of a preset shown and the others switched off.
+pub fn preset_kinds(mut state: V, preset: &str) -> V {
+    if let Some(off) = preset_off(preset) {
+        state["links_off"] = json!(names_off(&off));
+    }
+    state
+}
+fn names_off(off: &KindsOff) -> Vec<&'static str> {
+    EDGE_ARROW_SPECS
+        .iter()
+        .zip(off)
+        .filter(|(_, off)| **off)
+        .map(|(spec, _)| spec.kind)
+        .collect()
+}
+/// How many links of a picture hold each kind, and how many of them are
+/// not drawn because every kind they hold is switched off.
+pub fn kind_counts(view: &V, off: &KindsOff) -> ([u64; 7], u64) {
+    let nodes = m::array(&view["nodes"]);
+    let boxed = view["nodes"].is_array();
+    let drawn = |path: &V| !boxed || nodes.iter().any(|node| &node["path"] == path);
+    let mut counts = [0u64; 7];
+    let mut hidden = 0;
+    for edge in m::array(&view["edges"])
+        .iter()
+        .filter(|edge| drawn(&edge["from"]) && drawn(&edge["to"]))
+    {
+        let kinds = EdgeKinds::of(edge);
+        for (count, held) in counts.iter_mut().zip(&kinds.counts) {
+            *count += u64::from(*held > 0);
+        }
+        hidden += u64::from(kinds.primary(off).is_none());
+    }
+    (counts, hidden)
+}
+/// The key of a picture's links, which is also their switchboard. Each of
+/// the seven kinds is a button with the arrow it is drawn as and how many
+/// links of the picture hold it: selecting it hides those links and shows
+/// them again, and resting on it lights them. A link that holds several
+/// kinds stays while one of them is shown, drawn as the strongest shown.
+/// The presets beside them switch several kinds at once. `surface` names
+/// the picture the buttons act on.
+pub fn kinds_legend_html(view: &V, off: &KindsOff, surface: &str) -> String {
+    let (counts, hidden) = kind_counts(view, off);
     let mut html = String::from(
-        "<div class=\"graph-arrow-legend\" role=\"list\" aria-label=\"Dependency arrow types\"><span class=\"graph-arrow-legend-title\">Arrows:</span>",
+        "<div class=\"graph-arrow-legend\" role=\"group\" aria-label=\"Kinds of links: select one to hide or show its links\"><span class=\"graph-arrow-legend-title\">Links:</span>",
     );
-    for spec in EDGE_ARROW_SPECS {
+    for (at, spec) in EDGE_ARROW_SPECS.iter().enumerate() {
         let dash = spec
             .dash_array
             .map(|d| format!(" stroke-dasharray=\"{d}\""))
             .unwrap_or_default();
         let arrow_class = arrow_class_for_kind(spec.kind);
+        let told = format!(
+            "{} · {} here · select to {}, Alt+select to show it alone",
+            spec.description,
+            plural(counts[at], "link", "links"),
+            if off[at] { "show" } else { "hide" },
+        );
         html.push_str(&format!(
-            "<span class=\"graph-arrow-legend-item\" role=\"listitem\" title=\"{}\"><svg class=\"graph-arrow-swatch\" data-edge-kind=\"{}\" viewBox=\"0 0 30 12\" width=\"30\" height=\"12\" aria-hidden=\"true\"><line class=\"graph-arrow-swatch-line\" x1=\"2\" y1=\"6\" x2=\"{:.1}\" y2=\"6\"{dash}/><g transform=\"translate(20 2)\" class=\"{arrow_class}\">{}</g></svg><span>{}</span></span>",
-            escape(spec.description),
+            "<button type=\"button\" class=\"graph-arrow-legend-item\" data-action=\"graph-kind-toggle\" data-payload=\"{}\" data-edge-kind=\"{}\" data-empty=\"{}\" aria-pressed=\"{}\" title=\"{}\"><svg class=\"graph-arrow-swatch\" data-edge-kind=\"{}\" viewBox=\"0 0 30 12\" width=\"30\" height=\"12\" aria-hidden=\"true\"><line class=\"graph-arrow-swatch-line\" x1=\"2\" y1=\"6\" x2=\"{:.1}\" y2=\"6\"{dash}/><g transform=\"translate(20 2)\" class=\"{arrow_class}\">{}</g></svg><span class=\"graph-arrow-legend-name\">{}</span><span class=\"graph-arrow-legend-count\">{}</span></button>",
+            payload(&json!({"kind": spec.kind, "surface": surface})),
+            spec.kind,
+            counts[at] == 0,
+            !off[at],
+            escape(&told),
             spec.kind,
             spec.swatch_line_end,
             spec.marker_body,
             spec.label,
+            count(counts[at]),
         ));
     }
+    html.push_str(
+        "<span class=\"graph-arrow-legend-presets\" role=\"group\" aria-label=\"Presets\">",
+    );
+    for (name, label, told, _) in KIND_PRESETS {
+        html.push_str(&format!(
+            "<button type=\"button\" class=\"graph-arrow-legend-preset\" data-action=\"graph-kind-preset\" data-payload=\"{}\" aria-pressed=\"{}\" title=\"{told}\">{label}</button>",
+            payload(&json!({"preset": name, "surface": surface})),
+            preset_off(name).as_ref() == Some(off),
+        ));
+    }
+    html.push_str("</span>");
+    html.push_str(&format!(
+        "<span class=\"graph-arrow-legend-note\">{}<svg class=\"graph-arrow-swatch graph-arrow-swatch-hollow\" viewBox=\"0 0 22 12\" width=\"22\" height=\"12\" aria-hidden=\"true\"><line class=\"graph-arrow-swatch-line\" x1=\"2\" y1=\"6\" x2=\"20\" y2=\"6\"/><line class=\"graph-arrow-swatch-core\" x1=\"2\" y1=\"6\" x2=\"20\" y2=\"6\"/></svg> hollow: only inferred · ● leaves as one kind · ◎ holds several</span>",
+        match hidden {
+            0 => String::new(),
+            hidden => format!(
+                "<span class=\"graph-arrow-legend-hidden\">{} hidden by this key · </span>",
+                plural(hidden, "link", "links")
+            ),
+        },
+    ));
     html.push_str("</div>");
     html
+}
+/// The key of the links where no picture is there to count them.
+#[cfg(test)]
+pub fn arrow_kinds_legend_html() -> String {
+    kinds_legend_html(&V::Null, &[false; 7], "modal")
 }
 
 /// Optional live focus, changed-files catalog, and selected file-impact overlays for `canvas_with_overlays`.
@@ -3989,6 +4345,8 @@ pub struct CanvasOverlayContext<'a> {
     pub live_focus: Option<&'a LiveFocus>,
     pub changes: Option<&'a V>,
     pub impact: Option<&'a V>,
+    /// The kinds of links the key of the picture has switched off.
+    pub links_off: KindsOff,
 }
 
 /// Canvas markup plus resolved plane size and live focus overlay coordinates.
@@ -4015,6 +4373,7 @@ pub fn canvas_with(view: &V, id_prefix: &str, live_focus: Option<&LiveFocus>) ->
             live_focus,
             changes: None,
             impact: None,
+            links_off: [false; 7],
         },
     )
 }
@@ -4076,9 +4435,10 @@ pub fn canvas_with_overlays(
             flow[*to].1 += (*links).max(1);
         }
     }
-    // A link starts in the colour of using and ends in the colour of being
-    // used. It shades along the way between its two columns, so the links
-    // between the same two columns share one shading.
+    // A link starts in the colour every link leaves in and ends in the
+    // colour of its kind. It shades along the way between its two columns,
+    // so the links of one kind between the same two columns share one
+    // shading.
     let span = |wire: &Wire| {
         let (from, to) = pairs[wire.edge];
         let (start, end) = (plan.nodes[from].x, plan.nodes[to].x);
@@ -4091,6 +4451,25 @@ pub fn canvas_with_overlays(
     let mut spans = plan.wires.iter().map(span).collect::<Vec<_>>();
     spans.sort_unstable();
     spans.dedup();
+    // The kinds each link holds, and the kind it is drawn as: the
+    // strongest of those the key of the picture has not switched off.
+    let links_off = overlay.links_off;
+    let wire_kinds = plan
+        .wires
+        .iter()
+        .map(|wire| EdgeKinds::of(edges[wire.edge]))
+        .collect::<Vec<_>>();
+    let shadings: BTreeSet<(usize, &'static str)> = plan
+        .wires
+        .iter()
+        .zip(&wire_kinds)
+        .filter_map(|(wire, kinds)| {
+            Some((
+                spans.binary_search(&span(wire)).unwrap_or(0),
+                kinds.primary(&links_off)?,
+            ))
+        })
+        .collect();
     let focus = view["focus"]["path"].as_str();
     let chosen = focus.and_then(|path| at(&json!(path)));
     // Among layers a link is selected too: its two ends.
@@ -4184,9 +4563,15 @@ pub fn canvas_with_overlays(
             .iter()
             .any(|edge| edge["architecture_violation"].as_u64().unwrap_or(0) > 0);
     html.push_str(&arrow_defs_svg(id_prefix, include_against));
-    for (index, (start, end)) in spans.iter().enumerate() {
+    for (index, kind) in &shadings {
+        let (start, end) = spans[*index];
+        let (suffix, kind_attr) = if *kind == "calls" {
+            (String::new(), String::new())
+        } else {
+            (format!("-{kind}"), format!(" data-edge-kind=\"{kind}\""))
+        };
         html.push_str(&format!(
-            "<linearGradient id=\"{id_prefix}-flow-{index}\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
+            "<linearGradient id=\"{id_prefix}-flow-{index}{suffix}\" class=\"graph-map-flow\"{kind_attr} gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
         ));
     }
     html.push_str("</defs>");
@@ -4246,7 +4631,8 @@ pub fn canvas_with_overlays(
     // and steps back with its link.
     let mut marks = String::new();
     let mut placed_ties = Vec::new();
-    for wire in &plan.wires {
+    let mut hidden_wires = Vec::with_capacity(plan.wires.len());
+    for (wire, kinds) in plan.wires.iter().zip(&wire_kinds) {
         let edge = edges[wire.edge];
         let (links, guessed) = (
             edge["links"].as_u64().unwrap_or(0),
@@ -4306,35 +4692,56 @@ pub fn canvas_with_overlays(
         let edge_diff_attr = edge_diff
             .map(|diff| format!(" data-diff=\"{diff}\""))
             .unwrap_or_default();
+        // A link whose every kind the key has switched off stays in the
+        // picture, so that nothing moves, and is not drawn. A link against
+        // the rules is drawn whatever the key says.
+        let shown_kind = kinds.primary(&links_off);
+        let hidden = shown_kind.is_none() && !against;
+        let hidden_attr = if hidden {
+            " data-kind-hidden=\"true\""
+        } else {
+            ""
+        };
+        hidden_wires.push(hidden);
         if against {
             html.push_str(&format!(
                 "<path class=\"graph-map-violation-halo\"{edge_state_attr} data-ends=\"{from} {to}\" d=\"{}\"/>",
                 wire.path,
             ));
         }
-        let (arrow_kind, multi_kind, kinds_breakdown) = edge_kind_stats(edge);
+        let arrow_kind = shown_kind.unwrap_or_else(|| pick_precedence_kind(&kinds.counts));
+        let multi_kind = kinds.multi(&links_off);
         let multi_attr = if multi_kind {
             " data-edge-multi=\"true\""
         } else {
             ""
         };
         let marker_suffix = arrow_marker_suffix(arrow_kind, against);
-        let breakdown_note = kinds_breakdown
+        let breakdown_note = kinds
+            .breakdown
             .as_deref()
             .map(|text| format!(" · {}", escape(text)))
             .unwrap_or_default();
+        // What the tool only inferred is drawn hollow: the link a little
+        // wider, and over it its own middle in the colour of the ground.
+        let guess = guessed == links;
+        let width = (1.0 + ((links.max(1) as f64).log2() * 0.5).min(2.5))
+            // A link that closes a cycle is a row of dots, kept thin.
+            .min(if back { 1.8 } else { 3.5 })
+            + if added { 1.5 } else { 0.0 };
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}{}{}\" data-ends=\"{from} {to}\"{edge_diff_attr}{}{} d=\"{}\" data-edge-kind=\"{arrow_kind}\"{multi_attr} stroke=\"url(#{id_prefix}-flow-{})\" stroke-width=\"{:.1}\" marker-end=\"url(#{id_prefix}-arrow{marker_suffix})\"><title>{told}{}{}{}{breakdown_note}</title></path>",
-            if guessed == links { " graph-map-edge-guess" } else { "" },
+            "<path class=\"graph-map-edge{state}{}{}{}\" data-ends=\"{from} {to}\"{edge_diff_attr}{}{}{hidden_attr} d=\"{}\" data-edge-kind=\"{arrow_kind}\" data-kinds=\"{}\"{multi_attr} stroke=\"url(#{id_prefix}-flow-{}{})\" stroke-width=\"{:.1}\" marker-start=\"url(#{id_prefix}-port{})\" marker-end=\"url(#{id_prefix}-arrow{marker_suffix})\"><title>{told}{}{}{}{breakdown_note}</title></path>",
+            if guess { " graph-map-edge-guess" } else { "" },
             if back { " graph-map-edge-back" } else { "" },
             if against { " graph-map-edge-against" } else { "" },
             if on_path { " data-shared-path=\"true\"" } else { "" },
             if added { " data-cycle-added=\"true\"" } else { "" },
             wire.path,
+            kinds.held(),
             spans.binary_search(&span(wire)).unwrap_or(0),
-            // A link that closes a cycle is a row of dots, kept thin.
-            (1.0 + ((links.max(1) as f64).log2() * 0.5).min(2.5)).min(if back { 1.8 } else { 3.5 })
-                + if added { 1.5 } else { 0.0 },
+            if arrow_kind == "calls" { String::new() } else { format!("-{arrow_kind}") },
+            width + if guess { 2.0 } else { 0.0 },
+            if multi_kind { "-multi" } else { "" },
             if back { " · against the main direction, closes a cycle" } else { "" },
             match grew {
                 Some(links) => format!(
@@ -4348,19 +4755,32 @@ pub fn canvas_with_overlays(
             },
             if added { " · added in PR" } else { "" },
         ));
+        if guess {
+            html.push_str(&format!(
+                "<path class=\"graph-map-edge-core{}\" data-ends=\"{from} {to}\"{hidden_attr} d=\"{}\" data-edge-kind=\"{arrow_kind}\" stroke-width=\"{width:.1}\"/>",
+                if back { " graph-map-edge-back" } else { "" },
+                wire.path,
+            ));
+        }
+        // What stands at the middle of a link: a word of a pattern, what a
+        // change did to it, or, on a link that passes layers and carries
+        // no word, a chevron that says which way it runs.
+        let mut worded = false;
         if pattern_view && !layered_view {
             if let Some((tie, (x, y))) = edge["tie"]
                 .as_str()
                 .zip(middle(&wire.path).and_then(|mid| place_tie(&mut placed_ties, mid)))
             {
+                worded = true;
                 marks.push_str(&format!(
-                    "<text class=\"graph-map-edge-tie\"{edge_state_attr} data-ends=\"{from} {to}\" data-pattern-family=\"{}\" x=\"{x:.1}\" y=\"{y:.1}\">{}</text>",
+                    "<text class=\"graph-map-edge-tie\"{edge_state_attr} data-ends=\"{from} {to}\" data-pattern-family=\"{}\"{hidden_attr} x=\"{x:.1}\" y=\"{y:.1}\">{}</text>",
                     escape(pattern_family.as_deref().unwrap_or("design")),
                     escape(&short_tie(tie)),
                 ));
             }
         }
         if let Some((links, (x, y))) = grew.zip(middle(&wire.path)) {
+            worded = true;
             marks.push_str(&format!(
                 "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" x=\"{x:.1}\" y=\"{y:.1}\">+{}</text>",
                 count(links)
@@ -4369,10 +4789,20 @@ pub fn canvas_with_overlays(
             .filter(|diff| matches!(*diff, "added" | "removed"))
             .zip(middle(&wire.path))
         {
+            worded = true;
             let symbol = if diff == "added" { "+" } else { "-" };
             marks.push_str(&format!(
-                "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" data-diff=\"{diff}\" x=\"{x:.1}\" y=\"{y:.1}\">{symbol}</text>"
+                "<text class=\"graph-map-edge-mark{state}\" data-ends=\"{from} {to}\" data-diff=\"{diff}\"{hidden_attr} x=\"{x:.1}\" y=\"{y:.1}\">{symbol}</text>"
             ));
+        }
+        if !worded && passes_layers(&wire.path) {
+            if let Some((x, y, angle)) = halfway(&wire.path) {
+                marks.push_str(&format!(
+                    "<path class=\"graph-map-edge-chevron{state}{}\" data-ends=\"{from} {to}\" data-edge-kind=\"{arrow_kind}\" data-kinds=\"{}\"{hidden_attr} transform=\"translate({x:.1} {y:.1}) rotate({angle:.0})\" d=\"M-3 -3.4 L1.4 0 L-3 3.4\"/>",
+                    if against { " graph-map-edge-against" } else { "" },
+                    kinds.held(),
+                ));
+            }
         }
     }
     if let Some(lookup) = impact_lookup.as_ref() {
@@ -4382,7 +4812,8 @@ pub fn canvas_with_overlays(
             let mut add_synthetic = |from_idx: usize,
                                      to_idx: usize,
                                      diff: &'static str,
-                                     label: &str| {
+                                     label: &str,
+                                     kind: &'static str| {
                 if from_idx == to_idx
                     || rendered_pairs.contains(&(from_idx, to_idx))
                     || !synthetic_drawn.insert((from_idx, to_idx, diff))
@@ -4394,7 +4825,8 @@ pub fn canvas_with_overlays(
                 curve(&mut d, fp, tp);
                 let mark_symbol = if diff == "added" { "+" } else { "-" };
                 html.push_str(&format!(
-                    "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\" data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"calls\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow)\"><title>{} ({label})</title></path>",
+                    "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\" data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"{kind}\" data-kinds=\"{kind}\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow{})\"><title>{} ({label} · {kind})</title></path>",
+                    arrow_marker_suffix(kind, false),
                     escape(&m::text(&nodes[from_idx], "name")),
                 ));
                 if let Some((mx, my)) = middle(&d) {
@@ -4405,22 +4837,34 @@ pub fn canvas_with_overlays(
             };
             for target in &lookup.uses_added {
                 if let Some(target_idx) = resolve_canvas_node_by_path(&nodes, target) {
-                    add_synthetic(sel_idx, target_idx, "added", "added dependency");
+                    add_synthetic(
+                        sel_idx,
+                        target_idx,
+                        "added",
+                        "added dependency",
+                        lookup.dep_kind(target, true),
+                    );
                 }
             }
             for target in &lookup.uses_removed {
                 if let Some(target_idx) = resolve_canvas_node_by_path(&nodes, target) {
-                    add_synthetic(sel_idx, target_idx, "removed", "removed dependency");
+                    add_synthetic(
+                        sel_idx,
+                        target_idx,
+                        "removed",
+                        "removed dependency",
+                        lookup.dep_kind(target, false),
+                    );
                 }
             }
             for caller in &lookup.callers_added {
                 if let Some(caller_idx) = resolve_canvas_node_by_path(&nodes, caller) {
-                    add_synthetic(caller_idx, sel_idx, "added", "added caller");
+                    add_synthetic(caller_idx, sel_idx, "added", "added caller", "calls");
                 }
             }
             for caller in &lookup.callers_risk {
                 if let Some(caller_idx) = resolve_canvas_node_by_path(&nodes, caller) {
-                    add_synthetic(caller_idx, sel_idx, "removed", "caller at risk");
+                    add_synthetic(caller_idx, sel_idx, "removed", "caller at risk", "calls");
                 }
             }
         }
@@ -4431,16 +4875,23 @@ pub fn canvas_with_overlays(
     // none of them is hidden under a link drawn later. A link between two
     // layers is many links of many files: selecting it lists the pairs of
     // files it is made of beside the picture.
-    for wire in plan.wires.iter().filter(|_| view["mode"] != "modules") {
+    for ((wire, kinds), hidden) in plan
+        .wires
+        .iter()
+        .zip(&wire_kinds)
+        .zip(&hidden_wires)
+        .filter(|_| view["mode"] != "modules")
+    {
         let (from, to) = pairs[wire.edge];
         let edge = edges[wire.edge];
-        let (_, _, kinds_breakdown) = edge_kind_stats(edge);
-        let breakdown_note = kinds_breakdown
+        let breakdown_note = kinds
+            .breakdown
             .as_deref()
             .map(|text| format!(" · {}", escape(text)))
             .unwrap_or_default();
         html.push_str(&format!(
-            "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\" d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{}{breakdown_note} · select to see {}</title></path>",
+            "<path class=\"graph-map-hit\" data-ends=\"{from} {to}\"{} d=\"{}\" data-action=\"graph-map-link\" data-payload=\"{}\"><title>{} uses {}{}{breakdown_note} · select to see {}</title></path>",
+            if *hidden { " data-kind-hidden=\"true\"" } else { "" },
             wire.path,
             payload(&json!({"from": nodes[from]["path"], "to": nodes[to]["path"]})),
             escape(&m::text(&nodes[from], "name")),
@@ -5396,10 +5847,11 @@ fn diff_badge_sign(diff: &str) -> &'static str {
 /// every link between two of them. `chosen` is the name whose links are lit.
 #[cfg(test)]
 pub fn link_canvas(view: &V, chosen: &str) -> String {
-    link_canvas_with(view, chosen, None)
+    link_canvas_with(view, chosen, None, &[false; 7])
 }
 /// Renders the link detail canvas with optional change-impact diff annotations (`+`/`-`/`=`).
-pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
+/// A link of a kind the key has switched off (`off`) keeps its place and is not drawn.
+pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>, off: &KindsOff) -> String {
     let diff_info = LinkDiffInfo::from_view(view, impact);
     let (names, held) = link_names(view);
     let at = |key: &V| names.iter().position(|(name, _)| &name["key"] == key);
@@ -5426,16 +5878,38 @@ pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
                 })
         })
     };
+    // Every link runs between the same two columns, so the links of one
+    // kind share one shading: from the colour of leaving to that of the kind.
+    let link_kinds = pairs
+        .iter()
+        .map(|(_, _, edge)| EdgeKinds::of(edge))
+        .collect::<Vec<_>>();
+    let shadings: BTreeSet<&'static str> = link_kinds
+        .iter()
+        .filter_map(|kinds| kinds.primary(off))
+        .chain(["calls"])
+        .collect();
     let mut html = format!(
-        "<div class=\"graph-map-plane\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>{}<linearGradient id=\"graph-link-flow\" gradientUnits=\"userSpaceOnUse\" x1=\"{:.0}\" y1=\"0\" x2=\"{:.0}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient></defs>",
+        "<div class=\"graph-map-plane\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>{}",
         plan.width,
         plan.height,
         plan.width,
         plan.height,
         arrow_defs_svg("graph-link", false),
-        MARGIN + FRAME_PAD + LINK_BOX,
-        MARGIN + FRAME_PAD + LINK_BOX + LINK_GAP,
     );
+    for kind in &shadings {
+        let (suffix, kind_attr) = if *kind == "calls" {
+            (String::new(), String::new())
+        } else {
+            (format!("-{kind}"), format!(" data-edge-kind=\"{kind}\""))
+        };
+        html.push_str(&format!(
+            "<linearGradient id=\"graph-link-flow{suffix}\" class=\"graph-map-flow\"{kind_attr} gradientUnits=\"userSpaceOnUse\" x1=\"{:.0}\" y1=\"0\" x2=\"{:.0}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>",
+            MARGIN + FRAME_PAD + LINK_BOX,
+            MARGIN + FRAME_PAD + LINK_BOX + LINK_GAP,
+        ));
+    }
+    html.push_str("</defs>");
     for frame in &plan.files {
         if frame.width > 0.0 {
             html.push_str(&format!(
@@ -5444,7 +5918,7 @@ pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
             ));
         }
     }
-    for ((from, to, edge), wire) in pairs.iter().zip(&plan.wires) {
+    for (((from, to, edge), wire), kinds) in pairs.iter().zip(&plan.wires).zip(&link_kinds) {
         let state = match picked {
             Some(picked) if picked == *from || picked == *to => " graph-map-edge-on",
             Some(_) => " graph-map-edge-off",
@@ -5491,7 +5965,15 @@ pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
         let risk_note = edge_risk
             .map(|r| format!(" · risk: {r}"))
             .unwrap_or_default();
-        let (arrow_kind, multi_kind, kinds_breakdown) = edge_kind_stats(edge);
+        let shown_kind = kinds.primary(off);
+        let hidden_attr = if shown_kind.is_none() {
+            " data-kind-hidden=\"true\""
+        } else {
+            ""
+        };
+        let arrow_kind = shown_kind.unwrap_or_else(|| pick_precedence_kind(&kinds.counts));
+        let multi_kind = kinds.multi(off);
+        let kinds_breakdown = kinds.breakdown.clone();
         let raw_kind = m::text(edge, "kind");
         let kind_label = match (raw_kind.is_empty(), kinds_breakdown) {
             (true, Some(breakdown)) => breakdown,
@@ -5512,8 +5994,12 @@ pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
         };
         let marker_suffix = arrow_marker_suffix(arrow_kind, false);
         html.push_str(&format!(
-            "<path class=\"graph-map-edge{state}{}\" data-ends=\"{from} {to}\"{diff_attr} d=\"{wire}\" data-edge-kind=\"{arrow_kind}\"{multi_attr} stroke=\"url(#graph-link-flow)\" stroke-width=\"1.4\" marker-end=\"url(#graph-link-arrow{marker_suffix})\"><title>{} uses {} · {}{}{diff_note}{}{}</title></path>",
+            "<path class=\"graph-map-edge{state}{}\" data-ends=\"{from} {to}\"{diff_attr}{hidden_attr} d=\"{wire}\" data-edge-kind=\"{arrow_kind}\" data-kinds=\"{}\"{multi_attr} stroke=\"url(#graph-link-flow{})\" stroke-width=\"{}\" marker-start=\"url(#graph-link-port{})\" marker-end=\"url(#graph-link-arrow{marker_suffix})\"><title>{} uses {} · {}{}{diff_note}{}{}</title></path>",
             if guessed { " graph-map-edge-guess" } else { "" },
+            kinds.held(),
+            if arrow_kind == "calls" { String::new() } else { format!("-{arrow_kind}") },
+            if guessed { "3.4" } else { "1.4" },
+            if multi_kind { "-multi" } else { "" },
             escape(&from_name),
             escape(&to_name),
             escape(&kind_label),
@@ -5521,6 +6007,12 @@ pub fn link_canvas_with(view: &V, chosen: &str, impact: Option<&V>) -> String {
             escape(&vis_note),
             escape(&risk_note),
         ));
+        // What was only guessed by name is drawn hollow.
+        if guessed {
+            html.push_str(&format!(
+                "<path class=\"graph-map-edge-core\" data-ends=\"{from} {to}\"{hidden_attr} d=\"{wire}\" data-edge-kind=\"{arrow_kind}\" stroke-width=\"1.4\"/>"
+            ));
+        }
     }
     html.push_str("</svg>");
     // The head of a frame: the file its names lie in.
@@ -7312,7 +7804,7 @@ fn legend(view: &V, change: bool) -> String {
         _ => LEGEND.to_owned(),
     };
     format!(
-        "An arrow runs from what uses {} to what is used {}, and a box is tinted by which it does more here. Solid: read from the code. Dashed: guessed by name. Thicker: more links. {particular}{}",
+        "An arrow runs from what uses {} to what is used {}, and a box is tinted by which it does more here. Its head and its dashes tell its kind, as the key of the links shows. Hollow: only guessed by name. Thicker: more links. {particular}{}",
         patch("uses"),
         patch("used"),
         if view["patterns"].is_object() {
@@ -7803,7 +8295,12 @@ fn apply_scroll_canvas_scale(
     let scale_value = scale_value.clamp(CAMERA_MIN, CAMERA_MAX);
     let size = (plane.offset_width() as f64, plane.offset_height() as f64);
     let scale_text = format!("{scale_value:.4}");
-    let _ = plane.set_attribute("style", &scaled(size, scale_value));
+    // The scale is told to the stylesheet too: the heads of the arrows are
+    // kept large enough to read in a picture made small.
+    let _ = plane.set_attribute(
+        "style",
+        &format!("{};--graph-scale:{scale_text}", scaled(size, scale_value)),
+    );
     let _ = plane.set_attribute("data-scale", &scale_text);
     let _ = canvas.set_attribute("data-scale", &scale_text);
     if let Some(label_id) = scroll_canvas_label_id(canvas_id) {
@@ -8277,9 +8774,17 @@ pub(crate) fn attach_system_wheel_listeners() {
     attach_canvas_wheel("system-member-graph-canvas");
     attach_canvas_hover("system-member-graph-canvas");
     attach_side_hover("system-member-graph-side", "system-member-graph-canvas");
+    attach_legend_hover(
+        "system-member-graph-arrow-legend",
+        "system-member-graph-canvas",
+    );
     attach_canvas_wheel("system-change-graph-canvas");
     attach_canvas_hover("system-change-graph-canvas");
     attach_side_hover("system-change-graph-side", "system-change-graph-canvas");
+    attach_legend_hover(
+        "system-change-graph-arrow-legend",
+        "system-change-graph-canvas",
+    );
 }
 fn ensure_surface_watch(surface: MapSurface) {
     attach_wheel_listeners();
@@ -8287,6 +8792,10 @@ fn ensure_surface_watch(surface: MapSurface) {
     attach_canvas_wheel(surface.canvas);
     attach_canvas_hover(surface.canvas);
     attach_side_hover(surface.side, surface.canvas);
+    attach_legend_hover(
+        &format!("{}-arrow-legend", surface.id_prefix),
+        surface.canvas,
+    );
 }
 /// Fits the picture again when the window changes its size, lights what
 /// the pointer or the keyboard rests on in the map and in the window of a
@@ -8302,6 +8811,8 @@ fn watch() {
     attach_canvas_hover("graph-map-canvas");
     attach_canvas_hover("graph-link-canvas");
     attach_side_hover("graph-map-side", "graph-map-canvas");
+    attach_legend_hover("graph-map-arrow-legend", "graph-map-canvas");
+    attach_legend_hover("graph-link-arrow-legend", "graph-link-canvas");
     // What a search found is closed once the keyboard leaves the search;
     // moving on into the list keeps it open.
     if let Some(search) = dom::get("graph-find") {
@@ -8348,6 +8859,103 @@ const NOTESTS: &str = "graph-map-notests";
 const FIT: &str = "graph-map-fit";
 /// And whether it marks its pictures with the patterns found in them.
 const PATTERNS: &str = "graph-map-patterns";
+/// And the kinds of links its key has switched off, their names joined by
+/// commas. One choice holds for every picture of links.
+const LINKS_OFF: &str = "graph-map-links-off";
+/// The kinds of links switched off now: as the key left them, or, the
+/// first time they are asked for, as this browser kept them.
+fn links_off_now() -> KindsOff {
+    let held = m::data(LINKS_OFF);
+    if held.is_object() {
+        return kinds_off(&held);
+    }
+    let kept = dom::storage(LINKS_OFF).unwrap_or_default();
+    let held =
+        json!({"links_off": kept.split(',').filter(|kind| !kind.is_empty()).collect::<Vec<_>>()});
+    m::set(LINKS_OFF, held.clone());
+    kinds_off(&held)
+}
+/// A kind of link, or a preset of them, was selected in the key of a
+/// picture: the choice is kept, and the picture that key belongs to is
+/// drawn again from what it holds. The server is asked nothing.
+fn switch_kinds(action: &str, asked: &V) {
+    let held = json!({"links_off": names_off(&links_off_now())});
+    let next = if action == "graph-kind-preset" {
+        preset_kinds(held, &m::text(asked, "preset"))
+    } else {
+        switched_kind(
+            held,
+            &m::text(asked, "kind"),
+            m::yes(&m::data("pointer-mods")["alt"]),
+        )
+    };
+    let kept = names_off(&kinds_off(&next)).join(",");
+    dom::save(LINKS_OFF, (!kept.is_empty()).then_some(kept.as_str()));
+    m::set(LINKS_OFF, next);
+    let surface = m::text(asked, "surface");
+    let legend = if surface == "link" {
+        draw_link();
+        "graph-link-arrow-legend".to_owned()
+    } else {
+        let surface = surface_by_name(&surface);
+        rerender_surface_preserving_camera(surface);
+        format!("{}-arrow-legend", surface.id_prefix)
+    };
+    // The key was drawn again: the keyboard goes back to what was selected.
+    let wanted = asked.to_string();
+    if let Some(button) = dom::all(&format!("#{legend} [data-action='{action}']"))
+        .into_iter()
+        .find(|button| button.get_attribute("data-payload").as_deref() == Some(wanted.as_str()))
+        .and_then(|button| button.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = button.focus();
+    }
+}
+/// Resting on a kind in the key of a picture lights the links that hold
+/// it, and leaving the key puts them back: a mark on the canvas the
+/// stylesheet reads, so nothing is drawn again.
+fn attach_legend_hover(legend_id: &str, canvas_id: &str) {
+    let Some(legend) = dom::get(legend_id) else {
+        return;
+    };
+    if legend.get_attribute("data-hover-bound").as_deref() == Some("true") {
+        return;
+    }
+    let _ = legend.set_attribute("data-hover-bound", "true");
+    for (kind, rests) in [
+        ("mouseover", true),
+        ("focusin", true),
+        ("mouseleave", false),
+        ("focusout", false),
+    ] {
+        let canvas_id = canvas_id.to_owned();
+        let moved = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let held = rests
+                .then(|| {
+                    event
+                        .target()
+                        .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                })
+                .flatten()
+                .and_then(|target| {
+                    target
+                        .closest(".graph-arrow-legend-item[aria-pressed='true']")
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|item| item.get_attribute("data-edge-kind"));
+            let Some(canvas) = dom::get(&canvas_id) else {
+                return;
+            };
+            let _ = match held {
+                Some(kind) => canvas.set_attribute("data-kind-hover", &kind),
+                None => canvas.remove_attribute("data-kind-hover"),
+            };
+        });
+        let _ = legend.add_event_listener_with_callback(kind, moved.as_ref().unchecked_ref());
+        moved.forget();
+    }
+}
 /// A map begun anew, with tests left out and pictures fitted where they
 /// were the last time.
 fn anew(target: &str) -> V {
@@ -8689,7 +9297,7 @@ fn draw_link() {
     dom::text("graph-link-note", &link_note(view));
     html(
         "graph-link-canvas",
-        &link_canvas_with(view, &chosen, impact.as_ref()),
+        &link_canvas_with(view, &chosen, impact.as_ref(), &links_off_now()),
     );
     if let Some(canvas) = dom::get("graph-link-canvas") {
         if let Some(plane) = canvas
@@ -8709,7 +9317,10 @@ fn draw_link() {
         "graph-link-side",
         &link_side_with(view, &chosen, impact.as_ref()),
     );
-    html("graph-link-arrow-legend", &arrow_kinds_legend_html());
+    html(
+        "graph-link-arrow-legend",
+        &kinds_legend_html(view, &links_off_now(), "link"),
+    );
 }
 #[allow(dead_code)]
 pub(crate) fn link_request(project: &str, from: &str, to: &str, selection: &V) -> String {
@@ -12317,11 +12928,15 @@ fn render(view: &V) {
             live_focus: None,
             changes: modal_changes.as_ref(),
             impact: modal_impact.as_ref(),
+            links_off: links_off_now(),
         },
     );
     html("graph-map-canvas", &rendered.html);
     fit();
-    html("graph-map-arrow-legend", &arrow_kinds_legend_html());
+    html(
+        "graph-map-arrow-legend",
+        &kinds_legend_html(view, &links_off_now(), "modal"),
+    );
     let changes_tab = m::text(&modal_state, "side_tab") == "changes";
     if scenario_mode && !changes_tab {
         let focused = dom::document().active_element().is_some_and(|element| {
@@ -12361,7 +12976,7 @@ fn render(view: &V) {
         );
         dom::text(
             "graph-map-legend",
-            "Arrows show dependencies between Graphify communities. Dashed links are inferred.",
+            "Arrows show dependencies between Graphify communities. Hollow links are inferred.",
         );
         if let Some(key) = view["focus"]["path"].as_str().filter(|_| module_focus) {
             let key = json!(key).to_string();
@@ -13165,6 +13780,11 @@ pub async fn event(
     value: &str,
     checked: bool,
 ) -> bool {
+    // The key of the links is the same in every picture.
+    if kind == "click" && matches!(action, "graph-kind-toggle" | "graph-kind-preset") {
+        switch_kinds(action, payload);
+        return true;
+    }
     if id.starts_with("session-graph-")
         || id.starts_with("system-member-graph-")
         || id.starts_with("system-change-graph-")
@@ -14227,10 +14847,14 @@ fn render_embedded_surface(
             live_focus: live.as_ref(),
             changes: changes_doc.as_ref(),
             impact: impact_doc.as_ref(),
+            links_off: links_off_now(),
         },
     );
     html(surface.canvas, &rendered.html);
-    html(&legend_id, &arrow_kinds_legend_html());
+    html(
+        &legend_id,
+        &kinds_legend_html(view, &links_off_now(), surface.name),
+    );
     dom::hidden(&legend_id, false);
     let was_empty = dom::get(surface.side).is_none_or(|el| el.inner_html().is_empty());
     let attach_action = format!("{prefix}-attach");
@@ -14996,84 +15620,12 @@ pub(crate) fn open_system_service_map(scope: GraphTargetScope, initial_target: O
         load(false).await;
     });
 }
-/// Opens `#graph-map` focused directly on `path` within a System member service, opening the
-/// Details / Impact side panel and fetching `/api/systems/service-graph/file-impact`.
-#[allow(dead_code)]
-pub(crate) fn open_system_file_impact(
-    scope: GraphTargetScope,
-    path: &str,
-    initial_target: Option<&str>,
-) {
-    let default_target = match &scope {
-        GraphTargetScope::SystemService {
-            run_id: Some(rid), ..
-        } if !rid.trim().is_empty() => format!("sysrun:{}", rid.trim()),
-        _ => "work".to_owned(),
-    };
-    let target = initial_target
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_owned)
-        .unwrap_or(default_target);
-    set_surface_scope(MODAL_SURFACE, scope);
-    m::next(MODAL_SURFACE.map_epoch);
-    m::next(MODAL_SURFACE.changes_epoch);
-    m::next(MODAL_SURFACE.impact_epoch);
-    m::take(MODAL_SURFACE.changes_key);
-    m::take(MODAL_SURFACE.impact_key);
-    m::set(MODAL_SURFACE.view_key, V::Null);
-
-    let mut modal = anew(&target);
-    if let Some(rid) = target.strip_prefix("sysrun:").filter(|s| !s.is_empty()) {
-        modal["run_id"] = json!(rid);
-    }
-    let clean_path = normalize_rel_path(strip_symbol_suffix(path));
-    if !clean_path.is_empty() {
-        let folder = parent(&clean_path);
-        if !folder.is_empty() {
-            let mut acc = String::new();
-            for part in folder.split('/').filter(|p| !p.is_empty()) {
-                if !acc.is_empty() {
-                    acc.push('/');
-                }
-                acc.push_str(part);
-                modal = spread(modal, &acc, false);
-            }
-        }
-        modal["focus"] = json!(clean_path);
-        modal["side_tab"] = json!("details");
-        modal["side_pinned"] = json!(true);
-    }
-    m::set("graph-map", modal.clone());
-
-    dom::disabled("graph-find-search", false);
-    dom::set_value("graph-map-filter", "");
-    dom::set_checked("graph-map-whole", false);
-    dom::set_checked("graph-map-notests", m::yes(&modal["notests"]));
-    dom::set_checked("graph-map-certain", m::yes(&modal["certain"]));
-    m::next("graph-find");
-    dom::cancel_timer("graph-find-search");
-    m::set("graph-find", V::Null);
-    dom::set_value("graph-find-search", "");
-    show_found();
-    dom::error("graph-map-error", "");
-    dom::hidden("graph-map-progress", true);
-    dom::text("graph-map-zoom-level", "100%");
-    blank();
-    dom::text("graph-map-chosen", "");
-    dom::text("graph-map-note", "Reading dependency impact…");
-    shut();
-    list();
-    dom::dialog("graph-map", true);
-    watch();
-    ensure_surface_impact(MODAL_SURFACE, &modal, None, true);
-    spawn_local(async move {
-        let _ = place().await;
-        if target.contains(':') && !target.starts_with("sysrun:") && !choose(&target).await {
-            return;
-        }
-        load(false).await;
-    });
+/// Selects a file of a member service in the picture embedded in the System
+/// view: the folders that hold it are opened there, the picture is brought
+/// to it, and what the change does to it is listed beside. Nothing is opened
+/// over the view; **Full map** of the embedded picture still does that.
+pub(crate) fn focus_system_file(kind: SystemEmbeddedKind, path: &str) -> bool {
+    focus_file_on_surface(kind.surface(), path)
 }
 fn handle_surface_input(surface: MapSurface, id: &str, value: &str, checked: Option<bool>) -> bool {
     let Some(suffix) = id.strip_prefix(surface.id_prefix) else {
@@ -16774,7 +17326,7 @@ mod tests {
     fn an_opened_file_draws_its_symbols_with_a_letter_and_the_files_around_without() {
         let html = canvas(&file());
         assert_eq!(html.matches("<button").count(), 7);
-        assert_eq!(html.matches("<path class=\"graph-map-edge").count(), 3);
+        assert_eq!(html.matches(" marker-end=").count(), 3);
         // A type, a method and a function carry a letter; the file's own
         // node and a plain name carry none.
         for letter in ["T", "m", "f"] {
@@ -17055,13 +17607,23 @@ mod tests {
     fn the_map_marks_the_selection_its_links_and_guesses() {
         let html = canvas(&view());
         assert_eq!(html.matches("<button").count(), 3);
-        assert_eq!(html.matches("<path class=\"graph-map-edge").count(), 2);
+        assert_eq!(html.matches(" marker-end=").count(), 2);
         // The selected folder, its two neighbours undimmed, both links lit.
         assert_eq!(html.matches("data-selected=\"true\"").count(), 1);
         assert_eq!(html.matches("data-dim=\"true\"").count(), 0);
         assert_eq!(html.matches("graph-map-edge-on").count(), 2);
-        // Only the link that is all guesses is dashed.
+        // Only the link that is all guesses is hollow: drawn wider, with
+        // its own middle over it in the colour of the ground.
         assert_eq!(html.matches("graph-map-edge-guess").count(), 1);
+        assert_eq!(
+            html.matches("<path class=\"graph-map-edge-core\"").count(),
+            1
+        );
+        assert!(
+            html.contains("graph-map-edge-guess\" data-ends=\"1 2\""),
+            "{html}"
+        );
+        assert!(html.contains("<path class=\"graph-map-edge-core\" data-ends=\"1 2\""));
         assert!(html.contains("<title>Order uses Cart · 3 links, 1 guessed</title>"));
         assert!(html.contains("<title>Order uses a&lt;b&gt;.php · 2 links guessed</title>"));
         // Names from the project never become markup.
@@ -17081,11 +17643,17 @@ mod tests {
         let (start, end) = (MARGIN + BOX_WIDTH, MARGIN + BOX_WIDTH + COLUMN_GAP);
         assert_eq!(html.matches("<linearGradient ").count(), 1);
         assert!(html.contains(&format!(
-            "<linearGradient id=\"graph-map-flow-0\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
+            "<linearGradient id=\"graph-map-flow-0\" class=\"graph-map-flow\" gradientUnits=\"userSpaceOnUse\" x1=\"{start}\" y1=\"0\" x2=\"{end}\" y2=\"0\"><stop offset=\"0\" class=\"graph-map-flow-uses\"/><stop offset=\"0.5\" class=\"graph-map-flow-between\"/><stop offset=\"1\" class=\"graph-map-flow-used\"/></linearGradient>"
         )), "{html}");
         assert_eq!(html.matches("stroke=\"url(#graph-map-flow-0)\"").count(), 2);
-        // All 7 dependency arrow markers are registered; default edges use the calls arrowhead.
-        assert_eq!(html.matches("<marker ").count(), 7);
+        // All 7 dependency arrow markers are registered, and the two a link
+        // leaves by; default edges use the calls arrowhead.
+        assert_eq!(html.matches("<marker ").count(), 9);
+        assert_eq!(
+            html.matches("marker-start=\"url(#graph-map-port)\"")
+                .count(),
+            2
+        );
         assert_eq!(
             html.matches("marker-end=\"url(#graph-map-arrow)\"").count(),
             2
@@ -17106,7 +17674,7 @@ mod tests {
         });
         let html = canvas(&ring);
         assert!(html.contains(&format!(
-            "<linearGradient id=\"graph-map-flow-1\" gradientUnits=\"userSpaceOnUse\" x1=\"{end}\" y1=\"0\" x2=\"{start}\""
+            "<linearGradient id=\"graph-map-flow-1\" class=\"graph-map-flow\" gradientUnits=\"userSpaceOnUse\" x1=\"{end}\" y1=\"0\" x2=\"{start}\""
         )), "{html}");
         assert!(html.contains("stroke=\"url(#graph-map-flow-0)\" stroke-width=\"3.5\""));
         assert!(html.contains(" graph-map-edge-back\""));
@@ -17157,7 +17725,7 @@ mod tests {
     #[test]
     fn the_legend_shows_both_colours_and_what_is_particular_to_the_picture() {
         let folder = legend(&view(), false);
-        assert!(folder.starts_with("An arrow runs from what uses <span class=\"graph-map-key graph-map-key-uses\" aria-hidden=\"true\"></span> to what is used <span class=\"graph-map-key graph-map-key-used\" aria-hidden=\"true\"></span>, and a box is tinted by which it does more here. Solid: read from the code."), "{folder}");
+        assert!(folder.starts_with("An arrow runs from what uses <span class=\"graph-map-key graph-map-key-uses\" aria-hidden=\"true\"></span> to what is used <span class=\"graph-map-key graph-map-key-used\" aria-hidden=\"true\"></span>, and a box is tinted by which it does more here. Its head and its dashes tell its kind, as the key of the links shows. Hollow: only guessed by name."), "{folder}");
         assert!(folder.ends_with("Dotted: against the main direction, closing a cycle (↻)."));
         let around = legend(&change(), true);
         assert!(
@@ -17810,7 +18378,7 @@ mod tests {
             let html = canvas(&other);
             assert_eq!(
                 html.matches("<path class=\"graph-map-hit\"").count(),
-                html.matches("<path class=\"graph-map-edge").count()
+                html.matches(" marker-end=").count()
             );
         }
         // So does each row of a selected place: the link is named in the
@@ -17839,7 +18407,12 @@ mod tests {
         let html = link_canvas(&view, "");
         assert_eq!(html.matches("<rect class=\"graph-map-frame\"").count(), 3);
         assert_eq!(html.matches("data-action=\"graph-link-node\"").count(), 5);
-        assert_eq!(html.matches("<path class=\"graph-map-edge").count(), 4);
+        assert_eq!(html.matches(" marker-end=").count(), 4);
+        // The one link that was guessed by name is hollow.
+        assert_eq!(
+            html.matches("<path class=\"graph-map-edge-core\"").count(),
+            1
+        );
         assert_eq!(
             html.matches("class=\"graph-map-edge graph-map-edge-guess\"")
                 .count(),
@@ -18010,7 +18583,9 @@ mod tests {
             html.contains("class=\"graph-map-node\" data-n=\"2\" data-action=\"graph-map-node\"")
         );
         assert_eq!(html.matches(" data-ends=\"1 0\" ").count(), 2);
-        assert_eq!(html.matches(" data-ends=\"1 2\" ").count(), 2);
+        // A guessed link is hollow, and the middle drawn over it is a part
+        // of it: it is lit and steps back with it.
+        assert_eq!(html.matches(" data-ends=\"1 2\" ").count(), 3);
         assert!(html.contains("<path class=\"graph-map-hit\" data-ends=\"1 0\" d=\"M"));
         let spread = canvas(&spread_view());
         assert!(spread.contains("class=\"graph-map-spread\" data-of=\"1\" data-dim=\"false\" data-action=\"graph-map-spread\" data-payload=\"&quot;src/Cart/Rules&quot;\""));
@@ -18028,10 +18603,11 @@ mod tests {
         let link = link_canvas(&link_view(), "");
         assert!(link.contains("class=\"graph-map-node\" data-n=\"0\" data-action=\"graph-link-node\" data-payload=\"&quot;src/Order/Order.php#L3:Order&quot;\""));
         assert!(link.contains("class=\"graph-map-node\" data-n=\"4\" data-action=\"graph-link-node\" data-payload=\"&quot;src/Cart/Cart.php#L20:.add&lt;T&gt;()&quot;\""));
+        // The guessed one twice: the link, and its middle drawn over it.
         assert_eq!(
             ["0 3", "0 4", "1 3", "2 3"]
                 .map(|ends| link.matches(&format!(" data-ends=\"{ends}\" ")).count()),
-            [1; 4]
+            [1, 2, 1, 1]
         );
     }
     const TOTAL: &str = "src/Cart/Cart.php#L19:.total()";
@@ -19741,7 +20317,7 @@ mod tests {
         );
         assert_eq!(
             note(&view),
-            "An abstraction with several implementations. 12 implementations stand under Gateway. A dashed link is one the tool only guessed."
+            "An abstraction with several implementations. 12 implementations stand under Gateway. A hollow link is one the tool only guessed."
         );
         let html = canvas(&view);
         // A frame is named for what its parts are, says how many of them
@@ -20140,7 +20716,7 @@ mod tests {
         );
         assert_eq!(
             note(&view),
-            "Files filed in layers by their names. 1 file of code here is filed in no layer. A dashed link is one the tool only guessed."
+            "Files filed in layers by their names. 1 file of code here is filed in no layer. A hollow link is one the tool only guessed."
         );
         let html = canvas(&view);
         // One row, in the order of the layers, whatever the links say.
@@ -20538,15 +21114,55 @@ mod tests {
         );
         // Not the middle of its ends: the handles pull it.
         assert_eq!(middle("M0 0 C0 8 8 16 16 16"), Some((5.0, 11.0)));
+        // A straight run has a middle too, and the angle it runs at.
+        assert_eq!(halfway("M10.0 10.0 L20.0 20.0"), Some((15.0, 15.0, 45.0)));
+        assert_eq!(halfway("M30 4 L10 4"), Some((20.0, 4.0, 180.0)));
         for other in [
-            "M10.0 10.0 L20.0 20.0",
             "M1 2 C3 4 5 6 7",
             "M1 2 C3 4 5 6 7 8 9",
             "M1 2 C3 4 5 6 7 x",
+            "M1 2 L3",
+            "M1 2",
+            "M1 2 3 L4 5",
+            "M1 2 Q3 4 5 6",
             "L1 2 C3 4 5 6 7 8",
             "",
         ] {
             assert_eq!(middle(other), None, "{other}");
+        }
+    }
+    /// A link that passes layers runs in pieces: a curve into the slot of
+    /// each layer it passes, straight through it, and a curve on. A word
+    /// about it stands halfway along the whole of it, so the links that
+    /// reach furthest keep their marks.
+    #[test]
+    fn a_link_of_several_pieces_has_its_middle_halfway_along_them() {
+        // Curve, straight slot, curve: the middle lies in the slot.
+        let (x, y, angle) =
+            halfway("M164.0 15.0 C200.0 15.0 200.0 40.0 236.0 40.0 L400.0 40.0 C436.0 40.0 436.0 15.0 472.0 15.0")
+                .unwrap();
+        assert_eq!((x, y, angle), (318.0, 40.0, 0.0));
+        // Drawn right to left, as the weaker direction of a cycle is, it
+        // runs the other way at the same place.
+        let (x, y, angle) =
+            halfway("M472.0 15.0 C436.0 15.0 436.0 40.0 400.0 40.0 L236.0 40.0 C200.0 40.0 200.0 15.0 164.0 15.0")
+                .unwrap();
+        assert_eq!((x, y, angle), (318.0, 40.0, 180.0));
+        // Two slots of unlike length: halfway by length, not by pieces.
+        let (x, y, _) = halfway("M0 0 L10 0 L10 30").unwrap();
+        assert_eq!((x, y), (10.0, 10.0));
+        // Every long link of a picture has a middle that lies on it.
+        let plan = plan(4, &[(0, 1, 1), (1, 2, 1), (2, 3, 1), (0, 3, 1), (0, 2, 1)]);
+        let long = plan
+            .wires
+            .iter()
+            .filter(|wire| wire.path.contains(" L"))
+            .collect::<Vec<_>>();
+        assert_eq!(long.len(), 2, "{plan:?}");
+        for wire in long {
+            let (x, _) = middle(&wire.path).expect("a middle of a long link");
+            let (from, to) = (plan.nodes[0].x + BOX_WIDTH, plan.nodes[3].x);
+            assert!(x > from && x < to, "{x} of {}", wire.path);
         }
     }
     #[test]
@@ -21448,6 +22064,7 @@ mod tests {
                 live_focus: None,
                 changes: Some(&changes),
                 impact: Some(&impact),
+                links_off: [false; 7],
             },
         );
         let bbox = rendered.selected_bbox.expect("selected_bbox present");
@@ -21508,7 +22125,7 @@ mod tests {
             },
             "used_by": []
         });
-        let canvas_html = link_canvas_with(&view, "", Some(&impact));
+        let canvas_html = link_canvas_with(&view, "", Some(&impact), &[false; 7]);
         assert!(canvas_html.contains("data-diff=\"added\""));
 
         let side_html = link_side_with(&view, "", Some(&impact));
@@ -21871,6 +22488,7 @@ mod tests {
                 live_focus: Some(&focus),
                 changes: None,
                 impact: None,
+                links_off: [false; 7],
             },
         );
         assert!(rendered.html.contains("data-visibility=\"protected\""));
@@ -22024,7 +22642,12 @@ mod tests {
             "kinds": [{ "kind": "reads", "links": 1 }, { "kind": "uses_const", "links": 1 }]
         });
 
-        let canvas = link_canvas_with(&view, "src/Billing/Checkout.php#L18:apply", None);
+        let canvas = link_canvas_with(
+            &view,
+            "src/Billing/Checkout.php#L18:apply",
+            None,
+            &[false; 7],
+        );
         assert!(canvas.contains(">P</span>"));
         assert!(canvas.contains(">K</span>"));
         assert!(canvas.contains("data-visibility=\"private\""));
@@ -22133,8 +22756,12 @@ mod tests {
             ],
             "kinds": []
         });
-        let link_canvas_html =
-            link_canvas_with(&link_view, "src/Billing/Checkout.php#L10:calc", None);
+        let link_canvas_html = link_canvas_with(
+            &link_view,
+            "src/Billing/Checkout.php#L10:calc",
+            None,
+            &[false; 7],
+        );
         assert!(link_canvas_html.contains(">P</span>"));
         assert!(link_canvas_html.contains(">K</span>"));
         assert!(link_canvas_html.contains("field of TaxRules"));
@@ -22473,7 +23100,7 @@ mod tests {
         });
 
         let html = canvas_with(&view, "session-graph", None).html;
-        assert_eq!(html.matches("<marker ").count(), 8);
+        assert_eq!(html.matches("<marker ").count(), 10);
         for suffix in [
             "",
             "-imports",
@@ -22498,7 +23125,19 @@ mod tests {
         // Multi-kind vs alias-only edges
         assert!(html.contains(
             "data-ends=\"0 1\" d=\"M"
-        ) && html.contains("data-edge-kind=\"calls\" data-edge-multi=\"true\" stroke=\"url(#session-graph-flow-"));
+        ) && html.contains("data-edge-kind=\"calls\" data-kinds=\"calls imports\" data-edge-multi=\"true\" stroke=\"url(#session-graph-flow-"));
+        // A link that holds several kinds leaves by a ring, one of a single
+        // kind by a dot.
+        assert_eq!(
+            html.matches("marker-start=\"url(#session-graph-port-multi)\"")
+                .count(),
+            1
+        );
+        assert_eq!(
+            html.matches("marker-start=\"url(#session-graph-port)\"")
+                .count(),
+            8
+        );
         assert!(html.contains(
             "marker-end=\"url(#session-graph-arrow)\"><title>A uses B · 3 links · calls 2, imports 1</title>"
         ));
@@ -22561,8 +23200,8 @@ mod tests {
             ]
         });
 
-        let html = link_canvas_with(&view, "", None);
-        assert_eq!(html.matches("<marker ").count(), 7);
+        let html = link_canvas_with(&view, "", None, &[false; 7]);
+        assert_eq!(html.matches("<marker ").count(), 9);
         assert!(!html.contains("graph-link-arrow-against"));
         assert!(html.contains("data-edge-kind=\"calls\""));
         assert!(html.contains("marker-end=\"url(#graph-link-arrow)\""));
@@ -22586,7 +23225,8 @@ mod tests {
     fn arrow_kinds_legend_html_and_existing_legend_endings_preserved() {
         let html = arrow_kinds_legend_html();
         assert_eq!(html.matches("class=\"graph-arrow-swatch\"").count(), 7);
-        assert_eq!(html.matches("aria-hidden=\"true\"").count(), 7);
+        // The seven arrows, and the hollow line of what was only inferred.
+        assert_eq!(html.matches("aria-hidden=\"true\"").count(), 8);
         assert!(!html.contains(" id=\""));
         for (kind, label) in [
             ("calls", "Calls"),
@@ -22598,7 +23238,9 @@ mod tests {
             ("uses", "Uses"),
         ] {
             assert!(html.contains(&format!("data-edge-kind=\"{kind}\"")));
-            assert!(html.contains(&format!("<span>{label}</span>")));
+            assert!(html.contains(&format!(
+                "<span class=\"graph-arrow-legend-name\">{label}</span>"
+            )));
         }
         assert!(html.contains("stroke-dasharray=\"8 4\""));
         assert!(html.contains("stroke-dasharray=\"6 3 2 3\""));
@@ -23018,5 +23660,319 @@ mod tests {
         assert!(compare_opts
             .contains("<option value=\"sess-launch-1\">Launch 1 · 2026-11-15 19:10 UTC</option>"));
         assert!(!compare_opts.contains("value=\"sess-launch-2\""));
+    }
+
+    /// Four files in a row and one link that passes two of them.
+    fn kinds_view() -> V {
+        json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/A.php", "name": "A", "folder": false},
+                {"path": "src/B.php", "name": "B", "folder": false},
+                {"path": "src/C.php", "name": "C", "folder": false},
+                {"path": "src/D.php", "name": "D", "folder": false}
+            ],
+            "edges": [
+                {"from": "src/A.php", "to": "src/B.php", "links": 4, "guessed": 0,
+                 "kinds": [{"kind": "calls", "links": 3}, {"kind": "imports", "links": 1}]},
+                {"from": "src/B.php", "to": "src/C.php", "links": 1, "guessed": 1,
+                 "kinds": [{"kind": "imports_from", "links": 1}]},
+                {"from": "src/C.php", "to": "src/D.php", "links": 2, "guessed": 0,
+                 "kinds": [{"kind": "references", "links": 2}, {"kind": "writes", "links": 3, "by": "source"}]},
+                {"from": "src/A.php", "to": "src/D.php", "links": 1, "guessed": 0,
+                 "kinds": [{"kind": "inherits", "links": 1}]}
+            ],
+            "focus": null
+        })
+    }
+    fn off(kinds: &[&str]) -> KindsOff {
+        kinds_off(&json!({"links_off": kinds}))
+    }
+    fn drawn_with(view: &V, links_off: KindsOff) -> String {
+        canvas_with_overlays(
+            view,
+            "graph-map",
+            CanvasOverlayContext {
+                links_off,
+                ..Default::default()
+            },
+        )
+        .html
+    }
+
+    #[test]
+    fn a_link_holds_its_kinds_and_is_drawn_as_the_strongest_that_is_shown() {
+        let view = kinds_view();
+        let kinds = |at: usize| EdgeKinds::of(&view["edges"][at]);
+        assert_eq!(kinds(0).held(), "calls imports");
+        assert_eq!(kinds(2).held(), "writes uses");
+        let all = [false; 7];
+        assert_eq!(kinds(0).primary(&all), Some("calls"));
+        assert!(kinds(0).multi(&all));
+        // With its calls switched off the link is an import, of one kind.
+        let no_calls = off(&["calls"]);
+        assert_eq!(kinds(0).primary(&no_calls), Some("imports"));
+        assert!(!kinds(0).multi(&no_calls));
+        // With every kind it holds switched off it is not drawn.
+        assert_eq!(kinds(0).primary(&off(&["calls", "imports"])), None);
+        assert_eq!(kinds(1).primary(&off(&["imports"])), None);
+        // What the source told counts like what the graph told.
+        assert_eq!(kinds(2).primary(&all), Some("writes"));
+        assert_eq!(kinds(2).primary(&off(&["writes"])), Some("uses"));
+        // A link that says nothing of its kind is a call, as it is drawn.
+        let plain = EdgeKinds::of(&json!({"from": "a", "to": "b", "links": 2}));
+        assert_eq!(plain.held(), "calls");
+        assert_eq!(plain.primary(&off(&["calls"])), None);
+        // Names that are no kind switch nothing off.
+        assert_eq!(off(&["nothing", "calls"]), off(&["calls"]));
+    }
+
+    #[test]
+    fn a_hidden_link_keeps_its_place_and_is_neither_drawn_nor_hit() {
+        let view = kinds_view();
+        let shown = drawn_with(&view, [false; 7]);
+        assert_eq!(shown.matches("data-kind-hidden").count(), 0);
+        let html = drawn_with(&view, off(&["imports"]));
+        // The link of imports alone is hidden: itself, the middle of its
+        // hollow line, and the wide link over it that is hit.
+        assert_eq!(html.matches("data-kind-hidden=\"true\"").count(), 3);
+        for part in [
+            "<path class=\"graph-map-edge graph-map-edge-guess\" data-ends=\"1 2\" data-kind-hidden=\"true\"",
+            "<path class=\"graph-map-edge-core\" data-ends=\"1 2\" data-kind-hidden=\"true\"",
+            "<path class=\"graph-map-hit\" data-ends=\"1 2\" data-kind-hidden=\"true\"",
+        ] {
+            assert!(html.contains(part), "{part} in {html}");
+        }
+        // Every box stands where it stood: the key hides, it does not lay
+        // the picture out anew.
+        let places = |html: &str| {
+            html.match_indices("style=\"left:")
+                .map(|(at, _)| html[at..].split('"').nth(1).unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(places(&shown), places(&html));
+        // A link of calls and imports stays, as calls, of one kind now.
+        assert!(html.contains("data-ends=\"0 1\" d=\"M"));
+        assert!(html.contains("data-edge-kind=\"calls\" data-kinds=\"calls imports\" stroke="));
+        // With the calls off as well it is drawn as nothing at all.
+        let html = drawn_with(&view, off(&["imports", "calls"]));
+        assert!(html.contains("data-ends=\"0 1\" data-kind-hidden=\"true\""));
+        // A link against the rules is drawn whatever the key says.
+        let mut ruled = view.clone();
+        ruled["edges"][3]["architecture_violation"] = json!(1);
+        let html = drawn_with(&ruled, off(&["extends"]));
+        assert!(
+            html.contains("graph-map-edge-against\" data-ends=\"0 3\" d=\"M"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_link_shades_into_the_colour_of_its_kind_and_keeps_its_dashes_when_guessed() {
+        let html = drawn_with(&kinds_view(), [false; 7]);
+        // One shading for each kind between each two columns.
+        for (id, kind) in [
+            ("graph-map-flow-0", None),
+            ("graph-map-flow-1-extends", Some("extends")),
+            ("graph-map-flow-2-imports", Some("imports")),
+            ("graph-map-flow-3-writes", Some("writes")),
+        ] {
+            let kind_attr = kind
+                .map(|kind| format!(" data-edge-kind=\"{kind}\""))
+                .unwrap_or_default();
+            assert!(
+                html.contains(&format!(
+                    "<linearGradient id=\"{id}\" class=\"graph-map-flow\"{kind_attr} gradientUnits"
+                )),
+                "{id} in {html}"
+            );
+        }
+        assert!(html.contains("stroke=\"url(#graph-map-flow-2-imports)\""));
+        // No style of a link is set on the link itself but its shading: the
+        // stylesheet gives the dashes of the kind, and nothing of a guess
+        // takes them away.
+        assert!(!html.contains("stroke-dasharray"));
+        // The guessed import is hollow: two wider, its middle as wide as it
+        // would be.
+        assert!(html.contains(
+            "data-edge-kind=\"imports\" data-kinds=\"imports\" stroke=\"url(#graph-map-flow-2-imports)\" stroke-width=\"3.0\""
+        ), "{html}");
+        assert!(html.contains("<path class=\"graph-map-edge-core\" data-ends=\"1 2\" d=\"M"));
+        assert!(html.contains("data-edge-kind=\"imports\" stroke-width=\"1.0\"/>"));
+    }
+
+    #[test]
+    fn a_link_that_passes_layers_carries_a_chevron_halfway() {
+        let html = drawn_with(&kinds_view(), [false; 7]);
+        // One link passes two layers in slots of its own; the others reach
+        // the next layer by one curve and need none.
+        assert_eq!(
+            html.matches("<path class=\"graph-map-edge-chevron\"")
+                .count(),
+            1
+        );
+        assert!(html.contains(
+            "<path class=\"graph-map-edge-chevron\" data-ends=\"0 3\" data-edge-kind=\"extends\" data-kinds=\"extends\" transform=\"translate("
+        ), "{html}");
+        assert!(html.contains("rotate(0)\" d=\"M-3 -3.4 L1.4 0 L-3 3.4\"/>"));
+        // It is hidden with its link.
+        let html = drawn_with(&kinds_view(), off(&["extends"]));
+        assert!(html
+            .contains("data-kinds=\"extends\" data-kind-hidden=\"true\" transform=\"translate("));
+        // A word about the link stands where the chevron would: then the
+        // word is drawn and the chevron is not.
+        let mut ruled = kinds_view();
+        ruled["pattern"] = json!({"sort": "layers", "declared": true});
+        ruled["edges"][3]["against"] = json!(true);
+        ruled["edges"][3]["added"] = json!(2);
+        let html = drawn_with(&ruled, [false; 7]);
+        if html.contains("graph-map-edge-mark") {
+            assert_eq!(html.matches("graph-map-edge-chevron").count(), 0, "{html}");
+        }
+    }
+
+    #[test]
+    fn the_key_of_the_links_counts_them_and_switches_them() {
+        let view = kinds_view();
+        let all = [false; 7];
+        assert_eq!(kind_counts(&view, &all), ([1, 2, 1, 0, 1, 0, 1], 0));
+        assert_eq!(kind_counts(&view, &off(&["imports"])).1, 1);
+        assert_eq!(kind_counts(&view, &off(&["imports", "calls"])).1, 2);
+        // A link whose end is not drawn is not counted, as it is not drawn.
+        let mut cut = view.clone();
+        cut["nodes"].as_array_mut().unwrap().pop();
+        assert_eq!(kind_counts(&cut, &all).0, [1, 2, 0, 0, 0, 0, 0]);
+        // The window of one link has no boxes of that kind: all are counted.
+        let window = json!({"edges": [{"from": "a", "to": "b", "kind": "calls"}]});
+        assert_eq!(kind_counts(&window, &all).0[0], 1);
+
+        let html = kinds_legend_html(&view, &off(&["imports"]), "session");
+        assert_eq!(html.matches("data-action=\"graph-kind-toggle\"").count(), 7);
+        assert_eq!(html.matches("data-action=\"graph-kind-preset\"").count(), 4);
+        assert!(html.contains(
+            "data-payload=\"{&quot;kind&quot;:&quot;imports&quot;,&quot;surface&quot;:&quot;session&quot;}\" data-edge-kind=\"imports\" data-empty=\"false\" aria-pressed=\"false\""
+        ), "{html}");
+        assert!(html.contains(
+            "<span class=\"graph-arrow-legend-name\">Imports</span><span class=\"graph-arrow-legend-count\">2</span>"
+        ));
+        assert!(html
+            .contains("data-edge-kind=\"implements\" data-empty=\"true\" aria-pressed=\"true\""));
+        assert!(html.contains("1 link hidden by this key"));
+        // The preset that fits what is switched off is the pressed one.
+        let pressed = |html: &str| {
+            html.split("data-action=\"graph-kind-preset\"")
+                .skip(1)
+                .filter(|part| part.contains("aria-pressed=\"true\""))
+                .map(|part| {
+                    part.split("&quot;preset&quot;:&quot;")
+                        .nth(1)
+                        .unwrap()
+                        .split('&')
+                        .next()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pressed(&html), ["no-imports"]);
+        assert_eq!(pressed(&kinds_legend_html(&view, &all, "modal")), ["all"]);
+        assert_eq!(
+            pressed(&kinds_legend_html(
+                &view,
+                &off(&["imports", "extends", "implements", "uses"]),
+                "modal"
+            )),
+            ["runtime"]
+        );
+        assert!(!kinds_legend_html(&view, &all, "modal").contains("hidden by this key"));
+    }
+
+    #[test]
+    fn a_kind_is_switched_off_and_on_shown_alone_and_never_leaves_nothing() {
+        let held = |state: &V| {
+            m::array(&state["links_off"])
+                .iter()
+                .map(|kind| kind.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let state = json!({});
+        let state = switched_kind(state, "imports", false);
+        assert_eq!(held(&state), "imports");
+        let state = switched_kind(state, "uses", false);
+        assert_eq!(held(&state), "imports uses");
+        let state = switched_kind(state, "imports", false);
+        assert_eq!(held(&state), "uses");
+        // Alone: every other kind goes off, also where the kind was off.
+        let alone = switched_kind(state.clone(), "uses", true);
+        assert_eq!(
+            held(&alone),
+            "calls imports extends implements writes reads"
+        );
+        // Asked again for the kind that is alone, every kind is shown.
+        assert_eq!(held(&switched_kind(alone.clone(), "uses", true)), "");
+        // Switching the last shown kind off shows every kind.
+        assert_eq!(held(&switched_kind(alone.clone(), "uses", false)), "");
+        // Another kind alone takes its place.
+        assert_eq!(
+            held(&switched_kind(alone, "calls", true)),
+            "imports extends implements writes reads uses"
+        );
+        // A name that is no kind changes nothing.
+        assert_eq!(switched_kind(state.clone(), "nothing", false), state);
+        // The presets.
+        assert_eq!(held(&preset_kinds(state.clone(), "all")), "");
+        assert_eq!(
+            held(&preset_kinds(state.clone(), "runtime")),
+            "imports extends implements uses"
+        );
+        assert_eq!(
+            held(&preset_kinds(state.clone(), "hierarchy")),
+            "calls imports writes reads uses"
+        );
+        assert_eq!(held(&preset_kinds(state.clone(), "no-imports")), "imports");
+        assert_eq!(preset_kinds(state.clone(), "nothing"), state);
+    }
+
+    #[test]
+    fn a_dependency_a_change_added_is_drawn_as_the_kind_it_is() {
+        let view = json!({
+            "scope": "src",
+            "nodes": [
+                {"path": "src/A.php", "name": "A", "folder": false},
+                {"path": "src/B.php", "name": "B", "folder": false},
+                {"path": "src/C.php", "name": "C", "folder": false}
+            ],
+            "edges": [],
+            "focus": {"path": "src/A.php"}
+        });
+        let impact = json!({
+            "path": "src/A.php",
+            "uses": {
+                "added": [
+                    {"target": "src/B.php", "kind": "writes"},
+                    {"target": "src/B.php", "kind": "reads"},
+                    {"target": "src/B.php", "kind": "writes"}
+                ],
+                "removed": [{"target": "src/C.php", "kind": "imports"}],
+                "unchanged": []
+            },
+            "used_by": []
+        });
+        let html = canvas_with_overlays(
+            &view,
+            "graph-map",
+            CanvasOverlayContext {
+                impact: Some(&impact),
+                ..Default::default()
+            },
+        )
+        .html;
+        assert!(html.contains(
+            "data-diff=\"added\" d=\"M"
+        ) && html.contains("data-edge-kind=\"writes\" data-kinds=\"writes\" stroke-width=\"2\" marker-end=\"url(#graph-map-arrow-writes)\"><title>A (added dependency · writes)</title>"), "{html}");
+        assert!(html.contains(
+            "data-edge-kind=\"imports\" data-kinds=\"imports\" stroke-width=\"2\" marker-end=\"url(#graph-map-arrow-imports)\"><title>A (removed dependency · imports)</title>"
+        ));
     }
 }

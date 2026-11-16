@@ -1299,12 +1299,19 @@ impl ActiveDispatch {
 struct BridgeState {
     sessions: BTreeMap<String, (String, String)>,
     dispatches: BTreeMap<(String, String, u64), ActiveDispatch>,
+    /// How many events of each run passed the bridge: what a run's
+    /// evidence reaches is worked out anew once another one did.
+    events: BTreeMap<String, u64>,
 }
 
 pub struct HarnessCodeGraphBridge {
     store: SessionStore,
     graphs: Arc<Graphs>,
     state: Mutex<BridgeState>,
+    /// What the evidence of each run was last found to reach.
+    reach: Mutex<BTreeMap<String, Reach>>,
+    /// How often that was worked out, not taken from what was kept.
+    reached: std::sync::atomic::AtomicU64,
 }
 
 impl HarnessCodeGraphBridge {
@@ -1313,6 +1320,8 @@ impl HarnessCodeGraphBridge {
             store,
             graphs,
             state: Mutex::new(BridgeState::default()),
+            reach: Mutex::new(BTreeMap::new()),
+            reached: std::sync::atomic::AtomicU64::new(0),
         });
         register_global_bridge(&me);
         me
@@ -1335,6 +1344,9 @@ impl HarnessCodeGraphBridge {
     /// Receives every emitted session event (along with its inserted SQLite `events.id`) from
     /// `SystemWorkflow`'s `ActivityStream::new_with_ids` so `shell_reads` stores exact SQLite row IDs.
     pub fn on_emitted_session_event(&self, run_id: &str, event_id: Option<u64>, event: &Value) {
+        if let Ok(mut guard) = self.state.lock() {
+            *guard.events.entry(run_id.to_owned()).or_default() += 1;
+        }
         let Some(eid) = event_id else {
             return;
         };
@@ -2185,6 +2197,25 @@ impl CodeGraphBridge for HarnessCodeGraphBridge {
 
         // 2. Enrich `evidence.unopened_callers` and `cross_service_unopened` from ready member-service Graphify indexes.
         if let (Some(sys), Some(st)) = (system, state) {
+            // The evidence of a run is summed up from its dispatches, with a
+            // look at the checkout of every member, and what it reaches is
+            // read from the graph of every edited service. A run that is
+            // going on is asked for all of it about once a second. The same
+            // evidence over the same graphs gives the same answer, so the
+            // answer is kept until either of them changes.
+            let key = self.reach_key(
+                run_id,
+                sys,
+                st,
+                &all_dispatches,
+                &targets,
+                &view["evidence"],
+            );
+            if let Some((evidence, cross)) = self.kept_reach(run_id, key) {
+                view["evidence"] = evidence;
+                view["cross_service_unopened"] = cross;
+                return Ok(());
+            }
             let clean_dispatches: Vec<DispatchEvidence> = all_dispatches
                 .iter()
                 .cloned()
@@ -2199,110 +2230,255 @@ impl CodeGraphBridge for HarnessCodeGraphBridge {
             if !clean_dispatches.is_empty() || !view["evidence"].is_object() {
                 view["evidence"] = summarize_run_evidence(Some(sys), st, &clean_dispatches);
             }
-            let mut impact_summaries = build_run_scoped_summaries(sys, &clean_dispatches);
-            let edited_services: BTreeSet<String> = impact_summaries
-                .iter()
-                .filter(|(sid, s)| *sid != "__system__" && !s.changed_files.is_empty())
-                .map(|(sid, _)| sid.clone())
-                .collect();
+            let existing = view["evidence"]["cross_service_unopened"].clone();
+            let (unopened_callers, merged_cross) = self.reach(
+                run_id,
+                sys,
+                &targets,
+                &clean_dispatches,
+                &all_dispatches,
+                &existing,
+            );
+            if view["evidence"].is_object() {
+                view["evidence"]["unopened_callers"] = json!(unopened_callers);
+                view["evidence"]["cross_service_unopened"] = json!(merged_cross);
+                view["cross_service_unopened"] = view["evidence"]["cross_service_unopened"].clone();
+            }
+            self.keep_reach(
+                run_id,
+                key,
+                &view["evidence"],
+                &view["cross_service_unopened"],
+            );
+        }
+        Ok(())
+    }
+}
 
-            let mut unopened_callers = Vec::new();
-            let target_sysrun = Target::SysRun(run_id.to_owned());
-            for target in &targets {
-                if target.service_id == "__system__"
-                    || !edited_services.contains(&target.service_id)
-                {
-                    continue;
+/// How long what a run's evidence reaches is kept while the run goes on,
+/// whatever the evidence says: a guard for an event that was stored without
+/// passing the bridge.
+const REACH_KEPT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Runs whose reach is kept at once; the least recently worked out gives way.
+const REACH_RUNS: usize = 32;
+
+/// The evidence of a run as it was last summed up, with what it was found
+/// to reach, and what that was worked out from.
+struct Reach {
+    key: u64,
+    at: std::time::Instant,
+    evidence: Value,
+    cross: Value,
+}
+
+impl HarnessCodeGraphBridge {
+    /// What the evidence of a run and its reach are worked out from, as
+    /// one number: the evidence of every dispatch, the summary the view
+    /// came with, the system and its state, the published graph of every
+    /// member, and how many events of the run passed the bridge.
+    fn reach_key(
+        &self,
+        run_id: &str,
+        sys: &System,
+        state: &Value,
+        dispatches: &[DispatchEvidence],
+        targets: &[ResolvedServiceTarget],
+        existing: &Value,
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_string(dispatches)
+            .unwrap_or_default()
+            .hash(&mut hasher);
+        existing.to_string().hash(&mut hasher);
+        state["status"].to_string().hash(&mut hasher);
+        sys.config.hash(&mut hasher);
+        sys.config_data.to_string().hash(&mut hasher);
+        for edge in &sys.edges {
+            edge.to_string().hash(&mut hasher);
+        }
+        sys.snapshot.hash(&mut hasher);
+        for target in targets {
+            target.service_id.hash(&mut hasher);
+            target.graph_id.hash(&mut hasher);
+            self.graphs.live_stamp(&target.graph_id).hash(&mut hasher);
+        }
+        let events = self
+            .state
+            .lock()
+            .ok()
+            .and_then(|guard| guard.events.get(run_id).copied())
+            .unwrap_or(0);
+        events.hash(&mut hasher);
+        hasher.finish()
+    }
+    /// The evidence kept for a run, where it was worked out from what
+    /// `key` stands for and not long ago.
+    fn kept_reach(&self, run_id: &str, key: u64) -> Option<(Value, Value)> {
+        let guard = self.reach.lock().ok()?;
+        let kept = guard.get(run_id)?;
+        (kept.key == key && kept.at.elapsed() < REACH_KEPT)
+            .then(|| (kept.evidence.clone(), kept.cross.clone()))
+    }
+    fn keep_reach(&self, run_id: &str, key: u64, evidence: &Value, cross: &Value) {
+        let Ok(mut guard) = self.reach.lock() else {
+            return;
+        };
+        if guard.len() >= REACH_RUNS && !guard.contains_key(run_id) {
+            let oldest = guard
+                .iter()
+                .min_by_key(|(_, kept)| kept.at)
+                .map(|(run, _)| run.clone());
+            if let Some(oldest) = oldest {
+                guard.remove(&oldest);
+            }
+        }
+        guard.insert(
+            run_id.to_owned(),
+            Reach {
+                key,
+                at: std::time::Instant::now(),
+                evidence: evidence.clone(),
+                cross: cross.clone(),
+            },
+        );
+    }
+    /// What the evidence of a run reaches beyond what the run opened: in
+    /// each edited service the files that use what was changed and were
+    /// not opened, and across services the consumers of its contracts.
+    fn reach(
+        &self,
+        run_id: &str,
+        sys: &System,
+        targets: &[ResolvedServiceTarget],
+        clean_dispatches: &[DispatchEvidence],
+        all_dispatches: &[DispatchEvidence],
+        existing: &Value,
+    ) -> (Vec<Value>, Vec<Value>) {
+        self.reached
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let mut impact_summaries = build_run_scoped_summaries(sys, clean_dispatches);
+        let edited_services: BTreeSet<String> = impact_summaries
+            .iter()
+            .filter(|(sid, s)| *sid != "__system__" && !s.changed_files.is_empty())
+            .map(|(sid, _)| sid.clone())
+            .collect();
+
+        let mut unopened_callers = Vec::new();
+        let target_sysrun = Target::SysRun(run_id.to_owned());
+        for target in targets {
+            if target.service_id == "__system__" || !edited_services.contains(&target.service_id) {
+                continue;
+            }
+            let Some(idx) = self.graphs.live_index(&target.graph_id) else {
+                continue;
+            };
+            let mut added_for_service = false;
+            if let Ok(map_val) = self.graphs.map(
+                &target.graph_id,
+                Some(&target_sysrun),
+                &crate::graph::Shown {
+                    scope: "",
+                    focus: None,
+                    focus_session: None,
+                    certain: false,
+                    filter: "",
+                    followed: None,
+                    notests: false,
+                    spread: &[],
+                    link: None,
+                    path: None,
+                    cycle: None,
+                    base: None,
+                    shared: None,
+                    patterns: false,
+                    history: false,
+                    modules: false,
+                    no_incoming: false,
+                    launch: None,
+                    compare_launch: None,
+                    agent: None,
+                    scenario: None,
+                    pattern: None,
+                    whole: false,
+                },
+            ) && let Some(items) = map_val["run"]["reach"]["rows"].as_array()
+                && !items.is_empty()
+            {
+                for item in items.iter().take(16) {
+                    let mut entry = item.clone();
+                    entry["service"] = json!(target.service_id);
+                    unopened_callers.push(entry);
+                    added_for_service = true;
                 }
-                let Some(idx) = self.graphs.live_index(&target.graph_id) else {
-                    continue;
-                };
-                let mut added_for_service = false;
-                if let Ok(map_val) = self.graphs.map(
-                    &target.graph_id,
-                    Some(&target_sysrun),
-                    &crate::graph::Shown {
-                        scope: "",
-                        focus: None,
-                        focus_session: None,
-                        certain: false,
-                        filter: "",
-                        followed: None,
-                        notests: false,
-                        spread: &[],
-                        link: None,
-                        path: None,
-                        cycle: None,
-                        base: None,
-                        shared: None,
-                        patterns: false,
-                        history: false,
-                        modules: false,
-                        no_incoming: false,
-                        launch: None,
-                        compare_launch: None,
-                        agent: None,
-                        scenario: None,
-                        pattern: None,
-                        whole: false,
-                    },
-                ) && let Some(items) = map_val["run"]["reach"]["rows"].as_array()
-                    && !items.is_empty()
-                {
-                    for item in items.iter().take(16) {
-                        let mut entry = item.clone();
-                        entry["service"] = json!(target.service_id);
-                        unopened_callers.push(entry);
-                        added_for_service = true;
-                    }
-                }
-                if !added_for_service
-                    && let Some(svc_summary) = impact_summaries.get(&target.service_id)
-                {
-                    let edited_ids: BTreeSet<u32> = svc_summary
-                        .changed_files
-                        .iter()
-                        .filter_map(|ch| idx.file_id(&ch.path))
-                        .collect();
-                    let opened_paths = &svc_summary.opened_files;
-                    let files = idx.files();
-                    let mut seen_callers = BTreeSet::new();
-                    for (from, to, pair) in idx.pairs() {
-                        if edited_ids.contains(to)
-                            && !edited_ids.contains(from)
-                            && pair.weight(false) > 0
-                            && seen_callers.insert(*from)
-                            && let Some(caller_path) = files.get(*from as usize)
-                            && !opened_paths.contains(caller_path.as_str())
-                        {
-                            let callee_path = files.get(*to as usize).cloned().unwrap_or_default();
-                            unopened_callers.push(json!({
-                                "service": target.service_id,
-                                "path": caller_path,
-                                "links": pair.weight(false),
-                                "to": callee_path,
-                                "test": graph_map::is_test_path(caller_path),
-                            }));
-                            if unopened_callers.len() >= 32 {
-                                break;
-                            }
+            }
+            if !added_for_service
+                && let Some(svc_summary) = impact_summaries.get(&target.service_id)
+            {
+                let edited_ids: BTreeSet<u32> = svc_summary
+                    .changed_files
+                    .iter()
+                    .filter_map(|ch| idx.file_id(&ch.path))
+                    .collect();
+                let opened_paths = &svc_summary.opened_files;
+                let files = idx.files();
+                let mut seen_callers = BTreeSet::new();
+                for (from, to, pair) in idx.pairs() {
+                    if edited_ids.contains(to)
+                        && !edited_ids.contains(from)
+                        && pair.weight(false) > 0
+                        && seen_callers.insert(*from)
+                        && let Some(caller_path) = files.get(*from as usize)
+                        && !opened_paths.contains(caller_path.as_str())
+                    {
+                        let callee_path = files.get(*to as usize).cloned().unwrap_or_default();
+                        unopened_callers.push(json!({
+                            "service": target.service_id,
+                            "path": caller_path,
+                            "links": pair.weight(false),
+                            "to": callee_path,
+                            "test": graph_map::is_test_path(caller_path),
+                        }));
+                        if unopened_callers.len() >= 32 {
+                            break;
                         }
                     }
                 }
             }
+        }
 
-            augment_summaries_with_intra_callers(
-                &self.graphs,
-                &targets,
-                &mut impact_summaries,
-                false,
-            );
-            let opened_by_service = collect_opened_by_service_for_run(&all_dispatches, None);
-            let sys_graph = SystemGraph::from_system(sys, impact_summaries);
-            let mut merged_cross = Vec::new();
-            let mut seen_cross = BTreeSet::new();
-            if let Some(existing) = view["evidence"]["cross_service_unopened"].as_array() {
-                for raw_item in existing {
+        augment_summaries_with_intra_callers(&self.graphs, targets, &mut impact_summaries, false);
+        let opened_by_service = collect_opened_by_service_for_run(all_dispatches, None);
+        let sys_graph = SystemGraph::from_system(sys, impact_summaries);
+        let mut merged_cross = Vec::new();
+        let mut seen_cross = BTreeSet::new();
+        if let Some(existing) = existing.as_array() {
+            for raw_item in existing {
+                let item = normalize_cross_unopened_entry(raw_item);
+                let key = (
+                    item["consumer"].as_str().unwrap_or("").to_owned(),
+                    item["contract"].as_str().unwrap_or("").to_owned(),
+                    item["path"].as_str().unwrap_or("").to_owned(),
+                );
+                if seen_cross.insert(key) {
+                    merged_cross.push(item);
+                }
+            }
+        }
+        for target in targets {
+            if target.service_id == "__system__" || !edited_services.contains(&target.service_id) {
+                continue;
+            }
+            let imp = sys_graph.impact_across_services(&CrossServiceImpactQuery {
+                service: Some(target.service_id.clone()),
+                path: None,
+                contract: None,
+                certain: false,
+                opened_by_service: opened_by_service.clone(),
+            });
+            if let Some(arr) = imp["cross_service_unopened"].as_array() {
+                for raw_item in arr {
                     let item = normalize_cross_unopened_entry(raw_item);
                     let key = (
                         item["consumer"].as_str().unwrap_or("").to_owned(),
@@ -2314,41 +2490,8 @@ impl CodeGraphBridge for HarnessCodeGraphBridge {
                     }
                 }
             }
-            for target in &targets {
-                if target.service_id == "__system__"
-                    || !edited_services.contains(&target.service_id)
-                {
-                    continue;
-                }
-                let imp = sys_graph.impact_across_services(&CrossServiceImpactQuery {
-                    service: Some(target.service_id.clone()),
-                    path: None,
-                    contract: None,
-                    certain: false,
-                    opened_by_service: opened_by_service.clone(),
-                });
-                if let Some(arr) = imp["cross_service_unopened"].as_array() {
-                    for raw_item in arr {
-                        let item = normalize_cross_unopened_entry(raw_item);
-                        let key = (
-                            item["consumer"].as_str().unwrap_or("").to_owned(),
-                            item["contract"].as_str().unwrap_or("").to_owned(),
-                            item["path"].as_str().unwrap_or("").to_owned(),
-                        );
-                        if seen_cross.insert(key) {
-                            merged_cross.push(item);
-                        }
-                    }
-                }
-            }
-
-            if view["evidence"].is_object() {
-                view["evidence"]["unopened_callers"] = json!(unopened_callers);
-                view["evidence"]["cross_service_unopened"] = json!(merged_cross);
-                view["cross_service_unopened"] = view["evidence"]["cross_service_unopened"].clone();
-            }
         }
-        Ok(())
+        (unopened_callers, merged_cross)
     }
 }
 

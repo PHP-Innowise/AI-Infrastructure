@@ -1165,6 +1165,102 @@ fn code_graph_bridge_captures_live_focus_shell_read_event_ids_and_enriches_run_v
             .any(|c| c["service"] == "web"),
         "expected cross-service unopened web: {run_view}"
     );
+
+    // A run that is going on is asked for its view about once a second.
+    // Its evidence is summed up, and what it reaches is worked out, once
+    // for the same evidence over the same graphs; the views asked for
+    // meanwhile are the same.
+    use std::sync::atomic::Ordering;
+    let asked = |evidence: &DispatchEvidence| {
+        let mut view = json!({
+            "id": run_id,
+            "project_id": fx.monorepo_pid,
+            "config_path": "system.json",
+        });
+        fx.bridge
+            .enrich_run_view(
+                run_id,
+                Some(&system),
+                Some(&ctx.state),
+                std::slice::from_ref(evidence),
+                &mut view,
+            )
+            .unwrap();
+        view
+    };
+    let reached = || fx.bridge.reached.load(Ordering::Relaxed);
+    let (_, _, members) =
+        resolve_all_targets(&fx.store, Some(&fx.graphs), None, &fx.monorepo_pid, None).unwrap();
+    // Looking at a run brings the graph of an edited member up to date,
+    // which publishes it anew. The graphs stand still once nothing is built.
+    let rested = || {
+        let started = std::time::Instant::now();
+        while members.iter().any(|member| {
+            fx.graphs
+                .status(&member.graph_id, false)
+                .is_ok_and(|status| status["state"] == "building")
+        }) {
+            assert!(started.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    // An answer worked out on a graph that is then published anew is
+    // worked out once more: ask until an answer comes from what was kept.
+    let mut settled = Value::Null;
+    for round in 0.. {
+        assert!(round < 10, "the graphs never stood still");
+        rested();
+        let before = reached();
+        settled = asked(&evidence);
+        rested();
+        if reached() == before {
+            break;
+        }
+    }
+    let base = reached();
+    for _ in 0..20 {
+        assert_eq!(asked(&evidence), settled);
+    }
+    assert_eq!(reached(), base);
+    // Other evidence is another question: the caller that was not opened
+    // is opened now, and is no longer told.
+    let mut opened = evidence.clone();
+    opened.opened.push("src/OrderController.php".to_owned());
+    let after = asked(&opened);
+    assert_eq!(reached(), base + 1);
+    assert!(
+        !after["evidence"]["unopened_callers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|caller| caller["path"] == "src/OrderController.php"),
+        "{after}"
+    );
+    assert_eq!(asked(&opened), after);
+    assert_eq!(reached(), base + 1);
+    // So is an event of the run that passed the bridge, whatever it held.
+    fx.bridge
+        .on_emitted_session_event(run_id, None, &json!({"kind": "agent_activity"}));
+    assert_eq!(asked(&opened), after);
+    assert_eq!(reached(), base + 2);
+    // And a graph of a member that was published anew: what the answer is
+    // kept by tells one published graph from the next.
+    let key = || {
+        fx.bridge.reach_key(
+            run_id,
+            &system,
+            &ctx.state,
+            std::slice::from_ref(&opened),
+            &members,
+            &Value::Null,
+        )
+    };
+    let before = key();
+    assert_eq!(before, key());
+    let graph = crate::graph::live(&fx.store.state, &orders_t.graph_id);
+    let text = fs::read_to_string(&graph).unwrap();
+    fs::write(&graph, format!("{text}\n")).unwrap();
+    assert_ne!(before, key());
 }
 
 #[test]

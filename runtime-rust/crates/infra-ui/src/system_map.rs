@@ -2320,7 +2320,7 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
         .unwrap_or_default();
 
     let mut html = format!(
-        "<div class=\"graph-map-plane system-map-plane\" data-surface=\"{}\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" aria-hidden=\"true\"><defs>{}</defs>",
+        "<div class=\"graph-map-plane system-map-plane\" data-surface=\"{}\" style=\"width:{:.0}px;height:{:.0}px\"><svg width=\"{:.0}\" height=\"{:.0}\" role=\"group\" aria-label=\"Links between services\"><defs>{}</defs>",
         surface.id,
         layout.width,
         layout.height,
@@ -2438,7 +2438,7 @@ pub fn render_canvas_html(surface: SysMapSurface, doc: &V, state: &V) -> (String
 
         if !m::yes(&edge["child_link"]) {
             html.push_str(&format!(
-                "<g class=\"graph-map-edge-tie system-map-edge-label\" data-from=\"{}\" data-to=\"{}\"{}><rect x=\"{:.1}\" y=\"{:.1}\" width=\"54\" height=\"16\" rx=\"8\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
+                "<g class=\"graph-map-edge-tie system-map-edge-label\" aria-hidden=\"true\" data-from=\"{}\" data-to=\"{}\"{}><rect x=\"{:.1}\" y=\"{:.1}\" width=\"54\" height=\"16\" rx=\"8\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text></g>",
                 escape(&from),
                 escape(&to),
                 if is_selected || is_highlighted { " data-edge-state=\"on\"" } else { "" },

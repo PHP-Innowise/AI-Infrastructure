@@ -35,6 +35,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
+mod access;
 mod history;
 mod incoming;
 pub(crate) mod layer_rules;
@@ -714,6 +715,9 @@ pub struct Index {
     /// The patterns the graph shows signs of, once they were asked for: by
     /// every link, and by the links the tool read from the code.
     patterns: [OnceLock<patterns::Patterns>; 2],
+    /// What the sources read and write of each other, file by file, as far
+    /// as pictures asked for it.
+    access: access::Access,
     /// What a graph without tests leaves out: test files, and tests inside
     /// the files it keeps.
     left: (u64, u64),
@@ -978,6 +982,7 @@ impl Index {
             plain: OnceLock::new(),
             wires: OnceLock::new(),
             patterns: Default::default(),
+            access: Default::default(),
             left: (0, 0),
             ruled,
             files: builder.files,
@@ -2532,6 +2537,7 @@ impl Index {
             plain: OnceLock::new(),
             wires: OnceLock::new(),
             patterns: Default::default(),
+            access: Default::default(),
             ties,
             left: (gone.iter().filter(|gone| **gone).count() as u64, inside),
             ruled,

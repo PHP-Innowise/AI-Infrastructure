@@ -24,6 +24,47 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Make the seven kinds of links of the Harness dependency map tell themselves
+  apart at once, and let none of an arrow's marks hide another. The native
+  source reader (`graph_deps`) now tells an assignment as `writes` and any other
+  access of a property, a field or a constant as `reads`, where it told both as
+  `uses`; a member reference is listed under the dependency of its own kind, once.
+  Pictures drawn on the checkout's own graph add to each drawn link how many
+  members the sources read and write (`graph_map/access.rs`, at most 160 sources
+  read anew for a picture, kept for the graph). An arrow's kind is the colour at
+  its head, its dashes and the shape of its head; its direction is the shade it
+  runs through, the dot it leaves by and a chevron halfway on a link that passes
+  layers; a link the tool only inferred is hollow, where it was dashed and lost
+  the dashes of its kind; the stylesheet no longer paints over the shading. Every
+  colour of an arrow stands at least 4.5 to 1 against its ground in both themes
+  (`--map-edge-from`, `--map-edge-calls`, a new `--map-edge-reads`), and the heads
+  keep their size in a picture made small.
+- Turn the key of the links into their switchboard in the Dependency Map, the
+  window of one link, the Sessions code graph and both System code maps: each
+  kind is a button with the number of links that hold it, resting on it lights
+  them, selecting it hides and shows them, Alt shows it alone, and **All**,
+  **Runtime**, **Hierarchy** and **No imports** switch several. Nothing is asked
+  of the server and no box moves; the choice is kept in the browser.
+- Give back the marks that links passing layers had lost: what a change added
+  to a link against the order of the layers (`+N`), the `+` and `-` of a
+  dependency diff and the word of a pattern stand halfway along a link of any
+  shape, where they stood only on a link of one curve.
+- Draw a link against the layer rules whatever the limits of a picture left out
+  (the 24 with the most links), and mark such links among the symbols of an
+  opened file.
+- Select a file of a member service in the code map embedded in the System view
+  instead of opening the Dependency Map window over it, from the search of the
+  system map and from **Map** beside a file of a receipt.
+- Keep the summed-up evidence of a system run and what it reaches while nothing
+  it is made from changed, instead of looking at the checkout of every member
+  and reading the graph of every edited service on each request of the run's
+  view. On the test fixture a repeated request went from 14-27 ms to 0.3-0.5 ms,
+  and from 30-34 ms to about 3 ms with a 4,000-file graph and a run of 1,500
+  events (debug build); it was not measured on a live system run.
+- Read the callers the graph knows before any other file when the callers of a
+  changed file are scanned, the most linked first, and expose the links of the
+  system map to assistive technology: they were focusable inside a hidden
+  drawing.
 - Add cross-service `SystemGraph` topology, contract provenance (`declared`, `verified`, `undeclared_in_code`), version/availability risk detection, cycle/path/shared/layer/blast-radius analysis, and cross-service change-impact reach (`cross_service_unopened`) in `infra-system`, together with `CodeGraphBridge` read-only Graphify worker sandbox/prompt grants (`GRAPHIFY_NO_AUTO_REFRESH=1`, `tell_agents_graph`), durable `<phase>-a<attempt>.evidence.json` dispatch evidence, and `infra-engine system map --format json` plus `infra-engine system graph {status,changes,impact}`.
 - Keep system runs from overflowing Tokio worker stacks (boxed run futures, 8 MiB runtime worker stacks), limit Codex `--add-dir` graph grants to the published graph folder, find Harness `sys-<digest>` member graphs from the CLI, and attribute run evidence only to files the run changed (pre-existing edits and `project-brain/`, `memory-bank/`, `.agentic-security/` records excluded).
 - Add distinct dependency-kind arrow markers, stroke/dash styles, dark/light/forced-colors CSS tokens (`--map-edge-*`), edge `<title>` kind breakdowns, and an accessible visual arrow legend (`arrow_kinds_legend_html`) across the Dependency Map modal, Link Detail modal, and Sessions Code Graph.

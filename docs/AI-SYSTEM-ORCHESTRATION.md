@@ -364,6 +364,16 @@ evidence at `<run-dir>/<phase>-a<attempt>.evidence.json` (`git_changed`,
 `GET /api/system-runs/<id>` surfaces aggregated `evidence` (including
 `cross_service_unopened` reach) alongside `launches` metadata.
 
+The browser asks for the view of a run that is going on about once a second.
+Summing its evidence up looks at the checkout of every member, and what the
+evidence reaches (`unopened_callers`, `cross_service_unopened`) is read from the
+graph of every edited service, so the Harness keeps the answer for a run and
+works it out again only when something it is made from changed: the evidence of
+a dispatch, an event of the run, the system file or the passports, the state of
+the run, or the published graph of a member. Whatever stands, an answer is no
+older than 15 seconds: what was edited in a member outside the run shows within
+that time. The answers of the 32 runs asked for last are kept.
+
 Historical pre-Rust invocation (reference only):
 
 ```text

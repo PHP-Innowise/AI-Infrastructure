@@ -263,6 +263,10 @@ pub trait CodeGraphBridge: Send + Sync {
         Ok(())
     }
 
+    /// Adds to the view of a run what the bridge knows of it. The view
+    /// comes without a summary of its evidence: a bridge that sums the
+    /// evidence up puts it in `view["evidence"]`, and where it leaves none
+    /// the manager sums the dispatches up itself.
     fn enrich_run_view(
         &self,
         _run_id: &str,

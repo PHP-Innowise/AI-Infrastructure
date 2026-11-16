@@ -2219,3 +2219,146 @@ fn layer_edges_aggregate_multi_kind_dependencies_sorted_by_count_then_name() {
         ])
     );
 }
+/// A picture leaves links out: a dense folder keeps the strongest of each
+/// box, and no picture draws more than its limit. A link against the rules
+/// is what the rules are asked for, so it is drawn all the same.
+#[test]
+fn a_link_against_the_order_is_drawn_whatever_the_limits_left_out() {
+    let index = shop().index();
+    let boxes = || {
+        json!({
+            "scope": "app",
+            "nodes": [
+                {"path": "app/Models", "folder": true},
+                {"path": "app/Services", "folder": true},
+                {"path": "app/Http", "folder": true},
+            ],
+            "edges": [
+                {"from": "app/Http", "to": "app/Services", "links": 3, "guessed": 0},
+            ],
+        })
+    };
+    let mut map = boxes();
+    index.mark_architecture(&mut map, false, None);
+    assert_eq!(map["architecture"]["kept"], 1, "{map}");
+    assert_eq!(
+        map["edges"],
+        json!([
+            {"from": "app/Http", "to": "app/Services", "links": 3, "guessed": 0},
+            {
+                "from": "app/Models", "to": "app/Services", "links": 2, "guessed": 0,
+                "kinds": [{"kind": "calls", "links": 1}, {"kind": "references", "links": 1}],
+                "kept": "violation", "architecture_violation": 2,
+            },
+        ]),
+        "{map}"
+    );
+    // A link the picture drew itself is marked where it stands, and none is
+    // added beside it.
+    let mut drawn = boxes();
+    drawn["edges"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"from": "app/Models", "to": "app/Services", "links": 2, "guessed": 0}));
+    index.mark_architecture(&mut drawn, false, None);
+    assert_eq!(drawn["architecture"]["kept"], 0, "{drawn}");
+    assert_eq!(drawn["edges"].as_array().unwrap().len(), 2);
+    assert_eq!(drawn["edges"][1]["architecture_violation"], 2);
+    assert!(drawn["edges"][1]["kept"].is_null());
+    // Two files of one box have no link to draw between them.
+    let mut one = json!({
+        "scope": "",
+        "nodes": [{"path": "app", "folder": true}],
+        "edges": [],
+    });
+    index.mark_architecture(&mut one, false, None);
+    assert_eq!(one["architecture"]["kept"], 0, "{one}");
+    assert_eq!(one["edges"], json!([]));
+    // What the tool only inferred is left out with the rest of its kind:
+    // data access calls an entry point by such a link.
+    let guessed = |certain| {
+        let mut map = json!({
+            "scope": "app",
+            "nodes": [{"path": REPOSITORY}, {"path": CONTROLLER}],
+            "edges": [],
+        });
+        index.mark_architecture(&mut map, certain, None);
+        map
+    };
+    let (all, certain) = (guessed(false), guessed(true));
+    assert_eq!(all["edges"][0]["architecture_violation"], 1, "{all}");
+    assert_eq!(all["edges"][0]["guessed"], 1);
+    assert_eq!(certain["edges"], json!([]), "{certain}");
+}
+/// No more of them are added than `KEPT_VIOLATIONS`: those of the most
+/// links first.
+#[test]
+fn the_links_kept_against_the_order_have_a_limit() {
+    let mut graph = Graph::default();
+    let (mut models, mut services) = (vec![], vec![]);
+    for at in 0..KEPT_VIOLATIONS + 3 {
+        models.push(format!("app/Models/Thing{at:02}.php"));
+        services.push(format!("app/Services/Step{at:02}Service.php"));
+    }
+    for path in models.iter().chain(&services) {
+        graph.file(path);
+    }
+    for (at, (model, service)) in models.iter().zip(&services).enumerate() {
+        graph
+            .link(service, model, "calls", None)
+            .link(model, service, "calls", None);
+        // The first pair holds one link more than any other.
+        if at == 0 {
+            graph.link(model, service, "references", Some("field"));
+        }
+    }
+    let index = graph.index();
+    let mut map = json!({
+        "scope": "app",
+        "nodes": models.iter().chain(&services).map(|path| json!({"path": path})).collect::<Vec<_>>(),
+        "edges": [],
+    });
+    index.mark_architecture(&mut map, false, None);
+    assert_eq!(map["architecture"]["kept"], KEPT_VIOLATIONS, "{map}");
+    assert_eq!(
+        map["architecture"]["violations"]["pairs"],
+        KEPT_VIOLATIONS + 3
+    );
+    let edges = map["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), KEPT_VIOLATIONS);
+    assert_eq!(edges[0]["from"], models[0].as_str());
+    assert_eq!(edges[0]["architecture_violation"], 2);
+    assert_eq!(edges[1]["from"], models[1].as_str());
+}
+/// In an opened file the links are those of its symbols. One that leads
+/// from the file to a file of a layer it may not use is marked, by its own
+/// links; a link the order allows is not.
+#[test]
+fn an_opened_file_marks_its_links_against_the_order() {
+    let index = shop().index();
+    let order = format!("{ORDER}#L3:Order");
+    let mut map = json!({
+        "mode": "file",
+        "scope": ORDER,
+        "nodes": [
+            {"path": order, "symbol": true},
+            {"path": SERVICE, "role": "both"},
+            {"path": REPOSITORY, "role": "uses"},
+        ],
+        "edges": [
+            {"from": order, "to": SERVICE, "links": 2, "guessed": 0},
+            {"from": SERVICE, "to": order, "links": 1, "guessed": 0},
+            {"from": REPOSITORY, "to": order, "links": 1, "guessed": 0},
+        ],
+    });
+    index.mark_architecture(&mut map, false, None);
+    let marks = map["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|edge| edge["architecture_violation"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(marks, [Some(2), None, None], "{map}");
+    assert_eq!(map["architecture"]["kept"], 0);
+    assert_eq!(map["edges"].as_array().unwrap().len(), 3);
+}

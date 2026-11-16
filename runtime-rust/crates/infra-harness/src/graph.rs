@@ -1419,6 +1419,13 @@ impl Graphs {
         }
         Err(HarnessError::missing("Project not found."))
     }
+    /// What tells one published graph of a project from the next, without
+    /// reading it: the size of its file and when it was written. None while
+    /// no graph is published.
+    pub fn live_stamp(&self, project: &str) -> Option<(u64, std::time::SystemTime)> {
+        let meta = std::fs::metadata(live(&self.store.state, project)).ok()?;
+        Some((meta.len(), meta.modified().ok()?))
+    }
     pub fn live_index(&self, project: &str) -> Option<Arc<crate::graph_map::Index>> {
         let graph = live(&self.store.state, project);
         if !graph.is_file() {
@@ -1732,6 +1739,9 @@ impl Graphs {
                 index.view_with_whole(name, scope, spread, focus, certain, filter, whole)
             });
             marked(&index, &mut view, &rules);
+            // The sources of the checkout say what the graph does not:
+            // which state a file reads of another, and which it writes.
+            index.mark_access(&mut view);
             mark_history(&index, &mut view, None);
             mark_incoming(&index, &mut view);
             view["project_id"] = json!(project);
@@ -1912,6 +1922,13 @@ impl Graphs {
                     }
                 };
                 marked(&index, &mut view, &rules);
+                // Reads and writes are told from the sources, by line: on
+                // the checkout's own graph while it is of the same lines.
+                // The files kept beside the graph of a commit are no
+                // sources to read.
+                if own && !stale {
+                    index.mark_access(&mut view);
+                }
                 mark_history(&index, &mut view, resolved.revision.as_deref());
                 mark_incoming(&index, &mut view);
                 if !notests && !stale {

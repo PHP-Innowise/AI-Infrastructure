@@ -215,8 +215,10 @@ pub fn drill_down_service_map(surface: &str, service_id: &str, focus_path: Optio
             crate::graph_map::SystemEmbeddedKind::Change,
             &live_focus,
         );
+        // A file is selected in the picture that is open here, not in a
+        // window over it.
         if let Some(path) = focus_path.filter(|p| !p.trim().is_empty()) {
-            crate::graph_map::open_system_file_impact(scope, path, None);
+            crate::graph_map::focus_system_file(crate::graph_map::SystemEmbeddedKind::Change, path);
         }
     } else {
         m::set("system-member-selected", json!(service_id));
@@ -241,7 +243,7 @@ pub fn drill_down_service_map(surface: &str, service_id: &str, focus_path: Optio
             crate::graph::sync_embedded_progress_for_surface("system-member-graph", st);
         }
         if let Some(path) = focus_path.filter(|p| !p.trim().is_empty()) {
-            crate::graph_map::open_system_file_impact(scope, path, None);
+            crate::graph_map::focus_system_file(crate::graph_map::SystemEmbeddedKind::Member, path);
         }
     }
 }
@@ -3643,28 +3645,19 @@ pub async fn event(
             }
         }
         "inspect-system-file-graph" => {
+            // The file of a receipt is shown in the code map of its service
+            // that is embedded in this view, and the view is brought to it.
             let svc = m::text(payload, "service");
             let path = m::text(payload, "path");
-            let project = dom::value("system-project");
-            let config = dom::value("system-config");
             let is_changes_view = m::read(|s| s.view == "system-changes");
-            let run_id = m::text(&m::data("system-run"), "id");
-            let target_opt = if is_changes_view && !run_id.is_empty() {
-                Some(format!("sysrun:{run_id}"))
-            } else {
-                Some("work".to_owned())
-            };
             if !svc.is_empty() && !path.is_empty() {
                 let surf = if is_changes_view {
                     "changes"
                 } else {
                     "services"
                 };
-                drill_down_service_map(surf, &svc, None);
-                if !project.is_empty() {
-                    let scope = build_system_graph_scope(&project, &config, &svc, is_changes_view);
-                    crate::graph_map::open_system_file_impact(scope, &path, target_opt.as_deref());
-                }
+                drill_down_service_map(surf, &svc, Some(&path));
+                focus_system_graph_workspace();
             }
         }
         "system-execute" => {
