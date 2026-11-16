@@ -2609,3 +2609,37 @@ project root to include links across folders.
 The current map reads the working copy's rules. A historical change uses the
 rules from its selected revision. Declared layers show violations in the chosen
 graph. The existing added/removed comparison applies to inferred layers.
+
+## Cross-session context sharing with Omnigraph
+
+When enabled, Harness integrates an out-of-process [Omnigraph](https://github.com/ModernRelay/omnigraph) (`v0.15.0`, HTTP API contract `0.14`) server over HTTP so multiple sessions can share structured architectural decisions, findings, contracts, warnings, and insights on versioned graph branches without embedding heavy Lance/Arrow crates into the Rust workspace.
+
+Operating modes persisted at `<state>/omnigraph.json` (plus auto-generated cluster config in `<state>/omnigraph/`):
+
+- **Off** (`off`): disabled; existing Brain and Memory Bank workflows behave identically.
+- **Local sidecar** (`local_sidecar`): installs or runs `omnigraph` / `omnigraph-server` (`<state>/tools/omnigraph/v0.15.0/`) locally on loopback.
+- **Docker** (`docker`): runs the managed container (`ghcr.io/modernrelay/omnigraph:v0.15.0`).
+- **External** (`external`): connects with bearer token auth to an existing Omnigraph endpoint.
+
+### Session lifecycle
+
+- `POST /api/sessions` (and `send` follow-ups) accepts optional `omnigraph` settings (`enabled`, `branch`, `pull_branches`, `query`, `auto_publish`, `auto_merge`), persisted on the SQLite `sessions.omnigraph` column.
+- Before a run launches, when `omnigraph.enabled` is `true`, Harness ensures the session branch (`session/<sid12>` or configured branch) exists, pulls any configured `pull_branches` (defaulting to `["main"]`), queries shared context atoms, and stores `injected_atoms` and a bounded capsule on the session. Unreachable Omnigraph servers record a session warning/event without blocking the Harness turn.
+- `prompt::build` inserts the bounded `Shared Omnigraph Context` section (6,000-character cap) and records it under the `"omnigraph"` bucket in `PromptLedger`.
+- After a turn completes (including manual `/api/sessions/{id}/memory` saves, Clash, and Fleet runs), when `auto_publish` is not `false`, Harness collects `memory-draft` learnings, Clash/Fleet findings, touched files, and the turn outcome summary, publishes `ContextAtom` nodes and provenance edges (`PublishedBy`, `TouchesFile`, `DerivedFrom`), optionally merges into `main` when `auto_merge` is `true`, and records a session `omnigraph` event.
+
+### HTTP endpoints
+
+All `GET` and CSRF-protected (`X-Harness-Token`) `POST` routes are registered in `infra-harness::http::ROUTES`:
+
+- `GET /api/omnigraph/status?project_id=...` — connection state, operating mode, MCP URL, and graph stats.
+- `POST /api/omnigraph/setup` — configure/start/stop/install/connect/disconnect (`local_sidecar`, `docker`, `external`, `off`).
+- `GET /api/omnigraph/graph?project_id=...&branch=...&snapshot=...&kind=...&q=...&session_id=...` — constellation nodes/edges, branches, and commits.
+- `GET /api/omnigraph/search?project_id=...&q=...&branch=...&kind=...&limit=...` — BM25/lexical hybrid search across atoms and neighbor context.
+- `GET /api/omnigraph/branches/diff?project_id=...&source=...&target=...` — 3-way branch diff (`added_atoms`, `updated_atoms`, `deleted_atoms`, `added_edges`, `deleted_edges`, dry-run conflict preview).
+- `POST /api/omnigraph/branches` — `create`, `merge` (returning conflict workbench payloads on 3-way conflicts), or `delete` branches.
+- `POST /api/omnigraph/atoms` — publish a `ContextAtom` with linked files, session provenance, and `relates_to` links.
+- `POST /api/omnigraph/share` — inject/share selected `atom_ids` into a target session (`inject`, `reference`, `inject_and_link`, or `copy`), updating `session["omnigraph"]` and emitting a session event.
+- `GET /api/omnigraph/changes?project_id=...&cursor=...&branch=...` — incremental commit/entity pulse feed.
+- `GET /api/omnigraph/commits/{commit_id}?project_id=...` — inspect commit metadata, `changes`, and affected `atoms`.
+

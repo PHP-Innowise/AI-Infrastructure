@@ -1378,6 +1378,12 @@ async fn http_omnigraph_routes_end_to_end_and_share_via_app_router() {
         .await;
     assert_eq!(status, 200, "{pub_main}");
     assert_eq!(pub_main["ok"], true);
+    assert_eq!(pub_main["id"], "atom-jwt-1");
+    assert_eq!(pub_main["atom_id"], "atom-jwt-1");
+    assert_eq!(pub_main["atom"]["id"], "atom-jwt-1");
+    assert_eq!(pub_main["atom"]["atom_id"], "atom-jwt-1");
+    assert_eq!(pub_main["atom"]["branch"], "main");
+    assert_eq!(pub_main["atom"]["source_branch"], "main");
     let commit_id = pub_main["commit"]["graph_commit_id"]
         .as_str()
         .unwrap()
@@ -1572,6 +1578,38 @@ async fn http_omnigraph_routes_end_to_end_and_share_via_app_router() {
     assert_eq!(status, 200, "{shared}");
     assert_eq!(shared["ok"], true);
     assert_eq!(shared["shared_count"], 2);
+    assert_eq!(
+        shared["session"]["omnigraph"]["injected_atoms"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // Verify `inject` & `inject_and_link` share modes return updated `res["session"]` cleanly
+    for extra_mode in ["inject", "inject_and_link"] {
+        let (st_m, res_m) = fx
+            .http(
+                Method::POST,
+                "/api/omnigraph/share",
+                Some(json!({
+                    "project_id": fx.project_id,
+                    "target_session_id": target_sid,
+                    "atom_ids": ["atom-jwt-1"],
+                    "source_branch": "main",
+                    "mode": extra_mode
+                })),
+                true,
+            )
+            .await;
+        assert_eq!(st_m, 200, "{res_m}");
+        assert_eq!(res_m["mode"], extra_mode);
+        assert!(
+            res_m["session"]["omnigraph"]["capsule_text"]
+                .as_str()
+                .is_some()
+        );
+    }
 
     let (status, session_after) = fx
         .http(

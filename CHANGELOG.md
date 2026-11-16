@@ -24,6 +24,7 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Wire Omnigraph (`v0.15.0` CLI/server HTTP API `0.14`) cross-session context sharing into `infra-harness`, `infra-ui`, and `harness/web`: add `OmnigraphManager` lifecycle management (`off`, managed `local_sidecar`, `docker`, and `external`), `/api/omnigraph/*` HTTP endpoints (`status`, `setup`, `graph`, `search`, `branches/diff`, `branches`, `atoms`, `share`, `changes`, `commits/{commit_id}`), SQLite `session["omnigraph"]` persistence/migration, pre-run branch preparation and bounded `Shared Omnigraph Context` prompt injection with `PromptLedger` accounting, post-turn learnings/Clash/Fleet/file publication and optional `auto_merge`, and the Context Graph Studio UI.
 - Tell in the side panel of a selected place of the Harness dependency map what
   a change to it reaches within four links (`graph_map/blast.rs`): the files
   that use it, and what uses those, each with the fewest links to it, how much
