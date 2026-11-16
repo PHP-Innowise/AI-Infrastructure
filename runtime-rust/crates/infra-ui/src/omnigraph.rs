@@ -208,7 +208,7 @@ pub fn session_payload_with_links(
     }
     let space = shared_space.trim();
     if !space.is_empty() {
-        payload["shared_space"] = json!(space);
+        payload["shared_space"] = json!(resolved_space_branch(space));
     }
     Some(payload)
 }
@@ -389,7 +389,9 @@ fn is_ndjson_record_obj(obj: &serde_json::Map<String, V>) -> bool {
         && (obj.contains_key("type")
             || obj.contains_key("entity_kind")
             || obj.contains_key("op")
-            || (obj.contains_key("from") && obj.contains_key("to")))
+            || obj.contains_key("edge")
+            || (obj.contains_key("from") && obj.contains_key("to"))
+            || (obj.contains_key("source") && obj.contains_key("target")))
 }
 
 fn count_ndjson_record(
@@ -400,32 +402,56 @@ fn count_ndjson_record(
     sessions: &mut usize,
     source_branch: &mut String,
 ) {
-    let kind = val["type"]
-        .as_str()
-        .or_else(|| val["entity_kind"].as_str())
-        .or_else(|| val["type_name"].as_str())
-        .unwrap_or("");
+    let raw_type = val["type"].as_str().unwrap_or("");
+    let kind = if raw_type.is_empty() || raw_type == "node" {
+        val["entity_kind"]
+            .as_str()
+            .or_else(|| val["type_name"].as_str())
+            .or_else(|| val["edge"].as_str())
+            .unwrap_or(raw_type)
+    } else {
+        raw_type
+    };
     match kind {
-        "ContextAtom" | "atom" => *atoms += 1,
-        "FileRef" | "file" => *files += 1,
+        "ContextAtom" | "context_atom" | "atom" => *atoms += 1,
+        "FileRef" | "file_ref" | "file" => *files += 1,
         "Session" | "session" => *sessions += 1,
-        "PublishedBy" | "ConsumedBy" | "TouchesFile" | "MentionsSymbol" | "RelatesTo"
-        | "DerivedFrom" | "SessionFollows" | "edge" => *edges += 1,
+        "SymbolRef" | "symbol_ref" | "symbol" | "TurnSnapshot" | "turn_snapshot" | "turn"
+        | "Project" | "project" | "Branch" | "branch" | "Commit" | "commit" => {}
+        "PublishedBy" | "published_by" | "ConsumedBy" | "consumed_by" | "TouchesFile"
+        | "touches_file" | "MentionsSymbol" | "mentions_symbol" | "RelatesTo" | "relates_to"
+        | "DerivedFrom" | "derived_from" | "SessionFollows" | "session_follows" | "edge" => {
+            *edges += 1
+        }
         _ => {
-            if val["from"].is_string() || val["src"].is_string() || val["endpoints"].is_object() {
+            if val["edge"].is_string()
+                || val["from"].is_string()
+                || (val["source"].is_string() && val["target"].is_string())
+                || val["src"].is_string()
+                || val["endpoints"].is_object()
+            {
                 *edges += 1;
             } else if val["path"].is_string() && !val["title"].is_string() {
                 *files += 1;
-            } else {
+            } else if val["title"].is_string() || val["summary"].is_string() {
                 *atoms += 1;
             }
         }
     }
     if source_branch.is_empty() {
-        for key in ["source_branch", "branch", "graph_branch"] {
-            if let Some(b) = val[key].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                *source_branch = b.to_owned();
-                break;
+        for container in [val, &val["data"], &val["properties"]] {
+            if !container.is_object() {
+                continue;
+            }
+            for key in ["source_branch", "branch", "graph_branch"] {
+                if let Some(b) = container[key]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    *source_branch = b.to_owned();
+                    return;
+                }
             }
         }
     }
@@ -771,14 +797,12 @@ pub fn render_session_peers_html(session: &V, all_sessions: &[V]) -> (bool, Stri
     (true, html)
 }
 
-pub fn render_panel_peer_checklist_html(
-    sessions: &[V],
+fn eligible_panel_peers<'a>(
+    sessions: &'a [V],
     current_sid: &str,
     current_project: &str,
-    selected_ids: &BTreeSet<String>,
-    disabled: bool,
-) -> (bool, usize, String) {
-    let eligible: Vec<&V> = sessions
+) -> Vec<&'a V> {
+    sessions
         .iter()
         .filter(|s| {
             let id = m::text(s, "id");
@@ -788,7 +812,34 @@ pub fn render_panel_peer_checklist_html(
                 && (current_project.is_empty() || proj.is_empty() || proj == current_project)
         })
         .take(24)
-        .collect();
+        .collect()
+}
+
+fn panel_peer_list_key(peers: &[&V]) -> String {
+    peers
+        .iter()
+        .map(|s| {
+            format!(
+                "{}|{}|{}|{}|{}",
+                m::text(s, "id"),
+                m::summary(s),
+                s["status"].as_str().unwrap_or("idle"),
+                m::omnigraph_branch(s),
+                session_atom_count(s),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn render_panel_peer_checklist_html(
+    sessions: &[V],
+    current_sid: &str,
+    current_project: &str,
+    selected_ids: &BTreeSet<String>,
+    disabled: bool,
+) -> (bool, usize, String) {
+    let eligible = eligible_panel_peers(sessions, current_sid, current_project);
     if eligible.is_empty() {
         return (false, 0, String::new());
     }
@@ -825,6 +876,52 @@ pub fn render_panel_peer_checklist_html(
     (true, checked_count, html)
 }
 
+fn share_session_matches_filter(s: &V, needle: &str) -> bool {
+    let id = m::text(s, "id");
+    if id.is_empty() {
+        return false;
+    }
+    if needle.is_empty() {
+        return true;
+    }
+    let hay = format!(
+        "{id} {} {} {} {}",
+        m::summary(s),
+        m::text(s, "provider"),
+        m::omnigraph_branch(s),
+        m::omnigraph_shared_space(s)
+    )
+    .to_ascii_lowercase();
+    hay.contains(needle)
+}
+
+fn filtered_share_sessions<'a>(sessions: &'a [V], filter: &str) -> Vec<&'a V> {
+    let needle = filter.trim().to_ascii_lowercase();
+    sessions
+        .iter()
+        .filter(|s| share_session_matches_filter(s, &needle))
+        .collect()
+}
+
+fn share_task_list_key(filtered: &[&V]) -> String {
+    filtered
+        .iter()
+        .map(|s| {
+            format!(
+                "{}|{}|{}|{}|{}|{}|{}",
+                m::text(s, "id"),
+                m::summary(s),
+                m::text(s, "provider"),
+                s["status"].as_str().unwrap_or("idle"),
+                m::omnigraph_branch(s),
+                session_atom_count(s),
+                m::omnigraph_shared_space(s),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn render_share_task_list_html(
     sessions: &[V],
     selected_ids: &BTreeSet<String>,
@@ -832,28 +929,7 @@ pub fn render_share_task_list_html(
     source_id: &str,
     filter: &str,
 ) -> String {
-    let needle = filter.trim().to_ascii_lowercase();
-    let filtered: Vec<&V> = sessions
-        .iter()
-        .filter(|s| {
-            let id = m::text(s, "id");
-            if id.is_empty() {
-                return false;
-            }
-            if needle.is_empty() {
-                return true;
-            }
-            let hay = format!(
-                "{id} {} {} {} {}",
-                m::summary(s),
-                m::text(s, "provider"),
-                m::omnigraph_branch(s),
-                m::omnigraph_shared_space(s)
-            )
-            .to_ascii_lowercase();
-            hay.contains(&needle)
-        })
-        .collect();
+    let filtered = filtered_share_sessions(sessions, filter);
     if filtered.is_empty() {
         return "<p class=\"empty-note\">No matching tasks found in this project.</p>".into();
     }
@@ -901,14 +977,43 @@ pub fn render_share_task_list_html(
     html
 }
 
+fn slugify_space_segment(raw: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if ch == '/' {
+            if !out.is_empty() && !out.ends_with('/') {
+                if out.ends_with('-') {
+                    out.pop();
+                }
+                out.push('/');
+            }
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() && !out.ends_with('/') {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') || out.ends_with('/') {
+        out.pop();
+    }
+    out
+}
+
 fn resolved_space_branch(space_name: &str) -> String {
-    let clean = space_name.trim().trim_matches('/');
-    if clean.is_empty() {
+    let trimmed = space_name.trim().trim_matches('/');
+    let rest = trimmed
+        .strip_prefix("shared/")
+        .or_else(|| trimmed.strip_prefix("SHARED/"))
+        .unwrap_or(trimmed);
+    let slug = slugify_space_segment(rest);
+    if slug.is_empty() {
         "shared/context".to_owned()
-    } else if clean.starts_with("shared/") {
-        clean.to_owned()
     } else {
-        format!("shared/{clean}")
+        format!("shared/{slug}")
     }
 }
 
@@ -2989,6 +3094,14 @@ pub fn sync_peer_draft_from_dom() {
 pub fn apply_session_settings(session: &V) {
     let omni = &session["omnigraph"];
     if !omni.is_object() {
+        dom::set_checked("omnigraph-enabled", false);
+        dom::set_value("omnigraph-branch-mode", "auto");
+        dom::set_value("omnigraph-existing-branch", "main");
+        dom::set_value("omnigraph-pull-branches", "");
+        dom::set_value("omnigraph-session-query", "");
+        dom::set_value("omnigraph-shared-space", "");
+        dom::set_checked("omnigraph-auto-publish", true);
+        dom::set_checked("omnigraph-auto-merge", false);
         m::set("omnigraph-session-peers", json!([]));
         return;
     }
@@ -3066,7 +3179,25 @@ pub fn session_controls() {
     dom::hidden("omnigraph-peer-sessions-wrap", !enabled || !show_peers);
     dom::text("omnigraph-peer-count", &format!("{peer_count} linked"));
     if let Some(host) = dom::get("omnigraph-peer-sessions") {
-        host.set_inner_html(&peer_html);
+        let peers = eligible_panel_peers(&sessions, &sid, &project);
+        let list_key = panel_peer_list_key(&peers);
+        let inputs =
+            dom::all("#omnigraph-peer-sessions input[data-action=\"omnigraph-peer-choice\"]");
+        let same_shape = !list_key.is_empty()
+            && host.get_attribute("data-list-key").as_deref() == Some(list_key.as_str())
+            && inputs.len() == peers.len();
+        if same_shape {
+            for el in inputs {
+                if let Ok(inp) = el.dyn_into::<web_sys::HtmlInputElement>() {
+                    let id = inp.value();
+                    inp.set_checked(selected_peers.contains(&id));
+                    inp.set_disabled(disable_edit);
+                }
+            }
+        } else {
+            let _ = host.set_attribute("data-list-key", &list_key);
+            host.set_inner_html(&peer_html);
+        }
     }
 
     let summary = if !enabled {
@@ -3645,12 +3776,20 @@ fn current_export_options() -> (String, String, String, String, String, bool) {
     let branch = if scope == "all" {
         "main".to_owned()
     } else if scope == "task" {
-        let sessions = m::read(|s| s.sessions.clone());
-        sessions
-            .iter()
-            .find(|s| m::text(s, "id") == session_id)
-            .map(m::omnigraph_branch)
-            .unwrap_or_else(|| dom::value("omni-export-branch"))
+        m::read(|s| {
+            s.sessions
+                .iter()
+                .chain(std::iter::once(&s.selected))
+                .find(|sess| m::text(sess, "id") == session_id)
+                .and_then(|sess| {
+                    sess["omnigraph"]["branch"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|b| !b.is_empty() && *b != "auto")
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default()
+        })
     } else {
         dom::value("omni-export-branch")
     };
@@ -3690,6 +3829,7 @@ async fn run_export_preview() -> Option<(String, String)> {
                     .as_str()
                     .filter(|s| !s.is_empty())
                     .unwrap_or("Export failed.");
+                dom::text("omni-export-preview-meta", "export failed");
                 dom::error("omni-export-error", msg);
                 return None;
             }
@@ -3852,9 +3992,10 @@ fn populate_transfer_selectors(preferred_session_id: Option<&str>, preferred_bra
             .collect::<Vec<_>>()
     });
     let mut sess_items = vec![json!({ "id": "", "name": "No session selected" })];
+    let mut seen_ids = BTreeSet::new();
     for s in &sessions {
         let id = m::text(s, "id");
-        if !id.is_empty() {
+        if !id.is_empty() && seen_ids.insert(id.clone()) {
             let label = m::summary(s);
             sess_items.push(json!({
                 "id": id,
@@ -3865,6 +4006,23 @@ fn populate_transfer_selectors(preferred_session_id: Option<&str>, preferred_bra
     let active_sid = preferred_session_id
         .map(str::to_owned)
         .unwrap_or_else(|| m::read(|s| s.sid.clone()));
+    if !active_sid.is_empty() && !seen_ids.contains(&active_sid) {
+        let selected_label = m::read(|s| {
+            if m::text(&s.selected, "id") == active_sid {
+                m::summary(&s.selected)
+            } else {
+                String::new()
+            }
+        });
+        sess_items.push(json!({
+            "id": active_sid.clone(),
+            "name": if selected_label.is_empty() {
+                active_sid.clone()
+            } else {
+                selected_label
+            }
+        }));
+    }
     dom::options(
         "omni-export-session",
         &sess_items,
@@ -3990,15 +4148,17 @@ async fn submit_import_form() {
     let mode = dom::value("omni-import-mode");
     let inject = dom::checked("omni-import-inject");
     let target_session_id = if inject {
-        let picked = dom::value("omni-import-session");
-        if picked.is_empty() {
-            m::read(|s| s.sid.clone())
-        } else {
-            picked
-        }
+        dom::value("omni-import-session")
     } else {
         String::new()
     };
+    if inject && target_session_id.is_empty() {
+        dom::error(
+            "omni-import-error",
+            "Choose a target session to inject into, or uncheck injection.",
+        );
+        return;
+    }
 
     let body = match import_request_body(
         &project,
@@ -4107,9 +4267,34 @@ fn render_share_dialog_state() {
     dom::text("omni-share-selected-count", &selected.len().to_string());
 
     if let Some(list_el) = dom::get("omnigraph-share-task-list") {
-        list_el.set_inner_html(&render_share_task_list_html(
-            &sessions, &selected, &mode, &source_id, &filter,
-        ));
+        let filtered = filtered_share_sessions(&sessions, &filter);
+        let list_key = share_task_list_key(&filtered);
+        let cards = dom::all("#omnigraph-share-task-list .omni-share-task-card");
+        let checks =
+            dom::all("#omnigraph-share-task-list input[data-action=\"omni-share-task-check\"]");
+        let same_shape = !list_key.is_empty()
+            && list_el.get_attribute("data-list-key").as_deref() == Some(list_key.as_str())
+            && cards.len() == filtered.len()
+            && checks.len() == filtered.len();
+        if same_shape {
+            for (card, check_el) in cards.into_iter().zip(checks) {
+                if let Ok(inp) = check_el.dyn_into::<web_sys::HtmlInputElement>() {
+                    let id = inp.value();
+                    let is_selected = selected.contains(&id);
+                    let is_source = mode == "broadcast" && !source_id.is_empty() && id == source_id;
+                    inp.set_checked(is_selected);
+                    let _ = card
+                        .set_attribute("data-selected", if is_selected { "true" } else { "false" });
+                    let _ =
+                        card.set_attribute("data-source", if is_source { "true" } else { "false" });
+                }
+            }
+        } else {
+            let _ = list_el.set_attribute("data-list-key", &list_key);
+            list_el.set_inner_html(&render_share_task_list_html(
+                &sessions, &selected, &mode, &source_id, &filter,
+            ));
+        }
     }
     if let Some(topo_el) = dom::get("omnigraph-share-topology") {
         topo_el.set_inner_html(&render_share_topology_html(
@@ -4212,26 +4397,20 @@ async fn submit_share_form() {
         .map(|s| m::text(&s, "id"))
         .filter(|id| share_selected_set().contains(id))
         .collect();
-    let target_branch = if !space_name.trim().is_empty() {
-        resolved_space_branch(&space_name)
+    let eff_space = if mode == "shared_branch" {
+        space_name.trim().to_owned()
     } else {
         String::new()
     };
 
-    let body = match link_sessions_request_body(
-        &project,
-        &selected,
-        &mode,
-        &source_id,
-        &space_name,
-        &target_branch,
-    ) {
-        Ok(body) => body,
-        Err(msg) => {
-            dom::error("omni-share-dlg-error", &msg);
-            return;
-        }
-    };
+    let body =
+        match link_sessions_request_body(&project, &selected, &mode, &source_id, &eff_space, "") {
+            Ok(body) => body,
+            Err(msg) => {
+                dom::error("omni-share-dlg-error", &msg);
+                return;
+            }
+        };
 
     dom::hidden("omni-share-progress", false);
     set_share_step(1, "done");
@@ -4250,6 +4429,7 @@ async fn submit_share_form() {
                     .filter(|s| !s.is_empty())
                     .unwrap_or("Failed to link tasks via Omnigraph.");
                 dom::error("omni-share-dlg-error", msg);
+                render_share_dialog_state();
             } else {
                 set_share_step(2, "done");
                 set_share_step(3, "running");
@@ -4302,9 +4482,7 @@ async fn submit_share_form() {
         }
     }
 
-    if !dom::get("omni-share-dlg-error").is_some_and(|el| !el.has_attribute("hidden")) {
-        render_share_dialog_state();
-    }
+    render_share_dialog_state();
     m::set("omnigraph-pending", json!(false));
     crate::session::sync_working_indicator();
 }
@@ -5171,18 +5349,8 @@ pub async fn event(
             let needle = dom::value("omni-share-filter").trim().to_ascii_lowercase();
             let mut set = share_selected_set();
             for s in share_project_sessions() {
-                let id = m::text(&s, "id");
-                if needle.is_empty()
-                    || format!(
-                        "{id} {} {} {}",
-                        m::summary(&s),
-                        m::text(&s, "provider"),
-                        m::omnigraph_branch(&s)
-                    )
-                    .to_ascii_lowercase()
-                    .contains(&needle)
-                {
-                    set.insert(id);
+                if share_session_matches_filter(&s, &needle) {
+                    set.insert(m::text(&s, "id"));
                 }
             }
             set_share_selected_set(&set);
@@ -5690,6 +5858,32 @@ mod tests {
         let bad_ndjson = inspect_import_payload("{\"type\":\"ContextAtom\"}\n{bad json");
         assert_eq!(bad_ndjson.format, ImportFormat::Invalid);
         assert!(bad_ndjson.error.contains("Line 2"));
+
+        // SymbolRef / TurnSnapshot / nested data.source_branch / {edge, source, target} lines
+        let backend_ndjson_raw = concat!(
+            r#"{"type":"SymbolRef","id":"sym-1","name":"validateJwt","data":{"source_branch":"session/nested"}}"#,
+            "\n",
+            r#"{"type":"TurnSnapshot","id":"turn-1","data":{"source_branch":"session/nested"}}"#,
+            "\n",
+            r#"{"type":"ContextAtom","id":"a-real","data":{"title":"Verified JWT flow","source_branch":"session/nested"}}"#,
+            "\n",
+            r#"{"type":"FileRef","path":"src/jwt.rs"}"#,
+            "\n",
+            r#"{"edge":"relates_to","source":"a-real","target":"sym-1"}"#
+        );
+        let backend_ndjson = inspect_import_payload(backend_ndjson_raw);
+        assert_eq!(backend_ndjson.format, ImportFormat::Ndjson);
+        assert_eq!(backend_ndjson.atoms, 1);
+        assert_eq!(backend_ndjson.files, 1);
+        assert_eq!(backend_ndjson.edges, 1);
+        assert_eq!(backend_ndjson.sessions, 0);
+        assert_eq!(backend_ndjson.source_branch, "session/nested");
+
+        let single_edge =
+            inspect_import_payload(r#"{"edge":"relates_to","source":"a","target":"b"}"#);
+        assert_eq!(single_edge.format, ImportFormat::Ndjson);
+        assert_eq!(single_edge.atoms, 0);
+        assert_eq!(single_edge.edges, 1);
     }
 
     #[test]
@@ -5706,6 +5900,15 @@ mod tests {
                 "include_inherited": true
             })
         );
+
+        // Task scope with no explicit branch omits branch so the backend resolves it by session_id.
+        let task_req_no_branch =
+            export_request_body("proj-1", "", "sess-1", "bundle", "task", false);
+        assert!(task_req_no_branch.get("branch").is_none());
+        assert_eq!(task_req_no_branch["session_id"], "sess-1");
+        let task_url_no_branch =
+            export_download_url("proj-1", "", "sess-1", "bundle", "task", false);
+        assert!(!task_url_no_branch.contains("branch="));
 
         let url = export_download_url("proj 1", "session/a&b", "sess-1", "ndjson", "task", false);
         assert!(url.starts_with("/api/omnigraph/export?"));
@@ -5901,5 +6104,62 @@ mod tests {
         assert!(show_panel_peers);
         assert_eq!(linked_count, 2);
         assert!(panel_html.contains("data-action=\"omnigraph-peer-choice\""));
+
+        // Slugification normalizes free-text shared space names cleanly.
+        assert_eq!(resolved_space_branch(""), "shared/context");
+        assert_eq!(resolved_space_branch("Team Auth"), "shared/team-auth");
+        assert_eq!(
+            resolved_space_branch("shared/Team Auth"),
+            "shared/team-auth"
+        );
+        assert_eq!(
+            resolved_space_branch("shared/sprint-auth"),
+            "shared/sprint-auth"
+        );
+        let slugged_session = session_payload_with_links(
+            true,
+            "auto",
+            "",
+            "main",
+            "",
+            true,
+            false,
+            &["s1".into()],
+            "Team Auth",
+        )
+        .unwrap();
+        assert_eq!(slugged_session["shared_space"], "shared/team-auth");
+
+        // Omitting target_branch allows the backend to slugify space_name or keep broadcast source_branch.
+        let space_only = link_sessions_request_body(
+            "p1",
+            &["s1".into(), "s2".into()],
+            "shared_branch",
+            "",
+            "Team Auth",
+            "",
+        )
+        .unwrap();
+        assert_eq!(space_only["space_name"], "Team Auth");
+        assert!(space_only.get("target_branch").is_none());
+        let broadcast_clean = link_sessions_request_body(
+            "p1",
+            &["s1".into(), "s2".into()],
+            "broadcast",
+            "s1",
+            "",
+            "",
+        )
+        .unwrap();
+        assert!(broadcast_clean.get("space_name").is_none());
+        assert!(broadcast_clean.get("target_branch").is_none());
+
+        // Filter parity between rendered share task cards and shared helper used by Select All.
+        let filtered_cards =
+            render_share_task_list_html(&all, &chosen, "shared_branch", "", "sprint-auth");
+        assert!(filtered_cards.contains("Auth API"));
+        assert!(filtered_cards.contains("Auth UI"));
+        assert!(share_session_matches_filter(&all[0], "sprint-auth"));
+        assert!(!share_session_matches_filter(&all[0], "nonexistent"));
     }
 }

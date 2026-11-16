@@ -265,7 +265,7 @@ fn normalize_edge_type(raw: &str) -> Result<String> {
         "MentionsSymbol" | "mentions_symbol" => Ok("MentionsSymbol".into()),
         "RelatesTo" | "relates_to" => Ok("RelatesTo".into()),
         "DerivedFrom" | "derived_from" => Ok("DerivedFrom".into()),
-        "SessionFollows" | "session_follows" => Ok("SessionFollows".into()),
+        "SessionFollows" | "session_follows" | "follows" => Ok("SessionFollows".into()),
         other => Err(HarnessError::invalid(format!(
             "Unsupported Omnigraph edge type '{other}'."
         ))),
@@ -620,8 +620,6 @@ fn parse_bundle_object(val: &Value) -> Result<ParsedGraph> {
                     let mut clean = obj.clone();
                     if node_type == "ContextAtom" {
                         clean.remove("id");
-                        clean.remove("branch");
-                        clean.remove("session_id");
                         clean.remove("files");
                     } else if matches!(
                         node_type,
@@ -640,12 +638,34 @@ fn parse_bundle_object(val: &Value) -> Result<ParsedGraph> {
 
     if let Some(edges) = root.get("edges").and_then(Value::as_array) {
         for edge in edges {
-            let Some(edge_type) = edge
+            let explicit_type = edge
                 .get("edge")
                 .or_else(|| edge.get("type"))
+                .or_else(|| edge.get("kind"))
                 .and_then(Value::as_str)
-            else {
-                continue;
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let rel_hint = edge
+                .get("relation")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let (edge_type, inferred_rel): (String, Option<String>) = match explicit_type {
+                Some(raw_type) => (normalize_edge_type(raw_type)?, rel_hint.map(str::to_string)),
+                None => {
+                    let Some(rel) = rel_hint else {
+                        continue;
+                    };
+                    if let Ok(known) = normalize_edge_type(rel) {
+                        (known, None)
+                    } else if let Some(norm_rel) = normalize_relation_name(rel) {
+                        ("RelatesTo".into(), Some(norm_rel))
+                    } else {
+                        return Err(HarnessError::invalid(format!(
+                            "Unsupported Omnigraph edge relation '{rel}'."
+                        )));
+                    }
+                }
             };
             let Some(from) = edge
                 .get("from")
@@ -670,19 +690,19 @@ fn parse_bundle_object(val: &Value) -> Result<ParsedGraph> {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            if edge_type == "RelatesTo"
+            if matches!(edge_type.as_str(), "RelatesTo" | "SessionFollows")
                 && !data.contains_key("relation")
-                && let Some(rel) = edge.get("relation").and_then(Value::as_str)
+                && let Some(rel) = inferred_rel.or_else(|| rel_hint.map(str::to_string))
             {
                 data.insert("relation".into(), json!(rel));
             }
             let rec = EdgeRecord {
-                edge_type: normalize_edge_type(edge_type)?,
                 id: edge
                     .get("id")
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("{edge_type}:{from}->{to}")),
+                edge_type,
                 from: from.to_string(),
                 to: to.to_string(),
                 data,
@@ -1293,6 +1313,61 @@ pub(super) fn validate_branch_token(raw: &str) -> Result<String> {
         return Err(HarnessError::invalid("Invalid Omnigraph branch name."));
     }
     Ok(trimmed.to_owned())
+}
+
+fn check_branch_safety(trimmed: &str) -> Result<()> {
+    if trimmed.is_empty()
+        || trimmed.chars().count() > 128
+        || trimmed.chars().any(char::is_control)
+        || trimmed.starts_with('/')
+        || trimmed.ends_with('/')
+        || trimmed.contains("..")
+        || trimmed.contains("//")
+    {
+        return Err(HarnessError::invalid("Invalid Omnigraph branch name."));
+    }
+    Ok(())
+}
+
+/// Normalize a `shared_space` name or slug into a canonical `shared/<slug>` branch (`main` allowed).
+pub fn normalize_shared_space_branch(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    check_branch_safety(trimmed)
+        .map_err(|_| HarnessError::invalid("Invalid Omnigraph `shared_space`."))?;
+    if trimmed == "main" {
+        return Ok("main".to_string());
+    }
+    let tail = trimmed.strip_prefix("shared/").unwrap_or(trimmed).trim();
+    if tail.is_empty() || !tail.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Err(HarnessError::invalid("Invalid Omnigraph `shared_space`."));
+    }
+    Ok(format!("shared/{}", slugify_segment(tail)))
+}
+
+/// Normalize a link target branch or human space name into a valid Omnigraph branch token.
+pub(super) fn normalize_link_target_branch(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    check_branch_safety(trimmed)?;
+    if trimmed == "main" {
+        return Ok("main".to_string());
+    }
+    if trimmed.starts_with("session/") {
+        return validate_branch_token(trimmed);
+    }
+    if let Some(rest) = trimmed.strip_prefix("shared/") {
+        let rest = rest.trim();
+        if rest.is_empty() || !rest.chars().any(|c| c.is_ascii_alphanumeric()) {
+            return Err(HarnessError::invalid("Invalid Omnigraph branch name."));
+        }
+        return Ok(format!("shared/{}", slugify_segment(rest)));
+    }
+    if trimmed.contains('/') {
+        return validate_branch_token(trimmed);
+    }
+    if !trimmed.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Err(HarnessError::invalid("Invalid Omnigraph branch name."));
+    }
+    Ok(format!("shared/{}", slugify_segment(trimmed)))
 }
 
 pub(super) fn filter_ndjson_excluding_atoms(

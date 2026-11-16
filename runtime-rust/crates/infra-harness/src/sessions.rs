@@ -865,6 +865,29 @@ impl Sessions {
             if session["omnigraph"]["enabled"] != true {
                 return;
             }
+            if let Some(raw_space) = session["omnigraph"]["shared_space"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                && let Ok(norm_space) = crate::omnigraph::normalize_shared_space_branch(raw_space)
+            {
+                let sess_branch = session["omnigraph"]["branch"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && *s != "auto")
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::omnigraph::session_branch_name(&job.sid));
+                if let Some(obj) = session["omnigraph"].as_object_mut() {
+                    obj.insert("shared_space".into(), json!(norm_space));
+                }
+                if norm_space != sess_branch {
+                    append_unique_str_list(
+                        &mut session["omnigraph"]["pull_branches"],
+                        &[norm_space.as_str()],
+                        32,
+                    );
+                }
+            }
             let Some(omnigraph) = self.omnigraph() else {
                 return;
             };
@@ -2502,15 +2525,9 @@ fn validate_omnigraph_fields(raw: &Value, sid: &str, base: Option<&Value>) -> Re
             let trimmed = s.trim();
             if trimmed.is_empty() {
                 out["shared_space"] = Value::Null;
-            } else if trimmed.chars().count() > 128
-                || trimmed.chars().any(char::is_control)
-                || trimmed.contains("..")
-                || trimmed.starts_with('/')
-                || trimmed.ends_with('/')
-            {
-                return Err(HarnessError::invalid("Invalid Omnigraph `shared_space`."));
             } else {
-                out["shared_space"] = json!(trimmed);
+                let normalized = crate::omnigraph::normalize_shared_space_branch(trimmed)?;
+                out["shared_space"] = json!(normalized);
             }
         }
     }
@@ -2920,6 +2937,17 @@ fn enrich_linked_pull_branches(
     project_id: &str,
     omni: &mut Value,
 ) -> Result<()> {
+    let mut extra_branches = Vec::new();
+    if let Some(raw_space) = omni["shared_space"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        && let Ok(space_branch) = crate::omnigraph::normalize_shared_space_branch(raw_space)
+    {
+        omni["shared_space"] = json!(space_branch);
+        extra_branches.push(space_branch);
+    }
+
     let linked: Vec<String> = omni["linked_session_ids"]
         .as_array()
         .into_iter()
@@ -2929,10 +2957,6 @@ fn enrich_linked_pull_branches(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    if linked.is_empty() {
-        return Ok(());
-    }
-    let mut extra_branches = Vec::new();
     for peer_id in &linked {
         let peer = store.get(peer_id)?;
         if peer["project_id"].as_str().unwrap_or("") != project_id {
@@ -2947,23 +2971,19 @@ fn enrich_linked_pull_branches(
             .map(str::to_string)
             .unwrap_or_else(|| crate::omnigraph::session_branch_name(peer_id));
         extra_branches.push(peer_branch);
-        if let Some(space) = peer["omnigraph"]["shared_space"]
+        if let Some(raw_space) = peer["omnigraph"]["shared_space"]
             .as_str()
             .map(str::trim)
-            .filter(|s| s.starts_with("shared/"))
+            .filter(|s| !s.is_empty())
+            && let Ok(space_branch) = crate::omnigraph::normalize_shared_space_branch(raw_space)
         {
-            extra_branches.push(space.to_string());
+            extra_branches.push(space_branch);
         }
     }
-    if let Some(space) = omni["shared_space"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| s.starts_with("shared/"))
-    {
-        extra_branches.push(space.to_string());
+    if !extra_branches.is_empty() {
+        let refs: Vec<&str> = extra_branches.iter().map(String::as_str).collect();
+        append_unique_str_list(&mut omni["pull_branches"], &refs, 32);
     }
-    let refs: Vec<&str> = extra_branches.iter().map(String::as_str).collect();
-    append_unique_str_list(&mut omni["pull_branches"], &refs, 32);
     Ok(())
 }
 
@@ -2992,7 +3012,8 @@ fn sync_reciprocal_session_links(store: &SessionStore, session: &Value) {
     let shared_space = session["omnigraph"]["shared_space"]
         .as_str()
         .map(str::trim)
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .and_then(|s| crate::omnigraph::normalize_shared_space_branch(s).ok());
 
     for peer_id in &linked {
         let Ok(peer) = store.get(peer_id) else {
@@ -3012,12 +3033,12 @@ fn sync_reciprocal_session_links(store: &SessionStore, session: &Value) {
         peer_omni["enabled"] = json!(true);
         append_unique_str_list(&mut peer_omni["linked_session_ids"], &[sid], 32);
         let mut pulls = vec![new_branch.as_str()];
-        if let Some(sp) = shared_space.filter(|s| s.starts_with("shared/")) {
-            pulls.push(sp);
+        if let Some(ref sp) = shared_space {
+            pulls.push(sp.as_str());
         }
         append_unique_str_list(&mut peer_omni["pull_branches"], &pulls, 32);
         if peer_omni["shared_space"].is_null()
-            && let Some(sp) = shared_space
+            && let Some(ref sp) = shared_space
         {
             peer_omni["shared_space"] = json!(sp);
         }

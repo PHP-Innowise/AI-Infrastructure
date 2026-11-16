@@ -30,6 +30,7 @@ pub use schema::{
     render_cluster_yaml, write_cluster_bundle,
 };
 pub use sidecar::{OmnigraphConfig, OmnigraphDomain, OmnigraphManager, OmnigraphMode};
+pub use transfer::normalize_shared_space_branch;
 
 /// Maps a Harness session ID to its deterministic Omnigraph branch name (`session/<sid12>`).
 pub fn session_branch_name(session_id: &str) -> String {

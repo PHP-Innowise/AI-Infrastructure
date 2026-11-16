@@ -3255,12 +3255,18 @@ async fn http_omnigraph_sessions_link_and_create_with_linked_peers() {
     assert_eq!(status, 201, "{r3}");
     let sid3 = r3["session"]["id"].as_str().unwrap().to_string();
     let s3 = fx.store.get(&sid3).unwrap();
-    assert_eq!(s3["omnigraph"]["shared_space"], json!("Auth Sync"));
+    assert_eq!(s3["omnigraph"]["shared_space"], json!("shared/auth-sync"));
     assert!(
         s3["omnigraph"]["pull_branches"]
             .as_array()
             .unwrap()
             .contains(&json!(br1))
+    );
+    assert!(
+        s3["omnigraph"]["pull_branches"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("shared/auth-sync"))
     );
     let s1_recip = fx.store.get(&sid1).unwrap();
     assert!(
@@ -3269,6 +3275,65 @@ async fn http_omnigraph_sessions_link_and_create_with_linked_peers() {
             .unwrap()
             .contains(&json!(sid3))
     );
+
+    // 2b. POST /api/sessions with `shared_space: "sprint-auth"` (without linked peers) normalizes to `shared/sprint-auth` and adds to `pull_branches`.
+    let (status, r4) = post_session_http(
+        &fx,
+        json!({
+            "project_id": fx.project_id,
+            "provider": "claude",
+            "workflow": "native",
+            "mode": "plan",
+            "project_context": false,
+            "prompt": "Check slug normalization on create",
+            "omnigraph": {
+                "enabled": true,
+                "branch": "auto",
+                "shared_space": "sprint-auth"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{r4}");
+    let sid4 = r4["session"]["id"].as_str().unwrap().to_string();
+    let s4 = fx.store.get(&sid4).unwrap();
+    assert_eq!(s4["omnigraph"]["shared_space"], json!("shared/sprint-auth"));
+    assert!(
+        s4["omnigraph"]["pull_branches"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("shared/sprint-auth"))
+    );
+
+    // 2c. Unnormalized `shared_space` in an existing session row gets normalized and pulled during `prepare_session_context` / run preparation.
+    let mut legacy_omni = s4["omnigraph"].clone();
+    legacy_omni["shared_space"] = json!("Legacy Space");
+    let patched_legacy = fx
+        .store
+        .patch(&sid4, &json!({ "omnigraph": legacy_omni }))
+        .unwrap();
+    assert_eq!(
+        patched_legacy["omnigraph"]["shared_space"],
+        json!("Legacy Space")
+    );
+    let _ = fx
+        .omnigraph
+        .prepare_session_context(&patched_legacy, &fx.project_path)
+        .await
+        .unwrap();
+    let branches = fx
+        .omnigraph
+        .graph_view_json(
+            &fx.project_id,
+            Some("shared/legacy-space"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(branches["active_branch"], "shared/legacy-space");
 
     // 3. POST /api/omnigraph/sessions/link in `broadcast` mode from sid1 -> sid3.
     let (status, bc) = fx
