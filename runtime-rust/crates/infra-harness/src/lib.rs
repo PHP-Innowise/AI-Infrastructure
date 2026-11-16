@@ -29,6 +29,7 @@ pub mod launch_accounting;
 pub mod legacy;
 pub mod legacy_msgpack;
 pub mod native_diagnostics;
+pub mod omnigraph;
 pub mod process;
 pub mod projects;
 pub mod provider;
