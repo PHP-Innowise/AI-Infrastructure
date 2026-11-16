@@ -18,8 +18,9 @@ use super::{
     session_branch_name,
     transfer::{
         self, BUNDLE_FORMAT_V1, filter_graph_for_export, filter_ndjson_excluding_atoms,
-        parse_bool_param, parse_import_body, parse_ndjson_records, prepare_import_ndjson,
-        serialize_graph_ndjson, slugify_segment, validate_branch_token,
+        normalize_link_target_branch, normalize_shared_space_branch, parse_bool_param,
+        parse_import_body, parse_ndjson_records, prepare_import_ndjson, serialize_graph_ndjson,
+        slugify_segment, validate_branch_token,
     },
 };
 use crate::{
@@ -2004,6 +2005,13 @@ impl OmnigraphManager {
             .unwrap_or_else(|| session_branch_name(sid));
 
         ensure_branch_exists(&client, &branch, Some("main")).await?;
+        if let Some(raw_space) = clean_opt(omni_opts["shared_space"].as_str())
+            && let Ok(space_branch) = normalize_shared_space_branch(raw_space)
+            && space_branch != "main"
+            && space_branch != branch
+        {
+            let _ = ensure_branch_exists(&client, &space_branch, Some("main")).await;
+        }
 
         if let Some(pull_branches) = omni_opts["pull_branches"].as_array() {
             for pull in pull_branches.iter().filter_map(Value::as_str) {
@@ -3037,12 +3045,11 @@ impl OmnigraphManager {
         }
 
         let space_name_opt = clean_opt(body["space_name"].as_str()).map(str::to_string);
-        let target_branch_opt = body["target_branch"]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(validate_branch_token)
-            .transpose()?;
+        let target_branch_opt = match body.get("target_branch") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(raw)) => Some(normalize_link_target_branch(raw)?),
+            Some(_) => return Err(HarnessError::invalid("Invalid Omnigraph branch name.")),
+        };
 
         let (shared_branch, shared_space) = if mode == "broadcast" {
             let source_branch = session_rows[0].2.clone();
@@ -3053,11 +3060,8 @@ impl OmnigraphManager {
             let sb = if let Some(tb) = target_branch_opt {
                 tb
             } else if let Some(ref sp) = space_name_opt {
-                if sp.starts_with("shared/") || *sp == "main" {
-                    validate_branch_token(sp)?
-                } else {
-                    format!("shared/{}", slugify_segment(sp))
-                }
+                normalize_shared_space_branch(sp)
+                    .map_err(|_| HarnessError::invalid("Invalid Omnigraph `space_name`."))?
             } else {
                 let mut sorted = all_sids.clone();
                 sorted.sort();

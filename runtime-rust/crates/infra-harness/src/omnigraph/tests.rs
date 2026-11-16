@@ -3688,7 +3688,82 @@ async fn sidecar_export_import_round_trip_and_scopes() {
         .collect();
     assert_eq!(after_ids, vec!["atom-replaced-only"]);
 
-    // 6. Malformed/empty import fails cleanly.
+    // 6. Bundle object accepts snake_case `"edge": "relates_to"` with `"relation"`, `{from, to, relation}`
+    // without `"edge"`/`"type"`, and preserves ContextAtom fallback `"branch"`/`"session_id"`.
+    let flexible_bundle = json!({
+        "format": "harness.omnigraph.bundle.v1",
+        "atoms": [
+            {
+                "id": "atom-flex-1",
+                "branch": "custom/origin-br",
+                "session_id": "s-origin-99",
+                "kind": "decision",
+                "title": "Flexible bundle atom 1",
+                "summary": "Carries branch and session_id fallbacks"
+            },
+            {
+                "atom_id": "atom-flex-2",
+                "branch": "custom/origin-br-2",
+                "session_id": "s-origin-98",
+                "kind": "insight",
+                "title": "Flexible bundle atom 2",
+                "summary": "Target of simplified edges"
+            }
+        ],
+        "edges": [
+            {
+                "edge": "relates_to",
+                "from": "atom-flex-1",
+                "to": "atom-flex-2",
+                "relation": "contradicts"
+            },
+            {
+                "from": "atom-flex-2",
+                "to": "atom-flex-1",
+                "relation": "supports"
+            }
+        ]
+    });
+    let flex_imported = mgr
+        .import_context_json(&json!({
+            "project_id": "proj-1",
+            "target_branch": "imported/flex-bundle",
+            "from_branch": "main",
+            "create_branch": true,
+            "mode": "replace",
+            "bundle": flexible_bundle
+        }))
+        .await
+        .unwrap();
+    assert_eq!(flex_imported["ok"], true);
+    assert_eq!(flex_imported["imported_atoms"], 2);
+    assert_eq!(flex_imported["imported_edges"], 2);
+
+    let flex_exported = mgr
+        .export_context_json(&json!({
+            "project_id": "proj-1",
+            "branch": "imported/flex-bundle",
+            "scope": "branch",
+            "format": "bundle"
+        }))
+        .await
+        .unwrap();
+    let flex_atoms = flex_exported["bundle"]["atoms"].as_array().unwrap();
+    let atom_flex_1 = flex_atoms
+        .iter()
+        .find(|a| a["id"] == "atom-flex-1")
+        .unwrap();
+    assert_eq!(atom_flex_1["source_branch"], "custom/origin-br");
+    assert_eq!(atom_flex_1["source_session_id"], "s-origin-99");
+    let flex_edges = flex_exported["bundle"]["edges"].as_array().unwrap();
+    assert!(flex_edges.iter().any(|e| {
+        e["from"] == "atom-flex-1" && e["to"] == "atom-flex-2" && e["relation"] == "contradicts"
+    }));
+    assert!(flex_edges.iter().any(|e| {
+        e["from"] == "atom-flex-2" && e["to"] == "atom-flex-1" && e["relation"] == "supports"
+    }));
+
+    // 7. Malformed/empty import fails cleanly.
     let empty_err = mgr
         .import_context_json(&json!({
             "project_id": "proj-1",
@@ -3887,6 +3962,61 @@ async fn sidecar_link_sessions_shared_branch_and_broadcast_via_mock() {
         broadcast["linked_session_ids"],
         json!([sid_a.clone(), sid_c.clone()])
     );
+
+    // 4. `target_branch` accepts human space names (`"Sprint Space"` -> `"shared/sprint-space"`)
+    // and `"shared/Team Alpha"` -> `"shared/team-alpha"`, while rejecting empty/traversal strings.
+    let human_target = mgr
+        .link_sessions_json(
+            &json!({
+                "project_id": project_id,
+                "session_ids": [sid_a, sid_b],
+                "mode": "shared_branch",
+                "target_branch": "Sprint Space"
+            }),
+            &store,
+        )
+        .await
+        .unwrap();
+    assert_eq!(human_target["shared_branch"], "shared/sprint-space");
+
+    let prefixed_human_target = mgr
+        .link_sessions_json(
+            &json!({
+                "project_id": project_id,
+                "session_ids": [sid_a, sid_b],
+                "mode": "shared_branch",
+                "target_branch": "shared/Team Alpha"
+            }),
+            &store,
+        )
+        .await
+        .unwrap();
+    assert_eq!(prefixed_human_target["shared_branch"], "shared/team-alpha");
+
+    for bad_branch in [
+        "",
+        "   ",
+        "../escape",
+        "shared/..",
+        "shared/",
+        "bad/with space",
+    ] {
+        let err = mgr
+            .link_sessions_json(
+                &json!({
+                    "project_id": project_id,
+                    "session_ids": [sid_a, sid_b],
+                    "mode": "shared_branch",
+                    "target_branch": bad_branch
+                }),
+                &store,
+            )
+            .await;
+        assert!(
+            err.is_err(),
+            "expected error for invalid target_branch `{bad_branch}`"
+        );
+    }
 
     mgr.close().await.unwrap();
 }
