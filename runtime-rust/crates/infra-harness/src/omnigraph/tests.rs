@@ -2562,6 +2562,46 @@ async fn sidecar_payload_contracts_cover_deleted_edges_and_share_modes() {
                         },
                         {
                             "kind": "edge",
+                            "type": { "id": "t-con", "name": "ConsumedBy" },
+                            "id": "e-con-1",
+                            "op": "insert",
+                            "after": {
+                                "properties": { "injection_mode": "auto_capsule", "atom_id": "a2", "session_id": "s1" },
+                                "endpoints": { "from": "a2", "to": "s1" }
+                            }
+                        },
+                        {
+                            "kind": "edge",
+                            "type": { "id": "t-tch", "name": "TouchesFile" },
+                            "id": "e-tch-1",
+                            "op": "insert",
+                            "after": {
+                                "properties": { "access": "referenced", "atom_id": "a2", "path": "src/lib.rs" },
+                                "endpoints": { "from": "a2", "to": "src/lib.rs" }
+                            }
+                        },
+                        {
+                            "kind": "edge",
+                            "type": { "id": "t-pub", "name": "PublishedBy" },
+                            "id": "e-pub-1",
+                            "op": "insert",
+                            "after": {
+                                "properties": { "role": "author", "atom_id": "a2", "session_id": "s1" },
+                                "endpoints": { "from": "a2", "to": "s1" }
+                            }
+                        },
+                        {
+                            "kind": "edge",
+                            "type": { "id": "t-der", "name": "DerivedFrom" },
+                            "id": "e-der-1",
+                            "op": "insert",
+                            "after": {
+                                "properties": { "atom_id": "a2", "snapshot_id": "snap-1" },
+                                "endpoints": { "from": "a2", "to": "snap-1" }
+                            }
+                        },
+                        {
+                            "kind": "edge",
                             "type": { "id": "t-rel", "name": "RelatesTo" },
                             "id": "e-del-1",
                             "op": "delete",
@@ -2572,6 +2612,38 @@ async fn sidecar_payload_contracts_cover_deleted_edges_and_share_modes() {
                         }
                     ]
                 }))
+            }),
+        )
+        .route(
+            &format!("/graphs/{}/changes", schema::HARNESS_GRAPH_ID),
+            get(|AxumQuery(q): AxumQuery<BTreeMap<String, String>>| async move {
+                if q.get("cursor").map(String::as_str) == Some("cur-other-branch") {
+                    return json_err(
+                        StatusCode::BAD_REQUEST,
+                        "change_cursor_rejected",
+                        "change cursor rejected: change feed continuation was minted for a different branch",
+                        None,
+                    );
+                }
+                axum::Json(json!({
+                    "blocks": [{
+                        "cause": {
+                            "graph_commit_id": "c-feat-2",
+                            "authored_branch": "feature/del-edge",
+                            "authored_at": 1_700_000_100_000_000i64
+                        },
+                        "changes": [{
+                            "kind": "node",
+                            "type": { "id": "t-atom", "name": "ContextAtom" },
+                            "id": "a2",
+                            "op": "insert",
+                            "after": { "properties": { "title": "Branch pulse atom" } }
+                        }]
+                    }],
+                    "cursor": "cur-feat-1",
+                    "caught_up": true
+                }))
+                .into_response()
             }),
         )
         .route(
@@ -2620,10 +2692,15 @@ async fn sidecar_payload_contracts_cover_deleted_edges_and_share_modes() {
         .branch_diff_json("proj-1", "feature/del-edge", Some("main"))
         .await
         .unwrap();
-    assert_eq!(diff["added_edges"].as_array().unwrap().len(), 1);
-    assert_eq!(diff["added_edges"][0]["from"], "a2");
-    assert_eq!(diff["added_edges"][0]["to"], "a1");
-    assert_eq!(diff["added_edges"][0]["relation"], "refines");
+    let added_edges = diff["added_edges"].as_array().unwrap();
+    assert_eq!(added_edges.len(), 5);
+    assert_eq!(added_edges[0]["from"], "a2");
+    assert_eq!(added_edges[0]["to"], "a1");
+    assert_eq!(added_edges[0]["relation"], "refines");
+    assert_eq!(added_edges[1]["relation"], "consumed_by");
+    assert_eq!(added_edges[2]["relation"], "touches_file");
+    assert_eq!(added_edges[3]["relation"], "published_by");
+    assert_eq!(added_edges[4]["relation"], "derived_from");
     assert_eq!(diff["deleted_edges"].as_array().unwrap().len(), 1);
     assert_eq!(diff["deleted_edges"][0]["from"], "a1");
     assert_eq!(diff["deleted_edges"][0]["to"], "a0");
@@ -2671,4 +2748,14 @@ async fn sidecar_payload_contracts_cover_deleted_edges_and_share_modes() {
         .unwrap();
     assert_eq!(gv2["commits"][0]["summary"], "Published: Cached atom title");
     assert_eq!(change_hits.load(Ordering::Relaxed), 1);
+
+    // Rejected cross-branch cursor automatically retries from start on that branch
+    let ch_reset = mgr
+        .changes_json("proj-1", Some("cur-other-branch"), Some("feature/del-edge"))
+        .await
+        .unwrap();
+    assert_eq!(ch_reset["reset"], true);
+    assert_eq!(ch_reset["cursor"], "cur-feat-1");
+    assert_eq!(ch_reset["events"].as_array().unwrap().len(), 1);
+    assert_eq!(ch_reset["events"][0]["atom_id"], "a2");
 }
