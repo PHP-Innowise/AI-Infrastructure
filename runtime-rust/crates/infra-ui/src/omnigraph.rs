@@ -51,13 +51,15 @@ pub fn zoom_at(
 }
 
 pub fn camera_for_fit(plane: (f64, f64), viewport: (f64, f64)) -> (f64, f64, f64) {
+    const FIT_MARGIN_X: f64 = 36.0;
+    const FIT_MARGIN_Y: f64 = 24.0;
     let pw = plane.0.max(1.0);
     let ph = plane.1.max(1.0);
-    let vw = (viewport.0 - 24.0).max(160.0);
-    let vh = (viewport.1 - 24.0).max(140.0);
+    let vw = (viewport.0 - FIT_MARGIN_X * 2.0).max(160.0);
+    let vh = (viewport.1 - FIT_MARGIN_Y * 2.0).max(140.0);
     let scale = (vw / pw).min(vh / ph).clamp(CAMERA_MIN, 1.15);
-    let pan_x = ((viewport.0 - pw * scale) / 2.0).max(12.0).round();
-    let pan_y = ((viewport.1 - ph * scale) / 2.0).max(12.0).round();
+    let pan_x = ((viewport.0 - pw * scale) / 2.0).max(FIT_MARGIN_X).round();
+    let pan_y = ((viewport.1 - ph * scale) / 2.0).max(FIT_MARGIN_Y).round();
     (scale, pan_x, pan_y)
 }
 
@@ -1262,14 +1264,31 @@ pub fn initialize() {
     sync_pulse_toggle();
 }
 
-pub fn focus_branch(branch: &str) {
-    if !branch.is_empty() && branch != "auto" {
-        set_ui_state(|s| {
-            s["branch"] = json!(branch);
+fn reset_pulse_cursor() {
+    m::set("omnigraph-pulse-cursor", json!({ "value": "" }));
+}
+
+fn switch_branch_state(branch: &str, clear_snapshot: bool) -> bool {
+    let target = branch.trim();
+    if target.is_empty() || target == "auto" {
+        return false;
+    }
+    let changed = m::text(&ui_state(), "branch") != target;
+    set_ui_state(|s| {
+        s["branch"] = json!(target);
+        if clear_snapshot {
             s["snapshot"] = V::Null;
             s["selected_commit_id"] = V::Null;
-        });
+        }
+    });
+    if changed {
+        reset_pulse_cursor();
     }
+    changed
+}
+
+pub fn focus_branch(branch: &str) {
+    let _ = switch_branch_state(branch, true);
 }
 
 pub fn hydrate_status(status: &V) {
@@ -1438,7 +1457,7 @@ pub fn on_project_changed() {
     m::set("omnigraph-search-results", V::Null);
     m::set("omnigraph-commit-detail", V::Null);
     m::set("omnigraph-pulse-events", json!([]));
-    m::set("omnigraph-pulse-cursor", json!(""));
+    reset_pulse_cursor();
     set_ui_state(|s| {
         s["branch"] = json!("main");
         s["snapshot"] = V::Null;
@@ -1600,12 +1619,10 @@ async fn poll_changes(force: bool) {
 
 async fn load_commit_detail(commit_id: &str, branch: &str) {
     let project = current_project_id();
+    let _ = switch_branch_state(branch, false);
     set_ui_state(|s| {
         s["snapshot"] = json!(commit_id);
         s["selected_commit_id"] = json!(commit_id);
-        if !branch.is_empty() {
-            s["branch"] = json!(branch);
-        }
         s["drawer_tab"] = json!("inspector");
     });
     render_tabs();
@@ -2466,12 +2483,8 @@ pub async fn event(
                 return true;
             }
             "omnigraph-branch" => {
-                let branch = value.to_owned();
-                set_ui_state(|s| {
-                    s["branch"] = json!(branch);
-                    s["snapshot"] = V::Null;
-                    s["selected_commit_id"] = V::Null;
-                });
+                let _ = switch_branch_state(value, true);
+                reset_pulse_cursor();
                 m::set("omnigraph-commit-detail", V::Null);
                 refresh_graph().await;
                 return true;
@@ -2544,10 +2557,8 @@ pub async fn event(
                 {
                     Ok(_) => {
                         dom::set_value("omni-new-branch-name", "");
-                        set_ui_state(|s| {
-                            s["branch"] = json!(name);
-                            s["snapshot"] = V::Null;
-                        });
+                        let _ = switch_branch_state(&name, true);
+                        reset_pulse_cursor();
                         refresh_graph().await;
                     }
                     Err(e) => dom::error("omnigraph-error", &e.message),
@@ -2841,6 +2852,7 @@ pub async fn event(
                 s["snapshot"] = V::Null;
                 s["selected_commit_id"] = V::Null;
             });
+            reset_pulse_cursor();
             m::set("omnigraph-commit-detail", V::Null);
             sync_controls_from_state();
             refresh_graph().await;
@@ -2870,10 +2882,10 @@ pub async fn event(
         "omnigraph-pulse-focus" => {
             let node_id = payload["node_id"].as_str().unwrap_or("").to_owned();
             let branch = payload["branch"].as_str().unwrap_or("").to_owned();
+            if switch_branch_state(&branch, true) {
+                reset_pulse_cursor();
+            }
             set_ui_state(|s| {
-                if !branch.is_empty() {
-                    s["branch"] = json!(branch);
-                }
                 if !node_id.is_empty() {
                     s["selected_id"] = json!(node_id);
                 }
@@ -2912,11 +2924,8 @@ pub async fn event(
         "omnigraph-switch-branch" | "omnigraph-open-branch" => {
             let branch = payload["branch"].as_str().unwrap_or("").to_owned();
             if !branch.is_empty() {
-                set_ui_state(|s| {
-                    s["branch"] = json!(branch);
-                    s["snapshot"] = V::Null;
-                    s["selected_commit_id"] = V::Null;
-                });
+                let _ = switch_branch_state(&branch, true);
+                reset_pulse_cursor();
                 m::set("omnigraph-commit-detail", V::Null);
                 sync_controls_from_state();
                 refresh_graph().await;
@@ -2938,10 +2947,8 @@ pub async fn event(
                 .await
                 {
                     Ok(_) => {
-                        set_ui_state(|s| {
-                            s["branch"] = json!("main");
-                            s["snapshot"] = V::Null;
-                        });
+                        let _ = switch_branch_state("main", true);
+                        reset_pulse_cursor();
                         refresh_graph().await;
                     }
                     Err(e) => dom::error("omnigraph-error", &e.message),
@@ -3000,7 +3007,7 @@ pub async fn event(
                     } else {
                         m::set("omnigraph-diff", res);
                         if delete_branch && m::text(&ui_state(), "branch") == src {
-                            set_ui_state(|s| s["branch"] = json!(dst));
+                            let _ = switch_branch_state(&dst, true);
                         }
                         render_merge();
                         refresh_graph().await;
@@ -3097,8 +3104,8 @@ pub async fn event(
         "omnigraph-open-atom" => {
             let aid = payload["atom_id"].as_str().unwrap_or("").to_owned();
             let branch = payload["branch"].as_str().unwrap_or("main").to_owned();
+            let _ = switch_branch_state(&branch, true);
             set_ui_state(|s| {
-                s["branch"] = json!(branch);
                 s["selected_id"] = json!(aid);
                 s["stage_tab"] = json!("constellation");
                 s["drawer_tab"] = json!("inspector");
@@ -3544,5 +3551,35 @@ mod tests {
             assert_eq!(s.sessions[0]["omnigraph"]["merge_status"], "fast_forward");
             assert!(!session_bar_summary(&s.sessions[0]).4);
         });
+    }
+
+    #[test]
+    fn branch_switch_resets_pulse_cursor_and_fit_keeps_right_margin() {
+        let _ = switch_branch_state("main", true);
+        m::set("omnigraph-pulse-cursor", json!({ "value": "cur-main-42" }));
+        assert_eq!(
+            m::text(&m::data("omnigraph-pulse-cursor"), "value"),
+            "cur-main-42"
+        );
+
+        assert!(switch_branch_state("session/feature-1", true));
+        assert_eq!(m::text(&ui_state(), "branch"), "session/feature-1");
+        assert_eq!(m::text(&m::data("omnigraph-pulse-cursor"), "value"), "");
+
+        // Same branch switch keeps existing cursor; distinct branch resets it again.
+        m::set("omnigraph-pulse-cursor", json!({ "value": "cur-feat-7" }));
+        assert!(!switch_branch_state("session/feature-1", false));
+        assert_eq!(
+            m::text(&m::data("omnigraph-pulse-cursor"), "value"),
+            "cur-feat-7"
+        );
+        focus_branch("main");
+        assert_eq!(m::text(&ui_state(), "branch"), "main");
+        assert_eq!(m::text(&m::data("omnigraph-pulse-cursor"), "value"), "");
+
+        let (scale, px, py) = camera_for_fit((1040.0, 540.0), (800.0, 500.0));
+        assert!(px >= 36.0);
+        assert!(py >= 24.0);
+        assert!(px + 1040.0 * scale <= 800.0 - 35.0);
     }
 }
