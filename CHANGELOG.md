@@ -24,6 +24,24 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- The Context Graph's **Keep source** and **Keep target** now have values to
+  work with on a live Omnigraph. Its own merge conflicts name an atom without
+  its values, which left both buttons disabled; the branch diff and a
+  conflicting merge (`GET /api/omnigraph/branches/diff`, the `merge` action of
+  `POST /api/omnigraph/branches`) now add to each `ContextAtom`
+  `divergent_update` the atom as the source and the target branch hold it
+  (`source_value`, `target_value`), with one read of each branch whatever the
+  number of conflicts. A request without a `project_id` and an atom of
+  another project get no values, since a Keep writes under the caller's
+  project, and other conflicts pass through unchanged. An atom update through
+  `POST /api/omnigraph/atoms` without `session_id`, which is what a Keep
+  button sends, keeps the stored `source_session_id` and links no session; an
+  explicit `session_id` still takes the atom over and links it, and `null`
+  clears. Checked against the Omnigraph v0.15.0 release: a `divergent_update`
+  compares whole rows, so content that agrees under another `updated_at` or
+  `source_branch` still conflicts and only identical rows converge, as in the
+  fake Omnigraph. A Keep write, which stamps its branch and time, therefore
+  does not settle the conflict yet: the kept row has to be copied as it is.
 - Harness curation from the page. Memory use lists a promotion queue:
   proposals waiting for review, automatic ones that stalled and the newest
   promoted automatically in the window, by ID, source record IDs, dates,
