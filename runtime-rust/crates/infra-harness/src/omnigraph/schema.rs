@@ -684,6 +684,58 @@ pub(crate) const GQ_LINK_TOUCHES_FILE: &str = r#"query link_touches_file(
     }
 }"#;
 
+/// A declaration a context atom names in a file it touches.
+pub(crate) const GQ_UPSERT_SYMBOL: &str = r#"query upsert_symbol(
+    $fqn: String,
+    $project_id: String,
+    $file_path: String,
+    $kind: String,
+    $name: String
+) {
+    insert SymbolRef {
+        fqn: $fqn,
+        project_id: $project_id,
+        file_path: $file_path,
+        kind: $kind,
+        name: $name
+    }
+}"#;
+
+pub(crate) const GQ_LINK_MENTIONS_SYMBOL: &str = r#"query link_mentions_symbol(
+    $atom_id: String,
+    $fqn: String,
+    $role: String?
+) {
+    insert MentionsSymbol {
+        from: $atom_id,
+        to: $fqn,
+        role: $role
+    }
+}"#;
+
+/// An atom whose text changed names other declarations: its old mentions go
+/// before the new ones are linked.
+pub(crate) const GQ_CLEAR_ATOM_SYMBOLS: &str = r#"query clear_atom_symbols($atom_id: String) {
+    delete MentionsSymbol where @src = $atom_id
+}"#;
+
+/// The declarations the project's atoms name, with the file each is in.
+pub(crate) const GQ_LIST_SYMBOL_EDGES: &str = r#"query list_symbol_edges($project_id: String) {
+    match {
+        $a: ContextAtom { project_id: $project_id }
+        $a $e:mentionsSymbol $s
+    }
+    return {
+        $a.atom_id as source_id,
+        $s.fqn as target_id,
+        $s.name as name,
+        $s.kind as kind,
+        $s.file_path as file_path,
+        $e.role as role
+    }
+    limit 500
+}"#;
+
 pub(crate) const GQ_LINK_RELATES_TO: &str = r#"query link_relates_to(
     $source_id: String,
     $target_id: String,

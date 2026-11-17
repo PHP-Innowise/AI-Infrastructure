@@ -2721,6 +2721,11 @@ fn apply_prepared_omnigraph_response(existing: &Value, sid: &str, prep: &Value) 
     if prep.get("head_commit").is_some_and(|c| !c.is_null()) {
         updated_omni["head_commit"] = prep["head_commit"].clone();
     }
+    // What this turn's capsule cautions about, for a person to review.
+    updated_omni["contradiction_warnings"] = match prep["contradiction_warnings"].as_array() {
+        Some(warnings) => Value::Array(warnings.iter().take(24).cloned().collect()),
+        None => json!([]),
+    };
     updated_omni["last_error"] = Value::Null;
     Some(updated_omni)
 }

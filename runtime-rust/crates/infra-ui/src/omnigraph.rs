@@ -184,7 +184,84 @@ fn render_provenance_jump_buttons_html(atom: &V) -> String {
             esc(memory_id)
         ));
     }
+    // A Git commit the atom names opens in the Code Map; an Omnigraph
+    // snapshot (`commit_id`) keeps `omnigraph-select-commit`.
+    for sha in git_commits_named(atom) {
+        let payload = json!({ "sha": sha }).to_string();
+        buttons.push(format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"omnigraph-open-git-commit\" data-payload=\"{}\" title=\"Open Git commit {} in the Code Map\">Git: {}</button>",
+            esc(&payload),
+            esc(&sha),
+            esc(&sha.chars().take(10).collect::<String>())
+        ));
+    }
     buttons.join("")
+}
+
+/// A Git commit id as the Code Map takes it: 7 to 40 lowercase hex digits.
+fn is_git_sha(text: &str) -> bool {
+    (7..=40).contains(&text.len())
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The Git commits an atom names, at most four: its `git_commit` field, or
+/// a lowercase hex word of 7 to 40 characters with a letter and a digit
+/// standing alone in its tags, title, summary or body (not part of a path,
+/// an id like `MEM-…-a1b2c3d4`, or a file name).
+fn git_commits_named(atom: &V) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let mut add = |sha: &str| {
+        if found.len() < 4 && is_git_sha(sha) && !found.iter().any(|seen| seen == sha) {
+            found.push(sha.to_owned());
+        }
+    };
+    if let Some(sha) = atom["git_commit"].as_str() {
+        add(sha.trim());
+    }
+    let texts = m::array(&atom["tags"])
+        .iter()
+        .filter_map(V::as_str)
+        .map(str::to_owned)
+        .chain(
+            ["title", "summary", "body"]
+                .iter()
+                .filter_map(|key| atom[*key].as_str().map(str::to_owned)),
+        )
+        .collect::<Vec<_>>();
+    for text in &texts {
+        let chars = text.char_indices().collect::<Vec<_>>();
+        let mut i = 0;
+        while i < chars.len() {
+            if !chars[i].1.is_ascii_hexdigit() {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < chars.len() && chars[i].1.is_ascii_hexdigit() {
+                i += 1;
+            }
+            let before = start.checked_sub(1).map(|at| chars[at].1);
+            let after = chars.get(i).map(|c| c.1);
+            let after_next = chars.get(i + 1).map(|c| c.1);
+            let opens = before.is_none_or(|c| c.is_whitespace() || "([{<'\"`:,;".contains(c));
+            let closes = match after {
+                None => true,
+                Some('.') => after_next.is_none_or(char::is_whitespace),
+                Some(c) => c.is_whitespace() || ")]}>'\"`,;:!?".contains(c),
+            };
+            let word = &text[chars[start].0..chars.get(i).map_or(text.len(), |c| c.0)];
+            if opens
+                && closes
+                && word.bytes().any(|b| b.is_ascii_digit())
+                && word.bytes().any(|b| (b'a'..=b'f').contains(&b))
+            {
+                add(word);
+            }
+        }
+    }
+    found
 }
 
 fn response_error_message(res: &V, fallback: &str) -> String {
@@ -5557,6 +5634,17 @@ pub async fn event(
             }
             true
         }
+        "omnigraph-open-git-commit" => {
+            let sha = payload["sha"].as_str().unwrap_or("").trim().to_owned();
+            let project = current_project_id();
+            if is_git_sha(&sha) && !project.is_empty() {
+                if dom::value("project") != project {
+                    crate::session::sync_project(&project);
+                }
+                crate::graph_map::open_project_commit(&project, &sha);
+            }
+            true
+        }
         "omnigraph-select-commit" => {
             let commit_id = payload["commit_id"].as_str().unwrap_or("").to_owned();
             let branch = payload["branch"].as_str().unwrap_or("").to_owned();
@@ -6865,6 +6953,63 @@ mod tests {
         assert!(filtered_cards.contains("Auth UI"));
         assert!(share_session_matches_filter(&all[0], "sprint-auth"));
         assert!(!share_session_matches_filter(&all[0], "nonexistent"));
+    }
+
+    #[test]
+    fn a_git_commit_an_atom_names_opens_the_code_map_apart_from_snapshots() {
+        let atom = json!({
+            "id": "atom-git",
+            "kind": "finding",
+            "title": "Regression from 3f2a9c1",
+            "summary": "Fixed again in (deadbeef0123); see commit:0a1b2c3d4e5f60718293a4b5c6d7e8f901234567.",
+            "tags": ["sha 7e57ab1"],
+            "commit_id": "c-0042",
+            "branch": "main"
+        });
+        assert_eq!(
+            git_commits_named(&atom),
+            vec![
+                "7e57ab1".to_owned(),
+                "3f2a9c1".to_owned(),
+                "deadbeef0123".to_owned(),
+                "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567".to_owned(),
+            ]
+        );
+        let graph = json!({"atoms": [atom]});
+        let html = render_node_inspector_html(&graph, "atom-git", &[], "main");
+        assert!(
+            html.contains("data-action=\"omnigraph-open-git-commit\" data-payload=\"{&quot;sha&quot;:&quot;3f2a9c1&quot;}\" title=\"Open Git commit 3f2a9c1 in the Code Map\">Git: 3f2a9c1</button>"),
+            "{html}"
+        );
+        assert!(html.contains(">Git: 0a1b2c3d4e</button>"), "{html}");
+        // The Omnigraph snapshot keeps its own action.
+        assert!(
+            html.contains("data-action=\"omnigraph-select-commit\" data-commit-id=\"c-0042\""),
+            "{html}"
+        );
+        assert!(!html.contains("&quot;sha&quot;:&quot;c-0042"), "{html}");
+        // Words that only look like hex: ids, paths, numbers, words, capitals.
+        let lookalikes = json!({"body": "Not commits: MEM-20261117-a1b2c3d4, src/abc1234.rs, 2026111712, facade, DEADBEEF1, abc123, 11111111-2222-4333-8444-555555555555, x9abcdef12, abc1234.rs and abc1234-fix."});
+        assert!(
+            git_commits_named(&lookalikes).is_empty(),
+            "{:?}",
+            git_commits_named(&lookalikes)
+        );
+        assert_eq!(
+            git_commits_named(&json!({"git_commit": " abcdef1234 "})),
+            vec!["abcdef1234"]
+        );
+        // At most four in all, and only a real id.
+        let explicit =
+            json!({"git_commit": "ABCDEF1", "title": "a1b2c3d e4f5a6b 0000000a 1111111b 2222222c"});
+        assert_eq!(
+            git_commits_named(&explicit),
+            vec!["a1b2c3d", "e4f5a6b", "0000000a", "1111111b"]
+        );
+        assert!(is_git_sha("abcdef1"));
+        assert!(!is_git_sha("abcdef"));
+        assert!(!is_git_sha("ABCDEF1"));
+        assert!(!is_git_sha(&"a".repeat(41)));
     }
 
     #[test]

@@ -224,6 +224,7 @@ svg { flex:none; }
 .graph-pick-badge[data-kind="tag"],.graph-pick-badge[data-kind="draft"] { border-color:var(--warning-line); background:var(--warning-soft); color:var(--warning); }
 .graph-pick-badge[data-kind="merged"],.graph-pick-badge[data-kind="open"] { border-color:var(--success-line); background:var(--success-soft); color:var(--success); }
 .graph-pick-badge[data-kind="closed"] { border-color:var(--error-line); background:var(--error-soft); color:var(--error); }
+.graph-pick-badge[data-kind="memory"] { border-color:var(--warning-line); background:var(--warning-soft); color:var(--warning); }
 .graph-pick-detail { flex:0 1 240px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
 .graph-pick-who { flex:0 0 132px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--ink-2); }
 .graph-pick-when { flex:0 0 92px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums; }
@@ -250,6 +251,8 @@ span.graph-map-crumb { color:var(--ink); font-weight:var(--weight-strong); }
 .graph-commit-banner-stats [data-status="modified"] { color:var(--graph-diff-modified); }
 .graph-commit-banner-stats [data-status="deleted"] { color:var(--graph-diff-removed); }
 .graph-commit-banner-stats [data-status="renamed"] { color:var(--graph-diff-renamed); }
+.graph-commit-memory { flex:1 0 100%; display:grid; gap:4px; min-width:0; }
+.graph-commit-memory .graph-memory-warning,.graph-commit-memory .knowledge-note { margin:0; overflow-wrap:anywhere; }
 .graph-commit-parent-btn { min-height:var(--control-height-sm); padding:2px 8px; border:1px solid var(--field-line); border-radius:var(--radius-sm); background:var(--paper); color:var(--ink-2); font-family:var(--font-mono); font-size:var(--text-meta); line-height:var(--leading-tight); transition:border-color var(--motion-fast) var(--ease-standard),background-color var(--motion-fast) var(--ease-standard),color var(--motion-fast) var(--ease-standard); }
 .graph-commit-parent-btn:hover { border-color:var(--purple); background:var(--purple-soft); color:var(--purple); }
 .graph-map-body { flex:1; min-height:0; display:flex; align-items:stretch; gap:16px; }
@@ -1787,6 +1790,7 @@ button.run-file:hover { border-color:var(--field-line-hover); }
 .graph-memory-badge { color:var(--muted); font-size:var(--text-meta); }
 .graph-memory-atom { padding:4px 8px; color:var(--ink-2); font-size:var(--text-ui); overflow-wrap:anywhere; }
 .graph-memory-warning { margin:0 0 8px; padding:8px; border-left:2px solid var(--purple-line); background:var(--purple-soft); color:var(--ink); font-size:var(--text-ui); }
+.graph-memory-warning .button { margin:4px 4px 0 0; }
 .memory-history { margin:16px 0 12px; }
 .memory-history h4 { margin:0 0 8px; color:var(--ink-2); font-size:var(--text-ui); font-weight:var(--weight-strong); }
 .memory-history-plot { display:inline-grid; max-width:100%; min-width:160px; }

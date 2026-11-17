@@ -744,6 +744,15 @@ async fn mock_mutate(
         props["target_id"] = json!(dst);
         snap.mentions_symbol.insert(format!("{src}->{dst}"), props);
         edges += 1;
+    } else if qname == "clear_atom_symbols"
+        || (qtext.contains("delete MentionsSymbol") && !qtext.contains("delete ContextAtom"))
+    {
+        // As `GQ_CLEAR_ATOM_SYMBOLS`: the atom's mentions only.
+        let aid = params["atom_id"].as_str().unwrap_or("");
+        let before = snap.mentions_symbol.len();
+        snap.mentions_symbol
+            .retain(|_, props| props["source_id"].as_str() != Some(aid));
+        edges += before - snap.mentions_symbol.len();
     } else if qname == "clear_branch_context" {
         nodes = snap.atoms.len()
             + snap.files.len()
@@ -847,6 +856,52 @@ fn eval_query(snap: &MockSnapshot, qname: &str, params: &Value) -> Vec<Value> {
         "list_file_edges" => snap.touches_file.values().cloned().collect(),
         "list_atom_relations" => snap.relates_to.values().cloned().collect(),
         "list_session_follows" => snap.session_follows.values().cloned().collect(),
+        "file_context" => {
+            let path = params["path"].as_str().unwrap_or("");
+            snap.touches_file
+                .values()
+                .filter(|edge| edge["target_id"].as_str() == Some(path))
+                .filter_map(|edge| snap.atoms.get(edge["source_id"].as_str()?).cloned())
+                .collect()
+        }
+        "list_symbol_edges" => snap
+            .mentions_symbol
+            .values()
+            .filter_map(|edge| {
+                let atom = snap.atoms.get(edge["source_id"].as_str()?)?;
+                let symbol = snap.symbols.get(edge["target_id"].as_str()?)?;
+                match_proj(atom).then(|| {
+                    json!({
+                        "source_id": edge["source_id"],
+                        "target_id": edge["target_id"],
+                        "name": symbol["name"],
+                        "kind": symbol["kind"],
+                        "file_path": symbol["file_path"],
+                        "role": edge["role"],
+                    })
+                })
+            })
+            .collect(),
+        "contradictions" => snap
+            .relates_to
+            .values()
+            .filter(|edge| edge["relation"].as_str() == Some("contradicts"))
+            .filter_map(|edge| {
+                let source = snap.atoms.get(edge["source_id"].as_str()?)?;
+                let target = snap.atoms.get(edge["target_id"].as_str()?)?;
+                match_proj(source).then(|| {
+                    json!({
+                        "source_id": edge["source_id"],
+                        "source_title": source["title"],
+                        "target_id": edge["target_id"],
+                        "target_title": target["title"],
+                        "note": edge["note"],
+                        "confidence": edge["confidence"],
+                        "created_at": edge["created_at"],
+                    })
+                })
+            })
+            .collect(),
         "list_session_turn_snapshots" => {
             let sid = params["session_id"].as_str().unwrap_or("");
             let mut rows: Vec<Value> = snap
@@ -3547,6 +3602,150 @@ async fn post_turn_publish_excludes_nonexistent_draft_files() {
 
     fx.shutdown().await;
     mock_task.abort();
+}
+
+#[tokio::test]
+async fn http_memory_links_show_named_declarations_and_contradictions_for_review() {
+    let (mock_url, _mock_task) = spawn_mock_omnigraph("tok-links").await;
+    let fx = HarnessFixture::new(None).await;
+    let ctx = setup_governed_fixture_project(&fx.project_path);
+    fx.omnigraph
+        .connect_external(&mock_url, Some("tok-links"), Some(schema::HARNESS_GRAPH_ID))
+        .await
+        .unwrap();
+    let finding = infra_core::MemoryService::new(ctx.clone(), None)
+        .execute(
+            "brain-create",
+            &json!({
+                "type": "finding",
+                "external_id": "links-finding-1",
+                "title": "check_jwt must verify the audience claim",
+                "goal": "Rejects cross-service token replay.",
+                "files": ["src/auth/jwt.rs"],
+                "sources": ["src/auth/jwt.rs"],
+                "privacy": "public",
+                "authority": "verified",
+                "attestation": "person",
+                "json": true,
+            }),
+            &[],
+        )
+        .unwrap();
+    let record_id = finding["id"].as_str().unwrap().to_owned();
+    let (status, synced) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/sync-knowledge",
+            Some(json!({ "project_id": fx.project_id })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{synced}");
+    // The record names `check_jwt`, a declaration of the file it cites.
+    assert_eq!(synced["symbols"], 1, "{synced}");
+    let brain_atom = format!("brain-{record_id}");
+
+    // A session's learning on the canonical branch contradicts the record.
+    let (status, published) = fx
+        .http(
+            Method::POST,
+            "/api/omnigraph/atoms",
+            Some(json!({
+                "project_id": fx.project_id,
+                "branch": schema::CANONICAL_KNOWLEDGE_BRANCH,
+                "atom_id": "atom-replay-ok",
+                "kind": "finding",
+                "title": "Token replay across services is accepted",
+                "files": ["src/auth/jwt.rs"],
+                "relates_to": [{"target_id": brain_atom, "relation": "contradicts", "note": "seen in staging"}]
+            })),
+            true,
+        )
+        .await;
+    assert_eq!(status, 200, "{published}");
+    let brain_before = fs::read_dir(fx.project_path.join("project-brain/dynamic"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+
+    let (status, links) = fx
+        .http(
+            Method::GET,
+            &format!(
+                "/api/projects/{}/graph/memory-links?path=src/auth/jwt.rs",
+                fx.project_id
+            ),
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(status, 200, "{links}");
+    assert!(
+        links["brain_records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record["id"] == record_id.as_str()),
+        "{links}"
+    );
+    let atoms = links["omnigraph_atoms"].as_array().unwrap();
+    let synced_atom = atoms
+        .iter()
+        .find(|atom| atom["atom_id"] == brain_atom.as_str())
+        .unwrap_or_else(|| panic!("{links}"));
+    assert_eq!(synced_atom["symbols"], json!(["check_jwt"]), "{links}");
+    let warnings = links["contradiction_warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{links}");
+    let warning = &warnings[0];
+    assert_eq!(warning["kind"], "atom-contradiction");
+    assert_eq!(warning["recommended_action"], "review");
+    assert_eq!(warning["source_id"], "atom-replay-ok");
+    assert_eq!(warning["target_id"], brain_atom.as_str());
+    assert_eq!(warning["linked"], json!([record_id]));
+    assert_eq!(warning["open"][0]["scope"], "brain");
+    assert!(
+        warning["text"]
+            .as_str()
+            .unwrap()
+            .contains("seen in staging"),
+        "{warning}"
+    );
+    // Review only: no Brain record was written or retired.
+    assert_eq!(
+        fs::read_dir(fx.project_path.join("project-brain/dynamic"))
+            .map(|entries| entries.count())
+            .unwrap_or(0),
+        brain_before
+    );
+
+    // A session prepared now carries the same relation as a caution under
+    // the canonical atom it injects.
+    let session = json!({
+        "id": "abcdefabcdef0001",
+        "project_id": fx.project_id,
+        "title": "Audience checks",
+        "provider": "claude",
+        "workflow": "native",
+        "status": "running",
+        "omnigraph": {"enabled": true, "branch": "auto"}
+    });
+    let prep = fx
+        .omnigraph
+        .prepare_session_context(&session, &fx.project_path)
+        .await
+        .unwrap();
+    assert_eq!(
+        prep["contradiction_warnings"].as_array().map(Vec::len),
+        Some(1),
+        "{prep}"
+    );
+    assert!(
+        prep["capsule_text"]
+            .as_str()
+            .unwrap()
+            .contains("Caution: this is contradicted by \"Token replay across services is accepted\" (`atom-replay-ok`: seen in staging)"),
+        "{prep}"
+    );
+    fx.shutdown().await;
 }
 
 #[tokio::test]

@@ -71,6 +71,25 @@ edition's own files remain in that edition's changelog.
   (`previous_path`). The map's side panel shows the links of a selected file
   once they arrive, opens each record or chunk in Knowledge, and keeps the map
   when the request fails.
+- The bridge goes further, still for review only. Publishing an Omnigraph
+  atom (`POST /api/omnigraph/atoms`, a session's learnings, the canonical
+  sync) links the declarations its text names in the files it touches as
+  `SymbolRef` nodes with `MentionsSymbol` edges, read from the session's
+  workspace or the registered project and never from a path in the request;
+  an edit that names others replaces them. An atom injected into a session
+  that a `contradicts` relation links to another gets a caution line in the
+  capsule and a `contradiction_warnings` entry on the session;
+  `memory-links` returns the same relations among a file's atoms with the
+  Brain record or chunk behind each end, and the map's side panel shows them
+  beside each atom's named declarations. A commit's banner asks the memory
+  that cites each file it renamed by its old name and shows what to review;
+  its dock row then shows the count. In the Omnigraph atom inspector a Git
+  commit the atom names opens the Code Map at that commit, apart from
+  Omnigraph snapshots. Nothing retires or changes a record or chunk.
+- `HARNESS_GRAPH_RISK_CALLER_HINTS=1` adds to the source hints the memory
+  citing a caller that a session's run puts at risk (`edge_diffs.risk_callers`).
+  It is off by default and stays off until a held-out measurement of its own
+  (`docs/MEMORY-EVAL.md`); a test holds the default.
 - Updating an Omnigraph atom through `POST /api/omnigraph/atoms` keeps what
   the update leaves out: its six provenance fields (`origin_layer`,
   `authority`, `privacy`, `brain_record_id`, `memory_id`,

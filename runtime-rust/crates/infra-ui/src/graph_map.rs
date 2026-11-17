@@ -11859,7 +11859,18 @@ fn commit_dock_note(dock: &V) -> String {
     )
 }
 fn render_commit_dock_list(dock: &V, selected_target: &str, now: i64) -> String {
-    let rows = m::array(&dock["rows"]);
+    // A row shows how much memory to review only once its commit's banner
+    // has the answers; rows are never asked for a count each.
+    let counts = m::data(COMMIT_MEMORY_COUNTS);
+    let rows = m::array(&dock["rows"])
+        .into_iter()
+        .map(|mut row| {
+            if let Some(count) = row["commit"].as_str().and_then(|sha| counts[sha].as_u64()) {
+                row["memory_review"] = json!(count);
+            }
+            row
+        })
+        .collect::<Vec<_>>();
     let selected_sha = selected_target.strip_prefix("commit:");
     crate::git_commit_graph::render_commit_graph_rows(
         &rows,
@@ -11877,7 +11888,142 @@ fn render_commit_banner_for_view(view: &V, changes: Option<&V>) -> String {
     if !is_commit_view(view) {
         return String::new();
     }
-    crate::git_commit_graph::render_commit_banner(view.get("commit_info"), &view["chosen"], changes)
+    let banner = crate::git_commit_graph::render_commit_banner(
+        view.get("commit_info"),
+        &view["chosen"],
+        changes,
+    );
+    if crate::git_commit_graph::renamed_files(changes, 1).is_empty() {
+        return banner;
+    }
+    let project = view["project_id"]
+        .as_str()
+        .filter(|project| !project.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| surface_scope(MODAL_SURFACE).project_id().to_owned());
+    let commit = view["commit_info"]["commit"]
+        .as_str()
+        .or_else(|| view["chosen"]["head"]["commit"].as_str())
+        .or_else(|| {
+            view["chosen"]["target"]
+                .as_str()
+                .and_then(|target| target.strip_prefix("commit:"))
+        })
+        .unwrap_or("");
+    format!(
+        "{banner}{}",
+        commit_memory_section(&project, commit, changes)
+    )
+}
+/// The commit-dock counts of memory to review, by commit, from the answers
+/// its banner received.
+const COMMIT_MEMORY_COUNTS: &str = "graph-commit-memory-counts";
+/// At most this many renamed files of one commit are asked about.
+const COMMIT_MEMORY_FILES: usize = 12;
+/// What the project's memory says about the files a commit renamed: the
+/// warnings to review, filled in as answers arrive. Nothing is retired or
+/// changed; once every answer is in, the commit's dock row shows the count.
+fn commit_memory_section(project: &str, commit: &str, changes: Option<&V>) -> String {
+    let renamed = crate::git_commit_graph::renamed_files(changes, COMMIT_MEMORY_FILES);
+    if project.is_empty() || renamed.is_empty() {
+        return String::new();
+    }
+    let answers = renamed
+        .iter()
+        .map(|(path, previous)| rename_memory_links(project, path, previous))
+        .collect::<Vec<_>>();
+    if !commit.is_empty()
+        && answers
+            .iter()
+            .all(|answer| answer.is_object() && answer["pending"] != true)
+    {
+        let count = crate::git_commit_graph::rename_review_count(&answers);
+        let mut counts = m::data(COMMIT_MEMORY_COUNTS);
+        if !counts.is_object() {
+            counts = json!({});
+        }
+        if counts[commit] != count {
+            counts[commit] = json!(count);
+            m::set(COMMIT_MEMORY_COUNTS, counts);
+        }
+    }
+    let total = changes
+        .and_then(|catalog| catalog["renamed_files"].as_u64())
+        .map_or(renamed.len(), |count| count as usize);
+    let body = crate::git_commit_graph::render_rename_memory_warnings(
+        &renamed,
+        &answers,
+        total.saturating_sub(renamed.len()),
+    );
+    if body.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<div class=\"graph-commit-memory\" data-commit=\"{}\" aria-live=\"polite\">{body}</div>",
+        escape(commit)
+    )
+}
+/// The memory-links answer for a file a commit renamed from `previous`, or
+/// `{"pending": true}` while it is asked: one request per file at a time,
+/// fresh for a minute, as the side panel's.
+fn rename_memory_links(project: &str, path: &str, previous: &str) -> V {
+    let key = format!("{project}\u{1f}{path}\u{1f}{previous}");
+    let cached = m::data(MEMORY_LINKS)[&key].clone();
+    if cached.is_object() && memory_links_fresh(&cached) {
+        return cached;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut cache = m::data(MEMORY_LINKS);
+        if !cache.is_object() {
+            cache = json!({});
+        }
+        cache[&key] = json!({"pending": true, "at": js_sys::Date::now()});
+        m::set(MEMORY_LINKS, cache);
+        let url = format!(
+            "/api/projects/{}/graph/memory-links?path={}&previous_path={}",
+            dom::enc(project),
+            dom::enc(path),
+            dom::enc(previous)
+        );
+        spawn_local(async move {
+            let mut links = match crate::api::get(&url).await {
+                Ok(links) => links,
+                Err(error) => json!({"error": error.message}),
+            };
+            links["at"] = json!(js_sys::Date::now());
+            let mut cache = m::data(MEMORY_LINKS);
+            if !cache.is_object() {
+                cache = json!({});
+            }
+            cache[&key] = links;
+            m::set(MEMORY_LINKS, cache);
+            refresh_commit_memory();
+        });
+    }
+    json!({"pending": true})
+}
+/// Redraws the commit banner, and the dock's counts, once an answer about a
+/// renamed file arrives.
+#[cfg(target_arch = "wasm32")]
+fn refresh_commit_memory() {
+    let view = m::data(MODAL_SURFACE.view_key);
+    if !view.is_object() {
+        return;
+    }
+    let changes = surface_changes_doc(MODAL_SURFACE, &state());
+    let banner_html = render_commit_banner_for_view(&view, changes.as_ref());
+    html("graph-commit-banner", &banner_html);
+    dom::hidden("graph-commit-banner", banner_html.trim().is_empty());
+    show_commit_dock();
+}
+/// Opens the dependency map of `project_id` at one Git commit, as its
+/// history lists it.
+pub(crate) fn open_project_commit(project_id: &str, sha: &str) {
+    open_system_service_map(
+        GraphTargetScope::single(project_id),
+        Some(&format!("commit:{sha}")),
+    );
 }
 fn commit_action_target(action: &str, payload: &V) -> Option<String> {
     match action {
@@ -15376,6 +15522,27 @@ pub(crate) fn render_side_memory_bridge_html(project: &str, links: &V) -> String
             escape(warning["text"].as_str().unwrap_or(""))
         ));
     }
+    // Two atoms of the file that contradict each other: both stay as they
+    // are, and the record or chunk behind either opens for a person to judge.
+    for warning in m::array(&links["contradiction_warnings"]) {
+        let opens = m::array(&warning["open"])
+            .iter()
+            .filter_map(|open| {
+                let scope = open["scope"].as_str().filter(|s| matches!(*s, "brain" | "memory"))?;
+                let target = open["target_id"].as_str().filter(|t| !t.is_empty())?;
+                Some(format!(
+                    " <button type=\"button\" class=\"button compact\" data-action=\"graph-map-open-memory\" data-payload=\"{}\">Open {}</button>",
+                    payload(&json!({"scope": scope, "project_id": project, "target_id": target})),
+                    escape(open["title"].as_str().unwrap_or(target))
+                ))
+            })
+            .collect::<String>();
+        html.push_str(&format!(
+            "<p class=\"graph-memory-warning\" data-kind=\"{}\" role=\"note\">Review: {}{opens}</p>",
+            escape(warning["kind"].as_str().unwrap_or("atom-contradiction")),
+            escape(warning["text"].as_str().unwrap_or(""))
+        ));
+    }
     let open = |scope: &str, target: &str, label: String| {
         format!(
             "<li><button type=\"button\" class=\"graph-memory-link\" data-action=\"graph-map-open-memory\" data-payload=\"{}\">{label}</button></li>",
@@ -15438,15 +15605,30 @@ pub(crate) fn render_side_memory_bridge_html(project: &str, links: &V) -> String
             "<p class=\"graph-memory-group\">Shared context</p><ul class=\"graph-memory-list\">",
         );
         for atom in &atoms {
+            // The declarations of this file the atom names, as it named them.
+            let symbols = m::array(&atom["symbols"])
+                .iter()
+                .filter_map(V::as_str)
+                .take(6)
+                .map(escape)
+                .collect::<Vec<_>>();
             html.push_str(&format!(
-                "<li class=\"graph-memory-atom\">{}</li>",
+                "<li class=\"graph-memory-atom\">{}{}</li>",
                 escape(
                     atom["capsule_line"]
                         .as_str()
                         .or_else(|| atom["title"].as_str())
                         .unwrap_or("")
                         .trim_start_matches("- ")
-                )
+                ),
+                if symbols.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " <span class=\"graph-memory-badge\">names {}</span>",
+                        symbols.join(", ")
+                    )
+                }
             ));
         }
         html.push_str("</ul>");
@@ -28321,5 +28503,101 @@ mod memory_bridge_tests {
         let cached = memory_links_section("proj-1", "src/Auth/TokenService.php");
         assert!(cached.contains("No Project Brain record"), "{cached}");
         m::take(MEMORY_LINKS);
+    }
+
+    #[test]
+    fn contradictions_and_named_declarations_are_shown_for_review() {
+        let links = json!({
+            "brain_records": [],
+            "memory_chunks": [],
+            "omnigraph_atoms": [{
+                "capsule_line": "- [unverified reference — verify against code & Brain] [finding] Replay is fine (from `main`)",
+                "symbols": ["TokenGuard::check", "<b>"]
+            }],
+            "hygiene_warnings": [],
+            "contradiction_warnings": [{
+                "kind": "atom-contradiction",
+                "text": "\"Replay is fine\" contradicts \"Tokens <expire>\"; check both against the code before relying on either.",
+                "open": [
+                    {"scope": "brain", "target_id": "11111111-2222-4333-8444-555555555555", "title": "Tokens <expire>"},
+                    {"scope": "shell", "target_id": "rm -rf"},
+                    {"scope": "memory", "target_id": ""}
+                ]
+            }]
+        });
+        let html = render_side_memory_bridge_html("proj-1", &links);
+        assert!(
+            html.contains("<p class=\"graph-memory-warning\" data-kind=\"atom-contradiction\" role=\"note\">Review: &quot;Replay is fine&quot; contradicts &quot;Tokens &lt;expire&gt;&quot;; check both against the code before relying on either. <button type=\"button\" class=\"button compact\" data-action=\"graph-map-open-memory\""),
+            "{html}"
+        );
+        assert!(
+            html.contains(">Open Tokens &lt;expire&gt;</button></p>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("&quot;target_id&quot;:&quot;11111111-2222-4333-8444-555555555555&quot;"),
+            "{html}"
+        );
+        // Only a Knowledge record or chunk opens; nothing else is offered.
+        assert_eq!(
+            html.matches("data-action=\"graph-map-open-memory\"")
+                .count(),
+            1,
+            "{html}"
+        );
+        assert!(!html.contains("rm -rf"), "{html}");
+        assert!(
+            html.contains(
+                "<span class=\"graph-memory-badge\">names TokenGuard::check, &lt;b&gt;</span>"
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_commit_banner_reviews_memory_citing_the_names_it_renamed() {
+        let view = json!({
+            "project_id": "proj-1",
+            "chosen": {"kind": "commit", "head": {"commit": "aaaa1111bbbb2222"}},
+            "commit_info": {"commit": "aaaa1111bbbb2222", "short": "aaaa111", "subject": "Rename the guard", "parents": []}
+        });
+        let changes = json!({
+            "renamed_files": 1,
+            "files": [{"path": "src/Auth/Guard.php", "previous_path": "src/Auth/TokenGuard.php", "status": "renamed"}]
+        });
+        // Until the answer is in, the banner says it is checking and no
+        // dock count is recorded.
+        let asking = render_commit_banner_for_view(&view, Some(&changes));
+        assert!(
+            asking.contains("<div class=\"graph-commit-memory\" data-commit=\"aaaa1111bbbb2222\" aria-live=\"polite\"><p class=\"knowledge-note\">Checking the memory that cites 1 renamed file…</p></div>"),
+            "{asking}"
+        );
+        assert!(m::data(COMMIT_MEMORY_COUNTS)["aaaa1111bbbb2222"].is_null());
+        m::set(
+            MEMORY_LINKS,
+            json!({"proj-1\u{1f}src/Auth/Guard.php\u{1f}src/Auth/TokenGuard.php": {
+                "hygiene_warnings": [{"kind": "cited-file-renamed", "linked": ["MEM-20261117-aabbccdd"], "recommended_action": "review", "text": "This file was src/Auth/TokenGuard.php; the memory that cites the old name may need its citation updated."}]
+            }}),
+        );
+        let answered = render_commit_banner_for_view(&view, Some(&changes));
+        assert!(
+            answered.contains(
+                "Review: <code>src/Auth/TokenGuard.php</code> → <code>src/Auth/Guard.php</code>"
+            ),
+            "{answered}"
+        );
+        // The commit's dock row now shows the count; another row shows none.
+        assert_eq!(m::data(COMMIT_MEMORY_COUNTS)["aaaa1111bbbb2222"], 1);
+        let dock = json!({"rows": [
+            {"commit": "aaaa1111bbbb2222", "short": "aaaa111", "subject": "Rename the guard", "parents": ["cccc3333dddd4444"]},
+            {"commit": "cccc3333dddd4444", "short": "cccc333", "subject": "Base", "parents": []}
+        ]});
+        let rows = render_commit_dock_list(&dock, "", 0);
+        assert_eq!(rows.matches("1 to review").count(), 1, "{rows}");
+        // A commit that renamed nothing asks nothing and adds nothing.
+        let plain = render_commit_banner_for_view(&view, Some(&json!({"modified_files": 1})));
+        assert!(!plain.contains("graph-commit-memory"), "{plain}");
+        m::take(MEMORY_LINKS);
+        m::take(COMMIT_MEMORY_COUNTS);
     }
 }
