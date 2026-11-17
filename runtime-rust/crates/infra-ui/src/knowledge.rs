@@ -1,5 +1,5 @@
 use crate::{api, dom, model as m, session};
-use serde_json::{json, Value as V};
+use serde_json::{Value as V, json};
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_bindgen::JsCast;
 pub fn initialize() {
@@ -235,7 +235,20 @@ fn fields(scope: &str) {
         dom::add(&wrap, &input);
         dom::append(&container, &wrap);
     }
-    dom::text(&format!("{scope}-knowledge-note"),match action.as_str(){"bank-reverify"=>"By running this action you attest that you checked this chunk against its current sources.","brain-update"=>"Revision must match the current record; refresh if it changed.","complete"=>"Record the task outcome and verification evidence.","reindex-bank"=>"This regenerates the shared INDEX.md.","compact"=>"Archive eligible terminal records.","export"=>"Create a downloadable knowledge ZIP.",_=>"Run the selected operation against the selected knowledge root."});
+    dom::text(
+        &format!("{scope}-knowledge-note"),
+        match action.as_str() {
+            "bank-reverify" => {
+                "By running this action you attest that you checked this chunk against its current sources."
+            }
+            "brain-update" => "Revision must match the current record; refresh if it changed.",
+            "complete" => "Record the task outcome and verification evidence.",
+            "reindex-bank" => "This regenerates the shared INDEX.md.",
+            "compact" => "Archive eligible terminal records.",
+            "export" => "Create a downloadable knowledge ZIP.",
+            _ => "Run the selected operation against the selected knowledge root.",
+        },
+    );
 }
 pub async fn load_context() {
     let p = dom::value("context-project");
@@ -614,17 +627,8 @@ fn render_list(scope: &str) {
         }
         count += 1;
         let p = m::text(v, "path");
-        let b = dom::button(
-            &format!(
-                "{} · {} · {} · {}",
-                m::summary(v),
-                p,
-                m::text(v, "status"),
-                bytes(&v["bytes"])
-            ),
-            "knowledge-file",
-            json!({"scope":scope,"path":p}),
-        );
+        let b = dom::button("", "knowledge-file", json!({"scope":scope,"path":p}));
+        b.set_inner_html(&render_list_entry_inner_html(v));
         b.set_class_name("memory-entry");
         if state["selected_path"] == p {
             let _ = b.set_attribute("aria-current", "true");
@@ -1211,11 +1215,24 @@ pub fn render_linked(session: &V) {
     if dom::value("linked-context-query").is_empty() {
         dom::set_value("linked-context-query", &m::text(brain, "query"));
     }
-    let meter = session["capsule_delivery_meter"]
-        .as_object()
-        .map(|_| &session["capsule_delivery_meter"])
-        .unwrap_or(&session["capsule_meter"]);
+    // The server measures the capsule as the runtime caps it.
+    let meter = [
+        &brain["capsule_meter"],
+        &session["capsule_delivery_meter"],
+        &session["capsule_meter"],
+    ]
+    .into_iter()
+    .find(|meter| meter.is_object())
+    .cloned()
+    .unwrap_or(V::Null);
     dom::hidden("capsule-meter", !meter.is_object());
+    if !meter.is_object() {
+        return;
+    }
+    if let Some(bar) = dom::get("capsule-bar") {
+        bar.set_inner_html(&render_capsule_bar_html(&meter));
+        let _ = bar.set_attribute("aria-label", &capsule_bar_label(&meter));
+    }
     dom::text(
         "capsule-facts",
         &format!(
@@ -1224,11 +1241,191 @@ pub fn render_linked(session: &V) {
             m::string(&meter["limit"])
         ),
     );
-    dom::pretty("capsule-legend", &meter["kinds"]);
+    if let Some(legend) = dom::get("capsule-legend") {
+        legend.set_inner_html(&render_capsule_legend_html(&meter));
+    }
     dom::text(
         "capsule-repeats",
         &format!("{} characters repeat", m::string(&meter["repeats"])),
     );
+}
+const CAPSULE_KINDS: [(&str, &str); 3] = [
+    ("brain", "Project Brain"),
+    ("bank", "Memory bank"),
+    ("rules", "Rules & docs"),
+];
+/// Each memory kind's characters and share of the capsule bar, which stands
+/// for the runtime's cap.
+pub(crate) fn capsule_segments(meter: &V) -> Vec<(&'static str, &'static str, u64, f64)> {
+    let limit = meter["limit"]
+        .as_u64()
+        .filter(|limit| *limit > 0)
+        .unwrap_or(8000) as f64;
+    CAPSULE_KINDS
+        .iter()
+        .map(|(kind, label)| {
+            let characters = meter["kinds"][*kind].as_u64().unwrap_or(0);
+            (
+                *kind,
+                *label,
+                characters,
+                (characters as f64 / limit * 100.).min(100.),
+            )
+        })
+        .collect()
+}
+pub(crate) fn render_capsule_bar_html(meter: &V) -> String {
+    capsule_segments(meter)
+        .into_iter()
+        .map(|(kind, label, characters, share)| {
+            if characters == 0 {
+                format!("<span class=\"capsule-part\" data-kind=\"{kind}\" hidden></span>")
+            } else {
+                format!(
+                    "<span class=\"capsule-part\" data-kind=\"{kind}\" style=\"width:{share:.2}%\" title=\"{label}: {characters} characters\"></span>"
+                )
+            }
+        })
+        .collect()
+}
+fn capsule_bar_label(meter: &V) -> String {
+    let parts = capsule_segments(meter)
+        .into_iter()
+        .filter(|(_, _, characters, _)| *characters > 0)
+        .map(|(_, label, characters, _)| format!("{label} {characters}"))
+        .collect::<Vec<_>>();
+    format!(
+        "{} of {} characters",
+        if parts.is_empty() {
+            "Nothing".to_string()
+        } else {
+            parts.join(", ")
+        },
+        m::string(&meter["limit"])
+    )
+}
+pub(crate) fn render_capsule_legend_html(meter: &V) -> String {
+    let mut html = String::new();
+    for (kind, label, characters, _) in capsule_segments(meter) {
+        if characters == 0 {
+            continue;
+        }
+        let items = meter["items"][kind].as_u64().unwrap_or(0);
+        html.push_str(&format!(
+            "<span><i class=\"capsule-swatch\" data-kind=\"{kind}\" aria-hidden=\"true\"></i>{label} · {characters} characters · {items} item{}</span>",
+            if items == 1 { "" } else { "s" }
+        ));
+    }
+    let dropped = meter["dropped"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(layer, count)| {
+            count
+                .as_u64()
+                .filter(|count| *count > 0)
+                .map(|count| format!("{count} {}", crate::omnigraph::esc(layer)))
+        })
+        .collect::<Vec<_>>();
+    if !dropped.is_empty() {
+        html.push_str(&format!(
+            "<span>Dropped to fit: {}</span>",
+            dropped.join(", ")
+        ));
+    }
+    html
+}
+/// A day's bar of retrievals: those that delivered a Memory Bank chunk at the
+/// foot, the rest above them, as shares of the busiest day.
+pub(crate) fn history_day_heights(day: &V, most: u64) -> (f64, f64) {
+    let retrievals = day["retrievals"].as_u64().unwrap_or(0);
+    let with_chunk = day["with_chunk"].as_u64().unwrap_or(0).min(retrievals);
+    let most = most.max(1) as f64;
+    (
+        (retrievals - with_chunk) as f64 / most * 100.,
+        with_chunk as f64 / most * 100.,
+    )
+}
+const USAGE_KINDS: [(&str, &str); 7] = [
+    ("brain", "Project Brain"),
+    ("bank", "Memory bank"),
+    ("rules", "Rules & docs"),
+    ("omnigraph", "Omnigraph"),
+    ("rest", "Conversation and tools"),
+    ("added", "Added this turn"),
+    ("free", "Free"),
+];
+/// The tokens a turn's bar shows for one kind: a compacted turn shows its
+/// whole fill as added, and a turn without a measured rest no memory split.
+fn turn_part(turn: &V, kind: &str) -> f64 {
+    if !m::array(&turn["compactions"]).is_empty() {
+        return if kind == "added" {
+            m::number(&turn["end"]).unwrap_or(0.)
+        } else {
+            0.
+        };
+    }
+    if turn["parts"]["rest"].is_null() && ["brain", "bank", "rules", "omnigraph"].contains(&kind) {
+        return 0.;
+    }
+    m::number(&turn["parts"][kind]).unwrap_or(0.)
+}
+/// A turn's button in the strip: a small track of what filled its window and
+/// its number.
+pub(crate) fn render_usage_turn_button_html(turn: &V) -> String {
+    let window = m::number(&turn["window"]).unwrap_or(0.);
+    let mut parts = String::new();
+    if window > 0. {
+        for kind in ["brain", "bank", "rules", "omnigraph", "rest", "added"] {
+            let value = turn_part(turn, kind);
+            if value > 0. {
+                parts.push_str(&format!(
+                    "<span class=\"context-turn-part\" data-kind=\"{kind}\" style=\"height:{:.2}%\"></span>",
+                    (value / window * 100.).clamp(0., 100.)
+                ));
+            }
+        }
+    }
+    format!(
+        "<span class=\"context-turn-track\" aria-hidden=\"true\">{parts}</span><span class=\"context-turn-label\">{}</span>",
+        crate::omnigraph::esc(&m::string(&turn["ordinal"]))
+    )
+}
+/// The legend rows of the selected turn, each with its swatch.
+pub(crate) fn render_usage_legend_html(turn: &V) -> String {
+    let mut rows = String::new();
+    for (kind, label) in USAGE_KINDS {
+        let value = m::number(&turn["parts"][kind])
+            .map(|n| {
+                format!(
+                    "{}{n:.0}",
+                    if ["brain", "bank", "rules", "omnigraph", "rest"].contains(&kind) {
+                        "≈ "
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .unwrap_or_else(|| "—".into());
+        rows.push_str(&format!(
+            "<tr><th scope=\"row\"><i class=\"context-swatch\" data-kind=\"{kind}\" aria-hidden=\"true\"></i>{label}</th><td class=\"context-number\">{value}</td></tr>"
+        ));
+    }
+    format!("<tbody>{rows}</tbody>")
+}
+/// A Brain or Memory Bank listing row: its title, its path and its state.
+pub(crate) fn render_list_entry_inner_html(v: &V) -> String {
+    let meta = [m::text(v, "status"), bytes(&v["bytes"])]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    format!(
+        "<span class=\"memory-entry-title\">{}</span><span class=\"memory-entry-path\">{}</span><span class=\"memory-entry-meta\">{}</span>",
+        crate::omnigraph::esc(&m::summary(v)),
+        crate::omnigraph::esc(&m::text(v, "path")),
+        crate::omnigraph::esc(&meta)
+    )
 }
 fn memory_model(v: &V, window: u64) -> V {
     let now = js_sys::Date::now();
@@ -1695,24 +1892,21 @@ fn render_usage() {
         "context-usage",
         &dom::el("p", "context-headline", &headline),
     );
-    dom::append("context-usage",&dom::el("p","knowledge-note",&format!("Memory sent this turn ≈ {:.0} tokens. Provider fill is exact; memory shares are character-based estimates.",turn["memory"].as_f64().unwrap_or(0.))));
+    dom::append(
+        "context-usage",
+        &dom::el(
+            "p",
+            "knowledge-note",
+            &format!(
+                "Memory sent this turn ≈ {:.0} tokens. Provider fill is exact; memory shares are character-based estimates.",
+                turn["memory"].as_f64().unwrap_or(0.)
+            ),
+        ),
+    );
     let bar = dom::el("div", "context-bar", "");
     let _ = bar.set_attribute("role", "img");
     for kind in ["brain", "bank", "rules", "omnigraph", "rest", "added"] {
-        let compacted = !m::array(&turn["compactions"]).is_empty();
-        let value = if compacted {
-            if kind == "added" {
-                m::number(&turn["end"]).unwrap_or(0.)
-            } else {
-                0.
-            }
-        } else if turn["parts"]["rest"].is_null()
-            && ["brain", "bank", "rules", "omnigraph"].contains(&kind)
-        {
-            0.
-        } else {
-            m::number(&turn["parts"][kind]).unwrap_or(0.)
-        };
+        let value = turn_part(&turn, kind);
         let window = m::number(&turn["window"]).unwrap_or(0.);
         if value <= 0. || window <= 0. {
             continue;
@@ -1729,38 +1923,7 @@ fn render_usage() {
     }
     dom::append("context-usage", &bar);
     let legend = dom::el("table", "context-legend", "");
-    for kind in [
-        "brain",
-        "bank",
-        "rules",
-        "omnigraph",
-        "rest",
-        "added",
-        "free",
-    ] {
-        let row = dom::el("tr", "", "");
-        dom::add(&row, &dom::el("th", "", &m::label(kind)));
-        dom::add(
-            &row,
-            &dom::el(
-                "td",
-                "",
-                &m::number(&turn["parts"][kind])
-                    .map(|n| {
-                        format!(
-                            "{} {n:.0}",
-                            if ["brain", "bank", "rules", "omnigraph", "rest"].contains(&kind) {
-                                "≈"
-                            } else {
-                                ""
-                            }
-                        )
-                    })
-                    .unwrap_or_else(|| "—".into()),
-            ),
-        );
-        dom::add(&legend, &row);
-    }
+    legend.set_inner_html(&render_usage_legend_html(&turn));
     dom::append("context-usage", &legend);
     let page = m::data("context-page").as_u64().unwrap_or(0) as usize;
     let size = if dom::window()
@@ -1793,11 +1956,10 @@ fn render_usage() {
     let _ = strip.set_attribute("id", "context-turns");
     let _ = strip.set_attribute("role", "radiogroup");
     for t in shown {
-        let b = dom::button(
-            &format!("Turn {}", m::string(&t["ordinal"])),
-            "context-turn",
-            t["id"].clone(),
-        );
+        let b = dom::button("", "context-turn", t["id"].clone());
+        b.set_class_name("context-turn");
+        b.set_inner_html(&render_usage_turn_button_html(t));
+        let _ = b.set_attribute("aria-label", &format!("Turn {}", m::string(&t["ordinal"])));
         let _ = b.set_attribute("role", "radio");
         let _ = b.set_attribute(
             "aria-checked",
@@ -2441,7 +2603,11 @@ fn analytics(data: &V, _model: &V) {
     {
         chunk_detail(chunk);
     }
+    let section = dom::el("section", "memory-history", "");
+    dom::add(&section, &dom::el("h4", "", "Retrievals per day"));
+    let plot = dom::el("div", "memory-history-plot", "");
     let history = dom::el("div", "memory-history-chart", "");
+    let _ = history.set_attribute("role", "img");
     let days = m::array(&data["history"]["days"]);
     let most = days
         .iter()
@@ -2449,27 +2615,51 @@ fn analytics(data: &V, _model: &V) {
         .max()
         .unwrap_or(1)
         .max(1);
-    for day in days {
+    let total = days
+        .iter()
+        .filter_map(|d| d["retrievals"].as_u64())
+        .sum::<u64>();
+    let delivered = days
+        .iter()
+        .filter_map(|d| d["with_chunk"].as_u64())
+        .sum::<u64>();
+    let _ = history.set_attribute(
+        "aria-label",
+        &format!(
+            "{total} retrievals over {} days, {delivered} of them with a Memory Bank chunk",
+            days.len()
+        ),
+    );
+    for day in &days {
         let column = dom::el("div", "memory-history-day", "");
         let _ = column.set_attribute(
             "title",
             &format!(
-                "{} · {} retrievals",
-                m::text(&day, "day"),
-                m::string(&day["retrievals"])
+                "{} · {} retrievals · {} with a chunk",
+                m::text(day, "day"),
+                m::string(&day["retrievals"]),
+                day["with_chunk"].as_u64().unwrap_or(0)
             ),
         );
-        style(
-            &column,
-            "--height",
-            &format!(
-                "{}%",
-                day["retrievals"].as_u64().unwrap_or(0) as f64 / most as f64 * 100.
-            ),
-        );
+        let (rest, bank) = history_day_heights(day, most);
+        for (class, height) in [("memory-history-rest", rest), ("memory-history-bank", bank)] {
+            if height > 0. {
+                let part = dom::el("span", class, "");
+                style(&part, "height", &format!("{height:.2}%"));
+                dom::add(&column, &part);
+            }
+        }
         dom::add(&history, &column);
     }
-    dom::append("memory-use-body", &history);
+    dom::add(&plot, &history);
+    if let (Some(first), Some(last)) = (days.first(), days.last()) {
+        let axis = dom::el("div", "memory-history-axis", "");
+        dom::add(&axis, &dom::el("span", "", &m::text(first, "day")));
+        dom::add(&axis, &dom::el("span", "", &m::text(last, "day")));
+        dom::add(&plot, &axis);
+    }
+    dom::add(&section, &plot);
+    dom::append("memory-use-body", &section);
     sortable(
         "chunk",
         &chunks,
@@ -2504,11 +2694,7 @@ fn sortable(kind: &str, rows: &[V], columns: &[(&str, &str)]) {
         } else {
             m::string(&a[key]).cmp(&m::string(&b[key]))
         };
-        if desc {
-            order.reverse()
-        } else {
-            order
-        }
+        if desc { order.reverse() } else { order }
     });
     let details = dom::el("details", "fleet-report", "");
     dom::add(
@@ -2815,10 +3001,113 @@ fn memory_changes(data: &V, before: &V) {
 #[cfg(test)]
 mod tests {
     use super::{
-        context_turns_model, memory_stage_metrics, render_detail_omnigraph_action_html,
-        render_linked_omnigraph_html,
+        capsule_segments, context_turns_model, history_day_heights, memory_stage_metrics,
+        render_capsule_bar_html, render_capsule_legend_html, render_detail_omnigraph_action_html,
+        render_linked_omnigraph_html, render_list_entry_inner_html, render_usage_legend_html,
+        render_usage_turn_button_html,
     };
     use serde_json::json;
+
+    #[test]
+    fn capsule_segments_and_legend_format_nonzero_parts_and_swatches() {
+        let meter = json!({"characters": 1577, "limit": 8000, "kinds": {"brain": 752, "rules": 423, "bank": 0}, "items": {"brain": 1, "rules": 2, "bank": 0}, "repeats": 824, "dropped": {"episodic": 1}});
+        let segments = capsule_segments(&meter);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|(kind, _, characters, _)| (*kind, *characters))
+                .collect::<Vec<_>>(),
+            [("brain", 752), ("bank", 0), ("rules", 423)]
+        );
+        assert!((segments[0].3 - 9.4).abs() < 1e-9);
+        let bar = render_capsule_bar_html(&meter);
+        assert!(
+            bar.contains("data-kind=\"brain\" style=\"width:9.40%\""),
+            "{bar}"
+        );
+        assert!(bar.contains("data-kind=\"bank\" hidden"), "{bar}");
+        let legend = render_capsule_legend_html(&meter);
+        assert!(
+            legend.contains("<i class=\"capsule-swatch\" data-kind=\"brain\""),
+            "{legend}"
+        );
+        assert!(
+            legend.contains("Rules &amp; docs · 423 characters · 2 items")
+                || legend.contains("Rules & docs · 423 characters · 2 items"),
+            "{legend}"
+        );
+        assert!(!legend.contains("Memory bank"), "{legend}");
+        assert!(legend.contains("Dropped to fit: 1 episodic"), "{legend}");
+        // No raw JSON reaches the legend.
+        assert!(!legend.contains('{'), "{legend}");
+    }
+
+    #[test]
+    fn history_day_heights_stacks_with_chunk_under_retrievals() {
+        let (rest, bank) = history_day_heights(&json!({"retrievals": 6, "with_chunk": 2}), 8);
+        assert_eq!((rest, bank), (50.0, 25.0));
+        // A count above the day's retrievals is held to them; an empty day is flat.
+        assert_eq!(
+            history_day_heights(&json!({"retrievals": 2, "with_chunk": 5}), 4),
+            (0.0, 50.0)
+        );
+        assert_eq!(history_day_heights(&json!({}), 0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn render_usage_turn_and_legend_emit_track_parts_and_swatches() {
+        let turn = json!({"ordinal": 3, "window": 200000, "end": 50000, "parts": {"brain": 1000, "bank": 500, "rules": 0, "rest": 40000, "added": 8500, "free": 150000}, "compactions": []});
+        let button = render_usage_turn_button_html(&turn);
+        assert!(button.contains("class=\"context-turn-track\""), "{button}");
+        assert!(
+            button.contains("data-kind=\"brain\" style=\"height:0.50%\""),
+            "{button}"
+        );
+        assert!(!button.contains("data-kind=\"rules\""), "{button}");
+        assert!(
+            button.ends_with("<span class=\"context-turn-label\">3</span>"),
+            "{button}"
+        );
+        let compacted = json!({"ordinal": 4, "window": 200000, "end": 20000, "parts": {"brain": 1000, "rest": 1}, "compactions": [{"at": "x"}]});
+        let only_added = render_usage_turn_button_html(&compacted);
+        assert!(
+            only_added.contains("data-kind=\"added\" style=\"height:10.00%\""),
+            "{only_added}"
+        );
+        assert!(!only_added.contains("data-kind=\"brain\""), "{only_added}");
+        let legend = render_usage_legend_html(&turn);
+        assert!(
+            legend.contains("<i class=\"context-swatch\" data-kind=\"bank\""),
+            "{legend}"
+        );
+        assert!(
+            legend.contains("<td class=\"context-number\">≈ 1000</td>"),
+            "{legend}"
+        );
+        assert!(
+            legend.contains("<td class=\"context-number\">—</td>"),
+            "{legend}"
+        );
+    }
+
+    #[test]
+    fn render_list_entry_inner_html_separates_title_path_and_meta() {
+        let html = render_list_entry_inner_html(
+            &json!({"title": "Retry <policy>", "path": "memory-bank/chunks/MEM-1.md", "status": "active", "bytes": 2048}),
+        );
+        assert!(
+            html.starts_with("<span class=\"memory-entry-title\">Retry &lt;policy&gt;</span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"memory-entry-path\">memory-bank/chunks/MEM-1.md</span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"memory-entry-meta\">active · "),
+            "{html}"
+        );
+    }
 
     #[test]
     fn selected_stage_metrics_follow_semantic_order_and_sentence_case() {

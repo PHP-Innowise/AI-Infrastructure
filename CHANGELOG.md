@@ -24,6 +24,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Bring back Harness memory views the Rust port left as placeholders, on the
+  markup their styles were written for. The linked task card's capsule meter
+  shows again: the server measures the capsule with the runtime's own
+  serializer (`capsule_meter`: characters against the 8,000 cap, Project
+  Brain / Memory bank / Rules & docs, items, repeats, dropped), which no code
+  had produced since the port, and the bar and its legend draw it instead of
+  raw JSON. Memory use's retrievals-per-day chart stacks the retrievals that
+  delivered a chunk under the rest (its columns had been empty). Usage's turn
+  strip draws each turn's fill as a track, its legend has swatches, and Brain
+  and Memory Bank listings show title, path and state on separate lines. The
+  run panel gains Memory and Omnigraph tabs for a launch that saved memory or
+  touched the shared graph.
 - Harness knowledge operations lock per project: one project's Brain or
   Memory Bank work no longer answers `knowledge-busy` for every other
   project. Fleet lenses that report progress at once no longer lose the race:

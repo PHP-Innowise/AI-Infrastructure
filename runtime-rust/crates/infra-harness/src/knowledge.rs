@@ -760,6 +760,7 @@ impl KnowledgeDomain {
         brain["approved"] = json!(false);
         brain["context_id"] = V::Null;
         brain["capsule"] = V::Null;
+        brain["capsule_meter"] = V::Null;
         let sid = required(session, "id", 100)?;
         let current = self.store.get(sid)?;
         if current["brain"]["task_id"] != task {
@@ -816,6 +817,7 @@ impl KnowledgeDomain {
         }
         brain["context_id"] = json!(Uuid::new_v4().to_string());
         brain["capsule"] = capsule.clone();
+        brain["capsule_meter"] = crate::context_usage::capsule_meter(&capsule);
         brain["capsule_text"] = refreshed["capsule_text"].clone();
         brain["task"] = current;
         brain["source_hashes"] = prepared_sources(

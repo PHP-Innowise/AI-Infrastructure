@@ -1754,6 +1754,11 @@ button.run-file:hover { border-color:var(--field-line-hover); }
 .memory-horizon-ticks span:first-child { transform:none; }
 .memory-horizon-ticks span:last-child { transform:translateX(-100%); }
 .memory-tables { display:grid; gap:4px; margin:0 0 24px; }
+.run-pane-state { margin:0 0 4px; color:var(--ink); font-size:var(--text-ui); font-weight:var(--weight-strong); }
+.run-pane-state[data-ok="false"] { color:var(--error); }
+.run-pane-text { margin:0 0 8px; color:var(--ink-2); font-size:var(--text-ui); line-height:var(--leading-body); overflow-wrap:anywhere; }
+.run-pane-facts { margin:0; padding:0; list-style:none; color:var(--muted); font-size:var(--text-meta); }
+.run-pane-facts li + li { margin-top:4px; }
 .memory-history { margin:16px 0 12px; }
 .memory-history h4 { margin:0 0 8px; color:var(--ink-2); font-size:var(--text-ui); font-weight:var(--weight-strong); }
 .memory-history-plot { display:inline-grid; max-width:100%; min-width:160px; }
