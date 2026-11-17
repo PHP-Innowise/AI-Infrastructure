@@ -1764,6 +1764,17 @@ button.run-file:hover { border-color:var(--field-line-hover); }
 .retrieval-trace-items .retrieval-cut { color:var(--muted); }
 .retrieval-votes { display:inline-flex; gap:4px; margin-left:auto; }
 .retrieval-votes .button[aria-pressed="true"] { background:var(--purple-soft); border-color:var(--purple-line); }
+.graph-memory-links { margin:16px 0 0; padding-top:12px; border-top:1px solid var(--line); }
+.graph-memory-links h4 { margin:0 0 8px; color:var(--ink); font-size:var(--text-ui); font-weight:var(--weight-strong); }
+.graph-memory-group { margin:8px 0 4px; color:var(--muted); font-size:var(--text-meta); }
+.graph-memory-list { margin:0; padding:0; list-style:none; }
+.graph-memory-link { display:block; width:100%; padding:4px 8px; border:1px solid transparent; border-radius:var(--radius); background:transparent; color:var(--ink); font-size:var(--text-ui); text-align:left; overflow-wrap:anywhere; cursor:pointer; }
+.graph-memory-link:hover { background:var(--soft); }
+.graph-memory-link:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+.graph-memory-kind { color:var(--muted); font:var(--text-meta)/var(--leading-body) var(--font-mono); }
+.graph-memory-badge { color:var(--muted); font-size:var(--text-meta); }
+.graph-memory-atom { padding:4px 8px; color:var(--ink-2); font-size:var(--text-ui); overflow-wrap:anywhere; }
+.graph-memory-warning { margin:0 0 8px; padding:8px; border-left:2px solid var(--purple-line); background:var(--purple-soft); color:var(--ink); font-size:var(--text-ui); }
 .memory-history { margin:16px 0 12px; }
 .memory-history h4 { margin:0 0 8px; color:var(--ink-2); font-size:var(--text-ui); font-weight:var(--weight-strong); }
 .memory-history-plot { display:inline-grid; max-width:100%; min-width:160px; }

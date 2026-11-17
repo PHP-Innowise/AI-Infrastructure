@@ -3772,6 +3772,54 @@ impl OmnigraphManager {
         Ok(synced)
     }
 
+    /// The context atoms that touch one file, on `main` and on the canonical
+    /// knowledge branch, each once: what the shared graph knows about it.
+    pub async fn file_context_json(&self, project_id: &str, path: &str) -> Result<Value> {
+        let path = path.trim().trim_start_matches("./");
+        if path.is_empty()
+            || path.starts_with('/')
+            || path.contains('\\')
+            || path.split('/').any(|part| part == "..")
+        {
+            return Err(HarnessError::invalid("Choose a file of the project."));
+        }
+        let cfg = self.config().await;
+        if cfg.mode == OmnigraphMode::Off {
+            return Ok(json!({"ok": false, "skipped": "omnigraph-off", "atoms": []}));
+        }
+        let client = self.client().await?;
+        let mut atoms = Vec::new();
+        let mut seen = BTreeSet::new();
+        for branch in ["main", CANONICAL_KNOWLEDGE_BRANCH] {
+            let Ok(found) = run_stored_or_inline(
+                &client,
+                "file_context",
+                schema::QUERY_FILE_CONTEXT,
+                json!({ "path": path }),
+                Some(branch.to_string()),
+                None,
+            )
+            .await
+            else {
+                continue;
+            };
+            for row in &found.rows {
+                let mut atom = normalize_atom_row(row);
+                if let Some(aid) = str_field(&atom, "atom_id")
+                    && seen.insert(aid)
+                {
+                    if atom["source_branch"].is_null() {
+                        atom["source_branch"] = json!(branch);
+                    }
+                    atom["capsule_line"] = json!(format_atom_line_with_authority(&atom).trim_end());
+                    atoms.push(atom);
+                }
+            }
+        }
+        let _ = project_id;
+        Ok(json!({"ok": true, "path": path, "atoms": atoms}))
+    }
+
     /// Locate `atom_id` on `branch` (or across `"main"`, `CANONICAL_KNOWLEDGE_BRANCH`, and listed branches)
     /// and attach its `TouchesFile` paths from `GQ_LIST_FILE_EDGES`.
     pub async fn fetch_atom_with_files(
@@ -4054,6 +4102,19 @@ impl Domain for OmnigraphDomain {
                     self.manager
                         .sync_canonical_knowledge_with_options(pid, items, &prune_layers)
                         .await?
+                }
+                "omnigraph.file_context" => {
+                    let pid = query["project_id"]
+                        .as_str()
+                        .or_else(|| body["project_id"].as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(project_id);
+                    let path = query["path"]
+                        .as_str()
+                        .or_else(|| body["path"].as_str())
+                        .unwrap_or("");
+                    self.manager.file_context_json(pid, path).await?
                 }
                 "omnigraph.fetch_atom" => {
                     let pid = body["project_id"]

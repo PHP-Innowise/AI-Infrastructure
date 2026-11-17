@@ -456,6 +456,42 @@ impl Services for NativeServices {
                         }
                         payload
                     }
+                    "knowledge.memory_links" => {
+                        let knowledge = self.domains.get("knowledge").ok_or_else(|| {
+                            HarnessError::unavailable("Required native service is unavailable.")
+                        })?;
+                        let Payload::Json(mut links) =
+                            knowledge.execute(operation, request.clone()).await?
+                        else {
+                            return Err(HarnessError::unavailable(
+                                "Unexpected memory links payload.",
+                            ));
+                        };
+                        // The shared graph's atoms are a companion: an
+                        // unreachable Omnigraph leaves the Brain and Bank
+                        // links standing.
+                        links["omnigraph_atoms"] = json!([]);
+                        if let Some(omnigraph) = self.domains.get("omnigraph") {
+                            let file = json!({
+                                "params": {},
+                                "body": {},
+                                "query": {"project_id": params["project_id"], "path": links["path"]},
+                            });
+                            match omnigraph.execute("omnigraph.file_context", file).await {
+                                Ok(Payload::Json(found)) if found["ok"] == true => {
+                                    links["omnigraph_atoms"] = found["atoms"].clone();
+                                }
+                                Ok(Payload::Json(found)) => {
+                                    links["omnigraph_skipped"] = found["skipped"].clone();
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    links["omnigraph_error"] = json!(error.message);
+                                }
+                            }
+                        }
+                        Payload::Json(links)
+                    }
                     "omnigraph.sync_knowledge" => {
                         let project_id = body["project_id"]
                             .as_str()

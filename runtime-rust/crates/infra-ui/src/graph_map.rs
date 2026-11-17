@@ -15277,7 +15277,161 @@ fn map_side_html(
             found_patterns(view, &unfolded(state, "kinds")),
         )
     };
-    format!("{header}<div class=\"graph-side-panel\" data-tab=\"details\">{details_body}</div>")
+    // What the project's memory says about the selected file fills in when
+    // it arrives; the map does not wait for it.
+    let memory = active_focus
+        .as_deref()
+        .map(|path| normalize_rel_path(strip_symbol_suffix(path)))
+        .filter(|path| !path.is_empty() && !path.ends_with('/'))
+        .map(|path| {
+            let project = view["project_id"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| scope.project_id().to_string());
+            memory_links_section(&project, &path)
+        })
+        .unwrap_or_default();
+    format!(
+        "{header}<div class=\"graph-side-panel\" data-tab=\"details\">{details_body}{memory}</div>"
+    )
+}
+const MEMORY_LINKS: &str = "graph-memory-links";
+/// The linked-memory section of a selected file: drawn from what an earlier
+/// request returned, or a placeholder a request fills in.
+fn memory_links_section(project: &str, path: &str) -> String {
+    let key = format!("{project}\u{1f}{path}");
+    let cached = m::data(MEMORY_LINKS)[&key].clone();
+    let body = if cached.is_object() {
+        render_side_memory_bridge_html(project, &cached)
+    } else {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let (project, path, key) = (project.to_owned(), path.to_owned(), key.clone());
+            spawn_local(async move {
+                let url = format!(
+                    "/api/projects/{}/graph/memory-links?path={}",
+                    dom::enc(&project),
+                    dom::enc(&path)
+                );
+                let links = match crate::api::get(&url).await {
+                    Ok(links) => links,
+                    Err(error) => json!({"error": error.message}),
+                };
+                let mut cache = m::data(MEMORY_LINKS);
+                if !cache.is_object() {
+                    cache = json!({});
+                }
+                cache[&key] = links.clone();
+                m::set(MEMORY_LINKS, cache);
+                for section in dom::all(".graph-memory-links") {
+                    if section.get_attribute("data-path").as_deref() == Some(path.as_str()) {
+                        section.set_inner_html(&render_side_memory_bridge_html(&project, &links));
+                    }
+                }
+            });
+        }
+        "<h4>Linked memory</h4><p class=\"knowledge-note\">Looking for Project Brain records and Memory Bank chunks that cite this file…</p>".to_owned()
+    };
+    format!(
+        "<section class=\"graph-memory-links\" data-path=\"{}\" aria-live=\"polite\" aria-label=\"Linked memory\">{body}</section>",
+        escape(path)
+    )
+}
+/// What the project's memory says about one file, with a way to open each
+/// record or chunk and warnings to review. A failed request says so and
+/// leaves the rest of the panel alone.
+pub(crate) fn render_side_memory_bridge_html(project: &str, links: &V) -> String {
+    let mut html = String::from("<h4>Linked memory</h4>");
+    if let Some(error) = links["error"].as_str() {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note\">Linked memory is unavailable: {}</p>",
+            escape(error)
+        ));
+        return html;
+    }
+    for warning in m::array(&links["hygiene_warnings"]) {
+        html.push_str(&format!(
+            "<p class=\"graph-memory-warning\" data-kind=\"{}\" role=\"note\">Review: {}</p>",
+            escape(warning["kind"].as_str().unwrap_or("")),
+            escape(warning["text"].as_str().unwrap_or(""))
+        ));
+    }
+    let open = |scope: &str, target: &str, label: String| {
+        format!(
+            "<li><button type=\"button\" class=\"graph-memory-link\" data-action=\"graph-map-open-memory\" data-payload=\"{}\">{label}</button></li>",
+            payload(&json!({"scope": scope, "project_id": project, "target_id": target}))
+        )
+    };
+    let records = m::array(&links["brain_records"]);
+    let chunks = m::array(&links["memory_chunks"]);
+    let atoms = m::array(&links["omnigraph_atoms"]);
+    if records.is_empty() && chunks.is_empty() && atoms.is_empty() {
+        html.push_str("<p class=\"knowledge-note\">No Project Brain record, Memory Bank chunk or shared context atom cites this file.</p>");
+        return html;
+    }
+    if !records.is_empty() {
+        html.push_str(
+            "<p class=\"graph-memory-group\">Project Brain</p><ul class=\"graph-memory-list\">",
+        );
+        for record in &records {
+            let target = record["external_id"]
+                .as_str()
+                .or_else(|| record["id"].as_str())
+                .unwrap_or("");
+            html.push_str(&open(
+                "brain",
+                target,
+                format!(
+                    "<span class=\"graph-memory-kind\">{}</span> {}",
+                    escape(record["type"].as_str().unwrap_or("record")),
+                    escape(record["title"].as_str().unwrap_or(target))
+                ),
+            ));
+        }
+        html.push_str("</ul>");
+    }
+    if !chunks.is_empty() {
+        html.push_str(
+            "<p class=\"graph-memory-group\">Memory Bank</p><ul class=\"graph-memory-list\">",
+        );
+        for chunk in &chunks {
+            let id = chunk["id"].as_str().unwrap_or("");
+            html.push_str(&open(
+                "memory",
+                id,
+                format!(
+                    "<span class=\"graph-memory-kind\">{}</span> {}{}",
+                    escape(id),
+                    escape(chunk["title"].as_str().unwrap_or("")),
+                    if chunk["auto_promoted"] == true {
+                        " <span class=\"graph-memory-badge\">auto-promoted</span>"
+                    } else {
+                        ""
+                    }
+                ),
+            ));
+        }
+        html.push_str("</ul>");
+    }
+    if !atoms.is_empty() {
+        html.push_str(
+            "<p class=\"graph-memory-group\">Shared context</p><ul class=\"graph-memory-list\">",
+        );
+        for atom in &atoms {
+            html.push_str(&format!(
+                "<li class=\"graph-memory-atom\">{}</li>",
+                escape(
+                    atom["capsule_line"]
+                        .as_str()
+                        .or_else(|| atom["title"].as_str())
+                        .unwrap_or("")
+                        .trim_start_matches("- ")
+                )
+            ));
+        }
+        html.push_str("</ul>");
+    }
+    html
 }
 fn set_surface_attrs(surface: MapSurface, view: &V) {
     let side_family = if patterned(view) {
@@ -16291,6 +16445,15 @@ pub async fn event(
     value: &str,
     checked: bool,
 ) -> bool {
+    if kind == "click" && action == "graph-map-open-memory" {
+        crate::knowledge::open_from_omnigraph(
+            payload["scope"].as_str().unwrap_or("brain"),
+            payload["project_id"].as_str().unwrap_or(""),
+            payload["target_id"].as_str().unwrap_or(""),
+        )
+        .await;
+        return true;
+    }
     // The key of the links is the same in every picture.
     if kind == "click"
         && matches!(
@@ -28035,5 +28198,68 @@ mod tests {
             commit_action_target("graph-commit-select", &V::Null),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod memory_bridge_tests {
+    use super::*;
+
+    #[test]
+    fn render_side_memory_bridge_surfaces_links_and_rename_warnings() {
+        let links = json!({
+            "path": "src/Auth/TokenService.php",
+            "brain_records": [{"id": "11111111-2222-4333-8444-555555555555", "external_id": "finding-7", "type": "finding", "title": "Tokens <expire>"}],
+            "memory_chunks": [{"id": "MEM-20261117-aabbccdd", "title": "TTL rule", "auto_promoted": true}],
+            "omnigraph_atoms": [{"capsule_line": "- [project-brain decision · 11111111] Tokens expire (from `knowledge/canonical`)"}],
+            "hygiene_warnings": [{"kind": "cited-file-renamed", "text": "This file was src/Auth/Tokens.php; the memory that cites the old name may need its citation updated.", "recommended_action": "review"}]
+        });
+        let html = render_side_memory_bridge_html("proj-1", &links);
+        assert!(html.contains("data-kind=\"cited-file-renamed\" role=\"note\">Review: This file was src/Auth/Tokens.php"), "{html}");
+        assert!(
+            html.contains("data-action=\"graph-map-open-memory\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("&quot;target_id&quot;:&quot;finding-7&quot;"),
+            "{html}"
+        );
+        assert!(html.contains("Tokens &lt;expire&gt;"), "{html}");
+        assert!(html.contains("MEM-20261117-aabbccdd</span> TTL rule <span class=\"graph-memory-badge\">auto-promoted</span>"), "{html}");
+        assert!(
+            html.contains("[project-brain decision · 11111111] Tokens expire"),
+            "{html}"
+        );
+        assert!(!html.contains('#') || !html.contains("color:#"), "{html}");
+        // An empty answer says so; a failed one says why and draws nothing else.
+        let empty = render_side_memory_bridge_html(
+            "proj-1",
+            &json!({"brain_records": [], "memory_chunks": [], "omnigraph_atoms": []}),
+        );
+        assert!(empty.contains("No Project Brain record"), "{empty}");
+        let failed =
+            render_side_memory_bridge_html("proj-1", &json!({"error": "Project not found"}));
+        assert!(
+            failed.contains("Linked memory is unavailable: Project not found"),
+            "{failed}"
+        );
+        assert!(!failed.contains("<button"), "{failed}");
+    }
+
+    #[test]
+    fn a_selected_file_gets_a_placeholder_until_its_links_arrive() {
+        let html = memory_links_section("proj-1", "src/Auth/TokenService.php");
+        assert!(
+            html.contains("class=\"graph-memory-links\" data-path=\"src/Auth/TokenService.php\""),
+            "{html}"
+        );
+        assert!(html.contains("Looking for Project Brain records"), "{html}");
+        m::set(
+            MEMORY_LINKS,
+            json!({"proj-1\u{1f}src/Auth/TokenService.php": {"brain_records": [], "memory_chunks": [], "omnigraph_atoms": []}}),
+        );
+        let cached = memory_links_section("proj-1", "src/Auth/TokenService.php");
+        assert!(cached.contains("No Project Brain record"), "{cached}");
+        m::take(MEMORY_LINKS);
     }
 }

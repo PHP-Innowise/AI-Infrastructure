@@ -1954,6 +1954,121 @@ impl KnowledgeDomain {
         ))
     }
 
+    /// The project's memory that cites one file: active Project Brain records
+    /// naming it among their files or sources, and active Memory Bank chunks
+    /// citing it, within the privacy the project allows. A file that is gone,
+    /// or a `previous_path` a commit renamed it from, raises a warning for a
+    /// person to review; nothing is retired or changed here.
+    pub fn memory_links(&self, project_id: &str, query: &V) -> Result<V> {
+        let _source_frame = core::git::source_frame_scope();
+        let path = query["path"]
+            .as_str()
+            .and_then(clean_relative_path)
+            .ok_or_else(|| HarnessError::invalid("Choose a file of the project."))?;
+        let previous = query["previous_path"]
+            .as_str()
+            .filter(|previous| !previous.trim().is_empty())
+            .map(|previous| {
+                clean_relative_path(previous)
+                    .ok_or_else(|| HarnessError::invalid("Choose a file of the project."))
+            })
+            .transpose()?
+            .filter(|previous| *previous != path);
+        let (context, info) = self.selected(project_id, None, None)?;
+        let config = RuntimeConfig::load(&context.roots)?;
+        let allowed_privacy = config.strings("allowed_privacy")?;
+        let names = std::iter::once(path.clone())
+            .chain(previous.clone())
+            .collect::<Vec<_>>();
+        let cites = |values: &V| -> Option<String> {
+            values
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(V::as_str)
+                .filter_map(|raw| clean_relative_path(raw.split('#').next().unwrap_or(raw)))
+                .find(|cited| names.contains(cited))
+        };
+        let mut brain_records = Vec::new();
+        if info["brain_available"] == true && context.mode == "governed" {
+            for image in BrainRepository::new(context.clone())?.records(false)? {
+                let r = &image.record;
+                let privacy = r["privacy"].as_str().unwrap_or("");
+                if !allowed_privacy.iter().any(|allowed| allowed == privacy) {
+                    continue;
+                }
+                let Some(cited) = cites(&r["files"]).or_else(|| cites(&r["sources"])) else {
+                    continue;
+                };
+                brain_records.push(json!({
+                    "id": r["id"],
+                    "external_id": r["external_id"],
+                    "type": r["type"],
+                    "title": collapse_preview(r["title"].as_str().unwrap_or(""), 240),
+                    "status": r["status"],
+                    "authority": r["authority"],
+                    "cited_path": cited,
+                }));
+            }
+        }
+        let mut memory_chunks = Vec::new();
+        if info["bank_id"].is_string()
+            && core::fs::admit_directory(&context.roots.state.join("memory-bank/chunks"))?
+        {
+            let bank_service = BankService::new(context.clone());
+            let mut state_files = PublicationFiles::new(&context.roots.state)?;
+            for chunk_path in core::bank::codec::paths(&bank_service)? {
+                let Ok(chunk) = core::bank::codec::read(&mut state_files, &chunk_path) else {
+                    continue;
+                };
+                let m = &chunk.metadata;
+                if m["status"] != "active" || core::index::memory_temporal_reason(m).is_some() {
+                    continue;
+                }
+                let Some(cited) = cites(&m["sources"]) else {
+                    continue;
+                };
+                memory_chunks.push(json!({
+                    "id": m["id"],
+                    "title": collapse_preview(m["title"].as_str().unwrap_or(""), 240),
+                    "type": m["type"],
+                    "review_after": m["review_after"],
+                    "auto_promoted": m["tags"].as_array().is_some_and(|tags| tags.iter().any(|tag| tag == "auto-promoted")),
+                    "cited_path": cited,
+                }));
+            }
+            state_files.check()?;
+        }
+        let linked = |name: &str| {
+            brain_records
+                .iter()
+                .chain(&memory_chunks)
+                .filter(|row| row["cited_path"] == name)
+                .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        let mut hygiene_warnings = Vec::new();
+        let gone = !context.roots.project.join(&path).exists();
+        let here = linked(&path);
+        if gone && !here.is_empty() {
+            hygiene_warnings.push(json!({"kind":"cited-file-missing","path":path,"linked":here,"recommended_action":"review","text":"This file is gone from the workspace; the memory that cites it may be stale."}));
+        }
+        if let Some(previous) = &previous {
+            let before = linked(previous);
+            if !before.is_empty() {
+                hygiene_warnings.push(json!({"kind":"cited-file-renamed","path":path,"previous_path":previous,"linked":before,"recommended_action":"review","text":format!("This file was {previous}; the memory that cites the old name may need its citation updated.")}));
+            }
+        }
+        Ok(json!({
+            "project_id": project_id,
+            "path": path,
+            "previous_path": previous,
+            "brain_records": brain_records,
+            "memory_chunks": memory_chunks,
+            "hygiene_warnings": hygiene_warnings,
+        }))
+    }
+
     pub fn promote_atom(&self, project_id: &str, body: &V, query_bank: Option<&str>) -> Result<V> {
         let _source_frame = core::git::source_frame_scope();
         let (effective_project, bank, workspace) =
@@ -2206,6 +2321,7 @@ impl KnowledgeDomain {
             "memory.check" => self.check(project, request["body"]["bank"].as_str().or(bank))?,
             "knowledge.run" => self.run(project, &request["body"], None, true)?,
             "knowledge.sync_collect" => self.sync_collect(project, &request["body"], bank)?,
+            "knowledge.memory_links" => self.memory_links(project, &request["query"])?,
             "knowledge.promote_atom" => self.promote_atom(project, &request["body"], bank)?,
             "knowledge.download" => {
                 return self.download(request["params"]["id"].as_str().unwrap_or(""));
@@ -3701,6 +3817,102 @@ mod tests {
         assert_eq!(mem_atom["authority"], "verified");
         assert_eq!(mem_atom["memory_id"], "MEM-20261117-aaaa1111");
         assert_eq!(mem_atom["files"], json!(["src/fresh.rs"]));
+    }
+
+    #[test]
+    fn linked_memory_for_files_emits_non_destructive_rename_and_delete_warnings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let (_store, knowledge, project_id, ctx) = setup_governed_knowledge_project(&project);
+        let finding = MemoryService::new(ctx.clone(), None)
+            .execute(
+                "brain-create",
+                &json!({"type": "finding", "external_id": "finding-links-1", "title": "Fresh fn must stay pure", "goal": "Callers rely on it.", "files": ["src/fresh.rs"], "sources": ["src/fresh.rs#L1"], "privacy": "public", "authority": "verified", "attestation": "person", "json": true}),
+                &[],
+            )
+            .unwrap();
+        std::fs::write(project.join("src/old.rs"), "pub fn old() {}\n").unwrap();
+        write_mem_chunk(
+            &project,
+            "MEM-20261117-aaaa1111",
+            "fresh",
+            "Fresh is pure",
+            "No side effects.",
+            &["src/fresh.rs"],
+        );
+        write_mem_chunk(
+            &project,
+            "MEM-20261117-bbbb2222",
+            "old",
+            "Old helper",
+            "Kept for the API.",
+            &["src/old.rs"],
+        );
+        let snapshot = || {
+            let mut files = Vec::new();
+            for dir in ["project-brain/dynamic", "memory-bank/chunks"] {
+                for entry in walkdir_files(&project.join(dir)) {
+                    files.push((entry.clone(), std::fs::read(&entry).unwrap()));
+                }
+            }
+            files.sort();
+            files
+        };
+        let before = snapshot();
+        let links = knowledge
+            .memory_links(&project_id, &json!({"path": "./src/fresh.rs"}))
+            .unwrap();
+        assert_eq!(links["path"], "src/fresh.rs");
+        assert_eq!(links["brain_records"][0]["id"], finding["id"]);
+        assert_eq!(links["brain_records"][0]["cited_path"], "src/fresh.rs");
+        assert_eq!(links["memory_chunks"][0]["id"], "MEM-20261117-aaaa1111");
+        assert_eq!(links["hygiene_warnings"], json!([]));
+        // A rename leaves the old name's citations to review.
+        let renamed = knowledge
+            .memory_links(
+                &project_id,
+                &json!({"path": "src/new.rs", "previous_path": "src/old.rs"}),
+            )
+            .unwrap();
+        let warning = &renamed["hygiene_warnings"][0];
+        assert_eq!(warning["kind"], "cited-file-renamed");
+        assert_eq!(warning["linked"], json!(["MEM-20261117-bbbb2222"]));
+        assert_eq!(warning["recommended_action"], "review");
+        // A deleted file's citations are flagged, never retired.
+        std::fs::remove_file(project.join("src/fresh.rs")).unwrap();
+        let gone = knowledge
+            .memory_links(&project_id, &json!({"path": "src/fresh.rs"}))
+            .unwrap();
+        assert_eq!(gone["hygiene_warnings"][0]["kind"], "cited-file-missing");
+        assert_eq!(
+            gone["hygiene_warnings"][0]["linked"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(snapshot(), before);
+        assert!(
+            knowledge
+                .memory_links(&project_id, &json!({"path": "../etc/passwd"}))
+                .is_err()
+        );
+    }
+
+    fn walkdir_files(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
     }
 
     #[test]

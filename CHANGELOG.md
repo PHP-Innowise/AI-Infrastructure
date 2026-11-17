@@ -24,6 +24,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Bridge the dependency map and project memory. `GET
+  /api/projects/{project_id}/graph/memory-links?path=` lists the active
+  Project Brain records and Memory Bank chunks that cite a file and the
+  shared Omnigraph atoms touching it (`GET /api/omnigraph/file-context`), and
+  warns, for review only, when the file is gone or a commit renamed it
+  (`previous_path`). The map's side panel shows the links of a selected file
+  once they arrive, opens each record or chunk in Knowledge, and keeps the map
+  when the request fails.
 - Updating an Omnigraph atom through `POST /api/omnigraph/atoms` keeps what
   the update leaves out: its six provenance fields (`origin_layer`,
   `authority`, `privacy`, `brain_record_id`, `memory_id`,

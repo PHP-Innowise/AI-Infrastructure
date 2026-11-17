@@ -1138,6 +1138,17 @@ fn evaluate_mock_query(
         );
     }
 
+    if query_name == "file_context" || query_text.contains("query file_context") {
+        let path = params["path"].as_str().unwrap_or("");
+        let rows: Vec<Value> = snap
+            .touches_file
+            .values()
+            .filter(|edge| edge["target_id"].as_str() == Some(path))
+            .filter_map(|edge| edge["source_id"].as_str())
+            .filter_map(|aid| snap.atoms.get(aid).cloned())
+            .collect();
+        return (rows, None);
+    }
     if query_name == "list_session_turn_snapshots"
         || query_text.contains("list_session_turn_snapshots")
     {
@@ -4571,6 +4582,60 @@ async fn publish_session_outputs_increments_turn_snapshot_turn_index() {
             (3, "Third turn done".to_string()),
         ]
     );
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn file_context_lists_main_and_canonical_atoms_with_authority_lines() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    let off = mgr
+        .file_context_json("proj-1", "src/auth.rs")
+        .await
+        .unwrap();
+    assert_eq!(off["skipped"], "omnigraph-off");
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    mgr.publish_atom_json(&json!({"project_id": "proj-1", "branch": "main", "atom_id": "atom-note", "kind": "insight", "title": "Auth note", "files": ["src/auth.rs"]}))
+        .await
+        .unwrap();
+    mgr.sync_canonical_knowledge(
+        "proj-1",
+        &[json!({"atom_id": "brain-auth", "kind": "decision", "title": "Tokens expire", "files": ["src/auth.rs"], "verified": true, "origin_layer": "project-brain", "authority": "verified", "brain_record_id": "11111111-2222-4333-8444-555555555555"})],
+    )
+    .await
+    .unwrap();
+    let found = mgr
+        .file_context_json("proj-1", "./src/auth.rs")
+        .await
+        .unwrap();
+    let lines = found["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|atom| atom["capsule_line"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2, "{found}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("- [project-brain decision · 11111111] Tokens expire")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("- [unverified reference")),
+        "{lines:?}"
+    );
+    assert!(mgr.file_context_json("proj-1", "../secret").await.is_err());
     mgr.close().await.unwrap();
 }
 
