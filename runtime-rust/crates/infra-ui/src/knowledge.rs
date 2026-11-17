@@ -1,5 +1,5 @@
 use crate::{api, dom, model as m, session};
-use serde_json::{Value as V, json};
+use serde_json::{json, Value as V};
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_bindgen::JsCast;
 pub fn initialize() {
@@ -2791,7 +2791,11 @@ fn sortable(kind: &str, rows: &[V], columns: &[(&str, &str)]) {
         } else {
             m::string(&a[key]).cmp(&m::string(&b[key]))
         };
-        if desc { order.reverse() } else { order }
+        if desc {
+            order.reverse()
+        } else {
+            order
+        }
     });
     let details = dom::el("details", "fleet-report", "");
     dom::add(

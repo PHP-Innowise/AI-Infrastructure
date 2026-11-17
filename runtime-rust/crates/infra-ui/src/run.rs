@@ -1,12 +1,12 @@
 use crate::{dom, model as m, session};
-use serde_json::{Value as V, json};
+use serde_json::{json, Value as V};
 use std::collections::BTreeMap;
 use wasm_bindgen::JsCast;
 
 #[allow(dead_code)]
 pub(crate) mod files_map {
     use crate::{dom, model as m};
-    use serde_json::{Value as V, json};
+    use serde_json::{json, Value as V};
     use std::collections::BTreeMap;
     use wasm_bindgen::JsCast;
 
@@ -176,7 +176,11 @@ pub(crate) mod files_map {
     }
 
     pub(crate) fn truth(value: bool) -> &'static str {
-        if value { "true" } else { "false" }
+        if value {
+            "true"
+        } else {
+            "false"
+        }
     }
 
     pub(crate) fn count_words(n: u64, one: &str) -> String {
@@ -184,7 +188,11 @@ pub(crate) mod files_map {
     }
 
     pub(crate) fn normalize_view(view: &str) -> &'static str {
-        if view == "list" { "list" } else { "map" }
+        if view == "list" {
+            "list"
+        } else {
+            "map"
+        }
     }
 
     pub(crate) fn place_of_path(path: &str, outside: bool) -> (String, String) {
@@ -1122,9 +1130,9 @@ pub(crate) mod files_map {
 #[cfg(test)]
 use files_map::place_popover as place;
 use files_map::{
-    FileCardAction, FileTouchEntry, OUTSIDE, bdi_el as bdi, count_words as count, district_label,
-    focus_element_no_scroll as focus_node, hushed_el as hushed, place_of_path,
-    splice_draft as spliced, truth,
+    bdi_el as bdi, count_words as count, district_label, focus_element_no_scroll as focus_node,
+    hushed_el as hushed, place_of_path, splice_draft as spliced, truth, FileCardAction,
+    FileTouchEntry, OUTSIDE,
 };
 
 thread_local! {
@@ -1255,11 +1263,9 @@ fn advance(mut run: V, event: &V) -> (V, Option<V>) {
                 json!({"tool":name,"key":key,"path":event["path"],"detail":event["detail"],"event_id":event["id"],"started":event["at"]}),
             );
             item["open"] = json!(start);
-            item["ok"] = json!(
-                event["ok"]
-                    .as_bool()
-                    .unwrap_or(!m::text(event, "text").contains("failed"))
-            );
+            item["ok"] = json!(event["ok"]
+                .as_bool()
+                .unwrap_or(!m::text(event, "text").contains("failed")));
             item["event_id"] = event["id"].clone();
             if start {
                 run["steps"] = json!(run["steps"].as_u64().unwrap_or(0) + 1);
@@ -1628,7 +1634,11 @@ fn is_check(run: &V) -> bool {
 /// The launch a finished turn's line and details describe: the newest one, or the one a Harness
 /// check replaced.
 fn turn<'a>(run: &'a V, before: &'a V) -> &'a V {
-    if is_check(run) { before } else { run }
+    if is_check(run) {
+        before
+    } else {
+        run
+    }
 }
 
 /// A launch the Run view describes: a native one, in a session that keeps no progress of its own.
@@ -2041,7 +2051,11 @@ fn detail_switch() -> &'static str {
         .ok()
         .flatten()
         .is_some_and(|media| media.matches());
-    if narrow { "run-compact" } else { "run-calm" }
+    if narrow {
+        "run-compact"
+    } else {
+        "run-calm"
+    }
 }
 
 /// Opens or collapses the view and its panel. The markup ships both collapsed and inert, and the
@@ -3982,11 +3996,9 @@ mod files_tests {
 
         // Outside files have no project code graph node, so they omit inspect-file-graph.
         let outside_actions = run_card_actions(file(&run, "secrets.env"));
-        assert!(
-            !outside_actions
-                .iter()
-                .any(|a| a.action == "inspect-file-graph")
-        );
+        assert!(!outside_actions
+            .iter()
+            .any(|a| a.action == "inspect-file-graph"));
 
         let entries = entries_of_run(&run, false);
         let list_html = files_map::render_files_surface(

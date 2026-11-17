@@ -1,6 +1,6 @@
 //! Next-turn input and durable browser-side ownership of an uncertain POST.
 use crate::{api, commands, dom, model as m, session};
-use serde_json::{Value as V, json};
+use serde_json::{json, Value as V};
 
 /// Largest saved state `stored` reads back; `persist` never writes more.
 const STORED_LIMIT: usize = 150000;
