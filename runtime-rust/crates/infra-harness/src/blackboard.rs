@@ -128,33 +128,24 @@ impl Blackboard for CoreBlackboard {
             return Ok(());
         }
         let brain = BrainRepository::new(self.context.clone())?;
-        // Fleet lenses report at once: a write that lost the race to another
-        // reads the task again rather than dropping its progress.
-        let mut attempts = 0;
-        loop {
-            let record = brain.get_task(task)?;
-            let written = brain.update(
-                record["id"]
-                    .as_str()
-                    .ok_or_else(|| HarnessError::invalid("Task identity is missing."))?,
-                UpdateRecord {
-                    expected_revision: record["revision"].as_u64(),
-                    progress: Some(message.chars().take(500).collect()),
-                    actor: self.context.actor.clone(),
-                    ..UpdateRecord::default()
-                },
-            );
-            match written {
-                Err(error) if error.kind == infra_core::ErrorKind::Conflict && attempts < 8 => {
-                    attempts += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(5 * attempts));
-                }
-                written => {
-                    written?;
-                    return Ok(());
-                }
-            }
-        }
+        // Fleet lenses report at once. Each reads and writes the task under the
+        // Brain's mutation lock (the update takes it again on this thread), so
+        // none writes over a revision another just replaced, and none reads the
+        // task while another replaces its file, which Windows can show as gone.
+        let _guard = brain.lock()?;
+        let record = brain.get_task(task)?;
+        brain.update(
+            record["id"]
+                .as_str()
+                .ok_or_else(|| HarnessError::invalid("Task identity is missing."))?,
+            UpdateRecord {
+                expected_revision: record["revision"].as_u64(),
+                progress: Some(message.chars().take(500).collect()),
+                actor: self.context.actor.clone(),
+                ..UpdateRecord::default()
+            },
+        )?;
+        Ok(())
     }
 }
 

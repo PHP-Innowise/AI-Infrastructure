@@ -3057,6 +3057,9 @@ async fn sidecar_manager_and_domain_work_end_to_end() {
     mgr.close().await.unwrap();
 }
 
+// The release is a Linux tarball and the stand-in executables are shell and
+// Python scripts, which Windows cannot run by name.
+#[cfg(unix)]
 #[tokio::test]
 async fn install_local_extracts_tarball_and_local_sidecar_lifecycle_works() {
     // Build a tiny `.tar.gz` containing mock `omnigraph` and `omnigraph-server` executables

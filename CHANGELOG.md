@@ -24,6 +24,13 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Fleet progress reads and writes its task under the Project Brain mutation
+  lock instead of retrying a stale revision: on Windows a lens reading the task
+  while another replaced its file could see it as missing. A System
+  Orchestration run's overlapping files are shown with `/` between their parts
+  on Windows too, the system graph test brings its own Graphify instead of
+  needing one on the machine, and the local Omnigraph install test, whose
+  stand-in executables are shell and Python scripts, runs on Unix only.
 - The Context Graph's **Keep source** and **Keep target** settle a conflict
   on a live Omnigraph. Its own merge conflicts name an atom without its
   values, which left both buttons disabled; the branch diff and a
