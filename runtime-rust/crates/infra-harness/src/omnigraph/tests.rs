@@ -1138,6 +1138,20 @@ fn evaluate_mock_query(
         );
     }
 
+    if query_name == "list_session_turn_snapshots"
+        || query_text.contains("list_session_turn_snapshots")
+    {
+        let sid = params["session_id"].as_str().unwrap_or("");
+        let mut rows: Vec<Value> = snap
+            .turn_snapshots
+            .values()
+            .filter(|t| t["session_id"].as_str() == Some(sid))
+            .cloned()
+            .collect();
+        rows.sort_by_key(|t| std::cmp::Reverse(t["turn_index"].as_i64().unwrap_or(0)));
+        rows.truncate(1);
+        return (rows, None);
+    }
     if query_name == "recent_atoms" || query_text.contains("recent_atoms") {
         let rows: Vec<Value> = snap
             .atoms
@@ -4388,6 +4402,173 @@ async fn real_omnigraph_binary_export_import_and_share_round_trip() {
     assert_eq!(imported_mem["memory_id"], "MEM-20261117-aabbccdd-pkce");
     assert_eq!(imported_mem["record_revision"], 4);
 
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn prepare_session_context_emits_canonical_consumed_by_sanitizes_prompt_and_normalizes_follows()
+ {
+    let state_dir = tempfile::tempdir().unwrap();
+    let store = crate::store::SessionStore::open(state_dir.path()).unwrap();
+    let proj_dir = state_dir.path().join("project");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    let project_id = store.register(&proj_dir).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), Some(store.clone())).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    mgr.sync_canonical_knowledge(
+        &project_id,
+        &[json!({"atom_id": "brain-retry", "kind": "decision", "title": "Retry backoff policy", "summary": "Retries back off exponentially.", "verified": true, "origin_layer": "project-brain", "authority": "verified", "privacy": "public", "brain_record_id": "11111111-2222-4333-8444-555555555555"})],
+    )
+    .await
+    .unwrap();
+    let sid = "aabbccddeeff0011";
+    let session = json!({
+        "id": sid,
+        "project_id": project_id,
+        "title": "Retry work",
+        "provider": "claude",
+        "workflow": "native",
+        "status": "running",
+        "prompt": "retry backoff with API_KEY=Sup3rS3cret99 for jane.doe@example.com",
+        "omnigraph": {
+            "enabled": true,
+            "branch": "auto",
+            "shared_space": "shared/team-space",
+            "linked_session_ids": ["9988776655443322"]
+        }
+    });
+    let prep = mgr
+        .prepare_session_context(&session, &proj_dir)
+        .await
+        .unwrap();
+    assert!(
+        prep["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|atom| atom["atom_id"] == "brain-retry"),
+        "{prep}"
+    );
+    // The canonical atom's consumption is recorded on its own branch.
+    assert_eq!(prep["consumed_count"], 1);
+    let canonical = mgr
+        .graph_view_json(
+            &project_id,
+            Some(schema::CANONICAL_KNOWLEDGE_BRANCH),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        canonical["edges"].as_array().unwrap().iter().any(|edge| {
+            edge["kind"] == "consumed_by"
+                && edge["source"] == "brain-retry"
+                && edge["target"] == sid
+        }),
+        "{}",
+        canonical["edges"]
+    );
+    let own = mgr
+        .graph_view_json(
+            &project_id,
+            Some("session/aabbccddeeff"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    // The atom is not copied onto the session branch.
+    assert!(
+        !own["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|atom| atom["atom_id"] == "brain-retry")
+    );
+    // The prompt reached the shared graph screened.
+    let written = own.to_string();
+    assert!(!written.contains("Sup3rS3cret99"), "{written}");
+    assert!(!written.contains("jane.doe@example.com"), "{written}");
+    assert!(written.contains("retry backoff"), "{written}");
+    // Linked sessions follow each other by kind of link, not by space name.
+    let follows = own["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|edge| edge["kind"] == "session_follows")
+        .collect::<Vec<_>>();
+    assert!(!follows.is_empty());
+    assert!(
+        follows
+            .iter()
+            .all(|edge| edge["relation"] == "shared_branch"),
+        "{follows:?}"
+    );
+    mgr.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn publish_session_outputs_increments_turn_snapshot_turn_index() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let (base_url, _server) = spawn_mock_omnigraph().await;
+    let mgr = OmnigraphManager::new(state_dir.path().to_path_buf(), None).unwrap();
+    mgr.setup_json(&json!({
+        "action": "connect",
+        "endpoint": base_url,
+        "token": "tok-harness",
+        "graph_id": schema::HARNESS_GRAPH_ID
+    }))
+    .await
+    .unwrap();
+    let session = json!({"id": "1234567890abcdef", "project_id": "proj-1", "omnigraph": {"enabled": true, "branch": "auto"}});
+    for turn in ["First turn done", "Second turn done", "Third turn done"] {
+        mgr.publish_session_outputs(&session, &[], &[], turn)
+            .await
+            .unwrap();
+    }
+    let ndjson = mgr
+        .client()
+        .await
+        .unwrap()
+        .export_branch(Some("session/1234567890ab"), &["TurnSnapshot"], None)
+        .await
+        .unwrap();
+    let mut turns = ndjson
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|row| row["type"] == "TurnSnapshot")
+        .map(|row| {
+            (
+                row["data"]["turn_index"].as_i64().unwrap(),
+                row["data"]["summary"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    turns.sort();
+    assert_eq!(
+        turns,
+        vec![
+            (1, "First turn done".to_string()),
+            (2, "Second turn done".to_string()),
+            (3, "Third turn done".to_string()),
+        ]
+    );
     mgr.close().await.unwrap();
 }
 

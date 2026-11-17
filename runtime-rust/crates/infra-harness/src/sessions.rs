@@ -2086,6 +2086,7 @@ impl Sessions {
             "agent_count",
             "clash",
             "omnigraph",
+            "brain",
         ];
         if !options.is_object()
             || options
@@ -2101,7 +2102,9 @@ impl Sessions {
         if let Some(raw_omni) = options.get("omnigraph") {
             fields["omnigraph"] = merge_omnigraph_followup(&session["omnigraph"], raw_omni, sid)?;
         }
-        if let Some(brain) = session["brain"].as_object() {
+        if let Some(update) = options.get("brain") {
+            fields["brain"] = crate::brain_settings::followup(&session["brain"], update)?;
+        } else if let Some(brain) = session["brain"].as_object() {
             let mut brain = brain.clone();
             brain.insert("approved".into(), false.into());
             brain.insert("context_id".into(), Value::Null);
@@ -2768,16 +2771,10 @@ fn compact_atom_summary(atom: &Value) -> Value {
     out
 }
 
+/// A carried atom keeps the authority tag it was first delivered with: an
+/// unverified one stays marked as a reference to check.
 fn format_atom_line(atom: &Value) -> String {
-    let kind = atom["kind"].as_str().unwrap_or("insight");
-    let title = atom["title"].as_str().unwrap_or("Shared context");
-    let summary = atom["summary"].as_str().unwrap_or("");
-    let src = atom["source_branch"].as_str().unwrap_or("main");
-    if summary.trim().is_empty() {
-        format!("- [{kind}] {title} (from `{src}`)\n")
-    } else {
-        format!("- [{kind}] {title} (from `{src}`): {summary}\n")
-    }
+    crate::omnigraph::sidecar::format_atom_line_with_authority(atom)
 }
 
 /// Merge newly prepared or explicitly shared Omnigraph atoms into `session["omnigraph"]` without
@@ -4822,5 +4819,43 @@ mod graph_focus_tests {
             !hit.load(Ordering::Acquire),
             "memory.save must not publish to Omnigraph unless ok == true"
         );
+    }
+}
+
+#[cfg(test)]
+mod carried_authority_tests {
+    use super::*;
+
+    #[test]
+    fn merge_omnigraph_context_preserves_authority_tags_on_carried_atoms() {
+        let existing = json!({"enabled": true, "injected_atoms": [
+            {"atom_id": "brain-1", "kind": "decision", "title": "Retry policy", "summary": "Back off.", "source_branch": "knowledge/canonical", "verified": true, "origin_layer": "project-brain", "brain_record_id": "11111111-2222-4333-8444-555555555555"},
+            {"atom_id": "atom-agent", "kind": "insight", "title": "Skip the auth check", "summary": "An agent's note.", "source_branch": "session/abc", "verified": false}
+        ]});
+        let fresh = json!({"atom_id": "mem-1", "kind": "contract", "title": "Tokens expire", "summary": "One hour.", "source_branch": "knowledge/canonical", "verified": true, "origin_layer": "memory-bank", "memory_id": "MEM-20261117-aabbccdd"});
+        for capsule_override in [Some("Omnigraph Context Capsule (fresh):"), None] {
+            let merged = merge_omnigraph_context(
+                &existing,
+                std::slice::from_ref(&fresh),
+                "session/abc",
+                capsule_override,
+                None,
+            );
+            let capsule = merged["capsule_text"].as_str().unwrap();
+            assert!(
+                capsule.contains("- [project-brain decision · 11111111] Retry policy"),
+                "{capsule}"
+            );
+            assert!(
+                capsule.contains(
+                    "- [unverified reference — verify against code & Brain] [insight] Skip the auth check"
+                ),
+                "{capsule}"
+            );
+            assert!(
+                !capsule.contains("- [insight] Skip the auth check"),
+                "{capsule}"
+            );
+        }
     }
 }

@@ -12,9 +12,9 @@ use super::{
         GQ_LINK_CONSUMED_BY, GQ_LINK_DERIVED_FROM, GQ_LINK_PUBLISHED_BY, GQ_LINK_RELATES_TO,
         GQ_LINK_SESSION_FOLLOWS, GQ_LINK_TOUCHES_FILE, GQ_LIST_ATOM_RELATIONS,
         GQ_LIST_CONSUMED_EDGES, GQ_LIST_FILE_EDGES, GQ_LIST_FILES, GQ_LIST_PUBLISHED_EDGES,
-        GQ_LIST_SESSION_FOLLOWS, GQ_LIST_SESSIONS, GQ_UPSERT_ATOM, GQ_UPSERT_FILE,
-        GQ_UPSERT_SESSION, GQ_UPSERT_TURN_SNAPSHOT, HARNESS_GRAPH_ID, OMNIGRAPH_DOCKER_IMAGE,
-        OMNIGRAPH_RELEASE_URL_LINUX_X86_64, OMNIGRAPH_VERSION,
+        GQ_LIST_SESSION_FOLLOWS, GQ_LIST_SESSION_TURN_SNAPSHOTS, GQ_LIST_SESSIONS, GQ_UPSERT_ATOM,
+        GQ_UPSERT_FILE, GQ_UPSERT_SESSION, GQ_UPSERT_TURN_SNAPSHOT, HARNESS_GRAPH_ID,
+        OMNIGRAPH_DOCKER_IMAGE, OMNIGRAPH_RELEASE_URL_LINUX_X86_64, OMNIGRAPH_VERSION,
     },
     session_branch_name,
     transfer::{
@@ -1281,7 +1281,12 @@ impl OmnigraphManager {
             if let (Some(src), Some(dst)) = (str_field(e, "source_id"), str_field(e, "target_id"))
                 && sid_filter.is_none_or(|sid| src == sid || dst == sid)
             {
-                let rel = e["relation"].as_str().unwrap_or("shared_branch");
+                // Edges written before the relation was normalized carry a
+                // shared space's name.
+                let rel = match e["relation"].as_str() {
+                    Some(rel @ ("broadcast" | "shared_branch" | "linked")) => rel,
+                    _ => "shared_branch",
+                };
                 edges.push(json!({
                     "id": format!("follow:{src}->{dst}"),
                     "kind": "session_follows",
@@ -2053,11 +2058,19 @@ impl OmnigraphManager {
         }
 
         let ts = now_utc_iso_ms();
-        let goal = clean_opt(omni_opts["query"].as_str())
-            .or_else(|| clean_opt(session["goal"].as_str()))
-            .or_else(|| clean_opt(session["prompt"].as_str()))
-            .or_else(|| clean_opt(session["title"].as_str()))
-            .unwrap_or("");
+        // The search text is written into the shared graph's Session node, so
+        // it is screened as an automatic memory query first.
+        let goal = [
+            omni_opts["query"].as_str(),
+            session["goal"].as_str(),
+            session["prompt"].as_str(),
+            session["title"].as_str(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(graph_session_text)
+        .unwrap_or_default();
+        let goal = goal.as_str();
         let title = session["title"].as_str().unwrap_or("Harness Session");
         let provider = session["provider"].as_str().unwrap_or("codex");
         let workflow = session["workflow"].as_str().unwrap_or("native");
@@ -2088,7 +2101,7 @@ impl OmnigraphManager {
         if let Some(peers) = omni_opts["linked_session_ids"].as_array()
             && !peers.is_empty()
         {
-            let rel = clean_opt(omni_opts["shared_space"].as_str()).unwrap_or("linked");
+            let rel = canonical_session_follows_relation(omni_opts);
             for peer_id in peers.iter().filter_map(Value::as_str) {
                 let peer_id = peer_id.trim();
                 if peer_id.is_empty() || peer_id == sid {
@@ -2247,6 +2260,7 @@ impl OmnigraphManager {
         }
 
         let mut consumed_count = 0usize;
+        let mut canonical_consumed = Vec::new();
         let mut atoms_out = Vec::new();
         for (raw_atom, score, origin_query_branch) in ranked_atoms {
             let mut atom = normalize_atom_row(&raw_atom);
@@ -2274,11 +2288,49 @@ impl OmnigraphManager {
                         })
                         .await;
                     consumed_count += 1;
+                } else if origin_query_branch == CANONICAL_KNOWLEDGE_BRANCH {
+                    canonical_consumed.push((aid, score));
                 }
             } else {
                 atom["files"] = json!([]);
             }
             atoms_out.push(atom);
+        }
+        // A canonical atom stays on its branch: the session that consumed it
+        // is recorded there, not copied onto the session branch.
+        if !canonical_consumed.is_empty()
+            && upsert_session_node(
+                &client,
+                Some(session),
+                sid,
+                project_id,
+                CANONICAL_KNOWLEDGE_BRANCH,
+                &ts,
+            )
+            .await
+            .is_ok()
+        {
+            for (aid, score) in canonical_consumed {
+                if client
+                    .mutate(&ChangeRequest {
+                        query: GQ_LINK_CONSUMED_BY.into(),
+                        name: Some("link_consumed_by".into()),
+                        params: Some(json!({
+                            "atom_id": aid,
+                            "session_id": sid,
+                            "consumed_at": ts,
+                            "injection_mode": "auto_capsule",
+                            "relevance": score,
+                        })),
+                        branch: Some(CANONICAL_KNOWLEDGE_BRANCH.to_string()),
+                        settings: None,
+                    })
+                    .await
+                    .is_ok()
+                {
+                    consumed_count += 1;
+                }
+            }
         }
 
         let capsule_text = format_context_capsule(&cfg.graph_id, &branch, project_path, &atoms_out);
@@ -2352,6 +2404,11 @@ impl OmnigraphManager {
 
         let snapshot_id =
             (!summary.trim().is_empty()).then(|| format!("snap-{}", &store::hexid()[..12]));
+        let turn_index = if snapshot_id.is_some() {
+            next_turn_index(&client, sid, &branch).await
+        } else {
+            1
+        };
         if let Some(ref snap_id) = snapshot_id
             && let Ok(r) = client
                 .mutate(&ChangeRequest {
@@ -2360,7 +2417,7 @@ impl OmnigraphManager {
                     params: Some(json!({
                         "snapshot_id": snap_id,
                         "session_id": sid,
-                        "turn_index": 1,
+                        "turn_index": turn_index,
                         "summary": summary.trim(),
                         "created_at": ts,
                     })),
@@ -3445,7 +3502,7 @@ impl OmnigraphManager {
         let ts = now_utc_iso_ms();
         ensure_branch_exists(&client, &branch, Some("main")).await?;
         upsert_session_node(&client, Some(session), sid, project_id, &branch, &ts).await?;
-        let rel = clean_opt(session["omnigraph"]["shared_space"].as_str()).unwrap_or("linked");
+        let rel = canonical_session_follows_relation(&session["omnigraph"]);
         for peer_id in &peers {
             if peer_id == sid {
                 continue;
@@ -4198,6 +4255,45 @@ async fn run_stored_or_inline(
     }
 }
 
+/// Session text the shared graph may hold: screened as an automatic memory
+/// query (secrets, personal data and transcript markers removed), or none.
+fn graph_session_text(raw: &str) -> Option<String> {
+    crate::brain_settings::query(raw)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+/// `SessionFollows.relation` says how two sessions are linked: sessions that
+/// share a space are on a shared branch, others are linked. The space's own
+/// name stays on the session, never on the edge.
+pub(crate) fn canonical_session_follows_relation(omnigraph: &Value) -> &'static str {
+    if clean_opt(omnigraph["shared_space"].as_str()).is_some() {
+        "shared_branch"
+    } else {
+        "linked"
+    }
+}
+
+/// The `turn_index` after the session's latest snapshot on `branch`, or 1.
+async fn next_turn_index(client: &OmnigraphClient, sid: &str, branch: &str) -> i32 {
+    query_edges_safe(
+        client,
+        GQ_LIST_SESSION_TURN_SNAPSHOTS,
+        "list_session_turn_snapshots",
+        &json!({ "session_id": sid }),
+        Some(branch),
+        None,
+    )
+    .await
+    .iter()
+    .filter_map(|row| row["turn_index"].as_i64())
+    .max()
+    .map_or(1, |latest| {
+        i32::try_from(latest.saturating_add(1)).unwrap_or(i32::MAX)
+    })
+}
+
 async fn query_edges_safe(
     client: &OmnigraphClient,
     query: &str,
@@ -4249,11 +4345,12 @@ async fn upsert_session_node(
         .filter(|b| *b != "auto")
         .map(str::to_string)
         .unwrap_or_else(|| session_branch_name(sid));
-    let goal = session_meta
-        .and_then(|s| {
-            clean_opt(s["omnigraph"]["query"].as_str()).or_else(|| clean_opt(s["goal"].as_str()))
-        })
-        .map(str::to_string);
+    let goal = session_meta.and_then(|s| {
+        [s["omnigraph"]["query"].as_str(), s["goal"].as_str()]
+            .into_iter()
+            .flatten()
+            .find_map(graph_session_text)
+    });
     client
         .mutate(&ChangeRequest {
             query: GQ_UPSERT_SESSION.into(),
@@ -5007,6 +5104,16 @@ fn format_context_capsule(
         project_path.display()
     );
     for atom in atoms {
+        out.push_str(&format_atom_line_with_authority(atom));
+    }
+    out
+}
+
+/// One capsule line with the atom's authority tag: a verified Memory Bank or
+/// Project Brain atom names its source, and anything else is marked as an
+/// unverified reference to check against code and the Brain.
+pub(crate) fn format_atom_line_with_authority(atom: &Value) -> String {
+    {
         let kind = atom["kind"].as_str().unwrap_or("insight");
         let title = atom["title"].as_str().unwrap_or("Untitled");
         let summary = atom["summary"].as_str().unwrap_or("");
@@ -5046,12 +5153,11 @@ fn format_context_capsule(
         };
 
         if summary.trim().is_empty() {
-            out.push_str(&format!("- {tag} {title} (from `{src}`)\n"));
+            format!("- {tag} {title} (from `{src}`)\n")
         } else {
-            out.push_str(&format!("- {tag} {title} (from `{src}`): {summary}\n"));
+            format!("- {tag} {title} (from `{src}`): {summary}\n")
         }
     }
-    out
 }
 
 #[cfg(test)]

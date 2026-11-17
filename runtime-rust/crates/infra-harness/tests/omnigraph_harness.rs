@@ -847,6 +847,18 @@ fn eval_query(snap: &MockSnapshot, qname: &str, params: &Value) -> Vec<Value> {
         "list_file_edges" => snap.touches_file.values().cloned().collect(),
         "list_atom_relations" => snap.relates_to.values().cloned().collect(),
         "list_session_follows" => snap.session_follows.values().cloned().collect(),
+        "list_session_turn_snapshots" => {
+            let sid = params["session_id"].as_str().unwrap_or("");
+            let mut rows: Vec<Value> = snap
+                .turn_snapshots
+                .values()
+                .filter(|t| t["session_id"].as_str() == Some(sid))
+                .cloned()
+                .collect();
+            rows.sort_by_key(|t| std::cmp::Reverse(t["turn_index"].as_i64().unwrap_or(0)));
+            rows.truncate(1);
+            rows
+        }
         _ => Vec::new(),
     }
 }

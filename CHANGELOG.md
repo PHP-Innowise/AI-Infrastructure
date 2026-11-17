@@ -24,6 +24,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Harness Omnigraph sessions: the text a session searches with and leaves
+  on its shared `Session` node is screened as an automatic memory query
+  (secrets, personal data and transcript markers removed) instead of the raw
+  prompt; a canonical atom a session consumes gets its `ConsumedBy` edge on
+  `knowledge/canonical`, where the atom stays, instead of none; a
+  `SessionFollows` edge names the kind of link (`shared_branch`, `linked`,
+  `broadcast`) rather than the shared space's name, and older edges read as
+  `shared_branch`; each published turn snapshot takes the next `turn_index`
+  instead of 1; atoms carried into a later capsule keep their authority tag,
+  so an unverified one is still marked for checking. A chat follow-up may
+  change the session's task-context `review` and `query`
+  (`brain_settings::followup`): a reviewed query is the person's bounded
+  text, an automatic one is screened, and the task, bank and goal stay.
 - Prune the Omnigraph `knowledge/canonical` branch: a canonical sync now
   deletes the project's synced Project Brain and Memory Bank atoms whose
   record or chunk is gone (retired, archived, superseded, stale), with every

@@ -743,6 +743,20 @@ pub(crate) const GQ_CLEAR_BRANCH_CONTEXT: &str = r#"query clear_branch_context()
     delete Session where session_id != ""
 }"#;
 
+/// The latest turn snapshot of a session on a branch: the next one takes the
+/// following `turn_index`.
+pub(crate) const GQ_LIST_SESSION_TURN_SNAPSHOTS: &str = r#"query list_session_turn_snapshots($session_id: String) {
+    match {
+        $t: TurnSnapshot { session_id: $session_id }
+    }
+    return {
+        $t.snapshot_id as snapshot_id,
+        $t.turn_index as turn_index
+    }
+    order { $t.turn_index desc }
+    limit 1
+}"#;
+
 /// Remove one synced atom and every edge that names it from a branch (the
 /// canonical sync prunes Project Brain and Memory Bank atoms gone from their
 /// source).
