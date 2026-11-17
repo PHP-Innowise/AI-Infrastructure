@@ -480,6 +480,12 @@ impl Services for NativeServices {
                             match omnigraph.execute("omnigraph.file_context", file).await {
                                 Ok(Payload::Json(found)) if found["ok"] == true => {
                                     links["omnigraph_atoms"] = found["atoms"].clone();
+                                    links["contradiction_warnings"] = json!(
+                                        crate::knowledge::KnowledgeDomain::contradiction_warnings(
+                                            &found["contradictions"],
+                                            &found["atoms"],
+                                        )
+                                    );
                                 }
                                 Ok(Payload::Json(found)) => {
                                     links["omnigraph_skipped"] = found["skipped"].clone();
@@ -545,6 +551,7 @@ impl Services for NativeServices {
                             "atom_ids": synced["atom_ids"].as_array().cloned().unwrap_or_default(),
                             "deleted": synced["deleted"].as_u64().unwrap_or(0),
                             "deleted_atom_ids": synced["deleted_atom_ids"].as_array().cloned().unwrap_or_default(),
+                            "symbols": synced["symbols"].as_u64().unwrap_or(0),
                         });
                         if let Some(error) = synced["prune_error"].as_str() {
                             out["prune_error"] = json!(error);
