@@ -1872,6 +1872,15 @@ impl OmnigraphManager {
                 None,
             )
             .await?;
+            let source_file_edges = query_edges_safe(
+                &client,
+                GQ_LIST_FILE_EDGES,
+                "list_file_edges",
+                &json!({ "project_id": sess_project_id }),
+                Some(&source_branch),
+                None,
+            )
+            .await;
             for row in &source_atoms.rows {
                 let atom = normalize_atom_row(row);
                 let aid = str_field(&atom, "atom_id").unwrap_or_default();
@@ -1894,7 +1903,7 @@ impl OmnigraphManager {
                         &ts,
                         &ts,
                     );
-                    let _ = client
+                    if let Ok(r) = client
                         .mutate(&ChangeRequest {
                             query: GQ_UPSERT_ATOM.into(),
                             name: Some("upsert_atom".into()),
@@ -1902,7 +1911,63 @@ impl OmnigraphManager {
                             branch: Some(target_branch.clone()),
                             settings: None,
                         })
-                        .await;
+                        .await
+                    {
+                        if r.commit.is_some() {
+                            last_commit = r.commit;
+                        }
+                        let mut copied_paths = BTreeSet::new();
+                        for fe in source_file_edges.iter().filter(|fe| {
+                            str_field(fe, "source_id").as_deref() == Some(aid.as_str())
+                        }) {
+                            let Some(path) = str_field(fe, "target_id") else {
+                                continue;
+                            };
+                            if !copied_paths.insert(path.clone()) {
+                                continue;
+                            }
+                            let _ = client
+                                .mutate(&ChangeRequest {
+                                    query: GQ_UPSERT_FILE.into(),
+                                    name: Some("upsert_file".into()),
+                                    params: Some(json!({
+                                        "path": path,
+                                        "project_id": sess_project_id,
+                                        "language": detect_language(&path),
+                                        "last_touched_at": ts,
+                                    })),
+                                    branch: Some(target_branch.clone()),
+                                    settings: None,
+                                })
+                                .await;
+                            if let Ok(fr) = client
+                                .mutate(&ChangeRequest {
+                                    query: GQ_LINK_TOUCHES_FILE.into(),
+                                    name: Some("link_touches_file".into()),
+                                    params: Some(json!({
+                                        "atom_id": aid,
+                                        "path": path,
+                                        "access": str_field(fe, "access")
+                                            .unwrap_or_else(|| "referenced".to_string()),
+                                        "line_start": fe
+                                            .get("line_start")
+                                            .cloned()
+                                            .unwrap_or(Value::Null),
+                                        "line_end": fe
+                                            .get("line_end")
+                                            .cloned()
+                                            .unwrap_or(Value::Null),
+                                    })),
+                                    branch: Some(target_branch.clone()),
+                                    settings: None,
+                                })
+                                .await
+                                && fr.commit.is_some()
+                            {
+                                last_commit = fr.commit;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3022,7 +3087,26 @@ impl OmnigraphManager {
             shared_session_ids.push(sid.clone());
         }
 
-        let atoms_out: Vec<Value> = normalized.atoms.values().map(normalize_atom_row).collect();
+        let mut files_by_atom: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for edge in &normalized.edges {
+            if edge.edge_type == "TouchesFile" {
+                let entry = files_by_atom.entry(edge.from.clone()).or_default();
+                if !entry.contains(&edge.to) {
+                    entry.push(edge.to.clone());
+                }
+            }
+        }
+        let atoms_out: Vec<Value> = normalized
+            .atoms
+            .values()
+            .map(|row| {
+                let mut atom = normalize_atom_row(row);
+                let aid = str_field(&atom, "atom_id").unwrap_or_default();
+                let files = files_by_atom.get(&aid).cloned().unwrap_or_default();
+                atom["files"] = json!(files);
+                atom
+            })
+            .collect();
         Ok(json!({
             "ok": true,
             "target_branch": target_branch,
@@ -3552,19 +3636,22 @@ impl OmnigraphManager {
             return Err(HarnessError::invalid("`atom_id` is required."));
         }
         let client = self.client().await?;
-        let candidate_branches = if let Some(b) = clean_opt(branch).filter(|b| *b != "auto") {
-            vec![validate_branch_token(b)?]
-        } else {
-            let mut candidates = vec!["main".to_string(), CANONICAL_KNOWLEDGE_BRANCH.to_string()];
-            if let Ok(list) = client.list_branches(false).await {
-                for b in list.branches {
-                    if !candidates.contains(&b) {
-                        candidates.push(b);
-                    }
+        let mut candidate_branches = Vec::new();
+        if let Some(b) = clean_opt(branch).filter(|b| *b != "auto") {
+            candidate_branches.push(validate_branch_token(b)?);
+        }
+        for default_branch in ["main", CANONICAL_KNOWLEDGE_BRANCH] {
+            if !candidate_branches.iter().any(|b| b == default_branch) {
+                candidate_branches.push(default_branch.to_string());
+            }
+        }
+        if let Ok(list) = client.list_branches(false).await {
+            for b in list.branches {
+                if !candidate_branches.contains(&b) {
+                    candidate_branches.push(b);
                 }
             }
-            candidates
-        };
+        }
 
         for resolved_branch in candidate_branches {
             let Some(mut atom) =
@@ -3596,6 +3683,7 @@ impl OmnigraphManager {
         atom: &Value,
         brain_record_id: &str,
         revision: i64,
+        privacy: Option<&str>,
     ) -> Result<Value> {
         let atom_id = str_field(atom, "atom_id")
             .or_else(|| str_field(atom, "id"))
@@ -3641,6 +3729,9 @@ impl OmnigraphManager {
         prov.authority = Some("verified".to_string());
         prov.brain_record_id = Some(brain_record_id.to_string());
         prov.record_revision = Some(revision);
+        if let Some(p) = clean_opt(privacy) {
+            prov.privacy = Some(p.to_string());
+        }
 
         let atom_params = build_upsert_atom_params(
             &atom_id,
@@ -3693,6 +3784,7 @@ impl OmnigraphManager {
             "record_revision": revision,
             "origin_layer": "project-brain",
             "authority": "verified",
+            "privacy": prov.privacy,
             "verified": true,
             "atom": atom_resp,
             "files": files,
@@ -3835,6 +3927,7 @@ impl Domain for OmnigraphDomain {
                         ));
                     }
                     let brain_record_id = body["brain_record_id"].as_str().unwrap_or("");
+                    let privacy = clean_opt(body["privacy"].as_str());
                     let revision =
                         body.get("revision")
                             .and_then(parse_i64_opt)
@@ -3844,7 +3937,7 @@ impl Domain for OmnigraphDomain {
                                 )
                             })?;
                     self.manager
-                        .link_atom_to_brain(pid, branch, atom, brain_record_id, revision)
+                        .link_atom_to_brain(pid, branch, atom, brain_record_id, revision, privacy)
                         .await?
                 }
                 "omnigraph.changes" => {

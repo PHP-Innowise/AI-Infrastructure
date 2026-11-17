@@ -4324,12 +4324,14 @@ async fn real_omnigraph_binary_export_import_and_share_round_trip() {
             &fetched["atom"],
             "brain-uuid-real-99",
             7,
+            Some("team"),
         )
         .await
         .unwrap();
     assert_eq!(linked_brain["ok"], true);
     assert_eq!(linked_brain["origin_layer"], "project-brain");
     assert_eq!(linked_brain["authority"], "verified");
+    assert_eq!(linked_brain["privacy"], "team");
     assert_eq!(linked_brain["verified"], true);
     assert_eq!(linked_brain["brain_record_id"], "brain-uuid-real-99");
     assert_eq!(linked_brain["record_revision"], 7);
@@ -4695,7 +4697,7 @@ async fn provenance_defaults_canonical_sync_fetch_and_link_brain_work() {
     };
     assert_eq!(missing_err.status, 404);
 
-    // 7. omnigraph.link_brain preserves content/tags/files while setting verified Project Brain provenance
+    // 7. omnigraph.link_brain preserves content/tags/files while setting verified Project Brain provenance + optional privacy
     let mut atom_to_link = fetch_res["atom"].clone();
     atom_to_link["tags"] = json!(["oauth", "promoted"]);
     let link_res = match domain
@@ -4709,7 +4711,8 @@ async fn provenance_defaults_canonical_sync_fetch_and_link_brain_work() {
                     "branch": fetch_res["branch"],
                     "atom": atom_to_link,
                     "brain_record_id": "brain-promoted-uuid-77",
-                    "revision": 4
+                    "revision": 4,
+                    "privacy": "public"
                 }
             }),
         )
@@ -4722,9 +4725,11 @@ async fn provenance_defaults_canonical_sync_fetch_and_link_brain_work() {
     assert_eq!(link_res["ok"], true);
     assert_eq!(link_res["origin_layer"], "project-brain");
     assert_eq!(link_res["authority"], "verified");
+    assert_eq!(link_res["privacy"], "public");
     assert_eq!(link_res["verified"], true);
     assert_eq!(link_res["brain_record_id"], "brain-promoted-uuid-77");
     assert_eq!(link_res["record_revision"], 4);
+    assert_eq!(link_res["atom"]["privacy"], "public");
     assert_eq!(link_res["atom"]["tags"], json!(["oauth", "promoted"]));
     assert_eq!(link_res["atom"]["files"], json!(["src/oauth_client.rs"]));
     assert_eq!(link_res["atom"]["title"], "Session oauth refresh finding");
@@ -4736,6 +4741,7 @@ async fn provenance_defaults_canonical_sync_fetch_and_link_brain_work() {
     assert_eq!(refetched["atom"]["verified"], true);
     assert_eq!(refetched["atom"]["origin_layer"], "project-brain");
     assert_eq!(refetched["atom"]["authority"], "verified");
+    assert_eq!(refetched["atom"]["privacy"], "public");
     assert_eq!(
         refetched["atom"]["brain_record_id"],
         "brain-promoted-uuid-77"
@@ -4743,6 +4749,47 @@ async fn provenance_defaults_canonical_sync_fetch_and_link_brain_work() {
     assert_eq!(refetched["atom"]["record_revision"], 4);
     assert_eq!(refetched["atom"]["tags"], json!(["oauth", "promoted"]));
     assert_eq!(refetched["files"], json!(["src/oauth_client.rs"]));
+
+    // 8. fetch_atom_with_files falls back from stale/deleted explicit branch to main/canonical/listed branches
+    let fallback_fetch = mgr
+        .fetch_atom_with_files(
+            &project_id,
+            &session_atom_id,
+            Some("session/deleted-branch"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fallback_fetch["branch"], "session/sessprov01");
+    assert_eq!(fallback_fetch["files"], json!(["src/oauth_client.rs"]));
+    assert_eq!(fallback_fetch["atom"]["privacy"], "public");
+
+    let canon_fallback = mgr
+        .fetch_atom_with_files(&project_id, "mem-202", Some("session/deleted-branch"))
+        .await
+        .unwrap();
+    assert_eq!(canon_fallback["branch"], schema::CANONICAL_KNOWLEDGE_BRANCH);
+
+    // 9. share_into_session_json (`mode: "copy"`) copies TouchesFile edges + FileRef to target_branch
+    let share_copy = mgr
+        .share_into_session_json(&json!({
+            "project_id": project_id,
+            "target_session_id": "target-copy-files-1",
+            "atom_ids": [session_atom_id],
+            "source_branch": "session/sessprov01",
+            "mode": "copy"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(share_copy["ok"], true);
+    assert_eq!(share_copy["shared_count"], 1);
+    let copied_branch = share_copy["target_branch"].as_str().unwrap();
+    let copied_fetch = mgr
+        .fetch_atom_with_files(&project_id, &session_atom_id, Some(copied_branch))
+        .await
+        .unwrap();
+    assert_eq!(copied_fetch["branch"], copied_branch);
+    assert_eq!(copied_fetch["files"], json!(["src/oauth_client.rs"]));
+    assert_eq!(copied_fetch["atom"]["privacy"], "public");
 
     mgr.close().await.unwrap();
 }
@@ -4827,6 +4874,7 @@ async fn transfer_round_trip_with_and_without_provenance_fields() {
     assert_eq!(reimp_atom["brain_record_id"], "brain-xfer-1");
     assert_eq!(reimp_atom["memory_id"], "MEM-20261117-deadbeef-prov");
     assert_eq!(reimp_atom["record_revision"], 9);
+    assert_eq!(reimp_atom["files"], json!(["src/prov.rs"]));
 
     let legacy_bundle = json!({
         "format": "harness.omnigraph.bundle.v1",
