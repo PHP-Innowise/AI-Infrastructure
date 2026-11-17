@@ -1111,6 +1111,120 @@ pub fn linked_controls() {
             "Named task"
         },
     );
+    // A selected session's follow-up may change its task context instead.
+    let (selected, session, locked) = m::read(|s| {
+        (
+            !s.sid.is_empty(),
+            s.selected.clone(),
+            s.pending || m::active(&s.selected),
+        )
+    });
+    let follow = selected && session["brain"].is_object();
+    dom::hidden("brain-followup-config", !follow);
+    if selected {
+        let review = follow && dom::checked("brain-followup-review");
+        dom::disabled("brain-followup-review", locked);
+        dom::disabled("brain-followup-query", locked);
+        dom::hidden("brain-followup-query-field", !review);
+        dom::text("brain-followup-hint", brain_followup_hint(review));
+        dom::text(
+            "brain-link-summary",
+            if !follow {
+                "Off"
+            } else if review {
+                "Review"
+            } else {
+                "Automatic"
+            },
+        );
+    }
+}
+fn brain_followup_hint(review: bool) -> &'static str {
+    if review {
+        "The next run waits until you approve the context this query retrieves."
+    } else {
+        "The next message is the retrieval query, as in every automatic turn."
+    }
+}
+/// The follow-up controls for a session's linked Brain task: whether its
+/// next context is reviewed by hand, and the query a reviewed context
+/// retrieves with. The task, knowledge root and goal stay as the session
+/// started them.
+pub(crate) fn render_brain_followup_html(task: &str, review: bool, query: &str) -> String {
+    let esc = crate::omnigraph::esc;
+    format!(
+        "<p class=\"knowledge-note\">Linked task <code>{}</code>. A follow-up may change how its context is retrieved.</p><label class=\"checkbox brain-link-review\"><input id=\"brain-followup-review\" type=\"checkbox\"{}>Review context by hand</label><div class=\"knowledge-form-grid\" id=\"brain-followup-query-field\"{}><label class=\"field wide\">Context query<textarea id=\"brain-followup-query\" maxlength=\"4000\" rows=\"2\" placeholder=\"A concise topic, files, or question for retrieval\">{}</textarea></label></div><p class=\"knowledge-note\" id=\"brain-followup-hint\">{}</p>",
+        esc(task),
+        if review { " checked" } else { "" },
+        if review { "" } else { " hidden" },
+        esc(query),
+        brain_followup_hint(review)
+    )
+}
+/// What a follow-up changes in its session's task context: `review`, and
+/// the query a reviewed context retrieves with. An automatic context takes
+/// the next message as its query, so it gets none; `None` when nothing
+/// changed.
+pub(crate) fn followup_brain_from_fields(
+    brain: &V,
+    review: bool,
+    query: &str,
+) -> Result<Option<V>, &'static str> {
+    if !brain.is_object() {
+        return Ok(None);
+    }
+    let mut changes = serde_json::Map::new();
+    if review != (brain["review"] == true) {
+        changes.insert("review".into(), json!(review));
+    }
+    if review {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err("Enter a context query to review, or turn off Review context by hand.");
+        }
+        if query != brain["query"].as_str().unwrap_or("").trim() {
+            changes.insert("query".into(), json!(query));
+        }
+    }
+    Ok((!changes.is_empty()).then_some(V::Object(changes)))
+}
+/// The selected session's follow-up change to its task context.
+pub fn followup_brain(session: &V) -> Result<Option<V>, &'static str> {
+    if dom::get("brain-followup-review").is_none() {
+        return Ok(None);
+    }
+    followup_brain_from_fields(
+        &session["brain"],
+        dom::checked("brain-followup-review"),
+        &dom::value("brain-followup-query"),
+    )
+}
+/// Render the follow-up controls when the selection or the session's own
+/// task context changes, and keep what the person typed between polls.
+fn sync_brain_followup(session: &V) {
+    let brain = &session["brain"];
+    let signature = json!([
+        m::read(|s| s.epoch),
+        session["id"],
+        brain["task_id"],
+        brain["review"],
+        brain["query"]
+    ]);
+    if m::data("brain-followup-signature") == signature {
+        return;
+    }
+    m::set("brain-followup-signature", signature);
+    if let Some(host) = dom::get("brain-followup-config") {
+        host.set_inner_html(&if brain.is_object() {
+            render_brain_followup_html(
+                &m::text(brain, "task_id"),
+                brain["review"] == true,
+                brain["query"].as_str().unwrap_or(""),
+            )
+        } else {
+            String::new()
+        });
+    }
 }
 pub fn render_linked_omnigraph_html(session: &V) -> (bool, String) {
     let metrics = crate::omnigraph::session_bar_metrics(session);
@@ -1163,6 +1277,7 @@ pub fn render_linked_omnigraph_html(session: &V) -> (bool, String) {
 }
 
 pub fn render_linked(session: &V) {
+    sync_brain_followup(session);
     let brain = &session["brain"];
     dom::hidden("linked-context", !brain.is_object());
     if !brain.is_object() {
@@ -1491,6 +1606,217 @@ pub(crate) fn render_list_entry_inner_html(v: &V) -> String {
         crate::omnigraph::esc(&meta)
     )
 }
+/// Where a proposal stands in the Memory use queue: `waiting` for a person,
+/// an automatic one that `stalled`, or `auto` once applied without review.
+fn promotion_group(item: &V) -> Option<&'static str> {
+    let automatic = item["mode"] == "automatic";
+    match item["status"].as_str() {
+        Some("proposed" | "reviewed") => Some(if automatic { "stalled" } else { "waiting" }),
+        Some("applied") if automatic => Some("auto"),
+        _ => None,
+    }
+}
+fn promotion_id(item: &V) -> Option<&str> {
+    item["id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+/// How many automatic promotions the queue lists, newest first.
+const PROMOTION_AUTO_SHOWN: usize = 20;
+/// The promotion queue on Memory use. Proposals, their source records and
+/// the chunks they made appear by ID only, so no Project Brain title or path
+/// reaches the page; a person reads a source in Project Brain before
+/// approving. Approve and Reject sign a human proposal with the reviewer's
+/// name, and Apply publishes an approved one. An automatic proposal takes no
+/// signature, so one that stalled before its review waits for the next
+/// automatic run. `since` keeps the automatic promotions applied at or after
+/// that UTC moment, and an empty `since` keeps them all.
+pub(crate) fn render_promotion_queue_html(
+    items: &[V],
+    since: &str,
+    reviewer: &str,
+    busy: bool,
+    status: &str,
+) -> String {
+    let esc = crate::omnigraph::esc;
+    let moment = |item: &V, key: &str| item[key].as_str().unwrap_or("").to_owned();
+    // RFC 3339 moments compare as text to the second.
+    let second = |at: &str| at.get(..19).unwrap_or(at).to_owned();
+    let (mut waiting, mut stalled, mut auto) = (vec![], vec![], vec![]);
+    for item in items {
+        match promotion_group(item) {
+            Some("waiting") => waiting.push(item),
+            Some("stalled") => stalled.push(item),
+            Some("auto")
+                if since.is_empty() || second(&moment(item, "applied_at")) >= second(since) =>
+            {
+                auto.push(item)
+            }
+            _ => {}
+        }
+    }
+    waiting.sort_by_key(|item| moment(item, "created_at"));
+    stalled.sort_by_key(|item| moment(item, "created_at"));
+    auto.sort_by_key(|item| std::cmp::Reverse(moment(item, "applied_at")));
+    let mut html = format!(
+        "<section class=\"memory-section promotion-queue\" aria-labelledby=\"promotion-queue-title\"><div class=\"memory-section-head\"><h3 id=\"promotion-queue-title\">Promotion queue</h3><span class=\"memory-range\">{} waiting · {} stalled · {} auto-promoted</span></div><p class=\"knowledge-note\">Proposals appear by ID only. Read a source record in Project Brain before you approve; Apply writes the approved chunk to the Memory Bank.</p>",
+        waiting.len(),
+        stalled.len(),
+        auto.len()
+    );
+    if waiting
+        .iter()
+        .any(|item| item["status"] == "proposed" && promotion_id(item).is_some())
+    {
+        html.push_str(&format!(
+            "<label class=\"field promotion-reviewer\">Reviewer<input id=\"memory-promotion-reviewer\" type=\"text\" maxlength=\"200\" autocomplete=\"name\" spellcheck=\"false\" value=\"{}\"></label>",
+            esc(reviewer)
+        ));
+    }
+    if !status.is_empty() {
+        html.push_str(&format!(
+            "<p class=\"knowledge-note promotion-status\" role=\"status\">{}</p>",
+            esc(status)
+        ));
+    }
+    for (group, title, list) in [
+        ("waiting", "Waiting for review", &waiting),
+        ("stalled", "Stalled automatic promotions", &stalled),
+        ("auto", "Auto-promoted in this window", &auto),
+    ] {
+        if list.is_empty() {
+            continue;
+        }
+        html.push_str(&format!(
+            "<h4 class=\"promotion-group-title\">{title} · {}</h4><ul class=\"promotion-list\">",
+            list.len()
+        ));
+        let shown = if group == "auto" {
+            PROMOTION_AUTO_SHOWN
+        } else {
+            list.len()
+        };
+        for item in list.iter().take(shown) {
+            html.push_str(&render_promotion_item_html(item, group, busy));
+        }
+        html.push_str("</ul>");
+        if list.len() > shown {
+            html.push_str(&format!(
+                "<p class=\"knowledge-note\">Showing the {shown} newest of {}.</p>",
+                list.len()
+            ));
+        }
+    }
+    if waiting.is_empty() && stalled.is_empty() && auto.is_empty() {
+        html.push_str("<p class=\"knowledge-note\">Nothing waits for review, no automatic promotion stalled, and none was applied automatically in this window.</p>");
+    }
+    html.push_str("</section>");
+    html
+}
+fn render_promotion_item_html(item: &V, group: &str, busy: bool) -> String {
+    let esc = crate::omnigraph::esc;
+    let id = promotion_id(item);
+    let status = item["status"].as_str().unwrap_or("");
+    let sources = item["source_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(V::as_str)
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .collect::<Vec<_>>();
+    let mut html = format!(
+        "<li class=\"promotion-item\" data-group=\"{group}\" data-status=\"{}\"><div class=\"promotion-head\">",
+        esc(status)
+    );
+    match id {
+        Some(id) => html.push_str(&format!("<code class=\"promotion-id\">{}</code>", esc(id))),
+        None => html.push_str("<span class=\"promotion-id\">Proposal without a readable ID</span>"),
+    }
+    html.push_str(&format!(
+        "<span class=\"promotion-state\">{}</span></div>",
+        match status {
+            "proposed" => "Proposed",
+            "reviewed" => "Approved, not applied",
+            _ => "Applied",
+        }
+    ));
+    let mut facts = vec![if sources.is_empty() {
+        "No source record ID".to_owned()
+    } else {
+        format!(
+            "{} {}",
+            if sources.len() == 1 {
+                "Source"
+            } else {
+                "Sources"
+            },
+            sources
+                .iter()
+                .map(|source| format!("<code>{}</code>", esc(source)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }];
+    for (key, label) in [
+        ("created_at", "proposed"),
+        ("reviewed_at", "reviewed"),
+        ("applied_at", "applied"),
+    ] {
+        if let Some(at) = item[key].as_str().filter(|at| !at.is_empty()) {
+            facts.push(format!("{label} {}", esc(at.get(..10).unwrap_or(at))));
+        }
+    }
+    if let Some(reason) = item["reason"].as_str().filter(|reason| !reason.is_empty()) {
+        facts.push(format!("outcome <code>{}</code>", esc(reason)));
+    }
+    if let Some(memory) = item["memory_id"]
+        .as_str()
+        .filter(|memory| !memory.is_empty())
+    {
+        facts.push(format!("chunk <code>{}</code>", esc(memory)));
+    }
+    html.push_str(&format!(
+        "<p class=\"promotion-facts\">{}</p><div class=\"promotion-actions\">",
+        facts.join(" · ")
+    ));
+    let button = |label: &str, action: &str, payload: V| {
+        format!(
+            "<button type=\"button\" class=\"button compact\" data-action=\"{action}\" data-payload=\"{}\"{}>{label}</button>",
+            esc(&payload.to_string()),
+            if id.is_none() || busy { " disabled" } else { "" }
+        )
+    };
+    let promotion = id.unwrap_or("");
+    match (group, status) {
+        ("waiting", "proposed") => {
+            for (label, reject) in [("Approve", false), ("Reject", true)] {
+                html.push_str(&button(
+                    label,
+                    "memory-promotion-review",
+                    json!({"promotion_id": promotion, "reject": reject}),
+                ));
+            }
+        }
+        ("waiting" | "stalled", "reviewed") => html.push_str(&button(
+            "Apply",
+            "memory-promotion-apply",
+            json!({"promotion_id": promotion}),
+        )),
+        ("stalled", "proposed") => html.push_str("<span class=\"promotion-note\">An automatic proposal takes no reviewer; the next automatic promotion retries it.</span>"),
+        _ => {}
+    }
+    html.push_str(&format!(
+        "<button type=\"button\" class=\"button compact\" data-action=\"memory-promotion-brain\" data-payload=\"{}\">Review in Project Brain</button>",
+        esc(&json!({"record_id": sources.first().copied().unwrap_or("")}).to_string())
+    ));
+    if id.is_none() && group != "auto" {
+        html.push_str("<span class=\"promotion-note\">Without a readable ID this proposal can only be reviewed in Project Brain.</span>");
+    }
+    html.push_str("</div></li>");
+    html
+}
 fn memory_model(v: &V, window: u64) -> V {
     let now = js_sys::Date::now();
     let within = |date: &V| {
@@ -1610,6 +1936,7 @@ pub async fn load_memory_use() {
             "memory-selected-chunk",
             "memory-filters",
             "memory-active",
+            "memory-promotion-status",
         ] {
             m::take(key);
         }
@@ -1759,6 +2086,28 @@ fn render_memory() {
         dom::add(&flow, &card);
     }
     dom::append("memory-use-body", &flow);
+    if v["promotions"].is_object() {
+        let since = if window == 0 {
+            String::new()
+        } else {
+            js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
+                js_sys::Date::now() - window as f64 * 86_400_000.,
+            ))
+            .to_iso_string()
+            .as_string()
+            .unwrap_or_default()
+        };
+        let html = render_promotion_queue_html(
+            &m::array(&v["promotions"]["items"]),
+            &since,
+            &promotion_reviewer(),
+            m::yes(&m::data("memory-promotion-busy")),
+            m::data("memory-promotion-status").as_str().unwrap_or(""),
+        );
+        if let Some(body) = dom::get("memory-use-body") {
+            let _ = body.insert_adjacent_html("beforeend", &html);
+        }
+    }
     if m::yes(&v["check_available"]) {
         dom::append(
             "memory-use-body",
@@ -2086,7 +2435,106 @@ fn render_usage() {
     }
     dom::append("context-usage", &all);
 }
+/// Where this browser keeps the reviewer name a person last typed on Memory
+/// use.
+const PROMOTION_REVIEWER_KEY: &str = "harness.memory-reviewer.v1";
+fn promotion_reviewer() -> String {
+    match m::data("memory-promotion-reviewer").as_str() {
+        Some(name) => name.to_owned(),
+        None => dom::storage(PROMOTION_REVIEWER_KEY).unwrap_or_default(),
+    }
+}
+/// Approve, reject or apply one proposal through the knowledge operation,
+/// then read Memory use again.
+async fn promotion_action(action: &str, payload: &V) {
+    let Some(id) = payload["promotion_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return;
+    };
+    let project = dom::value("memory-use-project");
+    let data = m::data("memory-use");
+    if project.is_empty()
+        || data["project_id"] != project
+        || m::yes(&m::data("memory-promotion-busy"))
+    {
+        return;
+    }
+    let review = action == "memory-promotion-review";
+    let reject = payload["reject"] == true;
+    let mut body = if review {
+        let reviewer = dom::value("memory-promotion-reviewer").trim().to_owned();
+        if reviewer.is_empty() {
+            dom::error(
+                "memory-use-error",
+                "Enter your name as the reviewer before you approve or reject a proposal.",
+            );
+            dom::focus("memory-promotion-reviewer");
+            return;
+        }
+        json!({"action": "promote-review", "promotion_id": id, "reviewer": reviewer, "reject": reject})
+    } else {
+        json!({"action": "promote-apply", "promotion_id": id})
+    };
+    if data["bank_id"].is_string() {
+        body["bank"] = data["bank_id"].clone();
+    }
+    dom::error("memory-use-error", "");
+    m::take("memory-promotion-status");
+    m::set("memory-promotion-busy", json!(true));
+    render_memory();
+    let result = api::post(
+        &format!("/api/projects/{}/knowledge", dom::enc(&project)),
+        body,
+    )
+    .await;
+    m::take("memory-promotion-busy");
+    match result {
+        Ok(v) if m::yes(&v["ok"]) => m::set(
+            "memory-promotion-status",
+            json!(format!(
+                "{} promotion {id}.",
+                if !review {
+                    "Applied"
+                } else if reject {
+                    "Rejected"
+                } else {
+                    "Approved"
+                }
+            )),
+        ),
+        Ok(v) => {
+            let error = v["error"]
+                .as_str()
+                .filter(|error| !error.is_empty())
+                .unwrap_or("The promotion operation failed.");
+            dom::error(
+                "memory-use-error",
+                &match v["error_code"].as_str().filter(|code| !code.is_empty()) {
+                    Some(code) => format!("{error} ({code})"),
+                    None => error.to_owned(),
+                },
+            );
+        }
+        Err(e) => dom::error("memory-use-error", &e.message),
+    }
+    if dom::value("memory-use-project") == project {
+        // Drawn again at once, so a failed reload leaves no button waiting.
+        render_memory();
+        load_memory_use().await;
+    }
+}
 pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str) -> bool {
+    if kind == "input" && id == "memory-promotion-reviewer" {
+        m::set("memory-promotion-reviewer", json!(value));
+        dom::save(
+            PROMOTION_REVIEWER_KEY,
+            Some(value.trim()).filter(|name| !name.is_empty()),
+        );
+        return true;
+    }
     if kind == "input" && (id == "memory-filter" || id == "brain-filter") {
         render_list(if id.starts_with("brain") {
             "brain"
@@ -2098,6 +2546,10 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
     if kind == "change" {
         if id == "brain-category" {
             render_list("brain");
+            return true;
+        }
+        if id == "brain-followup-review" {
+            linked_controls();
             return true;
         }
         if id == "context-project" {
@@ -2286,6 +2738,24 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, value: &str)
                 Ok(_) => load_memory_use().await,
                 Err(e) => dom::error("memory-use-error", &e.message),
             }
+        }
+        "memory-promotion-review" | "memory-promotion-apply" => {
+            promotion_action(action, payload).await
+        }
+        "memory-promotion-brain" => {
+            // Project Brain shows the source record Memory use names only by ID.
+            let project = dom::value("memory-use-project");
+            if let Some(bank) = m::data("memory-use")["bank_id"].as_str() {
+                if dom::value("brain-project") == project {
+                    dom::set_value("brain-bank", bank);
+                }
+            }
+            open_from_omnigraph(
+                "brain",
+                &project,
+                payload["record_id"].as_str().unwrap_or(""),
+            )
+            .await;
         }
         "memory-chunk-open" => {
             let p = dom::value("memory-use-project");
@@ -3104,10 +3574,177 @@ mod tests {
     use super::{
         capsule_segments, context_turns_model, history_day_heights, memory_stage_metrics,
         render_capsule_bar_html, render_capsule_legend_html, render_detail_omnigraph_action_html,
-        render_linked_omnigraph_html, render_list_entry_inner_html, render_usage_legend_html,
-        render_usage_turn_button_html,
+        render_linked_omnigraph_html, render_list_entry_inner_html, render_promotion_queue_html,
+        render_usage_legend_html, render_usage_turn_button_html,
     };
+    use crate::test_support::{assert_no_inline_hex_colors, payloads};
     use serde_json::json;
+
+    #[test]
+    fn promotion_queue_offers_review_apply_and_brain_by_id_only() {
+        let id = |n: u8| format!("{n}{n}{n}{n}{n}{n}{n}{n}-0000-4000-8000-00000000000{n}");
+        let source = |n: u8| format!("aaaaaaa{n}-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+        let items = vec![
+            json!({"id": id(1), "source_ids": [source(1)], "reason": null, "status": "proposed", "mode": "human", "created_at": "2026-11-10T09:00:00+00:00", "reviewed_at": null, "applied_at": null, "memory_id": null, "title": "Rotate <session> keys", "path": "project-brain/dynamic/findings/rotate.md"}),
+            json!({"id": id(2), "source_ids": [source(2), source(3)], "reason": "approved", "status": "reviewed", "mode": "human", "created_at": "2026-11-09T09:00:00+00:00", "reviewed_at": "2026-11-11T09:00:00+00:00"}),
+            json!({"id": id(3), "source_ids": [source(4)], "status": "proposed", "mode": "automatic", "created_at": "2026-11-12T09:00:00+00:00"}),
+            json!({"id": id(4), "source_ids": [source(5)], "reason": "approved-without-review", "status": "reviewed", "mode": "automatic", "created_at": "2026-11-12T10:00:00+00:00", "reviewed_at": "2026-11-12T10:00:01+00:00"}),
+            json!({"id": id(5), "source_ids": [source(6)], "reason": "approved-without-review", "status": "applied", "mode": "automatic", "applied_at": "2026-11-15T10:00:00+00:00", "memory_id": "MEM-20261115-aabbccdd"}),
+            json!({"id": id(6), "source_ids": [source(7)], "status": "applied", "mode": "automatic", "applied_at": "2026-09-01T10:00:00+00:00", "memory_id": "MEM-20260901-00112233"}),
+            json!({"id": null, "source_ids": [], "status": "proposed", "mode": "human", "created_at": "2026-11-13T09:00:00+00:00"}),
+            json!({"id": id(7), "source_ids": [source(8)], "status": "rejected", "mode": "human"}),
+            json!({"id": id(8), "source_ids": [source(9)], "status": "applied", "mode": "human", "applied_at": "2026-11-16T10:00:00+00:00"}),
+        ];
+        let html = render_promotion_queue_html(
+            &items,
+            "2026-10-18T09:30:00.000Z",
+            "Jane \"QA\"",
+            false,
+            "Approved promotion x.",
+        );
+        assert!(
+            html.contains("3 waiting · 2 stalled · 1 auto-promoted"),
+            "{html}"
+        );
+        // A person signs only a human proposal, oldest first; one without a
+        // readable ID shows its buttons disabled.
+        assert_eq!(
+            payloads(&html, "memory-promotion-review"),
+            vec![
+                json!({"promotion_id": id(1), "reject": false}),
+                json!({"promotion_id": id(1), "reject": true}),
+                json!({"promotion_id": "", "reject": false}),
+                json!({"promotion_id": "", "reject": true}),
+            ]
+        );
+        assert_eq!(html.matches(" disabled>").count(), 2, "{html}");
+        assert!(html.contains("Without a readable ID"), "{html}");
+        // Apply publishes an approved proposal, a stalled automatic one too.
+        assert_eq!(
+            payloads(&html, "memory-promotion-apply"),
+            vec![
+                json!({"promotion_id": id(2)}),
+                json!({"promotion_id": id(4)})
+            ]
+        );
+        // An automatic proposal is never signed by a person.
+        assert!(
+            html.contains("An automatic proposal takes no reviewer"),
+            "{html}"
+        );
+        // Every listed proposal opens its first source record in Project Brain.
+        assert_eq!(
+            payloads(&html, "memory-promotion-brain"),
+            [
+                source(2),
+                source(1),
+                String::new(),
+                source(4),
+                source(5),
+                source(6)
+            ]
+            .map(|record| json!({"record_id": record}))
+            .to_vec()
+        );
+        // IDs, outcome codes, dates and chunk IDs only: no Brain title or path.
+        assert!(!html.contains("Rotate"), "{html}");
+        assert!(!html.contains("project-brain/"), "{html}");
+        assert!(
+            html.contains("outcome <code>approved-without-review</code>"),
+            "{html}"
+        );
+        assert!(html.contains("chunk <code>MEM-20261115-aabbccdd</code>"));
+        assert!(html.contains("proposed 2026-11-10"), "{html}");
+        // Outside the window, rejected and applied-after-review proposals stay off.
+        for absent in ["MEM-20260901-00112233".to_owned(), id(7), id(8)] {
+            assert!(!html.contains(&absent), "{absent}: {html}");
+        }
+        assert!(html.contains("value=\"Jane &quot;QA&quot;\""), "{html}");
+        assert!(html.contains("role=\"status\">Approved promotion x.</p>"));
+        assert_no_inline_hex_colors(&html);
+
+        // While one action runs, every review and apply button waits.
+        let busy = render_promotion_queue_html(&items, "", "", true, "");
+        assert!(busy.contains("2 auto-promoted"), "{busy}");
+        assert_eq!(busy.matches(" disabled>").count(), 6, "{busy}");
+        assert!(!busy.contains("promotion-status"), "{busy}");
+
+        let empty = render_promotion_queue_html(&[], "", "", false, "");
+        assert!(empty.contains("Nothing waits for review"), "{empty}");
+        assert!(!empty.contains("memory-promotion-reviewer"), "{empty}");
+    }
+
+    #[test]
+    fn brain_followup_changes_review_and_reviewed_query_only() {
+        use super::{followup_brain_from_fields, render_brain_followup_html};
+        let automatic = json!({"task_id": "harness/fix-login-abc123", "review": false, "query": "fix login redirect"});
+        // An automatic turn takes the next message as its query.
+        assert_eq!(
+            followup_brain_from_fields(&automatic, false, "anything"),
+            Ok(None)
+        );
+        assert_eq!(
+            followup_brain_from_fields(&automatic, true, " fix login redirect "),
+            Ok(Some(json!({"review": true})))
+        );
+        assert_eq!(
+            followup_brain_from_fields(&automatic, true, "session cookie expiry"),
+            Ok(Some(
+                json!({"review": true, "query": "session cookie expiry"})
+            ))
+        );
+        assert!(followup_brain_from_fields(&automatic, true, "  ").is_err());
+        let reviewed = json!({"task_id": "TASK-7", "review": true, "query": "retry policy"});
+        assert_eq!(
+            followup_brain_from_fields(&reviewed, true, "retry policy"),
+            Ok(None)
+        );
+        assert_eq!(
+            followup_brain_from_fields(&reviewed, true, "backoff caps"),
+            Ok(Some(json!({"query": "backoff caps"})))
+        );
+        assert_eq!(
+            followup_brain_from_fields(&reviewed, false, ""),
+            Ok(Some(json!({"review": false})))
+        );
+        assert_eq!(
+            followup_brain_from_fields(&json!(null), true, "x"),
+            Ok(None)
+        );
+
+        let html = render_brain_followup_html("TASK-<7>", true, "retry & backoff");
+        assert!(html.contains("<code>TASK-&lt;7&gt;</code>"), "{html}");
+        assert!(
+            html.contains("id=\"brain-followup-review\" type=\"checkbox\" checked>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("id=\"brain-followup-query-field\">"),
+            "{html}"
+        );
+        assert!(html.contains(">retry &amp; backoff</textarea>"), "{html}");
+        assert!(html.contains("waits until you approve"), "{html}");
+        let automatic_html = render_brain_followup_html("TASK-7", false, "");
+        assert!(automatic_html.contains("type=\"checkbox\">Review context by hand"));
+        assert!(automatic_html.contains("id=\"brain-followup-query-field\" hidden>"));
+        assert!(automatic_html.contains("The next message is the retrieval query"));
+        assert_no_inline_hex_colors(&html);
+    }
+
+    #[test]
+    fn promotion_queue_lists_the_newest_automatic_promotions() {
+        let items = (0..25)
+            .map(|day| {
+                json!({"id": format!("00000000-0000-4000-8000-0000000000{day:02}"), "status": "applied", "mode": "automatic", "applied_at": format!("2026-11-{:02}T08:00:00+00:00", day + 1), "source_ids": []})
+            })
+            .collect::<Vec<_>>();
+        let html = render_promotion_queue_html(&items, "", "", false, "");
+        assert!(html.contains("Showing the 20 newest of 25."), "{html}");
+        assert!(html.contains("applied 2026-11-25"), "{html}");
+        assert!(!html.contains("applied 2026-11-05"), "{html}");
+        // Nothing to sign, so no reviewer field.
+        assert!(!html.contains("memory-promotion-reviewer"), "{html}");
+    }
 
     #[test]
     fn capsule_segments_and_legend_format_nonzero_parts_and_swatches() {

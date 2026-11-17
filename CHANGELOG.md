@@ -24,6 +24,25 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Harness curation from the page. Memory use lists a promotion queue:
+  proposals waiting for review, automatic ones that stalled and the newest
+  promoted automatically in the window, by ID, source record IDs, dates,
+  outcome code and chunk ID only, so no Brain title or path reaches the page.
+  **Approve** and **Reject** sign a waiting proposal with the reviewer's name
+  (`promote-review`) and **Apply** publishes an approved one
+  (`promote-apply`), through the knowledge operation and only with the
+  proposal's ID; an automatic proposal is never signed by a person, and
+  **Review in Project Brain** opens a source record to read first. The
+  Context Graph's merge preview offers **Keep source** and **Keep target** on
+  a `ContextAtom` `divergent_update` conflict that carries both values: the
+  kept value goes onto the other branch through `POST /api/omnigraph/atoms`,
+  which keeps the atom's provenance and verification, and the preview runs
+  again; a `delete_vs_update`, an edge conflict or one without both values
+  shows the buttons disabled with the reason. A follow-up may change its
+  session's Omnigraph pull branches, focus query and auto-publish, and its
+  linked task's review and reviewed query, sending only what changed; a poll
+  no longer overwrites what the person typed there. The session bar shows ten
+  shared atoms, then `+N more` / `Show fewer`.
 - Bridge the dependency map and project memory. `GET
   /api/projects/{project_id}/graph/memory-links?path=` lists the active
   Project Brain records and Memory Bank chunks that cite a file and the

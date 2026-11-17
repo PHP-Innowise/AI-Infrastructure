@@ -1575,6 +1575,16 @@ A person may mark what one retrieval delivered as helped, stale or harmful
 Harness's database, keyed by manifest and item, and come back with the view as
 `feedback`; nothing reads them to rank, admit or pack memory.
 
+The **Promotion queue** lists proposals waiting for review, automatic ones that
+stalled, and up to 20 promoted automatically in the chosen window, each by its
+ID, source record IDs, dates, outcome code and chunk ID. **Approve** and
+**Reject** sign a waiting proposal with the name typed under **Reviewer**
+(`promote-review`); **Apply** publishes an approved one (`promote-apply`). Both
+run through the knowledge operation and need the proposal's ID. An automatic
+proposal takes no reviewer, so one that stalled before its review waits for the
+next automatic promotion. Since the page shows no Brain text, **Review in
+Project Brain** opens the first source record there to read before approving.
+
 Retrieval history outlives the 200 manifests a project keeps. This Harness folds
 each manifest once into a daily rollup in its own database, either when Memory use
 reads it or when a session launch in the project ends. The rollup holds counts per
@@ -1684,6 +1694,12 @@ contents again before launching it. Changed context requires a fresh preview. Ea
 chat follow-up also prepares a new capsule. These explicit retrievals disable the
 runtime's repeat-query heuristic while retaining its privacy and source eligibility
 rules. Sessions linked before memory ran by itself keep this flow.
+
+On an open session, **Memory** holds the next turn's settings instead: **Review
+context by hand** and, when it is ticked, the context query. A follow-up sends
+only what changed (`brain: {review, query}`); the task, knowledge root and goal
+stay as the session started them. With review off, the next message is the
+query again.
 
 A reviewed run's memory draft is saved when the run completes, as in any other
 session, and the conversation says what was saved. Task actions stay in the
@@ -2629,7 +2645,7 @@ Operating modes persisted at `<state>/omnigraph.json` (plus auto-generated clust
 
 ### Session lifecycle
 
-- `POST /api/sessions` (and `send` follow-ups) accepts optional `omnigraph` settings (`enabled`, `branch`, `pull_branches`, `query`, `auto_publish`, `auto_merge`, `shared_space`, `linked_session_ids`), persisted on the SQLite `sessions.omnigraph` column. Passing `linked_session_ids` automatically adds peer branches to `pull_branches`, updates reciprocal `linked_session_ids`, and records `SessionFollows` edges in Omnigraph.
+- `POST /api/sessions` (and `send` follow-ups) accepts optional `omnigraph` settings (`enabled`, `branch`, `pull_branches`, `query`, `auto_publish`, `auto_merge`, `shared_space`, `linked_session_ids`), persisted on the SQLite `sessions.omnigraph` column. Passing `linked_session_ids` automatically adds peer branches to `pull_branches`, updates reciprocal `linked_session_ids`, and records `SessionFollows` edges in Omnigraph. In the composer, a follow-up to an Omnigraph session may change **Pull context from branches**, **Focus query** and **Auto-publish**, and sends only the fields that changed; the branch, shared space, links and auto-merge stay as the session started, and a follow-up never turns Omnigraph on for a session without it.
 - Before a run launches, when `omnigraph.enabled` is `true`, Harness ensures the session branch (`session/<sid12>` or configured branch) exists, pulls any configured `pull_branches` (defaulting to `["main"]`), queries shared context atoms (plus read-only `knowledge/canonical` hits), attaches touched `files`, resolves eligible local `Project Brain` / `Memory Bank` references into `infra-core` `source-hints-v1`, and stores `injected_atoms` and a bounded capsule on the session prior to `awaiting_context` review (preserving the approved capsule after `context.run`). Unreachable Omnigraph servers record a session warning/event without blocking the Harness turn.
 - `prompt::build` inserts the bounded `Shared Omnigraph Context` section (6,000-character cap, distinguishing verified canonical atoms from unverified reference context) and records it under the `"omnigraph"` bucket in `PromptLedger` (charted alongside Brain/Bank/Rules in `#context-usage`).
 - After a turn completes (including manual `/api/sessions/{id}/memory` saves, Clash, and Fleet runs), when `auto_publish` is not `false`, Harness validates `memory-draft` learnings against workspace sources and safety checks (`sensitive_label`, `instruction_like`), collects Clash/Fleet findings, touched files, and the turn outcome summary, publishes `ContextAtom` nodes with provenance metadata (`origin_layer`, `authority`, `privacy`, `brain_record_id`, `memory_id`, `record_revision`) and edges (`PublishedBy`, `TouchesFile`, `DerivedFrom`), optionally merges into `main` when `auto_merge` is `true`, and records a session `omnigraph` event. Canonical Knowledge/Brain/Memory mutations also trigger best-effort sync onto `knowledge/canonical`.
@@ -2643,7 +2659,7 @@ All `GET` and CSRF-protected (`X-Harness-Token`) `POST` routes are registered in
 - `GET /api/omnigraph/graph?project_id=...&branch=...&snapshot=...&kind=...&q=...&session_id=...` — constellation nodes/edges, branches, and commits.
 - `GET /api/omnigraph/search?project_id=...&q=...&branch=...&kind=...&limit=...` — BM25/lexical hybrid search across atoms and neighbor context.
 - `GET /api/omnigraph/branches/diff?project_id=...&source=...&target=...` — 3-way branch diff (`added_atoms`, `updated_atoms`, `deleted_atoms`, `added_edges`, `deleted_edges`, dry-run conflict preview).
-- `POST /api/omnigraph/branches` — `create`, `merge` (returning conflict workbench payloads on 3-way conflicts), or `delete` branches.
+- `POST /api/omnigraph/branches` — `create`, `merge` (returning conflict workbench payloads on 3-way conflicts), or `delete` branches. In the merge preview, a `divergent_update` conflict on one `ContextAtom` that carries both values (`source_value`, `target_value`) offers **Keep source**, which writes the source's value onto the target branch through `POST /api/omnigraph/atoms`, and **Keep target**, which writes the target's onto the source; the update leaves provenance and verification to the stored atom unless the kept value names them, adds no edge, and the preview runs again. A `delete_vs_update`, an edge conflict, or a conflict without both values shows the buttons disabled with the reason. Omnigraph's own 409 conflicts name the atom without its values, so their buttons stay disabled until the diff carries them.
 - `POST /api/omnigraph/atoms` — publish a `ContextAtom` with linked files, session provenance, and `relates_to` links.
 - `POST /api/omnigraph/share` — inject/share selected `atom_ids` into a target session (`inject`, `reference`, `inject_and_link`, or `copy`), updating `session["omnigraph"]` and emitting a session event.
 - `GET /api/omnigraph/file-context?project_id=…&path=…` — the context atoms that touch one file on `main` and `knowledge/canonical`, each once, with its capsule line and authority tag.
