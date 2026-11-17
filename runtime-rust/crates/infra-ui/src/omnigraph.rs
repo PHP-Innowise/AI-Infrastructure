@@ -197,6 +197,24 @@ fn response_error_message(res: &V, fallback: &str) -> String {
         .to_owned()
 }
 
+fn matching_project_session_id(selected: &V, sid: &str, project_id: &str) -> Option<String> {
+    let sid = sid.trim();
+    let project_id = project_id.trim();
+    if sid.is_empty() || project_id.is_empty() {
+        return None;
+    }
+    (selected["project_id"].as_str() == Some(project_id)).then(|| sid.to_owned())
+}
+
+fn promote_target_branch<'a>(atom: &'a V, active_branch: &'a str) -> &'a str {
+    let viewed = active_branch.trim();
+    if !viewed.is_empty() {
+        viewed
+    } else {
+        atom_branch(atom, "main")
+    }
+}
+
 pub fn parse_csv_list(raw: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
@@ -1854,9 +1872,10 @@ fn render_atom_inspector_html(graph: &V, atom: &V, sessions: &[V], active_branch
         "warning" => "incident",
         _ => "finding",
     };
+    let promote_branch = promote_target_branch(atom, active_branch);
     let promote_payload = json!({
         "atom_id": id,
-        "branch": branch,
+        "branch": promote_branch,
     })
     .to_string();
     let promote_label = if has_brain_link {
@@ -1895,7 +1914,7 @@ fn render_atom_inspector_html(graph: &V, atom: &V, sessions: &[V], active_branch
     html.push_str(&format!(
         "</select></div><div class=\"field\"><label for=\"omni-promote-privacy\">Privacy</label><select id=\"omni-promote-privacy\"{promote_disabled}><option value=\"team\" selected>Team</option><option value=\"public\">Public</option></select></div><button type=\"button\" class=\"button compact\" id=\"omni-promote-atom\" data-action=\"omnigraph-promote-atom\" data-atom-id=\"{}\" data-branch=\"{}\" data-payload=\"{}\"{promote_disabled}>{promote_label}</button></div><p class=\"knowledge-note\" id=\"omni-promote-status\" role=\"status\" hidden></p><p class=\"error-text\" id=\"omni-promote-error\" role=\"alert\" hidden></p></div></article>",
         esc(&id),
-        esc(branch),
+        esc(promote_branch),
         esc(&promote_payload)
     ));
     html
@@ -5200,8 +5219,9 @@ pub async fn event(
                     body["bank"] = json!(bank);
                 }
             }
-            let sid = m::read(|s| s.sid.clone());
-            if !sid.is_empty() {
+            if let Some(sid) =
+                m::read(|s| matching_project_session_id(&s.selected, &s.sid, &project))
+            {
                 body["session_id"] = json!(sid);
             }
             match api::post("/api/omnigraph/sync-knowledge", body).await {
@@ -5620,20 +5640,10 @@ pub async fn event(
                     body["bank"] = json!(bank);
                 }
             }
-            if let Some(atom) = m::array(&m::data("omnigraph-graph")["atoms"])
-                .into_iter()
-                .find(|a| atom_id(a) == atom_id_str)
+            if let Some(sid) =
+                m::read(|s| matching_project_session_id(&s.selected, &s.sid, &project))
             {
-                let atom_sid = atom_session_id(&atom);
-                if !atom_sid.is_empty() {
-                    body["session_id"] = json!(atom_sid);
-                }
-            }
-            if body["session_id"].is_null() {
-                let sid = m::read(|s| s.sid.clone());
-                if !sid.is_empty() {
-                    body["session_id"] = json!(sid);
-                }
+                body["session_id"] = json!(sid);
             }
             dom::disabled("omni-promote-atom", true);
             dom::text("omni-promote-status", "Promoting to Project Brain…");
@@ -6787,5 +6797,48 @@ mod tests {
         assert_eq!(m.verified_count, 2);
         assert_eq!(m.unverified_count, 2);
         assert_eq!(m.atom_count, 4);
+    }
+
+    #[test]
+    fn promote_uses_active_branch_over_source_branch_and_suppresses_cross_project_session() {
+        let merged_atom = json!({
+            "id": "atom-merged",
+            "kind": "finding",
+            "title": "Merged finding",
+            "source_branch": "session/deleted-branch",
+            "verified": false
+        });
+        let graph = json!({ "atoms": [merged_atom.clone()] });
+
+        let on_main = render_node_inspector_html(&graph, "atom-merged", &[], "main");
+        assert!(on_main.contains("id=\"omni-promote-atom\" data-action=\"omnigraph-promote-atom\" data-atom-id=\"atom-merged\" data-branch=\"main\""));
+        assert!(on_main.contains("&quot;branch&quot;:&quot;main&quot;"));
+
+        let on_canonical =
+            render_node_inspector_html(&graph, "atom-merged", &[], "knowledge/canonical");
+        assert!(on_canonical.contains("data-branch=\"knowledge/canonical\""));
+
+        assert_eq!(
+            promote_target_branch(&merged_atom, ""),
+            "session/deleted-branch"
+        );
+
+        let selected_p1 = json!({ "id": "sess-1", "project_id": "proj-1" });
+        assert_eq!(
+            matching_project_session_id(&selected_p1, "sess-1", "proj-1").as_deref(),
+            Some("sess-1")
+        );
+        assert_eq!(
+            matching_project_session_id(&selected_p1, "sess-1", "proj-2"),
+            None
+        );
+        assert_eq!(
+            matching_project_session_id(&json!({}), "sess-1", "proj-1"),
+            None
+        );
+        assert_eq!(
+            matching_project_session_id(&selected_p1, "", "proj-1"),
+            None
+        );
     }
 }
