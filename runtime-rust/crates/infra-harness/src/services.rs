@@ -511,8 +511,7 @@ impl Services for NativeServices {
                             HarnessError::unavailable("Required native service is unavailable.")
                         })?;
                         let collected =
-                            collect_sync_items(knowledge.as_ref(), project_id, &query, &body)
-                                .await?;
+                            collect_sync_items(knowledge.as_ref(), project_id, query, body).await?;
                         let Payload::Json(synced) = omnigraph
                             .execute(
                                 "omnigraph.sync_items",

@@ -1283,10 +1283,10 @@ impl OmnigraphManager {
             {
                 // Edges written before the relation was normalized carry a
                 // shared space's name.
-                let rel = match e["relation"].as_str() {
-                    Some(rel @ ("broadcast" | "shared_branch" | "linked")) => rel,
-                    _ => "shared_branch",
-                };
+                let rel = e["relation"]
+                    .as_str()
+                    .filter(|rel| matches!(*rel, "broadcast" | "shared_branch" | "linked"))
+                    .unwrap_or("shared_branch");
                 edges.push(json!({
                     "id": format!("follow:{src}->{dst}"),
                     "kind": "session_follows",
