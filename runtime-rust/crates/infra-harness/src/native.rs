@@ -144,6 +144,7 @@ impl ServicesFactory for NativeFactory {
                 infra_tooling::installer::Installer::new(&config.source)?.engine_capabilities()?;
             let gates = Arc::new(infra_adapters::generator_gate::Gate::current()?);
             let graphs = crate::graph::Graphs::new(store.clone());
+            knowledge.install_graphs(graphs.clone());
             let code_graph_bridge =
                 crate::system_graph::HarnessCodeGraphBridge::new(store.clone(), graphs.clone());
             let mut special: BTreeMap<String, Arc<dyn SpecialWorkflow>> = BTreeMap::new();

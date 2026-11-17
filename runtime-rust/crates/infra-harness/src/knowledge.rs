@@ -61,6 +61,51 @@ pub struct KnowledgeDomain {
     /// reason to answer "busy".
     operations: Arc<Mutex<BTreeMap<String, Arc<Mutex<()>>>>>,
     exports: Arc<Mutex<ExportCache>>,
+    /// The code graphs a session's change is measured on, for the risk-caller
+    /// hints `HARNESS_GRAPH_RISK_CALLER_HINTS=1` turns on.
+    graphs: Arc<std::sync::OnceLock<Arc<crate::graph::Graphs>>>,
+}
+/// Tier B, off by default: `HARNESS_GRAPH_RISK_CALLER_HINTS=1` also hints the
+/// memory that cites a caller a session's change puts at risk
+/// (`edge_diffs.risk_callers` of its run). No retrieval heuristic ships on
+/// before a held-out measurement of its own (`docs/MEMORY-EVAL.md`,
+/// "Accepting a retrieval change"), and this one has none.
+pub const GRAPH_RISK_CALLER_HINTS: &str = "HARNESS_GRAPH_RISK_CALLER_HINTS";
+/// At most this many risk callers are offered as hint files.
+const RISK_CALLER_HINT_FILES: usize = 8;
+/// Whether the risk-caller hints are on for this value of
+/// `HARNESS_GRAPH_RISK_CALLER_HINTS`: only an explicit `1` turns them on.
+pub fn graph_risk_caller_hints(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("1")
+}
+/// The caller files `edge_diffs.risk_callers` names, those at risk of
+/// breaking first, each once, at most `limit`.
+pub fn risk_caller_files(edge_diffs: &V, limit: usize) -> Vec<String> {
+    let rank = |impact: &str| match impact {
+        "broken_risk" => 0u8,
+        "impacted" => 1,
+        _ => 2,
+    };
+    let mut callers = edge_diffs["risk_callers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|caller| {
+            let path = clean_relative_path(caller["from"].as_str()?)?;
+            Some((rank(caller["impact"].as_str().unwrap_or("")), path))
+        })
+        .collect::<Vec<_>>();
+    callers.sort();
+    let mut files: Vec<String> = Vec::new();
+    for (_, path) in callers {
+        if files.len() >= limit {
+            break;
+        }
+        if !files.contains(&path) {
+            files.push(path);
+        }
+    }
+    files
 }
 impl KnowledgeDomain {
     pub fn new(store: SessionStore, source: PathBuf) -> Self {
@@ -69,7 +114,59 @@ impl KnowledgeDomain {
             source,
             operations: Arc::new(Mutex::new(BTreeMap::new())),
             exports: Arc::new(Mutex::new(VecDeque::new())),
+            graphs: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+    /// The code graphs a session's change is measured on; only the
+    /// risk-caller hints read them, and only when they are turned on.
+    pub fn install_graphs(&self, graphs: Arc<crate::graph::Graphs>) {
+        let _ = self.graphs.set(graphs);
+    }
+    /// The source hints of a retrieval for `session`: the Omnigraph atoms
+    /// injected into it and, with `HARNESS_GRAPH_RISK_CALLER_HINTS=1` only,
+    /// the callers its run puts at risk.
+    pub fn session_source_hints(&self, context: &RuntimeContext, session: &V) -> Option<V> {
+        let enabled =
+            graph_risk_caller_hints(std::env::var(GRAPH_RISK_CALLER_HINTS).ok().as_deref());
+        self.session_source_hints_with(context, session, enabled, || {
+            self.session_risk_callers(session)
+        })
+    }
+    /// `session_source_hints` with the flag and the risk callers given:
+    /// when the hints are off, `risk_callers` is never asked, so the
+    /// session's graph is not measured either.
+    fn session_source_hints_with(
+        &self,
+        context: &RuntimeContext,
+        session: &V,
+        enabled: bool,
+        risk_callers: impl FnOnce() -> Vec<String>,
+    ) -> Option<V> {
+        let atoms = if session["omnigraph"]["enabled"] == true {
+            session["omnigraph"]["injected_atoms"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let callers = if enabled { risk_callers() } else { Vec::new() };
+        self.build_source_hints(context, &atoms, &callers)
+    }
+    /// The callers the session's run puts at risk, from its code graph.
+    fn session_risk_callers(&self, session: &V) -> Vec<String> {
+        let (Some(graphs), Some(project), Some(sid)) = (
+            self.graphs.get(),
+            session["project_id"].as_str(),
+            session["id"].as_str(),
+        ) else {
+            return Vec::new();
+        };
+        let run = crate::graph_changes::Target::Run(sid.to_owned());
+        graphs
+            .changes_catalog(project, Some(&run), Some(sid), true)
+            .map(|catalog| risk_caller_files(&catalog["edge_diffs"], RISK_CALLER_HINT_FILES))
+            .unwrap_or_default()
     }
     /// The lock of one project's knowledge operations.
     pub fn project_lock(&self, project_id: &str) -> Result<Arc<Mutex<()>>> {
@@ -792,10 +889,7 @@ impl KnowledgeDomain {
             "capsule_profile": if automatic { "recall" } else { "full" },
             "json": true,
         });
-        if session["omnigraph"]["enabled"] == true
-            && let Some(atoms) = session["omnigraph"]["injected_atoms"].as_array()
-            && let Some(hints) = self.build_omnigraph_source_hints(&context, atoms)
-        {
+        if let Some(hints) = self.session_source_hints(&context, session) {
             request["source_hints"] = hints;
         }
         let refreshed = service.execute(
@@ -878,10 +972,7 @@ impl KnowledgeDomain {
             "json": true,
             "provenance_response": true,
         });
-        if session["omnigraph"]["enabled"] == true
-            && let Some(atoms) = session["omnigraph"]["injected_atoms"].as_array()
-            && let Some(hints) = self.build_omnigraph_source_hints(&context, atoms)
-        {
+        if let Some(hints) = self.session_source_hints(&context, session) {
             verify_req["source_hints"] = hints;
         }
         let refreshed =
@@ -1436,7 +1527,17 @@ impl KnowledgeDomain {
         })
     }
     pub fn build_omnigraph_source_hints(&self, context: &RuntimeContext, atoms: &[V]) -> Option<V> {
-        if atoms.is_empty() {
+        self.build_source_hints(context, atoms, &[])
+    }
+    /// Source hints from Omnigraph atoms and, after the files the atoms
+    /// name, `caller_files`: the indexed memory that cites them.
+    fn build_source_hints(
+        &self,
+        context: &RuntimeContext,
+        atoms: &[V],
+        caller_files: &[String],
+    ) -> Option<V> {
+        if atoms.is_empty() && caller_files.is_empty() {
             return None;
         }
         let mut memory_ids = Vec::new();
@@ -1489,6 +1590,13 @@ impl KnowledgeDomain {
                         files.push(clean);
                     }
                 }
+            }
+        }
+        for raw in caller_files {
+            if let Some(clean) = clean_relative_path(raw)
+                && seen_files.insert(clean.clone())
+            {
+                files.push(clean);
             }
         }
         if memory_ids.is_empty() && brain_record_ids.is_empty() && files.is_empty() {
@@ -4018,6 +4126,84 @@ mod tests {
             "\"brain-99999999-8888-4777-8666-555555555555\" contradicts \"atom-plain\""
         ));
         assert!(KnowledgeDomain::contradiction_warnings(&json!(null), &atoms).is_empty());
+    }
+
+    #[test]
+    fn risk_caller_hints_are_off_unless_the_flag_says_1() {
+        // The variable unset is the default, and the default is off.
+        assert!(!graph_risk_caller_hints(None));
+        for value in ["", "0", "true", "yes", "on", "01", "2"] {
+            assert!(!graph_risk_caller_hints(Some(value)), "{value:?}");
+        }
+        assert!(graph_risk_caller_hints(Some("1")));
+        assert!(graph_risk_caller_hints(Some(" 1\n")));
+        assert_eq!(GRAPH_RISK_CALLER_HINTS, "HARNESS_GRAPH_RISK_CALLER_HINTS");
+
+        // Callers at risk of breaking come first, each once, within the limit.
+        let edge_diffs = json!({"risk_callers": [
+            {"from": "src/z_added.rs", "to": "src/core.rs", "impact": "added_caller"},
+            {"from": "src/b_impacted.rs", "to": "src/core.rs", "impact": "impacted"},
+            {"from": "./src/a_broken.rs", "to": "src/core.rs", "impact": "broken_risk"},
+            {"from": "src/a_broken.rs", "to": "src/other.rs", "impact": "impacted"},
+            {"from": "../outside.rs", "to": "src/core.rs", "impact": "broken_risk"},
+            {"to": "src/core.rs", "impact": "broken_risk"}
+        ]});
+        assert_eq!(
+            risk_caller_files(&edge_diffs, 8),
+            vec!["src/a_broken.rs", "src/b_impacted.rs", "src/z_added.rs"]
+        );
+        assert_eq!(risk_caller_files(&edge_diffs, 1), vec!["src/a_broken.rs"]);
+        assert!(risk_caller_files(&json!({}), 8).is_empty());
+    }
+
+    #[test]
+    fn risk_callers_reach_source_hints_only_when_turned_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let (_store, knowledge, project_id, ctx) = setup_governed_knowledge_project(&project);
+        std::fs::write(project.join("src/caller.rs"), "pub fn caller() {}\n").unwrap();
+        write_mem_chunk(
+            &project,
+            "MEM-20261117-cccc3333",
+            "caller",
+            "Caller keeps the old signature",
+            "The caller depends on the two-argument form.",
+            &["src/caller.rs"],
+        );
+        MemoryService::new(ctx.clone(), None)
+            .execute("index", &json!({}), &[])
+            .unwrap();
+        let session =
+            json!({"id": "s-1", "project_id": project_id, "omnigraph": {"enabled": false}});
+        let asked = std::cell::Cell::new(false);
+        let callers = || {
+            asked.set(true);
+            vec!["src/caller.rs".to_string()]
+        };
+        // Off: nothing is hinted, and the session's graph is not measured.
+        assert_eq!(
+            knowledge.session_source_hints_with(&ctx, &session, false, callers),
+            None
+        );
+        assert!(!asked.get());
+        // On: the memory citing a caller at risk is hinted.
+        let on = knowledge
+            .session_source_hints_with(&ctx, &session, true, callers)
+            .expect("a chunk citing the caller is hinted");
+        assert!(asked.get());
+        let paths = on["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|reference| reference["path"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec!["memory-bank/chunks/MEM-20261117-cccc3333-caller.md"]
+        );
+        // The public path reads the flag; with no graph installed it adds
+        // nothing either way.
+        assert_eq!(knowledge.session_source_hints(&ctx, &session), None);
     }
 
     fn walkdir_files(root: &Path) -> Vec<PathBuf> {
