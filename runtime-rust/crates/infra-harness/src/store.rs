@@ -151,6 +151,7 @@ impl SessionStore {
             ("clash_result", "TEXT"),
             ("cost_totals", "TEXT"),
             ("omnigraph", "TEXT"),
+            ("permissions", "TEXT"),
         ] {
             if !columns.contains(name) {
                 db.execute_batch(&format!(
@@ -575,6 +576,7 @@ impl SessionStore {
             "clash_result",
             "cost_totals",
             "omnigraph",
+            "permissions",
         ];
         if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
             return Err(HarnessError::invalid("Unknown session update."));
@@ -646,6 +648,7 @@ impl SessionStore {
             "clash_result",
             "cost_totals",
             "omnigraph",
+            "permissions",
         ];
         if map.keys().any(|key| !allowed.contains(&key.as_str())) {
             return Err(HarnessError::invalid("Unknown session update."));
@@ -700,6 +703,7 @@ impl SessionStore {
             "brain",
             "fleet_action",
             "omnigraph",
+            "permissions",
         ];
         if fields.keys().any(|k| !allowed.contains(&k.as_str())) {
             return Err(HarnessError::invalid("Unknown follow-up option."));
@@ -794,12 +798,12 @@ pub(crate) fn insert_session(
     let provider = options["provider"]
         .as_str()
         .ok_or_else(|| HarnessError::invalid("Select a provider."))?;
-    tx.execute("INSERT INTO sessions(id,title,project_id,project_path,provider,model,mode,workflow,project_context,status,native_session_id,created_at,updated_at,agents_enabled,agent_count,thinking_effort,workspace,branch,git_common_dir,fleet,fleet_action,brain,budgets,sdd,model_routing,clash)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'queued',NULL,?10,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+    tx.execute("INSERT INTO sessions(id,title,project_id,project_path,provider,model,mode,workflow,project_context,status,native_session_id,created_at,updated_at,agents_enabled,agent_count,thinking_effort,workspace,branch,git_common_dir,fleet,fleet_action,brain,budgets,sdd,model_routing,clash,permissions)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'queued',NULL,?10,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
    params![sid,prompt.chars().take(80).collect::<String>(),project["id"].as_str(),options["_workspace_path"].as_str().or_else(||project["path"].as_str()),provider,options["model"].as_str(),
    options["mode"].as_str().unwrap_or("plan"),options["workflow"].as_str().unwrap_or("native"),i64::from(options["project_context"].as_bool().unwrap_or(false)),
    at,i64::from(options["agents_enabled"].as_bool().unwrap_or(false)),options["agent_count"].as_i64().unwrap_or(3),options["thinking_effort"].as_str(),
    options["workspace"].as_str().unwrap_or("project"),options["branch"].as_str(),options["git_common_dir"].as_str(),encode_option(&options["fleet"]),if options["fleet"].is_null(){None}else{Some("start")},
-   encode_option(&options["brain"]),encode_option(&options["budgets"]),encode_option(&options["sdd"]),encode_option(&options["model_routing"]),encode_option(&options["clash"])])?;
+   encode_option(&options["brain"]),encode_option(&options["budgets"]),encode_option(&options["sdd"]),encode_option(&options["model_routing"]),encode_option(&options["clash"]),options["permissions"].as_str()])?;
     tx.execute(
         "INSERT INTO events(session_id,data)VALUES(?1,?2)",
         params![

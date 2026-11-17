@@ -467,6 +467,14 @@ impl infra_host::provider::LaunchAdapter for ProjectLaunchAdapter {
                 &overlay,
                 input.session.is_none(),
             )?;
+            // Cursor's ACP server takes its prompt over the protocol, so the
+            // first turn's policy preamble goes there.
+            if input.provider == "cursor"
+                && input.session.is_none()
+                && command.argv.last().is_some_and(|value| value == "acp")
+            {
+                command.prompt_prefix = overlay.prompt_prefix.clone();
+            }
             for key in ["ACCELERATOR_HOME", "ACCELERATOR_STATE_DIR"] {
                 if let Some(value) = overlay.environment.get(key) {
                     command.readable.push(PathBuf::from(value));
@@ -614,6 +622,8 @@ mod system_launch_tests {
             count: 1,
             usd: None,
             hook_events: false,
+            permissions: None,
+            approvals: None,
         }
     }
     fn command() -> PreparedCommand {
@@ -623,6 +633,7 @@ mod system_launch_tests {
             input: vec![],
             readable: vec![],
             remove: vec![],
+            prompt_prefix: String::new(),
         }
     }
     /// A prompt lists every upload by its path under the Harness state. Claude

@@ -1160,6 +1160,7 @@ pub fn reset() {
         m::take(key);
     }
     hide_card(false);
+    m::take("permission-pending");
     dom::clear("events");
     dom::clear("run-tree");
     dom::clear("run-pane-plan");
@@ -1474,6 +1475,10 @@ fn settle(run: &mut V, call: &mut V, event: &V) {
 
 fn conversation(v: &V) {
     let kind = m::text(v, "kind");
+    if kind == "permission" {
+        permission(v);
+        return;
+    }
     let text = clean(&m::text(v, "text"));
     let id = m::string(&v["id"]);
     if ![
@@ -1528,6 +1533,174 @@ fn conversation(v: &V) {
         let _ = block.set_attribute("role", "alert");
     }
     dom::append("events", &block);
+}
+
+/// Whether a request of the selected session waits for the person.
+pub(crate) fn permission_waiting() -> bool {
+    m::active(&m::read(|s| s.selected.clone()))
+        && m::data("permission-pending")
+            .as_object()
+            .is_some_and(|pending| !pending.is_empty())
+}
+
+/// The heading of a permission request in each state it can reach.
+pub(crate) fn permission_heading(event: &V) -> String {
+    let tool = m::text(event, "tool");
+    let tool = if tool.is_empty() {
+        "Tool".to_owned()
+    } else {
+        tool
+    };
+    let host = match event["provider"].as_str() {
+        Some("claude") => "Claude Code",
+        Some("codex") => "Codex",
+        Some("cursor") => "Cursor",
+        _ => "The agent",
+    };
+    match event["state"].as_str().unwrap_or("") {
+        "pending" => format!("{host} asks permission · {tool}"),
+        "allowed" => format!("Allowed · {tool}"),
+        "allowed_session" => format!("Allowed for this session · {tool}"),
+        "denied" => format!("Denied · {tool}"),
+        "declined" => format!("Declined automatically · {tool}"),
+        "withdrawn" => format!("Withdrawn by {host} · {tool}"),
+        "expired" => format!("No longer waiting · {tool}"),
+        other => format!("{} · {tool}", m::label(other)),
+    }
+}
+
+/// A request the agent's host asked permission for, and what became of it. Every
+/// event of one request redraws the same block.
+fn permission(event: &V) {
+    let request = m::text(event, "request_id");
+    if request.is_empty() {
+        return;
+    }
+    let state = m::text(event, "state");
+    let mut pending = m::data("permission-pending")
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if state == "pending" {
+        pending.insert(request.clone(), json!(true));
+    } else {
+        pending.remove(&request);
+    }
+    m::set("permission-pending", V::Object(pending));
+    let found = dom::all("#events [data-permission-id]")
+        .into_iter()
+        .find(|block| {
+            block.get_attribute("data-permission-id").as_deref() == Some(request.as_str())
+        });
+    let block = match found {
+        Some(block) => {
+            block.set_inner_html("");
+            block
+        }
+        None => {
+            let block = dom::el("div", "conversation-permission", "");
+            let _ = block.set_attribute("data-permission-id", &request);
+            let _ = block.set_attribute("role", "group");
+            dom::append("events", &block);
+            block
+        }
+    };
+    let _ = block.set_attribute("data-event-id", &m::string(&event["id"]));
+    let _ = block.set_attribute("data-state", &state);
+    let heading = permission_heading(event);
+    let _ = block.set_attribute("aria-label", &heading);
+    dom::add(&block, &dom::el("p", "permission-heading", &heading));
+    let summary = clean(&m::text(event, "summary"));
+    if !summary.is_empty() {
+        dom::add(&block, &dom::el("code", "permission-summary", &summary));
+    }
+    let detail = clean(&m::text(event, "detail"));
+    if !detail.is_empty() {
+        dom::add(&block, &dom::el("p", "permission-detail", &detail));
+    }
+    if state != "pending" {
+        return;
+    }
+    if !m::active(&m::read(|s| s.selected.clone())) {
+        dom::add(
+            &block,
+            &dom::el("p", "permission-detail", "The run that asked has ended."),
+        );
+        return;
+    }
+    let actions = dom::el("div", "permission-actions", "");
+    let choices: &[(&str, &str)] = if m::yes(&event["session_option"]) {
+        &[
+            ("allow", "Allow"),
+            ("allow_session", "Allow for this session"),
+            ("deny", "Deny"),
+        ]
+    } else {
+        &[("allow", "Allow"), ("deny", "Deny")]
+    };
+    for (decision, label) in choices {
+        let button = dom::button(
+            label,
+            "permission-decide",
+            json!({"request_id": request, "decision": decision}),
+        );
+        if *decision == "allow" {
+            let _ = button.set_attribute("class", "button primary compact");
+        } else {
+            let _ = button.set_attribute("class", "button compact");
+        }
+        dom::add(&actions, &button);
+    }
+    dom::add(&block, &actions);
+    dom::add(&block, &dom::el("p", "permission-error error-text", ""));
+}
+
+/// Sends the person's answer to a waiting request.
+async fn decide_permission(payload: &V) {
+    let sid = m::read(|s| s.sid.clone());
+    let request = m::text(payload, "request_id");
+    let decision = m::text(payload, "decision");
+    if sid.is_empty() || request.is_empty() {
+        return;
+    }
+    let block = dom::all("#events [data-permission-id]")
+        .into_iter()
+        .find(|block| {
+            block.get_attribute("data-permission-id").as_deref() == Some(request.as_str())
+        });
+    let buttons: Vec<web_sys::Element> = block
+        .iter()
+        .flat_map(dom::children)
+        .filter(|child| child.class_list().contains("permission-actions"))
+        .flat_map(|actions| dom::children(&actions))
+        .collect();
+    for button in &buttons {
+        let _ = button.set_attribute("disabled", "");
+    }
+    let answered = crate::api::post(
+        &format!(
+            "/api/sessions/{}/permissions/{}",
+            dom::enc(&sid),
+            dom::enc(&request)
+        ),
+        json!({"decision": decision}),
+    )
+    .await;
+    if let Err(error) = answered {
+        for button in &buttons {
+            let _ = button.remove_attribute("disabled");
+        }
+        if let Some(note) = block
+            .iter()
+            .flat_map(dom::children)
+            .find(|child| child.class_list().contains("permission-error"))
+        {
+            note.set_text_content(Some(&error.message));
+        }
+    }
+    // The answer comes back as the request's next event.
+    let epoch = m::read(|s| s.epoch);
+    session::poll(epoch).await;
 }
 
 fn native_run(run: &V) -> bool {
@@ -2902,6 +3075,7 @@ pub async fn event(kind: &str, id: &str, action: &str, payload: &V, _value: &str
                 let _ = wasm_bindgen_futures::JsFuture::from(p).await;
             }
         }
+        "permission-decide" => decide_permission(payload).await,
         _ => {
             if id.starts_with("run-filter-") {
                 m::set(
@@ -4164,5 +4338,42 @@ mod clock_tests {
         let mut managed = with_step;
         managed["kinds"] = json!(["fleet_stage"]);
         assert!(!run_view_open(&managed, &json!({"status": "completed"})));
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    #[test]
+    fn a_request_heading_names_its_host_tool_and_outcome() {
+        let event = |state: &str| json!({"kind":"permission","state":state,"provider":"codex","tool":"Shell","request_id":"codex-7"});
+        assert_eq!(
+            permission_heading(&event("pending")),
+            "Codex asks permission · Shell"
+        );
+        assert_eq!(permission_heading(&event("allowed")), "Allowed · Shell");
+        assert_eq!(
+            permission_heading(&event("allowed_session")),
+            "Allowed for this session · Shell"
+        );
+        assert_eq!(permission_heading(&event("denied")), "Denied · Shell");
+        assert_eq!(
+            permission_heading(&event("declined")),
+            "Declined automatically · Shell"
+        );
+        assert_eq!(
+            permission_heading(&event("withdrawn")),
+            "Withdrawn by Codex · Shell"
+        );
+        assert_eq!(
+            permission_heading(&event("expired")),
+            "No longer waiting · Shell"
+        );
+        let unnamed = json!({"state":"pending","provider":"claude"});
+        assert_eq!(
+            permission_heading(&unnamed),
+            "Claude Code asks permission · Tool"
+        );
     }
 }

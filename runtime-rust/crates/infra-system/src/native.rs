@@ -236,6 +236,8 @@ pub fn launch(
         count: 1,
         usd: None,
         hook_events: false,
+        permissions: None,
+        approvals: None,
     };
     let (mut argv, environment, input) = infra_host::provider::command(&options).map_err(host)?;
     if provider == "codex" {
@@ -1144,6 +1146,7 @@ pub fn prepare_launch(
         input,
         readable: vec![],
         remove: vec![],
+        prompt_prefix: String::new(),
     };
     if let Some(adapter) = adapter {
         let options = infra_host::provider::Launch {
@@ -1159,6 +1162,8 @@ pub fn prepare_launch(
             count: 1,
             usd: None,
             hook_events: false,
+            permissions: None,
+            approvals: None,
         };
         adapter.adapt(&options, prepared).map_err(host)
     } else {

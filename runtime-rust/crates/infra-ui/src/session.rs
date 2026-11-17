@@ -247,6 +247,7 @@ const PREF_FIELDS: &[&str] = &[
     "provider",
     "workflow",
     "mode",
+    "permissions",
     "agents-enabled",
     "agent-count",
     "workspace",
@@ -898,6 +899,20 @@ pub fn controls() {
             || ["plan", "review", "fleet-review", "sdd"].contains(&workflow.as_str())
             || !sid.is_empty() && routing().is_null(),
     );
+    // Read-only workflows never edit, so their launches never ask.
+    let read_only = ["plan", "review", "fleet-review"].contains(&workflow.as_str());
+    dom::disabled("permissions", !ready || locked || read_only);
+    let permission = dom::value("permissions");
+    let editing = if read_only {
+        "plan".to_owned()
+    } else {
+        dom::value("mode")
+    };
+    dom::text(
+        "permissions-hint",
+        permissions_hint(&dom::value("provider"), &editing, &permission),
+    );
+    dom::attr("permissions-hint", "data-mode", &permission);
     let description = phases
         .iter()
         .find(|entry| entry["id"] == phase)
@@ -1060,12 +1075,16 @@ pub(crate) struct WorkingSignals<'a> {
     pub(crate) create_skill_pending: bool,
     pub(crate) sign_in_pending: bool,
     pub(crate) sdd_pending: bool,
+    /// A permission request of the selected session waits for the person.
+    pub(crate) permission_waiting: bool,
 }
 
 pub(crate) fn working_message(signals: &WorkingSignals<'_>) -> Option<&'static str> {
     if m::active(signals.selected) {
         return Some(if signals.selected["status"] == "queued" {
             "Queued — waiting for an available runner…"
+        } else if signals.permission_waiting {
+            "Waiting for your answer to a permission request…"
         } else {
             "Agent is working on your task…"
         });
@@ -1163,6 +1182,7 @@ pub fn sync_working_indicator() {
             create_skill_pending,
             sign_in_pending,
             sdd_pending,
+            permission_waiting: crate::run::permission_waiting(),
         };
         working_message(&signals)
     });
@@ -1457,6 +1477,15 @@ fn restore_preferences() {
     }
     restore_draft(&dom::value("project"));
 }
+/// A remembered field as a new draft starts with it. Bypass Permissions is
+/// chosen for each session on purpose, so a draft starts with Auto instead.
+fn restored_value<'a>(id: &str, value: &'a str) -> &'a str {
+    if id == "permissions" && value == "bypass" {
+        "auto"
+    } else {
+        value
+    }
+}
 fn restore_draft(project: &str) {
     m::set("composer-project", json!(project));
     let prefs = dom::json_storage(PREFS);
@@ -1469,7 +1498,7 @@ fn restore_draft(project: &str) {
         if let Some(b) = fields[*id].as_bool() {
             dom::set_checked(id, b);
         } else if let Some(v) = fields[*id].as_str() {
-            dom::set_value(id, v);
+            dom::set_value(id, restored_value(id, v));
         }
     }
     let model = fields["model"].as_str().unwrap_or("").to_owned();
@@ -1792,6 +1821,39 @@ pub async fn poll(epoch: u64) {
         Err(_) => {}
     }
 }
+/// What a session's Permissions setting does for the chosen host and mode.
+pub(crate) fn permissions_hint(provider: &str, mode: &str, permission: &str) -> &'static str {
+    if mode != "edit" {
+        return "Planning is read-only, so nothing asks for permission. The setting applies when a turn edits.";
+    }
+    match (permission, provider) {
+        ("manual", "claude") => {
+            "Claude Code asks before edits and commands. Each request appears in the chat with Allow and Deny, and the run waits for your answer."
+        }
+        ("manual", "codex") => {
+            "Codex works read-only and asks before each edit and each command that writes. Each request appears in the chat with Allow and Deny, and the run waits for your answer."
+        }
+        ("manual", "cursor") => {
+            "Cursor asks before actions outside your allowlist. Each request appears in the chat with Allow and Deny, and the run waits for your answer."
+        }
+        ("manual", _) => {
+            "Each request the agent asks appears in the chat with Allow and Deny, and the run waits for your answer."
+        }
+        ("bypass", _) => {
+            "Every action runs without asking and without the sandbox. Use it only in a disposable checkout or container."
+        }
+        (_, "claude") => {
+            "Claude Code's auto mode reviews each action and declines risky ones; nothing waits for you. Where a model has no auto mode, it accepts edits and declines the rest."
+        }
+        (_, "codex") => {
+            "Codex edits in its workspace sandbox and its automatic reviewer answers anything that needs approval; nothing waits for you."
+        }
+        (_, "cursor") => {
+            "Cursor edits the workspace and runs commands in its sandbox; anything else that needs approval is declined. Nothing waits for you."
+        }
+        _ => "The agent works on its own and the host declines what needs approval; nothing waits for you.",
+    }
+}
 pub fn apply_settings(v: &V) {
     for (id, key) in [
         ("provider", "provider"),
@@ -1805,6 +1867,7 @@ pub fn apply_settings(v: &V) {
         }
     }
     dom::set_checked("agents-enabled", m::yes(&v["agents_enabled"]));
+    dom::set_value("permissions", v["permissions"].as_str().unwrap_or("auto"));
     models("", Some(m::text(v, "model")));
     dom::set_value("thinking-effort", &m::text(v, "thinking_effort"));
     restore_model_routing(&v["model_routing"]);
@@ -2077,7 +2140,7 @@ pub async fn send() {
         return;
     }
     let dry = workflow == "fleet-review" && dom::checked("fleet-dry-run");
-    let mut turn = json!({"prompt":prompt,"agents_enabled":dom::checked("agents-enabled"),"agent_count":dom::num("agent-count"),"model_routing":routing(),"model":if dry{V::Null}else{selected_model("")},"thinking_effort":if dry{V::Null}else{nullable(dom::value("thinking-effort"))}});
+    let mut turn = json!({"prompt":prompt,"agents_enabled":dom::checked("agents-enabled"),"agent_count":dom::num("agent-count"),"model_routing":routing(),"model":if dry{V::Null}else{selected_model("")},"thinking_effort":if dry{V::Null}else{nullable(dom::value("thinking-effort"))},"permissions":dom::value("permissions")});
     if follow && workflow == "native" && !routing().is_null() {
         turn["mode"] = json!(dom::value("mode"));
     }
@@ -4016,6 +4079,29 @@ mod history_projection_tests {
 mod session_contract_tests {
     use super::*;
     #[test]
+    fn a_new_draft_never_starts_with_bypass_permissions() {
+        assert_eq!(restored_value("permissions", "bypass"), "auto");
+        assert_eq!(restored_value("permissions", "manual"), "manual");
+        assert_eq!(restored_value("mode", "bypass"), "bypass");
+    }
+    #[test]
+    fn the_permissions_hint_says_what_each_mode_does_for_the_host() {
+        // Planning never asks, whatever the setting.
+        for permission in ["auto", "manual", "bypass"] {
+            assert!(
+                permissions_hint("claude", "plan", permission).starts_with("Planning is read-only")
+            );
+        }
+        assert!(permissions_hint("claude", "edit", "auto").contains("auto mode"));
+        assert!(permissions_hint("codex", "edit", "auto").contains("automatic reviewer"));
+        assert!(permissions_hint("cursor", "edit", "auto").contains("sandbox"));
+        for provider in ["claude", "codex", "cursor"] {
+            assert!(permissions_hint(provider, "edit", "manual").contains("Allow and Deny"));
+            assert!(permissions_hint(provider, "edit", "bypass").contains("without the sandbox"));
+        }
+        assert!(permissions_hint("codex", "edit", "manual").contains("read-only"));
+    }
+    #[test]
     fn merge_settings_never_replace_the_saved_ordinary_project_draft() {
         let previous = json!({"drafts":{"a":{"workflow":"sdd","prompt":"ordinary work"}},"project_id":"a","session_id":null});
         let merge = json!({"project_id":"a","selection_epoch":4,"sources":["x","y"]});
@@ -4247,8 +4333,18 @@ mod update_tests {
             create_skill_pending: false,
             sign_in_pending: false,
             sdd_pending: false,
+            permission_waiting: false,
         };
         assert_eq!(working_message(&idle), None);
+        let asking = json!({"id":"s1","status":"running"});
+        assert_eq!(
+            working_message(&WorkingSignals {
+                selected: &asking,
+                permission_waiting: true,
+                ..idle
+            }),
+            Some("Waiting for your answer to a permission request…")
+        );
 
         let running = json!({"id":"s1","status":"running"});
         assert_eq!(

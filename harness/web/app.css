@@ -2170,6 +2170,19 @@ button.graph-member-row:focus-visible { outline:2px solid var(--graph-target-bor
 .sidebar-omnigraph-pill .omni-pill-shape { display:none; }
 .omni-pill-shape { flex:none; font-size:var(--text-meta); line-height:var(--leading-tight); }
 .omni-state-icon { display:inline-flex; align-items:center; justify-content:center; flex:none; font-size:var(--text-meta); line-height:var(--leading-tight); }
+.conversation-permission { margin:12px 0; padding:12px 14px; border:1px solid var(--line); border-left:3px solid var(--purple); border-radius:var(--radius-md); background:var(--surface-elevated); color:var(--ink); }
+.conversation-permission[data-state="pending"] { border-color:var(--warning-line); border-left-color:var(--warning); background:var(--warning-surface); box-shadow:var(--shadow-xs); }
+.conversation-permission[data-state="denied"],.conversation-permission[data-state="declined"] { border-left-color:var(--error); }
+.conversation-permission[data-state="allowed"],.conversation-permission[data-state="allowed_session"] { border-left-color:var(--success); }
+.conversation-permission[data-state="withdrawn"],.conversation-permission[data-state="expired"] { border-left-color:var(--field-line); color:var(--ink-2); }
+.permission-heading { margin:0 0 6px; font-size:var(--text-ui); font-weight:var(--weight-strong); line-height:var(--leading-ui); }
+.permission-summary { display:block; padding:6px 8px; border-radius:var(--radius); background:var(--surface-subtle); font-family:var(--font-mono); font-size:var(--text-ui); line-height:var(--leading-ui); white-space:pre-wrap; overflow-wrap:anywhere; }
+.permission-detail { margin:6px 0 0; color:var(--muted); font-size:var(--text-meta); line-height:var(--leading-body); overflow-wrap:anywhere; }
+.permission-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+.permission-error { margin:8px 0 0; }
+.permission-error:empty { display:none; }
+.permissions-hint { flex:1 1 100%; margin:0; color:var(--muted); font-size:var(--text-ui); line-height:var(--leading-body); overflow-wrap:anywhere; }
+.permissions-hint[data-mode="bypass"] { color:var(--error); }
 .conversation-omnigraph { margin:8px 0; padding:4px 0 4px 12px; border-left:2px solid var(--purple); color:var(--ink-2); font-size:var(--text-meta); line-height:var(--leading-body); overflow-wrap:anywhere; }
 .conversation-omnigraph p { margin:0; }
 .omni-icon-xs { width:14px; height:14px; flex:none; }

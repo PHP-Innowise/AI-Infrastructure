@@ -1189,6 +1189,14 @@ pub const ROUTES: &[Route] = &[
     },
     Route {
         method: "POST",
+        pattern: "/api/sessions/{session_id}/permissions/{request_id}",
+        operation: "sessions.permission",
+        status: 200,
+        token: true,
+        query: &[],
+    },
+    Route {
+        method: "POST",
         pattern: "/api/sessions/{session_id}/cancel",
         operation: "sessions.cancel",
         status: 200,
