@@ -99,7 +99,10 @@ pub fn render_commit_graph_rows(
                 };
                 let when_html = match &when {
                     Some(label) => {
-                        format!("<span class=\"graph-pick-when\">{}</span>", escape_html(label))
+                        format!(
+                            "<span class=\"graph-pick-when\">{}</span>",
+                            escape_html(label)
+                        )
                     }
                     None => String::new(),
                 };
@@ -130,7 +133,10 @@ pub fn render_commit_graph_rows(
                 };
                 let when_html = match &when {
                     Some(label) => {
-                        format!("<span class=\"git-graph-when\">{}</span>", escape_html(label))
+                        format!(
+                            "<span class=\"git-graph-when\">{}</span>",
+                            escape_html(label)
+                        )
                     }
                     None => String::new(),
                 };
@@ -713,16 +719,10 @@ fn is_commit_selected(sha: &str, short: &str, selected_commit: Option<&str>) -> 
         if sha.eq_ignore_ascii_case(sel) {
             return true;
         }
-        if sel.len() >= 4
-            && sha.len() >= sel.len()
-            && sha[..sel.len()].eq_ignore_ascii_case(sel)
-        {
+        if sel.len() >= 4 && sha.len() >= sel.len() && sha[..sel.len()].eq_ignore_ascii_case(sel) {
             return true;
         }
-        if sha.len() >= 4
-            && sel.len() >= sha.len()
-            && sel[..sha.len()].eq_ignore_ascii_case(sha)
-        {
+        if sha.len() >= 4 && sel.len() >= sha.len() && sel[..sha.len()].eq_ignore_ascii_case(sha) {
             return true;
         }
     }
@@ -803,7 +803,9 @@ fn render_catalog_stats(catalog: &Value) -> String {
         ));
     }
     if out.is_empty() {
-        out.push_str("<span class=\"graph-commit-stat\" data-status=\"unchanged\">0 file changes</span>");
+        out.push_str(
+            "<span class=\"graph-commit-stat\" data-status=\"unchanged\">0 file changes</span>",
+        );
     }
     out
 }
@@ -1161,9 +1163,11 @@ mod tests {
         assert!(html.contains("<div class=\"git-graph-body\"><div class=\"git-graph-top\"><span class=\"git-graph-subject\">Add DAG renderer</span><span class=\"git-graph-badges\"><span class=\"graph-pick-badge\" data-kind=\"branch\">feat/dag</span></span></div><div class=\"git-graph-meta\"><code class=\"git-graph-hash\">abcdef1</code><span class=\"git-graph-who\">Ada</span><span class=\"git-graph-when\">just now</span></div></div>"));
         assert!(html.contains("<li class=\"git-graph-row\" id=\"graph-commit-row-1\" role=\"option\" aria-selected=\"false\" data-current=\"false\" data-action=\"graph-commit-select\""));
         assert!(html.contains("data-selected=\"true\""));
-        assert!(html.ends_with("data-action=\"graph-commit-graph-more\">Show older commits</button></li>"));
+        assert!(html
+            .ends_with("data-action=\"graph-commit-graph-more\">Show older commits</button></li>"));
 
-        let empty_no_more = render_commit_graph_rows(&[], None, None, false, 0, CommitGraphSurface::Dock);
+        let empty_no_more =
+            render_commit_graph_rows(&[], None, None, false, 0, CommitGraphSurface::Dock);
         assert_eq!(empty_no_more, "");
     }
 
@@ -1194,14 +1198,24 @@ mod tests {
 
         let html = render_commit_banner(Some(&commit_info), &chosen, Some(&catalog));
         assert!(html.contains("<code class=\"graph-commit-banner-sha\">abc1234</code>"));
-        assert!(html.contains("<span class=\"graph-commit-banner-subject\">Merge &lt;feature&gt; branch</span>"));
+        assert!(html.contains(
+            "<span class=\"graph-commit-banner-subject\">Merge &lt;feature&gt; branch</span>"
+        ));
         assert!(html.contains("<span class=\"graph-commit-banner-author\">Linus</span>"));
         assert!(html.contains("<span class=\"graph-pick-badge\" data-kind=\"head\">main</span>"));
         assert!(html.contains("<span class=\"graph-pick-badge\" data-kind=\"tag\">v1.0</span>"));
-        assert!(html.contains("<span class=\"graph-commit-stat\" data-status=\"created\">+2 created</span>"));
-        assert!(html.contains("<span class=\"graph-commit-stat\" data-status=\"modified\">~3 modified</span>"));
-        assert!(html.contains("<span class=\"graph-commit-stat\" data-status=\"deleted\">-1 deleted</span>"));
-        assert!(html.contains("<span class=\"graph-commit-stat\" data-status=\"renamed\">→4 renamed</span>"));
+        assert!(html.contains(
+            "<span class=\"graph-commit-stat\" data-status=\"created\">+2 created</span>"
+        ));
+        assert!(html.contains(
+            "<span class=\"graph-commit-stat\" data-status=\"modified\">~3 modified</span>"
+        ));
+        assert!(html.contains(
+            "<span class=\"graph-commit-stat\" data-status=\"deleted\">-1 deleted</span>"
+        ));
+        assert!(html.contains(
+            "<span class=\"graph-commit-stat\" data-status=\"renamed\">→4 renamed</span>"
+        ));
         assert!(html.contains("data-action=\"graph-commit-select\" data-payload=\"&quot;commit:1111111aaaa&quot;\">Parent 1 1111111</button>"));
         assert!(html.contains("data-action=\"graph-commit-select\" data-payload=\"&quot;commit:2222222bbbb&quot;\">Parent 2 2222222</button>"));
         assert!(html.contains("<button type=\"button\" class=\"button compact graph-commit-reset-btn\" data-action=\"graph-commit-reset\">Whole project</button>"));
@@ -1226,6 +1240,7 @@ mod tests {
         );
         assert!(fallback.contains("deadbeef"));
         assert!(fallback.contains("Fix bug"));
-        assert!(fallback.contains("data-payload=\"&quot;commit:cafebabe&quot;\">Parent cafebab</button>"));
+        assert!(fallback
+            .contains("data-payload=\"&quot;commit:cafebabe&quot;\">Parent cafebab</button>"));
     }
 }

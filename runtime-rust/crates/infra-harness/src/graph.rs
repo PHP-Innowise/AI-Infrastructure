@@ -6733,7 +6733,11 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             assert!(
                 fixture
                     .graphs
-                    .map(&fixture.project, Some(&Target::Named("feature".into())), &Shown::default())
+                    .map(
+                        &fixture.project,
+                        Some(&Target::Named("feature".into())),
+                        &Shown::default()
+                    )
                     .is_err()
             );
         }

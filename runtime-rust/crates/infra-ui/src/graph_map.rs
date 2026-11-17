@@ -4207,9 +4207,7 @@ impl ChangesLookup {
             other_path.starts_with(&prefix)
                 && self.exact.get(&other_path).map(String::as_str) != Some("deleted")
         });
-        if has_surviving_child
-            || node.is_some_and(|n| n["changed"].as_u64().unwrap_or(0) > 0)
-        {
+        if has_surviving_child || node.is_some_and(|n| n["changed"].as_u64().unwrap_or(0) > 0) {
             Some("modified".to_owned())
         } else {
             Some("deleted".to_owned())
@@ -4411,11 +4409,7 @@ impl ImpactLookup {
                     if let Some(caller_str) = caller.as_str() {
                         let from = normalize_rel_path(strip_symbol_suffix(caller_str));
                         if !from.is_empty() {
-                            let key = (
-                                from.clone(),
-                                del_path.clone(),
-                                "broken_risk".to_owned(),
-                            );
+                            let key = (from.clone(), del_path.clone(), "broken_risk".to_owned());
                             if seen_risk.insert(key) {
                                 commit_risk_callers.push((
                                     from,
@@ -4474,7 +4468,13 @@ impl ImpactLookup {
             .any(|path| path_matches_node(&node_path, is_folder, path))
     }
 
-    fn pair_matches(nodes: &[V], from: usize, to: usize, expected_from: &str, expected_to: &str) -> bool {
+    fn pair_matches(
+        nodes: &[V],
+        from: usize,
+        to: usize,
+        expected_from: &str,
+        expected_to: &str,
+    ) -> bool {
         let from_node = &nodes[from];
         let to_node = &nodes[to];
         path_matches_node(
@@ -4563,11 +4563,9 @@ impl ImpactLookup {
                 return Some("broken_risk");
             }
         }
-        if self
-            .commit_risk_callers
-            .iter()
-            .any(|(cf, ct, imp)| imp == "broken_risk" && Self::pair_matches(nodes, from, to, cf, ct))
-        {
+        if self.commit_risk_callers.iter().any(|(cf, ct, imp)| {
+            imp == "broken_risk" && Self::pair_matches(nodes, from, to, cf, ct)
+        }) {
             return Some("broken_risk");
         }
         None
@@ -4594,11 +4592,9 @@ impl ImpactLookup {
         }
         let node_path = m::text(node, "path");
         let is_folder = m::yes(&node["folder"]);
-        if self
-            .commit_risk_callers
-            .iter()
-            .any(|(cf, _, imp)| imp == "broken_risk" && path_matches_node(&node_path, is_folder, cf))
-        {
+        if self.commit_risk_callers.iter().any(|(cf, _, imp)| {
+            imp == "broken_risk" && path_matches_node(&node_path, is_folder, cf)
+        }) {
             return Some("caller-risk");
         }
         if self.commit_risk_callers.iter().any(|(cf, _, imp)| {
@@ -5362,9 +5358,7 @@ fn inject_synthetic_deleted_nodes_and_edges(
     let commit_or_change_view = view["chosen"].is_object()
         || self::changes(view)
         || matches!(changes_doc["target"].as_str(), None | Some(""))
-        || changes_doc["target"]
-            .as_str()
-            .is_some_and(|t| t != "work");
+        || changes_doc["target"].as_str().is_some_and(|t| t != "work");
     if !commit_or_change_view {
         return;
     }
@@ -5511,7 +5505,13 @@ pub fn canvas_with_overlays(
     let mut nodes = m::array(&view["nodes"]);
     let mut edges = m::array(&view["edges"]);
     let frames = m::array(&view["frames"]);
-    inject_synthetic_deleted_nodes_and_edges(view, overlay.changes, &mut nodes, &mut edges, &frames);
+    inject_synthetic_deleted_nodes_and_edges(
+        view,
+        overlay.changes,
+        &mut nodes,
+        &mut edges,
+        &frames,
+    );
     let changes_lookup = overlay.changes.and_then(ChangesLookup::from_value);
     let impact_lookup = ImpactLookup::from_sources(overlay.impact, overlay.changes, &nodes);
     let at = |path: &V| nodes.iter().position(|node| &node["path"] == path);
@@ -6078,12 +6078,13 @@ pub fn canvas_with_overlays(
             let impact_attr = impact
                 .map(|imp| format!(" data-impact=\"{imp}\""))
                 .unwrap_or_default();
-            let touched_attr =
-                if commit_changes_active && (node_is_changed[from_idx] || node_is_changed[to_idx]) {
-                    " data-commit-touched=\"true\""
-                } else {
-                    ""
-                };
+            let touched_attr = if commit_changes_active
+                && (node_is_changed[from_idx] || node_is_changed[to_idx])
+            {
+                " data-commit-touched=\"true\""
+            } else {
+                ""
+            };
             html.push_str(&format!(
                 "<path class=\"graph-map-edge graph-map-edge-synthetic\" data-ends=\"{from_idx} {to_idx}\"{impact_attr}{touched_attr} data-diff=\"{diff}\" d=\"{d}\" data-edge-kind=\"{kind}\" data-kinds=\"{kind}\" stroke-width=\"2\" marker-end=\"url(#{id_prefix}-arrow{})\"><title>{} ({label} · {kind})</title></path>",
                 arrow_marker_suffix(kind, false),
@@ -6673,10 +6674,7 @@ pub fn canvas_with_overlays(
                         .as_str()
                         .map(normalize_change_status)
                         .filter(|s| {
-                            matches!(
-                                s.as_str(),
-                                "created" | "modified" | "deleted" | "renamed"
-                            )
+                            matches!(s.as_str(), "created" | "modified" | "deleted" | "renamed")
                         })
                 })
                 .unwrap_or_else(|| "modified".to_owned());
@@ -11873,18 +11871,13 @@ fn render_commit_dock_list(dock: &V, selected_target: &str, now: i64) -> String 
     )
 }
 fn is_commit_view(view: &V) -> bool {
-    view["chosen"]["kind"] == "commit"
-        || view.get("commit_info").is_some_and(V::is_object)
+    view["chosen"]["kind"] == "commit" || view.get("commit_info").is_some_and(V::is_object)
 }
 fn render_commit_banner_for_view(view: &V, changes: Option<&V>) -> String {
     if !is_commit_view(view) {
         return String::new();
     }
-    crate::git_commit_graph::render_commit_banner(
-        view.get("commit_info"),
-        &view["chosen"],
-        changes,
-    )
+    crate::git_commit_graph::render_commit_banner(view.get("commit_info"), &view["chosen"], changes)
 }
 fn commit_action_target(action: &str, payload: &V) -> Option<String> {
     match action {
@@ -16808,8 +16801,7 @@ pub async fn event(
             }
             chosen = true;
         }
-        ("click", "graph-commit-graph-toggle", _)
-        | ("click", _, "graph-commit-graph-toggle") => {
+        ("click", "graph-commit-graph-toggle", _) | ("click", _, "graph-commit-graph-toggle") => {
             let mut dock = commit_dock();
             if m::yes(&dock["open"]) {
                 shut_commit_dock();
@@ -16839,8 +16831,7 @@ pub async fn event(
             }
             return true;
         }
-        ("click", "graph-commit-graph-close", _)
-        | ("click", _, "graph-commit-graph-close") => {
+        ("click", "graph-commit-graph-close", _) | ("click", _, "graph-commit-graph-close") => {
             shut_commit_dock();
             dom::focus("graph-commit-graph-toggle");
             return true;
@@ -27973,9 +27964,12 @@ mod tests {
             Some("renamed")
         );
 
-        let surviving_folder = json!({ "path": "src/surviving_dir", "folder": true, "files": 3, "changed": 0 });
-        let dead_folder = json!({ "path": "src/dead_dir", "folder": true, "files": 0, "changed": 0 });
-        let mixed_folder = json!({ "path": "src/mixed_dir", "folder": true, "files": 2, "changed": 1 });
+        let surviving_folder =
+            json!({ "path": "src/surviving_dir", "folder": true, "files": 3, "changed": 0 });
+        let dead_folder =
+            json!({ "path": "src/dead_dir", "folder": true, "files": 0, "changed": 0 });
+        let mixed_folder =
+            json!({ "path": "src/mixed_dir", "folder": true, "files": 2, "changed": 1 });
         let touched_sym = json!({ "path": "src/Cart.php#L19:.total()", "name": "Cart.total()", "kind": "symbol", "symbol": true, "line": 19, "changed": 0 });
         let untouched_sym = json!({ "path": "src/Cart.php#L12:Cart", "name": "Cart", "kind": "symbol", "symbol": true, "line": 12, "changed": 0 });
         let all_nodes = vec![
@@ -27987,7 +27981,9 @@ mod tests {
         ];
 
         assert_eq!(
-            lookup.status_for_node(&surviving_folder, &all_nodes).as_deref(),
+            lookup
+                .status_for_node(&surviving_folder, &all_nodes)
+                .as_deref(),
             Some("modified")
         );
         assert_eq!(
@@ -28044,10 +28040,20 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(rendered.html.contains("data-commit-changes=\"true\""), "{}", rendered.html);
+        assert!(
+            rendered.html.contains("data-commit-changes=\"true\""),
+            "{}",
+            rendered.html
+        );
         assert!(rendered.html.contains("data-change-status=\"renamed\""));
         assert!(rendered.html.contains("<span class=\"graph-map-node-status\" data-status=\"renamed\" aria-hidden=\"true\">R</span>"));
-        assert!(rendered.html.contains("data-payload=\"&quot;src/Removed.php&quot;\""), "{}", rendered.html);
+        assert!(
+            rendered
+                .html
+                .contains("data-payload=\"&quot;src/Removed.php&quot;\""),
+            "{}",
+            rendered.html
+        );
         assert!(rendered.html.contains("data-change-status=\"deleted\""));
         assert!(rendered.html.contains("<span class=\"graph-map-node-status\" data-status=\"deleted\" aria-hidden=\"true\">D</span>"));
         assert!(rendered.html.contains("data-impact=\"caller-risk\""));
@@ -28089,15 +28095,33 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(file_rendered.html.matches("data-change-status=\"modified\"").count(), 1, "{}", file_rendered.html);
-        assert_eq!(file_rendered.html.matches("graph-map-node-status").count(), 1, "{}", file_rendered.html);
+        assert_eq!(
+            file_rendered
+                .html
+                .matches("data-change-status=\"modified\"")
+                .count(),
+            1,
+            "{}",
+            file_rendered.html
+        );
+        assert_eq!(
+            file_rendered.html.matches("graph-map-node-status").count(),
+            1,
+            "{}",
+            file_rendered.html
+        );
 
         // 3. Fallback safety when edge_diffs is absent
         let no_edge_diffs = json!({
             "target": "commit:abc123456789",
             "files": [{ "path": "src/NewName.php", "status": "renamed" }]
         });
-        assert!(ImpactLookup::from_sources(None, Some(&no_edge_diffs), &view["nodes"].as_array().cloned().unwrap()).is_none());
+        assert!(ImpactLookup::from_sources(
+            None,
+            Some(&no_edge_diffs),
+            &view["nodes"].as_array().cloned().unwrap()
+        )
+        .is_none());
     }
 
     #[test]
@@ -28154,9 +28178,15 @@ mod tests {
 
         let list_html = render_commit_dock_list(&dock, "commit:aaaa1111bbbb2222", 1_794_400_000);
         assert!(list_html.contains("class=\"git-graph-row\""), "{list_html}");
-        assert!(list_html.contains("data-action=\"graph-commit-select\""), "{list_html}");
+        assert!(
+            list_html.contains("data-action=\"graph-commit-select\""),
+            "{list_html}"
+        );
         assert!(list_html.contains("aria-selected=\"true\""), "{list_html}");
-        assert!(list_html.contains("data-action=\"graph-commit-graph-more\""), "{list_html}");
+        assert!(
+            list_html.contains("data-action=\"graph-commit-graph-more\""),
+            "{list_html}"
+        );
         assert_eq!(
             commit_dock_note(&dock),
             "2 commits · click a commit to inspect its changes"
@@ -28182,8 +28212,14 @@ mod tests {
         let banner = render_commit_banner_for_view(&commit_view, Some(&changes_catalog));
         assert!(banner.contains("aaaa111"), "{banner}");
         assert!(banner.contains("Add commit graph"), "{banner}");
-        assert!(banner.contains("data-action=\"graph-commit-select\""), "{banner}");
-        assert!(banner.contains("data-action=\"graph-commit-reset\""), "{banner}");
+        assert!(
+            banner.contains("data-action=\"graph-commit-select\""),
+            "{banner}"
+        );
+        assert!(
+            banner.contains("data-action=\"graph-commit-reset\""),
+            "{banner}"
+        );
         assert_eq!(render_commit_banner_for_view(&view(), None), "");
 
         assert_eq!(
@@ -28194,10 +28230,7 @@ mod tests {
             commit_action_target("graph-commit-reset", &V::Null),
             Some(String::new())
         );
-        assert_eq!(
-            commit_action_target("graph-commit-select", &V::Null),
-            None
-        );
+        assert_eq!(commit_action_target("graph-commit-select", &V::Null), None);
     }
 }
 
