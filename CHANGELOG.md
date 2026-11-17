@@ -24,6 +24,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Withhold an `auto-promoted` Memory Bank chunk whose title or body reads as
+  instructions to the agent, as `docs/MEMORY-WRITE-PATH.md` describes and the
+  retired runtime did; the native port had lost it. Indexing excludes such a
+  chunk with the reason `provenance`, and the fresh source read behind every
+  admission path (`filter_in_scope`, `unscoped_reason`) refuses it, so an
+  index built by an older engine cannot serve it either. A reviewed chunk with
+  the same text is served, and `memory bank-audit --provenance` still lists
+  the withheld one. The instruction patterns add `override … instructions`,
+  revealing hidden instructions or a developer prompt, the end-of-text control
+  token and the `[INST]` and `<<SYS>>` template markers; a bracketed `SYSTEM`
+  stays project text (a Markdown link, a log prefix). A literal screen runs
+  first: text with none of `instruction`, `prompt`, `<|`, `<<` or `[INST` skips
+  the expressions, 1.2 ms to 5 µs for a 3 KB chunk in a debug build.
 - Integrate Omnigraph with Harness project memory (`Project Brain`, `Memory Bank`, `Local Context Engine`): add `ContextAtom` provenance fields (`origin_layer`, `authority`, `privacy`, `brain_record_id`, `memory_id`, `record_revision`), filter auto-published `memory-draft` learnings through source/usability/safety gates (`verified: false` by default), inject Omnigraph-discovered local references into `infra-core` via `source-hints-v1`, unify `awaiting_context` review and `#context-usage` budget tracking (`ledger["omnigraph"]`), add `POST /api/omnigraph/sync-knowledge` (`knowledge/canonical`) and human-gated `POST /api/omnigraph/promote` (`PublicationFiles`, `sensitive_label`, `instruction_like`), and add Context Graph/Knowledge UI provenance badges, sync/promote controls, and bidirectional jump links.
 - Extend Omnigraph Harness backend (`infra-harness`) with scoped task/branch/graph context export and import (`GET|POST /api/omnigraph/export`, `POST /api/omnigraph/import` supporting `harness.omnigraph.bundle.v1` and raw Omnigraph NDJSON via `/export` + `/load/ndjson`) and multi-task session context linking (`POST /api/omnigraph/sessions/link` in `shared_branch` and `broadcast` modes, `omnigraph.shared_space` / `omnigraph.linked_session_ids` on `POST /api/sessions`, `SessionFollows` graph edges, and best-effort live native `session_inbox` updates).
 - Wire Omnigraph (`v0.15.0` CLI/server HTTP API `0.14`) cross-session context sharing into `infra-harness`, `infra-ui`, and `harness/web`: add `OmnigraphManager` lifecycle management (`off`, managed `local_sidecar`, `docker`, and `external`), `/api/omnigraph/*` HTTP endpoints (`status`, `setup`, `graph`, `search`, `branches/diff`, `branches`, `atoms`, `share`, `changes`, `commits/{commit_id}`), SQLite `session["omnigraph"]` persistence/migration, pre-run branch preparation and bounded `Shared Omnigraph Context` prompt injection with `PromptLedger` accounting, post-turn learnings/Clash/Fleet/file publication and optional `auto_merge`, and the Context Graph Studio UI.
