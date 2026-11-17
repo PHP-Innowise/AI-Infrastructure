@@ -1801,10 +1801,7 @@ impl Graphs {
                 target,
                 &self.listed(project, &root),
             )?),
-            _ => lock(&self.chosen)?
-                .get(&(project.to_owned(), target.text()))
-                .cloned()
-                .ok_or_else(|| HarnessError::conflict("Choose the change again."))?,
+            _ => self.resolve_chosen_or_commit(project, &root, target)?,
         };
         if let Some(expected) = base {
             let chosen = chosen(&resolved);
@@ -2015,6 +2012,15 @@ impl Graphs {
         view["project_id"] = json!(project);
         view["target"] = json!(target.text());
         view["chosen"] = chosen(&resolved);
+        if matches!(target, Target::Commit(_))
+            && let Some(revision) = resolved
+                .revision
+                .as_deref()
+                .or_else(|| resolved.head.as_ref().map(|side| side.commit.as_str()))
+            && let Ok(Some(info)) = graph_changes::commit_info(&root, revision)
+        {
+            view["commit_info"] = info;
+        }
         view["state"] = json!(found.state);
         view["build"] = found.build;
         view["failure"] = json!(found.failure);
@@ -2094,10 +2100,7 @@ impl Graphs {
                 Some((project.to_owned(), published, root))
             }
             Some(target) => {
-                let resolved = lock(&self.chosen)?
-                    .get(&(project.to_owned(), target.text()))
-                    .cloned()
-                    .ok_or_else(|| HarnessError::conflict("Choose the change again."))?;
+                let resolved = self.resolve_chosen_or_commit(project, &root, target)?;
                 match self.graph_of(project, &root, &resolved)?.graph {
                     Some(own) => Some(own),
                     None if published.is_file() => Some((project.to_owned(), published, root)),
@@ -2122,6 +2125,26 @@ impl Graphs {
         found["project_id"] = json!(project);
         found["notests"] = json!(notests);
         Ok(found)
+    }
+
+    fn resolve_chosen_or_commit(
+        &self,
+        project: &str,
+        root: &Path,
+        target: &Target,
+    ) -> Result<Arc<Resolved>> {
+        if let Some(resolved) = lock(&self.chosen)?
+            .get(&(project.to_owned(), target.text()))
+            .cloned()
+        {
+            return Ok(resolved);
+        }
+        if matches!(target, Target::Commit(_)) {
+            let resolved = Arc::new(graph_changes::resolve(root, target, &[])?);
+            lock(&self.chosen)?.insert((project.to_owned(), target.text()), resolved.clone());
+            return Ok(resolved);
+        }
+        Err(HarnessError::conflict("Choose the change again."))
     }
 
     fn load_project_focus(
@@ -6634,6 +6657,13 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
             // cart uses the price in the project's own graph.
             assert_eq!(view["state"], "building");
             assert_eq!(view["preliminary"], true);
+            assert_eq!(view["commit_info"]["commit"], long);
+            assert_eq!(view["commit_info"]["subject"], "Change the price");
+            assert!(
+                view["commit_info"]["parents"]
+                    .as_array()
+                    .is_some_and(|parents| parents.len() == 1)
+            );
             assert_eq!(drawn(&view), ["price.php changed M", "cart.php affected"]);
             assert_eq!(view["change"]["files"], 2);
             // A search reads the project's graph until then, as the map does.
@@ -6664,6 +6694,48 @@ echo "[graphify watch] Rebuilt: 7 nodes, 9 edges, 2 communities"
                 assert!(started.elapsed() < Duration::from_secs(20));
                 std::thread::sleep(Duration::from_millis(20));
             }
+        }
+        #[test]
+        fn commit_target_auto_resolves_and_enriches_commit_info() {
+            let fixture = Fixture::new();
+            fixture.branched();
+            let head = fixture.said(&["rev-parse", "feature"]);
+            let parent = fixture.said(&["rev-parse", "feature^"]);
+            fixture.graphs.act(&fixture.project, "enable").unwrap();
+            assert_eq!(fixture.settled()["state"], "ready");
+
+            // Calling `map` or `find` directly on a `Target::Commit` without a
+            // prior `choose()` auto-resolves smoothly and enriches `commit_info`.
+            let short_target = Target::Commit(head[..8].to_owned());
+            let view = fixture
+                .graphs
+                .map(&fixture.project, Some(&short_target), &Shown::default())
+                .unwrap();
+            assert_eq!(view["commit_info"]["commit"], head);
+            assert_eq!(view["commit_info"]["subject"], "two");
+            assert_eq!(view["commit_info"]["parents"], json!([parent]));
+            assert!(view["commit_info"]["short"].is_string());
+            assert!(view["commit_info"]["author"].is_string());
+            assert!(view["commit_info"]["at"].as_i64().is_some());
+            assert!(
+                view["commit_info"]["refs"]
+                    .as_array()
+                    .is_some_and(|refs| refs.iter().any(|r| r["name"] == "feature"))
+            );
+
+            let found = fixture
+                .graphs
+                .find(&fixture.project, Some(&short_target), "cart", false)
+                .unwrap();
+            assert_eq!(found["rows"][0]["path"], "cart.php");
+
+            // Non-commit targets that were not chosen still conflict.
+            assert!(
+                fixture
+                    .graphs
+                    .map(&fixture.project, Some(&Target::Named("feature".into())), &Shown::default())
+                    .is_err()
+            );
         }
         #[test]
         fn deleting_the_graph_ends_the_build_of_a_commit() {

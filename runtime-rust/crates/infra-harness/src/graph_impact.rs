@@ -34,6 +34,7 @@ const MAX_CALLER_SCAN: usize = 300;
 const MAX_CYCLE_DEPTH: usize = 6;
 const MAX_CYCLES_REPORTED: usize = 24;
 const MAX_CYCLE_VISITS: usize = 20_000;
+const MAX_EDGE_DIFFS: usize = 500;
 
 const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -173,7 +174,6 @@ pub(crate) fn changed_catalog(
     // whole scan from the others.
     let per_file = merged
         .iter()
-        .filter(|(_, entry)| entry.status != "deleted" || entry.previous_path.is_some())
         .map(|(path, entry)| {
             index_callers(
                 index,
@@ -205,10 +205,16 @@ pub(crate) fn changed_catalog(
     let mut created_files = 0usize;
     let mut modified_files = 0usize;
     let mut deleted_files = 0usize;
+    let mut renamed_files = 0usize;
     let mut created_entities = 0usize;
     let mut modified_entities = 0usize;
     let mut deleted_entities = 0usize;
     let mut files_json = Vec::with_capacity(merged.len());
+    let mut added_edges: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    let mut removed_edges: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    let mut risk_callers_map: BTreeMap<(String, String), &'static str> = BTreeMap::new();
+    let mut removed_callers_by_target: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut deleted_entries: Vec<(usize, String, Option<String>, BTreeSet<String>)> = Vec::new();
 
     for (path, entry) in &merged {
         let exists = if entry.status == "deleted" {
@@ -222,6 +228,7 @@ pub(crate) fn changed_catalog(
         match entry.status.as_str() {
             "created" => created_files += 1,
             "deleted" => deleted_files += 1,
+            "renamed" => renamed_files += 1,
             _ => modified_files += 1,
         }
         let in_graph = index.is_some_and(|idx| idx.file_id(path).is_some());
@@ -261,6 +268,13 @@ pub(crate) fn changed_catalog(
             live_focus,
             false,
         );
+        record_edge_diffs(path, &dep_diff.added, &mut added_edges, None);
+        record_edge_diffs(
+            path,
+            &dep_diff.removed,
+            &mut removed_edges,
+            Some(&mut removed_callers_by_target),
+        );
 
         let target_symbols =
             collect_target_symbols(path, &entities, before.as_deref(), after.as_deref(), index);
@@ -279,12 +293,51 @@ pub(crate) fn changed_catalog(
             &index_incoming,
             &caller_cache,
         );
+        for caller in &callers {
+            if caller.path != *path
+                && matches!(caller.impact, "broken_risk" | "impacted" | "added_caller")
+            {
+                risk_callers_map
+                    .entry((caller.path.clone(), path.clone()))
+                    .and_modify(|existing| {
+                        if impact_rank(caller.impact) < impact_rank(existing) {
+                            *existing = caller.impact;
+                        }
+                    })
+                    .or_insert(caller.impact);
+            }
+        }
         let callers_at_risk = callers.iter().filter(|c| c.impact == "broken_risk").count();
         let impacted_callers = callers
             .iter()
             .filter(|c| matches!(c.impact, "broken_risk" | "impacted"))
             .count();
         let visibility_warnings: usize = callers.iter().map(|c| c.visibility_warnings.len()).sum();
+
+        if entry.status == "deleted" {
+            let mut del_callers: BTreeSet<String> = callers
+                .iter()
+                .map(|c| c.path.clone())
+                .filter(|caller| caller != path)
+                .collect();
+            for caller in index_callers(
+                index,
+                path,
+                entry.previous_path.as_deref(),
+                false,
+                MAX_CALLER_SCAN,
+            ) {
+                if caller != *path {
+                    del_callers.insert(caller);
+                }
+            }
+            deleted_entries.push((
+                files_json.len(),
+                path.clone(),
+                entry.previous_path.clone(),
+                del_callers,
+            ));
+        }
 
         files_json.push(json!({
             "path": path,
@@ -304,6 +357,24 @@ pub(crate) fn changed_catalog(
         }));
     }
 
+    for (idx, path, previous_path, mut del_callers) in deleted_entries {
+        for key in [Some(path.as_str()), previous_path.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(removed_callers) = removed_callers_by_target.get(key) {
+                for caller in removed_callers {
+                    if caller != &path {
+                        del_callers.insert(caller.clone());
+                    }
+                }
+            }
+        }
+        files_json[idx]["callers"] = json!(del_callers.into_iter().collect::<Vec<_>>());
+    }
+
+    let edge_diffs = build_edge_diffs_json(added_edges, removed_edges, risk_callers_map);
+
     json!({
         "target": target_label,
         "total_files": merged.len(),
@@ -311,10 +382,78 @@ pub(crate) fn changed_catalog(
         "created_files": created_files,
         "modified_files": modified_files,
         "deleted_files": deleted_files,
+        "renamed_files": renamed_files,
         "created_entities": created_entities,
         "modified_entities": modified_entities,
         "deleted_entities": deleted_entities,
         "files": files_json,
+        "edge_diffs": edge_diffs,
+    })
+}
+
+/// Accumulates deduplicated resolved outgoing dependency edges from one file's diff.
+fn record_edge_diffs(
+    from_path: &str,
+    deps: &[DepRef],
+    edges: &mut BTreeMap<(String, String), BTreeSet<String>>,
+    mut callers_by_target: Option<&mut BTreeMap<String, BTreeSet<String>>>,
+) {
+    for dep in deps {
+        if !dep.resolved || dep.target.is_empty() || dep.target == from_path {
+            continue;
+        }
+        let kinds = edges
+            .entry((from_path.to_owned(), dep.target.clone()))
+            .or_default();
+        if !dep.kind.is_empty() {
+            kinds.insert(dep.kind.clone());
+        }
+        if let Some(map) = callers_by_target.as_deref_mut() {
+            map.entry(dep.target.clone())
+                .or_default()
+                .insert(from_path.to_owned());
+        }
+    }
+}
+
+/// Serializes commit-wide `edge_diffs` (`added`, `removed`, `risk_callers`), bounded to `MAX_EDGE_DIFFS`.
+fn build_edge_diffs_json(
+    added_edges: BTreeMap<(String, String), BTreeSet<String>>,
+    removed_edges: BTreeMap<(String, String), BTreeSet<String>>,
+    risk_callers_map: BTreeMap<(String, String), &'static str>,
+) -> Value {
+    let serialize_edges = |map: BTreeMap<(String, String), BTreeSet<String>>| -> Vec<Value> {
+        map.into_iter()
+            .take(MAX_EDGE_DIFFS)
+            .map(|((from, to), kinds)| {
+                json!({
+                    "from": from,
+                    "to": to,
+                    "kinds": kinds.into_iter().collect::<Vec<_>>(),
+                })
+            })
+            .collect()
+    };
+    let mut risk_callers = risk_callers_map
+        .into_iter()
+        .map(|((from, to), impact)| (impact_rank(impact), from, to, impact))
+        .collect::<Vec<_>>();
+    risk_callers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let risk_callers_json = risk_callers
+        .into_iter()
+        .take(MAX_EDGE_DIFFS)
+        .map(|(_, from, to, impact)| {
+            json!({
+                "from": from,
+                "to": to,
+                "impact": impact,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "added": serialize_edges(added_edges),
+        "removed": serialize_edges(removed_edges),
+        "risk_callers": risk_callers_json,
     })
 }
 
@@ -4497,5 +4636,129 @@ mod tests {
         assert_eq!(callers(false, 1), ["app/b.php"]);
         assert!(index_callers(Some(&index), "lib/none.php", None, false, 8).is_empty());
         assert!(index_callers(None, "lib/target.php", None, false, 8).is_empty());
+    }
+
+    #[test]
+    fn changed_catalog_emits_renamed_files_deleted_callers_and_edge_diffs() {
+        let repo = TempRepo::new_git();
+        repo.write(
+            "src/Legacy.php",
+            "<?php\nnamespace App;\nclass Legacy {\n    public function run(): void {}\n}\n",
+        );
+        repo.write(
+            "src/OldName.php",
+            "<?php\nnamespace App;\nclass OldName {\n    public function ping(): void {}\n}\n",
+        );
+        repo.write(
+            "src/Service.php",
+            "<?php\nnamespace App;\nuse App\\Legacy;\nclass Service {\n    public function work(string $x): void {\n        $l = new Legacy();\n        $l->run();\n    }\n}\n",
+        );
+        repo.write(
+            "src/BrokenCaller.php",
+            "<?php\nnamespace App;\nuse App\\Legacy;\nclass BrokenCaller {\n    public function go(): void {\n        $l = new Legacy();\n        $l->run();\n    }\n}\n",
+        );
+        repo.write(
+            "src/SvcCaller.php",
+            "<?php\nnamespace App;\nuse App\\Service;\nclass SvcCaller {\n    public function call(Service $s): void {\n        $s->work('a');\n    }\n}\n",
+        );
+        repo.commit("base");
+
+        // Commit changes: delete Legacy.php, rename OldName -> NewName, create DepNew,
+        // and modify Service to drop Legacy, add DepNew, and change work() signature.
+        repo.remove("src/Legacy.php");
+        let rename = std::process::Command::new("git")
+            .args(["mv", "src/OldName.php", "src/NewName.php"])
+            .current_dir(&repo.root)
+            .output()
+            .unwrap();
+        assert!(rename.status.success());
+        repo.write(
+            "src/DepNew.php",
+            "<?php\nnamespace App;\nclass DepNew {\n    public function ok(): void {}\n}\n",
+        );
+        repo.write(
+            "src/Service.php",
+            "<?php\nnamespace App;\nuse App\\DepNew;\nclass Service {\n    public function work(string $x, int $y): void {\n        $d = new DepNew();\n        $d->ok();\n    }\n}\n",
+        );
+        let commit_sha = repo.commit("refactor");
+
+        let resolved = crate::graph_changes::resolve(
+            &repo.root,
+            &crate::graph_changes::Target::Commit(commit_sha.clone()),
+            &[],
+        )
+        .unwrap();
+        let catalog = changed_catalog(
+            &repo.root,
+            None,
+            Some(&resolved),
+            None,
+            &[],
+            &format!("commit:{commit_sha}"),
+            false,
+        );
+
+        assert_eq!(catalog["total_files"], 4, "{catalog}");
+        assert_eq!(catalog["created_files"], 1, "{catalog}");
+        assert_eq!(catalog["modified_files"], 1, "{catalog}");
+        assert_eq!(catalog["deleted_files"], 1, "{catalog}");
+        assert_eq!(catalog["renamed_files"], 1, "{catalog}");
+
+        let files = catalog["files"].as_array().unwrap();
+        let renamed = files
+            .iter()
+            .find(|f| f["path"] == "src/NewName.php")
+            .expect("renamed entry");
+        assert_eq!(renamed["status"], "renamed");
+        assert_eq!(renamed["previous_path"], "src/OldName.php");
+
+        let deleted = files
+            .iter()
+            .find(|f| f["path"] == "src/Legacy.php")
+            .expect("deleted entry");
+        assert_eq!(deleted["status"], "deleted");
+        assert_eq!(deleted["exists"], false);
+        let del_callers = deleted["callers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>();
+        assert!(del_callers.contains(&"src/BrokenCaller.php"), "{deleted}");
+        assert!(del_callers.contains(&"src/Service.php"), "{deleted}");
+
+        let edge_diffs = &catalog["edge_diffs"];
+        let added = edge_diffs["added"].as_array().unwrap();
+        let removed = edge_diffs["removed"].as_array().unwrap();
+        let risk_callers = edge_diffs["risk_callers"].as_array().unwrap();
+
+        let added_svc_new = added
+            .iter()
+            .find(|e| e["from"] == "src/Service.php" && e["to"] == "src/DepNew.php")
+            .expect("added Service -> DepNew");
+        assert!(!added_svc_new["kinds"].as_array().unwrap().is_empty());
+
+        let removed_svc_legacy = removed
+            .iter()
+            .find(|e| e["from"] == "src/Service.php" && e["to"] == "src/Legacy.php")
+            .expect("removed Service -> Legacy");
+        assert!(!removed_svc_legacy["kinds"].as_array().unwrap().is_empty());
+
+        assert!(
+            risk_callers.iter().any(|r| {
+                r["from"] == "src/BrokenCaller.php"
+                    && r["to"] == "src/Legacy.php"
+                    && r["impact"] == "broken_risk"
+            }),
+            "{edge_diffs}"
+        );
+        assert!(
+            risk_callers.iter().any(|r| {
+                r["from"] == "src/SvcCaller.php"
+                    && r["to"] == "src/Service.php"
+                    && r["impact"] == "broken_risk"
+            }),
+            "{edge_diffs}"
+        );
     }
 }
